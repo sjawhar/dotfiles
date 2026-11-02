@@ -281,6 +281,15 @@ before handing the call to the real one.
   on 2026-11-02 an agent's get-credentials for `grade-us-west1` switched it to the grade cluster,
   and every other session's `kubectl create` in `builds-*` failed with "requires
   container.jobs.create". A person's shell and a caller that set `KUBECONFIG` are unchanged.
+  A `gcloud storage` command runs with `CLOUDSDK_STORAGE_PROCESS_COUNT=4` (the shim's
+  `GCLOUD_STORAGE_PROCESS_COUNT`) unless the caller set the process count: in the environment, an
+  empty value included, in the configuration the call runs under, or in the SDK's installation
+  `properties`. Left to itself the SDK starts 16 worker processes of 4 threads for a copy of many
+  files on a 64-core box, and on 2026-11-02 at 21:11Z sami-rocqperf held 157 gcloud processes in
+  groups of 16 while it swapped 53 GiB. Measured there that day, `storage cp -r` of 1,024 files of
+  2 MiB: 16 processes took 21-30 s up and 12-18 s down at 18 processes and 1.8 GiB summed RSS;
+  4 took 39-45 s up and 12-20 s down at 6 processes and 0.62 GiB. The thread count stays the
+  SDK's: 8 threads instead of 4 gained nothing.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
   harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
   mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data

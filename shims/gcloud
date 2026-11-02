@@ -478,14 +478,21 @@ config_account() {
     printf '%s' "$account"
 }
 
-# The configuration a login would sign in under, and its account, for the refusal text.
-login_target() {
-    local name account
+# The configuration a call runs under, as the SDK picks it: the last --configuration when it is not
+# empty, then the environment, then active_config, then `default` (named_configs.py:119-148,494-511).
+effective_configuration() {
+    local name
     name="$(effective_option_value --configuration "$@")"
     [[ -n "$name" ]] || name="${CLOUDSDK_ACTIVE_CONFIG_NAME:-${GCLOUD_ACCOUNT:-}}"
     resolve_config_root
     [[ -n "$name" ]] || name="$(cat "${GCLOUD_CONFIG_ROOT}/active_config" 2>/dev/null || true)"
-    [[ -n "$name" ]] || name=default
+    printf '%s' "${name:-default}"
+}
+
+# The configuration a login would sign in under, and its account, for the refusal text.
+login_target() {
+    local name account
+    name="$(effective_configuration "$@")"
     account="$(config_account "$name")"
     printf 'the account this login signs in (configuration %s%s)' "$name" "${account:+, account $account}"
 }
@@ -667,6 +674,7 @@ exec_real_gcloud() {
     local real_gcloud="$1"
     shift
     export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-1}"
+    limit_storage_parallelism "$real_gcloud" "$@"
     local -a launcher=("$real_gcloud")
     if needs_forward_browser; then
         launcher=(env DISPLAY=:0 "BROWSER=forward open %s" "$real_gcloud")
@@ -675,6 +683,49 @@ exec_real_gcloud() {
         run_with_lock_retry "${launcher[@]}" "$@"
     fi
     exec "${launcher[@]}" "$@"
+}
+
+# `gcloud storage` sizes its worker pool from the core count when nothing sets
+# storage/process_count (lib/googlecloudsdk/command_lib/storage/optimize_parameters_util.py:58-127):
+# on a 64-core box a copy of many files starts 16 worker processes of 4 threads each. On
+# 2026-11-02 at 21:11Z there were 157 gcloud processes on sami-rocqperf, in groups of 16, while it
+# swapped 53 GiB at load 900-1,400. For a `gcloud storage` command the shim sets the process count
+# to GCLOUD_STORAGE_PROCESS_COUNT unless the caller set it: in the environment (an empty value
+# included), in the configuration the call runs under, or in the SDK's installation properties,
+# which the environment would otherwise outrank. The thread count stays the SDK's own choice.
+# Measured that day on that box (load 300-360), `storage cp -r` of 1,024 files of 2 MiB, two runs
+# each: the SDK's 16 processes took 21-30 s up and 12-18 s down, peaking at 18 processes and
+# 1.8 GiB summed RSS (0.68 GiB PSS); 4 processes took 39-45 s up and 12-20 s down, at 6 processes
+# and 0.62 GiB RSS (0.27 GiB PSS). 8 threads per process instead of 4 gained nothing.
+GCLOUD_STORAGE_PROCESS_COUNT=4
+limit_storage_parallelism() {
+    local real_gcloud="$1"
+    shift
+    [[ "${GCLOUD_COMMAND_WORDS[0]:-}" == storage && -z "${CLOUDSDK_STORAGE_PROCESS_COUNT+set}" ]] || return 0
+    local -a files=("$(dirname "$(readlink -f "$real_gcloud")")/../properties")
+    if [[ -n "${CLOUDSDK_CONFIG:-}" ]] || resolve_user_home; then
+        resolve_config_root
+        files+=("${GCLOUD_CONFIG_ROOT}/configurations/config_$(effective_configuration "$@")")
+    fi
+    storage_process_count_is_set "${files[@]}" ||
+        export CLOUDSDK_STORAGE_PROCESS_COUNT="$GCLOUD_STORAGE_PROCESS_COUNT"
+}
+
+# True when one of the property files sets process_count in its [storage] section.
+storage_process_count_is_set() {
+    local file line section
+    for file in "$@"; do
+        [[ -f "$file" ]] || continue
+        section=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ ^[[:space:]]*\[([^]]*)\] ]]; then
+                section="${BASH_REMATCH[1]}"
+            elif [[ "$section" == storage && "$line" =~ ^[[:space:]]*process_count[[:space:]]*= ]]; then
+                return 0
+            fi
+        done 2> /dev/null < "$file" || :
+    done
+    return 1
 }
 
 # The SDK opens its sqlite stores in the configuration directory with a 5 s busy timeout

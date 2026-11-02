@@ -1187,6 +1187,106 @@ class GcloudRouting(unittest.TestCase):
                 self.assertIn("Set KUBECONFIG", result.stderr)
 
 
+class GcloudStorageParallelism(unittest.TestCase):
+    """`gcloud storage` sizes its worker pool from the core count: 16 processes of 4 threads on a
+    64-core box. The shim gives a storage command a small process count unless the caller chose
+    one, in the environment, in the configuration the call runs under, or in the SDK's installation
+    properties. The thread count is the SDK's own choice and the caller's, never the shim's."""
+
+    PROCESSES = shim_array("GCLOUD_STORAGE_PROCESS_COUNT")[0]
+    UNSET = "<unset>"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        # The SDK layout: <sdk>/bin/gcloud, and its installation properties at <sdk>/properties.
+        self.sdk = self.root / "sdk"
+        (self.sdk / "bin").mkdir(parents=True)
+        write_stub(
+            self.sdk / "bin",
+            "gcloud",
+            'echo "PROCESSES=${CLOUDSDK_STORAGE_PROCESS_COUNT-<unset>}"\n'
+            'echo "THREADS=${CLOUDSDK_STORAGE_THREAD_COUNT-<unset>}"',
+        )
+        self.home = self.root / "home"
+        self.configs = self.home / ".config" / "gcloud" / "configurations"
+        self.configs.mkdir(parents=True)
+        for name in ("box", "theorem"):
+            (self.configs / f"config_{name}").write_text("[core]\naccount = a@b.iam.gserviceaccount.com\n",
+                                                         encoding="utf-8")
+        (self.home / ".config" / "gcloud" / "active_config").write_text("box\n", encoding="utf-8")
+        self.env = {"PATH": f"{self.sdk / 'bin'}:{SHIMS}:/usr/bin:/bin", "HOME": str(self.home),
+                    "GCE_METADATA_HOST": "127.0.0.1:9"}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def run_shim(self, args: list[str], extra_env: Mapping[str, str] | None = None) -> tuple[str, str]:
+        env = {**self.env, **(extra_env or {})}
+        result = subprocess.run([str(SHIMS / "gcloud"), *args], capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+        return values["PROCESSES"], values["THREADS"]
+
+    def test_the_default_is_small(self):
+        self.assertIn(int(self.PROCESSES), range(1, 9))
+
+    def test_storage_commands_get_the_default(self):
+        for args in (["storage", "cp", "-r", "d", "gs://b/d"], ["storage", "rsync", "gs://b/d", "d"],
+                     ["alpha", "storage", "ls", "gs://b"], ["--project", "p", "storage", "cat", "gs://b/o"],
+                     ["--configuration", "theorem", "storage", "rm", "gs://b/o"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_shim(args), (self.PROCESSES, self.UNSET))
+
+    def test_other_commands_are_untouched(self):
+        for args in (["config", "list"], ["compute", "instances", "create", "storage"],
+                     ["--project", "storage", "config", "list"], ["auth", "print-access-token"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_shim(args), (self.UNSET, self.UNSET))
+
+    def test_the_callers_environment_is_kept(self):
+        cases = (
+            ({"CLOUDSDK_STORAGE_PROCESS_COUNT": "32"}, ("32", self.UNSET)),
+            ({"CLOUDSDK_STORAGE_THREAD_COUNT": "1"}, (self.PROCESSES, "1")),
+            ({"CLOUDSDK_STORAGE_PROCESS_COUNT": "", "CLOUDSDK_STORAGE_THREAD_COUNT": "8"}, ("", "8")),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                self.assertEqual(self.run_shim(["storage", "cp", "a", "gs://b/a"], env), expected)
+
+    def test_a_configured_value_is_kept(self):
+        """The environment outranks a configuration, so the shim sets nothing there either."""
+        (self.configs / "config_box").write_text("[core]\nprocess_count = 1\n[storage]\n  process_count=24\n",
+                                                 encoding="utf-8")
+        (self.configs / "config_theorem").write_text("[storage]\nthread_count = 2\n[core]\nprocess_count = 3\n",
+                                                     encoding="utf-8")
+        cases = (
+            ([], {}, self.UNSET),
+            (["--configuration", "theorem"], {}, self.PROCESSES),
+            # The last --configuration is empty, so it names none and active_config's box decides.
+            (["--configuration=theorem", "--configuration="], {}, self.UNSET),
+            ([], {"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, self.PROCESSES),
+            ([], {"GCLOUD_ACCOUNT": "theorem"}, self.PROCESSES),
+            ([], {"CLOUDSDK_CONFIG": str(self.root / "empty")}, self.PROCESSES),
+        )
+        for flags, env, expected in cases:
+            with self.subTest(flags=flags, env=env):
+                self.assertEqual(self.run_shim([*flags, "storage", "cp", "a", "gs://b/a"], env),
+                                 (expected, self.UNSET))
+
+    def test_an_installation_property_is_kept(self):
+        (self.sdk / "properties").write_text("[storage]\nprocess_count = 2\n", encoding="utf-8")
+        self.assertEqual(self.run_shim(["storage", "ls"]), (self.UNSET, self.UNSET))
+
+    def test_without_a_home_the_storage_call_still_runs(self):
+        """No HOME and no passwd entry: no configuration to read, and nothing to refuse."""
+        write_stub(self.sdk / "bin", "id", "exit 1")
+        env = {k: v for k, v in self.env.items() if k != "HOME"}
+        result = subprocess.run([str(SHIMS / "gcloud"), "storage", "ls"], capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"PROCESSES={self.PROCESSES}", result.stdout)
+
+
 LOCK_CRASH = "ERROR: gcloud crashed (OperationalError): database is locked"
 # What a `gcloud storage` task-graph worker logs when it finds credentials.db locked, after the
 # progress dots gcloud writes to a stderr that is no terminal (reproduced on 2026-11-02).
