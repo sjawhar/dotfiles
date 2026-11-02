@@ -13,17 +13,18 @@ All of Theorem's spend is in BigQuery dataset `theorem-agent-infra.agent_spend`.
 bq query --project_id=theorem-agent-infra --use_legacy_sql=false --maximum_bytes_billed=5000000000 '<SQL>'
 ```
 
-- Always pass `--maximum_bytes_billed=5000000000` (5 GB): no quota caps the project, and the queries here bill under 600 MB.
-- If the job is refused for `bigquery.jobs.create` in `theorem-agent-infra`, run it with `--project_id=autoformalization` or `--project_id=theorem-research` (a colleague's box identity and the OSS Verify lane VMs hold the right there). An "Access Denied" on the table itself means your identity is not a reader: tell the cost tracking lead (dispatch://INFRA-165).
+- Always pass `--maximum_bytes_billed=5000000000` (5 GB). Nothing else stops a large query: no quota caps the project, and a `SELECT *` on `otel_raw` reads about 19 GB. The queries here bill under 600 MB.
+- Run the same command with `--dry_run` first on a table you have not queried before: it prints the bytes it would read and bills nothing.
+- If the job is refused for `bigquery.jobs.create` in `theorem-agent-infra`, run it with `--project_id=autoformalization` or `--project_id=theorem-research` (a colleague's box identity and the OSS Verify lane VMs hold the right there). The Verified Linux agent hosts and Legion's pods can open the tables but cannot run a query yet: say so to the cost tracking lead (dispatch://INFRA-165) instead of looking for another way. An "Access Denied" on the table itself means your identity is not a reader: tell the same lead.
 
 ## Start from `project_spend_daily_v`
 
 One row per UTC `day`, `project`, `platform`, `item`, `kind`, with `usd`.
 
-- `project`: `BET`, `OSSV`, `LINUX`, `INFRA`; other streams by their own name (`Rocq speed`, `lean-speed`, `shared`, `untagged`). `(no project)` is the part of a bill no record places in a stream.
-- `platform` and `item`: `Anthropic`, `OpenAI`, `Other model providers` by model; `Google Cloud` by lane or machine group; `Azure` by service; `GitHub` by repository.
+- `project`: `BET`, `OSSV`, `LINUX`, `INFRA`; other streams by their own name (`Rocq speed`, `lean-speed`, `shared`, `untagged`). `(no project)` is the part of a bill no record places in a stream, including Azure outside VMs and disks and, before 2026-10-31, all of GitHub.
+- `platform` and `item`: `Anthropic`, `OpenAI`, `Other model providers` by model; `Google Cloud` by lane or machine group; `Azure` by service; `GitHub` by repository from 2026-10-31 only.
 - Sum every `kind` except `attributed_org_unknown`: that kind may be in a bill already, and adding it counts dollars twice.
-- `Google Cloud` is `estimated` at list price, so read it as a close figure, not the invoice.
+- `Google Cloud` is the estimate for spend-cloud-cost's projects only, at list price, about $725-$3,835 a day below Google's bill of all projects (`infra_spend_daily_v`). Read it as a close figure per project, not the invoice.
 
 My project this week by platform:
 
@@ -38,7 +39,7 @@ Change `platform` in `GROUP BY` to `item` and filter `platform` to drill down: `
 
 ## Workflow and job cost: `project_actions_daily_v`
 
-GitHub Actions by `project`, `repository`, `workflow`, `runner`, `outcome`, with `minutes` and `usd` at list price. It is the same money as the `GitHub` rows above counted another way, so never add the two views together.
+GitHub Actions by `project`, `repository`, `workflow`, `runner`, `outcome`, with `minutes` and `usd` at list price. It is the same money as the `GitHub` rows above counted another way, so never add the two views together. It ends on 2026-10-31 until its loader is back, and `outcome` is NULL on rows loaded before that column existed (10-28 and 10-29), which hold every outcome of those days together.
 
 ```sql
 SELECT repository, workflow, runner, outcome, SUM(minutes) AS minutes, ROUND(SUM(usd), 2) AS usd
@@ -50,4 +51,4 @@ GROUP BY 1, 2, 3, 4 ORDER BY usd DESC LIMIT 20
 ## Other questions
 
 - One person's spend, how fresh each source is: the README section has the exact queries. Check freshness first when a number looks too low: a source whose last `day` is older than yesterday stopped loading.
-- A colleague's machines show only as `People's machines`, never by name. Do not try to name them, and do not act on a colleague's workload.
+- Never name, stop, resize or act on a machine that is not ours. The views show colleagues' machines only as `People's machines`, but the tables (`cloud_cost_estimated`, `cloud_cost_today`) name them: do not read names from those tables, and treat `People's machines` as out of scope.
