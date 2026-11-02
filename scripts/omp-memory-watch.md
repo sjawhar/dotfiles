@@ -69,7 +69,8 @@ below each pane, and finds the session the way `tmux-resurrect-omp` does: the se
 holds open, else the `--resume` id on its command line; for a pane running `agentbox new <spec>
 -- omp …`, the launcher's own line, else (once per pane per 5 min, one box per run, since each
 `docker exec` costs about 1.5 s) the omp inside that one box. The state file keeps, per pane, the
-session, the working directory, and for a box the launcher's spec.
+session, the working directory, the window (`#{window_id}`, since `renumber-windows` is on and a
+window's index changes) and for a box the launcher's spec.
 
 The pass is bounded, because at load 425 on 2026-11-02 an unbounded one took 33 s and the unit
 killed the next period's run at its 25 s limit. Every process is read once, from its
@@ -100,6 +101,7 @@ the reason in the journal, when:
 | Reason | Why |
 |---|---|
 | the pane was respawned while the run decided (its pid is not the listed one) | something else, such as `agentbox move`, has already started the pane again |
+| `agentbox move` owns the session's respawn (`wait:`; the record is kept and read again next run) | the move respawns the pane itself, 1 to 17 s after its hang-up; a resume in that gap gives one transcript two writers. See below |
 | the pane still runs omp or an agentbox launcher | it is not dead |
 | the session's transcript ends in a `session_exit` with `kind: "normal"` | it ended on purpose; the test is `normal_exit_at` from `envoy-role-holder-watch`, imported, not copied |
 | another live omp holds the session | resuming it twice would give one transcript two writers |
@@ -111,9 +113,49 @@ the reason in the journal, when:
 A `session_exit` of kind `signal` (a `kill <pid>`, SIGTERM) is **not** a normal end, so a session
 stopped that way is resumed, once. A memcg OOM kill is SIGKILL and writes no `session_exit` at all.
 A pane this watch never saw running omp is never touched, so nothing that died before the
-restarter was deployed is resumed by it.
+restarter was deployed is resumed by it. A pane that is gone (its owner closed it) is forgotten,
+not resumed, unless a move holds its session.
 
-`--restart-dry-run` (and `--dry-run`) decides and logs `DRY RUN, would resume: … <command>`, and
+### A session in an `agentbox move`
+
+A move hangs the session's omp up with SIGHUP, so its transcript ends in a `signal` exit like a
+machine loss, a lead's restart or a memory stop, which are about 55 of the 73 signal exits read in
+the study for dispatch://INFRA-898 and must all be resumed. The exit entry cannot tell them apart,
+so the move's own log decides: `~/.cache/omp/agentbox/move-<id>.log`, read by `who_respawns`,
+the one place that decides who brings a session back (the `intent` omp is to record in
+`session_exit.data` goes there). Only the session's latest move counts, and only its lines from
+the last time this watch saw the session running, so a move the session already came back from
+is history.
+
+- **The move is running**: its latest step (the start, `hung up; waiting for its teardown`,
+  `exited after`, `respawn of pane … failed (try N of 40)`, `respawned into`) is less than 10 min
+  old. The pane is left with `wait: agentbox move owns its respawn (<time>: <step>)`, and a pane
+  that is gone is kept (`kept: the pane is gone, and agentbox move owns its respawn`), not
+  forgotten. A move that logs nothing for 10 min has died, and the pane is decided as any other.
+- **The move gave up**: its last line says `the session is DOWN` (every respawn try failed),
+  `pane … is gone; nothing respawned`, or, before 2026-11-02, tmux's `respawn pane failed`. The
+  session is resumed as the box the move was making (`agentbox new <the move's spec> -- omp
+  --resume <id>`), after the other checks above. A pane still there is respawned in place. A pane
+  that is gone gets a **new pane in the window it was in**, opened as `scripts/agent-new` opens one
+  (`tmux split-window -d -t <window id> -c <cwd>`, and once more after `select-layout tiled` when
+  tmux has no space). A window still full after that, which is common here (the agents windows
+  hold 10 and more panes; a drill window refused its third split on 2026-11-02 at 15:29:49Z), or
+  a window that is gone, gives way to a new window `omp-<first 8 of the id>` in the same tmux
+  session (`tmux new-window -d -t <session>: -n omp-<id>`). Either way the box-health owner is
+  told which move gave up and where the session now runs.
+
+Why a new pane and not an alert only: R3A (`01a16c67`) closed its pane %74 (`agents3:7.4` then)
+with its omp on 2026-11-02 at 10:20:48Z, the move then tried 40 times and logged DOWN at
+10:32:00Z, and nothing but that log knew: the session stayed down until 14:31:16Z, when it was
+resumed by hand on the host in a new pane (%1641, a new window `r3a`). The restarter holds what
+that hand resume needed (the session, the directory, the move's box spec, the window), and an
+alert would only have handed the same command to a person four hours later. The pane goes into
+the window it was in (dispatch://INFRA-202 gives each stream one window), never one this watch
+guesses. When no new pane can be opened (the tmux session is gone too), and whenever a respawn
+this watch decided on fails, the box-health owner gets the exact command to run instead.
+
+`--restart-dry-run` (and `--dry-run`) decides and logs `DRY RUN, would resume: … <command>` (for a
+gone pane, `DRY RUN, would resume in a new pane of window <id>`), tells nobody, and
 respawns nothing. `--no-restart` turns it off. On a machine without `~/.dotfiles/shims/omp` or
 without a reachable tmux server the pass does nothing and says so in the run's line. The unit
 sets `TMUX_TMPDIR` and puts `shims/` first on `PATH`, as `envoy-role-holder-watch.service` does:
@@ -448,6 +490,7 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 | OOM bias | `cgroup.procs` of each capped omp scope, `/proc/<pid>/comm`, `/proc/<pid>/stat` (parent), `/proc/<pid>/oom_score_adj` (read, and written upward) |
 | Panes | `tmux list-panes -a`, `/proc/<pid>/task/*/children` below each pane, an omp's open session file or `--resume` id, `docker exec` into one box when nothing else names its session |
 | Whether a session ended on purpose | the last entry of its transcript, by `normal_exit_at` in `envoy-role-holder-watch` |
+| Whether `agentbox move` owns a session's respawn, or gave up | `~/.cache/omp/agentbox/move-<id>.log` |
 
 ## Running it by hand
 
@@ -481,7 +524,7 @@ An adj already raised stays raised until its process ends; to put one back by ha
 Every pane decision of the last hour:
 
 ```sh
-journalctl --user -u omp-memory-watch.service --since -1h | grep -E 'RESUMED|would resume|: left:|forgotten'
+journalctl --user -u omp-memory-watch.service --since -1h | grep -E 'RESUMED|would resume|: left:|wait:|kept:|forgotten|failed'
 ```
 
 `installers/omp-memory-watch.sh` arms it (links `omp/omp-memory-watch.{service,timer}` into

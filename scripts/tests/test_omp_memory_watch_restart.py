@@ -12,11 +12,13 @@ a temporary session root, read by the real normal_exit_at.
 """
 
 import argparse
+import calendar
 import importlib.machinery
 import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -37,7 +39,9 @@ NORMAL_EXIT = {
 }
 
 
-class RestartPassTest(unittest.TestCase):
+class RestarterCase(unittest.TestCase):
+    """A temporary session root, shim and state file, with tmux and the pane's processes replaced."""
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -91,6 +95,8 @@ class RestartPassTest(unittest.TestCase):
     def host(self) -> tuple[str, dict]:
         return "host", {"pid": 777, "start": 1, "sid": SID, "cwd": str(self.cwd)}
 
+
+class RestartPassTest(RestarterCase):
     def test_a_pane_whose_omp_died_is_resumed_with_the_absolute_shim(self) -> None:
         self.run_pass(self.host(), 1000.0)
         note = self.run_pass(("idle", {}), 1030.0)
@@ -248,6 +254,274 @@ class RestartPassTest(unittest.TestCase):
         self.run_pass(("idle", {}), 1000.0)
         self.assertEqual(self.respawned, [])
         self.assertEqual(self.lines, [])
+
+
+# Two real move logs from ~/.cache/omp/agentbox on sami-rocqperf, verbatim. A healthy move:
+# 01a14db1 hung up at 12:09:23Z and respawned into its box at 12:09:29Z on 2026-11-02.
+HEALTHY_SID = "01a14db1-5568-7640-b39d-4b09c768ce73"
+HEALTHY_LOG = """2026-11-02T12:09:23Z move 01a14db1-5568-7640-b39d-4b09c768ce73: pid 48107, pane %3, cwd /home/sami/src, spec --dir /home/sami/src --dir /mnt/nvme/sami/frac-verify --dir /mnt/nvme/sami/session-tmp/48107-STceSGNZ --dir /mnt/nvme/sami/trend
+2026-11-02T12:09:23Z move 01a14db1-5568-7640-b39d-4b09c768ce73: tmux server /home/sami/.tmux/sockets/tmux-1000/default, client /home/sami/.mise/installs/github-sjawhar-tmux-builds/3.8-fix5776/tmux
+2026-11-02T12:09:23Z move 01a14db1-5568-7640-b39d-4b09c768ce73: omp 48107 hung up; waiting for its teardown
+2026-11-02T12:09:29Z move 01a14db1-5568-7640-b39d-4b09c768ce73: omp 48107 exited after 6s
+2026-11-02T12:09:29Z move 01a14db1-5568-7640-b39d-4b09c768ce73: pane %3 respawned into agentbox new --dir /home/sami/src --dir /mnt/nvme/sami/frac-verify --dir /mnt/nvme/sami/session-tmp/48107-STceSGNZ --dir /mnt/nvme/sami/trend
+2026-11-02T12:10:34Z move 01a14db1-5568-7640-b39d-4b09c768ce73: the resumed session registered on Envoy; wake notice sent
+"""
+HEALTHY_CWD = "/home/sami/src"
+# R3A (01a16c67): the first move failed to fork on 2026-11-01; the second hung it up at 10:20:35Z
+# on 2026-11-02, its pane %74 was already gone, and at 10:32:00Z, after 40 tries, it gave up.
+DOWN_SID = "01a16c67-c564-7581-82fb-53fbc135de32"
+DOWN_LOG = """2026-11-01T17:47:30Z move 01a16c67-c564-7581-82fb-53fbc135de32: pid 51406, pane %74, cwd /home/sami/src/speed-r3-a, spec --dir /home/sami/src/speed-r3-a
+2026-11-01T17:47:30Z move 01a16c67-c564-7581-82fb-53fbc135de32: omp 51406 hung up; waiting for its teardown
+2026-11-01T17:47:36Z move 01a16c67-c564-7581-82fb-53fbc135de32: omp 51406 exited after 6s
+respawn pane failed: fork failed: No such device
+2026-11-02T10:20:34Z move 01a16c67-c564-7581-82fb-53fbc135de32: pid 908873, pane %74, cwd /home/sami/src/speed-r3-a, spec --dir /home/sami/src/speed-r3-a --dir /mnt/nvme/sami/frac-verify --dir /mnt/nvme/sami/speed --dir /mnt/nvme/sami/tmp/r3a --dir /mnt/nvme/sami/gate-runs --dir /mnt/nvme/sami/gate-briefs --dir /mnt/nvme/sami/git-objects
+2026-11-02T10:20:35Z move 01a16c67-c564-7581-82fb-53fbc135de32: omp 908873 hung up; waiting for its teardown
+2026-11-02T10:20:47Z move 01a16c67-c564-7581-82fb-53fbc135de32: omp 908873 exited after 12s
+2026-11-02T10:20:48Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 1 of 40): can't find pane: %74
+2026-11-02T10:21:03Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 2 of 40): can't find pane: %74
+2026-11-02T10:21:18Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 3 of 40): can't find pane: %74
+2026-11-02T10:21:33Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 4 of 40): can't find pane: %74
+2026-11-02T10:21:48Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 5 of 40): can't find pane: %74
+2026-11-02T10:22:04Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 6 of 40): can't find pane: %74
+2026-11-02T10:22:28Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 7 of 40): can't find pane: %74
+2026-11-02T10:22:45Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 8 of 40): can't find pane: %74
+2026-11-02T10:23:00Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 9 of 40): can't find pane: %74
+2026-11-02T10:23:18Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 10 of 40): can't find pane: %74
+2026-11-02T10:23:34Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 11 of 40): can't find pane: %74
+2026-11-02T10:23:55Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 12 of 40): can't find pane: %74
+2026-11-02T10:24:10Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 13 of 40): can't find pane: %74
+2026-11-02T10:24:31Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 14 of 40): can't find pane: %74
+2026-11-02T10:24:46Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 15 of 40): can't find pane: %74
+2026-11-02T10:25:02Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 16 of 40): can't find pane: %74
+2026-11-02T10:25:17Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 17 of 40): can't find pane: %74
+2026-11-02T10:25:32Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 18 of 40): can't find pane: %74
+2026-11-02T10:25:55Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 19 of 40): can't find pane: %74
+2026-11-02T10:26:11Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 20 of 40): can't find pane: %74
+2026-11-02T10:26:26Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 21 of 40): can't find pane: %74
+2026-11-02T10:26:45Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 22 of 40): can't find pane: %74
+2026-11-02T10:27:03Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 23 of 40): can't find pane: %74
+2026-11-02T10:27:18Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 24 of 40): can't find pane: %74
+2026-11-02T10:27:33Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 25 of 40): can't find pane: %74
+2026-11-02T10:27:54Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 26 of 40): can't find pane: %74
+2026-11-02T10:28:09Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 27 of 40): can't find pane: %74
+2026-11-02T10:28:24Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 28 of 40): can't find pane: %74
+2026-11-02T10:28:42Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 29 of 40): can't find pane: %74
+2026-11-02T10:28:58Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 30 of 40): can't find pane: %74
+2026-11-02T10:29:15Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 31 of 40): can't find pane: %74
+2026-11-02T10:29:33Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 32 of 40): can't find pane: %74
+2026-11-02T10:29:48Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 33 of 40): can't find pane: %74
+2026-11-02T10:30:06Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 34 of 40): can't find pane: %74
+2026-11-02T10:30:21Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 35 of 40): can't find pane: %74
+2026-11-02T10:30:36Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 36 of 40): can't find pane: %74
+2026-11-02T10:30:54Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 37 of 40): can't find pane: %74
+2026-11-02T10:31:18Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 38 of 40): can't find pane: %74
+2026-11-02T10:31:33Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 39 of 40): can't find pane: %74
+2026-11-02T10:32:00Z move 01a16c67-c564-7581-82fb-53fbc135de32: respawn of pane %74 failed (try 40 of 40): can't find pane: %74
+2026-11-02T10:32:00Z move 01a16c67-c564-7581-82fb-53fbc135de32: pane %74 holds no process and would not respawn; the session is DOWN. Bring it back from a host session: tmux respawn-pane -k -t %74 -c /home/sami/src/speed-r3-a bash -i -c '( setsid /home/sami/.dotfiles/scripts/agentbox move --wake 01a16c67-c564-7581-82fb-53fbc135de32 </dev/null >>/home/sami/.cache/omp/agentbox/move-01a16c67-c564-7581-82fb-53fbc135de32.log 2>&1 & ); agentbox new --dir /home/sami/src/speed-r3-a --dir /mnt/nvme/sami/frac-verify --dir /mnt/nvme/sami/speed --dir /mnt/nvme/sami/tmp/r3a --dir /mnt/nvme/sami/gate-runs --dir /mnt/nvme/sami/gate-briefs --dir /mnt/nvme/sami/git-objects -- omp --resume 01a16c67-c564-7581-82fb-53fbc135de32 ; exec bash -i'
+"""
+DOWN_CWD = "/home/sami/src/speed-r3-a"
+
+
+def at(stamp: str) -> float:
+    return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")))
+
+
+class MoveLogTest(RestarterCase):
+    """`agentbox move` respawns a session itself, 1 to 17 s after its SIGHUP, and the transcript's
+    `signal` exit cannot tell that from a machine loss: the move's own log decides
+    (dispatch://INFRA-898). When the move gives up, the session is brought back in a new pane."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.moves = Path(self.tmp.name) / "agentbox"
+        self.moves.mkdir()
+        self.splits: list[tuple[str, str, str, str, str]] = []
+        self.split_answer = (True, "%900", "window @7")
+        self.told: list[str] = []
+        self.logs: dict[Path, list[str]] = {}
+        for name, value in (
+            ("MOVE_LOG_DIR", self.moves),
+            ("open_pane", lambda window, session, name, cwd, command: self.splits.append((window, session, name, cwd, command)) or self.split_answer),
+            ("tell_box_health", lambda envoy, text: self.told.append(text) or "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"),
+        ):
+            original = getattr(WATCH, name)
+            setattr(WATCH, name, value)
+            self.addCleanup(setattr, WATCH, name, original)
+
+    def session(self, sid: str, cwd: str, log: str, upto: int | None = None) -> Path:
+        """The session's transcript and its move log, with the log's real working directory
+        replaced by one that exists here (the first `upto` lines only, when given). Each pass
+        sees the log as it stood at that pass's time."""
+        work = Path(self.tmp.name) / sid[:8]
+        work.mkdir(exist_ok=True)
+        lines = log.replace(cwd, str(work)).splitlines(keepends=True)
+        self.logs[self.moves / f"move-{sid}.log"] = lines[:upto] if upto else lines
+        (self.sessions / "-work" / f"2026-11-01T00-00-00-000Z_{sid}.jsonl").write_text(
+            json.dumps({"type": "session", "id": sid}) + "\n"
+        )
+        return work
+
+    def pass_at(self, stamp: str, *states: tuple[str, dict], **overrides) -> str:
+        now = at(stamp)
+        for path, lines in self.logs.items():
+            written, last = [], 0.0
+            for line in lines:
+                if line[:20].endswith("Z") and line[4] == "-":
+                    last = at(line[:20])
+                if last <= now:
+                    written.append(line)
+            path.write_text("".join(written))
+        self.states += list(states)
+        return WATCH.restart_pass(self.options(**overrides), self.state, [], now, envoy=object())
+
+    def test_a_pane_idle_during_a_healthy_move_is_left_to_the_move(self) -> None:
+        work = self.session(HEALTHY_SID, HEALTHY_CWD, HEALTHY_LOG)
+        self.pass_at("2026-11-02T12:09:10Z", ("host", {"pid": 777, "start": 1, "sid": HEALTHY_SID, "cwd": str(work)}))
+        # Between the hang-up (12:09:23Z) and the respawn (12:09:29Z).
+        note = self.pass_at("2026-11-02T12:09:26Z", ("idle", {}))
+        self.assertEqual(self.respawned, [])
+        self.assertIn("wait: agentbox move owns its respawn (2026-11-02T12:09:23Z: omp 48107 hung up", self.lines[-1])
+        self.assertIn("1 held by agentbox move", note)
+        # The record stays: the next run reads the pane again, and finds the box launcher.
+        self.assertIn(PANE["id"], self.state.data["panes"])
+
+    def test_a_box_that_dies_after_the_move_respawned_it_is_resumed(self) -> None:
+        """The move's lines before this watch saw the box running are history, so its death a
+        minute later is an ordinary one."""
+        work = self.session(HEALTHY_SID, HEALTHY_CWD, HEALTHY_LOG)
+        box = {"pid": 9, "start": 1, "sid": HEALTHY_SID, "spec": f"--dir {work}", "box": "agentbox-0123456789ab", "cwd": str(work)}
+        self.pass_at("2026-11-02T12:09:40Z", ("box", box))
+        self.pass_at("2026-11-02T12:10:10Z", ("idle", {}))
+        self.assertEqual(len(self.respawned), 1)
+        self.assertIn(f"agentbox new --dir {work} -- omp --resume {HEALTHY_SID}", self.respawned[0][2])
+
+    def test_a_move_silent_for_ten_minutes_no_longer_holds_the_pane(self) -> None:
+        work = self.session(HEALTHY_SID, HEALTHY_CWD, HEALTHY_LOG, upto=3)  # killed after the hang-up
+        self.pass_at("2026-11-02T12:09:10Z", ("host", {"pid": 777, "start": 1, "sid": HEALTHY_SID, "cwd": str(work)}))
+        self.pass_at("2026-11-02T12:14:00Z", ("idle", {}))
+        self.assertEqual(self.respawned, [])
+        self.pass_at("2026-11-02T12:19:24Z", ("idle", {}))
+        self.assertEqual(len(self.respawned), 1)
+
+    def r3a_record(self, work: Path) -> dict:
+        return {"pid": 908873, "start": 1, "sid": DOWN_SID, "cwd": str(work)}
+
+    def test_a_pane_gone_during_the_move_is_kept_then_resumed_in_its_window_when_the_move_gives_up(self) -> None:
+        work = self.session(DOWN_SID, DOWN_CWD, DOWN_LOG)
+        self.panes = [dict(PANE, id="%74", target="agents3:7.4", window="@7")]
+        self.pass_at("2026-11-02T10:20:30Z", ("host", self.r3a_record(work)))
+        self.panes = []
+        self.pass_at("2026-11-02T10:20:48Z")
+        self.pass_at("2026-11-02T10:26:00Z")
+        self.assertEqual(self.splits, [])
+        kept = [line for line in self.lines if "kept: the pane is gone" in line]
+        self.assertEqual(len(kept), 1, self.lines)
+        note = self.pass_at("2026-11-02T10:32:20Z")
+        self.assertEqual(len(self.splits), 1)
+        window, tmux_session, title, cwd, command = self.splits[0]
+        self.assertEqual((window, tmux_session, title, cwd), ("@7", "agents3", "omp-01a16c67", str(work)))
+        # Back as the box the move was making, with its spec, not as the host session it was.
+        self.assertTrue(command.endswith(
+            f"cd {work} && /home/u/.dotfiles/scripts/agentbox new --dir {work} --dir /mnt/nvme/sami/frac-verify"
+            " --dir /mnt/nvme/sami/speed --dir /mnt/nvme/sami/tmp/r3a --dir /mnt/nvme/sami/gate-runs"
+            f" --dir /mnt/nvme/sami/gate-briefs --dir /mnt/nvme/sami/git-objects -- omp --resume {DOWN_SID}"
+        ), command)
+        self.assertIn("resumed 1", note)
+        self.assertIn("RESUMED in new pane %900 (window @7)", self.lines[-1])
+        self.assertEqual(len(self.told), 1)
+        self.assertIn(f"agentbox move could not bring session {DOWN_SID} back (2026-11-02T10:32:00Z", self.told[0])
+        self.assertNotIn("%74", self.state.data["panes"])
+        # Once: the next run finds it resumed less than an hour ago.
+        self.pass_at("2026-11-02T10:32:50Z")
+        self.assertEqual(len(self.splits), 1)
+
+    def test_no_new_pane_tells_the_box_health_owner_the_command(self) -> None:
+        work = self.session(DOWN_SID, DOWN_CWD, DOWN_LOG)
+        self.panes = [dict(PANE, id="%74", target="agents3:7.4", window="@7")]
+        self.pass_at("2026-11-02T10:20:30Z", ("host", self.r3a_record(work)))
+        self.panes = []
+        self.split_answer = (False, "split-window -t @7: can't find window: @7; new-window -t agents3: can't find session: agents3", "")
+        self.pass_at("2026-11-02T10:32:20Z")
+        self.assertEqual(len(self.told), 1)
+        self.assertIn(f"session {DOWN_SID} is down and was NOT resumed", self.told[0])
+        self.assertIn("no new pane could be opened: split-window -t @7: can't find window: @7; new-window", self.told[0])
+        self.assertIn(f"Resume it from a host session: tmux new-window -n omp-01a16c67 -c {work} bash -i -c ", self.told[0])
+        self.assertIn(f"omp --resume {DOWN_SID}; exec bash -i", self.told[0])
+
+    def test_dry_run_names_the_new_pane_and_opens_none(self) -> None:
+        work = self.session(DOWN_SID, DOWN_CWD, DOWN_LOG)
+        self.panes = [dict(PANE, id="%74", target="agents3:7.4", window="@7")]
+        self.pass_at("2026-11-02T10:20:30Z", ("host", self.r3a_record(work)))
+        self.panes = []
+        self.pass_at("2026-11-02T10:32:20Z", restart_dry_run=True)
+        self.assertEqual((self.splits, self.told), ([], []))
+        self.assertIn("DRY RUN, would resume in a new pane of window @7 (else a new window omp-01a16c67 of tmux session agents3)", self.lines[-1])
+
+    def test_a_pane_still_there_after_the_move_gave_up_is_respawned_into_the_box(self) -> None:
+        """2026-11-01T17:47Z: `fork failed: No such device` left the pane with no process."""
+        work = self.session(DOWN_SID, DOWN_CWD, DOWN_LOG)
+        self.pass_at("2026-11-01T17:47:00Z", ("host", self.r3a_record(work)))
+        self.pass_at("2026-11-01T17:48:00Z", ("idle", {}))
+        self.assertEqual(len(self.respawned), 1)
+        self.assertIn(f"agentbox new --dir {work} -- omp --resume {DOWN_SID}", self.respawned[0][2])
+        self.assertIn("agentbox move gave up (2026-11-01T17:47:36Z: respawn pane failed", self.lines[-1])
+        self.assertEqual(len(self.told), 1)
+
+    def test_a_session_resumed_by_hand_after_the_move_gave_up_is_its_own_again(self) -> None:
+        """R3A came back by hand on the host in pane %1641: its next death is not the move's."""
+        work = self.session(DOWN_SID, DOWN_CWD, DOWN_LOG)
+        self.pass_at("2026-11-02T14:50:00Z", ("host", self.r3a_record(work)))
+        self.pass_at("2026-11-02T14:50:30Z", ("idle", {}))
+        self.assertEqual(len(self.respawned), 1)
+        self.assertTrue(self.respawned[0][2].endswith(f"--resume {DOWN_SID}"), self.respawned[0][2])
+        self.assertNotIn("agentbox new", self.respawned[0][2].split(";", 1)[1])
+        self.assertEqual(self.told, [])
+
+    def test_a_pane_closed_with_no_move_is_forgotten(self) -> None:
+        self.pass_at("2026-11-02T12:55:00Z", self.host())
+        self.panes = []
+        self.pass_at("2026-11-02T12:55:30Z")
+        self.assertEqual((self.splits, self.told), ([], []))
+        self.assertIn("forgotten, the pane is gone", self.lines[-1])
+        self.assertEqual(self.state.data["panes"], {})
+
+
+class OpenPaneTest(unittest.TestCase):
+    """Where a session whose pane is gone gets a new one: its window, else a new window."""
+
+    def run_tmux(self, answers: dict[str, tuple[int, str]]) -> tuple[tuple[bool, str, str], list[list[str]]]:
+        calls: list[list[str]] = []
+
+        class Done:
+            def __init__(self, code: int, text: str) -> None:
+                self.returncode, self.stdout, self.stderr = code, text if code == 0 else "", text if code else ""
+
+        def fake(argv, **kw):
+            calls.append(argv)
+            return Done(*answers.get(argv[1], (0, "")))
+
+        original = WATCH.subprocess.run
+        WATCH.subprocess.run = fake
+        self.addCleanup(setattr, WATCH.subprocess, "run", original)
+        return WATCH.open_pane("@1570", "mvdrill", "omp-01a19cd3", "/w", "cd /w && omp --resume x"), calls
+
+    def test_a_window_with_room_gets_the_pane(self) -> None:
+        result, calls = self.run_tmux({"split-window": (0, "%900\n")})
+        self.assertEqual(result, (True, "%900", "window @1570"))
+        self.assertEqual(calls, [["tmux", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "@1570", "-c", "/w",
+                                  "bash", "-i", "-c", "cd /w && omp --resume x; exec bash -i"]])
+
+    def test_a_full_window_is_tiled_then_a_new_window_is_opened(self) -> None:
+        """tmux 3.8 says `no space for a new pane`: the drill window refused at 15:29:49Z on 2026-11-02."""
+        result, calls = self.run_tmux({"split-window": (1, "no space for a new pane"), "new-window": (0, "%901\n")})
+        self.assertEqual(result, (True, "%901", "new window omp-01a19cd3 of tmux session mvdrill"))
+        self.assertEqual([c[1] for c in calls], ["split-window", "select-layout", "split-window", "new-window"])
+        self.assertEqual(calls[1], ["tmux", "select-layout", "-t", "@1570", "tiled"])
+        self.assertEqual(calls[3][:10], ["tmux", "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "mvdrill:", "-n", "omp-01a19cd3"])
+
+    def test_no_window_and_no_session_says_both_errors(self) -> None:
+        result, _ = self.run_tmux({"split-window": (1, "can't find window: @1570"), "new-window": (1, "can't find session: mvdrill")})
+        self.assertEqual(result, (False, "split-window -t @1570: can't find window: @1570; new-window -t mvdrill: can't find session: mvdrill", ""))
 
 
 class PaneStateTest(unittest.TestCase):

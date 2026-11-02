@@ -64,6 +64,7 @@ crossing is still open and still rising 10 minutes later, goes to the same owner
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
 import importlib.machinery
 import importlib.util
@@ -1630,7 +1631,10 @@ BIAS_DEADLINE = 6.0
 RESTART_DEADLINE = 14.0
 # Open-file scans a run may make: about 0.2 s each at that load.
 SCAN_BUDGET = 10
-PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{session_name}:#{window_index}.#{pane_index}"
+# The window id (@N) as well as the target: with renumber-windows on, as on sami-rocqperf, a
+# window's index changes when one before it closes, and a new pane for a session whose pane is
+# gone goes into the window by its id.
+PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{session_name}:#{window_index}.#{pane_index}\t#{window_id}"
 BOX_NAME_RE = re.compile(r"--name[=\s]+(agentbox-[0-9a-f]{12})\b")
 PANE_WALK_DEPTH = 4
 PANE_WALK_MAX = 64
@@ -1665,8 +1669,8 @@ def tmux_panes() -> list[dict] | None:
     rows = []
     for line in done.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) == 4 and parts[1].isdigit():
-            rows.append({"id": parts[0], "pid": int(parts[1]), "dead": parts[2] == "1", "target": parts[3]})
+        if len(parts) == 5 and parts[1].isdigit():
+            rows.append({"id": parts[0], "pid": int(parts[1]), "dead": parts[2] == "1", "target": parts[3], "window": parts[4]})
     return rows
 
 
@@ -1807,7 +1811,10 @@ def live_holder(sid: str, omps: list[tuple[int, str]], resurrect, records: dict,
     No open-file scan here: one per omp is about 0.2 s at load 400, a hundred omps would cost the
     whole run, and the pane records already hold what those scans found."""
     for other, record in records.items():
-        if other != pane_id and now - float(record.get("seen") or 0) < SID_REFRESH and same_session(record.get("sid") or "", sid):
+        if (
+            other != pane_id and not record.get("gone_at") and now - float(record.get("seen") or 0) < SID_REFRESH
+            and same_session(record.get("sid") or "", sid)
+        ):
             return f"pane {other}"
     for pid, _cgroup in omps:
         if same_session(resurrect.named_session(cmdline_of(pid)) or "", sid):
@@ -1884,46 +1891,194 @@ def respawn_pane(pane_id: str, cwd: str, command: str) -> tuple[bool, str]:
     return done.returncode == 0, done.stderr.strip()
 
 
+def tmux_call(argv: list[str]) -> tuple[bool, str]:
+    """Run one tmux command: (it succeeded, its stdout, else its error)."""
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as failure:
+        return False, str(failure)
+    return done.returncode == 0, (done.stdout if done.returncode == 0 else done.stderr).strip()
+
+
+def open_pane(window: str, session: str, name: str, cwd: str, command: str) -> tuple[bool, str, str]:
+    """Open a new pane for `command`: (True, its pane id, where it is) or (False, each error, "").
+
+    In `window`, as scripts/agent-new opens a session's pane (`split-window -d`, and once more
+    after `select-layout tiled` when tmux has no space for it). When the window has no room even
+    then, which is common here (the agents windows hold 10 and more panes, and a drill window
+    of 80x24 refused a third split on 2026-11-02 at 15:29:49Z), or is gone, a new window `name`
+    in the tmux session `session`."""
+    run = ["-c", cwd, "bash", "-i", "-c", f"{command}; exec bash -i"]
+    errors = []
+    if window:
+        split = ["tmux", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", window, *run]
+        ok, out = tmux_call(split)
+        if not ok and "no space for" in out:
+            tmux_call(["tmux", "select-layout", "-t", window, "tiled"])
+            ok, out = tmux_call(split)
+        if ok:
+            return True, out, f"window {window}"
+        errors.append(f"split-window -t {window}: {out}")
+    if session:
+        ok, out = tmux_call(["tmux", "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"{session}:", "-n", name, *run])
+        if ok:
+            return True, out, f"new window {name} of tmux session {session}"
+        errors.append(f"new-window -t {session}: {out}")
+    return False, "; ".join(errors) or "no window or tmux session was recorded", ""
+
+
+# ------------------------------------------------------------ who brings a session back
+
+# `agentbox move` hangs a session's omp up (SIGHUP, so its transcript ends in a `signal`
+# session_exit like any other) and then respawns the pane into the box itself, 1 to 17 s later
+# on 2026-11-02, or after up to 40 failed tries 15 s apart. Its detached relauncher logs each step
+# here, one file per session, appended to by every move of that session.
+MOVE_LOG_DIR = Path.home() / ".cache" / "omp" / "agentbox"
+# How long after its latest step a move still owns the session's respawn. A move that logs
+# nothing for this long has died without saying how it ended.
+MOVE_OWNS = 600.0
+# A log line is stamped to the second and a pane is read up to RESTART_DEADLINE after the run's
+# start, which is the `seen` a record holds, so a step this much before `seen` still counts.
+MOVE_SLACK = 2.0
+MOVE_LINE_RE = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) move ([0-9a-f-]{36}): (.*)")
+# The first line of each move (move_relaunch): `resume <path>` is absent before 2026-11-02.
+MOVE_START_RE = re.compile(r"pid \d+, pane (%\d+), cwd (.+?), (?:resume (.+?), )?spec (.*)")
+# The steps of a move still in progress, after its first line: the hang-up, the teardown, each
+# respawn try, and the respawn itself (move_respawn; the launcher typed into the pane's shell is
+# its last resort). The Envoy wake lines after them are the resumed session's, not the move's.
+MOVE_STEPS = (
+    "hung up; waiting for its teardown", "exited after", "is still up after", "respawn of pane",
+    "respawned into", "the launcher was typed into",
+)
+# The move's last line when it gave up. "is DOWN": every respawn try failed. "is gone": the pane
+# closed with its omp, so there was nothing to respawn (pane %74 of 01a16c67 on 2026-11-02).
+# "respawn pane failed" is tmux's own error, printed unstamped by the relauncher before 2026-11-02.
+MOVE_GAVE_UP = ("the session is DOWN", "is gone; nothing respawned")
+
+
+def who_respawns(sid: str, since: float, now: float) -> dict:
+    """Whether something other than this watch brings the session back. The one place that
+    decides it.
+
+    {"owner": "move", "at", "line"}: an `agentbox move` is respawning the session, so a resume
+    now would give one transcript two writers. {"owner": "down", "at", "line", "record"}: the
+    move gave up, and `record` is what it was moving the session to (kind "box", its spec), which
+    is what the session is brought back as. {} when nothing else claims it.
+
+    Only the session's latest move counts, and only its lines from `since` on (the record's last
+    sight of the session running): a move this watch saw the session survive is history.
+
+    A `signal` session_exit cannot tell a move from a machine loss, a lead's restart or a memory
+    stop, which all must be resumed (dispatch://INFRA-898, about 55 of 73 read). Today the move's
+    own log says it; when omp records the sender's `intent` in session_exit.data, it is read here.
+    """
+    paths = sorted(MOVE_LOG_DIR.glob(f"move-{sid}*.log"))
+    if len(paths) != 1:
+        return {}
+    try:
+        lines = paths[0].read_text(errors="replace").splitlines()
+    except OSError:
+        return {}
+    begun: dict | None = None
+    last: dict = {}
+    stamp = 0.0
+    for raw in lines:
+        match = MOVE_LINE_RE.match(raw)
+        if not match:
+            if begun is not None and raw.startswith("respawn pane failed"):
+                last = {"owner": "down", "at": stamp, "line": raw}
+            continue
+        stamp = float(calendar.timegm(time.strptime(match.group(1), "%Y-%m-%dT%H:%M:%SZ")))
+        line = match.group(3)
+        start = MOVE_START_RE.fullmatch(line)
+        if start:
+            begun = {"kind": "box", "sid": match.group(2), "pane": start.group(1), "cwd": start.group(2),
+                     "spec": start.group(4)}
+            last = {"owner": "move", "at": stamp, "line": line}
+        elif begun is None:
+            continue
+        elif any(words in line for words in MOVE_GAVE_UP):
+            last = {"owner": "down", "at": stamp, "line": line}
+        elif any(words in line for words in MOVE_STEPS):
+            last = {"owner": "move", "at": stamp, "line": line}
+    if not last or begun is None or last["at"] < since - MOVE_SLACK:
+        return {}
+    if last["owner"] == "move":
+        return last if now - last["at"] < MOVE_OWNS else {}
+    return dict(last, record=begun)
+
+
 def restart_decision(record: dict, omps: list, restarts: dict, options: argparse.Namespace, now: float,
-                     resurrect, holder, records: dict, pane_id: str) -> str:
-    """"" when the pane's session should be resumed, else why it is left. Cheap tests first."""
+                     resurrect, holder, records: dict, pane_id: str) -> tuple[str, dict]:
+    """("", what to resume) when the pane's session should be resumed, else (why it is left, {}).
+
+    What to resume is the pane's record, or the box an `agentbox move` that gave up was moving
+    the session to. A reason that starts "wait:" keeps the record for the next run. Cheap tests
+    first."""
     sid = record.get("sid") or ""
     if not sid:
-        return "left: the session it ran could not be read while it was alive"
+        return "left: the session it ran could not be read while it was alive", {}
+    claim = who_respawns(sid, float(record.get("seen") or 0), now)
+    if claim.get("owner") == "move":
+        return f"wait: agentbox move owns its respawn ({iso(claim['at'])}: {claim['line'][:120]})", {}
+    resume = dict(claim["record"]) if claim else record
     if now - float(record.get("seen") or 0) > RESTART_STALE:
-        return f"left: last seen running at {iso(record.get('seen'))}, more than {human(RESTART_STALE)} ago"
-    if not record.get("cwd") or not os.path.isdir(record["cwd"]):
-        return f"left: its working directory {record.get('cwd') or '(unknown)'} is gone"
-    if record.get("kind") == "box" and not record.get("spec"):
-        return "left: the agentbox launcher line names no spec"
+        return f"left: last seen running at {iso(record.get('seen'))}, more than {human(RESTART_STALE)} ago", {}
+    if not resume.get("cwd") or not os.path.isdir(resume["cwd"]):
+        return f"left: its working directory {resume.get('cwd') or '(unknown)'} is gone", {}
+    if resume.get("kind") == "box" and not resume.get("spec"):
+        return "left: the agentbox launcher line names no spec", {}
     last = float(restarts.get(sid) or 0)
     if last and now - last < options.restart_cooldown:
-        return f"left: resumed at {iso(last)}, less than {human(options.restart_cooldown)} ago"
+        return f"left: resumed at {iso(last)}, less than {human(options.restart_cooldown)} ago", {}
     transcript = find_transcript(sid, holder)
     if not transcript:
-        return "left: no transcript found, so whether it ended on purpose cannot be told"
+        return "left: no transcript found, so whether it ended on purpose cannot be told", {}
     ended = holder.normal_exit_at(transcript)
     if ended:
-        return f"left: the session ended normally at {ended}"
+        return f"left: the session ended normally at {ended}", {}
     elsewhere = live_holder(sid, omps, resurrect, records, pane_id, now)
     if elsewhere:
-        return f"left: the session is live in {elsewhere}"
-    return ""
+        return f"left: the session is live in {elsewhere}", {}
+    if claim:
+        resume["gave_up"] = f"{iso(claim['at'])}: {claim['line'][:160]}"
+    return "", resume
+
+
+def resume_failed_text(sid: str, why: str, how: str) -> str:
+    """The box-health owner's alert for a session this watch decided to resume and could not."""
+    return (
+        f"omp-memory-watch: session {sid} is down and was NOT resumed: {why}. Resume it from a host"
+        f" session: {how}"
+    )
+
+
+def down_resumed_text(sid: str, gave_up: str, where: str, command: str) -> str:
+    """The box-health owner's notice that a session `agentbox move` left down was resumed."""
+    return (
+        f"omp-memory-watch: agentbox move could not bring session {sid} back ({gave_up}). This watch"
+        f" resumed it {where}: {command}"
+    )
 
 
 def restart_pass(
     options: argparse.Namespace, state: State, omps: list[tuple[int, str]], now: float,
-    deadline: float = float("inf"),
+    deadline: float = float("inf"), envoy: Envoy | None = None,
 ) -> str:
     """Resume each tmux pane whose omp died without ending its session on purpose.
 
     Each run records, for every pane running omp (on the host or through `agentbox new`), the
-    session it runs, its working directory and, for a box, the launcher's spec. A recorded pane
-    that is now idle -- its shell has no child, or tmux marks it dead -- is resumed with
-    `tmux respawn-pane -k`, unless: no session was read for it; it was last seen running more
-    than an hour ago; its directory is gone; the session's transcript ends in a normal
-    `session_exit` (envoy-role-holder-watch's normal_exit_at); another omp holds the session;
-    or the session was resumed less than --restart-cooldown ago. Every decision is logged.
+    session it runs, its working directory, its window and, for a box, the launcher's spec. A
+    recorded pane that is now idle -- its shell has no child, or tmux marks it dead -- is resumed
+    with `tmux respawn-pane -k`, unless: no session was read for it; an `agentbox move` is
+    respawning it (who_respawns: the record is kept and read again next run); it was last seen
+    running more than an hour ago; its directory is gone; the session's transcript ends in a
+    normal `session_exit` (envoy-role-holder-watch's normal_exit_at); another omp holds the
+    session; or the session was resumed less than --restart-cooldown ago. A pane that is gone is
+    forgotten, unless a move holds its session: then it is kept while the move runs, and when the
+    move gives up the session is resumed in a new pane of the same window. Every decision is
+    logged; a session this pass leaves down after deciding to resume it, and a session it brings
+    back after a move gave up, are told to the box-health owner (`envoy`).
     """
     if not os.access(OMP_SHIM, os.X_OK):
         return f"panes: restarter off here, no {OMP_SHIM}"
@@ -1937,14 +2092,58 @@ def restart_pass(
     restarts: dict = state.data.setdefault("restarts", {})
     for sid in [sid for sid, at in restarts.items() if now - float(at) > max(options.restart_cooldown, RESTART_STALE)]:
         restarts.pop(sid, None)
-    live = resumed = left = 0
+    live = resumed = left = waiting = 0
     box_lookups = 0
     table = process_table()
     budget = {"scans": SCAN_BUDGET, "deadline": deadline}
     present = {pane["id"] for pane in panes}
+
+    def report(text: str) -> str:
+        return (tell_box_health(envoy, text) if envoy is not None else "") or "nobody: every route refused it"
+
     for pane_id in [pane_id for pane_id in records if pane_id not in present]:
-        old = records.pop(pane_id)
-        log(f"pane {pane_id} ({old.get('target')}) session {old.get('sid') or 'unknown'}: forgotten, the pane is gone")
+        old = records[pane_id]
+        name = f"pane {pane_id} ({old.get('target')}) session {old.get('sid') or 'unknown'}"
+        # A pane its owner closed stays closed (dispatch://INFRA-898, group 6). A pane that closed
+        # during a move is the move's: it owns the session until it respawns it or gives up.
+        claim = who_respawns(old["sid"], float(old.get("seen") or 0), now) if old.get("sid") else {}
+        if claim.get("owner") == "move":
+            waiting += 1
+            if not old.get("gone_at"):
+                old["gone_at"] = now
+                log(f"{name}: kept: the pane is gone, and agentbox move owns its respawn"
+                    f" ({iso(claim['at'])}: {claim['line'][:120]})")
+            continue
+        records.pop(pane_id)
+        if not claim:
+            log(f"{name}: forgotten, the pane is gone")
+            continue
+        reason, resume = restart_decision(old, omps, restarts, options, now, resurrect, holder, records, pane_id)
+        if reason:
+            log(f"{name}: the pane is gone; {reason}")
+            left += 1
+            continue
+        window = old.get("window") or (old.get("target") or "").rpartition(".")[0]
+        tmux_session = (old.get("target") or "").rpartition(":")[0]
+        title = f"omp-{resume['sid'][:8]}"
+        command = resume_command(resume)
+        how = f"tmux new-window -n {title} -c {shlex.quote(resume['cwd'])} bash -i -c {shlex.quote(command + '; exec bash -i')}"
+        if dry:
+            log(f"{name}: DRY RUN, would resume in a new pane of window {window} (else a new window {title}"
+                f" of tmux session {tmux_session}): agentbox move gave up ({resume['gave_up']}): {command}")
+            resumed += 1
+            continue
+        restarts[resume["sid"]] = now
+        state.commit(options)
+        ok, out, where = open_pane(window, tmux_session, title, resume["cwd"], command)
+        if ok:
+            heard = report(down_resumed_text(resume["sid"], resume["gave_up"], f"in new pane {out} ({where}), since pane {pane_id} is gone", command))
+            log(f"{name}: RESUMED in new pane {out} ({where}): agentbox move gave up ({resume['gave_up']}): {command} -> {heard}")
+            resumed += 1
+        else:
+            heard = report(resume_failed_text(resume["sid"], f"agentbox move gave up ({resume['gave_up']}), its pane {pane_id} is gone, and no new pane could be opened: {out}", how))
+            log(f"{name}: no new pane could be opened: {out} -> {heard}")
+            left += 1
     # A run that runs out of RESTART_BUDGET stops where it is, and the next run starts there, so
     # every pane is read within a few runs however loaded the box is and the watch's alerting
     # never waits on it.
@@ -1979,7 +2178,7 @@ def restart_pass(
                     found = None
                 if found:
                     seen["sid"] = found[1]
-            records[pane["id"]] = dict(seen, kind=kind, target=pane["target"], seen=now)
+            records[pane["id"]] = dict(seen, kind=kind, target=pane["target"], window=pane.get("window", ""), seen=now)
             continue
         if not old:
             continue
@@ -1995,15 +2194,20 @@ def restart_pass(
             records.pop(pane["id"], None)
             left += 1
             continue
-        reason = restart_decision(old, omps, restarts, options, now, resurrect, holder, records, pane["id"])
+        reason, resume = restart_decision(old, omps, restarts, options, now, resurrect, holder, records, pane["id"])
+        if reason.startswith("wait:"):
+            log(f"{name}: {reason}")
+            waiting += 1
+            continue
         if reason:
             log(f"{name}: {reason}")
             records.pop(pane["id"], None)
             left += 1
             continue
-        command = resume_command(old)
+        command = resume_command(resume)
+        why = f"agentbox move gave up ({resume['gave_up']})" if resume.get("gave_up") else "its omp is gone and the session did not end normally"
         if dry:
-            log(f"{name}: DRY RUN, would resume: its omp is gone and the session did not end normally: {command}")
+            log(f"{name}: DRY RUN, would resume: {why}: {command}")
             resumed += 1
             continue
         # The pane as it is NOW, not as the listing at the start of this run had it: `agentbox
@@ -2017,18 +2221,21 @@ def restart_pass(
         if pane_processes(current["pid"], resurrect) and not current["dead"]:
             log(f"{name}: left: something started in the pane while this run decided")
             continue
-        restarts[old["sid"]] = now
+        restarts[resume["sid"]] = now
         state.commit(options)
-        ok, error = respawn_pane(pane["id"], old["cwd"], command)
+        ok, error = respawn_pane(pane["id"], resume["cwd"], command)
         if ok:
-            log(f"{name}: RESUMED: its omp is gone and the session did not end normally: {command}")
+            heard = report(down_resumed_text(resume["sid"], resume["gave_up"], f"in its pane {pane['id']}", command)) if resume.get("gave_up") else ""
+            log(f"{name}: RESUMED: {why}: {command}" + (f" -> {heard}" if heard else ""))
             old["seen"] = now
             resumed += 1
         else:
-            log(f"{name}: respawn-pane failed: {error}")
+            how = f"tmux respawn-pane -k -t {pane['id']} -c {shlex.quote(resume['cwd'])} bash -i -c {shlex.quote(command + '; exec bash -i')}"
+            heard = report(resume_failed_text(resume["sid"], f"tmux respawn-pane -k -t {pane['id']} failed: {error}", how))
+            log(f"{name}: respawn-pane failed: {error} -> {heard}")
             left += 1
     verb = "would resume" if dry else "resumed"
-    note = f"panes: {live} running omp, {verb} {resumed}, left {left}"
+    note = f"panes: {live} running omp, {verb} {resumed}, left {left}, {waiting} held by agentbox move"
     if unread:
         note += f", {unread} not read this run (out of time; the next run starts there)"
     return note
@@ -2364,7 +2571,7 @@ def run_once(options: argparse.Namespace) -> int:
     restart_note = "panes: restarter off"
     if options.restart:
         try:
-            restart_note = restart_pass(options, state, omps, started, run_clock + RESTART_DEADLINE)
+            restart_note = restart_pass(options, state, omps, started, run_clock + RESTART_DEADLINE, envoy)
         except Exception as error:  # noqa: BLE001 -- the run's own record must still be written
             restart_note = f"panes: restarter failed: {type(error).__name__}: {error}"
 
