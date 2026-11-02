@@ -624,6 +624,9 @@ def _jobs(path: Path) -> tuple[str, list[dict]]:
         required = ("name", "at", "command", "cwd", "timeout_s")
         if any(key not in job for key in required) or not isinstance(job["at"], list) or not isinstance(job["command"], list):
             raise ValueError(f"invalid job: {job!r}")
+        timeout = job["timeout_s"]
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError(f"invalid job: timeout_s must be a positive integer of seconds: {job!r}")
     return data["timezone"], data["jobs"]
 
 
@@ -637,20 +640,24 @@ def write_heartbeat(state: Path, now: dt.datetime, pid: int) -> None:
     (state / "heartbeat").write_text(f"{utc_text(now)}\t{pid}\n")
 
 
-def _beat(state: Path, interval_s: float) -> None:
+def _beat(state: Path, interval_s: float, on_death) -> None:
     try:
         while True:
             write_heartbeat(state, dt.datetime.now(dt.UTC), os.getpid())
             time.sleep(interval_s)
     except BaseException as error:  # noqa: BLE001 - any death of the heartbeat must stop the scheduler
         print(f"pilot-schedule heartbeat stopped: {error!r}", file=sys.stderr, flush=True)
-        os._exit(1)
+        try:
+            on_death()
+        finally:
+            os._exit(1)
 
 
-def start_heartbeat(state: Path, interval_s: float = HEARTBEAT_INTERVAL_S) -> threading.Thread:
+def start_heartbeat(state: Path, interval_s: float = HEARTBEAT_INTERVAL_S, on_death=lambda: None) -> threading.Thread:
     """Write the heartbeat from a daemon thread, so it stays fresh while a job runs up to its timeout. A heartbeat
-    that cannot be written ends the whole process with exit 1: a stale file must mean the scheduler is down."""
-    thread = threading.Thread(target=_beat, args=(state, interval_s), name="pilot-heartbeat", daemon=True)
+    that cannot be written runs ON_DEATH (the scheduler kills its jobs there) and ends the whole process with exit 1:
+    a stale file must mean the scheduler is down."""
+    thread = threading.Thread(target=_beat, args=(state, interval_s, on_death), name="pilot-heartbeat", daemon=True)
     thread.start()
     return thread
 
@@ -660,29 +667,47 @@ def start_scheduled_command(job: dict) -> subprocess.Popen:
     return subprocess.Popen(job["command"], cwd=job["cwd"], start_new_session=True)
 
 
+def kill_scheduled_command(process: subprocess.Popen) -> None:
+    """Kill a scheduled command's whole process group and reap its leader. Safe to call on one already reaped."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    process.wait()
+
+
 def finish_scheduled_command(process: subprocess.Popen, timeout_s: float) -> int:
     """Wait for a started command. If its timeout expires, kill and reap every descendant before reporting exit 124:
-    a wrapper around omp must not leave omp alive."""
+    a wrapper around omp must not leave omp alive. If the wait itself fails, kill and reap the group before raising,
+    so no failure leaves a command running unsupervised."""
     try:
         return process.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        kill_scheduled_command(process)
         return 124
+    except BaseException:
+        kill_scheduled_command(process)
+        raise
 
 
 def _await_job(fire: Fire, process, timeout_s: float, results: queue.Queue) -> None:
     """A job's worker thread: it only waits for the process and hands the outcome to the main thread, which alone
-    touches the scheduler's state."""
+    touches the scheduler's state. `finish_scheduled_command` has killed the group before it reports an error."""
     started = time.monotonic()
     try:
         code: int | str = finish_scheduled_command(process, timeout_s)
     except BaseException as error:  # noqa: BLE001 - the main thread must learn the job ended, or it never runs again
         code = f"error {error!r}"
     results.put((fire, code, time.monotonic() - started))
+
+
+def _kill_all(running: dict) -> None:
+    """Kill and reap every running job's group: the scheduler that enforced their timeouts is about to exit."""
+    for _, process in list(running.values()):
+        try:
+            kill_scheduled_command(process)
+        except Exception as error:  # noqa: BLE001 - one failure must not spare the other groups
+            print(f"pilot-schedule could not kill pid {process.pid}: {error!r}", file=sys.stderr, flush=True)
 
 
 def _wait_for_result(results: queue.Queue, seconds: float) -> list:
@@ -699,58 +724,73 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
     refreshes the due-source records and recomputes the fires from them (`fires_since`), so nothing a record no longer
     holds can run. It starts every fire that is due, earliest first, while fewer than MAX_JOBS jobs run; a job runs
     at most one instance at a time, so a fire of a running job waits until it ends. Then it waits for the next fire
-    time, a job's end or ten minutes. CLOCK and WAIT are injectable so the loop itself is tested on a fake clock."""
+    time, a job's end or ten minutes. Whatever ends the scheduler (an error, SIGTERM, the heartbeat's death) kills and
+    reaps every running job's group first. CLOCK and WAIT are injectable so the loop itself is tested on a fake
+    clock."""
     clock = clock or (lambda: dt.datetime.now(dt.UTC))
     started_at = clock()
     print(f"pilot-schedule started {utc_text(started_at)}", flush=True)
-    heartbeat = start_heartbeat(state)
+    running: dict[str, tuple[Fire, subprocess.Popen]] = {}
+    heartbeat = start_heartbeat(state, on_death=lambda: _kill_all(running))
     api = api or Dispatch()
     fired: dict[str, set[str]] = {}
     executed_daily: set[tuple[str, str]] = set()
-    running: dict[str, Fire] = {}
     results: queue.Queue = queue.Queue()
     finished: list = []
-    while True:
-        if not heartbeat.is_alive():
-            print("pilot-schedule heartbeat thread is not running", file=sys.stderr, flush=True)
-            raise SystemExit(1)
+    on_main = threading.current_thread() is threading.main_thread()
+    if on_main:
+        previous_term = signal.signal(signal.SIGTERM, _exit_on_term)
+    try:
         while True:
-            try:
-                finished.append(results.get_nowait())
-            except queue.Empty:
-                break
-        if finished:
-            for fire, code, elapsed in finished:
-                del running[fire.name]
-                print(f"{utc_text(clock())} ran {fire.name} exit {code} in {elapsed:.1f}s", flush=True)
-                # A daily time is marked run whatever the fire's kind: a due that coincides with it covers it.
-                executed_daily.add((fire.name, utc_text(fire.at)))
-                for stream, key in fire.due_keys:
-                    fired.setdefault(stream, set()).add(key)
-            _write_fired(state, fired)
-            finished = []
-        timezone, jobs = _jobs(jobs_file)
-        now = clock()
-        streams = {job["dues_from"] for job in jobs if job.get("dues_from")}
-        for stream in streams:
-            refresh_stream_record(api, state, stream)
-            fired.setdefault(stream, _load_fired(state, {stream})[stream])
-        dues = {stream: _load_dues(state, stream, now) for stream in streams}
-        fires = coalesce_fires(fires_since(jobs, timezone, started_at, now, dues, fired, executed_daily))
-        by_name = {job["name"]: job for job in jobs}
-        for fire in fires:
-            if fire.at > now or len(running) >= max_jobs:
-                break
-            if fire.name in running:
-                continue
-            job = by_name[fire.name]
-            process = start_scheduled_command(job)
-            running[fire.name] = fire
-            print(f"{utc_text(now)} start {fire.name} for {utc_text(fire.at)}", flush=True)
-            threading.Thread(target=_await_job, args=(fire, process, job["timeout_s"], results),
-                             name=f"pilot-job-{fire.name}", daemon=True).start()
-        upcoming = [(fire.at - now).total_seconds() for fire in fires if fire.at > now and fire.name not in running]
-        finished = wait(results, min([600.0, *upcoming]))
+            if not heartbeat.is_alive():
+                print("pilot-schedule heartbeat thread is not running", file=sys.stderr, flush=True)
+                raise SystemExit(1)
+            while True:
+                try:
+                    finished.append(results.get_nowait())
+                except queue.Empty:
+                    break
+            if finished:
+                for fire, code, elapsed in finished:
+                    del running[fire.name]
+                    print(f"{utc_text(clock())} ran {fire.name} exit {code} in {elapsed:.1f}s", flush=True)
+                    # A daily time is marked run whatever the fire's kind: a due that coincides with it covers it.
+                    executed_daily.add((fire.name, utc_text(fire.at)))
+                    for stream, key in fire.due_keys:
+                        fired.setdefault(stream, set()).add(key)
+                _write_fired(state, fired)
+                finished = []
+            timezone, jobs = _jobs(jobs_file)
+            now = clock()
+            streams = {job["dues_from"] for job in jobs if job.get("dues_from")}
+            for stream in streams:
+                refresh_stream_record(api, state, stream)
+                fired.setdefault(stream, _load_fired(state, {stream})[stream])
+            dues = {stream: _load_dues(state, stream, now) for stream in streams}
+            fires = coalesce_fires(fires_since(jobs, timezone, started_at, now, dues, fired, executed_daily))
+            by_name = {job["name"]: job for job in jobs}
+            for fire in fires:
+                if fire.at > now or len(running) >= max_jobs:
+                    break
+                if fire.name in running:
+                    continue
+                job = by_name[fire.name]
+                process = start_scheduled_command(job)
+                running[fire.name] = (fire, process)
+                print(f"{utc_text(now)} start {fire.name} for {utc_text(fire.at)}", flush=True)
+                threading.Thread(target=_await_job, args=(fire, process, job["timeout_s"], results),
+                                 name=f"pilot-job-{fire.name}", daemon=True).start()
+            upcoming = [(fire.at - now).total_seconds() for fire in fires if fire.at > now and fire.name not in running]
+            finished = wait(results, min([600.0, *upcoming]))
+    finally:
+        _kill_all(running)
+        if on_main:
+            signal.signal(signal.SIGTERM, previous_term)
+
+
+def _exit_on_term(signum, frame) -> None:
+    """SIGTERM ends the scheduler through its normal exit path, so it kills its jobs first."""
+    raise SystemExit(128 + signum)
 
 
 def census_ids(measured: dict, stream: str) -> list[str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -329,7 +330,8 @@ def drive_schedule(monkeypatch, tmp_path, start: datetime, durations: dict[str, 
 
     monkeypatch.setattr(pilot, "start_scheduled_command", start_command)
     monkeypatch.setattr(pilot, "finish_scheduled_command", finish_command)
-    monkeypatch.setattr(pilot, "start_heartbeat", lambda state: Alive())
+    monkeypatch.setattr(pilot, "kill_scheduled_command", lambda handle: handle.released.set())
+    monkeypatch.setattr(pilot, "start_heartbeat", lambda state, on_death: Alive())
 
     try:
         with pytest.raises(Stop):
@@ -420,33 +422,128 @@ def test_schedule_runs_one_fire_for_a_daily_time_and_both_dues_while_another_job
     assert (state / "INFRA-167" / "fired-dues.json").read_text() == (
         '{\n  "fired": [\n    "B@2026-11-01T14:31:00Z"\n  ]\n}\n')
 
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0]
+    except FileNotFoundError:  # reaped
+        return False
+    return state != "Z"
+
+
+def _dies(pid: int) -> bool:
+    """Whether PID stops running within five seconds (a zombie waiting for its reaper is dead)."""
+    import time as clock
+
+    for _ in range(50):
+        if not _alive(pid):
+            return True
+        clock.sleep(0.1)
+    return False
+
+
+def _grandchild_command(pid_file: Path) -> list[str]:
+    """A wrapper whose child would outlive it, as omp does under its shim."""
+    return ["sh", "-c", f"sleep 60 & echo $! > {pid_file}.tmp && mv {pid_file}.tmp {pid_file}; wait"]
+
+
+def _read_pid(pid_file: Path) -> int:
+    import time as clock
+
+    for _ in range(50):
+        if pid_file.exists():
+            return int(pid_file.read_text())
+        clock.sleep(0.1)
+    pytest.fail(f"{pid_file} never appeared")
+
+
 def test_scheduled_command_timeout_kills_a_real_grandchild(tmp_path):
     """The reviewer's case without mocks: a wrapper whose child outlives it. After the timeout no process of the
-    group may run on (a zombie waiting for its reaper is dead)."""
+    group may run on."""
     import time as clock
 
     pid_file = tmp_path / "grandchild.pid"
-    command = ["sh", "-c", f"sleep 60 & echo $! > {pid_file}; wait"]
     started = clock.monotonic()
 
-    process = pilot.start_scheduled_command({"command": command, "cwd": str(tmp_path), "timeout_s": 1})
+    process = pilot.start_scheduled_command({"command": _grandchild_command(pid_file), "cwd": str(tmp_path),
+                                             "timeout_s": 1})
     assert pilot.finish_scheduled_command(process, 1) == 124
     assert clock.monotonic() - started < 10
-    grandchild = int(pid_file.read_text())
-    def running(pid: int) -> bool:
-        try:
-            state = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1][0]
-        except FileNotFoundError:  # reaped
-            return False
-        return state != "Z"
+    grandchild = _read_pid(pid_file)
+    assert _dies(grandchild), f"grandchild {grandchild} still runs after the timeout"
 
-    for _ in range(50):
-        if not running(grandchild):
-            break
-        clock.sleep(0.1)
-    else:
-        pytest.fail(f"grandchild {grandchild} still runs after the timeout")
 
+def test_a_failed_wait_kills_the_group_before_it_reports(tmp_path):
+    """A wait that raises (here a timeout the loader would now refuse) must not leave the command running unwatched."""
+    import signal
+
+    pid_file = tmp_path / "grandchild.pid"
+    process = pilot.start_scheduled_command({"command": _grandchild_command(pid_file), "cwd": str(tmp_path),
+                                             "timeout_s": 1})
+    grandchild = _read_pid(pid_file)
+    try:
+        with pytest.raises(TypeError):
+            pilot.finish_scheduled_command(process, "1")
+        assert process.returncode is not None, "the wrapper was not reaped"
+        assert _dies(grandchild), f"grandchild {grandchild} still runs after the failed wait"
+    finally:
+        if _alive(grandchild):
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def test_schedule_kills_running_jobs_when_a_launch_fails(monkeypatch, tmp_path):
+    """A starts at 06:30 PST (14:30Z); B, due at the same time, names a missing program. The scheduler exits on B's
+    error, and A's group must not outlive the scheduler that enforced its timeout."""
+    import json
+    import signal
+
+    pid_file = tmp_path / "grandchild.pid"
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [
+        {"name": "A", "at": ["06:30"], "command": _grandchild_command(pid_file), "cwd": str(tmp_path),
+         "timeout_s": 600},
+        {"name": "B", "at": ["06:30"], "command": [str(tmp_path / "missing")], "cwd": str(tmp_path),
+         "timeout_s": 600},
+    ]}))
+
+    class Alive:
+        def is_alive(self):
+            return True
+
+    launched = []
+    real_start = pilot.start_scheduled_command
+    monkeypatch.setattr(pilot, "start_scheduled_command", lambda job: launched.append(real_start(job)) or launched[-1])
+    monkeypatch.setattr(pilot, "start_heartbeat", lambda state, on_death=None: Alive())
+    at = datetime(2026, 11, 1, 14, 30, tzinfo=UTC)
+
+    with pytest.raises(FileNotFoundError):
+        pilot.schedule(jobs, tmp_path / "state", api=object(), clock=lambda: at,
+                       wait=lambda results, seconds: pytest.fail("the scheduler must exit before it waits"))
+
+    [process] = launched
+    grandchild = _read_pid(pid_file)
+    try:
+        assert process.returncode is not None, "A's wrapper was not reaped"
+        assert _dies(grandchild), f"A's grandchild {grandchild} outlived the scheduler"
+    finally:
+        if _alive(grandchild):
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+@pytest.mark.parametrize("timeout", ["1", 0, -5, True, 1.5, None])
+def test_jobs_file_refuses_a_timeout_that_is_not_a_positive_integer(tmp_path, timeout):
+    import json
+
+    jobs = tmp_path / "jobs.json"
+    job = {"name": "A", "at": ["06:30"], "command": ["true"], "cwd": ".", "timeout_s": timeout}
+    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [job]}))
+    with pytest.raises(ValueError, match="timeout_s"):
+        pilot._jobs(jobs)
+
+    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [{**job, "timeout_s": 1}]}))
+    assert pilot._jobs(jobs)[1][0]["timeout_s"] == 1
 
 
 def test_schedule_drops_only_times_already_past_when_the_process_started(monkeypatch, tmp_path):
@@ -771,11 +868,12 @@ def test_heartbeat_thread_keeps_writing_and_stops_the_process_when_it_dies(monke
     monkeypatch.setattr(pilot, "write_heartbeat", write)
     monkeypatch.setattr(pilot.os, "_exit", exits.append)
 
-    thread = pilot.start_heartbeat(tmp_path, interval_s=0.01)
+    died: list[bool] = []
+    thread = pilot.start_heartbeat(tmp_path, interval_s=0.01, on_death=lambda: died.append(True))
     thread.join(timeout=5)
 
     assert thread.daemon is True and not thread.is_alive()
-    assert writes == [str(tmp_path), str(tmp_path)] and exits == [1]
+    assert writes == [str(tmp_path), str(tmp_path)] and died == [True] and exits == [1]
 
 
 class FakeDispatch:

@@ -86,9 +86,11 @@ per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary`
   one job at one time run once, and every due they cover goes into `DIR/<stream>/fired-dues.json`, so a restart does
   not fire it again; only the main thread writes that file, once for all the jobs that ended together, by renaming a
   complete copy over it. It waits at most 10 minutes between cycles, and wakes early for a fire time or a job's end.
-  Each job runs in its own process group: at its timeout the whole group is killed and reaped (exit 124) before the
-  job counts as ended. A thread writes `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if that thread
-  dies, so a file older than 15 minutes means the scheduler is down.
+  Each job runs in its own process group: at its timeout (`timeout_s`, a positive integer of seconds) the whole group
+  is killed and reaped (exit 124) before the job counts as ended, and so is a group whose wait fails. Whatever ends
+  the scheduler (an error, SIGTERM, the heartbeat's death) first kills and reaps every running group. A thread writes
+  `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if that thread dies, so a file older than 15
+  minutes means the scheduler is down.
 - `census --stream KEY [--out FILE]` prints the session ids of the live top-level sessions in the stream's tmux
   windows (`sessions.py`), one per line, to freeze a baseline.
 - `measure --stream KEY --start ISO --end ISO [--sessions-file FILE] [--json]` counts, per session and over
