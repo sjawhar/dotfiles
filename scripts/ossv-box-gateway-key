@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# ossv-box-gateway-key -- (sami-rocqperf, sami-devbox) keep this box's OSS Verify model-gateway key in tmpfs, where
+# ossv-box-gateway-key -- (sami-rocqperf) keep this box's OSS Verify model-gateway key in tmpfs, where
 # omp/models.local.yml's `apiKey: "!cat ..."` reads it (dispatch://INFRA-398).
 #
 # The key is consumer `box` (team box) of agent-infra's model-gateway/ stack, which mints it and writes it to Secret
 # Manager as theorem-agent-infra's agent-secrets-box-model-gateway-key. Only the gateway VM's own account may read
 # that secret, so this asks the gateway VM, over ssh on the tailnet, to read the newest version with its own metadata
 # token. The policy grants sami-rocqperf's two addresses tag:model-gateway on tcp:22 (agent-infra#335) and tcp:4000
-# (#336), and tag:sami-devbox both (bootstrap/main.go, dispatch://INFRA-993). The key is written 0600 to
+# (#336); ossv-vm logs in as sami's OS Login user, so sami-devbox, a machine with no person's login, uses the dev-box@
+# ID token of ossv-box-gateway-token instead (dispatch://INFRA-993). The key is written 0600 to
 # $XDG_RUNTIME_DIR/ossv-box/gateway-key, which is tmpfs, so it is gone after a
 # reboot and this unit puts it back; a rotated key replaces the file at the next run (a running omp keeps the value
 # it read at start until it restarts). The key passes through this process only, and is never printed or logged.

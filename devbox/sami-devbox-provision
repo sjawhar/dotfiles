@@ -97,8 +97,10 @@ EXTRA_INSTALLERS=(
     # Not here:
     # - omp-root-hang-watch watches one root session (SPEEDCOACH, scripts/omp-root-hang-watch
     #   DEFAULT_SESSION), whose transcript is on sami-rocqperf. Arm it here when that session moves.
-    # - ossv-box-gateway-key needs ~/src/oss-verifier/bin/ossv-vm, which arrives with the data copy
-    #   (step 3). Run installers/ossv-box-gateway-key.sh after that copy.
+    # - ossv-box-gateway-key: it reads the box key over ssh to the gateway VM as sami's OS Login
+    #   user with sami-rocqperf's key (bin/ossv-vm), a person's login; dev-sjawhar may not read the
+    #   key's secret itself (403, 2026-11-02). Here the ossv-gateway provider signs in with the
+    #   dev-box@ ID token of ossv-box-gateway-token instead (step_secrets rewrites the apiKey line).
     # - hawk-token-refresh and omp-billing-watch: sami-rocqperf arms neither (checked
     #   2026-11-02: `systemctl --user is-enabled` not-found), and no omp model there uses hawk.
     #   hawk-token-refresh would fail every 3 minutes here: it clones a private repository with
@@ -163,6 +165,11 @@ step_secrets() {
     # --relative keeps each path under $HOME; -a keeps the 0600 modes; nothing is deleted there.
     (cd "$HOME" && rsync -a --relative -e "ssh -o BatchMode=yes" "${SECRET_FILES[@]}" "sami@$VM:")
     remote 'ls -l ~/.config/sops/age/keys.txt ~/.config/legion/envoy.json ~/.ssh/jj-signing ~/.dotfiles/secrets.env ~/.dotfiles/omp/models.local.yml && du -sh ~/.dotfiles/.secrets'
+    # sami-rocqperf's overlay reads the box key, which this machine cannot get (EXTRA_INSTALLERS);
+    # point the ossv-gateway provider at the dev-box@ ID token, which the gateway takes as team box.
+    remote 'f=~/.dotfiles/omp/models.local.yml
+        sed -i "s|^\(    apiKey: \"!cat /run/user/1000/ossv-box/\)gateway-key\"\$|\1gateway-token\"|" "$f"
+        grep -n "ossv-box/gateway-token" "$f"'
 }
 
 step_tools() {
