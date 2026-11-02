@@ -121,10 +121,18 @@ cmd_release() {
 	done
 }
 
+# status prunes expired rows, so it writes the state file: it takes the same lock
+# as reserve and release. Without it, a status that ran while a reserve held the
+# lock rewrote the file from a copy made in the middle of that reserve, and both
+# used "$f.tmp", so other lanes' reservations were lost: 2026-11-02, 40 statuses
+# against 40 reserves of one name in a private ledger left 1 holder of 3.
 cmd_status() {
-	local f held free floor
+	local f lock held free floor
 	f="$(state_file "$MOUNT")"
 	mkdir -p "$STATE_DIR"
+	lock="$f.lock"
+	exec 9>"$lock"
+	flock 9
 	live_rows "$f" >"$f.tmp" 2>/dev/null || true
 	mv -f "$f.tmp" "$f" 2>/dev/null || true
 	held=$(awk -F'\t' '{s += $2} END {print s + 0}' "$f" 2>/dev/null)
@@ -132,6 +140,7 @@ cmd_status() {
 	floor=$(floor_gib "$MOUNT")
 	echo "$MOUNT: ${free} GiB free, ${held} GiB reserved, ${floor} GiB floor, $(awk -v f="$free" -v h="$held" -v fl="$floor" 'BEGIN {printf "%.1f", f - h - fl}') GiB available to reserve."
 	[[ -s "$f" ]] && awk -F'\t' '{printf "  %s %s GiB since %s\n", $1, $2, strftime("%H:%M:%SZ", $3)}' "$f"
+	flock -u 9
 	return 0
 }
 
