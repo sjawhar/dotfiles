@@ -2,8 +2,9 @@
 # dotfiles-sync [--old SHA] [HOST...]: put each machine's ~/.dotfiles working copy on origin's
 # main. HOST is an ssh destination, or `local` for this machine; with none, every machine in
 # MACHINES below. --old is the tip main had before a history rewrite (scripts/dotfiles-squash
-# prints it and tags it pre-squash-<date>); commits from that old history are dropped, while
-# anything a machine holds that is neither on main nor in the old history is kept and named.
+# prints it and tags it pre-squash-<date>); commits from that old history are dropped, except one
+# that a commit outside it still builds on, while anything a machine holds that is neither on main
+# nor in the old history is kept and named.
 #
 # A jj checkout keeps its working-copy change: it is rebased onto main, and the run refuses a
 # conflict instead of resolving it. The refusal comes before the rebase: a duplicate of the
@@ -119,8 +120,12 @@ sync_here() {
       printf 'local commits that were never on main, left in place under bookmark %s:\n%s\n' "$anchor-kept" "$local_only"
       jj bookmark set "$anchor-kept" -r "$anchor" --allow-backwards >/dev/null
     elif [ -n "$old" ]; then
-      # The old week's commits, except any another workspace's working copy still sits on.
-      jj abandon --quiet --ignore-immutable "::$anchor ~ ::main@origin ~ ::working_copies()"
+      # The old week's commits, except one that any commit outside them still builds on (a working
+      # copy, another session's side branch): abandoning it would rebase that commit, and on
+      # 2026-11-02 at 05:04:54Z this step abandoned 524 commits and rebased the 165 commits built on
+      # them, most into conflicts. The working copy already sits on main, so jj leaves it alone.
+      local week="::$anchor ~ ::main@origin"
+      jj abandon --ignore-working-copy --quiet --ignore-immutable "($week) ~ ::(visible_heads() ~ ($week))"
     fi
     jj bookmark delete "$anchor" >/dev/null
     if [ -n "$published" ]; then

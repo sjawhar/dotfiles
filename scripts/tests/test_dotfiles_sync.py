@@ -191,6 +191,37 @@ class SyncHere(DotfilesCheckout):
         self.assertEqual(self.jj("log", "-r", f"{side}-", "--no-graph", "-T", "commit_id"), published)
         self.assertEqual(self.jj("log", "-r", "visible_heads() & description(exact:'a side branch\n')", "--no-graph", "-T", "commit_id"), side)
 
+    def test_after_a_squash_an_old_commit_a_side_branch_builds_on_stays_and_the_side_branch_is_not_rewritten(self) -> None:
+        # The shape of 2026-11-02 05:04:54Z: `--old` abandoned the old week (524 commits) and
+        # rebased the 165 commits built on them, most into conflicts.
+        base = self.run_ok("git", "rev-parse", "HEAD", cwd=self.upstream).strip()
+        for path, text in (("shared.txt", "a1\n"), ("other.txt", "a2\n"), ("wip.txt", "a3\n")):
+            (self.upstream / path).write_text(text)
+            self.commit_upstream(f"old week: {path}")
+        old = self.run_ok("git", "rev-parse", "HEAD", cwd=self.upstream).strip()
+        a2 = self.run_ok("git", "rev-parse", "HEAD^", cwd=self.upstream).strip()
+        self.jj("git", "fetch", "--quiet")
+        self.jj("new", "--quiet", a2, "-m", "a side branch")
+        (self.checkout / "other.txt").write_text("side\n")
+        self.jj("new", "--quiet", old)
+        side = self.jj("log", "-r", f"children({a2}) & description(exact:'a side branch\n')", "--no-graph", "-T", "commit_id")
+        self.run_ok("git", "reset", "-q", "--soft", base, cwd=self.upstream)
+        self.run_ok("git", "commit", "-q", "-m", "the squashed week", cwd=self.upstream)
+        self.run_ok("git", "push", "-q", "--force", "origin", "HEAD:main", cwd=self.upstream)
+
+        result = subprocess.run(["bash", str(SYNC), "--here", old], env=self.env, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+        self.assertEqual(self.jj("log", "-r", "visible_heads() & description(exact:'a side branch\n')", "--no-graph", "-T", "commit_id"), side)
+        self.assertEqual(self.jj("log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"), "")
+        # The old commit nothing builds on is gone; the ones under the side branch stay.
+        self.assertEqual(self.jj("log", "-r", f"{old} & ::visible_heads()", "--no-graph", "-T", "commit_id"), "")
+        self.assertEqual(self.jj("log", "-r", f"{a2} & ::visible_heads()", "--no-graph", "-T", "commit_id"), a2)
+
 
 PUBLISH = Path(__file__).resolve().parents[1] / "dotfiles-publish"
 
