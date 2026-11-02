@@ -123,10 +123,13 @@ sync_here() {
     fi
     jj bookmark delete "$anchor" >/dev/null
     if [ -n "$published" ]; then
-      # Their changes are on main; any another workspace's working copy sits on stays.
+      # Their changes are on main; any another workspace's working copy sits on stays. None is
+      # under a working copy, so jj leaves the working copy alone: its checkout step lost a race to
+      # another session's `jj commit` on 2026-11-02 at 20:29Z ("Concurrent checkout") and left
+      # the moved working copy behind as a second head.
       echo "dropped commits whose changes main already has:"
-      jj log -r "($published) ~ ::working_copies()" --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
-      jj abandon --quiet --ignore-immutable "($published) ~ ::working_copies()"
+      jj log --ignore-working-copy -r "($published) ~ ::working_copies()" --no-graph -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
+      jj abandon --ignore-working-copy --quiet --ignore-immutable "($published) ~ ::working_copies()"
     fi
     printf '%s on %s\n' "$(hostname)" "$(jj log -r @- --no-graph -T 'commit_id.short()')"
   else
