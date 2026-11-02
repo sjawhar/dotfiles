@@ -9,8 +9,6 @@ mcp:
 
 # Apify
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Use an Apify Actor, not one-off browser scraping, when any one of these holds: the task needs many listings, the site is JS-heavy or blocks bots, a community Actor for the site exists, or the user wants structured output. On such sites browser scraping breaks often and returns unstructured text.
 
 ## Steps

@@ -16,8 +16,7 @@ TARGET_BYTES = 8_000  # Codex injects only the first 8,000 bytes
 HARD_DESC = 1_024  # Codex catalog cap; also the Agent Skills spec limit
 TARGET_DESC = 500
 RULE_LINES = 40  # every-rule-obeyed rates collapse between 40 and 80 rules
-PRECEDENCE = "say which line of this skill is wrong"
-GROWTH_ALLOWANCE = 200  # a rewrite may add the precedence sentence (about 135 bytes) and no more
+GROWTH_ALLOWANCE = 200  # a rewrite may grow this much and no more
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\]\(([^)#\s]+)\)|`((?:references|scripts|assets)/[^`\s]+)`")
 
@@ -77,8 +76,6 @@ def check(path: Path) -> tuple[dict, list[str], list[str]]:
         fails.append(f"name {name!r} is not lowercase words joined by hyphens")
     elif name != skill_dir.name:
         warns.append(f"name {name!r} differs from directory {skill_dir.name!r}")
-    if PRECEDENCE not in " ".join(body.split()):
-        fails.append("precedence sentence missing (copy it from writing-agent-skills)")
     if rule_lines > RULE_LINES:
         warns.append(f"{rule_lines} rule lines, over {RULE_LINES}: split or delete")
     # A skill inside a repository may name a repo-root path (`scripts/deploy/x.sh`) as well as its own files.

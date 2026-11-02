@@ -5,8 +5,6 @@ description: "Use the moment a person sends a request while this session is alre
 
 # Taking a new request while working
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 A request folded into running work gets done only where it overlaps, and the rest disappears without anyone writing it down. That is the largest single way delivered work misses its goal.
 
 ## Steps

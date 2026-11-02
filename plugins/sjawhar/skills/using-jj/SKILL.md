@@ -5,8 +5,6 @@ description: "Use for version control in a checkout that has a `.jj` directory, 
 
 # Using jj (Jujutsu)
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 In a jj repository use jj, not git, unless the user says otherwise: git writes can desync jj. The git commands in the references are read-only diagnostics or named exceptions. There is no staging: every jj command first snapshots the working copy into `@`, so your saved files are already in it. Change IDs survive rewrites; commit IDs do not. Commands: [commands](references/commands.md).
 
 All workspaces share one commit store and one operation log, so an undo or a rewrite you run changes what the others see.

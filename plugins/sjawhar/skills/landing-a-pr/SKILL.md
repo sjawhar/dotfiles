@@ -10,8 +10,6 @@ description: >-
 
 # Landing a PR
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 You make the PR ready; auto-merge (`gh pr merge --auto`) merges it.
 
 ## Merging

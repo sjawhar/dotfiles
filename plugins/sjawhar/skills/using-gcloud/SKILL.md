@@ -5,8 +5,6 @@ description: Use when running gcloud compute ssh or scp against several VMs, or 
 
 # Using gcloud
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Which identity gcloud uses
 
 On an Azure VM enrolled in the box identity (`~/.dotfiles/installers/gcloud-box.sh`), gcloud acts as the service account `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com`, in the active configuration `box` (project `autoformalization`). In an agent session, client libraries and Pulumi act as it too: the session sets `GOOGLE_APPLICATION_CREDENTIALS` to its keyless configuration `~/.config/gcloud/box_credential_config.json`. It needs no sign-in and does not expire. Do not unset that variable or point it at `application_default_credentials.json`: on sami-rocqperf that file has held Sami's own login since 2026-11-01.

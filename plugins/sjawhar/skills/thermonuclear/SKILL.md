@@ -6,8 +6,6 @@ disable-model-invocation: true
 
 # Thermonuclear Review
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 `ce-code-review` is the general diff or PR review; this is the double review.
 
 1. Set the scope from the request: the PR, the current branch, else the files changed against the base branch.

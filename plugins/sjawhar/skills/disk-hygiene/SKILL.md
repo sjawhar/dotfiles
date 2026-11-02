@@ -5,7 +5,7 @@ description: Use when a shared dev box is low on disk or RAM or `df` far exceeds
 
 # Disk hygiene
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong. Reasons: `references/reasons.md`.
+Reasons: `references/reasons.md`.
 
 ## Safety rules (your own paths too)
 
