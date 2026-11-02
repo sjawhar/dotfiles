@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""What shims/secrets hands the real secrets: an agent's human-tier request is refused, all else unchanged.
+"""What shims/secrets hands the real secrets: on a machine with the broker's helper, an agent's human-tier
+request is refused; on a machine without it (the laptop), and for everything else, the call is unchanged.
 
 Technique: a stub `secrets` after shims/ on PATH logs every argv it receives and answers
-`get --no-request KEY` the way the real client does, a stub `agent-secrets` answers `identity`, and a
-scratch secretsd config.toml names a source root whose secrets.human.d holds the human-tier keys.
+`get --no-request KEY` the way the real client does, a stub `agent-secrets` answers `identity`, a
+scratch secretsd config.toml names a source root whose secrets.human.d holds the human-tier keys, and
+a scratch HOME holds the helper's user unit unless a test removes it.
 """
 
 from __future__ import annotations
@@ -70,6 +72,9 @@ class SecretsShim(unittest.TestCase):
             "SECRETSD_CONFIG": str(config),
             "STUB_LOG": str(self.log),
         }
+        self.helper_unit = root / ".config" / "systemd" / "user" / "agent-secrets-helper.service"
+        self.helper_unit.parent.mkdir(parents=True)
+        self.helper_unit.write_text("[Service]\n", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -163,6 +168,17 @@ class SecretsShim(unittest.TestCase):
             self.assertEqual(
                 self.assert_passes_through(*args, agent=False), [list(args)]
             )
+
+    def test_machine_without_the_broker_helper_sends_agents_to_secretsd(self) -> None:
+        # The laptop has no helper, so refusing there left its agents with no human-tier key at all.
+        self.helper_unit.unlink()
+        for args in (
+            ("get", "HUMAN_KEY"),
+            ("get", "--ttl", "12h", "HUMAN_KEY"),
+            ("HUMAN_KEY", "--", "env"),
+            ("GITHUB_ADMIN_PAT_THEOREM", "--", "gh", "api", "user"),
+        ):
+            self.assertEqual(self.assert_passes_through(*args), [list(args)])
 
     def test_every_agent_variable_marks_an_agent(self) -> None:
         for var in AGENT_VARS:
