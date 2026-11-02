@@ -1,13 +1,11 @@
 ---
 name: disk-hygiene
-description: Use when a shared dev box is low on disk or RAM or `df` is far above what known work explains, on load spikes with D-state processes, when agent sessions pile up workspaces, worktrees, docker images, build cache or temp dirs, and to clean up after yourself. Triggers - disk full, ENOSPC, stale worktrees, missing git worktree entry, docker prune, buildx cache, /tmp full, io pressure, jj op store growth.
+description: Use when a shared dev box is low on disk or RAM or `df` far exceeds what known work explains, on load spikes with D-state processes, when agent sessions pile up workspaces, worktrees, docker images, build cache or temp dirs, and to clean up after yourself. Triggers - disk full, ENOSPC, stale worktrees, missing git worktree entry, docker prune, buildx cache, /tmp full, io pressure, jj op store growth.
 ---
 
-# Disk Hygiene on a Shared Agent Box
+# Disk hygiene
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
-Reasons: `references/reasons.md`.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong. Reasons: `references/reasons.md`.
 
 ## Safety rules (your own paths too)
 
@@ -21,12 +19,12 @@ Tool: `S=$SKILL/scripts/disk_hygiene.py`, `SKILL=~/.dotfiles/plugins/sjawhar/ski
 | Phase | Do | Gate |
 |---|---|---|
 | 1 | Baseline: `df`, `/proc/pressure/io`, `$S writers` and `$S cpu` while the disk still fills; pick a ledger path under `~/.local/state/` | — |
-| 2 | Check in: send `references/check-in.md`'s message to each titled session on this machine in `envoy_sessions` (not subagents) and build the release and protected files it describes; never skip it for being slow | Each replied or 20 min passed; protected set written |
+| 2 | Check in: send `references/check-in.md`'s message to each titled `envoy_sessions` session on this machine (not subagents) and build the release and protected files it describes; never skip it for being slow | Each replied or 20 min passed; protected set written |
 | 3 | Inventory and classify working copies | Every non-live row has a class |
 | 4 | Apply, one item at a time | Ledger shows 0 errors |
 | 5 | Docker: `references/docker.md` | Each container's owner known and its verdict allows deletion |
 | 6 | Caches, temp, jj op store: `references/caches.md` | Only temp-dir families `$S tmp` lists, idle >24 h |
-| 7 | Report: a ledger line per manual action; a summary: space freed, what you kept and why (unpushed, holds, fresh), undescribed WIP in shared checkouts with its session (`skill://session-attribution`) or "unknown", what you could not reclaim (locks, live owners); each sampled number with its interval | Summary next to the ledger |
+| 7 | Report: a ledger line per manual action; a summary: space freed, what you kept and why (unpushed, holds, fresh), undescribed WIP in shared checkouts with its session or "unknown", what you could not reclaim (locks, live owners); each sampled number with its interval | Summary next to the ledger |
 
 Largest first, the space is usually in: dangling images, buildkit cache with leaked leases, unused tagged images, orphaned sandboxes, `/tmp` families, workspaces.
 
@@ -50,10 +48,10 @@ Delete only paths you prove are yours; never assume an unknown workspace has no 
 - Delete only while `/proc/pressure/io` `full avg10 < 20`.
 - Never `lsof +D` or `fuser` a tree per candidate; before each item, check one `$S procs` for a cwd in it.
 - Never size a candidate to decide its deletion. Measure the result by the removed directory, not `df`; where you read `df`, read `df <path>`.
-- Never run one `du` of everything, even bounded by `-d` or `-t`. Size suspected paths one at a time, `du -xsm` under `systemd-run --user -p Nice=19 -p IOWeight=10`. For where space went, what writes now or what appeared recently: `references/finding-space.md`.
+- Never run one `du` of everything, even bounded by `-d` or `-t`. Size suspected paths one at a time, `du -xsm` under `systemd-run --user -p Nice=19 -p IOWeight=10`. Where space went, what writes now, what appeared recently: `references/finding-space.md`.
 - Rank space owners by each session's `du -xsm` of its own paths, never by walking all trees or by a write sample; a process, by sizing its open files twice, minutes apart.
 - A free-space guard samples during a batch too: a higher number to start, a lower one to abort what runs.
-- When many agents of one lead write to one disk, one reads free space and refuses for all. Across leads, run `disk-gate reserve <gib> <name>` before the work and `disk-gate release <name>` after, sized by a measured peak and never by what the work keeps; measure an unmeasured build in a pool pod first.
+- When one lead's agents share a disk, one of them reads free space and refuses for all. Across leads, run `disk-gate reserve <gib> <name>` before the work, sized by its measured peak, never by what it keeps (measure an unmeasured build in a pool pod first), and `disk-gate release <name>` after.
 - Before you promise space back, measure every path that may share inodes (a workspace and `~/.cache/uv`, a cache and a data directory, `os.link` copies) in one `du` (`$S sizes --hardlinks <tree> <cache>`).
 - When a leaked test or process causes space or load, read `references/test-leaks.md`.
 
@@ -77,7 +75,7 @@ python3 $S plan --inventory inv.json --protected protected.json [--releases rele
 
 - In a box, judge a missing directory and a process's age from a host session (`inventory --box-dir none`), not `systemd-run --user`.
 - Judge by the classes, never by `jj workspace list` "(empty)".
-- The freshness gate (`--fresh-hours`, default 24) never proves nothing writes in a tree; `$S procs` and `$S writers` do. The plan lists refusals in `refused`.
+- The freshness gate (`--fresh-hours`, default 24) never proves nothing writes in a tree; `$S procs` and `$S writers` do.
 - Before you call a stale checkout's diff a revert, run `jj log -r '::@ ~ ::trunk()'`.
 - Leave alone knives fork checkouts (`knives finish`, never `rm`), Legion daemon state (`~/.local/state/legion/`) and check-in holds (paths a human said to keep).
 - Never run a repo-wide `git worktree prune`. Before you forget a jj workspace, remove a git worktree, repair a worktree entry, or run `jj new` in a workspace you did not create, read `references/shared-git-store.md`.
