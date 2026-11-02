@@ -58,7 +58,8 @@ What one run does, with `statvfs` and /proc reads only, no model call:
 
 It also keeps the /tmp rule of the script it replaces, and applies it to the checkout root
 (~/src) too: a top-level entry of either, born in the last 6 hours and now at or over 500 MB,
-is named once with its owning session. Both are on / here, agents' scratch in /tmp was the
+is named once with its owning session. Which disk each is on is read from its device, never
+assumed: on sami-rocqperf both are on /, agents' scratch in /tmp was the
 repeated root cause on 2026-10-26, and a checkout cut under ~/src instead of on /mnt/nvme fills
 the same disk. Unlike that script, a young DIRECTORY is sized too -- but only while a crossing
 is open on the mount that holds the root, and under a bounded walk, because /tmp holds ~20k
@@ -370,6 +371,17 @@ def device_of(path: str) -> int | None:
         return os.stat(path).st_dev
     except OSError:
         return None
+
+
+def disk_phrase(mount: str) -> str:
+    """A mount named with the device behind it, e.g. "/mnt/nvme (/dev/nvme47n1)", from
+    /proc/self/mounts; the mount alone when it is not listed there."""
+    try:
+        rows = [line.split() for line in Path("/proc/self/mounts").read_text().splitlines()]
+    except OSError:
+        return mount
+    sources = [row[0] for row in rows if len(row) > 1 and row[1] == mount]
+    return f"{mount} ({sources[-1]})" if sources else mount
 
 
 # ---------------------------------------------------------------------- who is writing now
@@ -1079,8 +1091,8 @@ def young_entries(
 ) -> list[tuple[int, str, float]]:
     """Top-level entries of `root` born within `age` seconds and now at or over `big` bytes.
 
-    `root` is /tmp or the checkout root (~/src): both are shared, both are on / here, and a
-    young, big entry in either is the same fact about the same disk.
+    `root` is /tmp or the checkout root (~/src): both are shared, and a young, big entry in
+    either is a fact about the disk its device is on.
 
     A SYMLINK is never followed and never sized beyond itself, so a tree moved to /mnt/nvme
     with a link left at its old path costs this filesystem nothing and says nothing: that is
@@ -1245,7 +1257,10 @@ def tmp_digest_text(pending: list[dict], window: float) -> str:
 # What a reader is told to do with a big young entry, per root. /tmp holds a session's scratch;
 # ~/src holds checkouts, and a checkout belongs on the big disk (agent-workspace cuts a worktree
 # there, work-dir a scratch directory), with a symlink left at the old path where something
-# still looks for it. This watch never follows such a link, so a moved tree is silent.
+# still looks for it. This watch never follows such a link, so a moved tree is silent. This
+# advice is only true of the root disk: where the root sits on the big disk itself (sami-devbox
+# binds /home from /mnt/nvme), there is nowhere better to move it, and the entry is named only
+# when that disk is short.
 TMP_ADVICE = (
     "If it is yours and the work is done, remove it; if it is still running, move it to"
     " /mnt/nvme."
@@ -1256,13 +1271,17 @@ SRC_ADVICE = (
     " symlink is measured only as itself and never alerts). If it is yours and the work is"
     " done, remove it."
 )
+SHORT_ADVICE = (
+    "That disk is short: if it is yours and the work is done, remove it; if it is still"
+    " running, move its output off the box."
+)
 
 
 def scratch_roots(options: argparse.Namespace) -> list[dict]:
     """The shared directories whose new, big top-level entries are named once each."""
     return [
-        {"path": options.tmp, "mount": options.tmp_mount, "label": "/tmp", "advice": TMP_ADVICE},
-        {"path": options.src, "mount": options.src_mount, "label": "~/src", "advice": SRC_ADVICE},
+        {"path": options.tmp, "label": "/tmp", "advice": TMP_ADVICE},
+        {"path": options.src, "label": "~/src", "advice": SRC_ADVICE},
     ]
 
 
@@ -1631,7 +1650,7 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
         lines.append(blocked)
     lines.append(writers)
     if tmp_lines:
-        lines.append("Young /tmp entries at or over the size rule (these are on /):")
+        lines.append(f"Young /tmp entries at or over the size rule (these are on {mount}):")
         lines.extend("  " + line for line in tmp_lines)
     # The closing paragraph is the one a tired reader keeps, so it is decided by the same
     # time-to-full the first line printed, never by the floor on its own. It said "there is no
@@ -2198,11 +2217,27 @@ def run_once(options: argparse.Namespace) -> int:
     # does not reach this run, the next run reaches, since a named entry is never looked at
     # again. A symlink is measured only as itself, so a tree already moved to /mnt/nvme with a
     # link left behind says nothing.
+    root_disk = device_of("/")
     for root in scratch_roots(options):
         label = root["label"]
         root_device = device_of(root["path"])
-        if root_device is None or not any(root_device == device_of(v["mount"]) for v in verdicts):
+        # The disk this root sits on is decided by its device, never assumed: ~/src is on / on
+        # sami-rocqperf but on the state disk on sami-devbox, where /home is a bind of
+        # /mnt/nvme/home. The mount named is the watched one holding that device.
+        root_verdict = next((v for v in verdicts if device_of(v["mount"]) == root_device), None)
+        if root_device is None or root_verdict is None:
             continue
+        on_root_disk = root_device == root_disk
+        short = disk_is_short(root_verdict["free"], root_verdict.get("total") or 0)
+        mount = root_verdict["mount"]
+        if not on_root_disk and not short:
+            # Off the root disk and that disk has room: a big tree there is where it belongs.
+            log(
+                f"{label}: {root['path']} is on {disk_phrase(mount)}, not the root disk, and that"
+                " disk is not short: its entries are not named"
+            )
+            continue
+        advice = root["advice"] if on_root_disk else SHORT_ADVICE
         seen = set(named_tmp)
         fresh = [
             (bytes_there, path, newest_mtime)
@@ -2218,10 +2253,6 @@ def run_once(options: argparse.Namespace) -> int:
                 refresh_live_sessions(Envoy())
             except SystemExit as error:
                 log(f"  live sessions unavailable: {error}; {label} notices go to the box-health owner")
-        # The disk this entry sits on: short, and the box's health owner hears it whoever made
-        # the entry.
-        root_verdict = next((v for v in verdicts if device_of(v["mount"]) == root_device), None)
-        short = bool(root_verdict) and disk_is_short(root_verdict["free"], root_verdict.get("total") or 0)
         for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
             found = owner_of_path(path)
             owner = tmp_owner_text(found, newest_mtime, started)
@@ -2233,7 +2264,7 @@ def run_once(options: argparse.Namespace) -> int:
             if not lane and not short and bytes_there < options.tmp_digest_max:
                 tmp_pending.append(
                     {"at": started, "path": path, "bytes": bytes_there, "owner": owner,
-                     "mount": root["mount"], "root": label}
+                     "mount": mount, "root": label}
                 )
                 del tmp_pending[: max(0, len(tmp_pending) - options.tmp_pending_max)]
                 state.commit(options)
@@ -2244,9 +2275,9 @@ def run_once(options: argparse.Namespace) -> int:
                 "This entry is yours: it was reached through a process of your session."
                 if lane
                 else (
-                    f"This goes to the box-health owner because {root['mount']} has"
-                    f" {size(root_verdict['free'] if root_verdict else 0)} free, under the"
-                    f" {size(max(ENTRY_SHORT_FRACTION * ((root_verdict or {}).get('total') or 0), ENTRY_SHORT_FLOOR))}"
+                    f"This goes to the box-health owner because {mount} has"
+                    f" {size(root_verdict['free'])} free, under the"
+                    f" {size(max(ENTRY_SHORT_FRACTION * (root_verdict.get('total') or 0), ENTRY_SHORT_FLOOR))}"
                     f" that is short for a disk this size"
                     if short
                     else "This goes to the box-health owner because no live session on this box"
@@ -2257,7 +2288,7 @@ def run_once(options: argparse.Namespace) -> int:
             message = (
                 f"NEW BIG {label} ENTRY on {socket.gethostname()}: {size(bytes_there)} at {path},"
                 f" born in the last {human_time(options.tmp_age)} (owner: {owner}). {label} is on"
-                f" {root['mount']}, which every session on this box shares. {root['advice']}"
+                f" {disk_phrase(mount)}, which every session on this box shares. {advice}"
                 f" {why} From disk-fill-watch; said once per entry."
             )
             if not options.dry_run:
@@ -2449,14 +2480,12 @@ def main() -> int:
         metavar="JSON",
         help=argparse.SUPPRESS,  # the privileged half of the writer sample, run through sudo
     )
-    parser.add_argument("--tmp", default="/tmp", help="the shared scratch directory watched for big young entries")
-    parser.add_argument("--tmp-mount", default="/", help="the mount --tmp lives on, named in its message")
     parser.add_argument(
         "--src",
         default=str(Path.home() / "src"),
         help="the checkout root watched for big young top-level entries (default ~/src)",
     )
-    parser.add_argument("--src-mount", default="/", help="the mount --src lives on, named in its message")
+    parser.add_argument("--tmp", default="/tmp", help="the shared scratch directory watched for big young entries")
     parser.add_argument("--tmp-age", type=float, default=21600.0, help="seconds: a /tmp entry is young for this long")
     parser.add_argument("--tmp-big", type=float, default=500000000, help="bytes at which a young /tmp entry is named")
     parser.add_argument(

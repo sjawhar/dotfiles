@@ -263,9 +263,9 @@ count and the open crossing live in the state file under `iops`.
 
 ## The scratch rule: `/tmp` and `~/src`
 
-Both are on `/` here and both are shared by every session: agents' scratch in `/tmp` was the
-repeated root cause on 2026-10-26, and a checkout cut under `~/src` instead of on `/mnt/nvme`
-fills the same disk. A top-level entry of either root (`--tmp`, `--src`, default `~/src`) born
+Both are shared by every session: agents' scratch in `/tmp` was the repeated root cause on
+2026-10-26, and a checkout cut under `~/src` instead of on `/mnt/nvme` fills the root disk. A
+top-level entry of either root (`--tmp`, `--src`, default `~/src`) born
 in the last 6 hours and now at or over 500 MB is named **once**, with the session of a process
 whose cwd or open descriptor is inside it. If none is observed, the notice says exactly that and
 gives the newest file or directory modification time it saw; it never infers that a session has
@@ -286,6 +286,16 @@ the work is done, move it to `/mnt/nvme` while it runs. A `~/src` entry: a check
 a **symlink** at its old path. **A symlink is measured as itself and never followed**, so the
 trees moved out of `~/src` on 2026-10-31 with links left behind (61 of them) say nothing; only
 a real new tree does.
+
+**Which disk a root is on is read from its device, never assumed.** The root's `st_dev` is
+matched to the watched mount with the same device, and the message names that mount and the
+device behind it (from `/proc/self/mounts`). Only a root on the same device as `/` gets the
+advice above. On sami-rocqperf `~/src` is on `/`, and it does. On sami-devbox `/home` is a bind
+of `/mnt/nvme/home`, so `~/src` is on the state disk: on 2026-11-02T19:42:14Z this watch told a
+session to move a 4.8 GB checkout there off `/`, where it never was. A root on another watched
+disk is now named only when that disk is short (the same short-disk rule below), with advice to
+remove it or move it off the box; while that disk has room, a big tree on it is where it
+belongs and nothing is said.
 
 Unlike the hand-run script this replaces, a young **directory** is sized too, under a few seconds
 of budget per run (`--tmp-idle-walk-budget`, 5 s; `--tmp-walk-budget`, 20 s while building an

@@ -100,9 +100,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "sudo": "never",
             "writers_json": None,
             "tmp": "/tmp",
-            "tmp_mount": "/",
             "src": "/nonexistent-src",
-            "src_mount": "/",
             "tmp_age": 21600.0,
             "tmp_big": 500000000,
             "tmp_walk_budget": 20.0,
@@ -540,9 +538,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             sudo="never",
             writers_json=None,
             tmp=self.tmp.name,
-            tmp_mount=MOUNT,
             src="/nonexistent-src",
-            src_mount=MOUNT,
             tmp_age=21600.0,
             tmp_big=500000000,
             tmp_walk_budget=20.0,
@@ -867,7 +863,7 @@ class DiskFillWatchBirthTimeTest(unittest.TestCase):
 class DiskFillWatchSrcEntryTest(unittest.TestCase):
     """A new, big top-level checkout under ~/src is named like a new, big /tmp entry.
 
-    ~/src is on / here, a checkout cut there fills the disk every session shares, and the tree
+    Where ~/src is on / (sami-rocqperf), a checkout cut there fills the disk every session shares, and the tree
     belongs on /mnt/nvme. A tree already moved leaves a SYMLINK at its old path, which is
     measured only as itself and must never alert: that is what the LPSREV trees became on
     2026-10-31.
@@ -904,7 +900,6 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
             state=self.state,
             tmp=str(Path(self.tmp.name) / "no-such-tmp"),
             src=str(self.src),
-            src_mount=MOUNT,
             tmp_big=1,
             tmp_digest_max=1000,
             tmp_pending_max=200,
@@ -948,6 +943,55 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
         self.run_once()
 
         self.assertEqual([], self.messages())
+
+    def big_checkout(self) -> Path:
+        checkout = self.src / "oss-verify-proofs-internal"
+        checkout.mkdir()
+        (checkout / "pack.bin").write_bytes(b"x" * 4096)
+        return checkout
+
+    def on_devices(self, src: int, mount: int, root: int, free: float = 500 * WATCH.GIB) -> None:
+        """Stat ~/src, the watched mount and / to the given devices."""
+        devices = {str(self.src): src, MOUNT: mount, "/": root}
+        WATCH.device_of = lambda path: devices.get(path, 99)
+        WATCH.free_bytes = lambda mount_point: (free, 1000 * WATCH.GIB)
+
+    def test_src_on_the_root_device_gets_the_root_disk_advice(self) -> None:
+        """sami-rocqperf: ~/src really is on /, and a checkout there belongs on /mnt/nvme."""
+        self.on_devices(src=1, mount=1, root=1)
+        checkout = self.big_checkout()
+
+        self.run_once()
+
+        self.assertEqual(1, len(self.messages()))
+        message = self.messages()[0]
+        self.assertIn(str(checkout), message)
+        self.assertIn(f"~/src is on {MOUNT}", message)
+        self.assertIn("A checkout belongs on /mnt/nvme", message)
+
+    def test_src_on_another_device_with_room_says_nothing(self) -> None:
+        """sami-devbox, 2026-11-02T19:42:14Z: /home is a bind of /mnt/nvme/home, so ~/src is on
+        the 16 TiB state disk, not on /, and a 4.8 GB checkout there is where it belongs."""
+        self.on_devices(src=2, mount=2, root=1)
+        self.big_checkout()
+
+        self.run_once()
+
+        self.assertEqual([], self.messages())
+        self.assertEqual([], self.envoy.published + self.envoy.sent)
+
+    def test_src_on_another_short_device_is_named_without_root_disk_advice(self) -> None:
+        self.on_devices(src=2, mount=2, root=1, free=10 * WATCH.GIB)
+        checkout = self.big_checkout()
+
+        self.run_once()
+
+        found = [text for text in self.messages() if str(checkout) in text]
+        self.assertEqual(1, len(found))
+        self.assertIn(f"~/src is on {MOUNT}", found[0])
+        self.assertNotIn("A checkout belongs on /mnt/nvme", found[0])
+        self.assertNotIn("agent-workspace", found[0])
+        self.assertIn("That disk is short", found[0])
 
 
 class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):
