@@ -796,9 +796,24 @@ def run_once(options: argparse.Namespace) -> int:
             if options.print_alert:
                 print(text)
         state.save()
+        # The end of a completed pass: what --report-failure reads to tell a slow pass from a
+        # watch that has stopped.
+        heartbeat_path(options).touch()
     finally:
         state.close()
     return alerts
+
+
+# A failed pass is news only when no pass has completed for this long: the watch's own budget to
+# reach a person. One pass killed at TimeoutStartSec under IO pressure, with the next one fine,
+# is not (3 of 331 passes on sami-rocqperf on 2026-11-01).
+FAILURE_GRACE = 300.0
+# While passes keep failing past the grace, the report repeats at most this often.
+FAILURE_REPEAT = 1800.0
+
+
+def heartbeat_path(options: argparse.Namespace) -> Path:
+    return Path(options.state).parent / "heartbeat"
 
 
 def report_failure(options: argparse.Namespace) -> int:
@@ -806,14 +821,40 @@ def report_failure(options: argparse.Namespace) -> int:
 
     A pass that dies -- an unwritable state file, a killed run, a python error -- is otherwise
     only a red unit in a journal nobody reads, and the box then has no watch on its logins at
-    all. systemd gives the handler the failed unit's result in MONITOR_*.
+    all. systemd gives the handler the failed unit's result in MONITOR_*. It sends only when
+    the last completed pass is older than FAILURE_GRACE (or there is none), and then at most
+    once per FAILURE_REPEAT.
     """
+    now = time.time()
     host = socket.gethostname().split(".")[0]
     unit = os.environ.get("MONITOR_UNIT") or "omp-login-watch.service"
+    result = (
+        f"{os.environ.get('MONITOR_SERVICE_RESULT', 'unknown')}, "
+        f"exit code {os.environ.get('MONITOR_EXIT_CODE', '?')}/{os.environ.get('MONITOR_EXIT_STATUS', '?')}"
+    )
+    heartbeat = heartbeat_path(options)
+    reported = heartbeat.with_name("failure-reported")
+    try:
+        last_pass: float | None = heartbeat.stat().st_mtime
+    except OSError:
+        last_pass = None
+    if last_pass is not None and now - last_pass < FAILURE_GRACE:
+        log(f"{unit} failed ({result}); last pass completed {human(now - last_pass)} ago, not reported")
+        return 0
+    try:
+        last_report = reported.stat().st_mtime
+    except OSError:
+        last_report = 0.0
+    if now - last_report < FAILURE_REPEAT:
+        log(f"{unit} failed ({result}); already reported {human(now - last_report)} ago")
+        return 0
+    gap = (
+        f"no pass completed for {human(now - last_pass)} (last at {iso(last_pass)})"
+        if last_pass is not None
+        else f"no completed pass on record ({heartbeat} absent)"
+    )
     text = (
-        f"{unit} FAILED on {host} ({os.environ.get('MONITOR_SERVICE_RESULT', 'unknown')}, "
-        f"exit code {os.environ.get('MONITOR_EXIT_CODE', '?')}/"
-        f"{os.environ.get('MONITOR_EXIT_STATUS', '?')}). While it does not run, nothing tells a "
+        f"{unit} FAILED on {host} ({result}); {gap}. While it does not run, nothing tells a "
         f"person when this box's omp sessions lose a provider login: on 2026-11-01 that silence "
         f"was 3 h 45 min and 67 stopped sessions (dispatch://{DISPATCH_ISSUE}). Read it with "
         f"`systemctl --user status {unit}` and `journalctl --user -u {unit} -n 50`; the watch is "
@@ -823,6 +864,12 @@ def report_failure(options: argparse.Namespace) -> int:
     envoy = Envoy()
     if not envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         envoy.send(options.box_health_owner, text)
+    try:
+        reported.parent.mkdir(parents=True, exist_ok=True)
+        reported.touch()
+        os.utime(reported, (now, now))
+    except OSError as error:
+        log(f"cannot write {reported}: {error}")
     return 0
 
 

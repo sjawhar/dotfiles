@@ -58,7 +58,15 @@ the turn omp could not send (`"stopReason":"error","errorMessage":"No API key fo
 | **A person** | `dispatch ask` on dispatch://INFRA-387, urgency `blocking` | Only Sami can log in again. The ask opens inside a minute of the crossing and is resolved when the login comes back. A refused ask falls back to `dispatch message` on the same issue. |
 | Agents | Envoy publish to `notifications.role.lead-box-health`, else a direct send to the box-health owner | The sessions that must stop working and wait |
 | Agents, when the human path is down | the same publish, with `NOBODY WAS TOLD …` and the CLI's own error | The ask was refused and the message after it was refused too, or the unit has no `DISPATCH_SESSION_ID` to act as. The alert still follows it, and the ask is tried again at the next repeat. |
-| Agents, when the watch cannot run | `omp-login-watch-failed.service`, the unit's `OnFailure=`, running `omp-login-watch --report-failure` | A pass that dies -- an unwritable state file, a killed run, a python error -- sends nothing, and the box then has no watch at all. The report names the unit and systemd's result. |
+| Agents, when the watch cannot run | `omp-login-watch-failed.service`, the unit's `OnFailure=`, running `omp-login-watch --report-failure` | A pass that dies -- an unwritable state file, a killed run, a python error -- sends nothing, and the box then has no watch at all. The report names the unit, systemd's result and how long since the last completed pass. |
+
+Each completed pass touches `heartbeat` beside the state file. `--report-failure` sends only when
+that heartbeat is older than 300 s or absent, and then at most once per 1800 s while passes keep
+failing (stamp: `failure-reported` in the same directory); a failure inside 300 s is only logged.
+Why: 300 s is the watch's own budget to reach a person, so one late pass loses nothing. Under IO
+pressure of 80-90 % on sami-rocqperf, 3 of 331 passes in 6 h hit `TimeoutStartSec=120` and the
+next pass succeeded each time; each had sent a FAILED message. A unit with no completed run over
+a longer window is unit-health-watch's report.
 
 Both run from a systemd user unit with **no model call**: the dispatch CLI is a bun program
 that needs `DISPATCH_HOST`, a `DISPATCH_SESSION_ID` (the unit's drop-in, written once per

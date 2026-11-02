@@ -476,6 +476,60 @@ class WhenTheWatchItselfDoesNotRun(WatchCase):
         self.assertEqual(self.calls, [], "the failure report needs no dispatch CLI")
 
 
+class AFailedPassIsReportedOnlyWhenTheWatchIsLate(WatchCase):
+    """One slow pass under IO pressure is not news; 300 s with no completed pass is."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.now = time.time()
+        self.heartbeat = self.tmp / "heartbeat"
+        self.restore["time"] = WATCH.time
+        clock = self
+
+        class Clock:
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+            def time(self):
+                return clock.now
+
+        WATCH.time = Clock()
+
+    def good_pass(self, ago: float) -> None:
+        self.heartbeat.write_text("")
+        os.utime(self.heartbeat, (self.now - ago, self.now - ago))
+
+    def failed_pass(self) -> list[str]:
+        before = len(self.every_alert())
+        WATCH.report_failure(options(self.tmp, self.tmp / "unused.db"))
+        return self.every_alert()[before:]
+
+    def test_a_completed_pass_writes_the_heartbeat(self) -> None:
+        db = self.tmp / "agent.db"
+        credential_store(db, [("anthropic", None)])
+        WATCH.run_once(options(self.tmp, db))
+        self.assertTrue(self.heartbeat.exists())
+
+    def test_a_failure_60_s_after_a_good_pass_sends_nothing(self) -> None:
+        self.good_pass(60)
+        self.assertEqual(self.failed_pass(), [])
+
+    def test_a_failure_400_s_after_sends_once_with_the_gap_then_repeats_at_30_min(self) -> None:
+        self.good_pass(400)
+        sent = self.failed_pass()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("no pass completed for 6 min 40 s", sent[0])
+        self.now += 120
+        self.assertEqual(self.failed_pass(), [], "a second failure 2 min later repeats nothing")
+        self.now += 29 * 60
+        self.assertEqual(len(self.failed_pass()), 1, "31 min after the first report it says it again")
+
+    def test_no_heartbeat_at_all_sends(self) -> None:
+        sent = self.failed_pass()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("no completed pass on record", sent[0])
+
+
 class TheUnitSaysWhenItDidNotRun(unittest.TestCase):
     """systemd is the only thing that sees a pass die; it must hand that to the Envoy path."""
 
