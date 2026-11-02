@@ -40,7 +40,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 | For a coordinator-owned issue | That coordinator's gate packet, naming the head |
 | From an uncoordinated session | The session itself, with an independent reviewer's verdict |
 | Sent by anyone but the work owner | Also ask the work owner whether a round is in flight before merging: green CI cannot tell "finished" from "between pushes" |
-| With an active gate session | Only that session's packet; neither the owner nor you can replace it |
+| With an active gate session | That session's packet, or a verdict on the PR, naming the head, from any other reviewer who is not the author |
 
 - A self-verdict packet begins `SELF-VERDICT - needs clearance or an independent reader`. Hold it until Sami approves this PR by name or an independent reviewer posts a verdict on the PR that names the head, never one inferred from an earlier general approval.
 - For each head you see, record the registration facts, its gate session and each fact steps 3 to 5 check, each with its read time and source link. Add the disposition and who acts next.

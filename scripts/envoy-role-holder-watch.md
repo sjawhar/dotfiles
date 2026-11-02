@@ -319,8 +319,8 @@ and then the remedy, in order, stopping as soon as one answers:
 4. Release the claim. The alert names **no call** for this today, and says why: `GET
    /v1/roles/<role>` releases a lapsed holder's claim as it answers, and
    `DELETE /v1/sessions/<holder>` unregisters a session that may be alive. Those two, run in
-   that order two minutes after a false alert, are what took `bet64-eta-arity`'s claim. Tell the
-   INFRA lead the role and the holder and let the claim lapse on its own. Agent infra is adding
+   that order two minutes after a false alert, are what took `bet64-eta-arity`'s claim. Let the
+   claim lapse on its own. Agent infra is adding
    an explicit `POST /v1/roles/release` that records who released it; when it is deployed, the
    one constant `RELEASE_CALL` in the script becomes that call — its wording is already in the
    comment above it — and nothing else in the text moves.

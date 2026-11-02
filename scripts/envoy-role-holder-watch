@@ -241,8 +241,8 @@ RELEASE_CALL = (
     " holder's claim as a side effect of answering (resolveLiveRoleHolder), and"
     " `curl -X DELETE ${{ENVOY_URL}}/v1/sessions/{holder}` unregisters a session that may be"
     " alive; together they are what cost role bet64-eta-arity its claim at 2026-10-29 09:22:31Z,"
-    " two minutes after a false alert on a live lane. Tell the INFRA lead the role and holder"
-    " and let the claim lapse on its own, or wait for agent infra's explicit release route,"
+    " two minutes after a false alert on a live lane. Let the claim lapse on its own, or wait"
+    " for agent infra's explicit release route,"
     " which this text will name as soon as it is deployed."
 )
 
