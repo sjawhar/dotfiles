@@ -45,7 +45,12 @@ The drill's `silence` suspends the CronJob itself: dev-sjawhar@ may get and patc
 cluster-grants, theorem-labs/agent-infra#1418). Check it with the plain form,
 `kubectl auth can-i patch cronjobs/box-monitor -n box-monitor`; the `cronjobs.batch/<name>` form
 answers yes for any name. The drill puts a Datadog downtime on the monitor first, so its alert
-does not post to `#fleet-alerts`, and resumes the CronJob after 35 minutes.
+does not post to `#fleet-alerts`, and resumes the CronJob after 35 minutes. Run it as
+`sami-devbox-drill silence --handle @slack-Theorem-fleet-alerts`: the notification proof is a
+twin monitor whose title starts with `DRILL`, which posts there for real. A pass needs the
+twin's Alert, its Datadog event (status error, `_dd.has_notification` true), and its post in
+the channel. Before agent-infra #1464 a silent responder showed No Data, not Alert, and paged
+nobody (the drills of 2026-11-02 17:37Z and 19:16Z).
 
 ## The secret files (step 2's copy)
 

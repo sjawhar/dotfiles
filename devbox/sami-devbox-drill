@@ -10,13 +10,23 @@
 #                               dispatch cluster) must find it TERMINATED and start it within 10
 #                               minutes. Then the three markers must be there, the scratch one gone
 #                               (a stop erases local SSD), and /mnt/scratch and its swap back.
-#   sami-devbox-drill silence   the second half of A6. The drill suspends the CronJob for 35
+#   sami-devbox-drill silence --handle @<handle>
+#                               the second half of A6. The drill suspends the CronJob for 35
 #                               minutes (dev-sjawhar@ may get and patch it: agent-infra
 #                               cluster-grants, theorem-labs/agent-infra#1418) and the monitor
-#                               box-monitor-silent-sami-devbox must go to Alert; then it resumes the
-#                               CronJob. A Datadog downtime on that monitor for the drill keeps its
-#                               alert out of #fleet-alerts, so the alert reaches only the box-health
-#                               lead, from this log.
+#                               box-monitor-silent-sami-devbox must go to Alert within those 35
+#                               minutes. Before agent-infra #1464 a silent responder showed No
+#                               Data, not Alert, and paged nobody (drills of 2026-11-02 17:37Z and
+#                               19:16Z); No Data is a FAIL. A Datadog downtime on that monitor keeps
+#                               its alert out of #fleet-alerts, and a downtime also stops its
+#                               event and notification, so the notification proof comes from a
+#                               drill twin: a monitor with the same query and options, no
+#                               downtime, a title that starts with DRILL, and the handle given,
+#                               so its post is real and reads as a drill. The proof is the twin's
+#                               Alert, its Datadog event with status error and
+#                               _dd.has_notification true, and its post in the handle's channel,
+#                               which the operator reads (the drill prints what to search for).
+#                               Then it resumes the CronJob, sees both recover, and deletes the twin.
 #
 # Each line is `ok`, `FAIL` or `note`, with UTC times; the log is the evidence, and it also goes to
 # $SAMI_DEVBOX_DRILL_LOGS/<subcommand>-<UTC time>.log.
@@ -153,19 +163,59 @@ drill_restart() {
     fails=$((fails + $(wc -l <"$failfile")))
 }
 
+# monitor_state <id>: the monitor's overall state from its own record, not from search, whose
+# index can lag the state.
+monitor_state() { ddpup monitors get "$1" 2>/dev/null | jq -r '.overall_state // "unknown"'; }
+
+# alert_event <monitor id> <window>: the newest monitor event of that monitor with status error
+# (an Alert), as one line of JSON, or nothing.
+alert_event() {
+    ddpup events search --query 'source:alert' --from "$2" --limit 1000 2>/dev/null | jq -c --argjson id "$1" '
+        [.data[]? | .attributes as $a | select(($a.attributes.monitor_id? // $a.attributes.monitor.id?) == $id and $a.attributes.status? == "error")
+         | {event: .id, at: $a.timestamp, title: $a.attributes.title, status: $a.attributes.status,
+            has_notification: $a.attributes._dd.has_notification}]
+        | first // empty'
+}
+
 drill_silence() {
-    local m id s t0 dt="" body
+    local m id s t0 dt="" body twin="" handles twin_name
+    [[ "$HANDLE" == @?* ]] || { fail "silence needs --handle @<handle>: where the DRILL twin posts"; return; }
     m="$(monitor_json)"
     [[ -n "$m" ]] || { fail "no Datadog monitor named \"$MONITOR_NAME\""; return; }
     id="$(jq -r .id <<<"$m")"
-    s="$(jq -r '.overall_state // .status' <<<"$m")"
+    m="$(ddpup monitors get "$id" 2>/dev/null)"
+    s="$(jq -r '.overall_state // "unknown"' <<<"$m")"
     [[ "$s" == OK ]] && ok "monitor $id \"$MONITOR_NAME\" is OK before the drill" || { fail "monitor $id is $s before the drill, want OK"; return; }
+    note "monitor $id query: $(jq -r .query <<<"$m"); options: $(jq -c '.options | del(.silenced)' <<<"$m")"
+    s="$(jq -r '.options.notify_no_data // false' <<<"$m")"
+    [[ "$s" == false ]] && ok "monitor $id notify_no_data is false (agent-infra #1464)" || { fail "monitor $id notify_no_data is $s: #1464 is not applied"; return; }
+    handles="$(jq -r '[.message | match("@[A-Za-z0-9_.-]+"; "g").string] | join(" ")' <<<"$m")"
+    [[ -n "$handles" ]] && ok "monitor $id notifies $handles when it goes to Alert" || { fail "monitor $id's message names no notification handle"; return; }
     # The plain resource/name form: `cronjobs.batch/<name>` answers yes for any name.
     s="$("${KUBE[@]}" auth can-i patch cronjobs/box-monitor 2>&1)"
     [[ "$s" == yes ]] && ok "dev-sjawhar@ may patch cronjobs/box-monitor" || { fail "kubectl auth can-i patch cronjobs/box-monitor -n box-monitor: $s (agent-infra #1418)"; return; }
 
-    # The downtime mutes the monitor's notifications for the drill only; its state still moves,
-    # which is what A6 reads.
+    # The twin: the production monitor's query and options, no downtime, a DRILL title and the
+    # handle, so its alert posts for real and nobody reads it as an outage.
+    twin_name="DRILL $MONITOR_NAME (twin $(date -u +%Y%m%dT%H%M%SZ))"
+    body="$(jq -c --arg n "$twin_name" --arg h "$HANDLE" --argjson id "$id" '{
+        name: $n, type, query, priority, options: (.options | del(.silenced)), tags: ["drill:sami-devbox-drill"],
+        message: "DRILL, not an outage: twin of monitor \($id) for the INFRA-993 silence drill (devbox/sami-devbox-drill in the dotfiles). The drill deletes it. \($h)"}' <<<"$m")"
+    if twin="$(ddpup monitors create --file <(printf %s "$body") 2>/dev/null | jq -r '.id // empty')" && [[ -n "$twin" ]]; then
+        ok "drill twin monitor $twin \"$twin_name\" created (query and options of monitor $id, handle $HANDLE, no downtime)"
+    else
+        fail "could not create the drill twin monitor"; return
+    fi
+    t0=$SECONDS
+    while (( SECONDS - t0 < 10 * 60 )); do
+        s="$(monitor_state "$twin")"
+        [[ "$s" == OK ]] && break
+        sleep 30
+    done
+    [[ "$s" == OK ]] && ok "drill twin $twin is OK $((SECONDS - t0))s after its creation" || { fail "drill twin $twin is $s 10 minutes after its creation, want OK"; ddpup monitors delete "$twin" -y >/dev/null 2>&1; return; }
+
+    # The downtime mutes the production monitor for the drill only: its state still moves, which
+    # is what A6 reads, but it makes no event and posts nothing to #fleet-alerts.
     body="$(jq -nc --argjson id "$id" --arg end "$(date -u -d '+75 minutes' +%FT%TZ)" \
         '{data: {type: "downtime", attributes: {scope: "*", monitor_identifier: {monitor_id: $id}, schedule: {end: $end}, message: "INFRA-993 step 2 drill: box-monitor suspended on purpose; the box-health lead reads the result from the drill log."}}}')"
     # stdout only: pup's warnings on stderr are not JSON.
@@ -173,30 +223,37 @@ drill_silence() {
         ok "Datadog downtime $dt on monitor $id for 75 minutes"
     else
         fail "could not create a downtime on monitor $id: the alert will post to #fleet-alerts; stop and tell the box-health lead first"
+        ddpup monitors delete "$twin" -y >/dev/null 2>&1
         return
     fi
 
-    local patch=("${KUBE[@]}" patch cronjob box-monitor --type merge -p)
+    local patch=("${KUBE[@]}" patch cronjob box-monitor --type merge -p) last
     if "${patch[@]}" '{"spec":{"suspend":true}}' >/dev/null 2>&1 \
         && [[ "$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.suspend}' 2>&1)" == true ]]; then
         t0=$SECONDS
-        ok "CronJob box-monitor suspended at $(stamp); last scheduled run $("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.status.lastScheduleTime}')"
+        last="$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.status.lastScheduleTime}')"
+        ok "CronJob box-monitor suspended at $(stamp); last scheduled run $last"
     else
         fail "could not suspend the CronJob box-monitor: $("${patch[@]}" '{"spec":{"suspend":true}}' 2>&1 | tail -1)"
         ddpup downtime cancel "$dt" -y >/dev/null 2>&1
+        ddpup monitors delete "$twin" -y >/dev/null 2>&1
         return
     fi
 
-    while (( SECONDS - t0 < 50 * 60 )); do
-        s="$(monitor_json | jq -r '.overall_state // .status')"
-        [[ "$s" == Alert || "$s" == "No Data" ]] && break
+    # A6: Alert within the 35 minutes of silence. No Data is not Alert: it is the state the monitor
+    # took before agent-infra #1464 (the drills of 2026-11-02 17:37Z and 19:16Z).
+    while (( SECONDS - t0 < 35 * 60 )); do
+        s="$(monitor_state "$id")"
+        [[ "$s" == Alert ]] && break
         sleep 60
     done
-    if [[ "$s" == Alert || "$s" == "No Data" ]]; then
-        ok "A6: monitor $id went to $s $(((SECONDS - t0) / 60)) minutes after the suspend"
+    if [[ "$s" == Alert ]]; then
+        ok "A6: monitor $id went to Alert at $(stamp), $(((SECONDS - t0) / 60)) minutes after the suspend ($(( ($(date +%s) - $(date -d "$last" +%s)) / 60 )) minutes after the last run)"
     else
-        fail "A6: monitor $id still $s 50 minutes after the suspend"
+        fail "A6: monitor $id is $s, not Alert, $(((SECONDS - t0) / 60)) minutes after the suspend"
     fi
+    s="$(monitor_state "$twin")"
+    [[ "$s" == Alert ]] && ok "A6: drill twin $twin is Alert at $(stamp)" || fail "A6: drill twin $twin is $s, not Alert"
     if (( SECONDS - t0 < 35 * 60 )); then
         note "holding the suspend to 35 minutes as A6 states"
         sleep $((35 * 60 - (SECONDS - t0)))
@@ -213,14 +270,39 @@ drill_silence() {
     else
         fail "could not resume the CronJob box-monitor: run ${KUBE[*]} patch cronjob box-monitor --type merge -p '{\"spec\":{\"suspend\":false}}'"
     fi
+    # The notification: the twin's Alert event. Datadog writes a monitor's alert event when it
+    # notifies, and the twin differs from monitor $id only in its downtime and its handle.
+    local ev="" w=$SECONDS
+    while (( SECONDS - w < 10 * 60 )); do
+        ev="$(alert_event "$twin" 2h)"
+        [[ -n "$ev" ]] && break
+        sleep 60
+    done
+    if [[ -n "$ev" && "$(jq -r .has_notification <<<"$ev")" == true ]]; then
+        ok "A6 notification: drill twin $twin event $(jq -r '"\(.event) at \(.at): \(.title), status \(.status), has_notification=\(.has_notification)"' <<<"$ev")"
+        note "read $HANDLE's channel for \"DRILL Box-monitor\" ($twin_name) and record the post's ts and text"
+        note "monitor $id was in Alert under downtime $dt, which alone held back its notification to $handles"
+    else
+        fail "A6 notification: no status-error event with has_notification true for drill twin $twin (event: ${ev:-none}; twin state $(monitor_state "$twin"))"
+    fi
     t0=$SECONDS
     while (( SECONDS - t0 < 20 * 60 )); do
-        s="$(monitor_json | jq -r '.overall_state // .status')"
+        s="$(monitor_state "$twin")"
         [[ "$s" == OK ]] && break
         sleep 60
     done
-    [[ "$s" == OK ]] && ok "monitor $id back to OK $(((SECONDS - t0) / 60)) minutes after the resume" || fail "monitor $id is $s 20 minutes after the resume"
+    [[ "$s" == OK ]] && ok "drill twin $twin back to OK at $(stamp)" || fail "drill twin $twin is $s 20 minutes after the resume"
+    t0=$SECONDS
+    while (( SECONDS - t0 < 20 * 60 )); do
+        s="$(monitor_state "$id")"
+        [[ "$s" == OK ]] && break
+        sleep 60
+    done
+    [[ "$s" == OK ]] && ok "monitor $id back to OK at $(stamp), $(((SECONDS - t0) / 60)) minutes after the resume" || fail "monitor $id is $s 20 minutes after the resume"
     ddpup downtime cancel "$dt" -y >/dev/null 2>&1 && ok "downtime $dt cancelled" || fail "could not cancel downtime $dt; it ends by itself at its end time"
+    ddpup monitors delete "$twin" -y >/dev/null 2>&1 && ok "drill twin $twin deleted" || fail "could not delete drill twin $twin; delete it by hand"
+    s="$("${KUBE[@]}" get cronjob box-monitor -o jsonpath='{.spec.suspend}' 2>&1)"
+    [[ "$s" == false ]] && ok "CronJob box-monitor suspend=$s at the end" || fail "CronJob box-monitor suspend=$s at the end, want false"
 }
 
 cmd="${1:-}"
@@ -228,12 +310,14 @@ case "$cmd" in
     restart | silence) ;;
     *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac
+HANDLE=""
+[[ "${2:-}" == --handle ]] && HANDLE="${3:-}"
 mkdir -p "$LOGS" || exit 1
 log="$LOGS/$cmd-$(date -u +%Y%m%dT%H%M%SZ).log"
 failfile="$(mktemp)" || exit 1
 trap 'rm -f -- "$failfile"' EXIT
 {
-    note "sami-devbox-drill $cmd"
+    note "sami-devbox-drill $cmd${HANDLE:+ --handle $HANDLE}"
     "drill_$cmd"
     echo "$(stamp) == $cmd: $fails failed"
 } 2>&1 | tee "$log"
