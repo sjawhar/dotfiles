@@ -18,7 +18,7 @@ lead's rounds once, from records, then end. You decide nothing for an owner and 
 5. In the record's top, change only the `## Numbers` values (from the scoreboard, each with its date) and the
    `Last summary:` link, with `dispatch doc-edit` against a fresh token. Other lines belong to the sessions that own
    them.
-6. For each overdue commitment, send its owner session one Envoy message (`envoy send <session> --message-file -`):
+6. For each overdue commitment, send its owner session one Envoy message (`envoy send --message-file - <session>`):
    the commitment line, its link, and "post the done link, or a new due time with its reason, on the issue". When
    the owner session is not live, comment that on the issue instead and list it in the summary.
 7. For each issue the facts mark `ready_no_owner`, start one task session, at most two per run. Before each start,
