@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# gh-agent-config: make the gh config directory every agent process uses, and print its path.
+#
+# The directory holds no GitHub login of the user's. Its config.yml is a link to the user's
+# (aliases, editor, protocol), and its hosts.yml names a placeholder account whose "token" is the
+# text below. gh takes a token from the environment first, then from hosts.yml, and reads the OS
+# keyring only when both are empty (cli/cli internal/config ActiveToken), so a gh that runs with
+# GH_CONFIG_DIR set here can never read the user's token from the keyring: not for an API call,
+# not for `gh auth token`, not for `gh auth git-credential`. A routed call still works, because
+# knives hands gh the App's token in GH_TOKEN, which outranks hosts.yml.
+#
+# Without a hosts.yml at all, gh's API calls stop at "not logged in", but `gh auth token` and
+# `gh auth git-credential` fall back to the keyring's unkeyed entry and print the user's token.
+#
+# shims/gh, scripts/agent-session and omp/extensions/session-env.ts point GH_CONFIG_DIR here, so a
+# gh run past shims/gh (an eval kernel whose PATH finds mise's gh first, a call by absolute path)
+# sends GitHub this placeholder and gets 401, instead of acting as the user. 2026-11-02T00:07Z: a
+# Python eval kernel's `gh pr review --approve` resolved to mise's gh and approved
+# theorem-labs/agent-infra#1178 as the user.
+set -euo pipefail
+
+user_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
+dir="${user_cfg}-agent"
+account="no-user-login-in-agent-sessions"
+token="agent-session-placeholder-not-a-token.gh-must-run-through-dotfiles-shims-gh"
+
+mkdir -p "$dir"
+[[ -e "$dir/config.yml" || -L "$dir/config.yml" ]] || ln -sfn "$user_cfg/config.yml" "$dir/config.yml"
+hosts="$dir/hosts.yml"
+want="github.com:
+    users:
+        $account:
+            oauth_token: $token
+    git_protocol: https
+    user: $account
+    oauth_token: $token
+"
+if [[ ! -f "$hosts" || "$(cat "$hosts")"$'\n' != "$want" ]]; then
+    tmp="$(mktemp "$dir/.hosts.yml.XXXXXX")"
+    printf '%s' "$want" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$hosts"
+fi
+printf '%s\n' "$dir"

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { userConfigChain } from "../session-env";
+import { agentGhConfigDir, userConfigChain } from "../session-env";
 
 const dirs: string[] = [];
 /** An environment whose PATH finds a `jj` running `body` first. */
@@ -27,6 +27,33 @@ describe("userConfigChain", () => {
 		expect(await userConfigChain(200, withJj("exec sleep 30"))).toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(4_000);
 	}, 5_000);
+});
+
+describe("agentGhConfigDir", () => {
+	// A gh that runs past shims/gh reads GH_CONFIG_DIR; the user's own directory holds his login.
+	const script = (body: string) => {
+		const dir = mkdtempSync(path.join(os.tmpdir(), "session-env-gh-"));
+		dirs.push(dir);
+		writeFileSync(path.join(dir, "gh-agent-config"), `#!/bin/sh\n${body}\n`);
+		chmodSync(path.join(dir, "gh-agent-config"), 0o755);
+		return path.join(dir, "gh-agent-config");
+	};
+	const make = () => script("echo /home/u/.config/gh-agent");
+
+	test("points an unset GH_CONFIG_DIR, or the user's own directory, at the agent directory", () => {
+		expect(agentGhConfigDir({ HOME: "/home/u", PATH: process.env.PATH }, make())).toBe("/home/u/.config/gh-agent");
+		expect(
+			agentGhConfigDir({ HOME: "/home/u", GH_CONFIG_DIR: "/home/u/.config/gh/", PATH: process.env.PATH }, make()),
+		).toBe("/home/u/.config/gh-agent");
+	});
+
+	test("keeps a directory a launcher chose", () => {
+		expect(agentGhConfigDir({ HOME: "/home/u", GH_CONFIG_DIR: "/legion/state/gh" }, make())).toBe("/legion/state/gh");
+	});
+
+	test("sets nothing when the directory cannot be made", () => {
+		expect(agentGhConfigDir({ HOME: "/home/u", PATH: process.env.PATH }, script("exit 1"))).toBeUndefined();
+	});
 });
 
 describe("the Python eval kernel's environment", () => {

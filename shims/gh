@@ -45,20 +45,29 @@ _gh_call_log() {
         "$now" "$$" "${OMP_SESSION_ID:-}" "${PWD//\"/}" "${out:1}" \
         >> "$dir/$(date -u +%Y%m%d%H).jsonl" 2> /dev/null || true
 }
-if [[ -z "${KNIVES_GH_SHIM_DEPTH:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && "${GH_READ_CACHE_LOG:-}" != 0 ]]; then
+if [[ -z "${KNIVES_GH_SHIM_DEPTH:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${GH_SHIM_INNER:-}" && "${GH_READ_CACHE_LOG:-}" != 0 ]]; then
     _gh_call_log "$@" || true
 fi
 
 # Agent context: an omp session (its bash tool carries OMP_SESSION_ID, its
 # eval kernel PI_SESSION_FILE with an allow-listed environment that drops
 # GIT_CONFIG_*), an agentbox session, or anything launched with the gh-app
-# routing include (shims/omp, scripts/cld). Two guarantees there:
+# routing include (shims/omp, scripts/cld). Three guarantees there:
 # the routing include is present even when the caller's environment was
-# scrubbed, and gh sees a config directory without hosts.yml, so a call with no
-# target owner to route falls to "not logged in", never to the user's own login
-# (an owner the App does not cover gets the upstream token from the secrets
-# store). On 2026-09-14 an agent's `gh api -X POST …/reviews` from omp's eval
-# kernel in /tmp ran on the user's keyring and approved a pull request as him.
+# scrubbed; gh sees the agent config directory of scripts/gh-agent-config,
+# whose placeholder login stands where the user's would be, so a call with no
+# target owner to route fails on GitHub's 401 and never reaches the user's own
+# login in hosts.yml or the keyring (an owner the App does not cover gets the
+# upstream token from the secrets store); and a call GitHub refuses for the
+# App ends with a refusal that names the call and the route to take instead.
+# On 2026-09-14 an agent's `gh api -X POST …/reviews` from omp's eval kernel in
+# /tmp ran on the user's keyring and approved a pull request as him. On
+# 2026-11-02T00:07Z a Python eval kernel's `gh pr review --approve` did it
+# again without reaching this shim at all: mise's python3 shim had put mise's
+# own gh ahead of this directory on the kernel's PATH. mise.toml's `_.path`
+# now puts this directory first in every mise-run process, and
+# scripts/agent-session and omp/extensions/session-env.ts export the agent
+# GH_CONFIG_DIR, so a gh that still runs past this shim finds no user login.
 agent_context() {
     [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
     local i v
@@ -67,6 +76,83 @@ agent_context() {
         [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
     done
     return 1
+}
+
+# A refusal names the exact call, the identity it would have acted as, why it
+# is refused and what to do instead, and exits non-zero. A silent or vague
+# refusal reads as "no approval exists" and sends the next agent looking for
+# another credential (the chief of staff's requirement, 2026-11-02).
+gh_shim_user_login() {
+    local line user=""
+    while IFS= read -r line; do
+        [[ "$line" =~ ^\ {4}user:\ *([^[:space:]]+) ]] && { user="${BASH_REMATCH[1]}"; break; }
+    done < "${XDG_CONFIG_HOME:-$HOME/.config}/gh/hosts.yml" 2> /dev/null || true
+    if [[ -n "$user" ]]; then
+        printf "the user login \`%s\` from gh's hosts.yml and keyring" "$user"
+    else
+        printf "the user's own GitHub login from gh's hosts.yml and keyring"
+    fi
+}
+gh_shim_quote() {
+    local out="gh" a
+    for a in "$@"; do out+=" $(printf '%q' "$a")"; done
+    printf '%s' "$out"
+}
+# gh_shim_refuse WHY INSTEAD ARGV…: the shim itself refuses, before gh runs.
+gh_shim_refuse() {
+    local why="$1" instead="$2"
+    shift 2
+    {
+        echo "gh shim: REFUSED: \`$(gh_shim_quote "$@")\`"
+        echo "  Identity: it would have used $(gh_shim_user_login)."
+        echo "  Why: $why A call that acts as that login is Sami's own signature on GitHub; no agent process may use it."
+        echo "  Instead: $instead"
+    } >&2
+    exit 1
+}
+# What GitHub answers when the App may not do a call: a review of the App's own
+# pull request, a permission the installation lacks, a token GitHub rejects.
+GH_SHIM_REFUSED_BY_GITHUB='Can not (approve|request changes on) your own pull request|Resource not accessible by|HTTP 40[13]|Bad credentials|must have (admin|push|write|maintain)|not have permission|Permission to [^ ]+ denied|requires authentication'
+# gh_shim_refused_for_app RC ARGV…: GitHub refused the call for the App.
+gh_shim_refused_for_app() {
+    local rc="$1" pr="" repo="" verdict="APPROVE" a prev="" instead
+    shift
+    if [[ "${1:-}" == pr && "${2:-}" == review ]]; then
+        for a in "${@:3}"; do
+            case "$prev" in
+                -R | --repo) repo="$a" ;;
+                -b | --body | -F | --body-file) ;;
+                *)
+                    case "$a" in
+                        --repo=*) repo="${a#--repo=}" ;;
+                        -r | --request-changes) verdict="REQUEST_CHANGES" ;;
+                        -*) ;;
+                        *) [[ -n "$pr" ]] || pr="$a" ;;
+                    esac
+                    ;;
+            esac
+            prev="$a"
+        done
+    elif [[ "${1:-}" == api ]]; then
+        for a in "${@:2}"; do
+            if [[ "$a" =~ ^/?repos/([^/]+/[^/]+)/pulls/([0-9]+)/reviews ]]; then
+                repo="${BASH_REMATCH[1]}" pr="${BASH_REMATCH[2]}"
+            fi
+            [[ "$a" == *REQUEST_CHANGES* ]] && verdict="REQUEST_CHANGES"
+        done
+    fi
+    if [[ -n "$pr" ]]; then
+        instead="post the verdict as a pull-request comment from the App: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
+    else
+        instead="stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
+    fi
+    {
+        echo "gh shim: REFUSED by GitHub: \`$(gh_shim_quote "$@")\` (exit $rc; GitHub's error is above)."
+        echo "  Identity: it ran as the GitHub App this repository's owner routes agent calls to. An agent has no other GitHub identity: $(gh_shim_user_login) is never used by an agent process, so retrying with another credential is not a route."
+        echo "  Why: GitHub does not let that App make this call (it cannot approve or request changes on a pull request it opened, and it cannot use a permission its installation lacks)."
+        echo "  Instead: $instead"
+    } >&2
+    exit "$rc"
 }
 if agent_context; then
     _dotfiles="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -79,29 +165,13 @@ if agent_context; then
         _i="${GIT_CONFIG_COUNT:-0}"
         export "GIT_CONFIG_KEY_${_i}=include.path" "GIT_CONFIG_VALUE_${_i}=${_dotfiles}/gh-app-routes.gitconfig" GIT_CONFIG_COUNT="$((_i + 1))"
     fi
-    _gh_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
-    _agent_cfg="${_gh_cfg}-agent"
-    mkdir -p "$_agent_cfg"
-    [[ -e "$_agent_cfg/config.yml" ]] || ln -sfn "$_gh_cfg/config.yml" "$_agent_cfg/config.yml"
+    _agent_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh-agent"
+    [[ -f "$_agent_cfg/hosts.yml" && -e "$_agent_cfg/config.yml" ]] || _agent_cfg="$("$_dotfiles/scripts/gh-agent-config")"
     export GH_CONFIG_DIR="$_agent_cfg"
-    # An inherited GH_TOKEN wins over everything below: knives skips minting and
-    # gh acts as whoever owns that token, with no trace at the call site. That
-    # is legitimate (the queue's admin PAT via `secrets`), so it is not refused,
-    # but it is never silent: 2026-09-17, two review verdicts went out as the
-    # human and nothing recorded which path produced them.
-    if [[ -n "${GH_TOKEN:-}" ]]; then
-        case "$GH_TOKEN" in
-            ghs_*) _kind="an App installation token" ;;
-            ghp_*|gho_*|github_pat_*) _kind="a PERSONAL token: this call acts as its user, not as an App" ;;
-            *) _kind="a token of unknown kind" ;;
-        esac
-        echo "gh shim: GH_TOKEN inherited from the environment (${GH_TOKEN:0:4}…, $_kind); not routing" >&2
-    fi
-    # `gh auth status` describes the user's own login, which the config
-    # directory above hides from every agent call, so on its own it always
-    # answers "not logged into any GitHub hosts" while routed calls work. Here
-    # it answers for what an agent call uses instead: it names the routing and,
-    # inside a GitHub repository, makes one routed read of it and exits on that.
+    # `gh auth status` would describe the placeholder login of the agent config
+    # directory, never the user's own, while routed calls work. Here it answers
+    # for what an agent call uses instead: it names the routing and, inside a
+    # GitHub repository, makes one routed read of it and exits on that.
     if [[ "${1:-}" == auth && "${2:-}" == status ]]; then
         echo "gh shim: agent session. gh calls are routed to the GitHub App for the target repo's owner (an owner without one gets the upstream token), minted per call; the user's own login is not used, so it is not reported."
         _remote="$(git remote get-url origin 2>/dev/null || true)"
@@ -121,11 +191,11 @@ if agent_context; then
         echo "github.com/$_slug: routed access FAILED: ${_out%%$'\n'*}"
         exit 1
     fi
-    # The config directory hides hosts.yml from API calls, but `gh auth token`
-    # and `gh auth git-credential` still read the user's login from the OS
-    # keyring (measured: a gho_ token with hosts.yml absent). Every `gh auth`
-    # verb except status is about the user's own login; none belongs to an
-    # agent. git-credential is what ~/.gitconfig names as the user's helper for
+    # Every `gh auth` verb except status is about the user's own login; none
+    # belongs to an agent. (Without the agent directory's placeholder hosts.yml,
+    # `gh auth token` and `gh auth git-credential` read the user's token from
+    # the OS keyring: measured, a gho_ token with hosts.yml absent.)
+    # git-credential is what ~/.gitconfig names as the user's helper for
     # github.com, so a git process whose environment lost the routing include
     # (omp's eval kernel) lands here: answer with the App helper on the same
     # request. It mints for an owner the App covers, answers the profile's
@@ -136,8 +206,40 @@ if agent_context; then
             [[ "${3:-}" == get ]] && exec gh-app-token agent get
             exit 0
         fi
-        echo "gh shim: 'gh auth ${2:-}' is the user's own login and is refused in an agent session; gh calls are routed to the GitHub App for the repo's owner" >&2
-        exit 1
+        gh_shim_refuse "gh auth ${2:-} reads or changes the user's own login, which no agent process may use or change." \
+            "Every other gh call is already routed to the GitHub App for the repository's owner: run the call itself (gh pr …, gh api repos/<owner>/<repo>/…) with -R <owner>/<repo>, and it gets the App's token. If that call is refused, stop and tell your lead which call and the error; do not look for another credential." \
+            "$@"
+    fi
+    # The outermost call runs the rest of this shim as a child and keeps a copy
+    # of its stderr: when GitHub refuses the call for the App, gh's own error
+    # ("Can not approve your own pull request", "Resource not accessible by
+    # integration") reads to an agent like a missing credential, and an agent
+    # that goes looking for another one finds the user's. The refusal below
+    # names the call, says no other identity exists and gives the route.
+    if [[ -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" ]] \
+        && _err="$(mktemp "${TMPDIR:-/tmp}/gh-shim-stderr.XXXXXX" 2> /dev/null)"; then
+        set +e
+        { GH_SHIM_INNER=1 "$0" "$@" 2>&1 >&3 3>&- | tee "$_err" >&2; } 3>&1
+        _rc=${PIPESTATUS[0]}
+        set -e
+        _refused=0
+        ((_rc != 0)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
+        rm -f "$_err"
+        ((_refused)) && gh_shim_refused_for_app "$_rc" "$@"
+        exit "$_rc"
+    fi
+    # An inherited GH_TOKEN wins over everything below: knives skips minting and
+    # gh acts as whoever owns that token, with no trace at the call site. That
+    # is legitimate (the queue's admin PAT via `secrets`), so it is not refused,
+    # but it is never silent: 2026-09-17, two review verdicts went out as the
+    # human and nothing recorded which path produced them.
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+        case "$GH_TOKEN" in
+            ghs_*) _kind="an App installation token" ;;
+            ghp_*|gho_*|github_pat_*) _kind="a PERSONAL token: this call acts as its user, not as an App" ;;
+            *) _kind="a token of unknown kind" ;;
+        esac
+        echo "gh shim: GH_TOKEN inherited from the environment (${GH_TOKEN:0:4}…, $_kind); not routing" >&2
     fi
     # A standalone docs-only pull request is refused where docs are batched.
     if [[ "${1:-}" == pr && "${2:-}" == create ]]; then

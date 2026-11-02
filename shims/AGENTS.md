@@ -8,8 +8,19 @@ before handing the call to the real one.
 - **`gh`** sources the auth token. In an agent session (omp, agentbox, or anything launched
   with the gh-app routing include) it routes every call to the repo owner's GitHub App; an
   owner with no App installation (METR, can1357, every upstream we fork) gets the upstream
-  token from the secrets store (`gh-app.agent.fallback-secret`, `GH_PUBLIC_REPO_PAT`). It
-  refuses the user's own login, so an agent never reaches the keyring. `gh pr create` for an
+  token from the secrets store (`gh-app.agent.fallback-secret`, `GH_PUBLIC_REPO_PAT`). No
+  agent process reaches the user's own login, through this shim or past it: gh runs with
+  `GH_CONFIG_DIR` at `scripts/gh-agent-config`'s directory, whose placeholder login stands
+  where the user's would be, so gh never reads his token from `hosts.yml` or the keyring;
+  `scripts/agent-session` and `omp/extensions/session-env.ts` export that directory for the
+  whole session (and omp's eval kernels, through `eval.envPassthrough`), and `mise.toml`'s
+  `_.path` puts this dir first in every PATH mise builds, since mise's python3 shim put mise's
+  gh ahead of it in omp's Python eval kernel, which approved a pull request as the user on
+  2026-11-02. `gh auth` verbs other than `status` are refused, and a call GitHub refuses for
+  the App (a review of the App's own pull request, a permission its installation lacks) ends
+  with a `gh shim: REFUSED` block naming the call, the identity, why, and the route: a
+  verdict goes out as an App comment beginning `VERDICT: <verdict> at <head sha>`; anything
+  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
   (`scripts/docs-pr-gate`).

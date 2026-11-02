@@ -50,6 +50,17 @@
 //     (depth 10 crosses octopus merges and explodes to 40k commits / 26s),
 //     zero foreign non-empty commits escape the closure.
 //
+//   GH_CONFIG_DIR — the gh config directory scripts/gh-agent-config makes,
+//     whose placeholder login stands where the user's own would be, so a gh
+//     that runs past shims/gh (an eval kernel whose PATH finds mise's gh first,
+//     a call by absolute path) finds no token of the user's, in hosts.yml or in
+//     the keyring, and GitHub answers 401. Set once when the extension loads,
+//     before any child process starts, for every omp however it was launched
+//     (scripts/agent-session sets it too). A directory a launcher chose is
+//     kept, unless it is the user's own default directory. 2026-11-02T00:07Z: a
+//     Python eval cell's `gh pr review --approve` ran mise's gh on the user's
+//     login and approved theorem-labs/agent-infra#1178 as him.
+//
 // Subagents load no extensions but share the parent process, and their
 // session_start events fire process-wide. A session family deliberately
 // shares one identity (one set of eyes): subagent transcripts live *inside*
@@ -67,7 +78,8 @@
 // session_start awaits the jj call below, so it is bounded: a jj that never
 // answers (a PATH wrapper that loops) degrades to no trailer instead of
 // holding the session past omp's 30 s extension-handler deadline.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -88,6 +100,20 @@ function withoutOverlays(chain: string): string {
 		.split(":")
 		.filter((entry) => entry && !ATTRIBUTION_OVERLAY.test(path.basename(entry)))
 		.join(":");
+}
+
+const GH_AGENT_CONFIG = path.join(path.dirname(realpathSync(import.meta.path)), "..", "..", "scripts", "gh-agent-config");
+
+/** The GH_CONFIG_DIR an agent process gets: the caller's own, unless it is unset or the user's default. */
+export function agentGhConfigDir(env: NodeJS.ProcessEnv = process.env, script = GH_AGENT_CONFIG): string | undefined {
+	const userDir = path.join(env.XDG_CONFIG_HOME || path.join(env.HOME || homedir(), ".config"), "gh");
+	const current = env.GH_CONFIG_DIR;
+	if (current && path.resolve(current) !== path.resolve(userDir)) return current;
+	try {
+		return execFileSync(script, { env, encoding: "utf8", timeout: 10_000 }).trim() || undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 // JJ_CONFIG replaces jj's default config lookup, so the overlay must chain
@@ -122,6 +148,8 @@ function jjConfigBase(): Promise<string | undefined> {
 }
 
 export default function (pi: ExtensionAPI) {
+	const ghConfigDir = agentGhConfigDir();
+	if (ghConfigDir) process.env.GH_CONFIG_DIR = ghConfigDir;
 	const set = async (
 		_event: unknown,
 		ctx: { sessionManager?: { getSessionFile?: () => string | undefined } },

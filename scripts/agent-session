@@ -9,6 +9,8 @@
 #     the repo owner's GitHub App, never the user's own login;
 #   - puts this checkout's shims/ first on PATH: a session keeps the PATH it started with, and a
 #     launching shell's mise hook may have put the real gh ahead of shims/gh;
+#   - points GH_CONFIG_DIR at the gh config directory with no login of the user's
+#     (scripts/gh-agent-config), so a gh that runs past shims/gh never acts as the user;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -44,6 +46,16 @@ done
 PATH="$shims"
 for dir in "${dirs[@]}"; do PATH+=":$dir"; done
 export PATH
+
+# A directory a caller chose is kept, unless it is the user's own default, which holds his login.
+user_gh_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
+if [[ -z "${GH_CONFIG_DIR:-}" || "${GH_CONFIG_DIR%/}" == "$user_gh_cfg" ]]; then
+    if gh_cfg="$("$DOTFILES_DIR/scripts/gh-agent-config")"; then
+        export GH_CONFIG_DIR="$gh_cfg"
+    else
+        echo "agent-session: scripts/gh-agent-config failed; GH_CONFIG_DIR is not set, so only shims/gh keeps gh off the user's login" >&2
+    fi
+fi
 
 # Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).
 # Root holds every session's transcript, so a root that fills wedges the whole box, and on

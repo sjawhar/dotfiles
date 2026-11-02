@@ -371,12 +371,16 @@ codexResets:
 # cross-session immutable_heads() guard); PI_COMMIT_TRAILERS passes already as
 # a PI_ variable. Admitting both names gives a command run from an eval cell
 # the identity it gets from bash. omp sets neither variable itself, so this
-# belongs here, not in omp's built-in allowlist.
+# belongs here, not in omp's built-in allowlist. GH_CONFIG_DIR (session-env.ts,
+# scripts/agent-session) is the gh config directory with no login of the user's:
+# without it a kernel's gh reads ~/.config/gh, and on 2026-11-02T00:07Z an eval
+# cell's `gh pr review --approve` approved a pull request as the user that way.
 eval:
   envPassthrough:
     names:
       - OMP_SESSION_ID
       - JJ_CONFIG
+      - GH_CONFIG_DIR
     prefixes:
       - DISPATCH_
       - ENVOY_

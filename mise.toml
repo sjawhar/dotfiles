@@ -55,6 +55,15 @@ auto_prune = false
 [settings.github]
 credential_command = "gh-app-token agent --owner sjawhar"
 
+# shims/ first in every PATH mise builds: `mise exec`, `mise env`, and each mise shim, which runs
+# its tool with mise's tool dirs put ahead of the caller's PATH. omp starts its Python eval kernel
+# through mise's python3 shim, so that kernel found mise's own gh before shims/gh, and on
+# 2026-11-02T00:07Z an eval cell's `gh pr review --approve` ran on the user's login and approved
+# theorem-labs/agent-infra#1178 as him (shims/gh header). Every shim is a pass-through outside an
+# agent session, so the user's own shells, which already put shims/ first, see no change.
+[env]
+_.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims']
+
 [tools]
 "github:sjawhar/jj" = "0.46.0-sami.20261008-234600"  # upstream 0.46.0 + gitattr filter drivers (jj-vcs/jj#8719, LFS) + #10097 + #10130 + #10159 + #10160 + #10163 + #10164 + #10166 + sparse paths skip-worktree in colocated Git indexes; #10129 and #10127 dropped
 "github:sjawhar/knives" = "3.1.17"  # keep equal to the plugin tag in omp/plugins/package.json: the plugin runs whichever binary this installs
