@@ -179,3 +179,18 @@ logs and skip shards already done.
 | --- | --- |
 | shard lists, upload log, monitor log | rocqperf `/mnt/nvme/sami/scratch/devbox-copy/`; leanperf `~/devbox-copy/` |
 | extract log (shard, bytes, times, result) | sami-devbox `/mnt/nvme/sami/cutover/bulk-copy.log` |
+
+## Known issues
+
+**A box close can wait many minutes in `umount`.** Seen 2026-11-02 from 19:40Z: after a box
+exited, its launcher's `sudo umount <boxes>/<box>` stayed in D state for over 15 minutes
+(kernel 7.0.0-1014-gcp; stack `cgroup_writeback_umount` → `__flush_workqueue`; dmesg `task
+umount:… blocked for more than 368 seconds`). Two kworkers held the CPU in
+`cleanup_offline_cgwbs_workfn` / `inode_prepare_wbs_switch` and in `inode_switch_wbs_work_fn` on
+a spin lock: the kernel moves every inode a dead cgroup wrote to its parent's writeback, and each
+umount on the machine waits for that one global queue (upstream:
+<https://lkml.iu.edu/2605.2/01175.html>). The container, its broker key and its knives claims are
+already released by then (`close_box` order); only the box's disk image and tree wait. The likely
+trigger is millions of files written by a process whose cgroup then ended (a bulk-copy extract,
+an ssh session's scope). Mitigation: run every long writer in a persistent systemd unit, so its
+cgroup stays alive and its inodes never need moving.
