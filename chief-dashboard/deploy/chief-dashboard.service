@@ -17,6 +17,14 @@ Environment=TMUX_TMPDIR=%h/.tmux/sockets
 Environment=MISE_DATA_DIR=%h/.mise
 # The pull request states come from `gh`: the dotfiles shim, which needs mise and mise's shims to find the real gh.
 Environment=PATH=%h/.dotfiles/shims:%h/.mise/shims:%h/.dotfiles/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The gh-app-routes include makes the dotfiles gh shim treat the service as an agent context: each call goes out as
+# the repository owner's GitHub App, never as Sami's own login (prs.py's docstring always said the unit set this; it
+# did not, and every call ran as sjawhar until 2026-11-02, found by the SRE at 12:57Z from an exec trace in
+# /mnt/nvme/sami/scratch/eng-ops-infra898/rest-quota.md row 65). GH_CONFIG_DIR alone is not enough: outside an agent
+# context the shim does not route, and the agent config's placeholder login answers 401.
+Environment=GIT_CONFIG_COUNT=1
+Environment=GIT_CONFIG_KEY_0=include.path
+Environment=GIT_CONFIG_VALUE_0=%h/.dotfiles/gh-app-routes.gitconfig
 ExecStart=/usr/bin/python3 -m chief_dashboard serve --socket %t/chief-dashboard.sock
 Restart=always
 RestartSec=5

@@ -1,9 +1,9 @@
-"""The state of every pull request the streams' plans name, read from GitHub in one GraphQL query through `gh api
-graphql` and cached for 5 minutes.
+"""The state of every pull request the streams' plans name, read from GitHub with one GraphQL query per repository
+owner through `gh api graphql`, and cached for 5 minutes.
 
 `gh` must be the dotfiles shim in agent routing (the service sets PATH and the gh-app-routes include): the query goes
-out as a repository owner's GitHub App, never as Sami's own login. An App token covers one owner, so the query is
-routed to the owner most of the pull requests belong to (`GH_REPO`); a pull request that token cannot see comes back
+out as a repository owner's GitHub App, never as Sami's own login. An App token covers one owner, so the refs are
+queried once per owner, each routed to that owner (`GH_REPO`); a pull request that owner's token cannot see comes back
 with its GitHub error, shown on the page as "state unknown"."""
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import os
 import re
 import subprocess
 import time
-from collections import Counter
 
 from .dispatch_check import names_key
 
@@ -86,14 +85,16 @@ def normalize(node: dict | None) -> dict:
 
 
 def fetch(refs: list[str], timeout: float = 60) -> dict[str, dict]:
-    """{ref: state} for every ref, in one query. A ref the query could not read carries `error`."""
+    """{ref: state} for every ref, one query per repository owner. A ref the query could not read carries `error`."""
     refs = [r for r in refs if parse_ref(r)]
-    if not refs:
-        return {}
-    owners = Counter(parse_ref(r)[0] for r in refs)
-    top = owners.most_common(1)[0][0]
-    # The shim routes by the first repository the query names: put the owner with the most pull requests first.
-    refs = sorted(refs, key=lambda r: parse_ref(r)[0] != top)
+    out: dict[str, dict] = {}
+    for owner in sorted({parse_ref(r)[0] for r in refs}):
+        out.update(_fetch_owner([r for r in refs if parse_ref(r)[0] == owner], timeout))
+    return out
+
+
+def _fetch_owner(refs: list[str], timeout: float) -> dict[str, dict]:
+    """One GraphQL query for refs that all belong to one owner, routed to that owner's App by `GH_REPO`."""
     env = {**os.environ, "GH_REPO": refs[0].split("#")[0]}
     # Outside any checkout: the shim routes by the working directory's git remote before GH_REPO.
     done = subprocess.run(
