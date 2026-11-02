@@ -114,8 +114,8 @@ tools_check() {
         fail "docker in the box: GHCR_PULL_TOKEN resolves but ~/.docker/config.json has no ghcr.io login (auths: ${got:-none})"
     fi
 
-    # omp's credentials copy with the global omp state at step 5 (spec "Shared state during the
-    # cutover"); until then agent.db holds no live credential at all, and that is the one wait.
+    # agent.db is not copied to this machine and it holds no person's login (INFRA-993 decision
+    # 18:24Z), so no live credential there is the expected state, named by two WAIT lines.
     read -r got live < <(python3 - "$HOME/.omp/agent/agent.db" <<'PY' 2>&1
 import sqlite3, sys
 try:
@@ -130,7 +130,8 @@ PY
     if [[ "$got" == 1 ]]; then
         ok "slack MCP: omp holds one live Slack credential"
     elif [[ "$got" == 0 && "$live" == 0 ]]; then
-        echo "WAIT slack MCP: ~/.omp/agent/agent.db holds no live credential (slack MCP, anthropic, openai-codex): they copy at step 5"
+        echo "WAIT omp provider logins: no person's login on the VM (INFRA-993 decision 18:24Z); models through ossv-gateway with the dev-box@ token"
+        echo "WAIT slack MCP: needs Sami's Slack OAuth, which is a person's login; decision pending"
     else
         fail "slack MCP: live Slack credentials: $got (all live credentials: $live)"
     fi
