@@ -303,8 +303,14 @@ host_units() {
     local got state
     got="$(systemctl --user --failed --no-legend --plain 2>&1)"
     [[ -z "$got" ]] && ok "units: systemctl --user --failed lists nothing" || fail "units: systemctl --user --failed: $(tr '\n' ';' <<<"$got")"
+    # logind's session-*.scope units are login sessions (an ssh session killed by a client timeout
+    # leaves one failed), not provisioning units: a note, not a FAIL. Every other unit is judged.
     got="$(systemctl --failed --no-legend --plain 2>&1)"
-    [[ -z "$got" ]] && ok "units: systemctl --failed lists nothing" || fail "units: systemctl --failed: $(tr '\n' ';' <<<"$got")"
+    local sessions
+    sessions="$(awk '$1 ~ /^session-.*\.scope$/ { print $1 }' <<<"$got")"
+    got="$(awk '$1 !~ /^session-.*\.scope$/' <<<"$got")"
+    [[ -n "$sessions" ]] && note "units: failed login-session scopes (not judged): $(tr '\n' ' ' <<<"$sessions")"
+    [[ -z "$got" ]] && ok "units: systemctl --failed lists nothing but login-session scopes" || fail "units: systemctl --failed: $(tr '\n' ';' <<<"$got")"
     for state in "/mnt/nvme/$(id -un)/tmp/unit-health-watch/state.json" "${XDG_STATE_HOME:-$HOME/.local/state}/unit-health-watch/state.json"; do
         [[ -s "$state" ]] && break
     done
@@ -329,9 +335,15 @@ host() {
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
     host_logins
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
-    # Bounded: it is for the record, and a doctor that hung (21:00Z, 2026-11-02) must not hold A2.
-    timeout 600 "$DOTFILES_DIR/scripts/agentbox" doctor </dev/null 2>&1 | sed 's/^/   doctor: /'
-    (( PIPESTATUS[0] == 124 )) && note "agentbox doctor did not finish in 10 minutes; stopped"
+    # Bounded, and into a file rather than a pipe: it is for the record, and on 2026-11-02 a doctor
+    # killed by its bound left its throwaway box's `sudo umount` running, which held a pipe's write
+    # end open and so held A2 for as long as the umount queue did.
+    local doctor_out
+    doctor_out="$(mktemp)"
+    timeout -k 30 600 "$DOTFILES_DIR/scripts/agentbox" doctor </dev/null >"$doctor_out" 2>&1
+    (( $? == 124 || $? == 137 )) && note "agentbox doctor did not finish in 10 minutes; stopped (its box teardown may still run)"
+    sed 's/^/   doctor: /' "$doctor_out"
+    rm -f "$doctor_out"
     echo "-- a new agent box runs the box half"
     local rc=0
     "$DOTFILES_DIR/scripts/agentbox" new --dir "$CUTOVER_DIR" -- bash "$DOTFILES_DIR/devbox/sami-devbox-check" --in-box </dev/null || rc=$?
