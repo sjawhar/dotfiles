@@ -4063,6 +4063,44 @@ done'
 # machine when TARGET is empty; status 2 when TARGET cannot be asked. Here the census answers
 # (one `find` over every omp's descriptors): reading each descriptor of this host's hundred omp
 # processes one `readlink` at a time took three minutes at load 300 in the 2026-11-02 drill.
+# move_omp_is_session SID CMDLINE OPEN-FILES: true when this omp IS that session. Two things make
+# it one: it holds the session's transcript, or its command line resumes it (`--resume <id>`,
+# `--resume <path>`, `-r`, `--session`). The id is read from the LAST component of the path only -
+# the .jsonl file's own name - because a subagent's transcript lives UNDER its parent's directory,
+# so the parent's id is in the path of every child: agentbox halted FRAC's move saying its session
+# already ran on sami-devbox, where that pid was BET-64's session in a transcript under FRAC's
+# directory (22:57Z, 2026-11-03). A mention of the id anywhere else in argv is never a match (a
+# lane's prompt held CAS's id and a move hung up that lane, 20:57Z).
+move_omp_is_session() {
+    local sid="$1" cmd="$2" fds="$3" word prev="" f
+    for f in $fds; do
+        move_jsonl_is_session "$sid" "$f" && return 0
+    done
+    for word in $cmd; do
+        case "$prev" in
+            --resume|-r|--session)
+                [[ "$word" == "$sid" ]] && return 0
+                move_jsonl_is_session "$sid" "$word" && return 0
+                ;;
+        esac
+        case "$word" in
+            --resume=*|--session=*)
+                [[ "${word#*=}" == "$sid" ]] && return 0
+                move_jsonl_is_session "$sid" "${word#*=}" && return 0
+                ;;
+        esac
+        prev="$word"
+    done
+    return 1
+}
+# move_jsonl_is_session SID PATH: true when PATH is that session's transcript: its FILE NAME holds
+# the id, whatever the directories above it hold.
+move_jsonl_is_session() {
+    local sid="$1" name="${2##*/}"
+    [[ "$name" == *.jsonl ]] || return 1
+    [[ "$name" == *"$sid"* ]]
+}
+
 move_to_running() {
     local target="$1" out sid pid _st cmd fds
     shift
@@ -4073,12 +4111,86 @@ move_to_running() {
     fi
     # Every omp that holds the session, not the first: two of them is exactly what the callers
     # look for (one session must not run twice on a machine).
+    # An omp belongs to a session when it HOLDS that session's transcript, or when its command
+    # line names it as the session to resume - never because the id appears somewhere in argv: a
+    # lane's prompt held another session's id, and a move hung up the wrong omp (CAS and its lane
+    # R17Pin, 2026-11-03 20:57Z).
     for sid in "$@"; do
         while IFS=$'\x1f' read -r pid _st cmd fds; do
             [[ -n "$pid" ]] || continue
-            if [[ " $cmd $fds " == *"$sid"* ]]; then printf '%s\t%s\n' "$sid" "$pid"; fi
+            # The census has already said whose each omp here is (it reads the transcript the
+            # process holds), so its answer is an id, not a path; the target's listing is a
+            # command line and open files, which move_omp_is_session reads.
+            if [[ "$fds" == "$sid" ]] || move_omp_is_session "$sid" "$cmd" "$fds"; then
+                printf '%s\t%s\n' "$sid" "$pid"
+            fi
         done <<<"$out"
     done
+    return 0
+}
+
+# The background services a session left running on THIS machine. omp's worker broker is parented
+# to init and outlives the omp, so a moved session's services keep running on the source: the
+# chief's six loops ran twice for five hours after its move (two sweeps, two ticks, two pilot
+# schedulers, cursor files advancing apart; 2026-11-03). Each broker keeps its services under
+# <omp run>/daemons/<broker>/daemons/<name>/meta.json, with the session that started one in
+# .daemon.owner, and the broker's project directory in <broker>/scope.json; `omp ps --dir <dir>
+# stop <name>` is how a service is stopped. A session's own processes are also in its systemd user
+# scopes, run-c<sid>*.scope.
+MOVE_OMP_RUN="${OMP_RUN_DIR:-$HOME/.omp/run}"
+# move_to_session_services SID: "<project dir>\t<name>" for each service of SID still running here.
+move_to_session_services() {
+    local sid="$1" meta dir name state owner
+    for meta in "$MOVE_OMP_RUN"/daemons/*/daemons/*/meta.json; do
+        [[ -r "$meta" ]] || continue
+        owner="$(jq -r '.daemon.owner // empty' "$meta" 2>/dev/null)" || continue
+        [[ "$owner" == "$sid" ]] || continue
+        state="$(jq -r '.daemon.state // empty' "$meta" 2>/dev/null)"
+        case "$state" in exited|stopped|failed|"") continue ;; esac
+        name="$(jq -r '.daemon.name // empty' "$meta" 2>/dev/null)"
+        [[ -n "$name" ]] || continue
+        dir="$(jq -r '.projectDir // empty' "${meta%/daemons/*/meta.json}/scope.json" 2>/dev/null)"
+        printf '%s\t%s\n' "$dir" "$name"
+    done
+}
+# move_to_session_scopes SID: this session's systemd user scopes, which hold what its tools started.
+move_to_session_scopes() {
+    systemctl --user list-units --type=scope --no-legend --plain 2>/dev/null \
+        | awk -v s="run-c$1" '$1 ~ "^" s { print $1 }'
+}
+# move_to_stop_services SID: stop what SID left running here, AFTER it is confirmed on the target.
+# Everything it finds is logged, stopped or not; what will not stop is said to the session and to
+# the box-health role, since a service that runs twice writes twice.
+MOVE_TO_STOP_SERVICES="${AGENTBOX_MOVE_STOP_SERVICES:-1}"
+move_to_stop_services() {
+    local sid="$1" dir name scope left=() found=0
+    (( MOVE_TO_STOP_SERVICES )) || return 0
+    while IFS=$'\t' read -r dir name; do
+        [[ -n "$name" ]] || continue
+        found=1
+        if omp ps ${dir:+--dir "$dir"} stop "$name" --timeout 10 >/dev/null 2>&1; then
+            say "$sid: service $name (${dir:-this machine}) stopped here; it moved with the session"
+        else
+            left+=("$name (${dir:-this machine})")
+            say "$sid: service $name (${dir:-this machine}) would NOT stop here"
+        fi
+    done < <(move_to_session_services "$sid")
+    while IFS= read -r scope; do
+        [[ -n "$scope" ]] || continue
+        found=1
+        if systemctl --user stop "$scope" >/dev/null 2>&1; then
+            say "$sid: scope $scope stopped here"
+        else
+            left+=("$scope")
+            say "$sid: scope $scope would NOT stop here"
+        fi
+    done < <(move_to_session_scopes "$sid")
+    (( found )) || say "$sid: no service or scope of this session is left running here"
+    if (( ${#left[@]} )); then
+        local text="agentbox: session $sid moved to $target, and these background services stay on $me: ${left[*]}. They run twice until a person ends them. (An automated notice from agentbox.)"
+        envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true
+        envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -5131,6 +5243,7 @@ move_to_git_native_prepush() {
         there="$(GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git --git-dir="$common" ls-remote --heads "$MOVE_TO_USER@$target:$common" 2>/dev/null)" || there=""
         while read -r sha ref; do [[ -n "$ref" ]] && theirs[$ref]="$sha"; done <<<"$there"
         refs=()
+        local -a fetchable=()
         # Only the branches this move's own worktrees have checked out: a shared checkout holds
         # hundreds that belong to other sessions and other machines, and pushing all of them was
         # the slowest step of the move (item 23, 2026-11-03).
@@ -5143,8 +5256,20 @@ move_to_git_native_prepush() {
         done
         while read -r sha ref; do
             [[ -n "${want[$ref]:-}" ]] || continue
-            [[ "${theirs[$ref]:-}" == "$sha" ]] || refs+=("$ref:$ref")
+            [[ "${theirs[$ref]:-}" == "$sha" ]] && continue
+            # A branch head GitHub has already: the target fetches it from origin, which a push
+            # into a big partial clone could not do (item 26, 2026-11-03).
+            if move_commit_on_origin "$common" "$sha"; then fetchable+=("$sha:$ref"); else refs+=("$ref:$ref"); fi
         done < <(git --git-dir="$common" for-each-ref --format='%(objectname) %(refname)' refs/heads 2>/dev/null)
+        if (( ${#fetchable[@]} )); then
+            if move_remote "$target" "git --git-dir=$(printf '%q' "$common") fetch --quiet --no-write-fetch-head origin $(printf '%q ' "${fetchable[@]}")" </dev/null; then
+                "$log" "${#fetchable[@]} branch(es) of $common are on GitHub; $target fetched them from origin ($((SECONDS - start))s)"
+            else
+                "$log" "${#fetchable[@]} branch(es) of $common could not be fetched from origin on $target; they are pushed instead"
+                local r2
+                for r2 in "${fetchable[@]}"; do refs+=("${r2#*:}:${r2#*:}"); done
+            fi
+        fi
         if (( ${#refs[@]} == 0 )); then
             "$log" "the branches of $common are on $target already ($((SECONDS - start))s)"
         elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git --git-dir="$common" push --quiet --no-verify \
@@ -5161,6 +5286,14 @@ move_to_git_native_prepush() {
 # After the hang-up, before the mirror: push each tree's HEAD and register the tree on the
 # target. Only HEAD, a small delta once the branches went before the hang-up. Sets MOVE_TO_WHY
 # on failure.
+# move_commit_on_origin TREE SHA: true when that commit is on the repository's GitHub origin, so
+# the target can fetch it instead of taking a push (only local refs are read, no network).
+move_commit_on_origin() {
+    local tree="$1" sha="$2"
+    [[ -n "$sha" ]] || return 1
+    [[ -n "$(git -C "$tree" branch -r --contains "$sha" --list 'origin/*' 2>/dev/null | head -1)" ]]
+}
+
 move_to_git_native_push() {
     local target="$1" n w common tag head branch script
     for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
@@ -5168,7 +5301,14 @@ move_to_git_native_push() {
         tag="refs/agentbox-move/$(printf '%s' "$w" | md5sum | cut -c1-12)"
         head="$(git -C "$w" rev-parse -q --verify HEAD)" || { MOVE_TO_WHY="$w has no commit to push"; return 1; }
         branch="$(git -C "$w" symbolic-ref -q --short HEAD || true)"
-        if ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
+        # A commit GitHub has already is FETCHED by the target, never pushed into its clone: a
+        # push into sami-devbox's blob:none partial clone of oss-verify-proofs-internal-src (~11k
+        # packs) failed for three moves on 2026-11-03 with non-fast-forward, exhausted file
+        # descriptors and promisor fetches, while a fetch of the same commit from GitHub works.
+        if move_commit_on_origin "$w" "$head" \
+            && move_remote "$target" "git --git-dir=$(printf '%q' "$common") fetch --quiet --no-write-fetch-head origin $(printf '%q' "$head"):$(printf '%q' "$tag")" </dev/null; then
+            :
+        elif ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "+HEAD:$tag" 2>&1; then
             MOVE_TO_WHY="git push of $w to $target:$common failed"
             return 1
@@ -6312,6 +6452,7 @@ move_to_run() {
             log_all "both-machines" "${all[@]}"
             return 1
         fi
+        for ((i = 0; i < n; i++)); do move_to_stop_services "${sids[i]}"; done
         log_all moved "${all[@]}"
         for ((i = 0; i < n; i++)); do
             member_tmux "$i"

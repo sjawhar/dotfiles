@@ -27,6 +27,7 @@ import fcntl
 import json
 import os
 import stat
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1951,6 +1952,113 @@ class AgentboxMove(unittest.TestCase):
         # the hang-up.
         for label in ("before the hold", "at the go", "after the hang-up"):
             self.assertIn(label, run.stdout, run.stdout)
+
+    def test_a_moved_session_s_services_are_stopped_on_the_machine_it_left(self) -> None:
+        """omp's worker broker is parented to init and outlives the omp, so a moved session's
+        services keep running on the source: the chief's six loops ran twice for five hours after
+        its move (two sweeps, two ticks, two pilot schedulers, 2026-11-03). After the session is
+        confirmed on the target, each service of its own and each of its scopes is stopped here,
+        and whatever will not stop is said to the session and to the box-health role."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        # The broker's layout: <omp run>/daemons/<broker>/daemons/<name>/meta.json.
+        run = self.root / "omp-run"
+        broker = run / "daemons" / "22b63d2a564ee63e"
+        (broker / "daemons" / "Sweep").mkdir(parents=True)
+        (broker / "daemons" / "Ticks").mkdir(parents=True)
+        (broker / "daemons" / "Gone").mkdir(parents=True)
+        (broker / "scope.json").write_text(json.dumps({"projectDir": str(self.lane)}), encoding="utf-8")
+        for name, owner, state in (("Sweep", self.TO, "running"), ("Ticks", self.TO, "ready"),
+                                   ("Gone", self.TO, "exited"), ):
+            (broker / "daemons" / name / "meta.json").write_text(
+                json.dumps({"daemon": {"name": name, "owner": owner, "state": state}}), encoding="utf-8")
+        other = broker / "daemons" / "SomeoneElse"
+        other.mkdir()
+        (other / "meta.json").write_text(
+            json.dumps({"daemon": {"name": "SomeoneElse", "owner": self.TO2, "state": "running"}}), encoding="utf-8")
+        calls = self.root / "OMP_PS"
+        write_stub(self.stubs, "omp", f'printf "%s\\n" "$*" >>"{calls}"; case "$*" in *Ticks*) exit 1 ;; esac; exit 0')
+        write_stub(self.stubs, "systemctl", "\n".join([
+            f'printf "%s\\n" "$*" >>"{self.root}/SYSTEMCTL"',
+            'case " $* " in',
+            f'  *" list-units "*) echo "run-c{self.TO}.scope loaded active running" ;;',
+            "esac",
+            "exit 0",
+        ]))
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run_out = self.run_bash(f'move_to_run "{job}"',
+                                {"AGENTBOX_MOVE_RSYNC_TICK": "0", "OMP_RUN_DIR": str(run)})
+        self.assertEqual(run_out.returncode, 0, run_out.stdout + run_out.stderr)
+        asked = calls.read_text(encoding="utf-8")
+        self.assertIn(f"ps --dir {self.lane} stop Sweep --timeout 10", asked)
+        self.assertIn(f"ps --dir {self.lane} stop Ticks --timeout 10", asked)
+        self.assertNotIn("Gone", asked, "a service that has exited is not stopped again")
+        self.assertNotIn("SomeoneElse", asked, "another session's service is left alone")
+        self.assertIn(f"stop run-c{self.TO}.scope", (self.root / "SYSTEMCTL").read_text(encoding="utf-8"))
+        self.assertIn(f"{self.TO}: service Sweep ({self.lane}) stopped here", run_out.stdout)
+        self.assertIn(f"{self.TO}: service Ticks ({self.lane}) would NOT stop here", run_out.stdout)
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
+        self.assertIn("these background services stay on oldbox", sent)
+        self.assertIn("notifications.role.lead-box-health", sent)
+
+    def test_an_omp_is_the_session_only_when_it_holds_or_resumes_it(self) -> None:
+        """A lane's prompt held another session's id, so an argv substring match hung up the wrong
+        omp: CAS's lane R17Pin was hung up and CAS was resumed on the target while the real CAS
+        kept running (20:57Z, 2026-11-03). An omp is a session's when it holds that session's
+        transcript or its command line resumes it."""
+        sid = self.TO
+        other = self.TO2
+        cases = [
+            (f"/x/bin/omp --resume /home/sami/.omp/agent/sessions/-w/2026-11-03T00-00-00-000Z_{sid}.jsonl", "", True),
+            (f"/x/bin/omp --resume {sid}", "", True),
+            (f"/x/bin/omp --session={sid} -p hi", "", True),
+            ("/x/bin/omp -p", f"/home/sami/.omp/agent/sessions/-w/2026-11-03T00-00-00-000Z_{sid}.jsonl", True),
+            (f"/x/bin/omp -p Review the work of session {sid} and report", "", False),
+            (f"/x/bin/omp --resume {other}", f"/w/2026-11-03T00-00-00-000Z_{other}.jsonl", False),
+            (f"/x/bin/omp --model gpt --resume {other} --dir /mnt/nvme/{sid}-lane", "", False),
+            # A subagent's transcript lives UNDER its parent's directory, so the parent's id is in
+            # the path of every child: only the file's own name says whose it is. agentbox halted
+            # FRAC's move for a pid that was BET-64's session in a transcript under FRAC's
+            # directory (22:57Z, 2026-11-03).
+            (f"/x/bin/omp --resume /home/sami/.omp/agent/sessions/-w/2026-10-14T17-14-49-559Z_{sid}/"
+             f"2026-10-25T02-17-36-102Z_{other}.jsonl", "", False),
+            (f"/x/bin/omp -p", f"/home/sami/.omp/agent/sessions/-w/2026-10-14T17-14-49-559Z_{sid}/"
+             f"2026-10-25T02-17-36-102Z_{other}.jsonl", False),
+            (f"/x/bin/omp --resume /home/sami/.omp/agent/sessions/-w/2026-10-14T17-14-49-559Z_{other}/"
+             f"2026-10-25T02-17-36-102Z_{sid}.jsonl", "", True),
+        ]
+        for cmd, fds, expected in cases:
+            result = self.run_bash(f'move_omp_is_session {sid} {shlex.quote(cmd)} {shlex.quote(fds)} && echo YES || echo NO')
+            self.assertEqual(result.stdout.strip(), "YES" if expected else "NO", f"{cmd!r} {fds!r}: {result.stdout}")
+
+    def test_a_commit_github_has_is_fetched_by_the_target_not_pushed_into_its_clone(self) -> None:
+        """Pushes into sami-devbox's blob:none partial clone of oss-verify-proofs-internal-src
+        (~11k packs) failed for three moves on 2026-11-03: non-fast-forward, exhausted file
+        descriptors, promisor fetches. A commit the repository's GitHub origin has already is
+        fetched there from origin; only a commit GitHub lacks is pushed."""
+        self.target()
+        repo = self.checkout("fetchme")
+        self.git("worktree", "add", "-q", "-b", "w1", str(self.root / "w1"), cwd=repo)
+        log = self.root / "GITLOG"
+        # `git branch -r --contains` says the commit is on origin; everything else is the real git.
+        write_stub(self.stubs, "git", f'echo "$*" >>"{log}"\n'
+                   'case " $* " in\n'
+                   '  *" branch -r --contains "*) echo "  origin/main"; exit 0 ;;\n'
+                   '  *" push "*) echo "push refused" >&2; exit 1 ;;\n'
+                   '  *" fetch "*" origin "*) exit 0 ;;\n'
+                   'esac\nexec /usr/bin/git "$@"')
+        result = self.run_bash(
+            f'MOVE_TO_NATIVE=("{self.root}/w1\t{repo}/.git")\n'
+            'move_to_git_native_push devbox')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        asked = log.read_text(encoding="utf-8")
+        self.assertIn(f"--git-dir={repo}/.git fetch --quiet --no-write-fetch-head origin", asked)
+        self.assertFalse([line for line in asked.splitlines() if " push " in f" {line} "],
+                         f"a commit GitHub has is never pushed: {asked}")
 
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
