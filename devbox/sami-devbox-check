@@ -698,6 +698,17 @@ leak_check_host_check() {
         || fail "public-leak-check: $here (sha256 ${out:0:12}) differs from sami-rocqperf's (sha256 ${there:0:12}); copy it again: sami-devbox-provision --from secrets"
 }
 
+# kubectl from a non-login shell or a system unit: the system PATH only, no ~/.local/bin or mise,
+# through the kubeconfig the ossv-job-farm uses. Its smoke failed there on 2026-11-03 11:35Z with
+# "Install gke-gcloud-auth-plugin"; installers/gcloud-sdk.sh links both into /usr/local/bin.
+host_plain_path_kubectl() {
+    local out rc=0
+    out="$(env -i HOME="$HOME" KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" get jobs --chunk-size 1 -o name 2>&1)" || rc=$?
+    (( rc == 0 )) && ok "system-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit 0 ($(grep -c . <<<"$out") jobs)" \
+        || fail "system-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit $rc: $(tail -1 <<<"$out")"
+}
+
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
@@ -705,6 +716,7 @@ host() {
     host_units
     host_follow
     host_packages
+    host_plain_path_kubectl
     local missing
     mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
