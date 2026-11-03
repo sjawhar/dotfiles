@@ -3893,11 +3893,28 @@ move_to_transcript_paths() {
 # tree under $SRC is its src tree instead) or a root that holds many sessions' trees ($SRC,
 # /mnt/nvme/<user>, ~/Code): a lead on this host works in ~/src itself, and its copy would have
 # been all of ~/src, its group every session with a tree there.
+# `move --to --leave PATH`: trees the caller works in no more (its omp may still have its working
+# directory there), and `--cwd PATH`: where it resumes instead. MOVE_TO_LEAVE_SID is the caller.
+MOVE_TO_LEAVE=() MOVE_TO_LEAVE_SID=""
+move_to_left() {
+    local p
+    for p in ${MOVE_TO_LEAVE[@]+"${MOVE_TO_LEAVE[@]}"}; do
+        if move_within "$1" "$p" || move_within "$(readlink -f "$1" 2>/dev/null || echo "$1")" "$p"; then return 0; fi
+    done
+    return 1
+}
 MOVE_TO_DIRS=() MOVE_TO_SHARE=() MOVE_TO_COPY=()
 move_to_session_paths() {
     local pid="$1" sid="$2" cwd="$3" path why kind store
     shift 3
     MOVE_TO_DIRS=() MOVE_TO_SHARE=() MOVE_TO_COPY=()
+    # What a pointer file names is the machine's own configuration, as the pointer is: the
+    # target's `agentbox new` binds its own (move_config_dirs), and no move copies it. So the
+    # inference reads no pointer file here. Dropping its entry afterwards was wrong: the entry is
+    # bounded at a shared root (/mnt/nvme/<user>/frac-verify for the leak check), every path the
+    # session named inside it collapsed into it, and S3's `--dir …/frac-verify/s3` vanished with
+    # it, silently (2026-11-03).
+    local MOVE_POINTER_FILES=(/nonexistent/agentbox-move-to-reads-no-pointer-file)
     # One walk of the session's processes, kept for both readers below.
     MOVE_PROC_MEMO_PID=""
     if [[ -n "$pid" ]]; then
@@ -3906,12 +3923,11 @@ move_to_session_paths() {
     fi
     while IFS=$'\t' read -r path why; do
         [[ -n "$path" ]] || continue
-        # What a pointer file names is the machine's own configuration, as the pointer is: the
-        # target's `agentbox new` binds its own (move_config_dirs), and no move copies it. Here
-        # it was /mnt/nvme/<user>/frac-verify, a whole lane tree, for every session.
-        case "$why" in *"a box has the pointer only") continue ;; esac
         MOVE_TO_DIRS+=("$path")
-        if [[ "$path" == "$cwd" ]] && { move_dir_in_box "$path" || move_dir_too_broad "$path"; }; then continue; fi
+        if [[ "$path" == "$cwd" ]] && { move_dir_in_box "$path" || move_dir_too_broad "$path"; }; then
+            echo "agentbox: $path (session $sid's working directory) is not copied: it holds many sessions' trees or every box has it; the target must have it already" >&2
+            continue
+        fi
         case "$why" in
             "the git object store of "*) MOVE_TO_COPY+=("merge	$path") ;;
             "the checkout that owns that worktree")
@@ -3933,6 +3949,23 @@ move_to_session_paths() {
         [[ "$kind" == mirror ]] && MOVE_TO_SHARE+=("$path")
     done < <(move_to_src_trees "$cwd" "$pid")
     MOVE_PROC_MEMO_PID="" MOVE_PROC_MEMO=""
+    # The trees the caller leaves behind (`move --to --leave`) are neither copied nor shared.
+    if [[ -n "$MOVE_TO_LEAVE_SID" && "$sid" == "$MOVE_TO_LEAVE_SID" ]]; then
+        local kept=() line
+        for line in ${MOVE_TO_DIRS[@]+"${MOVE_TO_DIRS[@]}"}; do move_to_left "$line" || kept+=("$line"); done
+        MOVE_TO_DIRS=(${kept[@]+"${kept[@]}"}); kept=()
+        for line in ${MOVE_TO_SHARE[@]+"${MOVE_TO_SHARE[@]}"}; do move_to_left "$line" || kept+=("$line"); done
+        MOVE_TO_SHARE=(${kept[@]+"${kept[@]}"}); kept=()
+        for line in "${MOVE_TO_COPY[@]}"; do
+            # A left checkout's git storage stays: a worktree of it that the session keeps needs it.
+            if [[ "${line#*$'\t'}" != */.git && "${line#*$'\t'}" != */.git/* ]] && move_to_left "${line#*$'\t'}"; then
+                echo "agentbox: ${line#*$'\t'} is not copied: it is in a tree this session --leave's" >&2
+            else
+                kept+=("$line")
+            fi
+        done
+        MOVE_TO_COPY=(${kept[@]+"${kept[@]}"})
+    fi
     return 0
 }
 
@@ -4215,6 +4248,7 @@ move_to_process_trees() {
             move_dir_too_broad "$MOVE_GIT_ROOT" && continue
             move_within "$MOVE_GIT_ROOT" "$HOME/.dotfiles" && continue
             move_within "$MOVE_GIT_ROOT" "$DOTFILES_DIR" && continue
+            [[ "$s" == "$MOVE_TO_LEAVE_SID" ]] && move_to_left "$MOVE_GIT_ROOT" && continue
             roots[$MOVE_GIT_ROOT]=1
         done < <(awk -F'\t' -v s="$s" '$1 == s' <<<"$MT_TOUCHES")
         MT_PTREES[$s]="$(printf '%s\n' "${!roots[@]}")"
@@ -4372,7 +4406,7 @@ move_to_is_ready() {
 }
 
 cmd_move_to() {
-    local target="" dry=false clear=false in_box=false raw_dirs=() me
+    local target="" dry=false clear=false in_box=false raw_dirs=() me new_cwd="" p
     [[ -n "${AGENTBOX_BOX:-}" || -e /etc/agentbox-identity ]] && in_box=true
     while (( $# )); do
         case "$1" in
@@ -4380,6 +4414,17 @@ cmd_move_to() {
             --dry-run) dry=true ;;
             --clear-halt) clear=true ;;
             --accept-orphans) MOVE_ACCEPT_ORPHANS=true ;;
+            --cwd)
+                [[ -d "${2:-}" ]] || die "--cwd takes an existing directory, the one the session resumes in. $MOVE_USAGE"
+                new_cwd="$(readlink -f "$2")"
+                shift
+                ;;
+            --leave)
+                [[ -d "${2:-}" ]] || die "--leave takes an existing directory, a tree this session no longer works in. $MOVE_USAGE"
+                MOVE_TO_LEAVE+=("$(readlink -f "$2")")
+                [[ "$(readlink -f "$2")" == "${2%/}" ]] || MOVE_TO_LEAVE+=("${2%/}")
+                shift
+                ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory. $MOVE_USAGE"
                 if $in_box; then raw_dirs+=("$2"); else add_box_dir "$2"; fi
@@ -4398,6 +4443,7 @@ cmd_move_to() {
         return 0
     fi
     if $in_box; then
+        [[ -z "$new_cwd" && ${#MOVE_TO_LEAVE[@]} -eq 0 ]] || die "--cwd and --leave are for a host session; a boxed session's paths are its box's --dir paths"
         move_to_in_box "$target" "$dry" ${raw_dirs[@]+"${raw_dirs[@]}"}
         return $?
     fi
@@ -4406,6 +4452,31 @@ cmd_move_to() {
     move_to_index_transcripts
     echo "agentbox move --to $target: reading this host's sessions' processes to find this session's group" >&2
     move_to_scan_processes
+    # --cwd / --leave: the session resumes in another tree and leaves one it no longer works in, so
+    # it does not group with the sessions there (LINUX-1248, 2026-11-03: its omp's working
+    # directory was ~/src/machcsl-riscv, shared by three other sessions, after it had moved its
+    # work to a worktree of its own). Refused while a process of its own, other than the omp,
+    # holds a file open for writing in a left tree; a working directory alone is not work (the
+    # session's tool shells and runners start in the omp's working directory).
+    if [[ -n "$new_cwd" || ${#MOVE_TO_LEAVE[@]} -gt 0 ]]; then
+        MOVE_TO_LEAVE_SID="$sid"
+        [[ -z "$new_cwd" ]] || ! move_to_left "$new_cwd" || die "--cwd $new_cwd is inside a tree it --leave's"
+        local busy
+        busy="$(awk -F'\t' -v s="$sid" -v omp="$PROC/$MOVE_SELF_PID/" '$1 == s && index($2, omp) != 1 { print $2 "\t" $3 }' <<<"$MT_TOUCHES" \
+            | while IFS=$'\t' read -r link tgt; do
+                [[ "$link" == */cwd ]] && continue
+                tgt="${tgt%/*}"
+                move_to_left "$tgt" && move_to_writes "$link" && { l="${link#"$PROC"/}"; echo "pid ${l%%/*} ($tgt)"; }
+            done | sort -u | head -5)"
+        [[ -z "$busy" ]] || die "this session still works in a tree it would --leave: $(paste -sd ';' <<<"$busy"); nothing was hung up"
+        if [[ -n "$new_cwd" ]]; then
+            local f=()
+            IFS="$SEP" read -r -a f <<<"${MT_ROW_OF[$sid]}"
+            f[5]="$new_cwd"
+            MT_ROW_OF[$sid]="$(IFS="$SEP"; echo "${f[*]}")"
+            MOVE_SELF_CWD="$new_cwd"
+        fi
+    fi
     [[ -n "${MT_ROW_OF[$sid]:-}" ]] || die "session $sid is not in this host's census"
     move_to_find_group "$sid" ${BOX_DIRS[@]+"${BOX_DIRS[@]}"}
     [[ -n "${MT_DIRS[$sid]:-}" ]] || die "$(move_dirs_why "$MOVE_SELF_CWD" "$MOVE_SELF_PID" "$sid" 2>&1 >/dev/null || true)"
@@ -4824,6 +4895,9 @@ MOVE_USAGE='usage:
                                                     the group of another session, --all every
                                                     group; changes nothing
   agentbox move --to <machine> [--dry-run] [--accept-orphans] [--dir PATH]…
+                     [--cwd PATH] [--leave PATH]…  (--cwd: resume there; --leave: a tree this
+                                                    session no longer works in, so it neither
+                                                    copies it nor groups with its users)
                                                     run by the session in its own pane at its safe
                                                     point: its group moves to <machine> over
                                                     Tailscale SSH and resumes there in boxes, with

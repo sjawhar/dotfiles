@@ -1679,6 +1679,27 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(str(self.lane), doc["merge"])
         self.assertNotIn(str(self.lane), doc["mirror"])
 
+    def test_a_path_the_session_names_inside_a_pointer_file_s_tree_is_copied(self) -> None:
+        """S3, 2026-11-03: the leak-check pointer names a file under a lane tree that is bounded at
+        a shared root, and S3's own `--dir <that tree>/s3` collapsed into the pointer's entry,
+        which the move then dropped: no copy, no message. The pointer is not read for a move."""
+        self.moving_session()
+        lanes = self.home / "tmp" / "frac-verify"
+        (lanes / "shared/leak-check").mkdir(parents=True)
+        (lanes / "s3").mkdir()
+        pointer = self.home / ".config/public-leak-check/path"
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text(f"{lanes}/shared/leak-check/public-leak-check.sh\n", encoding="utf-8")
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        moved = self.move_to(f'--to devbox --dir "{lanes / "s3"}"')
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        self.assertIn(str(lanes / "s3"), doc["merge"])
+        self.assertIn(str(lanes / "s3"), doc["members"][0]["spec"])
+
     def test_what_a_pointer_file_names_stays_the_machine_s_own(self) -> None:
         """The leak check a pointer file names is configuration of each machine, as the pointer is:
         on sami-rocqperf it is inside a whole lane tree. A move neither copies it nor names it as a
@@ -1797,6 +1818,47 @@ class AgentboxMove(unittest.TestCase):
         fresh = self.move_to()
         self.assertEqual(fresh.returncode, 0, fresh.stderr)
         self.assertEqual(len(self.jobs()), 1)
+
+    def test_a_session_resumes_in_its_own_worktree_and_leaves_a_shared_checkout(self) -> None:
+        """LINUX-1248's shape (2026-11-03): its omp's working directory is a checkout three other
+        sessions work in, and its work is in a worktree of its own. With --cwd and --leave it
+        moves alone, resumes in the worktree, and the shared checkout is not mirrored."""
+        shared = self.src / "shared" if (self.src / "shared").exists() else self.checkout("shared")
+        own = self.root / "wt" / "mine"
+        self.git("worktree", "add", "-q", "-b", "mine", str(own), cwd=shared)
+        (own / "file").write_text("my uncommitted work\n", encoding="utf-8")
+        transcript = self.home / ".omp/agent/sessions/-src-shared" / f"2026-11-03T00-00-00-000Z_{self.TO}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        self.make_proc(999999960, comm="bash", ppid=1, cwd=shared)
+        self.make_proc(999999961, ppid=999999960, cwd=shared, writes=(transcript,))
+        self.make_proc(999999962, comm="bash", ppid=999999961, cwd=shared)  # its tool shell
+        self.make_proc(999999970, comm="bash", ppid=1, cwd=shared)
+        self.make_proc(999999971, ppid=999999970, cwd=shared, session=self.TO2)
+        self.set_pids(999999961, 999999971)
+        self.set_panes({999999960: ("%91", "agents:9.1"), 999999970: ("%92", "agents:9.2")})
+        self.target()
+        grouped = self.move_to("--to devbox --dry-run", own=999999961)
+        self.assertIn("2 session(s)", grouped.stdout, grouped.stderr)
+        alone = self.move_to(f'--to devbox --cwd "{own}" --leave "{shared}"', own=999999961)
+        self.assertEqual(alone.returncode, 0, alone.stdout + alone.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        [member] = doc["members"]
+        self.assertEqual((member["sid"], member["cwd"]), (self.TO, str(own)))
+        self.assertEqual(member["spec"][:2], ["--dir", str(own)])
+        self.assertIn(str(own), doc["mirror"])
+        self.assertNotIn(str(shared), doc["mirror"])
+        # The worktree's git storage still travels (merged), or the tree would have no repository.
+        self.assertTrue(any(p.startswith(str(shared / ".git")) for p in doc["merge"]), doc["merge"])
+        # A process of its own still writing in the left tree refuses the move.
+        (self.root / "cache/omp/agentbox/move-to").mkdir(parents=True, exist_ok=True)
+        for j in self.jobs():
+            j.unlink()
+        self.make_proc(999999963, comm="python3", ppid=999999961, cwd=own, writes=(shared / "out.log",))
+        busy = self.move_to(f'--to devbox --cwd "{own}" --leave "{shared}"', own=999999961)
+        self.assertEqual(busy.returncode, 1)
+        self.assertIn("still works in a tree it would --leave: pid 999999963", busy.stderr)
 
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own
