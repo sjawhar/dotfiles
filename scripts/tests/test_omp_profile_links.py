@@ -68,8 +68,12 @@ class OmpProfileLinks(unittest.TestCase):
 
     def assert_mirrors_canonical(self, profile: Path) -> None:
         self.assertEqual(os.readlink(profile / "plugins"), str(self.targets / "plugins"))
-        for name in ("agents", "hooks", "prompts", "mcp.json"):
+        for name in ("agents", "hooks", "prompts"):
             self.assertEqual(os.readlink(profile / "agent" / name), str(self.targets / name))
+        # A shared config file is a copy, so a write to the profile's file cannot reach the shared one.
+        self.assertFalse(os.path.islink(profile / "agent" / "mcp.json"))
+        self.assertEqual((profile / "agent" / "mcp.json").read_bytes(), (self.targets / "mcp.json").read_bytes())
+        # Extension code stays linked: a copy would resolve its imports from the profile.
         self.assertEqual(os.readlink(profile / "agent/extensions/viewport.ts"), str(self.targets / "viewport.ts"))
 
     def test_named_profile_gets_every_installer_link(self) -> None:
@@ -95,6 +99,49 @@ class OmpProfileLinks(unittest.TestCase):
         self.assertFalse(os.path.lexists(agent / "models.yml"))
         self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "the profile's own")
         self.assertEqual((agent / "agent.db").read_text(encoding="utf-8"), "state")
+
+    def test_a_write_to_the_profiles_mcp_json_does_not_reach_the_shared_file(self) -> None:
+        """2026-11-01: a probe harness wrote `{ "mcpServers": {} }` to its profile's agent/mcp.json,
+        a link to the shared file, and every session on the box started with no MCP servers."""
+        (self.targets / "mcp.json").write_text('{"mcpServers": {"slack": {}}}', encoding="utf-8")
+        agent = self.omp / "profiles" / "probe" / "agent"
+        self.assert_launched(self.omp_run("--profile", "probe"))
+        (agent / "mcp.json").write_text('{ "mcpServers": {} }\n', encoding="utf-8")
+        self.assertEqual((self.targets / "mcp.json").read_text(encoding="utf-8"), '{"mcpServers": {"slack": {}}}')
+        self.assert_launched(self.omp_run("--profile", "probe"))
+        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), '{ "mcpServers": {} }\n')
+        self.assertEqual((self.targets / "mcp.json").read_text(encoding="utf-8"), '{"mcpServers": {"slack": {}}}')
+
+    def test_the_copy_follows_the_shared_file_until_the_profile_changes_it(self) -> None:
+        agent = self.omp / "profiles" / "theorem" / "agent"
+        (self.targets / "mcp.json").write_text("v1", encoding="utf-8")
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        (self.targets / "mcp.json").write_text("v2", encoding="utf-8")
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "v2")
+        (agent / "mcp.json").write_text("the profile's own", encoding="utf-8")
+        (self.targets / "mcp.json").write_text("v3", encoding="utf-8")
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "the profile's own")
+
+    def test_an_old_link_to_the_shared_file_becomes_a_copy(self) -> None:
+        agent = self.omp / "profiles" / "theorem" / "agent"
+        agent.mkdir(parents=True)
+        (self.targets / "mcp.json").write_text("shared", encoding="utf-8")
+        (agent / "mcp.json").symlink_to(self.targets / "mcp.json")
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertFalse(os.path.islink(agent / "mcp.json"))
+        self.assertEqual((agent / "mcp.json").read_text(encoding="utf-8"), "shared")
+        (agent / "mcp.json").write_text("written", encoding="utf-8")
+        self.assertEqual((self.targets / "mcp.json").read_text(encoding="utf-8"), "shared")
+
+    def test_a_copy_whose_shared_file_is_gone_is_removed_unless_changed(self) -> None:
+        agent = self.omp / "profiles" / "theorem" / "agent"
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertTrue((agent / "mcp.json").is_file())
+        (self.omp / "agent" / "mcp.json").unlink()
+        self.assert_launched(self.omp_run("--profile", "theorem"))
+        self.assertFalse(os.path.lexists(agent / "mcp.json"))
 
     def test_a_profiles_envoy_json_is_its_own(self) -> None:
         """A named profile reads Dispatch and Envoy from its own agent dir's envoy.json, and has

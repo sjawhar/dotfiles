@@ -115,12 +115,39 @@ if [[ -f "$local_overlay" ]]; then
     esac
 fi
 
-mirror_links() { # mirror_links SRC DST
-    local src="$1" dst="$2" entry name
+# A profile's copy of one shared config file (mcp.json, lsp.json, keybindings.yml, WATCHDOG.*).
+# A link would let anything that writes the profile's file write the shared one instead: on
+# 2026-11-01 a probe harness wrote `{ "mcpServers": {} }` to its profile's agent/mcp.json, which
+# was a link to ~/.dotfiles/omp/mcp.json, and every session on the box started with no MCP
+# servers. So the profile holds a real copy, refreshed from the shared file on each launch while
+# it is still exactly what was last copied (recorded in DST/.mirror-src/NAME). A file the profile
+# wrote itself, or changed since, stays the profile's and is no longer refreshed.
+mirror_copy() { # mirror_copy SHARED_LINK DST NAME
+    local shared="$1" dst="$2" name="$3"
+    local copy="$dst/$name" last="$dst/.mirror-src/$name"
+    [[ -L "$copy" ]] && rm -f "$copy"
+    if [[ -e "$copy" ]]; then
+        [[ -f "$last" ]] && cmp -s "$copy" "$last" || return 0
+        cmp -s "$shared" "$copy" && return 0
+    fi
+    mkdir -p "$dst/.mirror-src"
+    { cp "$shared" "$copy.new.$$" && mv -f "$copy.new.$$" "$copy" \
+        && cp "$copy" "$last.new.$$" && mv -f "$last.new.$$" "$last"; } 2>/dev/null \
+        || rm -f "$copy.new.$$" "$last.new.$$"
+}
+mirror_links() { # mirror_links SRC DST [copy-files]
+    local src="$1" dst="$2" copy_files="${3:-}" entry name
     mkdir -p "$dst"
     for entry in "$dst"/*; do
-        [[ -L "$entry" ]] || continue
         name="${entry##*/}"
+        if [[ ! -L "$entry" ]]; then
+            # A copy whose shared file is gone goes too, unless the profile changed it.
+            if [[ -n "$copy_files" && -f "$dst/.mirror-src/$name" && ! -L "$src/$name" ]] \
+                && cmp -s "$entry" "$dst/.mirror-src/$name"; then
+                rm -f "$entry" "$dst/.mirror-src/$name"
+            fi
+            continue
+        fi
         case "$name" in config.yml|models.yml) rm -f "$entry"; continue ;; envoy.json) continue ;; esac
         [[ -L "$src/$name" ]] || rm -f "$entry"
     done
@@ -128,11 +155,14 @@ mirror_links() { # mirror_links SRC DST
         name="${entry##*/}"
         case "$name" in config.yml|models.yml|envoy.json) continue ;; esac
         if [[ -L "$entry" ]]; then
-            if [[ -L "$dst/$name" || ! -e "$dst/$name" ]] \
+            if [[ -n "$copy_files" && -f "$entry" && ! -d "$entry" ]]; then
+                mirror_copy "$entry" "$dst" "$name"
+            elif [[ -L "$dst/$name" || ! -e "$dst/$name" ]] \
                 && [[ "$(readlink "$dst/$name" 2>/dev/null)" != "$(readlink "$entry")" ]]; then
                 ln -sfn "$(readlink "$entry")" "$dst/$name"
             fi
         elif [[ "$name" == extensions && -d "$entry" ]]; then
+            # Extension code stays linked: a copied .ts would resolve its imports from the profile.
             mirror_links "$entry" "$dst/$name"
         fi
     done
@@ -201,7 +231,7 @@ if [[ -n "$profile" ]]; then
         if cmp -s "$models_out.new.$$" "$models_out"; then rm -f "$models_out.new.$$"; chmod 600 "$models_out"; else mv "$models_out.new.$$" "$models_out"; fi
     else
         mirror_links "$root" "$root/profiles/$profile"
-        mirror_links "$root/agent" "$root/profiles/$profile/agent"
+        mirror_links "$root/agent" "$root/profiles/$profile/agent" copy-files
     fi
 fi
 
