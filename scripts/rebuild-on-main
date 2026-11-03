@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# rebuild-on-main.sh <worktree> <new-branch> [remote]
+#
+# Rebuild the change in <worktree> onto a fresh origin/main, by patch.
+#
+# Why this exists. Twice in one day this lane pushed a branch built by copying
+# files from another branch, and each time it silently reverted someone else's
+# merged work:
+#   - agent-infra#730 copied bootstrap/*.go over a fresh main and deleted
+#     TestWorkloadIdentityDisplayNamesFitGoogleLimit, which #724 had merged
+#     minutes before (struggle report 2026-10-28, Agent infra row 5);
+#   - agent-infra#673 used `git checkout <branch> -- <file>` and restored a
+#     tailnet identity that #660 had removed.
+# A third incident was a preview run against a tree 190 commits behind main
+# (row 2), which reported deletes that were not real.
+#
+# The copy looks harmless in a transcript, which is why the rule alone did not
+# hold. This does the safe thing in one command: take the change as a patch
+# against its own merge base, then apply that patch to a fresh origin/main. A
+# hunk that no longer applies stops the run, which is the whole point: that
+# hunk is where main has moved under you.
+#
+# It never pushes and never deletes a branch.
+set -euo pipefail
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: $0 <worktree holding the change> <new branch name> [remote, default origin]" >&2
+  exit 2
+fi
+
+src=$1
+branch=$2
+remote=${3:-origin}
+
+[ -d "$src/.git" ] || [ -f "$src/.git" ] || { echo "$src is not a git worktree" >&2; exit 2; }
+cd "$src"
+
+git fetch -q "$remote" main
+base=$(git merge-base "$remote/main" HEAD)
+patch=$(mktemp "${TMPDIR:-/tmp}/rebuild-on-main.XXXXXXXX.patch")
+git diff "$base" HEAD > "$patch"
+
+if [ ! -s "$patch" ]; then
+  echo "no change between $base and HEAD: nothing to rebuild" >&2
+  rm -f "$patch"
+  exit 1
+fi
+
+echo "change is $(git diff --shortstat "$base" HEAD), taken against merge base $base"
+echo "patch: $patch"
+
+git switch -c "$branch" "$remote/main"
+if ! git apply --3way --whitespace=nowarn "$patch"; then
+  echo >&2
+  echo "a hunk did not apply to $remote/main. That hunk is where main moved under you:" >&2
+  echo "read the conflict, fix it in this worktree, and keep the patch at $patch." >&2
+  echo "Do not resolve it by copying a file from the old branch." >&2
+  exit 1
+fi
+
+echo
+echo "applied onto $remote/main at $(git rev-parse --short "$remote/main"). Now, before you commit:"
+echo "  git diff --stat $remote/main    # must equal the shortstat above"
+echo "  git diff $remote/main           # read every hunk; a deletion you did not write is the defect this guards"
+echo "and run the repository's checks here, not in the old worktree."

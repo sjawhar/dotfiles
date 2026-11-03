@@ -1,0 +1,79 @@
+#!/usr/bin/python3
+"""Send an Envoy message to the session that made a commit.
+
+The address is the commit's own `Omp-Session:` trailer, which this estate's commits carry. It
+is the only address that is both in the commit and a thing Envoy can reach: a GitHub login is
+an account, not a session.
+
+Why this exists. A verdict that reaches a peer in conversation and not the author is a verdict
+that was not delivered: agent infra's 2026-10-31 drop sweep put 233.3 of 240.0 delayed hours on
+owed gate verdicts. `post-review` closes the gap between posting and telling. This closes the
+other half — the silence while a gate runs, which is minutes to an hour — so the author knows a
+verdict is coming and holds the head still rather than pushing under it. The measured form is
+FRAC's (tick 46-47, dispatch://BET-59/artifact/speed-log-md): 33 of 36 verdicts reached their
+owner in 1-20 s.
+
+It never fails loudly: a commit with no trailer, an unreachable Envoy or a bad SHA prints one
+line and exits 0, because the caller is doing something else that matters more.
+
+Usage:
+  tell-head-session <owner/repo> <sha> <message>
+  tell-head-session <owner/repo> <sha> -        # message on stdin
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+TRAILER = re.compile(r"^Omp-Session:\s*([0-9a-fA-F-]{36})\s*$", re.MULTILINE)
+
+
+def say(message: str) -> None:
+    print(f"tell-head-session: {message}")
+
+
+def main() -> None:
+    if len(sys.argv) < 4:
+        print(
+            "usage: tell-head-session <owner/repo> <sha> <message|->",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    slug, sha = sys.argv[1], sys.argv[2]
+    text = sys.stdin.read() if sys.argv[3] == "-" else " ".join(sys.argv[3:])
+    if not text.strip():
+        say("nothing to send")
+        return
+
+    try:
+        run = subprocess.run(
+            ["gh", "api", f"repos/{slug}/commits/{sha}", "--jq", ".commit.message"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if run.returncode != 0:
+            say(f"could not read {slug}@{sha[:8]}: {run.stderr.strip()[:200]}")
+            return
+        found = TRAILER.search(run.stdout)
+        if not found:
+            say(f"no Omp-Session trailer on {sha[:8]}, nobody told")
+            return
+        session = found.group(1)
+        if session == os.environ.get("OMP_SESSION_ID"):
+            say("the head is this session's own commit, nobody told")
+            return
+        sent = subprocess.run(
+            ["envoy", "send", session, text], capture_output=True, text=True, timeout=60
+        )
+        if sent.returncode == 0:
+            say(f"told {session}")
+        else:
+            say(f"could not tell {session}: {sent.stderr.strip()[:200]}")
+    except Exception as error:  # noqa: BLE001 - the caller's own work matters more
+        say(f"could not tell the author: {error}")
+
+
+if __name__ == "__main__":
+    main()
