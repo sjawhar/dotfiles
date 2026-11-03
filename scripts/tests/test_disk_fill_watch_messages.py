@@ -1119,5 +1119,86 @@ class SlowStepTest(Harness):
         self.assertIn("guard journal: skipped", self.log_text)
 
 
+class LiveIopsCapTest(Harness):
+    """The IOPS cap is the one the disk has now, read from the cloud, not a number in a unit.
+
+    sami-devbox, 2026-11-03T11:22Z: "DISK AT ITS IOPS CAP: /mnt/durable (nvme44n1) 6253 IOPS,
+    208% of its 3000 cap", while the disk (sami-devbox-cold, hyperdisk-balanced) had been
+    raised to 12,000 IOPS for a copy. The 3000 was the unit drop-in's fixed --iops-cap.
+    """
+
+    DURABLE = "/mnt/durable"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ops = 5_000_000
+        self.logs: list[str] = []
+        # (until this instant, the caps the cloud answers): the lookup runs in a forked child,
+        # so it answers by the clock the child inherited rather than by mutating test state.
+        self.live: list[tuple[float, dict]] = []
+        original_ops = WATCH.device_ops
+        WATCH.device_ops = lambda mount: ("nvme44n1", self.ops)
+        self.addCleanup(setattr, WATCH, "device_ops", original_ops)
+
+        def lookup(mounts: list[str]) -> dict:
+            for until, caps in self.live:
+                if WATCH.time.time() < until:
+                    return caps
+            return self.live[-1][1]
+
+        original_live = getattr(WATCH, "live_caps", None)
+        WATCH.live_caps = lookup
+        self.addCleanup(setattr, WATCH, "live_caps", original_live)
+
+    def step(self, iops: float, seconds: float) -> None:
+        self.now += seconds
+        self.ops += int(iops * seconds)
+        self.run_watch(mount=[], iops_caps={self.DURABLE: 3000.0})
+        self.logs.append(self.log_text)
+
+    def lookups(self) -> int:
+        return sum("IOPS caps read live" in text for text in self.logs)
+
+    def cap(self, iops: float) -> dict:
+        return {self.DURABLE: {"iops": iops, "throughput": 600.0, "source": "gcp disk sami-devbox-cold"}}
+
+    def test_the_live_cap_replaces_the_fixed_one_and_is_read_once_in_five_minutes(self) -> None:
+        self.live = [(float("inf"), self.cap(12000.0))]
+        for _ in range(5):
+            self.step(6253.0, 60.0)
+
+        self.assertEqual([], self.messages())
+        self.assertEqual(1, self.lookups())
+        self.assertIn("cap 12000", self.logs[-1])
+
+    def test_a_cap_raised_between_runs_from_3000_to_12000_sends_no_alert(self) -> None:
+        raised = self.now + 2 * 310.0 + 1
+        self.live = [(raised, self.cap(3000.0)), (float("inf"), self.cap(12000.0))]
+        for _ in range(6):
+            self.step(6253.0, 310.0)  # past the five-minute cache each time: read every run
+
+        self.assertEqual([], self.messages())
+        self.assertEqual(6, self.lookups())
+        self.assertIn("cap 3000", self.logs[1])
+        self.assertIn("cap 12000", self.logs[-1])
+
+    def test_a_failed_lookup_falls_back_to_the_fixed_cap_and_says_so_once(self) -> None:
+        self.live = [(float("inf"), {self.DURABLE: {"error": "metadata server unreachable"}})]
+        for _ in range(4):
+            self.step(6253.0, 310.0)
+
+        self.assertEqual(1, len(self.messages()))
+        self.assertIn("DISK AT ITS IOPS CAP", self.messages()[0])
+        self.assertEqual(1, sum("fixed --iops-cap" in text for text in self.logs))
+
+    def test_a_local_disk_has_no_cloud_cap_and_keeps_the_fixed_one_quietly(self) -> None:
+        self.live = [(float("inf"), {self.DURABLE: {"local": "a local NVMe disk: no provisioned cap"}})]
+        for _ in range(4):
+            self.step(6253.0, 310.0)
+
+        self.assertEqual(1, len(self.messages()))
+        self.assertFalse(any("fixed --iops-cap" in text for text in self.logs))
+
+
 if __name__ == "__main__":
     unittest.main()

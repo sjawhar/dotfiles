@@ -346,6 +346,26 @@ is why the sample is taken every run and not only while something is wrong.
 `--iops-cap /mnt/durable=0` stops watching that mount's IOPS. Counters, the consecutive-run
 count and the open crossing live in the state file under `iops`.
 
+**The cap used is the one the disk has now**, read from the cloud with the box's own identity,
+and the `--iops-cap` number is only the fallback. On sami-devbox at 2026-11-03T11:22Z this watch
+said `/mnt/durable (nvme44n1) 6253 IOPS, 208% of its 3000 cap` while `sami-devbox-cold` had been
+raised to 12,000 IOPS for a copy; the 3000 was the installer drop-in's fixed number. Every
+5 minutes (`iops_caps_live` in the state file), in a forked child with a 20 s limit, after the
+df path:
+
+| Cloud | How the device is matched | Where the cap comes from |
+|---|---|---|
+| Google Cloud | `/dev/disk/by-id/google-<device name>` → the instance's disk with that `deviceName` | `provisionedIops` and `provisionedThroughput` of that disk, from the Compute API with the metadata server's token |
+| Azure | `/dev/disk/azure/data/by-lun`, or NVMe namespace `nvme0n<LUN+2>` | the instance metadata's data disk at that LUN: a `Premium_LRS` disk's size tier (P50 = 7,500 IOPS, 250 MB/s). A performance tier raised above the size's own is not visible this way |
+
+Measured 2026-11-03: sami-devbox `/mnt/durable` 12,000 IOPS, 600 MB/s (`sami-devbox-cold`,
+hyperdisk-balanced), `/mnt/nvme` 160,000 IOPS, 2,400 MB/s (`sami-devbox-state`); sami-rocqperf
+`/mnt/durable` 7,500 IOPS, 250 MB/s (`sami-rocqperf-durable-1`, P50). Local SSDs, md arrays and
+machines off the cloud have no provisioned cap and keep the configured number quietly; a read
+that fails keeps it too and says so once (`using the fixed --iops-cap …`). A live read older
+than an hour is not trusted over the configured number. Throughput is read and logged; only
+IOPS alerts.
+
 ## The scratch rule: `/tmp` and `~/src`
 
 Both are shared by every session: agents' scratch in `/tmp` was the repeated root cause on

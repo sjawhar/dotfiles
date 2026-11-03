@@ -2685,6 +2685,195 @@ def forward_guard_faults(
     return sent
 
 
+# ------------------------------------------------------------------ the live provisioned cap
+
+# A cap is a property of the disk NOW, not of the unit file. On sami-devbox at
+# 2026-11-03T11:22Z this watch said "DISK AT ITS IOPS CAP: /mnt/durable (nvme44n1) 6253 IOPS,
+# 208% of its 3000 cap" while sami-devbox-cold (hyperdisk-balanced) had been raised to 12,000
+# IOPS for a copy: the 3000 was the installer drop-in's fixed --iops-cap. So each capped mount's
+# provisioned IOPS and throughput are read from the cloud, with the box's own identity (the
+# metadata server), every CAP_CACHE_SECONDS, in a bounded child; the fixed --iops-cap is used
+# only when that read fails, and the fallback is logged once.
+CAP_CACHE_SECONDS = 300.0
+# A live read older than this is not trusted over the configured number.
+CAP_STALE_SECONDS = 3600.0
+CAP_LOOKUP_TIMEOUT = 20.0
+GCE_METADATA = "http://metadata.google.internal/computeMetadata/v1"
+AZURE_IMDS = "http://169.254.169.254/metadata/instance?api-version=2021-12-13"
+# Azure Premium SSD (v1) performance by size tier: (tier, largest GiB, IOPS, MB/s). The instance
+# metadata gives a data disk's size and type but not its IOPS, and Premium_LRS IOPS follow the
+# tier its size falls in (learn.microsoft.com, "Premium SSD size", as of 2026-11). A performance
+# tier raised above the size's own is not visible this way.
+AZURE_PREMIUM_TIERS = [
+    ("P1", 4, 120, 25), ("P2", 8, 120, 25), ("P3", 16, 120, 25), ("P4", 32, 120, 25),
+    ("P6", 64, 240, 50), ("P10", 128, 500, 100), ("P15", 256, 1100, 125), ("P20", 512, 2300, 150),
+    ("P30", 1024, 5000, 200), ("P40", 2048, 7500, 250), ("P50", 4096, 7500, 250),
+    ("P60", 8192, 16000, 500), ("P70", 16384, 18000, 750), ("P80", 32767, 20000, 900),
+]
+
+
+def http_get(url: str, headers: dict, timeout: float = 5.0) -> str:
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as answer:
+        return answer.read().decode()
+
+
+def block_name(mount: str) -> str:
+    """The kernel name of the whole disk under `mount` (nvme44n1, md127), or ""."""
+    device = device_of(mount)
+    if device is None:
+        return ""
+    path = os.path.realpath(f"/sys/dev/block/{os.major(device)}:{os.minor(device)}")
+    if os.path.exists(os.path.join(path, "partition")):
+        path = os.path.dirname(path)
+    return os.path.basename(path)
+
+
+def gcp_cap(device: str) -> dict:
+    """The provisioned IOPS and throughput of a GCE persistent disk, by its attached name."""
+    names = [
+        link.name[len("google-"):]
+        for link in Path("/dev/disk/by-id").glob("google-*")
+        if os.path.basename(os.path.realpath(link)) == device
+    ]
+    if not names:
+        return {"error": f"no /dev/disk/by-id/google-* link names {device}"}
+    name = names[0]
+    if name.startswith("local-"):
+        return {"local": f"{device} is a local SSD ({name}), with no provisioned cap"}
+    metadata = {"Metadata-Flavor": "Google"}
+    token = json.loads(http_get(f"{GCE_METADATA}/instance/service-accounts/default/token", metadata))
+    instance = http_get(f"{GCE_METADATA}/instance/name", metadata)
+    zone = http_get(f"{GCE_METADATA}/instance/zone", metadata).rsplit("/", 1)[-1]
+    project = http_get(f"{GCE_METADATA}/project/project-id", metadata)
+    auth = {"Authorization": f"Bearer {token['access_token']}"}
+    api = f"https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}"
+    # The by-id name is the disk's DEVICE name on this instance, not the disk's own name: the
+    # instance resource maps one to the other.
+    vm = json.loads(http_get(f"{api}/instances/{instance}", auth, timeout=10.0))
+    source = next((disk.get("source") for disk in vm.get("disks", []) if disk.get("deviceName") == name), "")
+    if not source:
+        return {"error": f"{instance} has no disk attached as {name}"}
+    disk = json.loads(http_get(source, auth, timeout=10.0))
+    kind = str(disk.get("type", "")).rsplit("/", 1)[-1]
+    if not disk.get("provisionedIops"):
+        return {"error": f"disk {disk.get('name')} ({kind}) reports no provisionedIops"}
+    return {
+        "iops": float(disk["provisionedIops"]),
+        "throughput": float(disk.get("provisionedThroughput") or 0) or None,
+        "source": f"gcp disk {disk.get('name')}, {kind}",
+    }
+
+
+def azure_cap(device: str) -> dict:
+    """The tier IOPS and throughput of an Azure Premium SSD data disk, by its LUN."""
+    local = Path("/dev/disk/azure/local")
+    if local.is_dir() and any(
+        os.path.basename(os.path.realpath(link)) == device for link in local.rglob("*")
+    ):
+        return {"local": f"{device} is a local NVMe disk, with no provisioned cap"}
+    lun = next(
+        (
+            link.name
+            for link in Path("/dev/disk/azure/data/by-lun").glob("*")
+            if os.path.basename(os.path.realpath(link)) == device
+        ),
+        None,
+    )
+    # An NVMe-attached data disk is namespace LUN + 2 of the first controller: on sami-rocqperf
+    # LUN 0 is nvme0n2, and nvme0n1 is the OS disk.
+    found = re.fullmatch(r"nvme0n(\d+)", device)
+    if lun is None and found and int(found.group(1)) >= 2:
+        lun = str(int(found.group(1)) - 2)
+    if lun is None:
+        return {"error": f"{device} is not a data disk this watch can place on a LUN"}
+    meta = json.loads(http_get(AZURE_IMDS, {"Metadata": "true"}))
+    disk = next(
+        (d for d in meta["compute"]["storageProfile"]["dataDisks"] if str(d.get("lun")) == lun), None
+    )
+    if disk is None:
+        return {"error": f"the instance metadata lists no data disk at LUN {lun}"}
+    kind = (disk.get("managedDisk") or {}).get("storageAccountType")
+    size = int(disk.get("diskSizeGB") or 0)
+    if kind != "Premium_LRS":
+        return {"error": f"disk {disk.get('name')} is {kind}, which has no size-tier table here"}
+    tier = next((row for row in AZURE_PREMIUM_TIERS if size <= row[1]), AZURE_PREMIUM_TIERS[-1])
+    return {
+        "iops": float(tier[2]),
+        "throughput": float(tier[3]),
+        "source": f"azure disk {disk.get('name')}, Premium_LRS {tier[0]} at {size} GiB",
+    }
+
+
+def live_caps(mounts: list[str]) -> dict[str, dict]:
+    """{mount: {"iops", "throughput", "source"} | {"local": why} | {"error": why}}."""
+    on_gcp = any(Path("/dev/disk/by-id").glob("google-*"))
+    on_azure = Path("/dev/disk/azure").is_dir()
+    caps: dict[str, dict] = {}
+    for mount in mounts:
+        device = block_name(mount)
+        if not device:
+            caps[mount] = {"error": "no block device under it"}
+        elif device.startswith(("md", "dm-", "loop")):
+            caps[mount] = {"local": f"{device} is an array or a mapping, with no single provisioned cap"}
+        elif not (on_gcp or on_azure):
+            caps[mount] = {"local": "not a cloud VM, so no provisioned cap"}
+        else:
+            try:
+                caps[mount] = gcp_cap(device) if on_gcp else azure_cap(device)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                caps[mount] = {"error": f"{type(error).__name__}: {error}"}
+    return caps
+
+
+def iops_caps(
+    options: argparse.Namespace, state: State, deadline: float
+) -> dict[str, tuple[float, str]]:
+    """{mount: (cap, where it came from)} for every mount whose IOPS this run checks."""
+    mounts = sorted(options.iops_caps)
+    if not mounts:
+        return {}
+    cache: dict = state.data.setdefault("iops_caps_live", {})
+    now = time.time()
+    if now - float(cache.get("at") or 0) >= CAP_CACHE_SECONDS or sorted(cache.get("caps") or {}) != mounts:
+        finished, caps = bounded(
+            "cloud IOPS cap lookup", min(CAP_LOOKUP_TIMEOUT, room(deadline)), live_caps, mounts
+        )
+        if finished:
+            cache.update({"at": now, "caps": caps})
+            log(
+                "  IOPS caps read live: "
+                + "; ".join(
+                    f"{mount} {entry['iops']:.0f} IOPS"
+                    + (f", {entry['throughput']:.0f} MB/s" if entry.get("throughput") else "")
+                    + f" ({entry['source']})"
+                    if entry.get("iops")
+                    else f"{mount} {entry.get('local') or entry.get('error')}"
+                    for mount, entry in sorted(caps.items())
+                )
+            )
+    fresh = now - float(cache.get("at") or 0) < CAP_STALE_SECONDS
+    notes: dict = state.data.setdefault("notes", {})
+    result: dict[str, tuple[float, str]] = {}
+    for mount in mounts:
+        entry = (cache.get("caps") or {}).get(mount) if fresh else None
+        entry = entry or {"error": "no live read in the last hour"}
+        if entry.get("iops"):
+            result[mount] = (float(entry["iops"]), str(entry.get("source") or "live"))
+            notes.pop(f"iops-fallback:{mount}", None)
+            continue
+        result[mount] = (options.iops_caps[mount], "configured")
+        if entry.get("error"):
+            say_once(
+                notes,
+                f"iops-fallback:{mount}",
+                str(entry["error"]),
+                f"{mount}: its live IOPS cap could not be read ({entry['error']}); using the fixed"
+                f" --iops-cap {options.iops_caps[mount]:.0f} until it can",
+            )
+    return result
+
+
 def check_iops(
     options: argparse.Namespace, state: State, envoy: Envoy, deadline: float
 ) -> tuple[int, int]:
@@ -2698,7 +2887,9 @@ def check_iops(
     """
     alerts = cleared = 0
     records: dict = state.data.setdefault("iops", {})
-    for mount, cap in sorted(options.iops_caps.items()):
+    caps = iops_caps(options, state, deadline)
+    for mount in sorted(options.iops_caps):
+        cap, source = caps[mount]
         sampled = device_ops(mount)
         if sampled is None:
             log(f"{mount}: no block device of its own in /proc/diskstats; IOPS not sampled")
@@ -2714,8 +2905,8 @@ def check_iops(
             state.commit(options)
             continue
         log(
-            f"{mount}: {rate:.0f} IOPS over the last {span:.0f} s, cap {cap:.0f}"
-            f" ({100 * rate / cap:.0f}% of it, on {name})"
+            f"{mount}: {rate:.0f} IOPS over the last {span:.0f} s, cap {cap:.0f} ({source};"
+            f" {100 * rate / cap:.0f}% of it, on {name})"
         )
         decision = update_iops(record, rate, cap, at)
         if not decision:
