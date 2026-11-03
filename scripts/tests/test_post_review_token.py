@@ -118,7 +118,7 @@ class TokenLocking(unittest.TestCase):
         source = SCRIPT.read_text()
         start = source.index("MINT_SCRIPT = (")
         end = source.index("\n)\n", start) + 3
-        exec(source[start:end], {"KEY_SECRET": "K", "APP_ID": "1"}, namespace)
+        exec(source[start:end], {"TOKEN_SECRET": "K"}, namespace)
         cache = Path(self.tmp.name) / "cache.token"
         held = {"token": "ghs_live", "expires_at": time.time() + 3600}
         cache.write_text(json.dumps(held))
@@ -129,6 +129,33 @@ class TokenLocking(unittest.TestCase):
         )
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(run.stdout)["token"], "ghs_live")
+
+    def test_the_mint_step_takes_the_owners_token_from_the_brokers_release(self):
+        """A cold cache takes the owner's token from the release the broker put in TOKEN_SECRET."""
+        namespace: dict = {}
+        source = SCRIPT.read_text()
+        start = source.index("MINT_SCRIPT = (")
+        end = source.index("\n)\n", start) + 3
+        exec(source[start:end], {"TOKEN_SECRET": "K"}, namespace)
+        cache = Path(self.tmp.name) / "cold.token"
+        release = {"installations": {"Acme": {"installation_id": 7, "token": "ghs_minted",
+                                              "expires_at": "2099-01-01T00:00:00Z"}}}
+        env = {**os.environ, "K": json.dumps(release)}
+        run = subprocess.run(
+            [sys.executable, "-c", namespace["MINT_SCRIPT"], "acme", "widgets", str(cache), str(cache) + ".lock"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["token"], "ghs_minted")
+        self.assertEqual(json.loads(cache.read_text())["token"], "ghs_minted")
+        self.assertEqual(oct(cache.stat().st_mode & 0o777), "0o600")
+
+    def test_the_request_names_the_token_secret_narrowed_to_the_repository(self):
+        """secret-run is asked for LEGION_REVIEW_APP narrowed to owner and repository, never a key."""
+        source = SCRIPT.read_text()
+        self.assertIn('TOKEN_SECRET = "LEGION_REVIEW_APP"', source)
+        self.assertNotIn("PRIVATE_KEY", source)
+        self.assertIn('"--github-owner",\n            owner,\n            "--github-repo",\n            repo,', source)
 
 
 if __name__ == "__main__":

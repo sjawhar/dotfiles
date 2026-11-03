@@ -13,9 +13,10 @@ has. If the head has moved, this refuses and the caller re-gates.
 GH_TOKEN is never exported. The installation token is passed to one `gh` call through its own
 environment, so no later command in the caller's shell speaks as the App.
 
-The review App's key is human-tier (Sami, 2026-10-26: "move the Legion reviewer App private
-key back to the human tier; he grants it to dev-box agents that need it"), so it comes from
-the secrets broker through secret-run and is never written to disk.
+The review App's tokens are minted by the secrets broker from the human-tier github-app secret
+LEGION_REVIEW_APP (dispatch://INFRA-1031), so this script never holds the App's private key: it
+asks secret-run for that secret narrowed to the one repository it reviews, and the broker hands
+it a one-hour installation token. Each new grant waits for Sami's approval in Dispatch.
 
 Every verdict ends with a `Reviewed by model: <id>` line, so a reader can tell a cross-family
 review from a same-family one. The id is `--model` when given; otherwise every model that answered
@@ -39,8 +40,7 @@ import subprocess
 import sys
 import time
 
-APP_ID = "5341243"  # git config gh-app.review.app-id
-KEY_SECRET = "GH_REVIEW_APP_PRIVATE_KEY_B64"  # git config gh-app.review.key-secret
+TOKEN_SECRET = "LEGION_REVIEW_APP"  # the broker's github-app secret of App 5341243
 EVENTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
 
 
@@ -59,11 +59,10 @@ def cache_path(owner: str, repo: str) -> pathlib.Path:
 def cached_token(path: pathlib.Path) -> str | None:
     """A GitHub installation token lives an hour; reuse it rather than asking again.
 
-    Each mint goes through the secrets broker to a human-tier key, so it asks Sami to approve
-    a grant. One verdict per approval made a night of gating a night of approving (Sami,
-    2026-11-01: "STOP REQUESTING THE REVIEW KEY SO MANY DAMN TIMES"). The token, not the key,
-    is what the calls need, so it is kept owner-only in the runtime directory, which is tmpfs
-    and goes at reboot, and is used while more than five minutes of its hour remain.
+    Each grant of the human-tier review App secret asks Sami to approve it. One verdict per
+    approval made a night of gating a night of approving (Sami, 2026-11-01: "STOP REQUESTING THE
+    REVIEW KEY SO MANY DAMN TIMES"). So the token is kept owner-only in the runtime directory,
+    which is tmpfs and goes at reboot, and is used while more than five minutes of its hour remain.
     """
     try:
         held = json.loads(path.read_text())
@@ -75,16 +74,18 @@ def cached_token(path: pathlib.Path) -> str | None:
     return token
 
 
-# How long a caller with a cold cache waits for another session's request for the key before it
+# How long a caller with a cold cache waits for another session's request for the token before it
 # asks too. Long enough that one approval usually serves every verdict posted in that minute; short
 # enough that a request nobody approves does not hold anyone else's post. The variable is for tests.
 ASK_WAIT_SECONDS = int(os.environ.get("POST_REVIEW_ASK_WAIT_SECONDS", "120"))
 
 # Runs under secret-run, so only after the grant: the broker's wait for a human is over before it
-# starts. It takes the cache lock for the token POST and the cache write alone, and re-reads the
-# cache under that lock, so two grants that land together mint one token.
+# starts. The broker put its release in the environment under TOKEN_SECRET:
+# {"installations": {"<owner>": {"installation_id": N, "token": "ghs_...", "expires_at": "..."}}}.
+# It takes the cache lock for the cache write alone, and re-reads the cache under that lock, so two
+# grants that land together leave one token in the cache.
 MINT_SCRIPT = (
-    "import base64,calendar,fcntl,json,os,sys,time,urllib.request\n"
+    "import calendar,fcntl,json,os,sys,time\n"
     "owner, repo, cache, lock_path = sys.argv[1:5]\n"
     "lock = open(lock_path, 'w')\n"
     "fcntl.flock(lock, fcntl.LOCK_EX)\n"
@@ -95,20 +96,13 @@ MINT_SCRIPT = (
     "if str(held.get('token', '')).startswith('ghs_') and held.get('expires_at', 0) - time.time() >= 300:\n"
     "    print(json.dumps(held))\n"
     "    sys.exit(0)\n"
-    "import jwt\n"
-    "key = base64.b64decode(os.environ['" + KEY_SECRET + "'])\n"
-    "now = int(time.time())\n"
-    "assertion = jwt.encode({'iat': now - 60, 'exp': now + 540, 'iss': '" + APP_ID + "'},"
-    " key, algorithm='RS256')\n"
-    "def api(path, method='GET'):\n"
-    "    req = urllib.request.Request('https://api.github.com' + path, method=method)\n"
-    "    req.add_header('Authorization', 'Bearer ' + assertion)\n"
-    "    req.add_header('Accept', 'application/vnd.github+json')\n"
-    "    return json.load(urllib.request.urlopen(req))\n"
-    "inst = api('/repos/' + owner + '/' + repo + '/installation')\n"
-    "out = api('/app/installations/%d/access_tokens' % inst['id'], 'POST')\n"
-    "minted = {'token': out['token'],"
-    " 'expires_at': calendar.timegm(time.strptime(out['expires_at'], '%Y-%m-%dT%H:%M:%SZ'))}\n"
+    "release = json.loads(os.environ['" + TOKEN_SECRET + "'])['installations']\n"
+    "entry = next((v for k, v in release.items() if k.lower() == owner.lower()), None)\n"
+    "if entry is None:\n"
+    "    sys.exit('the review App has no installation on ' + owner)\n"
+    "stamp = entry['expires_at'].replace('Z', '+00:00')[:19]\n"
+    "minted = {'token': entry['token'],"
+    " 'expires_at': calendar.timegm(time.strptime(stamp, '%Y-%m-%dT%H:%M:%S'))}\n"
     "if minted['token'].startswith('ghs_'):\n"
     "    fd = os.open(cache + '.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n"
     "    with os.fdopen(fd, 'w') as f:\n"
@@ -146,7 +140,7 @@ def installation_token(owner: str, repo: str) -> str:
                 return held
             if time.monotonic() >= deadline:
                 print(
-                    f"post-review: another session's request for {KEY_SECRET} has waited more than"
+                    f"post-review: another session's request for {TOKEN_SECRET} has waited more than"
                     f" {ASK_WAIT_SECONDS} s for its approval; asking as well",
                     file=sys.stderr,
                 )
@@ -162,7 +156,11 @@ def installation_token(owner: str, repo: str) -> str:
             "--register",
             "--reason",
             f"post-review {owner}/{repo}",
-            KEY_SECRET,
+            "--github-owner",
+            owner,
+            "--github-repo",
+            repo,
+            TOKEN_SECRET,
             "--",
             "python3",
             "-c",
