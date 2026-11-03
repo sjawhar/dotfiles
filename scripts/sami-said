@@ -112,10 +112,10 @@ machine survives; earlier ones print nowhere.
 Speed: a session file whose mtime is before --since is never opened; in a file over 1 MB a
 binary search on byte offsets (probing only "message" entries, which omp stamps as it writes
 them) skips to 30 minutes before --since, and reading stops 30 minutes after --until. Files and
-directories are read 16 at a time. The whole session tree (rules 1 and 9) is walked once, and
-walked and read for rule 9 from the start when the prompt history has a row in the window; a
-directory whose mtime has not changed since an earlier run is not listed again: its listing is
-kept in $XDG_RUNTIME_DIR/sami-said-<uid>/ (else the temporary directory).
+directories are read 16 at a time. The whole session tree (rules 1 and 9) is walked once, from
+the start when the prompt history has a row in the window, and a directory whose mtime has not
+changed since an earlier run is not listed again: its listing is kept in
+$XDG_RUNTIME_DIR/sami-said-<uid>/ (else the temporary directory).
 """
 
 from __future__ import annotations
@@ -1389,22 +1389,24 @@ def main() -> int:
     def wanted(sid: str | None) -> bool:
         return not args.session or (sid is not None and any(sid.startswith(p) for p in args.session))
 
+    def read_dispatch() -> tuple[DispatchConfig, list[Message], dict[str, str]]:
+        cfg = dispatch_config()
+        return (cfg, *dispatch_rows(cfg, args.dispatch_user, since, until, now))
+
+    # The Dispatch feed is read beside the session files, which it does not depend on.
+    dispatch_read = ThreadPoolExecutor(1).submit(read_dispatch) if args.dispatch else None
+
     typed: list[Message] = []
     sessions: dict[str, Session] = {}
     paths: dict[str, Path] = {}
     stats = {"files": 0, "read": 0, "launch": 0, "agent": 0, "resumed": 0}
     consumed: set[tuple[Path, int]] = set()  # history rows a transcript message in the window was sent as
     dirs = [load_history(d) for d in agent_dirs(args.agent_dir)]
-    early_calls: Future | None = None
     if any(since <= row.created < until for ad in dirs for row in ad.history or ()):
         # Someone typed in a terminal in the window, so rules 1 and 9 will almost surely need the
-        # session tree and its typing calls: read them while the session files are scanned and
-        # Dispatch is read. Every rule 9 window lies in this one (its texts are in [since, until)),
-        # and a call outside a text's window matches nothing, so this reads a superset.
+        # session tree: walk it while the session files are scanned and Dispatch is read.
         for ad in dirs:
             start_walk(ad.root / "sessions")
-        early_calls = ThreadPoolExecutor(1).submit(agent_typing_calls, [ad.root for ad in dirs],
-                                                   since - TYPED_BEFORE, until + TYPED_AFTER)
     shakes: dict = {}
 
     def take(ad: AgentDir, files: list[tuple[Path, str]]) -> None:
@@ -1472,13 +1474,7 @@ def main() -> int:
     pauses = [m for m in typed if m.source == PAUSE_SOURCE]
     if suspects:  # a resume is attributed only through a text the same call typed into that session
         times = [m.time for m in suspects + pauses]
-        start, end = min(times) - TYPED_BEFORE, max(times) + TYPED_AFTER
-        if early_calls is not None:
-            # Read a file up to the last entry stamped at end, whole seconds, as agent_typing_calls does.
-            last = end.replace(microsecond=0)
-            calls = [c for c in early_calls.result() if start <= c.time <= last]
-        else:
-            calls = agent_typing_calls([ad.root for ad in dirs], start, end)
+        calls = agent_typing_calls([ad.root for ad in dirs], min(times) - TYPED_BEFORE, max(times) + TYPED_AFTER)
         dropped: set[int] = set()
         typed_into: set[tuple[str, int]] = set()  # (session id, id of a call that typed into it)
         for m in suspects:
@@ -1495,8 +1491,7 @@ def main() -> int:
     status = 0
     if args.dispatch:
         try:
-            cfg = dispatch_config()
-            extra, authors = dispatch_rows(cfg, args.dispatch_user, since, until, now)
+            cfg, extra, authors = dispatch_read.result()
         except (RuntimeError, OSError, urllib.error.URLError, ValueError) as e:
             warn(f"--dispatch FAILED, so no Dispatch rows are listed and dispatch-turn authors are unchecked: {e}")
             status = 1
