@@ -194,6 +194,13 @@ BROKER_UNREADY=""
 # the host's; "none" there means the host has no such directory. AGENTBOX_DURABLE replaces the
 # path for the tests too. Empty when there is nothing to bind.
 DURABLE_DIR="${AGENTBOX_DURABLE:-/mnt/durable/$(id -un)}"
+# The compute ledger `ossv-vm` writes (/mnt/nvme/<user>/compute-inventory): every box gets it rw at
+# the same path, made when missing, on every host that has /mnt/nvme/<user>; a box without it
+# failed its ledger write in `ossv-vm create` (2026-11-03 03:01Z, FileNotFoundError). The
+# launcher passes it as AGENTBOX_COMPUTE_INVENTORY, which doctor checks; empty when the host has
+# no /mnt/nvme/<user>.
+COMPUTE_INVENTORY="${AGENTBOX_COMPUTE_INVENTORY:-}"
+if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVENTORY="/mnt/nvme/$(id -un)/compute-inventory"; fi
 [[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
 # The durable filesystem as `agentbox doctor` compares it: device number, total blocks, block
 # size, available blocks. The device and not statfs's filesystem id: two stat builds on this host
@@ -923,6 +930,10 @@ mount_args() {
     # symlinks at their old paths (2026-11-02). A --dir or an object store under it is not in
     # BOX_MOUNTS (box_dir_bound_why, box_dir_have), so nothing here binds it twice.
     [[ -z "$DURABLE_DIR" ]] || a+=(-v "$DURABLE_DIR:$DURABLE_DIR")
+    if [[ -n "$COMPUTE_INVENTORY" ]]; then
+        mkdir -p "$COMPUTE_INVENTORY" || { echo "agentbox: cannot make $COMPUTE_INVENTORY, the compute ledger every box writes" >&2; return 1; }
+        a+=(-v "$COMPUTE_INVENTORY:$COMPUTE_INVENTORY")
+    fi
     a+=(-v "$BOXES/$box:$BOXES/$box")
     # $HOME and /tmp inside the box's own directory, so the box's disk limit covers the two
     # places a session writes without being told where. Without them both land in the
@@ -1092,6 +1103,7 @@ session_env() {
     else
         e+=(-e AGENTBOX_DURABLE=none)
     fi
+    e+=(-e "AGENTBOX_COMPUTE_INVENTORY=${COMPUTE_INVENTORY:-none}")
     # The box's disk limit, so a session and `agentbox doctor --here` can name the ceiling their
     # ENOSPC came from; 0 for a box started with --disk 0, which has no filesystem of its own.
     e+=(-e "AGENTBOX_DISK=$(if (( BOX_DISK_BYTES )); then size_text "$BOX_DISK_BYTES"; else echo 0; fi)")
@@ -5473,6 +5485,15 @@ probe_run() {
 # the point: everything expands where it runs.
 # shellcheck disable=SC2016
 DURABLE_CHECK='
+# The compute ledger ossv-vm writes (COMPUTE_INVENTORY): bound rw in every box.
+check_compute_inventory() {
+case "${AGENTBOX_COMPUTE_INVENTORY:-}" in
+        "") fail "compute ledger: this box predates its bind (no AGENTBOX_COMPUTE_INVENTORY), so ossv-vm cannot write its ledger; relaunch it at a safe point with: agentbox move --self" ;;
+        none) echo "note box: no compute ledger (the host has no /mnt/nvme/<user>)" ;;
+        *) if t="$(mktemp -p "$AGENTBOX_COMPUTE_INVENTORY" .doctor.XXXXXX 2>/dev/null)"; then rm -f "$t"; ok "compute ledger $AGENTBOX_COMPUTE_INVENTORY is writable"
+           else fail "compute ledger $AGENTBOX_COMPUTE_INVENTORY is not writable here, so ossv-vm create fails its ledger write"; fi ;;
+    esac
+}
 check_durable() {
     d="${AGENTBOX_DURABLE:-}"
     case "$d" in
@@ -5583,6 +5604,7 @@ else
     fi
 fi
 check_durable
+check_compute_inventory
 if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [ ! -e "$top/.jj" ]; then ok "cwd is a git clone of its own"; else fail "cwd is not a git clone of its own (cwd-dependent: run doctor from your checkout, not /tmp)"; fi
 out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integration"*) ok "gh runs as an App (never the user)";; *) fail "gh api user: $(echo "$out" | head -1) (cwd-dependent: the shim routes by repository, so run doctor from your workspace)";; esac
 # `gh auth status` is answered by shims/gh, which reports the App routing instead of a user

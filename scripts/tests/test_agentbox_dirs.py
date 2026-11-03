@@ -88,6 +88,9 @@ class AgentboxDirs(unittest.TestCase):
             # host has it. Absent unless a test makes it, so no answer here depends on whether
             # this host has /mnt/durable/<user>.
             "AGENTBOX_DURABLE": str(self.root / "durable"),
+            # The compute ledger every box binds, pinned to the fixture: by default it is this
+            # host's real /mnt/nvme/<user>/compute-inventory.
+            "AGENTBOX_COMPUTE_INVENTORY": str(self.root / "compute-inventory"),
         }
 
     def tearDown(self) -> None:
@@ -306,6 +309,36 @@ class AgentboxDirs(unittest.TestCase):
         args = self.run_args_of("--dir", str(self.lane))
         self.assertEqual([b for b in self.binds_of(args) if "durable" in b], [])
         self.assertEqual(self.env_of(args).get("AGENTBOX_DURABLE"), "none")
+
+    def test_every_box_binds_the_compute_ledger_rw_and_makes_it_when_missing(self) -> None:
+        """`ossv-vm create` from a box failed its ledger write (2026-11-03 03:01Z): boxes did not
+        bind /mnt/nvme/<user>/compute-inventory. Every box now gets it rw at its own path, made
+        when missing, and the launcher names it for doctor."""
+        ledger = self.root / "nvme" / "compute-inventory"
+        self.env["AGENTBOX_COMPUTE_INVENTORY"] = str(ledger)
+        args = self.run_args_of("--dir", str(self.lane))
+        self.assertTrue(ledger.is_dir())
+        self.assertIn(f"{ledger}:{ledger}", self.binds_of(args))
+        self.assertEqual(self.env_of(args).get("AGENTBOX_COMPUTE_INVENTORY"), str(ledger))
+
+    def test_doctor_checks_the_compute_ledger_is_writable(self) -> None:
+        ledger = self.root / "ledger"
+        ledger.mkdir()
+        def check(value: str | None) -> str:
+            env = {k: v for k, v in self.env.items() if k != "AGENTBOX_COMPUTE_INVENTORY"}
+            if value is not None:
+                env["AGENTBOX_COMPUTE_INVENTORY"] = value
+            script = (f'source "{AGENTBOX}"\n' 'ok() { echo "ok   $*"; }; fail() { echo "FAIL $*"; }\n'
+                      'eval "$DURABLE_CHECK"\ncheck_compute_inventory\n')
+            return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60).stdout
+        self.assertIn(f"ok   compute ledger {ledger} is writable", check(str(ledger)))
+        ledger.chmod(0o555)
+        try:
+            self.assertIn("FAIL compute ledger", check(str(ledger)))
+        finally:
+            ledger.chmod(0o755)
+        self.assertIn("this box predates its bind", check(None))
+        self.assertIn("note box: no compute ledger", check("none"))
 
     def check_durable(self, durable: Path | None, host_fs: str | None) -> subprocess.CompletedProcess[str]:
         """The box side of the doctor check, run against a directory of this host. No
