@@ -3,7 +3,8 @@
 agentbox runs each agent session in its own disposable [Sysbox](https://github.com/nestybox/sysbox) container (a
 "box"). One command, `scripts/agentbox new`, starts the box and the session in it.
 
-- The box gets a git clone of its own of each repository you name, and works in the first one.
+- The box gets a git clone of its own of each repository you name, and works in the first one. The clone is
+  made over the network from the `origin` URL of `~/src/<repo>`, so commits you have not pushed are not in it.
 - It mounts an allow-list of your home directory (`agentbox/mounts`): omp state, the mise tool store, cloud
   configs and similar. A home path that is not on the list is writable in the box but is lost with it.
 - Host services come in through relays: the session bus (so the GNOME keyring, and every tool that keeps its
@@ -16,7 +17,8 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   A clone with uncommitted changes, or commits that no remote has, keeps its directory, and the pane names it.
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's
-`install.sh` (and, on a Google Cloud VM, `devbox/gce-host.sh`). The details and the reasons for each choice are in
+`install.sh`. (`devbox/gce-host.sh` is for Sami's own Google Cloud devbox only: it needs its disks and must run
+before `install.sh`.) The details and the reasons for each choice are in
 [AGENTS.md](AGENTS.md).
 
 ## What the host must have
@@ -24,17 +26,18 @@ This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set u
 | Requirement | Why | Set up by |
 | --- | --- | --- |
 | Ubuntu 24.04, x86-64, kernel 6.8 or later | Sysbox 0.7.1 supports it | the OS |
-| Passwordless `sudo` for `mount`/`umount` | each box's disk image is loop-mounted with `sudo -n mount -o loop`; without it, start boxes with `--disk 0` (no disk limit) | your sudoers |
-| Tailscale | boxes resolve names through `100.100.100.100` first (then `1.1.1.1`) | `installers/tailscale.sh` |
-| Docker Engine | runs the boxes | `installers/docker.sh` |
+| Host user with uid 1000 | the session in the box runs as uid 1000 (`ubuntu`), and bind mounts keep the host's owners, so another uid likely cannot write its mounted home paths (not tested) | the OS |
+| Passwordless `sudo` for `mount`/`umount` | each box's disk image is loop-mounted with `sudo -n mount -o loop`; without it, start boxes with `--disk 0` (no disk limit), and run `doctor` with `AGENTBOX_DISK=0` | your sudoers |
+| Tailscale, joined to your tailnet | boxes resolve names through `100.100.100.100` first (then `1.1.1.1`) | Tailscale's own install; `installers/tailscale.sh` works only on Sami's devbox |
+| Docker Engine, and your user in the `docker` group | runs the boxes | `installers/docker.sh`; log in again after it adds you to the group |
 | Sysbox CE 0.7.1, registered as the Docker runtime `sysbox-runc` | every box runs under it | `installers/sysbox.sh` |
-| The dotfiles at `~/.dotfiles` (or `DOTFILES_DIR`) | the launcher reads the image source, the mounts list and `agent-secrets/` from there | `git clone https://github.com/sjawhar/dotfiles ~/.dotfiles`, then `~/.dotfiles/install.sh` |
-| Repository checkouts under `~/src` (or `AGENTBOX_SRC`) | `agentbox new <repo>` clones from `~/src/<repo>` | you |
+| The dotfiles at `~/.dotfiles` (boxes always mount that path) | the launcher reads the image source, the mounts list and `agent-secrets/` from there | `git clone https://github.com/sjawhar/dotfiles ~/.dotfiles`, then `~/.dotfiles/install.sh` |
+| Repository checkouts under `~/src` (or `AGENTBOX_SRC`) | `agentbox new <repo>` reads the `origin` URL of `~/src/<repo>` and clones that remote; a checkout with no `origin` is refused | you |
 | A systemd user manager, with lingering on | the relays run as transient user units (`systemd-run --user`) | `loginctl enable-linger $USER` |
 | A session bus at `/run/user/$UID/bus` | relayed into the box for the keyring | a login session or lingering |
-| secretsd listening on `/run/user/$UID/secretsd.sock` | `agentbox new` stops without it | the dotfiles secretsd setup |
-| `socat`, `jq`, `python3`, `ss` (iproute2) | relays and launcher | apt |
-| Optional: the `agent-secrets` helper with a launcher credential | gives each box its own secrets-broker identity; without it, boxes use secretsd | `installers/agent-secrets.sh` |
+| secretsd listening on `/run/user/$UID/secretsd.sock` | `agentbox new` stops without it | `installers/secretsd.sh` (it skips when mise has no `secretsd` binary) |
+| `git`, `socat`, `jq`, `python3`, `ss` (iproute2) | clones, relays and launcher | `sudo apt-get install -y git socat jq python3 iproute2` |
+| The `agent-secrets` helper with a live launcher credential, or a `gh-app.<profile>.key-secret` in `~/.config/git/config` | git in the box, and the clone `agentbox new` makes, get GitHub tokens from `shims/gh-app-token`; with neither, every github.com credential request fails, so private repositories cannot be cloned | `installers/agent-secrets.sh` (see `agent-secrets/AGENTS.md`); `shims/gh-app-token --help` for `key-secret` |
 | Optional: `forward serve` running | YubiKey and browser access from the box | `forward/` |
 
 ### Install Sysbox
@@ -102,13 +105,15 @@ It runs `docker buildx build --builder default --load -t agentbox:<hash> ~/.dotf
 # Change limits, set variables (a bare NAME passes your value):
 ~/.dotfiles/scripts/agentbox new -e MY_VAR=1 --memory 32g --cpus 4 --disk 64g my-repo -- omp
 
-~/.dotfiles/scripts/agentbox ls                       # running boxes
+~/.dotfiles/scripts/agentbox ls                       # running boxes, then box trees kept for unpushed work
 ~/.dotfiles/scripts/agentbox sh <box|session-id>      # a shell in a running box
-~/.dotfiles/scripts/agentbox restart <box|session-id> # relaunch omp in place on the current pins
+~/.dotfiles/scripts/agentbox restart <box|session-id> # ask the session to relaunch omp in place at a safe point;
+                                                      # add --now to relaunch at once
 ~/.dotfiles/scripts/agentbox move --plan              # which host sessions could move into a box
 ```
 
-`scripts/agentbox` with no argument prints its usage (exit 2); the complete list, `move <session-id>… | --all` included, is the comment block at the top of `scripts/agentbox`. Default limits are 24 GiB memory, 8 cpus and a
+`scripts/agentbox` with no argument prints its usage (exit 2); the usage stops part way, so read the comment block at the top of `scripts/agentbox` and `agentbox/AGENTS.md`
+for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`). Default limits are 24 GiB memory, 8 cpus and a
 32 GiB disk.
 
 ## What it assumes about the host
@@ -116,10 +121,12 @@ It runs `docker buildx build --builder default --load -t agentbox:<hash> ~/.dotf
 - **Where boxes live.** `<boxes>` is `/mnt/nvme/<user>/agentbox/boxes` when `/mnt/nvme/<user>` exists, else
   `~/boxes`. Each box's disk limit is a sparse ext4 image loop-mounted at `<boxes>/<box>`; it holds the clones,
   the box's `$HOME` and its `/tmp`.
-- **Mounts.** Only the paths in `mounts` come from your home directory, at their own paths. There is no GitHub
-  login, no ssh identity and no docker login in a box: git pushes go through the repository's GitHub App
-  (`gh-app-routes.gitconfig`).
-- **The user.** The image has user `ubuntu` (uid 1000). Sysbox maps it to your host user.
+- **Mounts.** From your home directory a box gets `~/src` (every checkout), `~/.dotfiles` and the paths in
+  `mounts`, each at its own path. There is no GitHub
+  login, no GitHub ssh key and no docker login in a box (only the jj signing key and the Compute Engine ssh key
+  are mounted from `~/.ssh`): git pushes go through the repository's GitHub App (`gh-app-routes.gitconfig`).
+- **The user.** The session runs as `ubuntu` (uid 1000). To host daemons a box process is a subordinate uid,
+  not yours, which is why the session bus, tmux and the metadata service reach the box through relays.
 - **Metadata service.** A relay on the box network's gateway (port 8169) reaches `169.254.169.254`. On a Google
   Cloud VM (`scripts/on-google-vm`) it is `scripts/agentbox-gce-metadata-relay`, which rewrites the Host header,
   and the box gets `GCE_METADATA_HOST`, `GCE_METADATA_ROOT` and `GCE_METADATA_IP`, so gcloud and Google client
