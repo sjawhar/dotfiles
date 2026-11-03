@@ -21,8 +21,14 @@
 #     sami-rocqperf's /home/sami/src/oss-verifier, which has no .git of its own, is one; on
 #     2026-11-03 at 06:53Z (the move of session 01a1959e) it put there 78 files that ops added later,
 #     75 of them byte for byte ops', and 2 tracked files ops later changed to the same bytes, and
-#     every run refused from about 09:05Z. A file whose bytes differ is left as it is, and the
-#     merge refuses, so its writer decides.
+#     every run refused from about 09:05Z.
+#   - An untracked file in the way whose bytes differ from ops' (an older draft from the same copy:
+#     2 files at 18:49Z and 12 at 20:15Z on 2026-11-03, set aside by hand) is MOVED, never deleted,
+#     to <set-aside>/<UTC stamp>/<its path>, and each path and its mtime go to the journal. Not when
+#     any such file was modified in the last 30 minutes: a live session in the tree (01a1959e works
+#     there) may be writing it, so nothing is moved and the merge refuses, naming the file. A tracked
+#     file whose local change differs from ops' bytes is left as it is, and the merge refuses, so its
+#     writer decides.
 # Any refusal exits non-zero, so the unit fails and unit-health-watch tells the box-health owner.
 # lane VMs keep the same tree with the stream's own agentvm/ossv-tree-sync, which stops on any local
 # change outside notes/status/; on this machine the stream's sessions write ledgers into the tree.
@@ -32,6 +38,8 @@ tree="${OSSV_TREE_FOLLOW_TREE:-$HOME/src/oss-verifier}"
 remote="${OSSV_TREE_FOLLOW_REMOTE:-https://github.com/theorem-labs/oss-verify-proofs-internal}"
 branch=ops
 reference="${OSSV_TREE_FOLLOW_REFERENCE:-$HOME/src/oss-verify-proofs-internal}"
+set_aside="${OSSV_TREE_FOLLOW_SET_ASIDE:-/mnt/nvme/$(id -un)/tmp/oss-verifier-set-aside}"
+fresh_s=1800   # an untracked file modified this recently may be a live session's: never moved
 
 say() { printf 'ossv-tree-follow: %s\n' "$*"; }
 die() { say "$*" >&2; exit 1; }
@@ -61,29 +69,51 @@ got="$(git -C "$tree" symbolic-ref --short -q HEAD || true)"
 before="$(git -C "$tree" rev-parse HEAD)"
 timeout 120 git -C "$tree" fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch"
 
-# clear_same: the paths that origin/$branch changes since HEAD and whose regular file here holds
-# its blob's bytes already (as git would store them, filters applied), when HEAD can move there
-# by fast-forward at all.
-clear_same() {
-    local p mode type oid
+# clear_way: the paths that origin/$branch changes since HEAD, when HEAD can move there by
+# fast-forward at all, and whose regular file here would make the merge refuse:
+#   - a file holding the blob's bytes already (as git would store them, filters applied): an
+#     untracked one is removed, a tracked one's local change undone; the merge writes the same;
+#   - an untracked file with other bytes: moved under $set_aside, unless one of them is fresh;
+#   - a tracked file with other local bytes: left, and the merge refuses.
+clear_way() {
+    local p mode type oid now stamp dest fresh=() old=()
     git -C "$tree" merge-base --is-ancestor HEAD "origin/$branch" || return 0
+    now="$(date +%s)"
     while IFS= read -r -d '' p; do
         # A path ops deletes has no entry there: nothing to clear.
         read -r mode type oid _ < <(git -C "$tree" ls-tree "origin/$branch" -- "$p") || continue
         [[ "$type" == blob && ( "$mode" == 100644 || "$mode" == 100755 ) ]] || continue
         [[ -f "$tree/$p" && ! -L "$tree/$p" ]] || continue
-        [[ "$(git -C "$tree" hash-object -- "$p")" == "$oid" ]] || continue
         if git -C "$tree" ls-files --error-unmatch -- "$p" > /dev/null 2>&1; then
             git -C "$tree" diff --quiet -- "$p" && continue
+            [[ "$(git -C "$tree" hash-object -- "$p")" == "$oid" ]] || continue
             git -C "$tree" checkout -q -- "$p"
             say "note: $p held a local change equal to origin/$branch's bytes; undone, the merge writes the same"
-        else
+        elif [[ "$(git -C "$tree" hash-object -- "$p")" == "$oid" ]]; then
             rm -f -- "${tree:?}/$p"
             say "note: untracked $p held origin/$branch's bytes; removed, the merge writes the same"
+        elif (( now - $(stat -c %Y -- "$tree/$p") < fresh_s )); then
+            fresh+=("$p")
+        else
+            old+=("$p")
         fi
     done < <(git -C "$tree" diff --no-renames --name-only -z HEAD "origin/$branch")
+    (( ${#old[@]} + ${#fresh[@]} )) || return 0
+    if (( ${#fresh[@]} )); then
+        for p in "${fresh[@]}"; do
+            say "untracked $p differs from origin/$branch and was modified at $(date -u -r "$tree/$p" +%FT%TZ), under $((fresh_s / 60)) minutes ago: a live session may be writing it; nothing is set aside" >&2
+        done
+        return 0
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    for p in "${old[@]}"; do
+        dest="$set_aside/$stamp/$p"
+        mkdir -p -- "${dest%/*}"
+        say "set aside: untracked $p (modified $(date -u -r "$tree/$p" +%FT%TZ)) differs from origin/$branch; moved to $dest"
+        mv -n -- "$tree/$p" "$dest"
+    done
 }
-clear_same
+clear_way
 timeout 120 git -C "$tree" merge -q --ff-only "origin/$branch" \
     || die "$tree stays at $before: git refused to fast-forward it to origin/$branch $(git -C "$tree" rev-parse "origin/$branch") (above)"
 after="$(git -C "$tree" rev-parse HEAD)"

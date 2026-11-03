@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for devbox/ossv-tree-follow: it fast-forwards a clone of ops, clears a path in the way
-only when its file already holds ops' bytes, and refuses, keeping the file, when the bytes differ.
+"""Tests for devbox/ossv-tree-follow: it fast-forwards a clone of ops, removes a path in the way
+that already holds ops' bytes, moves aside an untracked file with other bytes unless it is fresh,
+and refuses, keeping the file, for a fresh untracked file or a tracked change with other bytes.
 
 Each case makes a throwaway origin with branch ops, lets the script clone it, moves the origin on,
 puts files in the clone's way, and runs the script again (dispatch://INFRA-993: `agentbox move --to`
@@ -10,6 +11,7 @@ copied stale and current files into sami-devbox's clone, and every run refused f
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -40,8 +42,10 @@ class OssvTreeFollowTest(unittest.TestCase):
         self.tree = root / "tree"
         run = root / "run"
         run.mkdir()
+        self.set_aside = root / "set-aside"
         self.env = dict(os.environ, OSSV_TREE_FOLLOW_TREE=str(self.tree), OSSV_TREE_FOLLOW_REMOTE=str(self.work),
-                        OSSV_TREE_FOLLOW_REFERENCE=str(root / "none"), XDG_RUNTIME_DIR=str(run))
+                        OSSV_TREE_FOLLOW_REFERENCE=str(root / "none"), XDG_RUNTIME_DIR=str(run),
+                        OSSV_TREE_FOLLOW_SET_ASIDE=str(self.set_aside))
         first = self.follow()
         self.assertEqual(first.returncode, 0, first.stderr)
 
@@ -77,16 +81,43 @@ class OssvTreeFollowTest(unittest.TestCase):
         self.assertEqual((self.tree / "peaks.tsv").read_text(), "p\nlocal\n")
         self.assertEqual((self.tree / "bin" / "tool").read_text(), "v2\n")
 
-    def test_an_untracked_file_with_other_bytes_refuses_and_is_kept(self) -> None:
+    def test_an_old_untracked_file_with_other_bytes_is_moved_aside(self) -> None:
+        tip = self.advance()
+        (self.tree / "briefs").mkdir()
+        old = self.tree / "briefs" / "new.md"
+        old.write_text("an older brief\n")
+        two_hours_ago = time.time() - 7200
+        os.utime(old, (two_hours_ago, two_hours_ago))
+        run = self.follow()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.head(), tip)
+        self.assertRegex(run.stdout, r"set aside: untracked briefs/new\.md \(modified \d{4}-\d\d-\d\dT[\d:]+Z\) differs")
+        moved = list(self.set_aside.glob("*/briefs/new.md"))
+        self.assertEqual(len(moved), 1, list(self.set_aside.rglob("*")))
+        self.assertEqual(moved[0].read_text(), "an older brief\n")
+        self.assertEqual(old.read_text(), "brief\n")
+
+    def test_a_fresh_untracked_file_with_other_bytes_refuses_and_is_kept(self) -> None:
         self.advance()
+        (self.work / "briefs" / "old.md").write_text("ops' old.md\n")
+        git(self.work, "add", "-A")
+        git(self.work, "commit", "-q", "-m", "three")
         before = self.head()
         (self.tree / "briefs").mkdir()
-        (self.tree / "briefs" / "new.md").write_text("an older brief\n")
+        (self.tree / "briefs" / "new.md").write_text("a live draft\n")
+        # An old differing file beside it is not moved either while a fresh one blocks the merge.
+        old = self.tree / "briefs" / "old.md"
+        old.write_text("an older old.md\n")
+        os.utime(old, (time.time() - 7200, time.time() - 7200))
         run = self.follow()
         self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("untracked briefs/new.md differs from origin/ops and was modified at", run.stderr)
+        self.assertIn("nothing is set aside", run.stderr)
         self.assertIn("stays at", run.stderr)
         self.assertEqual(self.head(), before)
-        self.assertEqual((self.tree / "briefs" / "new.md").read_text(), "an older brief\n")
+        self.assertEqual((self.tree / "briefs" / "new.md").read_text(), "a live draft\n")
+        self.assertEqual(old.read_text(), "an older old.md\n")
+        self.assertFalse(self.set_aside.exists())
         self.assertEqual((self.tree / "bin" / "tool").read_text(), "v1\n")
 
     def test_a_tracked_change_with_other_bytes_refuses_and_is_kept(self) -> None:
