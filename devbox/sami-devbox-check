@@ -652,6 +652,20 @@ host_follow() {
     fi
 }
 
+# The apt packages devbox/gce-host.sh adds for lanes (2026-11-03): python3 has pip and venv (the
+# N6 farm runs `python3 -m pip install --target`), and the commands of the other packages resolve.
+host_packages() {
+    local out dir c missing=""
+    out="$(python3 -m pip --version 2>&1)" && ok "python3 -m pip --version: $out" || fail "python3 -m pip --version: $(tail -1 <<<"$out")"
+    dir="$(mktemp -d)"
+    out="$(python3 -m venv "$dir/venv" 2>&1)" && [[ -x "$dir/venv/bin/python" ]] && ok "python3 -m venv: made $dir/venv" || fail "python3 -m venv: $(tail -1 <<<"$out")"
+    rm -rf "$dir"
+    for c in opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64; do
+        command -v "$c" >/dev/null || missing+=" $c"
+    done
+    [[ -z "$missing" ]] && ok "lane packages: opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64 resolve" || fail "lane packages: missing command(s):$missing"
+}
+
 # Movers (S3 and others) run scripts on sami-rocqperf over ssh after the move, so this machine
 # must reach it. While the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending
 # (dispatch://INFRA-734) the connection times out, which is a WAIT; any other error is a FAIL.
@@ -665,20 +679,6 @@ rocqperf_check() {
     else
         fail "ssh sami-devbox -> sami-rocqperf: exit $rc: $(tail -1 <<<"$out")"
     fi
-}
-
-# The apt packages devbox/gce-host.sh adds for lanes (2026-11-03): python3 has pip and venv (the
-# N6 farm runs `python3 -m pip install --target`), and the commands of the other packages resolve.
-host_packages() {
-    local out dir c missing=""
-    out="$(python3 -m pip --version 2>&1)" && ok "python3 -m pip --version: $out" || fail "python3 -m pip --version: $(tail -1 <<<"$out")"
-    dir="$(mktemp -d)"
-    out="$(python3 -m venv "$dir/venv" 2>&1)" && [[ -x "$dir/venv/bin/python" ]] && ok "python3 -m venv: made $dir/venv" || fail "python3 -m venv: $(tail -1 <<<"$out")"
-    rm -rf "$dir"
-    for c in opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64; do
-        command -v "$c" >/dev/null || missing+=" $c"
-    done
-    [[ -z "$missing" ]] && ok "lane packages: opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64 resolve" || fail "lane packages: missing command(s):$missing"
 }
 
 # The public-text leak check. It has no source repository: it lives unversioned in
