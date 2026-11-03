@@ -406,11 +406,30 @@ def start_walk(sessions: Path) -> Future:
         return _walks[sessions]
 
 
-def walk_cache_path(sessions: Path) -> Path:
-    """Where the walk of `sessions` keeps its directory listings between runs: the user's runtime
-    directory (tmpfs, emptied at boot), else the temporary directory."""
+def cache_path(kind: str, key: str) -> Path:
+    """Where a run keeps what it read for the next one (kind "walk": directory listings; "rule9":
+    how far each transcript was read): the user's runtime directory (tmpfs, emptied at boot), else
+    the temporary directory."""
     base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / f"sami-said-{os.getuid()}"
-    return base / f"walk-{hashlib.sha1(str(sessions).encode()).hexdigest()[:16]}.json"
+    return base / f"{kind}-{hashlib.sha1(key.encode()).hexdigest()[:16]}.json"
+
+
+def load_cache(path: Path, version: int) -> dict:
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return cache if isinstance(cache, dict) and cache.get("version") == version else {}
+
+
+def save_cache(path: Path, cache: dict) -> None:
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(cache))
+        os.replace(tmp, path)
+    except OSError as e:
+        warn(f"cannot keep what this run read in {path}: {e}")
 
 
 def walk_jsonl(sessions: Path) -> list[JsonlFile]:
@@ -426,19 +445,14 @@ def _walk_jsonl(sessions: Path) -> list[JsonlFile]:
     /mnt/durable. The root disk that holds the tree answered a read in 108 ms on average under the
     box's load, and reading every directory took 957 s one at a time, 77 s 64 at a time. So
     directories are read IO_WORKERS at a time, and each directory's subdirectories and .jsonl
-    entries are kept in walk_cache_path, with the target of each symlink among them: a directory
+    entries are kept in cache_path("walk", ...), with the target of each symlink among them: a directory
     whose device, inode and mtime are unchanged has the same entries (creating, removing, renaming
     or replacing one sets its mtime, and a symlink cannot be changed in place), so it is not read
     again, only stat'ed, and a symlink is stat'ed at its target without reading the link on the
     root disk. Each .jsonl is still stat'ed every run. A listing read within WALK_RACY_NS of the
     directory's mtime is not kept: an entry added in the same timestamp tick would not move it."""
-    cache_file = walk_cache_path(sessions)
-    try:
-        cache = json.loads(cache_file.read_text())
-        cache = cache if isinstance(cache, dict) and cache.get("version") == 2 else {}
-    except (OSError, ValueError):
-        cache = {}
-    old: dict = cache.get("dirs") or {}
+    cache_file = cache_path("walk", str(sessions))
+    old: dict = load_cache(cache_file, 2).get("dirs") or {}
     new: dict = {}
     found: list[JsonlFile] = []
     seen: set[tuple[int, int]] = set()  # directories entered, by device and inode
@@ -528,13 +542,7 @@ def _walk_jsonl(sessions: Path) -> list[JsonlFile]:
         if failed:
             raise failed[0]
     if new != old:
-        try:
-            cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            tmp = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps({"version": 2, "dirs": new}))
-            os.replace(tmp, cache_file)
-        except OSError as e:
-            warn(f"cannot keep the session tree's listings in {cache_file}: {e}")
+        save_cache(cache_file, {"version": 2, "dirs": new})
     found.sort(key=lambda j: str(j.path))
     return found
 
@@ -787,51 +795,109 @@ def typing_call(part: dict, t: datetime, sid: str, files: dict[str, str | None])
 def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> list[TypingCall]:
     """Rule 9's calls in [start, end), from the session files, nested ones included. The transcript
     store is not used: it cuts a call's arguments at 4000 characters, and the 2026-10-25 wind-down
-    cell named send-keys after that."""
+    cell named send-keys after that.
+
+    Reading the last hour or two of some 2,000 transcripts took 25-45 s on 2026-11-03 under the
+    box's load, so a run keeps in cache_path("rule9", ...), for each file, how far it was read and
+    where its candidate entries are: each assistant "message" entry with a bash, eval or write call
+    that says send-keys, paste-buffer or load-buffer, or names a script (its offset, length, stamp,
+    the newest message stamp up to it, and the script paths). A transcript only grows, so the next
+    run reads only the bytes after that point, while the file is the same (device and inode), no
+    shorter, ends in the same bytes there, and was read from no later than this window's start.
+    Which candidates type, and what they type, is decided anew every run from the entry itself and
+    the named files as they are now, as before. A file is read up to the first message entry
+    stamped after `end`, as before, and the next run goes on from that entry."""
     files: dict[str, str | None] = {}
     target = start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    stop = end.strftime("%Y-%m-%dT%H:%M:%S.000Z").encode()
+    stop = end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     names = tuple(f'"name":"{tool}"'.encode() for tool in TYPING_TOOLS)
+    cache_file = cache_path("rule9", "\n".join(sorted(map(str, roots))))
+    old: dict = load_cache(cache_file, 1).get("files") or {}
+    new: dict = {}
 
     def scan(path: Path) -> list[TypingCall]:
         calls: list[TypingCall] = []
-        header = None  # read only for a file that holds a typing call: most hold none
         try:
             fh = open(path, "rb")
         except OSError:
             return calls
         with fh:
-            size = os.fstat(fh.fileno()).st_size
-            fh.seek(seek_start(fh, size, target) if size > SEEK_MIN_BYTES else 0)
+            st = os.fstat(fh.fileno())
+            rec = old.get(str(path))
+            if kept_reading(fh, rec, [st.st_dev, st.st_ino], st.st_size, target):
+                ents = [e for e in rec["ents"] if e[2] is None or e[2] >= target]
+                pos, upto, head = rec["to"], rec["upto"], rec.get("head")
+            else:
+                ents, upto, head = [], "", None
+                pos = seek_start(fh, st.st_size, target) if st.st_size > SEEK_MIN_BYTES else 0
+            fh.seek(pos)
             for line in fh:
-                if not line.startswith(MESSAGE_LINE):
-                    continue
-                stamp = ENTRY_TS.search(line, 0, 300)
-                if stamp and stamp.group(1) > stop:
+                if not line.endswith(b"\n"):
+                    break  # an entry being written: the next run reads it whole
+                if line.startswith(MESSAGE_LINE):
+                    m = ENTRY_TS.search(line, 0, 300)
+                    stamp = m.group(1).decode() if m else None
+                    newest = max(upto, stamp or "")
+                    if newest > stop:
+                        break
+                    upto = newest
+                    if b'"role":"assistant"' in line and any(n in line for n in names):
+                        verb = any(v in line for v in TYPING_VERB_BYTES)
+                        scripts = sorted({p.decode(errors="replace") for p in script_paths(line)})
+                        if verb or scripts:
+                            ents.append([pos, len(line), stamp, upto, verb, scripts])
+                pos += len(line)
+            fh.seek(max(0, pos - 32))
+            tail = fh.read(pos - max(0, pos - 32))
+            # Every candidate stamped from this window's start on is now held, wherever reading began.
+            new[str(path)] = {"id": [st.st_dev, st.st_ino], "from": target, "to": pos, "tail": tail.hex(),
+                              "upto": upto, "ents": ents, "head": head}
+            for off, length, stamp, newest, verb, scripts in ents:
+                if newest > stop:
                     break
-                if b'"role":"assistant"' not in line or not any(n in line for n in names):
+                if stamp is not None and parse_ts(stamp) < start:
                     continue
-                if not any(v in line for v in TYPING_VERB_BYTES) and not any(
-                        types_into_pane(named_file(p.decode(errors="replace"), files)) for p in set(script_paths(line))):
+                if not verb and not any(types_into_pane(named_file(p, files)) for p in scripts):
                     continue
+                fh.seek(off)
                 try:
-                    e = json.loads(line)
+                    e = json.loads(fh.read(length))
                 except ValueError:
                     continue
                 t = parse_ts(e.get("timestamp"))
                 if t is None or t < start:
                     continue  # out of the window
-                header = header or read_header(path, "")
-                if header.forked is not None and t < header.forked:
+                if head is None:  # read only for a file that holds a typing call: most hold none
+                    h = read_header(path, "")
+                    head = [h.sid, h.forked.isoformat() if h.forked else None]
+                    new[str(path)]["head"] = head
+                sid, forked = head[0], parse_ts(head[1])
+                if forked is not None and t < forked:
                     continue  # a fork's copy of its parent's call
                 for part in (e.get("message") or {}).get("content") or ():
-                    call = typing_call(part, t, header.sid, files) if isinstance(part, dict) else None
+                    call = typing_call(part, t, sid, files) if isinstance(part, dict) else None
                     if call is not None:
                         calls.append(call)
         return calls
 
     paths = [path for root in roots for path in recent_jsonl(root / "sessions", start.timestamp())]
-    return [call for found in pmap(scan, paths) for call in found]
+    calls = [call for found in pmap(scan, paths) for call in found]
+    save_cache(cache_file, {"version": 1, "files": new})
+    return calls
+
+
+def kept_reading(fh, rec, file_id: list[int], size: int, target: str) -> bool:
+    """Whether an earlier run's record of a transcript still holds: the same file (device and inode),
+    no shorter than where that run stopped, still ending there in the bytes it read, and read from no
+    later than target."""
+    try:
+        if rec["id"] != file_id or rec["from"] > target or rec["to"] > size:
+            return False
+        want = bytes.fromhex(rec["tail"])
+        fh.seek(rec["to"] - len(want))
+        return fh.read(len(want)) == want and isinstance(rec["ents"], list)
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
 
 
 def typing_calls_for(m: Message, calls: list[TypingCall]) -> list[TypingCall]:

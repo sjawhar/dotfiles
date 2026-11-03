@@ -489,7 +489,7 @@ class LargeFile(unittest.TestCase):
             self.assertEqual([r["text"] for r in rows(root)], [TYPED])
 
 
-class WalkCache(unittest.TestCase):
+class KeptBetweenRuns(unittest.TestCase):
     def test_a_kept_listing_still_finds_a_subagent_added_after_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "agent"
@@ -517,6 +517,20 @@ class WalkCache(unittest.TestCase):
             con.close()
             new = next(r for r in rows(root) if r["session"] == new_lane)
             self.assertEqual((new["source"], new["title"]), ("terminal", "NewLane"))
+
+    def test_a_typing_call_appended_after_a_run_is_read_from_where_it_stopped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            Store(root)
+            coach = root / "sessions" / "-src-example-task-repo" / f"2026-10-23T21-15-45-293Z_{COACH}.jsonl"
+            lines = coach.read_text().splitlines(keepends=True)
+            coach.write_text("".join(lines[:-1]))  # without the call that typed NUDGE into LEAD's pane
+            self.assertIn(NUDGE, [r["text"] for r in rows(root)])
+            kept = json.loads(next(Path(tmp).glob("sami-said-*/rule9-*.json")).read_text())["files"][str(coach)]
+            self.assertEqual(kept["to"], coach.stat().st_size)
+            with coach.open("a") as fh:
+                fh.write(lines[-1])
+            self.assertNotIn(NUDGE, [r["text"] for r in rows(root)])
 
 
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
