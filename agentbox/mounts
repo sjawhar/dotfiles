@@ -115,6 +115,14 @@ ro .ssh/jj-signing.pub
 # a push from a box is still the repo's GitHub App over https.
 ro .ssh/google_compute_engine
 ro .ssh/google_compute_engine.pub
+# sami-devbox's key for sami-rocqperf's OpenSSH on tcp:443 (dispatch://INFRA-734, INFRA-993), and
+# that host's pinned key. Its only verifier is sami-rocqperf's authorized_keys, which accepts it
+# only from sami-devbox's tailnet address; GitHub never sees it. A session moved to sami-devbox
+# runs its scripts on sami-rocqperf with: ssh -i ~/.ssh/sami-rocqperf -p 443
+# -o UserKnownHostsFile=~/.ssh/known_hosts.sami-rocqperf sami@100.88.161.31. Absent on other hosts.
+ro .ssh/sami-rocqperf
+ro .ssh/sami-rocqperf.pub
+ro .ssh/known_hosts.sami-rocqperf
 
 # The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. This entry is
 # the POINTER, `path`, holding the script's absolute path; the script itself lives on /mnt/nvme,

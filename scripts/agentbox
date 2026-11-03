@@ -5367,7 +5367,12 @@ while read -r m p; do
     esac
 done < <(cat "$DOTFILES_DIR/agentbox/mounts"; [ -r "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts" ] && cat "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts")
 r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ[\"DBUS_SESSION_BUS_ADDRESS\"].split(\"=\",1)[1]); s.sendall(b\"\\0AUTH EXTERNAL 31303030\\r\\n\"); print(s.recv(64).split()[0].decode())" 2>&1)"; [ "$r" = OK ] && ok "session bus (keyring) reachable through the relay" || fail "session bus: $r"
-[ "$(ls -A "$HOME/.ssh" | sort | tr "\n" " ")" = "jj-signing jj-signing.pub " ] && ok ".ssh holds exactly the jj-signing pair" || fail ".ssh contents: $(ls -A "$HOME/.ssh" | tr "\n" " ")"
+# ~/.ssh holds only what the allow-list names under .ssh/ (the jj signing pair, the Compute Engine
+# key, the sami-devbox key for sami-rocqperf), each where the host has it: never a GitHub identity.
+ssh_ok=" $( { cat "$DOTFILES_DIR/agentbox/mounts"; [ -r "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts" ] && cat "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts"; } | awk "\$1 == \"ro\" || \$1 == \"rw\" { print \$2 }" | tr "\n" " ") "
+ssh_extra=""
+for e in $(ls -A "$HOME/.ssh" 2>/dev/null); do case "$ssh_ok" in *" .ssh/$e "*) ;; *) ssh_extra="$ssh_extra $e" ;; esac; done
+[ -z "$ssh_extra" ] && ok ".ssh holds only allow-listed files: $(ls -A "$HOME/.ssh" | tr "\n" " ")" || fail ".ssh holds files outside the allow-list:$ssh_extra"
 # The ghcr login the entrypoint makes needs the machine to hold GHCR_PULL_TOKEN, so the host
 # decides whether its absence is a defect or this machine (see PROBE_FUNCS).
 auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && echo "@probe dockerauths ok only the box ghcr login" || echo "@probe dockerauths fail auths: ${auths:-none}"
