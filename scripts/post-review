@@ -24,12 +24,6 @@ in the omp session running this command, read from its transcript (PI_SESSION_FI
 in each session's and subagent's shell). A session posting a verdict another session wrote passes
 that session's model with `--model`, since its own transcript names its own model.
 
-Every verdict ends with a `Reviewed by model: <id>` line, so a reader can tell a cross-family
-review from a same-family one. The id is `--model` when given; otherwise every model that answered
-in the omp session running this command, read from its transcript (PI_SESSION_FILE, which omp sets
-in each session's and subagent's shell). A session posting a verdict another session wrote passes
-that session's model with `--model`, since its own transcript names its own model.
-
 Usage:
   post-review [--model <id>] [--dry-run] <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT
               <body-file> <owner/repo>
