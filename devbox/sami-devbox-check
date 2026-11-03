@@ -810,22 +810,30 @@ host_packages() {
 }
 
 # The open-file soft limit of Tailscale SSH and sshd sessions (devbox/nofile.conf). The unit
-# property holds once gce-host.sh installed the drop-in; the running tailscaled takes it only at
-# its next start, which waits for a planned reset (devbox/sami-devbox.md, "Next planned reset").
+# property holds once gce-host.sh installed the drop-in; a running daemon has it only when it
+# started after the drop-in, and tailscaled restarts only at a planned reset (devbox/sami-devbox.md,
+# "Next planned reset"). /proc/<pid>/limits cannot show it: tailscaled and its be-child are Go,
+# which raises its own soft limit to the hard one (524287 seen) and gives its children the soft
+# limit it started with.
 host_nofile() {
-    local unit got pid
+    local unit got started installed
     for unit in tailscaled ssh; do
         got="$(systemctl show "$unit.service" -p LimitNOFILESoft --value 2>&1)"
-        [[ "$got" == 65536 ]] && ok "nofile: $unit.service LimitNOFILESoft=65536" \
-            || fail "nofile: $unit.service LimitNOFILESoft=$got, want 65536; run sudo devbox/gce-host.sh"
+        if [[ "$got" != 65536 ]]; then
+            fail "nofile: $unit.service LimitNOFILESoft=$got, want 65536; run sudo devbox/gce-host.sh"
+            continue
+        fi
+        started="$(systemctl show "$unit.service" -p ExecMainStartTimestamp --value --timestamp=unix 2>&1)"
+        started="${started#@}"
+        installed="$(stat -c %Y "/etc/systemd/system/$unit.service.d/60-nofile.conf" 2>&1)"
+        if [[ "$started" =~ ^[0-9]+$ && "$installed" =~ ^[0-9]+$ && "$started" -ge "$installed" ]]; then
+            ok "nofile: $unit.service LimitNOFILESoft=65536, and its process started after the drop-in"
+        elif [[ "$unit" == tailscaled && "$started" =~ ^[0-9]+$ && "$installed" =~ ^[0-9]+$ ]]; then
+            echo "WAIT nofile: tailscaled.service LimitNOFILESoft=65536, but tailscaled started before the drop-in, so its sessions start at its old soft limit until it restarts (devbox/sami-devbox.md, \"Next planned reset\")"
+        else
+            fail "nofile: $unit.service started @$started, drop-in written @$installed: restart $unit.service (KillMode=process keeps sessions)"
+        fi
     done
-    pid="$(pgrep -o -x tailscaled)" || { fail "nofile: no tailscaled process"; return; }
-    got="$(awk '/^Max open files/ {print $4}' "/proc/$pid/limits")"
-    if [[ "$got" == 65536 ]]; then
-        ok "nofile: running tailscaled (pid $pid) has soft limit 65536"
-    else
-        echo "WAIT nofile: running tailscaled (pid $pid) has soft limit $got; it takes 65536 at its next start (devbox/sami-devbox.md, \"Next planned reset\")"
-    fi
 }
 
 # bwrap makes its network namespace as sami: the AppArmor profile devbox/gce-host.sh installs
