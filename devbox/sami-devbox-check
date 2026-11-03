@@ -217,8 +217,9 @@ n6_check() {
         && ok "N6 disk-gate $where: reserve 1 $name, seen in status, released" \
         || { fail "N6 disk-gate $where: the reserve/release round trip failed: $(tail -1 <<<"$out")"; disk-gate release "$name" >/dev/null 2>&1; }
     if [[ "$where" == "in the box" ]]; then
-        # The farm's work root and run index are the host's directories, not the box's own.
-        for f in "/mnt/nvme/$(id -un)/ossv-n6" "$HOME/.cache/ossv-n6-runs"; do
+        # The farm's work root and run index are the host's directories, not the box's own. The
+        # box's user is not the host's, and its HOME is the host's (/home/<host user>).
+        for f in "/mnt/nvme/${HOME##*/}/ossv-n6" "$HOME/.cache/ossv-n6-runs"; do
             [[ "$(findmnt -n -o TARGET --target "$f" 2>/dev/null)" == "$f" ]] && ok "N6 farm in the box: $f is bound from the host ($(findmnt -n -o SOURCE --target "$f"))" \
                 || fail "N6 farm in the box: $f is not bound from the host (findmnt: $(findmnt -n -o TARGET,SOURCE --target "$f" 2>&1))"
         done
