@@ -241,6 +241,11 @@ class UserLogin(unittest.TestCase):
             "`~/.dotfiles/scripts/post-review 1178 <full 40-character head sha> APPROVE <body-file> o/r`", err
         )
         self.assertIn("only when your session did not author the pull request", err)
+        # A CODEOWNERS approval in Sami's name is not the review App's to give: the admin token route
+        # is offered for the refused review itself.
+        self.assertIn("a CODEOWNERS approval in his name", err)
+        self.assertIn("GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' "
+                      "gh pr review 1178 -R o/r --approve --body VERDICT:\\ APPROVE`", err)
 
     def test_an_api_review_refused_for_the_app_gets_the_same_route(self):
         argv = ["api", "-X", "POST", "repos/o/r/pulls/7/reviews", "-f", "event=REQUEST_CHANGES"]
@@ -265,8 +270,8 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         err = result.stderr
         self.assertIn("`gh pr merge 5 -R o/r --admin`", err)
-        self.assertIn("Instead: if this is a GitHub admin action that work Sami already asked for needs", err)
-        self.assertIn("Never ask Sami to do it (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a)", err)
+        self.assertIn("Instead: If this is a GitHub admin action that work Sami already asked for needs", err)
+        self.assertIn("never ask Sami to do it (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a)", err)
         route = ("`secret-run --reason '<what and why>' GITHUB_ADMIN_PAT -- "
                  "sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' gh pr merge 5 -R o/r --admin`")
         self.assertIn(route, err)
@@ -308,6 +313,26 @@ class UserLogin(unittest.TestCase):
         self.assertIn("Identity: it ran as the token in GH_TOKEN, inherited from the environment (gith…)", result.stderr)
         self.assertNotIn("ran as the GitHub App", result.stderr)
         self.assertIn("GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN", result.stderr)
+        self.assertNotIn("GITHUB_ADMIN_PAT --", result.stderr)
+
+    def test_an_admin_call_refused_on_an_inherited_token_offers_no_admin_token(self):
+        # The call already ran on a token from the environment (perhaps the admin token itself).
+        executable(self.bin / "knives", 'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
+        result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path,
+                                GH_TOKEN="github_pat_FAKE", **self.agent)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Instead: stop, and tell your lead which call GitHub refused", result.stderr)
+        self.assertNotIn("GITHUB_ADMIN_PAT --", result.stderr)
+
+    def test_a_post_refused_for_the_app_offers_the_approval_and_the_admin_token_routes(self):
+        # An App without the issues permission is refused a post; that permission is an admin action.
+        executable(self.bin / "knives", 'echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1')
+        result, _ = self.run_gh(["issue", "comment", "3", "-R", "o/r", "--body", "b"], self.shim_path, **self.agent)
+        self.assertEqual(result.returncode, 1)
+        err = result.stderr
+        self.assertIn("GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>", err)
+        self.assertIn("GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' gh issue comment 3 -R o/r --body b`", err)
+        self.assertIn("Otherwise stop, and tell your lead", err)
 
     def test_a_refusal_on_the_upstream_token_names_that_token(self):
         executable(self.bin / "knives",
