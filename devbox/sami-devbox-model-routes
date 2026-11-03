@@ -1,90 +1,84 @@
 #!/usr/bin/env bash
-# sami-devbox-model-routes: (sami-devbox only) send omp's OpenAI models through the model gateway.
-# Run by devbox/sami-devbox-provision at step install, after install.sh's models.yml merge and
-# once mise has installed yq; safe to run again (dispatch://INFRA-993).
+# sami-devbox-model-routes: (sami-devbox only) send omp's OpenAI roles and agents to GPT-6.1 Sol
+# through the model gateway. Run by devbox/sami-devbox-provision at step install, after
+# install.sh's models.yml build and once mise has installed yq; safe to run again
+# (dispatch://INFRA-993).
 #
 # sami-devbox holds no ChatGPT login: the spec bars a person's login there, and omp's agent.db is
 # not copied. So every openai-codex/<id> that agents and roles name has no credential on it. The
 # gateway's openai/ group (dispatch://INFRA-481, agent-infra #1476) serves OpenAI models to the
-# dev-box@ ID token (team box), and the OpenAI API agents and roles move there too, so the
-# machine's OpenAI traffic has one route. This script:
-#   1. declares the gateway's openai/ models in the ossv-gateway provider of omp/models.local.yml,
-#      on the OpenAI Responses API at <gateway>/v1, as ossv-gateway/openai/<id> (the gateway takes
-#      the id with its openai/ prefix and refuses the bare one with 403);
-#   2. in omp/config.local.yml, points the roles (slow, deep, review, oracle) and the agents that
-#      name an OpenAI model (astra, sami-proxy, astra-api, gpt-api) at them, and makes the gateway
-#      model the fallback chain of each openai-codex/<id> and openai/<id> key, so a turn that
-#      fails on one walks to the gateway. A session STARTED with `--model openai-codex/<id>`
-#      still stops at model selection ("Use /login"; measured 2026-11-03), and needs /model;
-#   3. merges models.yml as installers/omp.sh does, so a new omp reads it.
-# The gateway serves gpt-6-astra, gpt-6.1-terra, gpt-6.1-sol and gpt-6-luna, and no 5.6 model, so
-# each 5.6 id takes the 6.1/6 model of its tier (TO below): terra -> 6.1-terra, which config.yml's
-# own openai/gpt-5.6-terra chain falls to first.
-# sami-rocqperf's overlays are not touched: it keeps the ChatGPT login and the direct API.
+# dev-box@ ID token (team box). Of them this box uses GPT-6.1 Sol only, as omp/config.yml's
+# @review and @oracle do: until 2026-11-03 20:55Z this script put slow, deep, review and oracle on
+# gateway GPT-6.1 Terra and the astra and sami-proxy agents on gateway GPT-6 Astra, about $56/h of
+# OpenAI spend (INFRA cost lead). This script:
+#   1. in omp/models.local.yml, declares GPT-6.1 Sol twice on the same route: as the provider
+#      `ossv-gateway-openai` (OpenAI Responses at <gateway>/v1), sami-rocqperf's id, and as
+#      `ossv-gateway/openai/gpt-6.1-sol`, the id omp/config.yml's Sol chains name second. It
+#      removes every other `openai/` model from `ossv-gateway`, so nothing here reaches Terra,
+#      Astra or Luna;
+#   2. in omp/config.local.yml, points the slow and deep roles and the astra, sami-proxy, astra-api
+#      and gpt-api agents at `ossv-gateway/openai/gpt-6.1-sol` (the id a session started before
+#      step 1 already knows: a live session re-reads config.local.yml at each subagent spawn but
+#      keeps the models.yml it started with), leaves review and oracle to omp/config.yml, and
+#      removes the fallback chains that sent openai-codex/<id> and openai/<id> to gateway models;
+#   3. rebuilds ~/.omp/agent/models.yml with scripts/omp-models-build, so a new omp reads it.
+# sami-rocqperf's overlays are not touched: it keeps the ChatGPT login.
 set -euo pipefail
 
 [[ "$(hostname -s)" == sami-devbox ]] || { echo "sami-devbox-model-routes: sami-devbox only" >&2; exit 1; }
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 models="$DOTFILES_DIR/omp/models.local.yml"
 config="$DOTFILES_DIR/omp/config.local.yml"
-out="${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml"
 for f in "$models" "$config"; do [[ -f "$f" ]] || { echo "sami-devbox-model-routes: no $f" >&2; exit 1; }; done
 
 url="$(yq -r '.providers["ossv-gateway"].baseUrl // ""' "$models")"
 [[ -n "$url" ]] || { echo "sami-devbox-model-routes: no ossv-gateway baseUrl in $models" >&2; exit 1; }
+key="$(yq -r '.providers["ossv-gateway"].apiKey // ""' "$models")"
+[[ "$key" == '!'* ]] || { echo "sami-devbox-model-routes: ossv-gateway's apiKey in $models is not a !command" >&2; exit 1; }
 
-GATEWAY_OPENAI=(gpt-6-astra gpt-6.1-terra gpt-6.1-sol gpt-6-luna)
-# An OpenAI model id named by openai-codex/ or openai/ -> the gateway id it goes to.
-declare -A TO=(
-    [gpt-6-astra]=gpt-6-astra
-    [gpt-6.1-sol]=gpt-6.1-sol
-    [gpt-6.1-terra]=gpt-6.1-terra
-    [gpt-6-luna]=gpt-6-luna
-    [gpt-5.6-terra]=gpt-6.1-terra
-    [gpt-5.6-sol]=gpt-6.1-sol
-    [gpt-5.6-luna]=gpt-6-luna
-)
+SOL=openai/gpt-6.1-sol
+ROUTE="ossv-gateway/$SOL"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp -p "$models" "$tmp/models.yml"
 cp -p "$config" "$tmp/config.yml"
 
-for id in "${GATEWAY_OPENAI[@]}"; do
-    ID="openai/$id" URL="$url/v1" yq -i '
-        .providers["ossv-gateway"].models |= ((. // []) | map(select(.id != strenv(ID)))) |
-        .providers["ossv-gateway"].models += [{
+ID="$SOL" URL="$url/v1" KEY="$key" yq -i '
+    .providers["ossv-gateway"].models |= map(select((.id | test("^openai/") | not) or .id == strenv(ID))) |
+    (select([.providers["ossv-gateway"].models[] | select(.id == strenv(ID))] | length == 0)
+        | .providers["ossv-gateway"].models) += [{
             "id": strenv(ID), "name": strenv(ID), "api": "openai-responses", "baseUrl": strenv(URL),
             "reasoning": true, "thinking": {"mode": "effort", "efforts": ["low", "medium", "high", "xhigh", "max"]},
-            "input": ["text", "image"], "contextWindow": 1050000, "maxTokens": 128000}]
-    ' "$tmp/models.yml"
-done
+            "input": ["text", "image"], "contextWindow": 1050000, "maxTokens": 128000}] |
+    (select(.providers["ossv-gateway-openai"] == null) | .providers["ossv-gateway-openai"]) = {
+        "baseUrl": strenv(URL), "apiKey": strenv(KEY), "api": "openai-responses",
+        "models": [{
+            "id": strenv(ID), "name": "gpt-6.1-sol", "reasoning": true, "input": ["text", "image"],
+            "contextWindow": 1050000, "maxTokens": 128000,
+            "cost": {"input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 2.5},
+            "thinking": {"mode": "effort", "efforts": ["low", "medium", "high", "xhigh", "max"]}}]}
+' "$tmp/models.yml"
 
-yq -i '
-    .modelRoles.slow = "ossv-gateway/openai/gpt-6.1-terra:xhigh" |
-    .modelRoles.deep = "ossv-gateway/openai/gpt-6.1-terra:xhigh" |
-    .modelRoles.review = "ossv-gateway/openai/gpt-6.1-terra:xhigh" |
-    .modelRoles.oracle = "ossv-gateway/openai/gpt-6.1-terra:high" |
-    .task.agentModelOverrides.astra = "ossv-gateway/openai/gpt-6-astra:xhigh" |
-    .task.agentModelOverrides["sami-proxy"] = "ossv-gateway/openai/gpt-6-astra:high" |
-    .task.agentModelOverrides["astra-api"] = "ossv-gateway/openai/gpt-6-astra:xhigh" |
-    .task.agentModelOverrides["gpt-api"] = "ossv-gateway/openai/gpt-6.1-terra:xhigh"
+ROUTE="$ROUTE" yq -i '
+    .modelRoles.slow = strenv(ROUTE) + ":xhigh" |
+    .modelRoles.deep = strenv(ROUTE) + ":xhigh" |
+    del(.modelRoles.review) | del(.modelRoles.oracle) |
+    .task.agentModelOverrides.astra = strenv(ROUTE) + ":xhigh" |
+    .task.agentModelOverrides["sami-proxy"] = strenv(ROUTE) + ":high" |
+    .task.agentModelOverrides["astra-api"] = strenv(ROUTE) + ":xhigh" |
+    .task.agentModelOverrides["gpt-api"] = strenv(ROUTE) + ":xhigh" |
+    .retry.fallbackChains |= ((. // {}) | with_entries(select(
+        ((.key | test("^openai(-codex)?/")) and (.value | length > 0) and
+         ([.value[] | select(test("^ossv-gateway/openai/") | not)] | length == 0)) | not)))
 ' "$tmp/config.yml"
-for id in $(printf '%s\n' "${!TO[@]}" | sort); do
-    for provider in openai-codex openai; do
-        KEY="$provider/$id" DEST="ossv-gateway/openai/${TO[$id]}" yq -i '
-            .retry.fallbackChains[strenv(KEY)] = [strenv(DEST)]
-        ' "$tmp/config.yml"
-    done
-done
 
 # Install by mv, keeping each file's mode; only a changed file moves.
 cmp -s "$tmp/models.yml" "$models" || mv "$tmp/models.yml" "$models"
 cmp -s "$tmp/config.yml" "$config" || mv "$tmp/config.yml" "$config"
 
-# installers/omp.sh's merge, into the file omp reads.
-yq eval-all '. as $item ireduce ({}; . * $item)' "$DOTFILES_DIR/omp/models.yml" "$models" > "$out.new"
-if cmp -s "$out.new" "$out"; then rm -f "$out.new"; else mv "$out.new" "$out"; fi
+DOTFILES_DIR="$DOTFILES_DIR" "$DOTFILES_DIR/scripts/omp-models-build"
 
-echo "sami-devbox-model-routes: $(yq -r '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | join(" ")' "$out") at $url/v1"
+out="${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml"
+echo "sami-devbox-model-routes: ossv-gateway-openai: $(yq -r '[.providers["ossv-gateway-openai"].models[].id] | join(" ")' "$out"); ossv-gateway openai/: $(yq -r '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | join(" ")' "$out") at $url/v1"
 yq -r '"slow=" + .modelRoles.slow + " deep=" + .modelRoles.deep + " astra=" + .task.agentModelOverrides.astra + " sami-proxy=" + .task.agentModelOverrides["sami-proxy"]' "$config"

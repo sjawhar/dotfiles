@@ -11,7 +11,7 @@ moves a session (step 5).
 | `devbox/gce-disks`, `gce-disks.service`, `gce-disks-ready.conf` | sami-devbox, root, every boot | local-SSD RAID 0 at `/mnt/scratch` with a 256 GiB swap file; state disk at `/mnt/nvme`; cold disk at `/mnt/durable`; `/home`, `/theorem`, `/theorem-ext4` and `/theorem-xfs` bound from `/mnt/nvme/<name>`; Docker, containerd and Sysbox data on the state disk; `/tmp` and `/var/tmp` bound from the scratch at boot only ("The boot disk holds the OS only"). Ordered before `user@1000`, ssh, Docker. |
 | `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, journald's cap (`devbox/journald-cap.conf`), Docker, Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
 | `devbox/sami-devbox-provision` | sami-rocqperf | the whole provisioning run, step by step (its header lists the steps) |
-| `devbox/sami-devbox-model-routes` | sami-devbox, by `sami-devbox-provision` step install | omp's OpenAI agents and roles (openai-codex/ and openai/) go to the gateway's openai/ group as `ossv-gateway/openai/<id>`, since this machine holds no ChatGPT login; edits only its own `omp/models.local.yml` and `omp/config.local.yml` |
+| `devbox/sami-devbox-model-routes` | sami-devbox, by `sami-devbox-provision` step install | omp's OpenAI roles and agents (`slow`, `deep`; `astra`, `sami-proxy`, `astra-api`, `gpt-api`) go to GPT-6.1 Sol through the gateway as `ossv-gateway/openai/gpt-6.1-sol`, since this machine holds no ChatGPT login; it also declares Sol as `ossv-gateway-openai/openai/gpt-6.1-sol` (sami-rocqperf's id, first in `config.yml`'s `review` and `oracle` lists) and no other gateway `openai/` model (gateway Terra and Astra cost about $56/h until 2026-11-03 20:55Z); edits only its own `omp/models.local.yml` and `omp/config.local.yml` |
 | `devbox/sami-devbox-check` | sami-devbox | A2, and the disks half of A5; `--mark-ready` writes `/mnt/nvme/sami/cutover/target-ready`, which `agentbox move --to sami-devbox` requires |
 | `devbox/sami-devbox-drill` | sami-rocqperf | A5 and A6: `restart`, then `silence` |
 
@@ -96,7 +96,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
 | dotfiles follow main | `systemctl --user is-active dotfiles-follow.timer`, `systemctl --user show dotfiles-follow.service`, its state file | timer active; last run exited 0; that run, at most 30 min ago, left HEAD on origin/main with nothing open and the tools installed |
 | mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it on the host after each fast-forward) | nothing missing |
-| openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`modelRoles.slow`, `.deep`, `task.agentModelOverrides.astra`, `["sami-proxy"]`) and of `~/.omp/agent/models.yml` | each names `ossv-gateway/openai/<id>`; ossv-gateway declares 4 or more `openai/` models |
+| openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`modelRoles.slow`, `.deep`, `task.agentModelOverrides.astra`, `["sami-proxy"]`) and of `~/.omp/agent/models.yml` | each names `ossv-gateway/openai/gpt-6.1-sol`; the only gateway `openai/` models are `ossv-gateway/openai/gpt-6.1-sol` and `ossv-gateway-openai/openai/gpt-6.1-sol` |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 | ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0; a time-out is a WAIT while the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending (dispatch://INFRA-734) |
 | N6 tools follow ops | `systemctl --user is-active ossv-tree-follow.timer`, `systemctl --user show ossv-tree-follow.service`, `git -C ~/src/oss-verifier rev-parse HEAD refs/remotes/origin/ops` | timer active; last run succeeded at most 15 min ago; HEAD = origin/ops (`devbox/ossv-tree-follow`) |
@@ -117,7 +117,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | Dispatch | `dispatch read --issue INFRA-993` | `Title: sami-devbox…` |
 | MLflow | `http://mlflow.tail12ec1c.ts.net/health` | `OK` |
 | model gateway | the `email` of `$XDG_RUNTIME_DIR/ossv-box/gateway-token`; `/v1/models` with it | dev-box@; 200 |
-| openai through the gateway | `omp -p "say ok" --model @slow`, and `--model ossv-gateway/openai/gpt-6-astra:xhigh` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
+| openai through the gateway | `omp -p "say ok" --model @slow`, and `--model @review` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
 | Azure | `az account show` | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
 | N6 tools | `sha256sum` of each of the 8 files above in `~/src/oss-verifier` against `git show HEAD:<file>` | equal |

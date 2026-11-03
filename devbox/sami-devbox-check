@@ -421,8 +421,9 @@ PY
     got="$(timeout 200 omp -p "say ok" --model anthropic/claude-opus-4-8 2>&1 | tail -1)"
     [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through ossv-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
     # openai/ goes through the gateway's openai group too (devbox/sami-devbox-model-routes): the
-    # slow role and astra's model each answer a real turn. A fail prints "Use /login" or an HTTP 4xx.
-    for model in @slow ossv-gateway/openai/gpt-6-astra:xhigh; do
+    # slow and review roles, both GPT-6.1 Sol, each answer a real turn. A fail prints "Use /login"
+    # or an HTTP 4xx.
+    for model in @slow @review; do
         got="$(timeout 200 omp -p "say ok" --model "$model" 2>&1 | tail -1)"
         [[ "${got,,}" == *ok* ]] && ok "$model through ossv-gateway's openai group answers: $got" || fail "$model: $got"
     done
@@ -961,17 +962,17 @@ host() {
     mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
-    # The openai/ agents and roles go to the gateway's openai group (devbox/sami-devbox-model-routes):
-    # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/ models,
-    # and omp's merged models.yml declares at least 4 of them.
+    # The openai/ agents and roles go to GPT-6.1 Sol through the gateway (devbox/sami-devbox-model-routes):
+    # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/gpt-6.1-sol,
+    # and omp's merged models.yml declares Sol, and no other openai/ model, on the gateway.
     missing="$(yq -r '.modelRoles.slow, .modelRoles.deep, .task.agentModelOverrides.astra, .task.agentModelOverrides["sami-proxy"]' "$DOTFILES_DIR/omp/config.local.yml" 2>&1)"
-    if [[ "$(grep -c '^ossv-gateway/openai/' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
-        ok "omp config.local.yml: slow, deep, astra and sami-proxy use ossv-gateway/openai/ ($(tr '\n' ' ' <<<"$missing"))"
+    if [[ "$(grep -c '^ossv-gateway/openai/gpt-6\.1-sol:' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
+        ok "omp config.local.yml: slow, deep, astra and sami-proxy use gateway GPT-6.1 Sol ($(tr '\n' ' ' <<<"$missing"))"
     else
-        fail "omp config.local.yml: slow, deep, astra, sami-proxy want ossv-gateway/openai/<id> each, got: $(tr '\n' ';' <<<"$missing")"
+        fail "omp config.local.yml: slow, deep, astra, sami-proxy want ossv-gateway/openai/gpt-6.1-sol each, got: $(tr '\n' ';' <<<"$missing")"
     fi
-    missing="$(yq '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
-    [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
+    missing="$(yq -r '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] + [.providers["ossv-gateway-openai"].models[].id | "ossv-gateway-openai/" + .] | join(" ")' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" == "openai/gpt-6.1-sol ossv-gateway-openai/openai/gpt-6.1-sol" ]] && ok "omp models.yml: the gateway's openai/ models are GPT-6.1 Sol only ($missing)" || fail "omp models.yml: the gateway's openai/ models: want openai/gpt-6.1-sol on ossv-gateway and ossv-gateway-openai, got: $missing"
     host_logins
     host_owners
     github_check "on the host"
