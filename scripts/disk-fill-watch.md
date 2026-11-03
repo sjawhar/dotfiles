@@ -453,9 +453,17 @@ B), 2026-11-03; agent-infra branch `guard-disk-writers-root-selftest`):
 | `disk-writers: WATCH STOPPED: …` | the watch is not running and systemd will not start it again |
 
 Read with `sudo -n journalctl -u guard-disk-writers.service -o cat --after-cursor <saved>
---show-cursor`; the cursor lives in this watch's state file under `guard_watch`, so each line
-is forwarded **once**. The first run records the cursor from the last 30 minutes, which is one
-round of the self-test. After the reporter restarts it writes no per-mount BACK, only
+--show-cursor`, **pinned with `--file` to the current `system.journal` and the newest archived
+`system@*.journal`**; the cursor lives in this watch's state file under `guard_watch`, so each
+line is forwarded **once**. The first run reads the last 30 minutes of those files, which is one
+round of the self-test. Unpinned, journalctl opens and seeks every journal file: on
+sami-rocqperf at 2026-11-03T18:02Z, load 471, that was 14 files and 2.1 GB, one read took 43.9 s,
+and the 15 s read and its 45 s retry timed out two runs in a row. Pinned, the same read took
+0.06-0.79 s over six reads at load ~430 at 18:08Z (7.1 s for the very first, cold). The two
+files cover one rotation since the last read; a cursor older than both (two rotations in one
+read period) starts the read at that cursor's own time in them instead, and says so, because
+journalctl given a cursor it cannot find would seek on silently. After the reporter restarts it
+writes no per-mount BACK, only
 `disk-writers: the self-test passed: …`; while a mount is open from an UNPROVEN, that line is
 its BACK, for every open mount. A journal read this watch cannot do is itself said once per
 reason, not swallowed: if it were, a fault in the growth watch would reach nobody. A **timeout**

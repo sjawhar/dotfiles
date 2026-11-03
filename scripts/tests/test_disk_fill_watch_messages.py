@@ -1033,6 +1033,82 @@ class GuardWatchFaultTest(Harness):
         self.assertEqual(3, len(self.reads))  # two in run 1, one in run 2: no retry for this
 
 
+class GuardJournalFilesTest(unittest.TestCase):
+    """The guard's journal is read from its two newest files, not from all of them.
+
+    sami-rocqperf, 2026-11-03T18:02Z at load 471: `journalctl -u guard-disk-writers.service
+    --after-cursor …` took 43.9 s opening and seeking 14 journal files (2.1 GB); the same read
+    pinned to `--file …/system.journal` took 0.24 s. The current file plus the newest archive
+    cover one rotation since the last read.
+    """
+
+    SEQNUM_ID = "625146e0df034002a8f1df232c81310a"
+    # The newest archive's head: 2026-11-03T16:01Z, in microseconds, as journald names it.
+    HEAD_USEC = 0x65F5E4D3AFD6D
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name) / "journal"
+        machine = root / "d28f6ecc934141378e656752caa262d0"
+        machine.mkdir(parents=True)
+        (Path(self.tmp.name) / "machine-id").write_text("d28f6ecc934141378e656752caa262d0\n")
+        self.current = machine / "system.journal"
+        self.older = machine / f"system@{self.SEQNUM_ID}-00000000013556cb-00065f5aca2a41ec.journal"
+        self.newest = machine / f"system@{self.SEQNUM_ID}-00000000013950d6-{self.HEAD_USEC:016x}.journal"
+        self.dirty = machine / "system@00065f547fed5b2a-ccd7cc3ea7bb0d12.journal~"
+        for age, path in ((0, self.current), (7200, self.newest), (21600, self.older), (60000, self.dirty)):
+            path.write_bytes(b"")
+            os.utime(path, (time.time() - age, time.time() - age))
+        for name, value in (("JOURNAL_ROOT", str(root)), ("MACHINE_ID_FILE", str(Path(self.tmp.name) / "machine-id"))):
+            original = getattr(WATCH, name, None)
+            setattr(WATCH, name, value)
+            self.addCleanup(setattr, WATCH, name, original)
+        self.commands: list[list[str]] = []
+
+        def run(command, **kwargs):
+            self.commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, f"-- cursor: s={self.SEQNUM_ID};t=1\n", "")
+
+        patch = unittest.mock.patch.object(WATCH.subprocess, "run", side_effect=run)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def cursor(self, usec: int) -> str:
+        return f"s={self.SEQNUM_ID};i=13a0000;b=c2650215b2d74d24b967019520fd6ff6;m=1;t={usec:x};x=1"
+
+    def read(self, cursor: str) -> list[str]:
+        with unittest.mock.patch.object(WATCH, "LOG_STREAM", io.StringIO()) as logged:
+            WATCH.guard_journal(cursor, time.time() + 60)
+        self.log_text = logged.getvalue()
+        return self.commands[-1]
+
+    def files(self, command: list[str]) -> list[str]:
+        return [command[index + 1] for index, word in enumerate(command) if word == "--file"]
+
+    def test_the_read_is_pinned_to_the_current_file_and_the_newest_archive(self) -> None:
+        command = self.read(self.cursor(self.HEAD_USEC + 10_000_000))
+
+        self.assertEqual([str(self.current), str(self.newest)], self.files(command))
+        self.assertIn("--after-cursor", command)
+
+    def test_a_cursor_older_than_those_files_falls_back_to_its_own_time(self) -> None:
+        """Two rotations since the last read: journalctl would seek silently, so say it."""
+        last_read = self.HEAD_USEC - 3_600_000_000  # an hour before the newest archive begins
+        command = self.read(self.cursor(last_read))
+
+        self.assertEqual([str(self.current), str(self.newest)], self.files(command))
+        self.assertNotIn("--after-cursor", command)
+        self.assertEqual(f"@{last_read // 1_000_000}", command[command.index("--since") + 1])
+        self.assertIn("not in the two newest journal files", self.log_text)
+
+    def test_with_no_cursor_the_first_read_is_the_last_30_minutes_of_those_files(self) -> None:
+        command = self.read("")
+
+        self.assertEqual([str(self.current), str(self.newest)], self.files(command))
+        self.assertEqual("-30min", command[command.index("--since") + 1])
+
+
 def slow(*_args, **_kwargs):
     """A disk or /proc read that does not come back: 2026-11-03 08:01-08:36Z, load ~500."""
     time.sleep(60)

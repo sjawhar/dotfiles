@@ -2499,10 +2499,58 @@ GUARD_TIMEOUT_ERROR = "journalctl timed out"
 GUARD_RETRY_TIMEOUT = 45.0
 GUARD_TIMEOUT_RUNS = 2
 
+# Which journal files the read opens. Without `--file`, journalctl opens and seeks every file
+# under /var/log/journal/<machine-id>: on sami-rocqperf at 2026-11-03T18:02Z, load 471, that
+# was 14 files and 2.1 GB, and one `--after-cursor` read took 43.9 s, so the 15 s read and its
+# 45 s retry both timed out two runs in a row and the box-health lead was told the growth watch
+# was unreadable. The same read pinned to system.journal took 0.24 s. The current file plus the
+# newest archive cover a rotation since the last read (journald rotates here every ~4 h, this
+# reads every 5 min).
+JOURNAL_ROOT = "/var/log/journal"
+MACHINE_ID_FILE = "/etc/machine-id"
+# An archive is named system@<seqnum id>-<head seqnum>-<head realtime>.journal, both hex; a
+# name ending `~` is a file journald found dirty and set aside, never the newest archive.
+ARCHIVE_HEAD_RE = re.compile(r"system@[0-9a-f]+-[0-9a-f]+-(?P<head>[0-9a-f]+)\.journal\Z")
+CURSOR_TIME_RE = re.compile(r"(?:^|;)t=(?P<usec>[0-9a-f]+)(?:;|$)")
+
 
 def guard_installed() -> bool:
     """Whether this machine has the growth watch at all."""
     return any(os.path.exists(f"{directory}/{GUARD_UNIT}") for directory in GUARD_UNIT_DIRS)
+
+
+def guard_journal_files() -> list[Path]:
+    """The current system journal and the newest archive, or [] where they cannot be listed."""
+    try:
+        machine = Path(JOURNAL_ROOT) / Path(MACHINE_ID_FILE).read_text().strip()
+        archives = sorted(machine.glob("system@*.journal"), key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return []
+    current = machine / "system.journal"
+    return ([current] if current.exists() else []) + archives[-1:]
+
+
+def guard_window(cursor: str, files: list[Path]) -> tuple[list[str], str]:
+    """(the arguments that start the read, a note when the cursor cannot be used there).
+
+    A cursor older than the files the read opens does not make journalctl fail: it seeks to the
+    nearest place and reads on, so the fallback has to be decided here. The cursor's own `t=`
+    is the time of the last line read, and the newest archive's name says when it begins.
+    """
+    if not cursor:
+        return ["--since", GUARD_FIRST_WINDOW], ""
+    archive = next((match for path in files if (match := ARCHIVE_HEAD_RE.match(path.name))), None)
+    found = CURSOR_TIME_RE.search(cursor)
+    if not archive or not found:
+        return ["--after-cursor", cursor], ""
+    last_read = int(found.group("usec"), 16) // 1_000_000
+    if int(found.group("usec"), 16) >= int(archive.group("head"), 16):
+        return ["--after-cursor", cursor], ""
+    return (
+        ["--since", f"@{last_read}"],
+        f"guard journal: the saved cursor ({iso(last_read)}) is not in the two newest journal"
+        f" files, so this read starts at that time in them instead",
+    )
 
 
 def guard_journal(
@@ -2518,8 +2566,14 @@ def guard_journal(
     timeout = min(timeout, left(deadline))
     if timeout <= 0:
         return [], cursor, GUARD_TIMEOUT_ERROR
+    files = guard_journal_files()
+    window, note = guard_window(cursor, files)
+    if note:
+        log(f"  {note}")
     command = ["sudo", "-n", "journalctl", "-u", GUARD_UNIT, "-o", "cat", "--show-cursor"]
-    command += ["--after-cursor", cursor] if cursor else ["--since", GUARD_FIRST_WINDOW]
+    for path in files:
+        command += ["--file", str(path)]
+    command += window
     try:
         done = subprocess.run(
             command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
