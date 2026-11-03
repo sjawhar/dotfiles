@@ -12,8 +12,8 @@ IOSchedulingClass=idle
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
 Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
-# Its steps' own limits add up to under 15 min (fetch 120 s, merge 120 s, mise install 600 s,
-# the pin check 180 s), so a run is killed here only when one of them hangs past its own.
-# Under two periods, so unit-health-watch never reads a run as one that never ends.
-TimeoutStartSec=1080
+# Its steps' own limits add up to under 20 min (fetch 120 s, merge 120 s, mise install 600 s,
+# the pin check 180 s, one hook sweep pass 120 s), so a run is killed here only when one of them
+# hangs past its own. Under two periods, so unit-health-watch never reads a run as one that never ends.
+TimeoutStartSec=1170
 ExecStart=%h/.dotfiles/scripts/dotfiles-follow

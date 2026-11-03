@@ -40,6 +40,14 @@ sami-devbox nothing pulled, and when someone did, nothing ran `mise install`, so
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins` (the omp plugins main pins;
    it never writes the tracked lock), then `devbox/sami-devbox-check --pins` (the check's knives
    and mise-pin lines). An alert when any fails; the next run tries again without a second alert.
+7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep,
+   `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
+   (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
+   pre-push hook in each checkout of a public repository under the sweep's roots that lacks one
+   (dispatch://INFRA-993, dispatch://BET-589). The script loops for ever, so its code up to the
+   loop is loaded and `sweep` runs once. The pass is bounded by `--sweep-timeout` (120 s; a full
+   pass on sami-devbox, /mnt/nvme/sami included, took 21 s on 2026-11-03), and its whole process
+   group is killed past it.
 
 It never stashes, resets, rebases, abandons, restores or deletes, and it discards only an edit
 whose bytes origin/main already holds, right before the fast-forward. A refusal leaves HEAD, the
@@ -71,6 +79,7 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | `git merge --ff-only` failed | `FAST-FORWARD FAILED` | a fast-forward passes, or HEAD is origin/main |
 | `mise install` or the pin lines failed | `TOOLS NOT INSTALLED` | both pass at the current HEAD |
+| the hook sweep is missing, ran past its bound, or could not hook a public checkout | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed |
 | `git fetch` failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
 
 All of one run's new conditions go in one message, `DOTFILES NOT FOLLOWING MAIN on <host>`. A

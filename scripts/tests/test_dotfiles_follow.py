@@ -54,6 +54,29 @@ PLUGINS_V2 = '{\n  "dependencies": {\n    "@sjawhar/pi-envoy": "15.5.0"\n  }\n}\
 LOCK_V1 = '{ "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@15.1.2"] }\n'
 LOCK_V2 = '{ "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@15.5.0"] }\n'
 
+# sweep-hooks.sh as the leak-check tag lays it out: settings, a `sweep ROOTS...` function, then the
+# endless loop from `i=0`, which dotfiles-follow never runs. FAKE_SWEEP picks the pass's outcome.
+FAKE_SWEEP = """#!/usr/bin/env bash
+set -uo pipefail
+here=$(dirname "$(readlink -f "$0")")
+log=$here/sweep-hooks.log
+fast_roots=(/fast)
+slow_roots=(/slow)
+sweep() {
+  echo "sweep $* here=$here" >> "$FAKE_LOG.sweep"
+  case "${FAKE_SWEEP:-ok}" in
+    ok) echo "2026-11-03T00:00:00Z sweep [$*]: 3 checkouts of the four public repos, 0 installed, 0 failed" >> "$log" ;;
+    installed) echo "2026-11-03T00:00:00Z INSTALLED /src/new" >> "$log"
+      echo "2026-11-03T00:00:00Z sweep [$*]: 3 checkouts of the four public repos, 1 installed, 0 failed" >> "$log" ;;
+    failed) echo "2026-11-03T00:00:00Z FAILED /src/broken" >> "$log"
+      echo "2026-11-03T00:00:00Z sweep [$*]: 3 checkouts of the four public repos, 0 installed, 1 failed" >> "$log" ;;
+    hang) sleep 60 ;;
+  esac
+}
+i=0
+while true; do sweep "${fast_roots[@]}"; i=$((i + 1)); sleep 300; done
+"""
+
 
 class FakeEnvoy:
     def __init__(self, timeout: float = 8.0) -> None:
@@ -84,6 +107,10 @@ class Harness(unittest.TestCase):
         for name, body in (("mise", FAKE_MISE), ("knives", FAKE_KNIVES), ("bun", FAKE_BUN)):
             (fakebin / name).write_text(body)
             (fakebin / name).chmod(0o755)
+        self.hooks_dir = root / "hooks"
+        self.hooks_dir.mkdir()
+        (self.hooks_dir / "sweep-hooks.sh").write_text(FAKE_SWEEP)
+        (self.hooks_dir / "sweep-hooks.sh").chmod(0o755)
         env = {
             key: value
             for key, value in os.environ.items()
@@ -182,6 +209,8 @@ class Harness(unittest.TestCase):
             "check_timeout": 60.0,
             "http_timeout": 1.0,
             "print_alert": False,
+            "hooks_dir": self.hooks_dir,
+            "sweep_timeout": 30.0,
         }
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -351,6 +380,45 @@ class Refuses(Harness):
         messages = self.run_follow(now=1_001_200.0)
         self.assertEqual(len(messages), 1)
         self.assertIn("CANNOT FETCH origin/main", messages[0])
+
+
+class PrePushHooks(Harness):
+    """Every run makes one pass of the leak check's hook sweep (dispatch://INFRA-993, BET-589)."""
+
+    def sweeps(self) -> list[str]:
+        path = Path(f"{self.fake_log}.sweep")
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_one_pass_over_both_roots_and_never_the_loop(self) -> None:
+        os.environ["FAKE_SWEEP"] = "installed"
+        self.assertEqual(self.run_follow(), [])
+        self.assertEqual(self.sweeps(), [f"sweep /fast /slow here={self.hooks_dir}"])
+        self.assertEqual(self.state_data()["last_outcome"], "ok")
+
+    def test_a_checkout_it_cannot_hook_alerts_once_and_clears(self) -> None:
+        os.environ["FAKE_SWEEP"] = "failed"
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED", messages[0])
+        self.assertIn("/src/broken", messages[0])
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        os.environ["FAKE_SWEEP"] = "ok"
+        cleared = self.run_follow(now=1_001_200.0)
+        self.assertEqual(len(cleared), 1)
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED cleared", cleared[0])
+
+    def test_a_pass_past_its_bound_is_killed_and_alerts(self) -> None:
+        os.environ["FAKE_SWEEP"] = "hang"
+        messages = self.run_follow(sweep_timeout=1.0)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("did not end in 1s and was killed", messages[0])
+
+    def test_a_missing_sweep_alerts(self) -> None:
+        (self.hooks_dir / "sweep-hooks.sh").unlink()
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("sweep-hooks.sh is missing", messages[0])
+        self.assertIn("--only prepush", messages[0])
 
 
 class TargetBytes(Harness):

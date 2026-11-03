@@ -27,7 +27,12 @@ What one run does:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins (the plugins main pins, the
      tracked lock never written), then `devbox/sami-devbox-check --pins` (the check's knives and
      mise-pin lines).
-  7. Say each new condition once, all of one run's in one message; say it again once after
+  7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
+     (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
+     devbox/sami-devbox-provision's step prepush installs). It installs the pre-push hook in every
+     checkout of a public repository under its roots that lacks it; a checkout it cannot hook, a
+     pass that does not end within --sweep-timeout, or a missing sweep is a condition.
+  8. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
 
 It never stashes, resets, rebases, abandons, restores or deletes, and discards only an edit whose
@@ -48,6 +53,7 @@ import re
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -79,6 +85,7 @@ HEADLINE = {
     "kept-file": "MAIN CHANGES A KEPT FILE",
     "merge": "FAST-FORWARD FAILED",
     "tools": "TOOLS NOT INSTALLED",
+    "hooks": "PRE-PUSH HOOK NOT INSTALLED",
 }
 KINDS = tuple(HEADLINE)
 # A tracked exception file may differ from its commit in the work tree or the index; any other
@@ -418,6 +425,68 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
     return ""
 
 
+# ------------------------------------------------------------------------------- pre-push hooks
+
+# One pass of sweep-hooks.sh: the script loops for ever, so its code up to the loop (`i=0`) is
+# loaded and `sweep` runs once over the script's own roots, with its log in a temp file.
+SWEEP_ONCE = (
+    'eval "$(sed "/^i=0\\$/,\\$d" "$1")" && here=$2 && log=$3'
+    ' && sweep "${fast_roots[@]}" "${slow_roots[@]}"'
+)
+SWEEP_SUMMARY_RE = re.compile(r" sweep \[[^\]]*\]: (\d+) checkouts.*, (\d+) installed, (\d+) failed$")
+
+
+def sweep_hooks(options: argparse.Namespace) -> str:
+    """"" when one sweep pass left every public checkout with the pre-push hook, else why.
+
+    Bounded by --sweep-timeout: on timeout the pass's whole process group is killed. A full pass
+    on sami-devbox (148 public checkouts, /mnt/nvme/sami included) took about 20 s on 2026-11-03.
+    """
+    script = options.hooks_dir / "sweep-hooks.sh"
+    if not script.is_file():
+        return (
+            f"{display_path(script)} is missing, so no checkout's pre-push hook was checked or installed."
+            " Install it from sami-rocqperf: devbox/sami-devbox-provision --only prepush."
+        )
+    with tempfile.TemporaryDirectory(prefix="dotfiles-follow-sweep-") as tmp:
+        sweep_log = Path(tmp) / "sweep.log"
+        argv = ["nice", "-n", "19", "ionice", "-c", "3", "bash", "-c", SWEEP_ONCE, "_",
+                str(script), str(options.hooks_dir), str(sweep_log)]
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        except OSError as error:
+            return f"the hook sweep could not start: {error}"
+        try:
+            out, _ = proc.communicate(timeout=options.sweep_timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, 9)
+            except OSError:
+                pass
+            proc.communicate()
+            return (
+                f"one pass of {display_path(script)} did not end in {options.sweep_timeout:.0f}s and was killed,"
+                " so some checkouts may lack the pre-push hook."
+            )
+        lines = sweep_log.read_text().splitlines() if sweep_log.exists() else []
+    summary = next((m for m in map(SWEEP_SUMMARY_RE.search, reversed(lines)) if m), None)
+    if proc.returncode != 0 or summary is None:
+        return f"one pass of {display_path(script)} exited {proc.returncode} without its summary line:\n{tail((out or '') + chr(10).join(lines))}"
+    for line in lines:
+        if " INSTALLED " in line:
+            log(f"hooks: {line}")
+    log(f"hooks: {summary.group(1)} public checkout(s), {summary.group(2)} installed, {summary.group(3)} failed")
+    failed = [line.split(" FAILED ", 1)[1] for line in lines if " FAILED " in line]
+    if failed or summary.group(3) != "0":
+        return (
+            f"the hook sweep could not install the leak check's pre-push hook in {summary.group(3)} public checkout(s):\n"
+            + "\n".join(f"    {path}" for path in failed[:LIST_LIMIT])
+            + f"\n  Install it by hand: {display_path(options.hooks_dir / 'install-prepush-hook.sh')} <checkout>."
+        )
+    return ""
+
+
 # ------------------------------------------------------------------------------- state
 
 
@@ -615,6 +684,10 @@ def run_once(options: argparse.Namespace) -> int:
     data = state.data
     incidents: dict = data.setdefault("incidents", {})
     found, judged, facts = assess_and_follow(repo, options, data)
+    judged.add("hooks")
+    why = sweep_hooks(options)
+    if why:
+        found["hooks"] = why
 
     opened: dict[str, str] = {}
     escalated: dict[str, str] = {}
@@ -717,6 +790,13 @@ def main() -> int:
     parser.add_argument("--fetch-timeout", type=float, default=120.0)
     parser.add_argument("--mise-timeout", type=float, default=600.0)
     parser.add_argument("--check-timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--hooks-dir",
+        type=Path,
+        default=Path.home() / ".local/share/public-leak-check-hooks",
+        help="where step prepush put the leak-check tag's sweep-hooks.sh (default ~/.local/share/public-leak-check-hooks)",
+    )
+    parser.add_argument("--sweep-timeout", type=float, default=120.0, help="one hook sweep pass, killed after this many seconds (default 120)")
     parser.add_argument("--http-timeout", type=float, default=8.0)
     parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
     options = parser.parse_args()
