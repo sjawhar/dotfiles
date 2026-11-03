@@ -42,7 +42,9 @@ copy)
     python3 "$C/exclude-filter.py" /mnt/durable "$C/EXCLUDE" "$L/refused.rules" <"$L/kept.list" >"$L/kept.list.ok" 2>>"$L/excluded.txt"
     mv "$L/kept.list.ok" "$L/kept.list"
   fi
-  rsync -aHAX --numeric-ids --inplace --from0 --files-from="$L/kept.list" "$MNT/" /mnt/durable/ \
+  # Under cgroup-guard: rsync dirties millions of inodes in this cgroup, which must not die holding
+  # them (see cgroup-guard.sh). The guard drains it when rsync ends, by itself or on a signal.
+  "$C/cgroup-guard.sh" run -- rsync -aHAX --numeric-ids --inplace --from0 --files-from="$L/kept.list" "$MNT/" /mnt/durable/ \
     --info=stats2 >"$L/rsync.txt" 2>"$L/rsync.err" || echo "rsync rc=$?" >>"$L/rsync.err" ;;
 verify)
   # Expected: from the kept listing, per depth-2 group (files = non-directories, bytes = regular files).

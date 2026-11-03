@@ -47,6 +47,15 @@ process() {  # BOX TREE TARGET SHARD
 export -f process
 
 while :; do
+  # One-shot jobs that must run inside this unit (no new unit, no ssh scope): when owner-fix.go
+  # exists, apply owner-fix.z (apply-owners.py) once, between shards. Main, 2026-11-03.
+  # Its chowns dirty ~1 M inodes; inside this unit, cgroup-guard (pull-unit.sh) bounds them.
+  if [[ -e $CUT/owner-fix.go && -s $CUT/owner-fix.z ]] && mv "$CUT/owner-fix.z" "$CUT/owner-fix.running" 2>/dev/null; then
+    echo "owner-fix start $(date -u +%FT%TZ)" >>"$CUT/owner-fix.log"
+    sudo python3 "$CUT/apply-owners.py" "$CUT/owner-fix.running" >>"$CUT/owner-fix.log" 2>&1
+    echo "owner-fix end $(date -u +%FT%TZ) rc=$?" >>"$CUT/owner-fix.log"
+    mv "$CUT/owner-fix.running" "$CUT/owner-fix.done"
+  fi
   while read -r box tree target; do
     [[ -z $box || $box == \#* ]] && continue
     grep -q "^$box $tree zdirs ok " "$LOG" 2>/dev/null && continue

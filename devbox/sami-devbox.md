@@ -220,16 +220,27 @@ logs and skip shards already done.
 | shard lists, upload log, monitor log, EXCLUDE | rocqperf `/mnt/durable/sami/devbox-copy/` (nothing on its `/mnt/nvme` or `/`); leanperf `~/devbox-copy/` |
 | extract log (shard, bytes, times, result) | sami-devbox `/mnt/nvme/sami/cutover/bulk-copy.log` |
 
-### The puller on sami-devbox: never stop it without the reclaim
+### Every mass write runs under cgroup-guard; never stop the puller without the drain
 
-One persistent unit, `devbox-copy-pull`, runs both pull loops; start it with
-`pull-unit.sh start` (it sets `MemoryHigh=16G`, so reclaim keeps its page cache and the inodes
-charged to it bounded while it runs). **Never stop this unit except with `pull-unit.sh stop`**,
-which writes the cgroup's own size to its `memory.reclaim` until it holds under 256 MiB, and only
-then stops it. To pause the copy, stop the uploads on the old boxes, not the puller (see "Known
-issues": a plain stop after about 7 TiB of extracts hung `sync` and `umount` until a reboot).
-Test of 2026-11-03 (198,279 files, 11 GiB): with the reclaim first, one `inode_switch_wbs` event
-in the 60 s after the stop and no hung umount.
+A cgroup must never end holding millions of the inodes it wrote. When it does, this kernel
+(7.0.0-1014-gcp, before torvalds f6988c90671e) moves them to the parent at 1-200 inodes/s,
+slowing as it goes, and every umount and `sync` hangs behind it until a reset (2026-11-02, and
+2026-11-03 12:05Z: `devbox-copy-snappar`, 15 rsyncs with `MemoryHigh=16G`, ended by itself
+holding ~15 M inodes; 16G of slab is ~13 M XFS inodes, so `MemoryHigh` does not bound them, and
+the reclaim before stop ran only for `pull-unit.sh stop`).
+
+- **Any job that writes or chowns many files** (rsync, tar, cp, `chown -R`, `apply-owners.py`)
+  runs as `cgroup-guard.sh run -- CMD`, once at the top of its cgroup. The guard keeps the
+  cgroup's slab under 1 GiB (~800k inodes) while CMD runs and drains it to under 256 MiB when CMD
+  ends, by itself or on INT/TERM. `snapshot-copy.sh copy` and `pull-unit.sh start` do this. A
+  mass write in an ssh session's scope dies with the session: run it inside a guarded unit.
+- **The puller**: one persistent unit, `devbox-copy-pull`, runs both pull loops; start it with
+  `pull-unit.sh start`. **Never stop it except with `pull-unit.sh stop`**, which drains the
+  cgroup first (`GUARD_CG=… cgroup-guard.sh drain`) and only then stops it. To pause the copy,
+  stop the uploads on the old boxes, not the puller.
+- Test of 2026-11-03 (198,279 files, 11 GiB): with the reclaim first, one `inode_switch_wbs`
+  event in the 60 s after the stop and no hung umount. The guard's own tests:
+  `scripts/tests/test_bulk_copy_cgroup_guard.py`.
 
 Data a lane owns may be marked `.no-offbox` or listed in `EXCLUDE`; `upload.sh` refuses to start
 without `EXCLUDE`, `exclude-filter.py`, `offbox-gate.py` and `no-offbox`, and checks each shard
