@@ -11,7 +11,10 @@
 //
 // A skill is in context when, on the branch from its lower bound, a `skill-prompt` custom message
 // names it (a /skill: prompt or an autoloaded skill) or a `read skill://<name>` (or
-// `skill://<name>/SKILL.md`) call has a non-error result. The lower bound is the newest boundary:
+// `skill://<name>/SKILL.md`, or a file path ending `<name>/SKILL.md`) call has a non-error result.
+// The file path counts because a session's loadable skills need not include the skill: there
+// `read skill://<name>` answers "Unknown skill", so the refusal also names the skill's file in the
+// dotfiles, which any session can read. The lower bound is the newest boundary:
 // the entry after the latest reset (/clear), or the latest compaction's first kept entry. A read in
 // the same assistant message as the gated call has no result yet when the call is checked, so it
 // does not count; the refusal says so.
@@ -25,6 +28,8 @@
 // that run the command after them may come first (sudo, env, VAR=value, timeout, nice, nohup, time,
 // a shell's -c, secrets … --, do, then and the like), and the command may be named by its path. A
 // helper an earlier cell defined, or a script a write created and a later call runs, is not read.
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 type Input = Record<string, unknown>;
@@ -34,6 +39,15 @@ type Ctx = { sessionManager: { getBranch: () => readonly Entry[] } };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const SKILL_READ = /^skill:\/\/([^/\s?#]+)(?:\/SKILL\.md)?$/;
+// A whole-file read of a skill's SKILL.md by file path (no line selector): the skill's directory name.
+const SKILL_FILE_READ = /(?:^|\/)([^/\s:]+)\/SKILL\.md$/;
+/** The dotfiles' own skill directory, resolved from this module's real path (omp/extensions/experiments). */
+const SKILLS_DIR = join(import.meta.dir, "..", "..", "..", "plugins", "sjawhar", "skills");
+/** The file a session can read for `skill` when skill:// does not resolve it; undefined when the dotfiles do not hold it. */
+export function skillFile(skill: string): string | undefined {
+	const file = join(SKILLS_DIR, skill, "SKILL.md");
+	return existsSync(file) ? file : undefined;
+}
 
 // eval code that shells out: a shell API in the code (Python's bare `exec(` runs code, not a shell), or in a Python cell
 // an IPython shell escape (`!cmd`, `out = !cmd`, a `%%bash` or `%%sh` cell).
@@ -184,7 +198,7 @@ export function loadedSkills(branch: readonly Entry[]): Set<string> {
 			for (const block of message.content) {
 				if (!isRecord(block) || block.type !== "toolCall" || block.name !== "read" || typeof block.id !== "string") continue;
 				const target = isRecord(block.arguments) && typeof block.arguments.path === "string" ? block.arguments.path : "";
-				const match = SKILL_READ.exec(target);
+				const match = SKILL_READ.exec(target) ?? (target.startsWith("skill://") ? null : SKILL_FILE_READ.exec(target));
 				if (match) pending.set(block.id, match[1]);
 			}
 		} else if (message.role === "toolResult" && message.toolName === "read" && !message.isError && typeof message.toolCallId === "string") {
@@ -202,7 +216,12 @@ export default function skillGate(pi: ExtensionAPI): void {
 		const loaded = loadedSkills(ctx.sessionManager.getBranch());
 		const missing = needed.filter(skill => !loaded.has(skill));
 		if (missing.length === 0) return undefined;
-		const skills = missing.map(skill => `skill://${skill}`).join(" and ");
+		const skills = missing
+			.map(skill => {
+				const file = skillFile(skill);
+				return file ? `skill://${skill} (if that answers "Unknown skill", read the file ${file})` : `skill://${skill}`;
+			})
+			.join(" and ");
 		return {
 			block: true,
 			reason: `Skill gate: nothing in this ${event.toolName} call ran. Read ${skills} in a step of its own (a read in the same batch does not count), then send the whole call again.`,

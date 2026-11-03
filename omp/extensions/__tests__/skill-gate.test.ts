@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import feature, { loadedSkills, skillsNeeded } from "../experiments/skill-gate";
+import feature, { loadedSkills, skillFile, skillsNeeded } from "../experiments/skill-gate";
 
 type Entry = { type: string; id?: string; [key: string]: unknown };
 type Result = { block?: boolean; reason?: string } | undefined;
@@ -132,6 +132,24 @@ describe("the refusal", () => {
 		expect(g.fire("bash", { command: "jj git push" })).toBeUndefined();
 		g.branch.push(reset());
 		expect(g.fire("bash", { command: "jj git push" })?.block).toBe(true);
+	});
+	test("names every required skill's dotfiles file, and a whole-file read of it satisfies the gate", () => {
+		for (const skill of ["opening-a-pr", "using-jj"]) expect(skillFile(skill)).toMatch(new RegExp(`/plugins/sjawhar/skills/${skill}/SKILL\\.md$`));
+		const g = bind();
+		const r = g.fire("bash", { command: "jj git push" });
+		const file = skillFile("using-jj") as string;
+		expect(r?.reason).toContain(file);
+		const c = `r${++n}`;
+		g.branch.push(call("read", { path: file }, c), result(c));
+		expect(g.fire("bash", { command: "jj git push" })).toBeUndefined();
+	});
+	test("a ranged read of the file, or an unknown-skill error, does not count", () => {
+		const c = `r${++n}`;
+		const d = `r${++n}`;
+		expect(loadedSkills([call("read", { path: "/x/using-jj/SKILL.md:1-20" }, c), result(c)])).toEqual(new Set());
+		expect(loadedSkills([call("read", { path: "skill://using-jj" }, d), result(d, "read", true)])).toEqual(new Set());
+		const e = `r${++n}`;
+		expect(loadedSkills([call("read", { path: "plugins/sjawhar/skills/opening-a-pr/SKILL.md" }, e), result(e)])).toEqual(new Set(["opening-a-pr"]));
 	});
 	test("passes every other call untouched", () => {
 		expect(bind().fire("bash", { command: "jj log && gh pr view" })).toBeUndefined();
