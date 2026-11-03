@@ -274,16 +274,22 @@ before handing the call to the real one.
   its repeats instead of starting hundreds of SDK processes (2026-11-03 00:38Z: 67 calls gave up
   after 6 attempts in 40 s while the root disk was saturated). This applies
   when running it again repeats nothing: the reads (`config config-helper`, which kubectl runs,
-  `auth print-access-token` and the others), whose attempts are held back so only the last one
-  shows, and `storage ls|cat|du|cp|rsync` and `storage objects|buckets list|describe`, whose
+  `auth print-access-token` and the others, and any group's `describe`, `list` or
+  `get-iam-policy` before the command's own flags, such as `compute instances describe`, which
+  failed transcript-mirror.service at 01:52Z on 2026-11-03), whose attempts are held back so only
+  the last one shows, and `storage ls|cat|du|cp|rsync` and `storage objects|buckets list|describe`, whose
   stdout streams, so an attempt that wrote a byte of it is not run again. Never with
   `--delete-unmatched-destination-objects`, stdin (`-`, `-I`), or a pipe or device as a path;
-  `storage mv` and `rm` never (the shim's `is_lock_retry_safe` gives each verb's reason).
+  `storage mv` and `rm` never (the shim's `is_lock_retry_safe` gives each verb's reason). A
+  command that changes anything (`create`, `delete`, `ssh`, …) runs once: the crash text is the
+  same whether or not its request went out.
   Each attempt of such a call appends one line per kind of lock text it printed to
   `~/.local/state/gcloud-shim/locks.tsv` (`GCLOUD_LOCK_LOG` overrides the path):
-  `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<omp session>\t<caller>`, kind `store`
-  (the error above; outcome `retried` or `gave-up`) or `token-cache` (any other `database is
-  locked` line, the SDK's access-token cache warning; outcome `warning`). The session is
+  `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<omp session>\t<caller>`, kind
+  `credcache` (the crash text), `store` (a `gcloud storage` worker's line; both with outcome
+  `retried` or `gave-up`) or `token-cache` (any other `database is locked` line, the SDK's
+  access-token cache warning; outcome `warning`). Lines from before `credcache` existed (before
+  about 02:30Z on 2026-11-03) log both texts as `store`. The session is
   `OMP_SESSION_ID` (`-` outside omp); the caller is the program that ran gcloud and its script or
   `-m` module, never `-c` code. Count lock hits with `wc -l` or `cut -f2,3 | sort | uniq -c`.
   Calls outside the retry are not seen; a failed log write never changes the call.

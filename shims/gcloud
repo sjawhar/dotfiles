@@ -757,8 +757,15 @@ GCLOUD_LOCK_RETRY_SECONDS="${GCLOUD_LOCK_RETRY_SECONDS:-300}"
 GCLOUD_LOCK_RETRY_SLOTS="${GCLOUD_LOCK_RETRY_SLOTS:-8}"
 
 # True for a command that running again repeats nothing, and that reads no stdin. The command
-# words are read as read_command_words reads them, to the third word; a `-` anywhere, as an
+# words are read as read_command_words reads them, to the fourth word; a `-` anywhere, as an
 # entry or a value, or a --flags-file can mean stdin, and is never retried.
+# - Any other group's `describe`, `list` or `get-iam-policy` (GCLOUD_LOCK_READ_VERBS) as the
+#   second to fourth word: `compute instances describe`, `container clusters list`, `iam
+#   service-accounts keys list`. On 2026-11-03 at 01:52Z transcript-mirror.service failed when
+#   `compute instances describe` crashed on a locked credentials.db. A command that changes
+#   anything is never retried: the SDK prints the same crash text whether or not its request went
+#   out (the traceback goes only to gcloud's file log, which this shim turns off), so a second
+#   attempt could repeat a create or a delete. Output is held back, as for the reads below.
 # - Reads that print: `auth print-access-token|print-identity-token|list`, `config
 #   config-helper|get|get-value|list|configurations list|configurations describe`, and
 #   `storage sign-url`. GCLOUD_LOCK_RETRY_STREAM is 0: an attempt's output is held back, so only
@@ -772,22 +779,28 @@ GCLOUD_LOCK_RETRY_SLOTS="${GCLOUD_LOCK_RETRY_SLOTS:-8}"
 #   can drain. `storage mv` and `rm` remove a source and stay out. GCLOUD_LOCK_RETRY_STREAM is 1:
 #   stdout goes through as it comes (`storage cat` of a large object into a pipe), and an attempt
 #   that wrote a byte of it is never run again; stderr shows every attempt.
+GCLOUD_LOCK_READ_VERBS=(describe list get-iam-policy)
 GCLOUD_LOCK_RETRY_STREAM=0
 is_lock_retry_safe() {
-    local arg track_stripped=0
+    local arg track_stripped=0 path_words=-1
     local -a words=() all=("$@")
     for arg in "$@"; do
         case "$arg" in
             - | *=- | --flags-file | --flags-file=*) return 1 ;;
         esac
     done
-    while (($#)) && ((${#words[@]} < 3)); do
+    while (($#)) && ((${#words[@]} < 4)); do
         arg="$1"
         shift
         case "$arg" in
             -?*)
-                if is_value_flag "$arg" && [[ "$arg" != *=* ]] && (($#)); then
-                    shift
+                if is_value_flag "$arg"; then
+                    if [[ "$arg" != *=* ]] && (($#)); then
+                        shift
+                    fi
+                elif ! is_boolean_flag "$arg" && ((path_words < 0)); then
+                    # A command's own flag ends the command path: its value could be any word.
+                    path_words=${#words[@]}
                 fi
                 ;;
             *)
@@ -800,7 +813,7 @@ is_lock_retry_safe() {
                 ;;
         esac
     done
-    GCLOUD_LOCK_SUBCOMMAND="${words[*]}"
+    GCLOUD_LOCK_SUBCOMMAND="${words[*]:0:3}"
     case "${words[0]:-} ${words[1]:-}" in
         "auth print-access-token" | "auth print-identity-token" | "auth list" | \
             "config config-helper" | "config get" | "config get-value" | "config list" | \
@@ -815,7 +828,17 @@ is_lock_retry_safe() {
             [[ "${words[2]:-}" == list || "${words[2]:-}" == describe ]] || return 1
             ;;
         "storage ls" | "storage cat" | "storage du" | "storage cp" | "storage rsync") ;;
-        *) return 1 ;;
+        *)
+            # The read verb comes before any of the command's own flags, whose values (`compute
+            # ssh vm --command list`) are not the path, and not after `ssh` or `scp`.
+            ((path_words >= 0)) || path_words=${#words[@]}
+            [[ "${words[1]:-}" != ssh && "${words[1]:-}" != scp ]] || return 1
+            local i
+            for ((i = 1; i < path_words; i++)); do
+                contains_word "${words[i]}" "${GCLOUD_LOCK_READ_VERBS[@]}" && return 0
+            done
+            return 1
+            ;;
     esac
     for arg in "${all[@]}"; do
         case "$arg" in
@@ -853,8 +876,10 @@ run_streamed_attempt() {
 # Every lock text an attempt printed adds one line to GCLOUD_LOCK_LOG, so counting lock hits is
 # `wc -l`, not a scan of transcripts:
 # `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<session>\t<caller>`.
-# Kind `store` is GCLOUD_LOCK_ERROR, the locked store this retry handles; its outcome is
-# `retried` when the shim runs the call again, else `gave-up`. Kind `token-cache` is any other
+# Kinds are the two texts of GCLOUD_LOCK_ERROR, the locked store this retry handles: `credcache`
+# is the SDK's crash on a locked credentials.db (`gcloud crashed (OperationalError): database is
+# locked`), and `store` is a `gcloud storage` worker's `ERROR: database is locked`. Their outcome
+# is `retried` when the shim runs the call again, else `gave-up`. Kind `token-cache` is any other
 # line with `database is locked`, the SDK's warning that access_tokens.db was locked (`Could not
 # initialize access token cache schema: database is locked`, `Could not store access token in
 # cache: database is locked`); its outcome is `warning`, since the call goes on. The pid is the
@@ -898,7 +923,11 @@ log_lock_hits() {
     grep -qF -- "database is locked" "$err" 2>/dev/null || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ $GCLOUD_LOCK_ERROR ]]; then
-            [[ "$kinds" == *store* ]] || kinds+=" store"
+            if [[ "$line" == *"gcloud crashed"* ]]; then
+                [[ "$kinds" == *credcache* ]] || kinds+=" credcache"
+            else
+                [[ "$kinds" == *" store"* ]] || kinds+=" store"
+            fi
         elif [[ "$line" == *"database is locked"* ]]; then
             [[ "$kinds" == *token-cache* ]] || kinds+=" token-cache"
         fi
@@ -916,7 +945,7 @@ log_lock_hits() {
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 0
     lock_caller
     for kind in $kinds; do
-        if [[ "$kind" == store ]]; then
+        if [[ "$kind" != token-cache ]]; then
             line="$outcome"
         else
             line=warning

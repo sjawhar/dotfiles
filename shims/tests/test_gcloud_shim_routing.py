@@ -1551,10 +1551,34 @@ class GcloudLockedStoreRetry(unittest.TestCase):
             self.assertLess(delay, 0.6 * attempt)
         self.assertLessEqual(max(delays), 6)
 
+    def test_any_groups_describe_list_and_get_iam_policy_are_run_again(self):
+        """On 2026-11-03 at 01:52Z transcript-mirror.service failed when `compute instances
+        describe` crashed on a locked credentials.db."""
+        for args in (["compute", "instances", "describe", "machcsl-gcp-4", "--zone", "us-east1-b"],
+                     ["--project", "p", "container", "clusters", "list"],
+                     ["beta", "iam", "service-accounts", "keys", "list", "--iam-account=a@b"],
+                     ["projects", "get-iam-policy", "p", "--format=json"]):
+            with self.subTest(args=args):
+                self.calls.unlink(missing_ok=True)
+                self.stub_gcloud_crashing(times=1)
+                result = self.run_shim(args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "OK-2\n")
+                self.assertNotIn(LOCK_CRASH, result.stderr)
+                self.assertEqual(self.call_count(), 2)
+
     def test_other_failures_and_other_commands_run_once(self):
+        """A command that changes anything runs once: the crash text is the same whether or not
+        its request went out."""
         cases = (
             (["compute", "instances", "create", "vm"], LOCK_CRASH),
+            (["compute", "instances", "delete", "vm", "--zone", "z"], LOCK_CRASH),
+            (["compute", "ssh", "vm", "--zone", "z", "--command", "list"], LOCK_CRASH),
+            (["compute", "ssh", "vm", "--command", "list"], LOCK_CRASH),
+            (["compute", "ssh", "list"], LOCK_CRASH),
+            (["run", "jobs", "execute", "j", "--args", "describe"], LOCK_CRASH),
             (["container", "clusters", "get-credentials", "c"], LOCK_CRASH),
+            (["storage", "rm", "gs://b/list"], LOCK_CRASH),
             (["auth", "login"], LOCK_CRASH),
             (["auth", "print-access-token", "-"], LOCK_CRASH),
             (["config", "config-helper", "--flags-file=-"], LOCK_CRASH),
@@ -1604,7 +1628,7 @@ class GcloudLockLog(unittest.TestCase):
                                  "--format=json"], capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = self.log_rows()
-        self.assertEqual(sorted(r[1:4] for r in rows), [["store", "retried", "config config-helper"],
+        self.assertEqual(sorted(r[1:4] for r in rows), [["credcache", "retried", "config config-helper"],
                                                         ["token-cache", "warning", "config config-helper"]])
         for row in rows:
             self.assertEqual(len(row), 7)
