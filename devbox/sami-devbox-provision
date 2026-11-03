@@ -193,6 +193,20 @@ step_secrets() {
         printf '%s\n' $AGENT_AZURE_CLIENT_ID > ~/.config/agent-azure/client-id
         chmod 0644 ~/.config/agent-azure/client-id
         ls -l ~/.config/agent-azure/client-id"
+    # The public-text leak check shims/gh requires. It has no source repository (it lives
+    # unversioned in this machine's /mnt/nvme/sami/frac-verify/shared/leak-check), so the VM gets
+    # the bytes this machine's pointer names, in ~/.local/share/public-leak-check (agentbox/mounts
+    # gives boxes that directory), with its pointer. sami-devbox-check compares the sha256 with
+    # this machine's on every run; run `--from secrets` again when it differs.
+    local plc
+    plc="$(dirname "$(cat "$HOME/.config/public-leak-check/path")")" || die "no ~/.config/public-leak-check/path here"
+    rsync -a -e "ssh -o BatchMode=yes" "$plc/public-leak-check.sh" "$plc/README.md" "$plc/must-pass-lines.txt" "sami@$VM:/tmp/plc-stage/" \
+        || die "could not copy the public-text leak check from $plc"
+    remote 'set -e; d=$HOME/.local/share/public-leak-check; mkdir -p "$d" "$HOME/.config/public-leak-check"
+        for f in README.md must-pass-lines.txt; do install -m 0644 "/tmp/plc-stage/$f" "$d/.$f.new" && mv -f "$d/.$f.new" "$d/$f"; done
+        install -m 0555 /tmp/plc-stage/public-leak-check.sh "$d/.public-leak-check.sh.new" && mv -f "$d/.public-leak-check.sh.new" "$d/public-leak-check.sh"
+        printf "%s\n" "$d/public-leak-check.sh" > "$HOME/.config/public-leak-check/path"
+        rm -rf /tmp/plc-stage; sha256sum "$d/public-leak-check.sh"'
 }
 
 step_tools() {

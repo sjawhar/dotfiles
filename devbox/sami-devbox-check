@@ -681,6 +681,23 @@ host_packages() {
     [[ -z "$missing" ]] && ok "lane packages: opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64 resolve" || fail "lane packages: missing command(s):$missing"
 }
 
+# The public-text leak check. It has no source repository: it lives unversioned in
+# sami-rocqperf's /mnt/nvme/sami/frac-verify/shared/leak-check, edited in place, and the dotfiles
+# do not carry it. This machine holds a copy in ~/.local/share/public-leak-check (made over
+# Tailscale SSH from sami-rocqperf, 2026-11-02 21:40Z, refreshed 2026-11-03 09:31Z), so the copy
+# must stay byte for byte the file sami-rocqperf's own pointer names.
+leak_check_host_check() {
+    local here there out rc=0
+    here="$(cat "$HOME/.config/public-leak-check/path" 2>&1)"
+    [[ -x "$here" ]] || { fail "public-leak-check: the pointer names '$here', which is not an executable file here"; return; }
+    out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf 'sha256sum "$(cat ~/.config/public-leak-check/path)"' </dev/null 2>&1)" || rc=$?
+    (( rc == 0 )) || { fail "public-leak-check: sha256sum of sami-rocqperf's copy: exit $rc: $(tail -1 <<<"$out")"; return; }
+    there="${out%% *}"
+    out="$(sha256sum "$here")"
+    [[ "${out%% *}" == "$there" ]] && ok "public-leak-check: $here is byte for byte sami-rocqperf's (sha256 ${there:0:12})" \
+        || fail "public-leak-check: $here (sha256 ${out:0:12}) differs from sami-rocqperf's (sha256 ${there:0:12}); copy it again: sami-devbox-provision --from secrets"
+}
+
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
@@ -706,6 +723,7 @@ host() {
     host_logins
     github_check "on the host"
     rocqperf_check
+    leak_check_host_check
     ossv_tree_host_check
     n6_check "on the host"
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"

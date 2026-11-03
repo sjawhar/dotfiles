@@ -66,6 +66,14 @@ keeps every `SECRET_FILES` path that git tracks (read from this list, not a seco
 refuses on any other change; it also refuses when main changes such a file
 (`scripts/dotfiles-follow.md`).
 
+The public-text leak check that `shims/gh` requires has no source repository: it lives,
+unversioned and edited in place, in sami-rocqperf's `/mnt/nvme/sami/frac-verify/shared/leak-check`,
+and the dotfiles do not carry it. The `secrets` step copies the files sami-rocqperf's
+`~/.config/public-leak-check/path` names into `~/.local/share/public-leak-check` here and points
+this machine's pointer at it; `agentbox/mounts` gives boxes that directory. `sami-devbox-check`
+compares its sha256 with sami-rocqperf's on every run and FAILs when they differ; then run
+`sami-devbox-provision --from secrets` again.
+
 ## A2: each check, its command, what passes
 
 Host half (`sami-devbox-check`, on sami-devbox as sami):
