@@ -1562,6 +1562,42 @@ class AgentboxMove(unittest.TestCase):
         self.assertFalse((self.root / "RSYNC").exists())
         self.assertNotIn("respawn-pane", self.local_tmux.read_text(encoding="utf-8") if self.local_tmux.exists() else "")
 
+    def test_a_dry_run_lists_the_copy_while_the_target_is_not_ready(self) -> None:
+        """S3 and LINUX-1248, 2026-11-03: with sami-devbox's target-ready gone, a dry run stopped
+        at that refusal and showed nothing of what a move would copy."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        (self.cutover / "target-ready").unlink()
+        dry = self.move_to("--to devbox --dry-run")
+        self.assertEqual(dry.returncode, 1, dry.stdout)
+        self.assertIn(f"  {self.worktree}\n", dry.stdout)
+        self.assertIn("the move would REFUSE now, before any hang-up: devbox has no", dry.stderr)
+        self.assertNotIn("stopped with exit", dry.stderr)
+        self.assertEqual(self.jobs(), [])
+
+    def test_a_copy_destination_the_target_will_not_let_it_write_refuses_before_the_hang_up(self) -> None:
+        """LINUX-1248's first move (2026-11-03 02:48Z) hung up, then rsync failed on a directory
+        on the target it could not write (an empty one owned by root, left by docker), and the
+        group rolled back. The move now asks first. The stub's target is this machine, so an
+        unwritable directory here stands in for one there."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.lane.chmod(0o555)
+        try:
+            refused = self.move_to()
+            dry = self.move_to("--to devbox --dry-run")
+        finally:
+            self.lane.chmod(0o755)
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn(f"nothing was hung up: the copy cannot write on devbox: {self.lane} ({self.lane} is not writable by", refused.stderr)
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(dry.returncode, 1)
+        self.assertIn("the move would REFUSE now, before any hang-up: the copy cannot write on devbox", dry.stderr)
+
     def test_nothing_is_hung_up_when_the_target_is_not_ready_or_does_not_answer(self) -> None:
         self.moving_session()
         self.set_pids(999999901)

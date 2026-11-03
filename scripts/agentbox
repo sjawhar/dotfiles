@@ -3826,6 +3826,39 @@ move_to_preflight() {
     return 0
 }
 
+# move_to_dests_writable TARGET: every path the copy writes on the target must be writable by the
+# move's user: the path itself when it exists, else its nearest existing ancestor. An EMPTY
+# directory owned by root there is what docker leaves when a box is started with a --dir that did
+# not exist yet; it is removed with `sudo -n rmdir` (empty only) and named. LINUX-1248's first
+# move (2026-11-03 02:48Z) hung up, then failed in rsync on such a directory, made at 02:18Z, and
+# rolled back. Asked BEFORE the hang-up; sets MOVE_TO_WHY and returns 1 when a path stays unwritable.
+move_to_dests_writable() {
+    local target="$1" out
+    local -a paths=(${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"} ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"})
+    (( ${#paths[@]} )) || return 0
+    # shellcheck disable=SC2016  # expanded on the target
+    out="$(printf '%s\0' "${paths[@]}" | move_remote "$target" '
+        while IFS= read -r -d "" p; do
+            q="$p"
+            if [ -d "$q" ] && [ ! -w "$q" ] && [ "$(stat -c %u "$q")" = 0 ] && [ -z "$(ls -A "$q" 2>/dev/null)" ]; then
+                if sudo -n rmdir "$q" 2>/dev/null; then echo "REMOVED $q"; else echo "BLOCKED $q (an empty directory owned by root, and sudo -n rmdir failed)"; continue; fi
+            fi
+            while [ ! -e "$q" ] && [ "$q" != / ]; do q="$(dirname "$q")"; done
+            if [ -d "$q" ]; then [ -w "$q" ] || echo "BLOCKED $p ($q is not writable by $(id -un))"
+            else [ -w "$q" ] || [ "$q" != "$p" ] || echo "BLOCKED $p (not writable by $(id -un))"; fi
+        done' 2>&1)" || { MOVE_TO_WHY="the copy destinations on $target could not be checked: $out"; return 1; }
+    local line blocked=()
+    while IFS= read -r line; do
+        case "$line" in
+            "REMOVED "*) echo "agentbox: removed the empty root-owned directory ${line#REMOVED } on $target (a box started with it before it existed)" >&2 ;;
+            "BLOCKED "*) blocked+=("${line#BLOCKED }") ;;
+        esac
+    done <<<"$out"
+    (( ${#blocked[@]} == 0 )) && return 0
+    MOVE_TO_WHY="the copy cannot write on $target: $(printf '%s; ' "${blocked[@]}")fix those there first"
+    return 1
+}
+
 # move_to_cwds_present TARGET CWD…: each working directory the copy does not bring (one every
 # box has, or a root of many sessions' trees, which a move never copies) must already be on the
 # target, since a box cannot start without its first --dir and --drop-gone-dirs never drops it.
@@ -4620,7 +4653,11 @@ cmd_move_to() {
     if (( ${#missing[@]} )); then
         die "group $group (${MOVE_TO_GROUP[*]}) cannot move; nothing was hung up: $(printf '%s; ' "${missing[@]}")"
     fi
-    move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
+    # A dry run goes on past a refusal of the target's checks and says each one at the end, so
+    # the copy list is seen even while the target is not ready; a real run stops at the first.
+    local would=()
+    move_to_or_would() { if $dry; then would+=("$1"); else die "no move to $target; nothing was hung up: $1"; fi; }
+    move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || move_to_or_would "$MOVE_TO_WHY"
     local copy="" cwds=()
     for s in "${MOVE_TO_GROUP[@]}"; do
         copy+="${MT_COPY[$s]}"$'\n'
@@ -4628,8 +4665,9 @@ cmd_move_to() {
     done
     move_to_copy_lists <<<"$copy"
     mapfile -t cwds < <(printf '%s\n' "${members[@]}" | jq -r .cwd)
-    move_to_cwds_present "$target" "${cwds[@]}" || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
-    move_to_offbox || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
+    move_to_cwds_present "$target" "${cwds[@]}" || move_to_or_would "$MOVE_TO_WHY"
+    move_to_dests_writable "$target" || move_to_or_would "$MOVE_TO_WHY"
+    move_to_offbox || move_to_or_would "$MOVE_TO_WHY"
     # What of THIS session dies with the hang-up; each other member asks its own when it runs this.
     move_orphans_gate "$MOVE_SELF_PID" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"
     # Each other session of the group says itself that it is at its safe point.
@@ -4652,6 +4690,11 @@ cmd_move_to() {
     for m in "${members[@]}"; do
         jq -r --arg t "$MOVE_TO_AGENTBOX" '"  \(.sid): tmux window moved:\(.sid[0:8]) on the target runs \($t) new \(.spec | join(" ")) -- omp --resume \(.resume)"' <<<"$m"
     done
+    if $dry && (( ${#would[@]} )); then
+        MOVE_SAID=1
+        printf 'agentbox: --dry-run: the move would REFUSE now, before any hang-up: %s\n' "${would[@]}" >&2
+        return 1
+    fi
     if (( ${#waiting[@]} )); then
         for s in "${waiting[@]}"; do
             IFS="$SEP" read -r _ m _ <<<"${MT_ROW[$s]}"
@@ -4796,7 +4839,8 @@ move_to_run() {
     # The ready files are spent: a member that comes back here starts its next move afresh.
     for ((i = 0; i < n; i++)); do rm -f "$MOVE_TO_JOBS/ready/${sids[i]}"; done
     # 0. The checks again, right before the hang-up: minutes may have passed.
-    if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" || ! move_to_offbox; then
+    if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
+        || ! move_to_dests_writable "$target" || ! move_to_offbox; then
         say "refused, nothing was hung up: $MOVE_TO_WHY"
         for ((i = 0; i < n; i++)); do
             envoy send --source envoy "${sids[i]}" "agentbox: the move to $target did not start and this session was not hung up: $MOVE_TO_WHY. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
