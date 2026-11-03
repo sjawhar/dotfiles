@@ -49,6 +49,8 @@ omp/models.local.yml
 # The machine's own model routing (roles and fallback chains): on sami-rocqperf it points the Claude roles at the
 # OSS Verify model gateway. shims/omp loads it after omp/config.yml for the default profile only.
 omp/config.local.yml
+# backups of the machine-local files above (2026-11-03: four sat staged in the checkout)
+omp/*.local.yml.*
 # No longer read; ignored so a copy left on a machine is never snapshotted or committed.
 envoy/env.local
 # cosmic-config writes each setting through a temp directory beside it
