@@ -563,18 +563,27 @@ def test_a_failed_wait_kills_the_group_before_it_reports(tmp_path):
             process.wait()
 
 
-def test_schedule_kills_running_jobs_when_a_launch_fails(monkeypatch, tmp_path):
-    """A starts at 06:30 PST (14:30Z); B, due at the same time, names a missing program. The scheduler exits on B's
-    error, and A's group must not outlive the scheduler that enforced its timeout."""
+def test_one_job_that_cannot_start_or_fails_stops_only_itself(monkeypatch, tmp_path, capsys):
+    """At 06:30 PST (14:30Z) five real jobs fire: A succeeds, B's cwd does not exist (the 2026-11-03 17:53Z case), C
+    names a program not on PATH, D exits 3, E is a wrapper whose child would outlive it. The scheduler reports B and C
+    by name when it loads the file, records every outcome in jobs-status.json and keeps running; when it ends, E's
+    group must not outlive it."""
     import json
+    import queue
     import signal
 
     pid_file = tmp_path / "grandchild.pid"
+    marker = tmp_path / "a-ran"
+    missing = tmp_path / "no-such-dir"
     jobs = tmp_path / "jobs.json"
     jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [
-        {"name": "A", "at": ["06:30"], "command": _grandchild_command(pid_file), "cwd": str(tmp_path),
+        {"name": "A", "at": ["06:30"], "command": ["sh", "-c", f"touch {marker}"], "cwd": str(tmp_path),
          "timeout_s": 600},
-        {"name": "B", "at": ["06:30"], "command": [str(tmp_path / "missing")], "cwd": str(tmp_path),
+        {"name": "B", "at": ["06:30"], "command": ["true"], "cwd": str(missing), "timeout_s": 600},
+        {"name": "C", "at": ["06:30"], "command": ["no-such-program-anywhere"], "cwd": str(tmp_path),
+         "timeout_s": 600},
+        {"name": "D", "at": ["06:30"], "command": ["sh", "-c", "exit 3"], "cwd": str(tmp_path), "timeout_s": 600},
+        {"name": "E", "at": ["06:30"], "command": _grandchild_command(pid_file), "cwd": str(tmp_path),
          "timeout_s": 600},
     ]}))
 
@@ -587,38 +596,109 @@ def test_schedule_kills_running_jobs_when_a_launch_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(pilot, "start_scheduled_command", lambda job: launched.append(real_start(job)) or launched[-1])
     monkeypatch.setattr(pilot, "start_heartbeat", lambda state, on_death=None: Alive())
     at = datetime(2026, 11, 1, 14, 30, tzinfo=UTC)
+    state = tmp_path / "state"
 
-    with pytest.raises(FileNotFoundError):
-        pilot.schedule(jobs, tmp_path / "state", api=object(), clock=lambda: at,
-                       wait=lambda results, seconds: pytest.fail("the scheduler must exit before it waits"))
+    def wait(results, seconds):
+        try:
+            return [results.get(timeout=5)]
+        except queue.Empty:
+            raise Stop from None  # A and D ended and were recorded; only E still runs
 
-    [process] = launched
-    assert process.returncode is not None, "A's wrapper was not reaped"
-    # The scheduler can kill A's group before its shell forks the child or writes the pid file; the whole group
-    # dies either way, so a missing pid file is a pass, not a hang.
+    with pytest.raises(Stop):
+        pilot.schedule(jobs, state, api=object(), clock=lambda: at, wait=wait)
+
+    err = capsys.readouterr().err
+    assert f"pilot-schedule job B: cwd {missing} is not a directory on this machine" in err
+    assert "pilot-schedule job C: command no-such-program-anywhere is not on the scheduler's PATH" in err
+    assert "pilot-schedule job B failed for 2026-11-01T14:30:00Z: start failed:" in err
+    assert "pilot-schedule job D failed for 2026-11-01T14:30:00Z: exit 3 (1 in a row)" in err
+    assert marker.exists()
+    status = json.loads((state / "jobs-status.json").read_text())["jobs"]
+    assert status["A"]["last"]["outcome"] == "exit 0" and status["A"]["consecutive_failures"] == 0
+    assert status["B"]["last"]["outcome"].startswith("start failed: [Errno 2]")
+    assert status["B"]["consecutive_failures"] == 1 and "is not a directory" in status["B"]["problems"][0]
+    assert status["C"]["consecutive_failures"] == 1 and status["C"]["last"]["outcome"].startswith("start failed")
+    assert status["D"]["last"]["outcome"] == "exit 3" and status["D"]["consecutive_failures"] == 1
+    assert status["E"]["last"] is None
+
+    [*_, process] = launched
+    assert process.returncode is not None, "E's wrapper was not reaped"
     if not pid_file.exists():
         return
     grandchild = int(pid_file.read_text())
     try:
-        assert _dies(grandchild), f"A's grandchild {grandchild} outlived the scheduler"
+        assert _dies(grandchild), f"E's grandchild {grandchild} outlived the scheduler"
     finally:
         if _alive(grandchild):
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
 
 
+def test_a_jobs_file_broken_at_a_reload_keeps_the_jobs_last_read(monkeypatch, tmp_path, capsys):
+    """Another session leaves the jobs file half-written after A starts at 14:30; B still runs at 14:31."""
+    jobs = tmp_path / "jobs.json"
+
+    def record(now):
+        if now > datetime(2026, 11, 1, 14, 30, tzinfo=UTC):
+            jobs.write_text('{"timezone": "America/Los_Angeles", "jobs": [')
+        return due_record()
+
+    ran, state = drive_schedule(monkeypatch, tmp_path, datetime(2026, 11, 1, 14, 29, tzinfo=UTC),
+                                {"A": 10, "B": 1}, runs=2, record=record)
+
+    assert ran == [("A", "2026-11-01T14:30:00Z"), ("B", "2026-11-01T14:31:00Z")]
+    assert "unreadable, keeping the jobs last read" in capsys.readouterr().err
+
+
+def test_a_jobs_file_unreadable_when_the_scheduler_starts_ends_it(tmp_path):
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text("{")
+    with pytest.raises(ValueError):
+        pilot.schedule(jobs, tmp_path / "state", api=object(), clock=lambda: datetime(2026, 11, 1, tzinfo=UTC),
+                       wait=lambda results, seconds: pytest.fail("must not wait"))
+
+
 @pytest.mark.parametrize("timeout", ["1", 0, -5, True, 1.5, None])
-def test_jobs_file_refuses_a_timeout_that_is_not_a_positive_integer(tmp_path, timeout):
+def test_jobs_file_drops_only_the_job_whose_timeout_is_not_a_positive_integer(tmp_path, timeout):
     import json
 
     jobs = tmp_path / "jobs.json"
-    job = {"name": "A", "at": ["06:30"], "command": ["true"], "cwd": ".", "timeout_s": timeout}
-    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [job]}))
-    with pytest.raises(ValueError, match="timeout_s"):
+    good = {"name": "A", "at": ["06:30"], "command": ["true"], "cwd": ".", "timeout_s": 1}
+    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [
+        {**good, "name": "bad", "timeout_s": timeout}, good]}))
+    _, loaded, dropped = pilot._jobs(jobs)
+    assert [job["name"] for job in loaded] == ["A"]
+    assert "timeout_s" in dropped["bad"]
+
+
+def test_jobs_file_drops_malformed_entries_and_duplicates_by_name(tmp_path):
+    import json
+
+    jobs = tmp_path / "jobs.json"
+    good = {"name": "A", "at": ["06:30"], "command": ["true"], "cwd": ".", "timeout_s": 1}
+    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [
+        good, {"at": ["06:30"]}, {**good, "name": "late", "at": ["25:00"]}, {**good, "command": ["false"]}, "x"]}))
+    _, loaded, dropped = pilot._jobs(jobs)
+    assert loaded == [good]
+    assert set(dropped) == {"jobs[1]", "late", "A (jobs[3])", "jobs[4]"}
+    with pytest.raises(ValueError, match="unknown"):
+        jobs.write_text(json.dumps({"timezone": "Mars/Olympus", "jobs": []}))
         pilot._jobs(jobs)
 
-    jobs.write_text(json.dumps({"timezone": "America/Los_Angeles", "jobs": [{**job, "timeout_s": 1}]}))
-    assert pilot._jobs(jobs)[1][0]["timeout_s"] == 1
+
+def test_job_problems_name_a_missing_cwd_or_program(tmp_path):
+    script = tmp_path / "run"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    ok = {"cwd": str(tmp_path), "command": ["./run"]}
+    assert pilot.job_problems(ok) == []
+    assert pilot.job_problems({**ok, "command": ["sh", "-c", "true"]}) == []
+    assert pilot.job_problems({**ok, "cwd": str(tmp_path / "gone")}) == [
+        f"cwd {tmp_path / 'gone'} is not a directory on this machine",
+        "command ./run is not an executable file"]
+    assert pilot.job_problems({**ok, "command": []}) == ["command must be a non-empty list of strings: []"]
+    assert pilot.job_problems({**ok, "command": ["no-such-program-anywhere"]}) == [
+        "command no-such-program-anywhere is not on the scheduler's PATH"]
 
 
 def test_schedule_drops_only_times_already_past_when_the_process_started(monkeypatch, tmp_path):

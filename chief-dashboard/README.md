@@ -93,9 +93,17 @@ per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary`
   complete copy over it. It waits at most 10 minutes between cycles, and wakes early for a fire time or a job's end.
   Each job runs in its own process group: at its timeout (`timeout_s`, a positive integer of seconds) the whole group
   is killed and reaped (exit 124) before the job counts as ended, and so is a group whose wait fails. Whatever ends
-  the scheduler (an error, SIGTERM, the heartbeat's death) first kills and reaps every running group. A thread writes
-  `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if that thread dies, so a file older than 15
-  minutes means the scheduler is down.
+  the scheduler (SIGTERM, the heartbeat's death, a jobs file unreadable when it starts) first kills and reaps every
+  running group. A thread writes `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if that thread
+  dies, so a file older than 15 minutes means the scheduler is down.
+  One job's failure stops only that job. A job that cannot start (its `cwd` or program is missing), exits non-zero
+  or is killed at its timeout is logged to stderr by name and counted in `DIR/jobs-status.json` (per job: what is
+  wrong with it now, its last fire's outcome, its failures in a row); its fire counts as run, and it fires again at
+  its next time, however often it failed: nothing gives up on it, since the fix is in the jobs file and a missing
+  directory may come back. Every load checks each entry and names at once, on stderr and in that file, an entry it
+  left out (a missing key, a bad `at` or `timeout_s`, a second job of one name) and a job whose `cwd` or program is
+  missing now, then again only when that changes. A jobs file unreadable at a reload (another session's half-written
+  copy) keeps the jobs last read.
 - `census --stream KEY --state DIR [--out FILE]` prints the session ids of the stream's live top-level sessions on
   every machine, one per line, to freeze a baseline. A session is the stream's when this machine sees it in one of the
   stream's tmux windows (`sessions.py`), or sees its old pane there, which `agentbox move --to` leaves saying where

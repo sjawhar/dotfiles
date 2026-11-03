@@ -7,7 +7,8 @@ against: sessions that spread their work over many issues, or move parts elsewhe
 `measure` reads Dispatch events only, never transcripts, so every count can be checked against Dispatch.
 
 Nothing here writes to Dispatch or sends an Envoy message. The state directory holds the record copy, the snapshots,
-`started.tsv`, `pilot-sessions.txt`, the offline files, `fired-dues.json` and the scheduler's `heartbeat`."""
+`started.tsv`, `pilot-sessions.txt`, the offline files, `fired-dues.json`, the scheduler's `heartbeat` and its
+`jobs-status.json`."""
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -633,18 +635,70 @@ def _write_fired(state: Path, fired: dict[str, set[str]]) -> None:
         os.replace(partial, directory / "fired-dues.json")
 
 
-def _jobs(path: Path) -> tuple[str, list[dict]]:
+def _jobs(path: Path) -> tuple[str, list[dict], dict[str, str]]:
+    """The jobs file's timezone, its well-formed jobs, and why each other entry was left out, by its name (or
+    `jobs[INDEX]` when it has none). Only a file that is not a jobs file at all raises: one bad entry, which another
+    session may have just added, must not stop the jobs beside it."""
     data = json.loads(path.read_text())
-    if not isinstance(data.get("timezone"), str) or not isinstance(data.get("jobs"), list):
+    if not isinstance(data, dict) or not isinstance(data.get("timezone"), str) or not isinstance(data.get("jobs"), list):
         raise ValueError("jobs file must have string timezone and list jobs")
-    for job in data["jobs"]:
+    try:
+        ZoneInfo(data["timezone"])
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"jobs file timezone {data['timezone']!r} is unknown: {error}") from error
+    jobs: list[dict] = []
+    dropped: dict[str, str] = {}
+    for index, job in enumerate(data["jobs"]):
+        name = job.get("name") if isinstance(job, dict) else None
+        label = name if isinstance(name, str) and name else f"jobs[{index}]"
         required = ("name", "at", "command", "cwd", "timeout_s")
-        if any(key not in job for key in required) or not isinstance(job["at"], list) or not isinstance(job["command"], list):
-            raise ValueError(f"invalid job: {job!r}")
+        if (not isinstance(job, dict) or any(key not in job for key in required) or not isinstance(job["at"], list)
+                or not isinstance(job["command"], list)):
+            dropped[label] = f"invalid job, needs {', '.join(required)} with list at and command: {job!r}"
+            continue
         timeout = job["timeout_s"]
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
-            raise ValueError(f"invalid job: timeout_s must be a positive integer of seconds: {job!r}")
-    return data["timezone"], data["jobs"]
+            dropped[label] = f"invalid job: timeout_s must be a positive integer of seconds: {job!r}"
+            continue
+        if not all(isinstance(at, str) and re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", at) for at in job["at"]):
+            dropped[label] = f"invalid job: each at must be a local HH:MM: {job['at']!r}"
+            continue
+        if any(other["name"] == label for other in jobs):
+            dropped[f"{label} (jobs[{index}])"] = "duplicate job name: only its first entry runs"
+            continue
+        jobs.append(job)
+    return data["timezone"], jobs, dropped
+
+
+def job_problems(job: dict) -> list[str]:
+    """Why JOB cannot start now: a missing working directory or program, read as `start_scheduled_command` would
+    start it. The job stays scheduled, since the directory or program may exist by its next fire."""
+    problems: list[str] = []
+    cwd = Path(str(job["cwd"])).expanduser()
+    if not cwd.is_dir():
+        problems.append(f"cwd {job['cwd']} is not a directory on this machine")
+    command = job["command"]
+    if not command or not all(isinstance(word, str) for word in command):
+        problems.append(f"command must be a non-empty list of strings: {command!r}")
+        return problems
+    program = command[0]
+    if "/" in program:
+        path = Path(program).expanduser()
+        path = path if path.is_absolute() else cwd / path
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            problems.append(f"command {program} is not an executable file")
+    elif shutil.which(program) is None:
+        problems.append(f"command {program} is not on the scheduler's PATH")
+    return problems
+
+
+def _write_status(state: Path, status: dict) -> None:
+    """`DIR/jobs-status.json`: the jobs file's last load and each job's problems, last outcome and failures in a row.
+    Written by the main thread alone, by renaming a complete copy over it."""
+    state.mkdir(parents=True, exist_ok=True)
+    partial = state / "jobs-status.json.tmp"
+    partial.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n")
+    os.replace(partial, state / "jobs-status.json")
 
 
 HEARTBEAT_INTERVAL_S = 60
@@ -743,7 +797,14 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
     at most one instance at a time, so a fire of a running job waits until it ends. Then it waits for the next fire
     time, a job's end or ten minutes. Whatever ends the scheduler (an error, SIGTERM, the heartbeat's death) kills and
     reaps every running job's group first. CLOCK and WAIT are injectable so the loop itself is tested on a fake
-    clock."""
+    clock.
+
+    One job's failure is that job's alone. A job that cannot start (no such cwd or program), exits non-zero or is
+    killed at its timeout is logged to stderr by name, counted in `DIR/jobs-status.json`, and its fire counts as run;
+    every other job and the scheduler go on, and it fires again at its next time however often it failed. Each load
+    names at once, on stderr and in that file, every entry it left out and every job that could not start now, and
+    again only when that changes. A jobs file that cannot be read at a reload keeps the jobs last read; only one
+    unreadable when the scheduler starts ends it."""
     clock = clock or (lambda: dt.datetime.now(dt.UTC))
     started_at = clock()
     print(f"pilot-schedule started {utc_text(started_at)}", flush=True)
@@ -754,6 +815,75 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
     executed_daily: set[tuple[str, str]] = set()
     results: queue.Queue = queue.Queue()
     finished: list = []
+    timeouts: dict[str, int] = {}
+    status: dict = {"jobs_file": str(jobs_file), "jobs_file_error": None, "checked_at": None, "jobs": {}}
+    current: dict = {}
+    dirty = False
+
+    def job_status(name: str) -> dict:
+        return status["jobs"].setdefault(name, {"problems": [], "consecutive_failures": 0, "last": None})
+
+    def load_jobs() -> tuple[str, list[dict]] | None:
+        """The jobs file's timezone and jobs, or None to keep the ones last read; reports what changed."""
+        nonlocal dirty
+        try:
+            timezone, jobs, dropped = _jobs(jobs_file)
+        except (OSError, ValueError) as error:
+            if not current:
+                raise
+            if status["jobs_file_error"] != str(error):
+                print(f"pilot-schedule jobs file {jobs_file} unreadable, keeping the jobs last read: {error}",
+                      file=sys.stderr, flush=True)
+                status["jobs_file_error"] = str(error)
+                dirty = True
+            return None
+        problems = {**{label: [reason] for label, reason in dropped.items()},
+                    **{job["name"]: found for job in jobs if (found := job_problems(job))}}
+        changed = status["jobs_file_error"] is not None
+        for name in sorted({*problems, *(n for n, entry in status["jobs"].items() if entry["problems"])}):
+            found = problems.get(name, [])
+            if job_status(name)["problems"] != found:
+                changed = True
+                text = "; ".join(found) if found else "can start now"
+                print(f"pilot-schedule job {name}: {text}", file=sys.stderr, flush=True)
+                job_status(name)["problems"] = found
+        names = {job["name"] for job in jobs} | set(problems)
+        for name in [n for n in status["jobs"] if n not in names]:
+            del status["jobs"][name]
+            changed = True
+        for name in names - set(status["jobs"]):
+            job_status(name)
+            changed = True
+        status["jobs_file_error"] = None
+        current.update(timezone=timezone, jobs=jobs)
+        if changed or status["checked_at"] is None:
+            status["checked_at"] = utc_text(clock())
+            dirty = True
+        return timezone, jobs
+
+    def ended(fire: Fire, code: int | str, elapsed: float, timeout_s: int | None) -> None:
+        """Record one fire's outcome; a failure is logged by name and counted, never raised."""
+        nonlocal dirty
+        running.pop(fire.name, None)
+        outcome = f"exit {code}" if isinstance(code, int) else code
+        if code == 124 and timeout_s is not None and elapsed >= timeout_s:
+            outcome = f"killed at its timeout of {timeout_s}s (exit 124)"
+        print(f"{utc_text(clock())} ran {fire.name} {outcome} in {elapsed:.1f}s", flush=True)
+        # A daily time is marked run whatever the fire's kind: a due that coincides with it covers it.
+        executed_daily.add((fire.name, utc_text(fire.at)))
+        for stream, key in fire.due_keys:
+            fired.setdefault(stream, set()).add(key)
+        entry = job_status(fire.name)
+        entry["last"] = {"fire_at": utc_text(fire.at), "ended_at": utc_text(clock()), "outcome": outcome,
+                         "elapsed_s": round(elapsed, 1)}
+        if code == 0:
+            entry["consecutive_failures"] = 0
+        else:
+            entry["consecutive_failures"] += 1
+            print(f"pilot-schedule job {fire.name} failed for {utc_text(fire.at)}: {outcome} "
+                  f"({entry['consecutive_failures']} in a row)", file=sys.stderr, flush=True)
+        dirty = True
+
     on_main = threading.current_thread() is threading.main_thread()
     if on_main:
         previous_term = signal.signal(signal.SIGTERM, _exit_on_term)
@@ -767,17 +897,16 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
                     finished.append(results.get_nowait())
                 except queue.Empty:
                     break
-            if finished:
-                for fire, code, elapsed in finished:
-                    del running[fire.name]
-                    print(f"{utc_text(clock())} ran {fire.name} exit {code} in {elapsed:.1f}s", flush=True)
-                    # A daily time is marked run whatever the fire's kind: a due that coincides with it covers it.
-                    executed_daily.add((fire.name, utc_text(fire.at)))
-                    for stream, key in fire.due_keys:
-                        fired.setdefault(stream, set()).add(key)
+            for fire, code, elapsed in finished:
+                ended(fire, code, elapsed, timeouts.pop(fire.name, None))
+            finished = []
+            loaded = load_jobs()
+            if loaded is not None:
+                timezone, jobs = loaded
+            if dirty:
                 _write_fired(state, fired)
-                finished = []
-            timezone, jobs = _jobs(jobs_file)
+                _write_status(state, status)
+                dirty = False
             now = clock()
             streams = {job["dues_from"] for job in jobs if job.get("dues_from")}
             for stream in streams:
@@ -792,11 +921,21 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
                 if fire.name in running:
                     continue
                 job = by_name[fire.name]
-                process = start_scheduled_command(job)
+                try:
+                    process = start_scheduled_command(job)
+                except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+                    # This job alone failed: its fire counts as run, so it does not retry every cycle until its next.
+                    ended(fire, f"start failed: {error}", 0.0, job["timeout_s"])
+                    continue
                 running[fire.name] = (fire, process)
+                timeouts[fire.name] = job["timeout_s"]
                 print(f"{utc_text(now)} start {fire.name} for {utc_text(fire.at)}", flush=True)
                 threading.Thread(target=_await_job, args=(fire, process, job["timeout_s"], results),
                                  name=f"pilot-job-{fire.name}", daemon=True).start()
+            if dirty:
+                _write_fired(state, fired)
+                _write_status(state, status)
+                dirty = False
             upcoming = [(fire.at - now).total_seconds() for fire in fires if fire.at > now and fire.name not in running]
             finished = wait(results, min([600.0, *upcoming]))
     finally:
