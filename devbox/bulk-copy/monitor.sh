@@ -83,6 +83,8 @@ while :; do
     fi
     if (( stop )); then sudo -n systemctl freeze "$u" 2>/dev/null; else sudo -n systemctl thaw "$u" 2>/dev/null; fi
   done
+  # $DIR/HOLD (any content, a reason) pauses every new shard; shards in flight finish.
+  [[ -s $DIR/HOLD ]] && dwhy+="hold:$(head -c 80 "$DIR/HOLD" | tr -s ' \n' '_') "
   if [[ -z $dwhy ]]; then echo OK >"$DIR/gate.state.tmp"; else echo "PAUSE $dwhy" >"$DIR/gate.state.tmp"; fi
   mv "$DIR/gate.state.tmp" "$DIR/gate.state"
   echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lwhy ]] && echo 1 || echo 0) high50=$high high95=$dhigh dbusy=$dbusy dcalm=$dcalm dheld=$dheld gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
