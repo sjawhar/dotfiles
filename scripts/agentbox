@@ -2652,6 +2652,28 @@ move_stat() {
 # client of another version cannot talk to it: LANE-E's tool shell had /usr/bin ahead of mise on
 # PATH (2026-11-02), and its tmux 3.4 against this host's 3.8 server answered "server exited
 # unexpectedly" on the right socket. `tmux` from PATH when the binary cannot be read.
+# A tmux client in a BOX that can talk to the host's server through the relay: a client of another
+# version cannot ("server exited unexpectedly"), and the image's tmux is 3.4 while this host's
+# server is 3.8, so a boxed move could not start its relauncher (2026-11-03). Tries the caller's
+# choice, then PATH, then every tmux the host's mise install dir holds (it is mounted in the box),
+# then /usr/bin/tmux, and takes the first that the server answers. Prints it, or nothing.
+MOVE_BOX_TMUX=""
+move_box_tmux() {
+    local t
+    if [[ -n "$MOVE_BOX_TMUX" ]]; then printf '%s\n' "$MOVE_BOX_TMUX"; return 0; fi
+    for t in ${AGENTBOX_TMUX_CLIENT:+"$AGENTBOX_TMUX_CLIENT"} tmux \
+        "$HOME"/.mise/installs/*tmux*/*/bin/tmux "$HOME"/.local/share/mise/installs/*tmux*/*/bin/tmux \
+        /usr/bin/tmux; do
+        command -v "$t" >/dev/null 2>&1 || [[ -x "$t" ]] || continue
+        if "$t" list-sessions >/dev/null 2>&1; then
+            MOVE_BOX_TMUX="$t"
+            printf '%s\n' "$t"
+            return 0
+        fi
+    done
+    return 1
+}
+
 MOVE_TMUX_BIN=tmux
 move_tmux_bin() {
     MOVE_TMUX_BIN=tmux
@@ -3288,11 +3310,30 @@ move_own_omp() {
 move_hand_off() {
     local sid="$2" log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$2.log"
     mkdir -p "$(dirname "$log")"
+    local before=0
+    [[ -f "$log" ]] && before="$(wc -c <"$log")"
     # This file by its absolute path, not $0: the relauncher outlives a caller that was started
     # by a relative path from a directory the pane is about to leave.
     setsid "$(readlink -f "${BASH_SOURCE[0]}")" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
-    echo "agentbox: session $sid handed to a detached relauncher; log: $log"
+    local child=$!
+    # It must be RUNNING before this says so: LANE-C's `move --self` returned 0 twice and nothing
+    # ever moved (2026-11-03). The relauncher's first line is its own; waiting for the log to grow
+    # also catches a relauncher that dies at once (setsid itself exits straight away, so its pid
+    # says nothing).
+    local waited=0
+    while (( waited < MOVE_HAND_OFF_WAIT )); do
+        if [[ -f "$log" ]] && (( $(wc -c <"$log") > before )); then
+            echo "agentbox: session $sid handed to a detached relauncher; log: $log"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$child" 2>/dev/null || true
+    die "the relauncher of session $sid wrote nothing to $log within ${MOVE_HAND_OFF_WAIT}s, so the move did NOT start; nothing was hung up. Read that log and tell the box-health lead"
 }
+# How long move_hand_off waits for its relauncher's first line.
+MOVE_HAND_OFF_WAIT="${AGENTBOX_HAND_OFF_WAIT:-30}"
 
 # How long the respawn below keeps trying, and the gap between tries. Ten minutes: what it rides
 # out is the machine's, and the relauncher is detached, so nothing waits on it.
@@ -5384,9 +5425,21 @@ move_to_in_box() {
     move_to_print_lists "$target" "$(move_to_not_carried <<<"$touches")"
     if [[ "$dry" == true ]]; then echo "agentbox: --dry-run: nothing was hung up, copied or sent"; return 0; fi
     job="$(move_to_job "$target" "$group" "$member")" || die "could not write the move's job file under $MOVE_TO_JOBS"
-    tmux run-shell -b -t "$pane" "$(printf 'setsid %q move --to-run %q </dev/null >>%q 2>&1' \
-        "$(readlink -f "${BASH_SOURCE[0]}")" "$job" "$MOVE_TO_JOBS/$group.log")" \
-        || die "could not start the relauncher through the host's tmux (is the relay up? \`tmux list-sessions\`); nothing was hung up"
+    local box_tmux run_cmd started=false
+    run_cmd="$(printf 'setsid %q move --to-run %q </dev/null >>%q 2>&1' \
+        "$(readlink -f "${BASH_SOURCE[0]}")" "$job" "$MOVE_TO_JOBS/$group.log")"
+    if box_tmux="$(move_box_tmux)" && "$box_tmux" run-shell -b -t "$pane" "$run_cmd"; then
+        started=true
+    else
+        # No tmux client here speaks to the host's server: hand the job to the host's own
+        # relauncher watcher instead, through the cache both share (move --to-run --wait-for-job).
+        mkdir -p "$MOVE_TO_JOBS/queue" && ln -sf "$job" "$MOVE_TO_JOBS/queue/$(basename "$job")" \
+            && started=queued
+    fi
+    [[ "$started" != false ]] || die "no way to start the relauncher on the host: no tmux client here speaks to its server, and $MOVE_TO_JOBS/queue could not be written; nothing was hung up"
+    if [[ "$started" == queued ]]; then
+        echo "agentbox: no tmux client in this box speaks to the host's server, so the job is queued at $MOVE_TO_JOBS/queue for the host's relauncher watcher (agentbox move --run-queue); it starts within a minute." >&2
+    fi
     if (( MOVE_TO_HOLD_WAIT > 0 )); then
         echo "agentbox: the host checks $target, clones and copies, then tells you over Envoy to run \`agentbox move --go\`; only that hangs this box up. Log: $MOVE_TO_JOBS/$group.log. Go on with your work."
     else
@@ -5405,6 +5458,25 @@ move_to_in_box() {
 # after the 04:10Z hang-up, since it read only the `move --self` log. A relauncher stopped by a
 # signal says so, with the step it was in, so its log never ends at "copying".
 MOVE_TO_ACTIVE="$MOVE_TO_JOBS/active"
+# Jobs a BOX queued because no tmux client there speaks to the host's server (move_to_in_box).
+# The host runs them: `agentbox move --run-queue`, which omp-memory-watch calls each pass.
+MOVE_TO_QUEUE="$MOVE_TO_JOBS/queue"
+move_to_run_queue() {
+    local link job group started=0
+    [[ -d "$MOVE_TO_QUEUE" ]] || return 0
+    for link in "$MOVE_TO_QUEUE"/*.json; do
+        [[ -e "$link" ]] || continue
+        job="$(readlink -f "$link")"
+        rm -f "$link"
+        [[ -r "$job" ]] || continue
+        group="$(jq -r .group "$job" 2>/dev/null)" || continue
+        setsid "$(readlink -f "${BASH_SOURCE[0]}")" move --to-run "$job" </dev/null >>"$MOVE_TO_JOBS/$group.log" 2>&1 &
+        echo "agentbox: started the queued move of group $group (job $job); log: $MOVE_TO_JOBS/$group.log"
+        started=$((started + 1))
+    done
+    (( started == 0 )) || echo "agentbox: $started queued move(s) started"
+    return 0
+}
 MOVE_TO_MAX_FLIGHT="${AGENTBOX_MOVE_MAX_FLIGHT:-2}"
 MOVE_TO_FLIGHT_POLL="${AGENTBOX_MOVE_FLIGHT_POLL:-10}"
 # The hold before the hang-up: once everything before it is done (checks, clones, branches, the
@@ -5938,6 +6010,7 @@ MOVE_USAGE='usage:
                                                     Tailscale SSH and resumes there in boxes, with
                                                     the same ids (the last of the group to run it
                                                     moves them all)
+  agentbox move --run-queue                        start the moves a box queued for this host
   agentbox move --go                               run by a session whose move to another machine is
                                                     holding before the hang-up: hang up now
   agentbox move --to <machine> --clear-halt        the box-health lead lets moves to <machine> go
@@ -5960,6 +6033,7 @@ cmd_move() {
         # first progress line, from a pipeline whose last loop test failed under `set -e`).
         --to) MOVE_FORM=--to; cmd_move_to "$@" ;;
         --to-run) shift; move_to_run "$@" ;;
+        --run-queue) shift; move_to_run_queue "$@" ;;
         --go) shift; cmd_move_go "$@" ;;
         --relaunch) shift; move_relaunch "$@" ;;
         --wake) shift; move_wake "$@" ;;

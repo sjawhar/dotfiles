@@ -1752,8 +1752,10 @@ class AgentboxMove(unittest.TestCase):
                              'move_to_find_group() { sleep 30; orig_move_to_find_group "$@"; }\n'
                              'cmd_move --to devbox --dry-run --accept-orphans')
         self.assertNotEqual(slow.returncode, 0)
-        self.assertRegex(slow.stderr, r"agentbox: \ds: finding this session's group")
-        self.assertIn("move --to gave up after 3s (AGENTBOX_MOVE_SCAN_LIMIT) in: finding this session's group", slow.stderr)
+        # The step it names is whichever one the bound caught, which under load may be an
+        # earlier one than the group; what matters is a line a second and a named step.
+        self.assertRegex(slow.stderr, r"agentbox: \d+s: \S")
+        self.assertRegex(slow.stderr, r"move --to gave up after \d+s \(AGENTBOX_MOVE_SCAN_LIMIT\) in: \S")
         self.assertNotIn("no message of its own", slow.stderr)
 
     def test_branches_are_pushed_once_per_repository(self) -> None:
@@ -2680,6 +2682,69 @@ class AgentboxMove(unittest.TestCase):
         self.assertTrue(any("mkdir" in line and str(theorem) in line for line in ssh), ssh[-3:])
         self.assertTrue(theorem.is_dir())
         self.assertNotIn(str(theorem), (self.root / "RSYNC").read_text(encoding="utf-8"))
+
+    def test_a_box_whose_tmux_cannot_reach_the_host_queues_its_move(self) -> None:
+        """A tmux client of another version cannot talk to the host's server (the image's 3.4
+        against this host's 3.8), so a boxed move could not start its relauncher (2026-11-03). It
+        takes the first client that the server answers, and queues the job when none does; the
+        host's watch runs `agentbox move --run-queue` each pass."""
+        self.moving_session()
+        self.target()
+        env = {"AGENTBOX_BOX": "agentbox-0123456789ab", "AGENTBOX_DIRS": str(self.lane),
+               "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
+        # Every tmux here refuses the server, as a client of the wrong version does.
+        write_stub(self.stubs, "tmux", 'echo "server exited unexpectedly" >&2; exit 1')
+        queued = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.lane}"\ncmd_move_to --to devbox --accept-orphans', env)
+        self.assertEqual(queued.returncode, 0, queued.stdout + queued.stderr)
+        self.assertIn("the job is queued at", queued.stderr)
+        queue = self.root / "cache/omp/agentbox/move-to/queue"
+        [link] = list(queue.glob("*.json"))
+        [job] = self.jobs()
+        self.assertEqual(link.resolve(), job.resolve())
+        # The host runs it: the job starts and the queue is emptied.
+        write_stub(self.stubs, "setsid", 'printf "%s\\n" "$*" >>"$STUB_SETSID"; exit 0')
+        ran = self.run_bash("move_to_run_queue")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertIn(f"started the queued move of group g-01a19700", ran.stdout)
+        self.assertEqual(list(queue.glob("*.json")), [])
+        # The queue runner starts each job in the background; wait for the stub's record.
+        record = Path(self.env["STUB_SETSID"])
+        for _ in range(300):
+            if record.exists():
+                break
+            time.sleep(0.1)
+        self.assertIn(f"move --to-run {job}", record.read_text(encoding="utf-8"))
+
+    def test_a_box_takes_the_tmux_client_the_host_server_answers(self) -> None:
+        self.moving_session()
+        self.target()
+        good = self.root / "mise-tmux"
+        good.mkdir()
+        write_stub(good, "tmux", 'exit 0')
+        write_stub(self.stubs, "tmux", 'echo "server exited unexpectedly" >&2; exit 1')
+        picked = self.run_bash(f'AGENTBOX_TMUX_CLIENT={good}/tmux\nmove_box_tmux')
+        self.assertEqual(picked.stdout.strip(), f"{good}/tmux", picked.stderr)
+        none = self.run_bash("set +e; move_box_tmux; echo rc=$?")
+        self.assertIn("rc=1", none.stdout, none.stderr)
+
+    def test_move_self_fails_when_its_relauncher_does_not_start(self) -> None:
+        """LANE-C, 2026-11-03: `agentbox move --self` returned 0 twice and nothing ever moved. The
+        hand-off now waits for the relauncher's own first line and fails when it never comes."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        env = {"AGENTBOX_HAND_OFF_WAIT": "2"}
+        write_stub(self.stubs, "setsid", 'exit 0')  # a relauncher that never runs
+        quiet = self.run_bash(f'move_hand_off 999999901 {self.TO} %81 "{self.worktree}" /t/x.jsonl --dir "{self.lane}"', env)
+        self.assertEqual(quiet.returncode, 1, quiet.stdout)
+        self.assertIn("wrote nothing to", quiet.stderr)
+        self.assertIn("the move did NOT start; nothing was hung up", quiet.stderr)
+        self.assertNotIn("handed to a detached relauncher", quiet.stdout)
+        log = self.root / "cache/omp/agentbox" / f"move-{self.TO}.log"
+        write_stub(self.stubs, "setsid", f'echo "the relauncher is up" >>"{log}"; exit 0')
+        started = self.run_bash(f'move_hand_off 999999901 {self.TO} %81 "{self.worktree}" /t/x.jsonl --dir "{self.lane}"', env)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertIn("handed to a detached relauncher", started.stdout)
 
     def test_in_a_box_the_plan_is_this_session_s_own(self) -> None:
         """GRADE, boxed with `move --self`, got "no-pane (parent 96:bun …), which only a person can

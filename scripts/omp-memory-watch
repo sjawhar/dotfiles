@@ -3062,6 +3062,29 @@ def drain_pending(options: argparse.Namespace) -> int:
     return 0
 
 
+def run_move_queue() -> None:
+    """Start the `agentbox move --to` jobs a box queued for this host.
+
+    A box starts its move's relauncher on the host through the tmux relay, and a tmux client of
+    another version cannot talk to that server (the image's 3.4 against this host's 3.8): such a
+    box leaves its job in <cache>/omp/agentbox/move-to/queue instead. This runs each one; the
+    watch runs every minute, so a queued move waits no longer than that. A failure is logged and
+    never stops the pass."""
+    queue = MOVE_LOG_DIR / "move-to" / "queue"
+    if not queue.is_dir() or not any(queue.glob("*.json")):
+        return
+    try:
+        done = subprocess.run(
+            [str(AGENTBOX), "move", "--run-queue"], capture_output=True, text=True, timeout=60, check=False
+        )
+    except Exception as error:
+        log(f"move queue: agentbox move --run-queue failed: {type(error).__name__}: {error}")
+        return
+    for line in (done.stdout + done.stderr).splitlines():
+        if line.strip():
+            log(f"move queue: {line.strip()}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -3181,6 +3204,8 @@ def main() -> int:
         log(f"--state is not {DEFAULT_STATE}: running as --dry-run, sending nothing")
     if options.wall_pending_json:
         return drain_pending(options)
+    if not options.dry_run:
+        run_move_queue()
     try:
         return run_once(options)
     except Exception as error:  # a crashing watch must say so in the journal, not vanish
