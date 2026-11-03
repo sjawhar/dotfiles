@@ -7,7 +7,8 @@ Type=oneshot
 # Above the lanes, like load-swap-watch: the silence this watch looks for comes from a loaded box,
 # where envoy-role-holder-watch's runs outgrew their 25 s limit at load 450. A watch scheduled
 # behind that load would go quiet with the units it watches. Its pass is two systemctl calls and
-# one journalctl read of systemd's own records, ~7 s of wall time at load 100.
+# one journalctl read of systemd's own records, ~7 s of wall time at load 100; a pass with a unit
+# running past its floor reads two days of those records once an hour, ~5 s more at load 250.
 Nice=5
 IOSchedulingClass=idle
 # A run that cannot finish is killed, so runs never pile up on the 5-minute period. 180 s is

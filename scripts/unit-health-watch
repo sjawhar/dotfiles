@@ -27,11 +27,15 @@ What one run does:
        - more than --killed-share of the runs that ended were killed at the time limit;
        - the timer stopped firing: an enabled timer that is not active, or an active one that
          has not fired for two periods while its service is not running;
-       - one run has been running for two periods and more (a run that never ends also stops
-         the timer from starting the next).
-  4. Say each new condition once, all of one run's in one message, with the counts, the last
-     error systemd logged, the last line the unit printed, and what to read. Say it again once,
-     after --escalate, if it still holds, and say when it clears.
+       - one run has been running past its limit: two periods, or twice the unit's own p99
+         run time when that is longer, and for a oneshot never past TimeoutStartSec +
+         TimeoutStopSec (a run that never ends also stops the timer from starting the next).
+     A unit with its own OnFailure= handler says its own failed runs, so the first two are not
+     judged for it: one message per failure.
+  4. Say each new condition once, all of one run's news in one message of at most 600
+     characters that ends with the report file holding the counts, the last error systemd
+     logged, the last line the unit printed, and what to read. A condition that still holds is
+     not said again; its clear is one line.
 
 Alerts go over Envoy to the box-health owner the same way every box watch here sends them:
 BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else the SRE session. This
@@ -45,6 +49,7 @@ import calendar
 import fcntl
 import itertools
 import json
+import math
 import os
 import re
 import socket
@@ -112,6 +117,25 @@ HEADLINE = {
     "stuck": "RUN NEVER ENDS",
 }
 KINDS = tuple(HEADLINE)
+# What a unit's OnFailure= handler already says: a run that failed. A stopped timer and a run
+# that never ends fail nothing, so no handler hears of them.
+FAILURE_KINDS = ("no-completion", "killed")
+
+# RUN NEVER ENDS opened 13 times in a replay of this box's user journal (2026-11-01 10:50Z to
+# 11-03 03:34Z) at the old two-period floor, and every one of those runs ended by itself:
+# transcript-import (every 10 min, floor 22 min) ran 32-45 min, omp-transcript-offload (15 min,
+# 33 min) 36-40 min, a repository mirror (5 min, 15 min) 20-41 min, agent-files-archive (20 min,
+# 43 min) 69 and 88 min. The limit is twice the unit's own p99 run time when that is longer,
+# from the completed runs of the last two days (kept an hour in the state file), and for a
+# oneshot never past TimeoutStartSec + TimeoutStopSec. Twice the p95 left 12 of the 13 (the p95
+# of the runs before each one was 8-19 min); twice the p99 leaves 5, each a run past twice the
+# p99 of that unit's runs before it. Only a unit already running past its earliest limit needs
+# the history, so most passes read nothing more.
+RUN_TIME_LOOKBACK = 2 * 86400.0
+RUN_TIME_REFRESH = 3600.0
+# Every message fits one Envoy notice; the detail goes to a report file kept a week.
+MESSAGE_LIMIT = 600
+REPORT_KEEP = 7 * 86400.0
 
 
 def log(message: str) -> None:
@@ -418,6 +442,8 @@ SERVICE_PROPS = [
     "ActiveState",
     "SubState",
     "TimeoutStartUSec",
+    "TimeoutStopUSec",
+    "OnFailure",
     "Documentation",
     "InvocationID",
     "ExecMainStartTimestamp",
@@ -496,6 +522,9 @@ def discover() -> list[dict]:
                 "service_state": first(service, "ActiveState"),
                 "service_substate": first(service, "SubState"),
                 "timeout_start": parse_timespan(first(service, "TimeoutStartUSec")),
+                "timeout_stop": parse_timespan(first(service, "TimeoutStopUSec")),
+                # The units its OnFailure= starts: a handler that says this unit's failures.
+                "on_failure": first(service, "OnFailure").split(),
                 "documentation": documentation,
                 "invocation": first(service, "InvocationID"),
                 "run_started": parse_when(first(service, "ExecMainStartTimestamp"))
@@ -727,20 +756,135 @@ def overdue_after(unit: dict) -> float:
     return 2 * unit["period"] + unit.get("slack", 0.0) + 120
 
 
+def stuck_floor(unit: dict, options: argparse.Namespace) -> float:
+    """Two periods, slack and 2 min, and at least --stuck-after: how long a run may last when
+    nothing else is known about the unit."""
+    return max(overdue_after(unit), options.stuck_after)
+
+
+def systemd_ends(unit: dict) -> float | None:
+    """When systemd itself must have ended a run: TimeoutStartSec + TimeoutStopSec of a oneshot,
+    whose start is its whole run. None for other types, where TimeoutStartSec bounds only the
+    start (infra977-trial-feed, Type=simple, 2 min, runs for hours)."""
+    if unit.get("service_type") not in {"oneshot", ""} or not unit.get("timeout_start"):
+        return None
+    return unit["timeout_start"] + (unit.get("timeout_stop") or 0.0)
+
+
+def stuck_earliest(unit: dict, options: argparse.Namespace) -> float:
+    """The shortest any limit below can be: the floor, or systemd's end when that is sooner."""
+    ends = systemd_ends(unit)
+    floor = stuck_floor(unit, options)
+    return min(floor, ends) if ends else floor
+
+
+def percentile(values: list[float], share: float) -> float | None:
+    """The nearest-rank percentile: the smallest value with `share` of them at or below it."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(share * len(ordered)) - 1)]
+
+
+def completed_run_times(runs: list[dict]) -> list[float]:
+    """Seconds from `Starting X...` to `Finished X.` of every run that completed."""
+    return [
+        run["done"] - run["started"]
+        for run in runs
+        if run.get("started") and run.get("done") and not run.get("outcome")
+    ]
+
+
+def run_time_history(units: list[dict], now: float, cache: dict) -> dict[str, dict]:
+    """{service: {"p99", "longest", "runs", "at"}} for these units' completed runs.
+
+    From `cache` (the state file's) while an entry is under RUN_TIME_REFRESH old, else from one
+    journal read of the last RUN_TIME_LOOKBACK for every stale unit at once. Only a oneshot's
+    `Finished` ends its run, so other service types have no history and keep the floor.
+    """
+    services = [
+        unit["service"]
+        for unit in units
+        if unit.get("service_type") in {"oneshot", ""}
+    ]
+    stale = [
+        service
+        for service in services
+        if now - float((cache.get(service) or {}).get("at") or 0) >= RUN_TIME_REFRESH
+    ]
+    if stale:
+        runs = runs_from_records(journal_records(stale, now - RUN_TIME_LOOKBACK, now))
+        for service in stale:
+            times = completed_run_times(runs.get(service, []))
+            cache[service] = {
+                "p99": percentile(times, 0.99),
+                "longest": max(times, default=None),
+                "runs": len(times),
+                "at": now,
+            }
+    return {service: cache[service] for service in services}
+
+
+def stuck_limit(
+    unit: dict, options: argparse.Namespace, history: dict | None = None
+) -> tuple[float, str]:
+    """(how long one run may last before it NEVER ENDS, where that limit comes from).
+
+    Twice the unit's own p99 run time of the last two days, or the two-period floor when that
+    is longer; for a oneshot, never past TimeoutStartSec + TimeoutStopSec, even below the
+    floor: past that, systemd itself should have ended the run. Since the p99 is at most the
+    longest completed run, the raise never passes twice the longest.
+    """
+    limit = stuck_floor(unit, options)
+    source = f"two periods, at least {human_time(options.stuck_after)}"
+    p99 = (history or {}).get("p99")
+    if p99 and 2 * p99 > limit:
+        limit = 2 * p99
+        source = (
+            f"2 x its p99 run time of {human_time(p99)} over {history.get('runs', 0)} runs,"
+            f" longest {human_time(history.get('longest'))}"
+        )
+    ends = systemd_ends(unit)
+    if ends and ends < limit:
+        limit, source = ends, "its TimeoutStartSec + TimeoutStopSec"
+    return limit, source
+
+
+def judged(unit: dict, kind: str) -> bool:
+    """Whether this watch says `kind` for this unit: not a failed run of a unit whose OnFailure=
+    handler says its failures itself (omp-session-sql-sweep, omp-login-watch), so each failure
+    has one message."""
+    return not (unit.get("on_failure") and kind in FAILURE_KINDS)
+
+
 def judge(
-    unit: dict, counts: dict, now: float, options: argparse.Namespace, live: bool = True
+    unit: dict,
+    counts: dict,
+    now: float,
+    options: argparse.Namespace,
+    live: bool = True,
+    limit: tuple[float, str] | None = None,
 ) -> dict[str, str]:
-    """{kind: why} for every condition that holds for this unit now."""
+    """{kind: why} for every condition that holds for this unit now.
+
+    `limit` is the unit's stuck_limit when its run time history was read; without it a run is
+    held to the floor.
+    """
     found: dict[str, str] = {}
     if not unit.get("period"):
         return found
     window = window_for(unit, options)
-    if counts["ended"] and counts["completed"] == 0:
+    if (
+        judged(unit, "no-completion")
+        and counts["ended"]
+        and counts["completed"] == 0
+    ):
         found["no-completion"] = (
             f"completed 0 of {counts['started']} runs started in the last {human_time(window)}"
         )
     if (
-        counts["ended"]
+        judged(unit, "killed")
+        and counts["ended"]
         and counts["killed"] >= options.min_killed
         and counts["killed"] / counts["ended"] > options.killed_share
     ):
@@ -770,10 +914,12 @@ def judge(
             )
     if running and unit.get("run_started"):
         age = now - unit["run_started"]
-        if age > max(overdue_after(unit), options.stuck_after):
+        seconds, source = limit or stuck_limit(unit, options)
+        if age > seconds:
             found["stuck"] = (
                 f"the run that started at {iso(unit['run_started'])} is still {unit.get('service_state')}"
-                f" after {human_time(age)}, against a period of {human_time(unit['period'])}; no other run can start"
+                f" after {human_time(age)}, over its {human_time(seconds)} limit ({source});"
+                " no other run can start"
             )
     return found
 
@@ -808,6 +954,7 @@ def reading(
         "service_state": unit.get("service_state"),
         "last_trigger": iso(unit.get("last_trigger")),
         "window": window,
+        "on_failure": unit.get("on_failure") or [],
     }
     if counts:
         row.update(
@@ -851,6 +998,8 @@ def report_text(
         verdict = "; ".join(HEADLINE[kind] for kind in KINDS if kind in found) or (
             "ok" if row.get("period") else "not periodic, not judged"
         )
+        if row.get("on_failure") and row.get("period"):
+            verdict += f" (failed runs told by {' '.join(row['on_failure'])})"
         if row.get("period") is None:
             counts = f"{'-':>5} {'-':>5} {'-':>5} {'-':>5} {'-':>4}"
         else:
@@ -937,6 +1086,68 @@ def unit_block(
     return "\n".join(lines)
 
 
+def report_dir(options: argparse.Namespace) -> Path:
+    return Path(options.state).parent / "reports"
+
+
+def write_report(
+    options: argparse.Namespace, now: float, kind: str, body: str
+) -> tuple[Path, str]:
+    """(the report's path, "" or why it could not be written). A dry run writes nothing."""
+    path = report_dir(options) / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))}-{kind}.txt"
+    if options.dry_run:
+        return path, ""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body.rstrip("\n") + "\n")
+    except OSError as error:
+        log(f"  cannot write {path}: {error}")
+        return path, str(error)
+    return path, ""
+
+
+def prune_reports(options: argparse.Namespace) -> None:
+    """Delete this watch's reports older than REPORT_KEEP."""
+    if options.dry_run:
+        return
+    cutoff = time.time() - REPORT_KEEP
+    try:
+        entries = list(report_dir(options).glob("*.txt"))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
+
+
+def fit(head: str, items: list[str], tail: str, limit: int = MESSAGE_LIMIT) -> str:
+    """`head`, as many of `items` as fit, and `tail`, in at most `limit` characters.
+
+    Items that do not fit are counted; a first item longer than the room left is cut.
+    """
+
+    def compose(shown: list[str], left: int) -> str:
+        body = "; ".join(shown) + "." if shown else ""
+        more = f" {left} more in the report." if left else ""
+        return f"{head}{body}{more} {tail}"
+
+    shown: list[str] = []
+    for index, item in enumerate(items):
+        left = len(items) - index - 1
+        if len(compose(shown + [item], left)) <= limit:
+            shown.append(item)
+            continue
+        if not shown:
+            room = limit - len(compose([""], left)) - 1
+            shown.append(item[: max(0, room)].rstrip() + "…")
+            continue
+        return compose(shown, len(items) - len(shown))
+    return compose(shown, 0)
+
+
 # ------------------------------------------------------------------------------- state
 
 
@@ -984,14 +1195,34 @@ class State:
 
 
 def assess(
-    options: argparse.Namespace, now: float, live: bool
+    options: argparse.Namespace,
+    now: float,
+    live: bool,
+    run_times: dict | None = None,
 ) -> tuple[list[dict], dict, dict, dict]:
-    """(units, counts by service, findings by service, window start by service)."""
+    """(units, counts by service, findings by service, window start by service).
+
+    `run_times` is the state file's cache of each unit's p99 run time (run_time_history); a
+    report passes none and reads what it needs.
+    """
     units = discover()
     periodic = [unit for unit in units if unit.get("period")]
     windows = {unit["service"]: window_for(unit, options) for unit in periodic}
     since = now - max(windows.values(), default=options.window)
     runs = runs_from_records(journal_records(sorted(windows), since, now))
+    # Only a run already past the earliest its limit can be may be NEVER ENDS, so only those
+    # units need their run time history.
+    long_running = [
+        unit
+        for unit in periodic
+        if live
+        and unit.get("service_state") in RUNNING_STATES
+        and unit.get("run_started")
+        and now - unit["run_started"] > stuck_earliest(unit, options)
+    ]
+    history = run_time_history(
+        long_running, now, run_times if run_times is not None else {}
+    )
     counts: dict[str, dict] = {}
     findings: dict[str, dict[str, str]] = {}
     starts: dict[str, float] = {}
@@ -1005,16 +1236,25 @@ def assess(
             live_invocation=unit.get("invocation", "") if live else "",
             oneshot=unit.get("service_type") in {"oneshot", ""},
         )
-        findings[service] = judge(unit, counts[service], now, options, live=live)
+        findings[service] = judge(
+            unit,
+            counts[service],
+            now,
+            options,
+            live=live,
+            limit=stuck_limit(unit, options, history[service])
+            if service in history
+            else None,
+        )
     return units, counts, findings, starts
 
 
 def run_once(options: argparse.Namespace) -> int:
     now = options.at or time.time()
     live = options.at is None
-    units, counts, findings, starts = assess(options, now, live)
 
     if options.report:
+        units, counts, findings, starts = assess(options, now, live)
         rows = [
             reading(unit, counts.get(unit["service"]), now, options) for unit in units
         ]
@@ -1035,40 +1275,39 @@ def run_once(options: argparse.Namespace) -> int:
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
         return 0
+    run_times: dict = state.data.setdefault("run_times", {})
+    units, counts, findings, starts = assess(options, now, live, run_times)
     incidents: dict = state.data.setdefault("incidents", {})
     by_service = {unit["service"]: unit for unit in units if unit.get("period")}
+    for service in [name for name in run_times if name not in by_service]:
+        run_times.pop(service)
     opened: dict[str, dict[str, str]] = {}
-    escalated: dict[str, dict[str, str]] = {}
     cleared: list[str] = []
 
     for service, unit in sorted(by_service.items()):
         for kind in KINDS:
             key = f"{service}|{kind}"
-            why = findings[service].get(kind)
             incident = incidents.get(key)
+            if not judged(unit, kind):
+                if incidents.pop(key, None) is not None:
+                    log(
+                        f"  {service}: {HEADLINE[kind]} closed unsaid; {' '.join(unit['on_failure'])}"
+                        " says its failed runs"
+                    )
+                continue
+            why = findings[service].get(kind)
             if why:
                 if not incident:
-                    incidents[key] = {
-                        "opened_at": now,
-                        "alerted_at": now,
-                        "escalated_at": None,
-                        "why": why,
-                    }
+                    incidents[key] = {"opened_at": now, "why": why}
                     opened.setdefault(service, {})[kind] = why
                 else:
+                    # Still true is no new fact: it is kept, and not said again.
                     incident["why"] = why
-                    if (
-                        incident.get("escalated_at") is None
-                        and now - incident["alerted_at"] >= options.escalate
-                    ):
-                        incident["escalated_at"] = now
-                        escalated.setdefault(service, {})[kind] = why
             elif incident and clears(
                 kind, unit, counts[service], findings[service], options
             ):
                 cleared.append(
-                    f"{service}: {HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
-                    f" (opened {iso(incident['opened_at'])})."
+                    f"{service} {HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
                 )
                 incidents.pop(key)
     # A unit whose timer is gone cannot be judged; its conditions close with that said.
@@ -1076,47 +1315,58 @@ def run_once(options: argparse.Namespace) -> int:
         service, _, kind = key.partition("|")
         if service not in by_service:
             cleared.append(
-                f"{service}: {HEADLINE.get(kind, kind)} closed: no loaded timer starts this unit any more"
-                f" (opened {iso(incidents[key]['opened_at'])})."
+                f"{service} {HEADLINE.get(kind, kind)} closed: no loaded timer starts this unit any more"
             )
             incidents.pop(key)
 
     host = socket.gethostname()
-    messages: list[str] = []
-
-    def blocks(chosen: dict[str, dict[str, str]]) -> list[str]:
-        return [
-            unit_block(
-                by_service[service],
-                counts[service],
-                kinds,
-                starts[service],
-                now,
-                own_line_for(service, counts[service], starts[service], now),
-            )
-            for service, kinds in sorted(chosen.items())
+    message = ""
+    report = ""
+    if opened or cleared:
+        sections = [
+            f"unit-health-watch on {host} at {iso(now)}. It only reports; it changed no unit."
         ]
-
-    if opened:
-        messages.append(
-            f"UNIT RUNS NOT COMPLETING on {host}: {len(opened)} timer-driven"
-            f" unit{'s' if len(opened) != 1 else ''} stopped doing {'their' if len(opened) != 1 else 'its'} job.\n\n"
-            + "\n\n".join(blocks(opened))
-            + f"\n\nFrom unit-health-watch on {host}. It only reports; it changed no unit."
+        if opened:
+            sections.append(
+                "Opened:\n\n"
+                + "\n\n".join(
+                    unit_block(
+                        by_service[service],
+                        counts[service],
+                        kinds,
+                        starts[service],
+                        now,
+                        own_line_for(service, counts[service], starts[service], now),
+                    )
+                    for service, kinds in sorted(opened.items())
+                )
+            )
+        if cleared:
+            sections.append("Cleared:\n" + "\n".join(f"  {line}." for line in cleared))
+        rows = [reading(unit, counts.get(unit["service"]), now, options) for unit in units]
+        sections.append("Every timer now:\n" + report_text(rows, findings, now, live))
+        sections.append(f"How it judges: {Path(os.path.realpath(__file__))}.md")
+        report = "\n\n".join(sections)
+        path, error = write_report(options, now, "open" if opened else "clear", report)
+        tail = (
+            f"Full report: {path}"
+            if not error
+            else f"No report ({error}); `unit-health-watch --report` reads every timer now."
         )
-    if escalated:
-        messages.append(
-            f"STILL NOT COMPLETING on {host}, {human_time(options.escalate)} after the first alert:"
-            f" {len(escalated)} unit{'s' if len(escalated) != 1 else ''}.\n\n"
-            + "\n\n".join(blocks(escalated))
-            + f"\n\nFrom unit-health-watch on {host}."
-        )
-    if cleared:
-        messages.append(
-            f"UNIT RUNS CLEARED on {host}:\n"
-            + "\n".join(f"  {line}" for line in cleared)
-            + f"\nNo action is needed for these. From unit-health-watch on {host}."
-        )
+        if opened:
+            items = [
+                f"{service} {HEADLINE[kind]} - {why}"
+                for service, kinds in sorted(opened.items())
+                for kind, why in kinds.items()
+            ]
+            message = fit(
+                f"UNIT RUNS NOT COMPLETING on {host}, for the box-health lead: ",
+                items + [f"also {line}" for line in cleared],
+                tail,
+            )
+        else:
+            message = fit(f"UNIT RUNS CLEARED on {host}: ", cleared, tail)
+    prune_reports(options)
 
     state.data["last_run"] = now
     state.data["last_summary"] = {
@@ -1133,25 +1383,20 @@ def run_once(options: argparse.Namespace) -> int:
         f"checked {len(by_service)} periodic timer(s) of {len(units)}; open: {len(incidents)};"
         f" new: {sum(len(kinds) for kinds in opened.values())}; cleared: {len(cleared)}"
     )
-    heard: list[str] = []
-    unheard = 0
-    for text in messages:
-        if options.print_alert or options.dry_run:
-            print(text + "\n")
-        if not options.dry_run:
-            target = tell_box_health(envoy, text)
-            if target:
-                heard.append(target)
-            else:
-                unheard += 1
-    for target in heard:
+    if not message:
+        return 0
+    if options.print_alert or options.dry_run:
+        print(message + "\n")
+    if options.dry_run:
+        print(report + "\n")
+        return 0
+    target = tell_box_health(envoy, message)
+    if target:
         log(f"told {target}")
-    if unheard:
-        # The state already records the alert as made, so this line is the only trace that it
+    else:
+        # The state already records the news as said, so this line is the only trace that it
         # reached nobody.
-        log(
-            f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above"
-        )
+        log("NOBODY HEARD IT: the message was refused by every Envoy route; see above")
     return 0
 
 
@@ -1199,13 +1444,8 @@ def main() -> int:
         "--stuck-after",
         type=float,
         default=900.0,
-        help="a run is stuck only after this many seconds as well as two periods (default 900)",
-    )
-    parser.add_argument(
-        "--escalate",
-        type=float,
-        default=7200.0,
-        help="say a condition again once after this many seconds (default 7200)",
+        help="a run is stuck only after this many seconds as well as two periods, or twice its"
+        " p99 run time when that is longer (default 900)",
     )
     parser.add_argument(
         "--state",

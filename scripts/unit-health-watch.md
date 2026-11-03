@@ -84,27 +84,76 @@ Each is judged on its own, opens and clears on its own, and is said once.
   `OnUnitInactiveSec` the clock starts when the service last went inactive. A disabled timer that
   is stopped is someone's choice and is not reported. A dead timer is the same silence as a unit
   that never completes, and leaves nothing in the journal to count.
-- **RUN NEVER ENDS**: the service has been running for longer than two periods + slack and
-  longer than 15 min (`--stuck-after`). A run that never ends holds the unit, so its timer
-  cannot start the next one.
+- **RUN NEVER ENDS**: one run has lasted longer than its limit. The floor is two periods + slack
+  + 2 min, and at least 15 min (`--stuck-after`). When twice the p99 of the unit's own completed
+  runs of the last two days is longer, that is the limit. For a oneshot the limit is never past
+  `TimeoutStartSec` + `TimeoutStopSec`, even below the floor: by then systemd itself should have
+  ended the run. The p99 is at most the longest completed run, so the raise never passes twice
+  the longest. A run that never ends holds the unit, so its timer cannot start the next one.
+
+  Why the p99: replayed over this box's user journal (2026-11-01 10:50Z to 11-03 03:46Z, 41 h),
+  the floor opened this 13 times, and every one of those runs ended by itself: transcript-import
+  (every 10 min, floor 22 min) ran 32-45 min, omp-transcript-offload (15 min, 33 min) 36-40 min,
+  a repository mirror (5 min, 15 min) 20-41 min, agent-files-archive (20 min, 43 min) 69 and 88 min.
+  Twice the p95 left 12 of them: taken from the runs before each one, as the watch must, the
+  p95 was 8-19 min. Twice the p99 leaves 5, each a run past twice the p99 of that unit's runs
+  before it: the mirror's first long runs, agent-files-archive's first two, one offload run.
+  Tried as well, replayed the same way: max(2 x p95, 1.25 x the longest) left 6; twice the
+  longest left 4, but one long outlier would then hide a hang for two days. The history is read
+  only for a unit already running past the earliest its limit can be, in one `journalctl` read
+  of the last two days (45,000 records, 1-5 s here), and kept for an hour in the state file
+  (`run_times`). Only a oneshot's `Finished` ends a run, so other service types keep the floor,
+  and their `TimeoutStartSec` bounds only their start (infra977-trial-feed: `Type=simple`, 2 min,
+  runs for hours).
+
+## Units with their own failure handler
+
+A unit whose `OnFailure=` names a handler (omp-session-sql-sweep, omp-login-watch,
+transcript-mirror here) says its own failed runs, so NO RUN COMPLETED and RUNS KILLED are not
+judged for it: each failure gets one message, from the handler. Its timer stopping and a run
+that never ends fail nothing and start no handler, so those two are still said. The list comes
+from each service's `OnFailure=` property, not from a list in this script; `--report` marks these
+units `(failed runs told by <handler>)`.
+
+What it gives up: a unit whose handler is broken, or says nothing, has its failed runs said by
+nobody.
 
 ## What a notice says
 
-All of one run's new conditions go in one message, one block per unit:
+All of one run's news is one message of at most 600 characters:
 
-- the conditions and why each holds;
-- the journal counts for the window: started, completed, killed at the unit's `TimeoutStartSec`,
-  failed otherwise by result, still running;
-- the timer, its trigger, its state, when it last fired and when it fires next;
-- the last error systemd logged for the last failed run (`start operation timed out.
-  Terminating. / Main process exited, code=killed, status=15/TERM / Failed with result
-  'timeout'.`), and the last line the unit printed in that run;
-- what to read: the `journalctl` command for the window, `systemctl --user status`, and the
-  unit's own `Documentation=`.
+- `UNIT RUNS NOT COMPLETING on <host>, for the box-health lead:` and one item per new condition,
+  `<service> <CONDITION> - <why>`; items that do not fit are counted (`N more in the report.`);
+  conditions that cleared in the same run follow as `also <service> <CONDITION> cleared after
+  <time>`;
+- or, when the run only clears, one line: `UNIT RUNS CLEARED on <host>: <service> <CONDITION>
+  cleared after <time>; ...`;
+- and last, always, `Full report: <path>`.
 
-A condition still open after `--escalate` (2 h) is said again once, and every clear is said.
-A unit whose timer is gone (removed, or a transient timer stopped) has its conditions closed with
-that said.
+The report, `reports/<UTC YYYYmmddTHHMMSSZ>-open.txt` or `-clear.txt` beside the state file
+(kept 7 days, pruned by each run), holds what the message used to: for each new condition the
+journal counts for the window (started, completed, killed at the unit's `TimeoutStartSec`,
+failed otherwise by result, still running), the timer and when it fires next, the last error
+systemd logged for the last failed run, the last line the unit printed in that run, what to read
+(the `journalctl` command, `systemctl --user status`, the unit's `Documentation=`) and the
+advice; then the clears, and the `--report` table of every timer.
+
+A condition that still holds is no new fact and is not said again; a new unit or a new condition
+of a unit already open is. A unit whose timer is gone (removed, or a transient timer stopped) has
+its conditions closed with that said.
+
+Volume, replayed: every 5 min over the user journal (2026-11-01 10:50Z to 11-03 03:46Z, 41 h;
+timers' run starts, ends and stops rebuilt from it, a stopped timer taken as disabled), the
+previous version sends 81 messages, 48 a day, and this one 45, 26 a day: 13 → 5 RUN NEVER ENDS,
+17 → 8 NO RUN COMPLETED and 7 → 6 RUNS KILLED (units with an `OnFailure=` handler:
+omp-session-sql-sweep, transcript-mirror), no repeat after 2 h (7 before), and every message at
+most 600 characters (the previous longest 5,020). In 2026-11-02 14:29Z to 11-03 01:50Z, while
+the previous version ran on the box, the replay gives it 33 messages against the 34 the SRE
+session received, and this one 20. The rest is mostly TIMER STOPPED FIRING (10 in the replay,
+7 of them in one stall at 2026-11-01 17:25-17:40Z) and the clears. What it gives up: a run that
+hangs in a long unit is said later (transcript-import at twice its p99, at most at 51.5 min, its
+TimeoutStartSec + TimeoutStopSec, where the floor said 22 min), and a condition that lasts for
+days is said once.
 
 ## Where notices go
 
@@ -117,7 +166,8 @@ The same route as every box watch here (`load-swap-watch.md`, "Where alerts go")
 
 - **Its own silence.** Its timer is in the list it reads, but a watch that does not run cannot
   say so. Its 180 s limit is far above its pass (about 7 s at load 100), and it runs at `Nice=5`,
-  above the lanes, for that reason.
+  above the lanes, for that reason. A pass that reads the two-day run time history takes ~5 s
+  more.
 - **A unit with no timer**: a long-running service, or work started by hand or by another unit.
 - **A run that completes and does nothing useful.** It counts what systemd recorded, not what
   the unit was for; that is each unit's own business.
@@ -129,4 +179,5 @@ The same route as every box watch here (`load-swap-watch.md`, "Where alerts go")
 `systemctl --user disable --now unit-health-watch.timer`; nothing re-arms it until someone runs
 `devbox/install.sh` again. Deleting the state file
 (`/mnt/nvme/sami/tmp/unit-health-watch/state.json`, or `$XDG_STATE_HOME/unit-health-watch/`
-without that disk) forgets every open condition, so each one still true is said again.
+without that disk) forgets every open condition, so each one still true is said again, and the
+run time cache, which the next long run reads again. Reports sit in `reports/` beside it.
