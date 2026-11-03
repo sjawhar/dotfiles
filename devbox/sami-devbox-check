@@ -392,6 +392,21 @@ host_follow() {
     fi
 }
 
+# Movers (S3 and others) run scripts on sami-rocqperf over ssh after the move, so this machine
+# must reach it. While the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending
+# (dispatch://INFRA-734) the connection times out, which is a WAIT; any other error is a FAIL.
+rocqperf_check() {
+    local out rc=0
+    out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true </dev/null 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+        ok "ssh sami-devbox -> sami-rocqperf: ssh -o BatchMode=yes sami@sami-rocqperf true exits 0"
+    elif [[ "$out" == *"timed out"* ]]; then
+        echo "WAIT ssh sami-devbox -> sami-rocqperf: tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 pending (dispatch://INFRA-734)"
+    else
+        fail "ssh sami-devbox -> sami-rocqperf: exit $rc: $(tail -1 <<<"$out")"
+    fi
+}
+
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
@@ -404,6 +419,7 @@ host() {
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
     host_logins
     github_check "on the host"
+    rocqperf_check
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
     # Bounded, and into a file rather than a pipe: it is for the record, and on 2026-11-02 a doctor
     # killed by its bound left its throwaway box's `sudo umount` running, which held a pipe's write

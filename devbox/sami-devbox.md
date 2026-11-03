@@ -82,6 +82,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | dotfiles follow main | `systemctl --user is-active dotfiles-follow.timer`, `systemctl --user show dotfiles-follow.service`, its state file | timer active; last run exited 0; that run, at most 30 min ago, left HEAD on origin/main with nothing open and the tools installed |
 | mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it on the host after each fast-forward) | nothing missing |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
+| ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0; a time-out is a WAIT while the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending (dispatch://INFRA-734) |
 
 Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-box`):
 
