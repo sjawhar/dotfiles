@@ -108,7 +108,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
-CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
+
+def default_cache_dir() -> Path:
+    """The token cache, covered-owner files and decisions.log: /mnt/nvme/<user>/gh-app-token on a
+    machine with that disk, else ~/.cache/gh-app-token. On sami-rocqperf ~/.cache is on the root disk,
+    whose ext4 journal ran out of space under load: on 2026-11-03 at 09:50Z 428 helper processes sat
+    writing decisions.log there and every push on the box hung."""
+    user = os.environ.get("USER") or ""
+    if user and Path("/mnt/nvme", user).is_dir():
+        return Path("/mnt/nvme", user, "gh-app-token")
+    return Path.home() / ".cache" / "gh-app-token"
+
+
+OLD_CACHE_DIR = Path.home() / ".cache" / "gh-app-token"
+DEFAULT_CACHE_DIR = default_cache_dir()
+CACHE_DIR = DEFAULT_CACHE_DIR
+MOVED_NOTE = "MOVED.txt"
+
+
+def seed_cache_dir(new: Path, old: Path) -> None:
+    """Once, when the cache moves: copy the cached tokens and covered-owner files from the old
+    directory (modes kept, 0600) into a new one built aside and published by one rename, and leave a
+    note in the old directory saying where the cache is now. decisions.log is not copied; it stays in
+    the old directory as the record up to the move. Failure leaves the new directory to fill itself."""
+    if new == old or new.exists() or not old.is_dir():
+        return
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        partial = Path(tempfile.mkdtemp(prefix=f".{new.name}.", dir=new.parent))
+        try:
+            for entry in old.iterdir():
+                if entry.is_file() and entry.name.endswith(".json") and entry.name.startswith(("token-", "covered-")):
+                    shutil.copy2(entry, partial / entry.name)
+            os.rename(partial, new)
+        finally:
+            if partial.exists():
+                shutil.rmtree(partial, ignore_errors=True)
+        note = old / MOVED_NOTE
+        if not note.exists():
+            note.write_text(
+                f"gh-app-token's cache and decisions.log moved to {new} on "
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}: this disk's journal stalled every "
+                "write to decisions.log (2026-11-03). Nothing here is written any more; decisions.log here is the "
+                "record up to the move.\n"
+            )
+    except OSError:
+        pass
+
+
 GITHUB_API = "https://api.github.com"
 TOKEN_REFRESH_MARGIN = 300  # Refresh five minutes before expiry.
 MIN_LIFETIME_ENV = "GH_APP_TOKEN_MIN_LIFETIME"
@@ -716,6 +763,38 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def log_decision_after_answer(*decision: Any) -> None:
+    """log_decision, never on the caller's path. git waits for its credential helper to exit
+    (credential.c: finish_command after reading the answer), and knives waits for this process too,
+    so a log write stuck on the disk holds the push: on 2026-11-03 at 09:50Z 428 helper processes,
+    the oldest 598 s, sat in ext4_buffered_write_iter on decisions.log (the root disk's journal was
+    out of space) while every push on the box hung. So once the answer is flushed, the process entry
+    point forks: the parent exits at once and a detached child, its stdin, stdout and stderr on
+    /dev/null, writes the line; when no child can be made the line is dropped. main() called in a
+    test (DETACH_DECISION_LOG False) writes it inline."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if not DETACH_DECISION_LOG:
+        log_decision(*decision)
+        return
+    try:
+        if os.fork():
+            return
+    except OSError:
+        return
+    try:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        log_decision(*decision)
+    finally:
+        os._exit(0)
+
+
+DETACH_DECISION_LOG = False
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.action in {"store", "erase"}:
@@ -737,6 +816,8 @@ def main(argv: list[str] | None = None) -> int:
         print("gh-app-token: target owner required: pass --owner or set GH_APP_OWNER", file=sys.stderr)
         return 1
 
+    if CACHE_DIR == DEFAULT_CACHE_DIR:
+        seed_cache_dir(CACHE_DIR, OLD_CACHE_DIR)
     scope = scope_of(args.repo, args.read_only)
     try:
         try:
@@ -751,15 +832,14 @@ def main(argv: list[str] | None = None) -> int:
             token = fallback_token(args.profile, owner)
             decision = "fallback-personal-token"
     except AppTokenError as error:
-        log_decision(args.profile, owner, request, "refused", str(error))
         print(f"gh-app-token: {error}", file=sys.stderr)
         if credential_mode:
             # Stop git's helper chain: a broker failure, or an uncovered owner
             # with no usable fallback, must fail loudly, never silently fall
             # back to the user's own credentials.
             print("quit=1")
+        log_decision_after_answer(args.profile, owner, request, "refused", str(error))
         return 1
-    log_decision(args.profile, owner, request, decision, f"token={token[:4]}…")
 
     if credential_mode:
         print(f"protocol={request.get('protocol', 'https')}")
@@ -768,8 +848,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"password={token}")
     else:
         print(token)
+    log_decision_after_answer(args.profile, owner, request, decision, f"token={token[:4]}…")
     return 0
 
 
 if __name__ == "__main__":
+    DETACH_DECISION_LOG = True
     sys.exit(main())

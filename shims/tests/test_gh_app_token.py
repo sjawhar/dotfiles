@@ -3,8 +3,10 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
+import time
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -702,6 +704,76 @@ class BoxEnrollmentWait(unittest.TestCase):
         # Long enough for the 116 s a box took to enroll on 2026-11-01.
         self.assertGreaterEqual(gh_app_token.ENROLLMENT_WAIT_SECONDS, 160)
 
+
+
+class CacheOffTheRootDisk(unittest.TestCase):
+    """The cache and decisions.log live on /mnt/nvme/<user> where that disk is, seeded once from the old
+    ~/.cache/gh-app-token; and a credential answer never waits for the decision log. On 2026-11-03 at
+    09:50Z 428 helper processes sat writing decisions.log on the stalled root disk and every push hung."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+
+    def test_the_old_cache_is_copied_once_with_its_modes_and_a_note_is_left(self):
+        old, new = self.root / "old", self.root / "nvme" / "gh-app-token"
+        old.mkdir()
+        for name in ("token-agent--app-1--acme.json", "covered-1.json"):
+            (old / name).write_text("{}")
+            (old / name).chmod(0o600)
+        (old / "decisions.log").write_text("history\n")
+        (old / "covered-1.lock").write_text("")
+        gh_app_token.seed_cache_dir(new, old)
+        self.assertEqual(sorted(p.name for p in new.iterdir()), ["covered-1.json", "token-agent--app-1--acme.json"])
+        self.assertEqual((new / "covered-1.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(new.stat().st_mode & 0o777, 0o700)
+        self.assertIn(str(new), (old / gh_app_token.MOVED_NOTE).read_text())
+        self.assertEqual((old / "decisions.log").read_text(), "history\n")
+        (old / "covered-1.json").write_text('{"changed": 1}')
+        gh_app_token.seed_cache_dir(new, old)
+        self.assertEqual((new / "covered-1.json").read_text(), "{}", "a published cache was replaced")
+
+    def test_the_cache_is_on_nvme_where_that_disk_is(self):
+        user = os.environ.get("USER", "")
+        expected = Path("/mnt/nvme", user, "gh-app-token") if user and Path("/mnt/nvme", user).is_dir() \
+            else Path.home() / ".cache" / "gh-app-token"
+        self.assertEqual(gh_app_token.default_cache_dir(), expected)
+
+    def test_the_answer_comes_while_the_decision_log_cannot_be_written(self):
+        home = self.root / "home"
+        cache = home / ".cache" / "gh-app-token"
+        cache.mkdir(parents=True, mode=0o700)
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        (cache / "token-agent--app-123--acme.json").write_text(json.dumps({"token": "ghs_cached", "expires_at": expires}))
+        gitconfig = self.root / "gitconfig"
+        gitconfig.write_text('[gh-app "agent"]\n\tapp-id = 123\n')
+        log = cache / "decisions.log"
+        os.mkfifo(log)  # opening it to append blocks until a reader comes: a log write that cannot finish
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "USER": "no-such-user-gh-app-token-test",
+               "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
+        try:
+            result = subprocess.run([sys.executable, str(MODULE_PATH), "agent", "--owner", "acme"], env=env,
+                                    capture_output=True, text=True, timeout=60, check=False)
+            self.assertEqual((result.returncode, result.stdout), (0, "ghs_cached\n"), result.stderr)
+            request = "protocol=https\nhost=github.com\npath=acme/repo.git\n\n"
+            result = subprocess.run([sys.executable, str(MODULE_PATH), "agent", "get"], env=env, input=request,
+                                    capture_output=True, text=True, timeout=60, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("password=ghs_cached", result.stdout)
+        finally:
+            # Unblock the detached log writers: each opens the FIFO, writes its line and exits.
+            reader = os.open(log, os.O_RDONLY | os.O_NONBLOCK)
+            deadline = time.monotonic() + 30
+            lines = b""
+            while time.monotonic() < deadline and lines.count(b"\n") < 2:
+                try:
+                    lines += os.read(reader, 65536)
+                except BlockingIOError:
+                    pass
+                time.sleep(0.05)
+            os.close(reader)
+        self.assertEqual(lines.count(b"\n"), 2, "the decision lines were not written once the log could be")
 
 
 if __name__ == "__main__":

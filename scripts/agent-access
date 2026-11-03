@@ -85,16 +85,18 @@ check_aws() {
 # owner). Read gh-app-token's own installation cache instead of minting a
 # fresh token just to report status.
 check_github_app() {
-    local f owners
-    f="$(find "$HOME/.cache/gh-app-token" -maxdepth 1 -name 'covered-*.json' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2-)"
+    local f owners dir="/mnt/nvme/${USER:-$(id -un)}/gh-app-token"
+    # gh-app-token's cache is on /mnt/nvme/<user> where that disk is (default_cache_dir in shims/gh-app-token).
+    [[ -d "/mnt/nvme/${USER:-$(id -un)}" ]] || dir="$HOME/.cache/gh-app-token"
+    f="$(find "$dir" -maxdepth 1 -name 'covered-*.json' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2-)"
     if [[ -z "$f" ]]; then
-        row github_app unknown - - "ls ~/.cache/gh-app-token/covered-*.json" \
+        row github_app unknown - - "ls $dir/covered-*.json" \
             "no installation discovered yet this host; shims/gh mints on first push/API call. Personal gh login is refused by design."
         return
     fi
     owners="$(jq -r 'keys | join(", ")' "$f" 2>/dev/null)"
     row github_app live "App covers: ${owners:-unknown}; other owners -> GH_PUBLIC_REPO_PAT fallback" \
-        "n/a (installation tokens auto-mint, ~1h)" "cat ~/.cache/gh-app-token/covered-*.json" \
+        "n/a (installation tokens auto-mint, ~1h)" "cat $dir/covered-*.json" \
         "personal gh login is refused by design (shims/gh)"
 }
 
