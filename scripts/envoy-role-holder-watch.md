@@ -58,8 +58,8 @@ One run, with no model call:
 
    | Source | What it reads |
    |---|---|
-   | `process` | an `omp` process naming the session on its command line (the id, or the header of the file `--resume <path>` names), in an open transcript's **file name**, or in that transcript's **header** (`{"type":"session","id":…}`, which is the second record, not the first). An omp in an agent box counts: its comm and command line are readable from the host, only its descriptors are not. So does an **agent box launcher** naming the session (`agentbox new … -- omp --resume <id>`, `agentbox-run.ts … --resume <id>`, matched on argv words): it lives exactly as long as the box, and it is the only process of a session between an `agentbox move` respawn and its box's omp starting (15 min at load 410 on 2026-11-02) |
-   | `openers` | any process **this user can read** holding the session's transcript open, matched by device and inode, so a lane under a wrapper or a renamed binary still counts and one inside an agent box (uid-shifted `/proc`) does not. Read **only** when the first three came back silent — which is also the only time it can change the answer — so a healthy role never pays its cost, and an open incident keeps paying it every period, since it is the one source that can see a lane running under a name this watch does not know, and so the one that can clear such an incident |
+   | `process` | an `omp` process that RUNS the session, by one of three things only: its `--resume`/`--restore` target (the id, or the header of the file a path names), a transcript it holds open **for writing** (`O_WRONLY`/`O_RDWR` in its `fdinfo` flags, the rule of omp-dup-watch), by that file's **name** or its **header** (`{"type":"session","id":…}`, the second record). Never from other words of its command line, never from a transcript it only reads, and never from an omp started with `-p`/`--print` or `--no-session`, which runs no session of its own: from 06:48Z to 07:13Z on 2026-11-03 the skill librarian's annotation batch ran `omp -p … --no-session … @…/known/runs/opus48/01a19366-…-s20/task.md` four times, and this watch read each run as NICKMINE (01a19366) running elsewhere. An omp in an agent box counts: its comm and command line are readable from the host, only its descriptors are not, so its resume target is the one source. So does an **agent box launcher** naming the session (`agentbox new … -- omp --resume <id>`, `agentbox-run.ts … --resume <id>`, matched on argv words): it lives exactly as long as the box, and it is the only process of a session between an `agentbox move` respawn and its box's omp starting (15 min at load 410 on 2026-11-02) |
+   | `openers` | any process **this user can read** holding the session's transcript open **for writing**, matched by device and inode, so a lane under a wrapper or a renamed binary still counts, a tool that only reads the file does not, and one inside an agent box (uid-shifted `/proc`) does not. Read **only** when the first three came back silent — which is also the only time it can change the answer — so a healthy role never pays its cost, and an open incident keeps paying it every period, since it is the one source that can see a lane running under a name this watch does not know, and so the one that can clear such an incident |
    | `transcript` | how long ago the session's transcript was written. Inside `--write-grace` (120 s) something is writing it |
    | `registry` | Envoy's own entry and heartbeat: `GET /v1/sessions`, confirmed for an absent holder with `GET /v1/registry/<id>`. Both only read |
 
@@ -268,15 +268,46 @@ It goes to the INFRA lead and the lane's stream lead — the live holder of a `l
 recipient **with the role it was reached by** (`stream lead (lead-oss-verify) 01a14b36-…`), so a
 reader knows who else saw it. When no stream lead resolves, the alert says so.
 
-**A pane left at a shell is treated as a death. A deliberate stop closes its pane.** There is no
-allow-list, no intentionally-down flag, nothing to expire — a suppression entry nobody expires is
-exactly how a real death hides (OSS Verify lead, 2026-10-27, who asked for one and then preferred
-this rule). The failure mode the rule guards against is a lead who stops a lane and walks away
-leaving its pane open: that pane is indistinguishable from a crashed one, so it alerts. Closing
-the pane costs one `tmux kill-pane` and removes the lane from this check entirely.
+**A pane counts only when its last omp died without meaning to.** There is still no allow-list,
+no intentionally-down flag, nothing to expire — a suppression entry nobody expires is exactly how
+a real death hides (OSS Verify lead, 2026-10-27). What the watch reads instead is what the
+session itself recorded. A pane at a shell is **not** an incident when:
 
-One alert per pane per incident, and one clear — when omp runs in the pane again (naming the
-pid), or when the pane is gone.
+1. **its session ended on purpose**: the last entry of its transcript is a normal
+   `session_exit`. On 2026-11-03 review panes `%2177` and `%2176` alerted at 07:04Z and 07:06Z,
+   three minutes after their sessions (01a1a031-90db, 01a1a031-9157) exited normally;
+2. **its omp was a one-shot**: started with `-p`/`--print`, which processes its prompt and exits;
+3. **an `agentbox move` owns its session**: `~/.cache/omp/agentbox/move-to/active/<session id>`
+   exists and its `pid=` is alive (a stale file whose relauncher died holds nothing), or the
+   session's `agentbox-moved` marker (in its transcript directory, or
+   `~/.omp/agentbox-moved/<session id>`) names this machine as `from=` — the rule omp-memory-watch
+   applies before it resumes anything. `%1740` and `%1741` alerted at 05:12:57Z and 05:35:37Z
+   while their sessions were being moved to sami-devbox. A move's hang-up writes no
+   `session_exit` (01a19e3c-8da0's transcript ends in an aborted turn at 05:32:08Z), so a move
+   that fails and leaves the pane down is still caught once its active file goes.
+
+The session a pane is judged by is the **top-level** session its omp runs (its `--resume`
+target, else the one top-level transcript it holds open), never a subagent's: `%1740` was
+remembered as running 01a19ed8, an advisor subagent of the moved 01a19e3c-8d64.
+
+**What it still catches: an omp that died without a normal exit** — a crash, a kill, an
+out-of-memory, a hang-up with nothing respawning it, a session that never started — in a pane
+that no move owns. A lead who stops a lane by killing it, rather than letting it exit, still gets
+an alert.
+
+**One alert per pane per session, until omp runs in that pane again.** A pane whose session is
+seen running in a process outside it is no longer that lane's pane: the clear says so, and the
+pane is not watched again until omp runs in it. On 2026-11-03 pane `%40` (session 01a19366,
+NICKMINE, which closed itself on purpose at about 07:05Z) cleared at 06:48Z and 07:04Z and
+alerted at 06:54Z and 07:09Z: each time an annotation run that only NAMED the session started,
+the watch read it as the session running elsewhere and closed the incident, and each time the
+run ended the pane opened a new incident and alerted again. The runs no longer count as the
+session (see the `process` source); the once-per-session rule holds even when something does.
+The same holds for
+any other way an incident closes and reopens — a shell child that comes and goes — because the
+lane's state has not changed, and neither has the alert its reader already has. One clear goes
+out when omp runs in the pane again (naming the pid), when the pane is gone, or when one of the
+three rules above applies.
 
 ### A pane whose tmux session is `mv-*` is a move, not a death
 
@@ -332,7 +363,7 @@ check then covers it however its pane ends. The repo lane is being re-dispatched
 | Live sessions, their roles, host, dir, topics | `GET $ENVOY/v1/sessions` |
 | Role claim | **not read** by the watch, and named in no remedy: `GET /v1/roles/<role>` releases a lapsed holder's claim as it answers; see "What not reading the claim costs" |
 | Envoy registry entry and heartbeat | `GET $ENVOY/v1/sessions`, and `GET $ENVOY/v1/registry/<id>` for a holder absent from that list (`sessionEntryHandler` reads the session bucket and answers it; it makes no release) |
-| Holder process | `/proc/*/stat` (one pass, shared with the pane check), then `/proc/*/cmdline` and `/proc/*/fd` of the `omp` and launcher processes only |
+| Holder process | `/proc/*/stat` (one pass, shared with the pane check), then `/proc/*/cmdline`, `/proc/*/fd` and `/proc/*/fdinfo` of the `omp` and launcher processes only |
 | Last seen alive | `st_mtime` of the holder's `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl`, else `mtime_ms` of its row in Postgres when the sweep took it, read once when the incident opens and carried unchanged through every message about it |
 | Swept transcript | the session sweep's record `~/.local/share/omp-session-sql/deleted.tsv` (which files it deleted, and when), then the last two 1 MiB parts of the row in `omp_session_files` on agents-postgres, through `psql` and the sweep's DSN file beside that record; read once per holder (5 s limit) and kept in the state file under `swept` |
 | Handover files (alert text only) | absolute `.md` paths the holder's transcript names whose basename reads like a handover, plus `WAKE.md`/`HANDOVER.md`/`HANDOFF.md`/`STATE.md` in its working directory, `/mnt/nvme/sami/<lane>` and `/mnt/nvme/sami/tmp/<lane>` |

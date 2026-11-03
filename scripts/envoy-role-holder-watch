@@ -64,6 +64,15 @@ omp runs there again or the pane goes away. The session is resolved from what th
 running in the pane, else the transcript in the pane's directory whose own title the pane title
 carries, else the `omp --resume` command tmux-resurrect saved for that pane's place.
 
+A pane counts only when its last omp died without meaning to (`pane_release`): not when its
+session's transcript ends in a normal session_exit, not when the omp was a one-shot (`omp -p`),
+not while an `agentbox move` owns the session or once it has moved it away from this machine.
+What it still catches is an omp that died without a normal exit. And it alerts once per pane per
+session until omp runs in that pane again: a pane whose session was seen running elsewhere is no
+longer that lane's pane. Pane %40 cleared and alerted twice each between 06:48Z and 07:09Z on
+2026-11-03 because annotation runs that only named its session read as the session running
+elsewhere; such a run no longer counts as the session (`runs_no_session`).
+
 The watcher never executes that command. A pane a person paused and a pane whose omp died look
 the same to a script, so the person or lead who reads the alert looks at the pane and decides.
 
@@ -129,6 +138,8 @@ DEFAULT_STATE = (
 )
 DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
+# The procfs every process read goes through. A module constant so tests can point it at a tree.
+PROC_ROOT = Path("/proc")
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 TEAM_TOPIC = "notifications.team."
@@ -794,7 +805,7 @@ _SCAN: dict = {"unread_headers": 0}
 def read_stat(entry: str) -> tuple[str, int, int] | None:
     """(comm, ppid, tpgid) from /proc/<pid>/stat, or None when the process is gone."""
     try:
-        with open(f"/proc/{entry}/stat", "rb") as handle:
+        with open(PROC_ROOT / entry / "stat", "rb") as handle:
             raw = handle.read().decode("utf8", "replace")
         head, _, tail = raw.rpartition(")")
         fields = tail.split()
@@ -803,13 +814,60 @@ def read_stat(entry: str) -> tuple[str, int, int] | None:
         return None
 
 
+# pid -> {"primary": the top-level session this omp runs, or None; "oneshot": started with -p}.
+# The pane check reads it: a pane is remembered by the session its omp RUNS, never by a subagent
+# transcript it holds open -- on 2026-11-03 pane %1740 was remembered as running 01a19ed8, an
+# advisor subagent of 01a19e3c-8d64, so nothing about the move of 01a19e3c-8d64 could match it.
+_OMP_PIDS: dict[int, dict] = {}
+
+
+def opened_for_writing(fdinfo: Path) -> bool:
+    """Whether the descriptor is open for writing: O_WRONLY or O_RDWR in the access mode of the
+    octal `flags:` line of /proc/<pid>/fdinfo/<fd>. False when it cannot be read. The rule of
+    omp-dup-watch (dotfiles 484c9c5): omp's session writer holds its own transcript
+    O_WRONLY|O_APPEND (flags 02102001), and an omp opens OTHER sessions' transcripts read-only
+    whenever a tool reads them."""
+    try:
+        text = fdinfo.read_text(errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("flags:"):
+            try:
+                return int(line.split()[1], 8) & os.O_ACCMODE != os.O_RDONLY
+            except (IndexError, ValueError):
+                return False
+    return False
+
+
+def runs_no_session(argv: list[str]) -> bool:
+    """True for an omp that runs no session of its own: a one-shot (`-p`/`--print`) or one
+    started with `--no-session`. Its command line names whatever it was asked about, not a lane.
+    On 2026-11-03 06:48-07:13Z the skill librarian's annotation batch ran
+    `omp -p ... --no-session ... @…/known/runs/opus48/01a19366-…-s20/task.md` over session
+    01a19366, and this watch read each of those four processes as 01a19366 running elsewhere."""
+    return any(word in ("-p", "--print", "--no-session") for word in argv[1:])
+
+
+def top_level_session(path: str) -> str | None:
+    """The session id of a top-level transcript (<session root>/<dir>/<stamp>_<id>.jsonl), or
+    None for anything else: a subagent's file lives one directory deeper, under its parent's."""
+    candidate = Path(path)
+    if candidate.parent.parent != SESSION_ROOT:
+        return None
+    match = re.fullmatch(r"[0-9T:.-]+Z_(" + UUID_RE.pattern + r")\.jsonl", candidate.name)
+    return match.group(1) if match else None
+
+
 def omp_sessions_by_pid() -> dict[str, int]:
     """Every session id an `omp` process on this machine holds, mapped to that pid.
 
-    Three sources, in widening order: the command line (`omp --resume <id>`, or the header of
-    the file `omp --resume <path>` names), the file name of an open transcript, and that
-    transcript's own header. The header is what makes a resumed subagent lane visible; without
-    it the process holds the session and nothing can tell.
+    Three sources, and only these: the `--resume`/`--restore` target (`omp --resume <id>`, or
+    the header of the file `omp --resume <path>` names), the file name of a transcript the omp
+    holds open FOR WRITING (`opened_for_writing`), and that transcript's own header. Never other
+    words of the command line, never a transcript it only reads, and nothing at all from an omp
+    that runs no session of its own (`runs_no_session`). The header is what makes a resumed
+    subagent lane visible; without it the process holds the session and nothing can tell.
 
     An omp in an agent box is a host process too: its comm is `omp` and its command line is
     readable, but its uid is shifted (166536 here) and its /proc/<pid>/fd and environ are not,
@@ -833,9 +891,10 @@ def omp_sessions_by_pid() -> dict[str, int]:
     children: dict[int, list[int]] = {}
     info: dict[int, tuple[str, int]] = {}
     _BOX_LAUNCHERS.clear()
+    _OMP_PIDS.clear()
     _SCAN["unread_headers"] = 0
     header_deadline = min(time.time() + HEADER_READ_SECONDS, _RUN["deadline"])
-    for entry in os.listdir("/proc"):
+    for entry in os.listdir(PROC_ROOT):
         if not entry.isdigit():
             continue
         check_time("the process scan")
@@ -849,7 +908,7 @@ def omp_sessions_by_pid() -> dict[str, int]:
         if comm != "omp" and comm not in BOX_LAUNCHER_COMMS:
             continue
         try:
-            with open(f"/proc/{entry}/cmdline", "rb") as handle:
+            with open(PROC_ROOT / entry / "cmdline", "rb") as handle:
                 argv = handle.read().decode("utf8", "replace").split("\0")
         except OSError:
             continue
@@ -861,43 +920,61 @@ def omp_sessions_by_pid() -> dict[str, int]:
                 if path:
                     _KNOWN_TRANSCRIPTS[session] = path
             continue
-        command = " ".join(argv)
-        found = set(UUID_RE.findall(command))
-        resumed, path = resume_target(command)
-        if resumed and path:
+        # An omp that runs no session of its own names none: its command line is about
+        # whatever it was asked, and NICKMINE's id in an annotation batch's task path read as
+        # NICKMINE running in four processes on 2026-11-03 (see runs_no_session).
+        oneshot = runs_no_session(argv)
+        _OMP_PIDS[pid] = {"primary": None, "oneshot": oneshot}
+        if oneshot:
+            continue
+        # A session id comes from three places only: the `--resume`/`--restore` target, a
+        # transcript this omp holds open FOR WRITING, and that transcript's own header. Never
+        # from other words of the command line, and never from a transcript it only reads.
+        found: set[str] = set()
+        resumed, path = resume_target(" ".join(argv))
+        if resumed:
             found.add(resumed)
-            _KNOWN_TRANSCRIPTS[resumed] = path
+            if path:
+                _KNOWN_TRANSCRIPTS[resumed] = path
+        tops: list[str] = []
         try:
-            descriptors = os.listdir(f"/proc/{pid}/fd")
+            descriptors = os.listdir(PROC_ROOT / str(pid) / "fd")
         except OSError:
             descriptors = []
         for descriptor in descriptors:
-            link = f"/proc/{pid}/fd/{descriptor}"
+            link = f"{PROC_ROOT}/{pid}/fd/{descriptor}"
             try:
                 target = os.readlink(link)
             except OSError:
                 continue
-            if "/.omp/agent/sessions/" in target and target.endswith(".jsonl"):
-                named = UUID_RE.findall(os.path.basename(target))
-                try:
-                    opened = os.stat(link)
-                except OSError:
-                    continue
-                known, from_header = header_known(target, opened)
-                if not known:
-                    if time.time() <= header_deadline:
-                        from_header = session_id_in_header(target, opened, via=link)
-                    else:
-                        _SCAN["unread_headers"] += 1
-                # The file a running omp holds is the transcript of these ids, for certain: kept,
-                # so the lookup after this holder stops needs no walk of the session root.
-                for session_id in named + ([from_header] if from_header else []):
-                    _KNOWN_TRANSCRIPTS[session_id] = target
-                found.update(named)
-                if from_header:
-                    found.add(from_header)
+            if "/.omp/agent/sessions/" not in target or not target.endswith(".jsonl"):
+                continue
+            if not opened_for_writing(PROC_ROOT / str(pid) / "fdinfo" / descriptor):
+                continue
+            named = UUID_RE.findall(os.path.basename(target))
+            try:
+                opened = os.stat(link)
+            except OSError:
+                continue
+            known, from_header = header_known(target, opened)
+            if not known:
+                if time.time() <= header_deadline:
+                    from_header = session_id_in_header(target, opened, via=link)
+                else:
+                    _SCAN["unread_headers"] += 1
+            # The file a running omp writes is the transcript of these ids, for certain: kept,
+            # so the lookup after this holder stops needs no walk of the session root.
+            for session_id in named + ([from_header] if from_header else []):
+                _KNOWN_TRANSCRIPTS[session_id] = target
+            found.update(named)
+            if from_header:
+                found.add(from_header)
+            top = top_level_session(target)
+            if top:
+                tops.append(top)
         for session_id in found:
             held.setdefault(session_id, pid)
+        _OMP_PIDS[pid]["primary"] = resumed or (sorted(set(tops))[0] if len(set(tops)) == 1 else None)
     for session, (pid, command) in launchers.items():
         if session not in held:
             held[session] = pid
@@ -911,14 +988,16 @@ _OPEN_JSONL: dict[tuple[int, int], list[int]] | None = None
 
 
 def transcript_holders(path: str | Path) -> list[int]:
-    """Every pid on this machine with `path` open, whatever the process is called.
+    """Every pid on this machine with `path` open FOR WRITING, whatever the process is called.
 
     `omp_sessions_by_pid` reads only processes whose comm is `omp`. This reads the file's own
     openers instead, by device and inode, so a lane running under a wrapper, a renamed binary or
-    a box's init still counts as a holder. It reads every descriptor of every process this user
-    can read, so it does that ONCE per run, for every holder asked about: once per holder was
-    0.66 s each at load 410 on 2026-11-02, with six open incidents in every period. A scan the
-    run's budget stops leaves no table behind: half a table would say "nobody holds it".
+    a box's init still counts as a holder. Only a writer counts (`opened_for_writing`): a tool
+    that reads another session's transcript holds it open read-only, and is not that session.
+    It reads every descriptor of every process this user can read, so it does that ONCE per
+    run, for every holder asked about: once per holder was 0.66 s each at load 410 on
+    2026-11-02, with six open incidents in every period. A scan the run's budget stops leaves no
+    table behind: half a table would say "nobody holds it".
     """
     global _OPEN_JSONL
     try:
@@ -927,11 +1006,11 @@ def transcript_holders(path: str | Path) -> list[int]:
         return []
     if _OPEN_JSONL is None:
         table: dict[tuple[int, int], list[int]] = {}
-        for entry in os.listdir("/proc"):
+        for entry in os.listdir(PROC_ROOT):
             if not entry.isdigit():
                 continue
             check_time("the open-file scan")
-            directory = f"/proc/{entry}/fd"
+            directory = f"{PROC_ROOT}/{entry}/fd"
             try:
                 descriptors = os.listdir(directory)
             except OSError:
@@ -939,6 +1018,8 @@ def transcript_holders(path: str | Path) -> list[int]:
             for descriptor in descriptors:
                 try:
                     if not os.readlink(f"{directory}/{descriptor}").endswith(".jsonl"):
+                        continue
+                    if not opened_for_writing(PROC_ROOT / entry / "fdinfo" / descriptor):
                         continue
                     seen = os.stat(f"{directory}/{descriptor}")
                 except OSError:
@@ -1524,11 +1605,11 @@ def holder_evidence(
             openers = transcript_holders(transcript)
             sources.append(
                 ("openers", bool(openers),
-                 f"its transcript is open in pid(s) {', '.join(str(p) for p in openers)}"
+                 f"its transcript is open for writing in pid(s) {', '.join(str(p) for p in openers)}"
                  if openers
-                 else "no process THIS USER CAN READ holds its transcript open, whatever the"
-                      " process is called -- a lane inside an agent box has a uid-shifted"
-                      " /proc and is invisible here"
+                 else "no process THIS USER CAN READ holds its transcript open for writing,"
+                      " whatever the process is called (a reader is not the session) -- a lane"
+                      " inside an agent box has a uid-shifted /proc and is invisible here"
                  )
             )
         else:
@@ -2074,7 +2155,7 @@ def process_table() -> tuple[dict[int, list[int]], dict[int, tuple[str, int]]]:
         return _PROC_TABLE
     children: dict[int, list[int]] = {}
     info: dict[int, tuple[str, int]] = {}
-    for entry in os.listdir("/proc"):
+    for entry in os.listdir(PROC_ROOT):
         if not entry.isdigit():
             continue
         check_time("the process table")
@@ -2213,10 +2294,10 @@ def resume_target(command: str) -> tuple[str | None, str | None]:
     words = command.split()
     value = ""
     for index, word in enumerate(words):
-        if word == "--resume" and index + 1 < len(words):
+        if word in ("--resume", "--restore") and index + 1 < len(words):
             value = words[index + 1]
             break
-        if word.startswith("--resume="):
+        if word.startswith(("--resume=", "--restore=")):
             value = word.split("=", 1)[1]
             break
     value = value.strip("'\"")
@@ -2458,6 +2539,77 @@ def move_in_progress(pane: dict) -> dict | None:
     return {"mover": pane["session_name"], "worker": worker, "where": moved_to(worker)}
 
 
+# `agentbox move --to <machine>` keeps MOVE_TO_ACTIVE/<session id> (`pid=<relauncher>`,
+# `target=`, `start=`) while it moves a session to another machine, and leaves the marker
+# `agentbox-moved` (`from=`, `to=`, `time=`) in the session's directory and as MOVED_INDEX/<id>
+# once it has. The same rule as omp-memory-watch's move_to_claim and moved_away (dotfiles 9312493):
+# a stale active file whose relauncher died holds nothing, and a marker counts only on the machine
+# its `from=` names. Pane %1740 alerted at 05:12:57Z and %1741 at 05:35:37Z on 2026-11-03 while
+# such moves of their sessions ran.
+MOVE_TO_ACTIVE = Path.home() / ".cache" / "omp" / "agentbox" / "move-to" / "active"
+MOVED_MARKER = "agentbox-moved"
+MOVED_INDEX = Path.home() / ".omp" / "agentbox-moved"
+
+
+def key_values(path: Path) -> dict[str, str]:
+    """A file of `key=value` lines as a dict, or {} when it cannot be read."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return {}
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def move_claim(session: str, transcript: str = "") -> str:
+    """Why an `agentbox move` owns `session` now, or "": a move --to running here, or a marker
+    saying the session moved away from this machine."""
+    if not UUID_RE.fullmatch(session or ""):
+        return ""
+    fields = key_values(MOVE_TO_ACTIVE / session)
+    pid = fields.get("pid", "")
+    if pid.isdigit() and (PROC_ROOT / pid).exists():
+        return (
+            f"agentbox move --to {fields.get('target') or 'another machine'} owns session {session}"
+            f" (relauncher pid {pid})"
+        )
+    here = os.environ.get("AGENTBOX_HOST") or socket.gethostname().split(".")[0]
+    markers = [MOVED_INDEX / session]
+    if transcript:
+        markers.append(Path(transcript).with_suffix("") / MOVED_MARKER)
+    for marker in markers:
+        fields = key_values(marker)
+        if fields and fields.get("from") == here:
+            return (
+                f"session {session} moved to {fields.get('to') or 'another machine'} at"
+                f" {fields.get('time') or 'an unknown time'} and runs there now (marker {marker})"
+            )
+    return ""
+
+
+def pane_release(record: dict, session: str | None, transcript: str) -> str:
+    """Why a pane whose omp is gone is NOT at a shell in the sense this check alerts on, or "".
+
+    A pane counts only when its last omp died without meaning to. Three things say it meant to:
+    the omp was a one-shot (`omp -p`, which processes its prompt and exits); an `agentbox move`
+    owns its session; or its session's transcript ends in a normal session_exit. On 2026-11-03
+    review panes %2177 and %2176 alerted three minutes after their sessions exited normally, and
+    %1740 and %1741 while their sessions were being moved to sami-devbox. What is left -- an omp
+    that died with no exit record and no move -- is what this check is for.
+    """
+    if record.get("oneshot"):
+        return "its omp ran a one-shot prompt (`omp -p`), which exits by design"
+    for candidate in [session] + [s for s in record.get("sessions") or [] if s != session]:
+        claim = move_claim(candidate or "", transcript if candidate == session else "")
+        if claim:
+            return claim
+    if session and UUID_RE.fullmatch(session):
+        path = transcript or str(transcript_of(session, walk=False) or "")
+        ended = normal_exit_at(path) if path else None
+        if ended:
+            return f"its session {session} ended with a normal session_exit at {ended}"
+    return ""
+
+
 def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
     targets = [(INFRA_LEAD, "INFRA lead")]
     live = {s.get("session_id") for s in sessions}
@@ -2579,11 +2731,21 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         agents += 1
         incident = incidents.get(key)
         if omp_pids:
-            session = next((pid_session[p] for p in omp_pids if p in pid_session), None)
+            facts = [_OMP_PIDS.get(p) or {} for p in omp_pids]
+            session = next((fact["primary"] for fact in facts if fact.get("primary")), None) or next(
+                (pid_session[p] for p in omp_pids if p in pid_session), None
+            )
             record = memory.setdefault(key, {})
             record.update({"where": where, "title": pane["pane_title"], "cwd": pane["pane_current_path"], "seen_at": now})
             if session:
                 record["session"] = session
+            # Every session the pane's omp holds, so a move of the one it runs is matched even
+            # when the top-level one could not be told; and whether it is a one-shot.
+            record["sessions"] = sorted(s for s, p in held.items() if p in omp_pids)[:8]
+            record["oneshot"] = any(fact.get("oneshot") for fact in facts)
+            # omp runs in this pane again: its next stop is news, whatever came before.
+            for stale in ("left", "alerted_for"):
+                record.pop(stale, None)
             if incident:
                 clear(key, incident, f"omp (pid {omp_pids[0]}) runs in the pane again"
                       + (f", session {session}" if session else ""))
@@ -2628,7 +2790,24 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             if incident:
                 clear(key, incident, "its owner marks this pane @agent_oneshot: a one-shot omp that exits by design")
             continue
-        at_shell += 1
+        # A pane whose session was seen running in a process outside it is no longer that lane's
+        # pane: the lane went elsewhere, and where it runs is watched there. Until omp runs in
+        # this pane again it is a leftover shell. On 2026-11-03 pane %40 (session 01a19366)
+        # alerted at 06:54Z and 07:09Z and cleared at 06:48Z and 07:04Z: each time a process was
+        # read as its session running elsewhere the incident closed, and each time that process
+        # stopped the pane opened a new one. (Those processes were annotation runs that only
+        # named the session; `runs_no_session` now keeps them out, and this rule keeps one alert.)
+        left = (memory.get(key) or {}).get("left")
+        if left:
+            log_change(
+                state, logged, f"left:{left.get('session')}",
+                f"pane {pane['pane_id']} {where}: at a shell; its session {left.get('session')} ran"
+                f" in pid {left.get('pid')} outside this pane at {iso(left.get('at'))}, so nothing"
+                " is watched here until omp runs in this pane again",
+            )
+            if incident:
+                clear(key, incident, f"its session {left.get('session')} runs outside this pane")
+            continue
         text = title_text(pane["pane_title"])
         # Resolve the session this pane last ran: what this watch saw running here, else the
         # transcript in its directory titled as the pane is, else the newest resurrect save.
@@ -2698,9 +2877,20 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
                 f" pid {held[session]} elsewhere; not an incident",
             )
             clear(key, incident, f"its session {session} runs in pid {held[session]} elsewhere")
+            memory.setdefault(key, {})["left"] = {"session": session, "pid": held[session], "at": now}
             incidents.pop(key, None)
             state.commit(options)
             continue
+        released = pane_release(memory.get(key) or {}, session, incident.get("transcript") or "")
+        if released:
+            log_change(
+                state, logged, f"released:{released}",
+                f"pane {pane['pane_id']} {where}: at a shell, but {released}; not an incident",
+            )
+            clear(key, incident, released)
+            state.commit(options)
+            continue
+        at_shell += 1
         open_for = now - incident["opened_at"]
         if open_for < options.pane_grace:
             log_change(
@@ -2738,6 +2928,19 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
                 f" {iso(incident['alerted_at'])}; nothing further goes out for this incident",
             )
             continue
+        # One alert per pane per session until omp runs in the pane again, however often the
+        # incident closes and reopens in between (a shell child that comes and goes, a session
+        # seen elsewhere and gone again): the lane's state has not changed, so neither has the
+        # alert a reader already has.
+        record = memory.setdefault(key, {})
+        if record.get("alerted_for") == (session or "-"):
+            log_change(
+                state, logged, f"realerted:{record.get('alerted_for')}:{record.get('alerted_at')}",
+                f"pane {pane['pane_id']} {where}: at a shell again; this watch alerted on it at"
+                f" {iso(record.get('alerted_at'))} for session {session or '(not resolved)'}, and"
+                " says nothing more until omp runs in this pane again",
+            )
+            continue
         session = incident.get("session")
         directory = pane["pane_current_path"]
         if incident.get("transcript"):
@@ -2769,6 +2972,7 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         )
         incident["alerted_at"] = now
         incident["told"] = [target for target, _ in targets]
+        record.update({"alerted_for": session or "-", "alerted_at": now})
         log_change(state, logged, f"alerted:{now}")
         state.commit(options)
         told = []
