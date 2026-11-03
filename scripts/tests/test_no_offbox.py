@@ -251,6 +251,20 @@ class NoOffbox(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("is not an absolute path", r.stderr)
 
+    def test_an_allow_line_naming_one_marker_lifts_that_marker_only(self) -> None:
+        """sendgate-review12's own top-level marker (0 bytes, a fixture) is listed by its exact
+        path; a real marker added later anywhere below still refuses."""
+        top = self.data / "review"
+        self.tree("review/replays/r9_case")
+        top_marker = self.mark(top)
+        self.allow(str(top_marker))
+        self.assertEqual(self.run_check(str(top)).returncode, 0)
+        later = self.tree("review/new-evidence")
+        self.mark(later)
+        r = self.run_check(str(top))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"holds marker {later / '.no-offbox'}", r.stdout)
+
     def test_a_tar_list_is_checked_entry_by_entry_without_a_walk(self) -> None:
         """The bulk copy's form: tar --no-recursion lists of paths relative to the root."""
         self.patterns("embargo")

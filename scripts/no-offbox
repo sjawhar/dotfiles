@@ -21,6 +21,7 @@ A marker inside a subtree listed in an allow file does not refuse: ~/.config/no-
 starts a comment line. It is for `.no-offbox` files that are test fixtures, not data (the 47
 zero-byte fixtures under review-evidence/sendgate-review12-717ae825/replays). It lifts only the
 markers in or below the listed directory: a marker above it, and every pattern, still refuse.
+A line that ends in `/.no-offbox` names one marker file and lifts that marker only.
 
 A path gone when read holds no marker, so it is skipped and counted, not refused as unreadable:
 a directory removed while the walk runs (another session's `git worktree remove` in a shared
@@ -128,8 +129,11 @@ class Checker:
         return None
 
     def allowed(self, d):
-        """Whether directory d is a listed allow directory or below one."""
-        return any(d == a or d.startswith(a.rstrip("/") + "/") for a in self.allow)
+        """Whether the marker of directory d is lifted: d is a listed allow directory or below one,
+        or the allow file names d's marker file itself (a line ending in /.no-offbox)."""
+        if os.path.join(d, MARKER) in self.allow:
+            return True
+        return any(d == a or d.startswith(a.rstrip("/") + "/") for a in self.allow if os.path.basename(a) != MARKER)
 
     def marker_in(self, d):
         """The marker file of directory d, '' when it has none, is gone or is allowed, None when d
