@@ -52,6 +52,14 @@ What one run does, from /proc only, with no model call and no subprocess on the 
 It also counts the box's agents, because on these boxes the dial that causes this is the number
 of concurrent workers, not any one of them.
 
+It also watches two kernel stalls that make a box unable to stop or start agent boxes
+(dispatch://INFRA-993, sami-devbox 2026-11-02 and 11-03): a WRITEBACK SWITCH STALL, where the
+kernel moves a dead cgroup's inodes to its parent's writeback at the crawl of a 7.0 kernel
+without torvalds f6988c90671e (`writeback:inode_switch_wbs` at or over SWITCH_RATE per second
+for the grace window, counted by `sudo -n perf stat` only while a `+inode_switch_wbs` kworker is
+busy or the crossing is open); and UMOUNT HUNG, an umount or fusermount3 in D state for over
+UMOUNT_HUNG seconds, timed from /proc/<pid>/sched. Both say the reset plan and the cause.
+
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
 falling back to the SRE session when nobody holds it. Each message is at most 600 characters and
 names a report file under the state directory that holds the full reasons and the consumer
@@ -123,6 +131,31 @@ CPU_STALL = 35.0
 # (11-03T00:32Z, 329 blocked), 93% (00:36Z, 167 blocked) and 68% (01:39Z, 11 blocked; the crossing
 # re-opened 8 minutes later and alerted again at 02:08Z). 50% sits between the two groups.
 IO_HOLD = 50.0
+
+# A writeback switch stall (dispatch://INFRA-993). When a cgroup that wrote millions of inodes
+# dies, the kernel moves each of its inodes to the parent cgroup's writeback, and on these 7.0
+# kernels (no torvalds f6988c90671e, which is in v7.3) `cleanup_offline_cgwb` re-walks every inode
+# it already queued on each pass, so the move crawls at 1-200 inodes/s. Every umount and
+# fusermount3 then waits in cgroup_writeback_umount for hours, agent boxes cannot stop or start,
+# and sync() hangs. sami-devbox, 2026-11-03 12:45-13:03Z: `writeback:inode_switch_wbs` at
+# 57-200/s for over an hour, all from one dead cgroup, `kworker/N:M+inode_switch_wbs` at 55-98% CPU
+# for 1 h 40 min. The rate is read with `perf stat` (PERF) only while such a worker is busy or a
+# crossing is open. The bar is a third of the lowest stall reading (57/s), so it still holds as
+# the move slows; healthy bursts pass it too (sami-rocqperf: 24 of 81 ten-second counts), and
+# what keeps them out is the busy worker the rule also asks of every run (writeback_finding).
+# The measurements are in load-swap-watch.md.
+SWITCH_RATE = 20.0
+SWITCH_SAMPLE = 5.0
+SWITCH_WORKER = "+inode_switch_wbs"
+PERF = ("sudo", "-n", "perf")
+SWITCH_EVENTS = ("writeback:inode_switch_wbs", "writeback:inode_switch_wbs_queue")
+# A teardown umount or fusermount3 in D state longer than this is waiting on that stall: on
+# sami-devbox on 2026-11-03 they were blocked 30 min to 3.4 h.
+UMOUNT_HUNG = 300.0
+HUNG_COMMANDS = ("umount", "fusermount3")
+PROC = Path("/proc")
+# What the box-health lead does about either: the reset runbook, not a reboot.
+RESET_PLAN = "sami-rocqperf:/mnt/nvme/sami/scratch/devbox-provision/reset-plan-20261103.md"
 
 # Per-host settings, by the host's short name. Every box runs this same script from its own
 # ~/.dotfiles, so a box whose CPU is meant to be full says so here, in git, where a reviewer sees
@@ -322,6 +355,136 @@ def run_queue() -> tuple[int, int]:
     return running, blocked
 
 
+def _proc_ticks(base: Path) -> int | None:
+    """utime + stime of the task under one /proc/<pid> directory, in clock ticks, or None."""
+    try:
+        data = (base / "stat").read_text()
+        fields = data[data.rfind(")") + 2 :].split()
+        return int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _exec_start(base: Path) -> float | None:
+    """`se.exec_start` from /proc/<pid>/sched: ms since boot when the task last ran on a CPU."""
+    try:
+        for line in (base / "sched").read_text().splitlines():
+            if line.startswith("se.exec_start"):
+                return float(line.split(":", 1)[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def kernel_stalls(proc: Path | None = None) -> dict:
+    """The writeback switch workers busy now, and every umount or fusermount3 in D state with how
+    long it has been blocked, from one walk of /proc that reads each process's comm.
+
+    All of it is world-readable, so no sudo: a root task's comm, stat, sched and cmdline can be
+    read by the watch's own user. A kworker's comm ends in `+inode_switch_wbs` only while it is
+    running a work item of that queue (`-inode_switch_wbs` once idle): on sami-devbox during the
+    stall of 2026-11-03 one was busy in 60 of 60 one-second samples, on sami-rocqperf at the same
+    hour in 7 of 60. The rate itself is not read here (switch_rate).
+
+    Time blocked is not process age. A task in D state does not run, so `se.exec_start` in
+    /proc/<pid>/sched, the last time it was on a CPU, is when it blocked, and /proc/uptime minus
+    that is how long. devbox/sami-devbox-check judges its D1 line the same way.
+    """
+    proc = proc or PROC
+    try:
+        uptime = float(read_text(str(proc / "uptime")).split()[0])
+    except (IndexError, ValueError):
+        uptime = 0.0
+    workers: list[dict] = []
+    hung: list[dict] = []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        # One raw read per process: half the CPU of Path.read_text over ~4,200 processes on
+        # sami-rocqperf (0.075 s against 0.14 s), and only the matches read anything more.
+        try:
+            handle = os.open(f"{proc}/{name}/comm", os.O_RDONLY)
+            try:
+                comm = os.read(handle, 64).decode("utf8", "replace").strip()
+            finally:
+                os.close(handle)
+        except OSError:
+            continue
+        base = proc / name
+        if comm.endswith(SWITCH_WORKER):
+            workers.append({"pid": int(name), "comm": comm, "ticks": _proc_ticks(base)})
+            continue
+        if comm not in HUNG_COMMANDS:
+            continue
+        try:
+            data = (base / "stat").read_text()
+            state = data[data.rfind(")") + 2 :].split()[0]
+        except (OSError, IndexError):
+            continue
+        started = _exec_start(base)
+        if state != "D" or started is None or not uptime:
+            continue
+        try:
+            argv = (base / "cmdline").read_bytes().decode("utf8", "replace").split("\0")
+        except OSError:
+            argv = []
+        # The mount point is the last argument that is not an option: `umount <dir>`,
+        # `fusermount3 -u <dir>`.
+        mount = next((arg for arg in reversed(argv[1:]) if arg and not arg.startswith("-")), "")
+        hung.append({"pid": int(name), "comm": comm, "mount": mount, "blocked": max(0.0, uptime - started / 1000)})
+    hung.sort(key=lambda task: -task["blocked"])
+    return {"switch_workers": workers, "umounts": hung}
+
+
+def switch_rate(seconds: float, workers: list[dict], proc: Path | None = None) -> dict:
+    """`writeback:inode_switch_wbs` events per second over `seconds`, counted by `perf stat`.
+
+    The tracepoint fires once per inode actually moved to another cgroup's writeback, which is
+    the work that crawls in this stall. `perf stat` only counts (no ring buffer, no trace file),
+    and it needs root, so it runs under `sudo -n`, which never waits for a password. Its cost is
+    paid only while a switch worker is busy or a crossing is open (run_once): `sudo -n perf stat
+    -a -- sleep 1` took 1.8 s of CPU on sami-rocqperf at load 300 on 64 cores. The CPU share of
+    each busy switch worker over the same interval comes with it, for the report.
+
+    A failure returns rate None and says why; it never reads as a rate of zero.
+    """
+    proc = proc or PROC
+    command = [*PERF, "stat", "-x,", "-e", ",".join(SWITCH_EVENTS), "-a", "--", "sleep", f"{seconds:g}"]
+    before = {worker["pid"]: _proc_ticks(proc / str(worker["pid"])) for worker in workers}
+    start = time.monotonic()
+    reading = {"rate": None, "switched": None, "queued": None, "seconds": seconds, "workers": [], "error": ""}
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=seconds + 60, cwd="/")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        reading["error"] = f"`{' '.join(command)}` did not run: {error}"
+        return reading
+    elapsed = max(time.monotonic() - start, 1e-3)
+    for worker in workers:
+        then, now = before.get(worker["pid"]), _proc_ticks(proc / str(worker["pid"]))
+        cpu = (now - then) / CLOCK_TICK / elapsed if None not in (then, now) else None
+        reading["workers"].append(dict(worker, cpu=cpu))
+    counts: dict[str, int] = {}
+    for line in done.stderr.splitlines():
+        fields = line.split(",")
+        if len(fields) >= 3 and fields[2] in SWITCH_EVENTS:
+            try:
+                counts[fields[2]] = int(float(fields[0]))
+            except ValueError:
+                pass
+    if done.returncode != 0 or SWITCH_EVENTS[0] not in counts:
+        detail = (done.stderr.strip().splitlines() or [f"exit {done.returncode}"])[-1]
+        reading["error"] = f"`{' '.join(command)}` gave no count (exit {done.returncode}): {detail[:200]}"
+        return reading
+    reading["switched"] = counts[SWITCH_EVENTS[0]]
+    reading["queued"] = counts.get(SWITCH_EVENTS[1])
+    reading["rate"] = reading["switched"] / seconds
+    return reading
+
+
 def sample_box() -> dict:
     memory = meminfo()
     swap_total = memory.get("SwapTotal", 0)
@@ -346,6 +509,7 @@ def sample_box() -> dict:
         "mem_available": memory.get("MemAvailable", 0),
         "mem_total": memory.get("MemTotal", 0),
         "pswpin": vmstat().get("pswpin", 0),
+        **kernel_stalls(),
     }
 
 
@@ -908,13 +1072,19 @@ def swap_drain_rate(samples: list[list[float]], window: float) -> tuple[float | 
 # makes the next true alert cheaper to dismiss, which on these boxes is expensive: six lanes on
 # that same machine lost an hour the night before by reading a working box as frozen. The lines
 # of one run share a message, and no line names a condition other than its own.
-KINDS = ("cpu", "swap", "memory")
+# The two kernel stalls lead: either one means the box needs a reset, which no other line asks.
+KINDS = ("writeback", "umount", "cpu", "swap", "memory")
+STALL_KINDS = ("writeback", "umount")
 HEADLINE = {
+    "writeback": "WRITEBACK SWITCH STALL",
+    "umount": "UMOUNT HUNG",
     "cpu": "BOX SHORT OF CPU",
     "swap": "BOX OUT OF SWAP",
     "memory": "BOX SHORT OF MEMORY",
 }
 STILL = {
+    "writeback": "STILL A WRITEBACK SWITCH STALL",
+    "umount": "STILL UMOUNT HUNG",
     "cpu": "STILL SHORT OF CPU",
     "swap": "STILL OUT OF SWAP",
     "memory": "STILL SHORT OF MEMORY",
@@ -993,9 +1163,89 @@ def cpu_finding(now: dict, options: argparse.Namespace) -> dict | None:
     }
 
 
+def short_mount(mount: str, width: int = 60) -> str:
+    """A mount point cut for a message line; the report names it whole."""
+    return mount if len(mount) <= width else mount[: width - 1] + "…"
+
+
+def worker_phrase(worker: dict, pid: bool = True) -> str:
+    cpu = worker.get("cpu")
+    named = f"{worker['comm']} (pid {worker['pid']})" if pid else worker["comm"]
+    return f"{named}{f' at {100 * cpu:.0f}% CPU' if cpu is not None else ''}"
+
+
+def writeback_finding(now: dict, options: argparse.Namespace) -> dict | None:
+    """Whether inodes are being moved between cgroup writebacks the way the stall moves them, or
+    None.
+
+    Two things in the same run, because the rate alone is wrong here. Healthy boxes switch inodes
+    in bursts: sami-rocqperf's 10 s counts on 2026-11-03 ran 0.7-778/s (mean 52/s, 24 of 81 at or
+    over 20/s), sami-devbox's after its reset 0-867/s. What a burst never does is keep a switch
+    worker busy: one was busy in 7 of 60 and 1 of 60 one-second samples on sami-rocqperf, and in
+    60 of 60 on sami-devbox during the stall. So a reading counts only with a
+    `+inode_switch_wbs` worker busy at the run, and the grace window (--grace, 600 s) asks it of
+    every run for ten minutes. None when the rate was not read.
+    """
+    reading = now.get("writeback") or {}
+    rate = reading.get("rate")
+    if rate is None or rate < options.switch_rate or not now.get("switch_workers"):
+        return None
+    workers = sorted(reading.get("workers") or [], key=lambda worker: -(worker.get("cpu") or 0))
+    busiest = f"; {worker_phrase(workers[0], pid=False)}" if workers else ""
+    queued = reading.get("queued")
+    reasons = [
+        f"writeback:inode_switch_wbs counted {reading['switched']} inodes switched to another"
+        f" cgroup's writeback in {reading['seconds']:g} s ({rate:.0f}/s), at or over the"
+        f" {options.switch_rate:g}/s rule"
+        + (f"; writeback:inode_switch_wbs_queue counted {queued} in the same interval" if queued is not None else "")
+    ]
+    if workers:
+        reasons.append("busy switch workers: " + ", ".join(worker_phrase(worker) for worker in workers))
+    return {
+        "reasons": reasons,
+        "evidence": f"{rate:.0f} inodes/s switched over {reading['seconds']:g} s (rule {options.switch_rate:g}/s){busiest}",
+        "figure": rate,
+    }
+
+
+def umount_finding(now: dict, options: argparse.Namespace) -> dict | None:
+    """Whether an umount or fusermount3 has been in D state past --umount-hung, or None.
+
+    The time is already a hold, so this condition has no grace window of its own (run_once).
+    """
+    hung = [task for task in now.get("umounts") or [] if task["blocked"] >= options.umount_hung]
+    if not hung:
+        return None
+
+    # The message names the longest-blocked task, with its mount point cut to fit; the report
+    # names every one whole.
+    longest = hung[0]
+    shown = (
+        f"pid {longest['pid']} {longest['comm']} {short_mount(longest['mount'])}"
+        f" blocked {human_time(longest['blocked'])}"
+    )
+    more = f"; {len(hung) - 1} more in the report" if len(hung) > 1 else ""
+    return {
+        "reasons": [
+            f"{len(hung)} umount/fusermount3 in D state for over {human_time(options.umount_hung)}"
+            f" (time since each last ran, /proc/<pid>/sched): "
+            + "; ".join(f"pid {task['pid']} {task['comm']} {task['mount']} blocked {human_time(task['blocked'])}" for task in hung)
+        ],
+        "evidence": f"{len(hung)} in D state over {human_time(options.umount_hung)}, longest {shown}{more}",
+        "figure": len(hung),
+        "tasks": hung,
+    }
+
+
 def verdict(now: dict, samples: list[list[float]], options: argparse.Namespace) -> dict:
     """What this box is short of, condition by condition, each with its own reasons."""
     findings: dict[str, dict] = {}
+
+    # The kernel stalls. Each is judged only when its reading exists in this run.
+    for kind, judge in (("writeback", writeback_finding), ("umount", umount_finding)):
+        found = judge(now, options)
+        if found:
+            findings[kind] = found
 
     # A host whose CPU is meant to be full (HOST_SETTINGS, --cpu-rule off) has no CPU rule at all.
     if options.cpu_rule:
@@ -1080,7 +1330,14 @@ def cpu_clear_held(now: dict, options: argparse.Namespace) -> str:
 
 def clears(kind: str, now: dict, options: argparse.Namespace) -> bool:
     """Hysteresis, per condition: it clears well clear of what opened it, never on the rule. A
-    CPU crossing also never clears while the box is stalled (cpu_clear_held)."""
+    CPU crossing also never clears while the box is stalled (cpu_clear_held). A writeback crossing
+    never clears on a rate this run could not read."""
+    if kind == "writeback":
+        rate = (now.get("writeback") or {}).get("rate")
+        # A burst ends with its worker idle; the stall keeps one busy (writeback_finding).
+        return rate is not None and (rate < options.switch_rate * options.clear_factor or not now.get("switch_workers"))
+    if kind == "umount":
+        return not [task for task in now.get("umounts") or [] if task["blocked"] >= options.umount_hung * options.clear_factor]
     if kind == "cpu":
         if cpu_clear_held(now, options):
             return False
@@ -1114,11 +1371,38 @@ def state_line(now: dict) -> str:
             f"swap {100 * now['swap_used_fraction']:.1f}% used ({gib(now['swap_free'])} free)"
         )
     pieces.append(f"MemAvailable {gib(now['mem_available'])}")
+    rate = (now.get("writeback") or {}).get("rate")
+    if rate is not None:
+        pieces.append(f"inode_switch_wbs {rate:.0f}/s")
+    if now.get("switch_workers"):
+        pieces.append(f"{len(now['switch_workers'])} busy {SWITCH_WORKER} worker(s)")
+    if now.get("umounts"):
+        pieces.append(
+            f"{len(now['umounts'])} umount/fusermount3 in D state, longest {human_time(now['umounts'][0]['blocked'])}"
+        )
     return ", ".join(pieces)
 
 
 def what_it_means(kind: str) -> list[str]:
     """What this condition is, and what to do about it. One condition, one action."""
+    if kind in STALL_KINDS:
+        return [
+            "What this is: the kernel is moving the inodes of a dead cgroup to its parent's"
+            " writeback, and on this 7.0 kernel (no torvalds f6988c90671e, in v7.3)"
+            " cleanup_offline_cgwb re-walks every inode it already queued on each pass, so the"
+            " move runs at 1-200 inodes/s and slows as it goes. Until it ends, every umount and"
+            " fusermount3 waits in cgroup_writeback_umount (D state, for hours), agent boxes"
+            " cannot stop or start (`agentbox new` fails at the sysbox-fs pre-register) and"
+            " sync() hangs. It does not drain on its own in any useful time: on sami-devbox on"
+            " 2026-11-03 it ran for over an hour and the backlog per pass grew.",
+            f"DO: reset the box by the sami-devbox reset plan ({RESET_PLAN}): safe-point asks to"
+            " each session, `sync -f` of each live file system, then the cloud reset. Never"
+            " `systemctl reboot`, `shutdown` or plain `sync`: on 2026-11-02 `systemctl reboot` hung"
+            " 36 min in shutdown on this same lock. Kill nothing on the box to free it. The cause"
+            " is a dead cgroup that wrote millions of inodes (a bulk-copy unit): stop such a copy"
+            " only with devbox/bulk-copy/pull-unit.sh stop, which reclaims the unit's memory first"
+            " so the cgroup dies holding few inodes.",
+        ]
     if kind == "cpu":
         return [
             "What this looks like from a pane: every agent still runs and answers, its"
@@ -1149,7 +1433,7 @@ def what_it_means(kind: str) -> list[str]:
     ]
 
 
-# What a condition's consumers are ranked by, as a message names them.
+# What a condition's consumers are ranked by, as a message names them. A kernel stall has none.
 CONSUMER = {"cpu": "CPU", "swap": "swap", "memory": "RSS"}
 
 # What the box-health owner does, per condition, as phrases one message can join without
@@ -1160,25 +1444,47 @@ ACTION = {
     "memory": ("stop finished sessions by exact pid, owner asked first", "move new work to another box"),
 }
 
+# A kernel stall's action is one line that every message about it carries whole (compose_message):
+# the reset, the one way not to reset, and the cause, so the next copy does not do it again.
+STALL_ACTION = (
+    f"DO (box-health owner): reset by the reset plan {RESET_PLAN}; never systemctl reboot (it hangs"
+    " on this lock). Cause: a dead cgroup that wrote millions of inodes; stop such a copy only with"
+    " devbox/bulk-copy/pull-unit.sh stop."
+)
 
-def told_of(now: dict, when: float, told: dict | None = None) -> dict:
+
+def told_of(now: dict, when: float, told: dict | None = None, figure: float | None = None) -> dict:
     """The marks a new fact must beat: the worst figure this crossing has said, per figure.
 
     They ratchet, and never fall back to the current reading when a message goes for some other
     reason. On 2026-11-02 sami-rocqperf said "369 blocked" at 00:20Z; at 08:10Z its load doubled
     while 67 were blocked; at 09:16Z 182 blocked doubled that 67 and went out, though the box had
-    been twice as bad nine hours earlier and the reader had been told.
+    been twice as bad nine hours earlier and the reader had been told. A kernel stall's own figure
+    (its switch rate, or its count of hung umounts) ratchets the same way, upwards.
     """
     told = dict(told or {})
     for key, pick in (("load1", max), ("procs_blocked", max), ("swap_free", min), ("mem_available", min)):
         told[key] = pick(now[key], told[key]) if key in told else now[key]
+    if figure is not None:
+        told["figure"] = max(figure, told.get("figure") or 0)
     told["at"] = when
     return told
 
 
-def worse_facts(kind: str, now: dict, told: dict) -> list[str]:
-    """What is clearly worse for this condition than the worst already said, or [] (see WORSE)."""
+def worse_facts(kind: str, now: dict, told: dict, finding: dict | None = None) -> list[str]:
+    """What is clearly worse for this condition than the worst already said, or [] (see WORSE).
+
+    A kernel stall is worse when its own figure doubled past the highest it read while open (the
+    switch rate, or the number of umounts hung; run_once passes that mark in `told`). How long a
+    task has been blocked is not a fact here: that is time passing."""
     facts = []
+    if kind in STALL_KINDS:
+        figure, was = (finding or {}).get("figure"), told.get("figure")
+        if figure is not None and was and figure >= WORSE * was:
+            if kind == "writeback":
+                facts.append(f"{figure:.0f} inodes/s switched (was {was:.0f})")
+            else:
+                facts.append(f"{figure} umount/fusermount3 hung (was {was})")
     if kind == "cpu":
         if told["load1"] and now["load1"] >= WORSE * told["load1"]:
             facts.append(f"load {now['load1']:.0f} (was {told['load1']:.0f})")
@@ -1230,8 +1536,12 @@ def item_line(item: dict, now: dict, options: argparse.Namespace, host: str, whe
                 back += f", {label} {value:.0f}%"
     elif kind == "swap":
         back = f"{100 * now['swap_used_fraction']:.1f}% used ({gib(now['swap_free'])} free)"
-    else:
+    elif kind == "memory":
         back = f"MemAvailable {gib(now['mem_available'])} (floor {gib(mem_floor(now, options)[0])})"
+    elif kind == "writeback":
+        back = f"inode_switch_wbs {(now.get('writeback') or {}).get('rate') or 0:.0f}/s"
+    else:
+        back = f"no umount or fusermount3 in D state for {human_time(options.umount_hung * options.clear_factor)}"
     opened = incident.get("opened_at") or when
     return f"{HEADLINE[kind]} CLEARED{where} after {human_time(when - opened)}: {back}."
 
@@ -1249,23 +1559,26 @@ def context_line(now: dict, kinds: list[str], measured: dict | None) -> str:
     if memory is not None:
         pieces.append(f"memory full {memory:.1f}%")
     for kind in kinds:
-        top = top_of(measured, kind)
+        top = top_of(measured, kind) if kind in CONSUMER else None
         if top:
             pieces.append(f"top {CONSUMER[kind]} {top_phrase(kind, top)}")
     return f"Also: {', '.join(pieces)}." if pieces else ""
 
 
-def fit(lines: list[str], optional: list[str], footer: str) -> str:
+def fit(lines: list[str], optional: list[str], footer: str, keep: list[str] | None = None) -> str:
     """Join a message under MESSAGE_LIMIT: drop optional lines from the end, then cut the rest.
-    The footer always survives, so every message names its report."""
+    The footer always survives, so every message names its report, and so do the `keep` lines
+    (a kernel stall's action), which go after the verdicts and before the optional lines."""
+    keep = [line for line in keep or [] if line]
     optional = [line for line in optional if line]
-    while optional and len("\n".join(lines + optional + [footer])) > MESSAGE_LIMIT:
+    while optional and len("\n".join(lines + keep + optional + [footer])) > MESSAGE_LIMIT:
         optional.pop()
-    body = "\n".join(lines + optional)
-    room = max(MESSAGE_LIMIT - len(footer) - 1, 1)
+    tail = "\n".join(keep + optional + [footer])
+    body = "\n".join(lines)
+    room = max(MESSAGE_LIMIT - len(tail) - 1, 1)
     if len(body) > room:
         body = body[: room - 1] + "…"
-    return f"{body}\n{footer}"
+    return f"{body}\n{tail}"
 
 
 def compose_message(
@@ -1288,11 +1601,18 @@ def compose_message(
     lines += [item_line(item, now, options, "", when) for item in items[1:]]
     speaking = [item["kind"] for item in items if item["event"] != "clear"]
     optional = []
+    keep = []
     if speaking:
-        actions = dict.fromkeys(phrase for kind in speaking for phrase in ACTION[kind])
-        optional = [f"DO (box-health owner): {'; '.join(actions)}.", context_line(now, speaking, measured)]
+        # A kernel stall's action is whole in every message about it; the other actions and the
+        # context give way first when the message is long.
+        if any(kind in STALL_KINDS for kind in speaking):
+            keep = [STALL_ACTION]
+        actions = dict.fromkeys(phrase for kind in speaking for phrase in ACTION.get(kind, ()))
+        if actions:
+            optional.append(f"DO (box-health owner): {'; '.join(actions)}.")
+        optional.append(context_line(now, speaking, measured))
     tail = f"Full report: {report}" if report else "Full report: could not be written (see the journal)"
-    return fit(lines, optional, tail)
+    return fit(lines, optional, tail, keep)
 
 
 def report_text(
@@ -1335,8 +1655,9 @@ def report_text(
         "",
         "A crossing still open is said again only on a new fact, measured against the worst this"
         " crossing has already said: load, or tasks blocked past the core count, doubled; swap free"
-        " or MemAvailable halved; or a command newly at the top of its consumers (looked for every"
-        f" {human_time(options.recheck)}). Never because time passed.",
+        " or MemAvailable halved; a writeback switch rate or a count of hung umounts doubled; or a"
+        f" command newly at the top of its consumers (looked for every {human_time(options.recheck)})."
+        " Never because time passed.",
         "This watch only detects. It kills nothing, stops no worker, and changes no limit."
         f" From load-swap-watch (~/.dotfiles/scripts/load-swap-watch) on {host}, a systemd --user"
         " timer. Now: `load-swap-watch --consumers`. Every run: `journalctl --user -u load-swap-watch`.",
@@ -1427,6 +1748,13 @@ def run_once(options: argparse.Namespace) -> int:
         return 0
 
     now = sample_box()
+    # The writeback switch rate costs a `perf stat` run, so it is read only when it can matter: a
+    # switch worker is busy now, or a writeback crossing is already open, which then needs a
+    # reading every run to hold, alert or clear.
+    if now.get("switch_workers") or "writeback" in (state.data.get("incidents") or {}):
+        now["writeback"] = switch_rate(options.switch_sample, now.get("switch_workers") or [])
+        if now["writeback"]["error"]:
+            log(f"writeback switch rate not read: {now['writeback']['error']}")
     samples: list = state.data.setdefault("samples", [])
     samples.append([now["at"], now["swap_free"]])
     cutoff = now["at"] - max(options.rate_window * 3, 7200)
@@ -1470,25 +1798,33 @@ def run_once(options: argparse.Namespace) -> int:
                 incident = incidents[kind] = {"opened_at": when, "alerted_at": None}
                 log(f"{kind} crossing opened: {'; '.join(finding['reasons'])}")
             incident["last_seen"] = when
+            # A kernel stall's figure swings inside the stall (57-200/s over the same hour), so
+            # its new fact is measured against the highest it read while open, said or not.
+            peak = incident.get("peak")
+            if finding.get("figure") is not None:
+                incident["peak"] = max(peak or 0, finding["figure"])
             if incident.get("alerted_at") is None:
                 held = when - incident["opened_at"]
-                if held >= options.grace:
+                # A hung umount's own blocked time is its hold, so it has no grace on top.
+                grace = 0.0 if kind == "umount" else options.grace
+                if held >= grace:
                     items.append({"kind": kind, "event": "alert", "finding": finding, "incident": incident})
                 else:
-                    log(f"{kind} crossing open for {human_time(held)}; alert at {iso(incident['opened_at'] + options.grace)}")
+                    log(f"{kind} crossing open for {human_time(held)}; alert at {iso(incident['opened_at'] + grace)}")
                 continue
             told = incident.get("told")
             if not told:
                 # Alerted by the version that re-sent on a timer: what it said is not on record, so
                 # this reading becomes the baseline and nothing goes out for it.
-                incident["told"] = told_of(now, when)
+                incident["told"] = told_of(now, when, figure=finding.get("figure"))
                 incident["checked_at"] = when
                 incident.setdefault("tops", [])
                 incident.pop("escalated_at", None)
                 log(f"{kind} crossing alerted at {iso(incident['alerted_at'])} has no baseline; this run's reading is it, nothing sent")
                 continue
-            facts = worse_facts(kind, now, told)
-            if when - max(told["at"], incident.get("checked_at") or 0) >= options.recheck:
+            marks = dict(told, figure=max(told.get("figure") or 0, peak or 0)) if peak is not None else told
+            facts = worse_facts(kind, now, marks, finding)
+            if kind in CONSUMER and when - max(told["at"], incident.get("checked_at") or 0) >= options.recheck:
                 incident["checked_at"] = when
                 top = top_of(measured_once(), kind)
                 tops = incident.setdefault("tops", [])
@@ -1524,13 +1860,16 @@ def run_once(options: argparse.Namespace) -> int:
     host = socket.gethostname()
     speaking = [item for item in items if item["event"] != "clear"]
     consumers = ""
+    # A kernel stall has no consumer table: the 10 s CPU sample is paid only for a condition that
+    # names its top consumer.
     if speaking:
-        consumers = consumers_text(options, envoy, measured_once())
+        if any(item["kind"] in CONSUMER for item in speaking):
+            consumers = consumers_text(options, envoy, measured_once())
         for item in speaking:
             incident = item["incident"]
             if item["event"] == "alert":
                 incident["alerted_at"] = when
-            incident["told"] = told_of(now, when, incident.get("told"))
+            incident["told"] = told_of(now, when, incident.get("told"), item["finding"].get("figure"))
             incident["checked_at"] = when
             tops = incident.setdefault("tops", [])
             top = top_of(measured, item["kind"])
@@ -1586,6 +1925,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "a CPU crossing does not clear while io some avg60 is at or over this percentage, nor"
             f" while more tasks are blocked than the box has cores (default {IO_HOLD:.0f})"
         ),
+    )
+    parser.add_argument(
+        "--switch-rate",
+        type=float,
+        default=SWITCH_RATE,
+        help=(
+            "writeback switch stall: writeback:inode_switch_wbs events per second at or over this,"
+            f" held for --grace (default {SWITCH_RATE:g})"
+        ),
+    )
+    parser.add_argument(
+        "--switch-sample",
+        type=float,
+        default=SWITCH_SAMPLE,
+        help=f"seconds one `sudo -n perf stat` count of the switch rate runs for (default {SWITCH_SAMPLE:g})",
+    )
+    parser.add_argument(
+        "--umount-hung",
+        type=float,
+        default=UMOUNT_HUNG,
+        help=f"an umount or fusermount3 in D state longer than this many seconds is hung (default {UMOUNT_HUNG:g})",
     )
     parser.add_argument(
         "--queue-per-core",

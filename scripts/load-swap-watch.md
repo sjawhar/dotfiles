@@ -4,7 +4,8 @@ What it watches, what it will not catch, and the measurements behind each thresh
 
 Armed by `installers/load-swap-watch.sh` as the `load-swap-watch` user timer
 (`omp/load-swap-watch.{service,timer}`). It detects only: it kills nothing, stops no worker and
-changes no limit.
+changes no limit. Since 2026-11-03 it also watches two kernel stalls that stop a box from
+stopping or starting agent boxes ([below](#two-kernel-stalls-writeback-switch-stall-and-umount-hung)).
 
 ## The incident it is built from
 
@@ -113,6 +114,87 @@ the same load line and the same consumer table in both.
   (io 68%; the crossing re-opened 8 minutes later). The one true clear, 11-01T12:45Z, had
   `io some` 6%, and the box was at load 8 by 14:20Z. 50% sits between the two groups.
 
+## Two kernel stalls: WRITEBACK SWITCH STALL and UMOUNT HUNG
+
+On 2026-11-02 and 2026-11-03 sami-devbox's cgroup writeback got stuck cleaning up a dead cgroup
+(dispatch://INFRA-993). A bulk-copy unit that wrote millions of inodes ended, and the kernel had to
+move each of its inodes to the parent cgroup's writeback. On these 7.0 kernels (7.0.0-1017-azure,
+7.0.0-1014-gcp; the fix is torvalds f6988c90671e, in v7.3) `cleanup_offline_cgwb` re-walks every
+inode it has already queued on each pass, so the move ran at 57-200 inodes/s and slowed. Every
+`umount` and `fusermount3` then waited in `cgroup_writeback_umount` in D state for hours, agent
+boxes could not stop or start (`agentbox new` failed at the sysbox-fs pre-register), and `sync()`
+hung. Nothing alerted. Both conditions below are judged on every box this watch runs on; each has
+its own crossing, alert, new fact and clear, in the same message as the others.
+
+| Reading | sami-devbox in the stall | sami-devbox healthy | sami-rocqperf healthy |
+| --- | --- | --- | --- |
+| When | 11-03 12:45-13:24Z | 11-03 13:36-13:55Z, after its 13:33Z reset | 11-03 13:22-13:55Z |
+| `writeback:inode_switch_wbs`, per 10 s count | 57-200/s for over 1 h (12:45-13:03Z); 201/s at 13:16Z | 0-867/s, median 0.1/s, mean 46/s, 8 of 90 counts ≥ 20/s | 0.7-778/s, median 6.9/s, mean 52/s, 24 of 81 counts ≥ 20/s |
+| A `kworker/N:M+inode_switch_wbs` busy, of 60 one-second samples | 60 (13:22Z), at 55-98% CPU for 1 h 40 min | 0 (13:54Z) | 7 (13:22Z), 1 (13:55Z) |
+| `umount` / `fusermount3` in D state | 9, blocked 6-77 min at 13:24Z (30 min to 3.4 h over the day) | 0 | 0 |
+
+The rate counts are `sudo -n perf stat -x, -I 10000 -e writeback:inode_switch_wbs -a`; the busy
+worker is a scan of `/proc/*/comm` once a second.
+
+**WRITEBACK SWITCH STALL: `writeback:inode_switch_wbs` ≥ 20/s with a switch worker busy, in every
+run for 10 minutes** (`--switch-rate`, `--grace`). The rate alone does not separate the two
+states: a healthy box switches inodes in bursts, up to 867/s for 10 s, and sami-rocqperf's mean
+over 15 minutes (52/s) is near the stall's lowest reading (57/s). What a burst never does is keep
+a switch worker busy: the comm of a kworker ends in `+inode_switch_wbs` only while it runs a work
+item of that queue, and that held in 60 of 60 seconds in the stall against at most 7 of 60 on
+either healthy box. So a run counts only when both hold, and a crossing needs six runs in a row
+(the 2-minute period over the 600 s grace). On a healthy box that is at most (7/60)^6, about one
+window in 400,000. The rate bar is a third of the stall's lowest reading, so the alert still holds
+as the move slows. It clears when a run reads the rate under 14/s (`--clear-factor` 0.7) or finds
+no switch worker busy. Replaying sami-rocqperf's 81 counts as runs, with the worker busy in one
+run in eight, sends nothing (`scripts/tests/test_load_swap_watch_stalls.py`).
+
+How the rate is read. `perf stat` counts the tracepoint without a ring buffer or a trace file, and
+changes no kernel setting; it needs root, so it runs under `sudo -n`, which fails at once instead
+of waiting for a password. `sudo -n` works for `sami` on both boxes (checked 2026-11-03 13:16Z),
+and both kernels have the tracepoint. One 5 s count (`--switch-sample`) by the watch's own
+`switch_rate()` at 14:06-14:07Z took 9.8-16.3 s of wall time and 0.21-0.33 s of CPU on
+sami-rocqperf at load ~300 on 64 cores, and 5.3 s and 0.14-0.16 s on sami-devbox. So it runs
+only while a switch worker is busy or the crossing is open; on sami-rocqperf that is about one
+run in eight. The walk of `/proc/*/comm` that finds the worker (and the hung umounts) runs every
+time: 0.10 s of CPU over 4,200 processes on sami-rocqperf, 0.03 s on sami-devbox. A `perf` that
+fails (no sudo, no tracepoint) is logged and never read as a rate of zero: it opens nothing and
+clears nothing. A tracefs instance was not used: its counters are a histogram trigger, which is
+kernel state that outlives the run. A worker's CPU share alone (`/proc/<pid>/stat`) would need no
+root, but it does not count inodes; it is in the report instead.
+
+**UMOUNT HUNG: an `umount` or `fusermount3` (by comm) in D state for over 5 minutes**
+(`--umount-hung`), said at once, since the 5 minutes are the hold. The time is time blocked, not
+process age: `/proc/uptime` minus `se.exec_start` of `/proc/<pid>/sched` (when the task last ran,
+in ms since boot), as `devbox/sami-devbox-check` reads its D1 line. Those files and
+`/proc/<pid>/cmdline` are world-readable, so this needs no root. A teardown umount on a healthy
+box ends in seconds; in the stall they were blocked 30 minutes to 3.4 hours, and none was in D
+state on either box at 13:24-13:55Z. The message names the longest-blocked task, its pid, its
+mount point (the last argument of its cmdline that is not an option) and how long it has been
+blocked; the report names every one. It clears when no such task has been blocked for 3.5 minutes.
+
+**What the box-health owner does**, in every message about either, whole, whatever else the
+message drops to stay under 600 characters:
+
+```text
+DO (box-health owner): reset by the reset plan sami-rocqperf:/mnt/nvme/sami/scratch/devbox-provision/reset-plan-20261103.md; never systemctl reboot (it hangs on this lock). Cause: a dead cgroup that wrote millions of inodes; stop such a copy only with devbox/bulk-copy/pull-unit.sh stop.
+```
+
+The report adds the plan's order (safe-point asks, `sync -f` of each live file system, the cloud
+reset), that `shutdown` and plain `sync` hang too, and to kill nothing to free the box.
+
+**Said again** only when the stall's own figure doubled past the highest it read while open: the
+switch rate (it swings 57-200/s inside one stall, so a mark taken from the first message alone
+would re-send on the swing), or the number of hung tasks. A task blocked longer is time passing,
+not a fact. A stall message has no consumer table, so it does not pay for the 10 s CPU sample.
+
+Why a rate held for 10 minutes, not a count: a cgroup that ends on a healthy box switches its
+inodes in one burst that drains at once. bpftrace on `writeback:inode_switch_wbs` per
+`old_cgroup_ino` on sami-devbox, 2026-11-03 13:53-14:07Z, after the reset with 6 boxes running
+(DevboxProvision.Unwedge): one cgroup end switched 275,480 inodes, an 86k-file tar test 72,382,
+four others 4,338 each, the rest under 3,000. The stall was one old cgroup at 57-200/s for over
+an hour.
+
 ## What the message says, and what the report holds
 
 **The message is at most 600 characters** and ends with `Full report: <path>`. Its first ~200
@@ -149,7 +231,9 @@ the worst it has already said** about that crossing:
 - swap free, or `MemAvailable`, at least **halved** (and by at least 1% of the total, so a figure
   already near zero cannot halve its way into a message every run);
 - a **command newly at the top** of that condition's consumers, looked for every `--recheck`
-  (30 min) and never more often, because finding it costs a 10-second CPU sample.
+  (30 min) and never more often, because finding it costs a 10-second CPU sample;
+- for a kernel stall, its switch rate or its count of hung umounts at least **doubled** past the
+  highest it read while open.
 
 Never because time passed. The old rule sent a `STILL …` at 30 minutes by the clock: of the four
 it sent in the 48 h to 2026-11-03, the SRE acted on none. The marks ratchet, so a level already
@@ -202,8 +286,8 @@ owner instead of to this box's role holder. An invalid value stops the watch at 
 
 ## What it will not catch, and what these rules give up
 
-- **A box that is slow for another reason.** A hung mount, a saturated disk or a network stall
-  shows up in `io some`, which the message prints but does not fire on; `disk-fill-watch` owns
+- **A box that is slow for another reason.** A saturated disk or a network stall shows up in
+  `io some`, which the message prints but does not fire on; `disk-fill-watch` owns
   the disk. Since 2026-11-03 a high `io some` also holds a CPU crossing open, so a box that is
   IO-bound keeps a CPU crossing it would once have cleared out of: that crossing is reported
   once, not once per flap, and its clear waits for the stall to end.
@@ -218,6 +302,13 @@ owner instead of to this box's role holder. An invalid value stops the watch at 
   case; the rest is the lane lead's.
 - **The last few seconds.** Its instrument is a 60-second average, so a 10-second spike is
   invisible by design.
+- **A writeback stall that has slowed under 14/s**, or whose switch worker is idle at a run. It
+  clears; the umounts it holds still say UMOUNT HUNG. A stall the kernel has not yet made a
+  teardown wait on is said only by its rate.
+- **A writeback rate the box cannot read.** Without `sudo -n perf` the rule never opens; each run
+  logs `writeback switch rate not read: …` in its journal. UMOUNT HUNG needs no root.
+- **A hung mount other than a teardown.** Only `umount` and `fusermount3` are judged; any other
+  task in D state (an `rsync` on a hung NFS mount) is not this condition.
 
 ## How much it says
 
@@ -233,6 +324,7 @@ load-swap-watch --consumers              # who is using the CPU and holding the 
 load-swap-watch --consumers --json       # the same, as one JSON object
 load-swap-watch --dry-run --print-alert  # decide; print the message and the report it would write
 load-swap-watch --dry-run --print-alert --grace 0   # the same for a crossing that just opened
+load-swap-watch --dry-run --print-alert --grace 0 --switch-sample 10   # a longer switch-rate count
 load-swap-watch --dry-run --print-alert --grace 0 --cpu-rule off   # as sami-leanperf judges it
 ```
 
