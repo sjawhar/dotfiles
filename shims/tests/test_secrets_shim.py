@@ -213,6 +213,7 @@ class SecretsShim(unittest.TestCase):
     def test_unregistered_session_gets_the_relaunch_line(self) -> None:
         stderr = self.assert_refused("HUMAN_KEY", "--", "env", IDENTITY_EXIT="1")
         self.assertIn("    omp --resume 01a1-agent-session\n", stderr)
+        self.assertIn('    secret-run --register --reason "<what for>" HUMAN_KEY -- <command>\n', stderr)
         stderr = self.run_shim(
             "get",
             "HUMAN_KEY",

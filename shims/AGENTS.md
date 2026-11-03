@@ -34,10 +34,15 @@ before handing the call to the real one.
   Sami's admin token from the credential broker, never asked of him (he said so five times,
   2026-10-25 to 2026-11-03, last on dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a).
   The block prints the refused call ready to run:
-  `secret-run --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>`
+  `secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>`
   for theorem-labs, `GITHUB_PERSONAL_ADMIN_PAT` for sjawhar's own repositories; the `sh -c`
   is there because the broker exports a key under its own name, which gh does not read. Sami
-  approves the broker's grant card once per session; the card is not an ask. Anything else,
+  approves the broker's grant card once per session; the card is not an ask. `--register`
+  is the route's fallback for a session with no broker identity: one launched past `shims/omp`
+  (on 2026-11-01 a shell's PATH put mise's omp ahead of `shims/`, so `scripts/agent-session` never
+  ran), where `agent-secrets` answers `NOT_A_SESSION` and plain `secret-run` reads secretsd and
+  gets "not found". It registers that one command as a broker session of its own, with no
+  restart, and changes nothing where the session has an identity. Anything else,
   and any refusal of an inherited `GH_TOKEN` or an upstream token, stops and goes to the lead
   (`shims/tests/test_gh_user_login.py`). A call GitHub stops
   for a spent budget (`API rate limit exceeded`, a secondary limit, HTTP 429) ends instead with
@@ -233,7 +238,8 @@ before handing the call to the real one.
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
 - **`secrets`** refuses every agent request for a human-tier key
   (exit 77), and names the broker command (`secret-run`) or, in a session the broker does not
-  serve, the `omp --resume` line that relaunches it as one. secretsd's only prompt for such a key
+  serve, `secret-run --register`, which registers that one command, and the `omp --resume` line
+  that relaunches the session as one. secretsd's only prompt for such a key
   is a YubiKey blink the firmware holds about 15 seconds, and on 2026-11-01 thirteen agent
   requests timed out on it. An agent is a caller with `OMP_SESSION_ID`, `PI_SESSION_FILE`,
   `CLAUDECODE` or `ENVOY_SESSION_ID` set; every other call, and every call from Sami's shells,

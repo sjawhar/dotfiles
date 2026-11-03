@@ -272,7 +272,7 @@ class UserLogin(unittest.TestCase):
         self.assertIn("`gh pr merge 5 -R o/r --admin`", err)
         self.assertIn("Instead: If this is a GitHub admin action that work Sami already asked for needs", err)
         self.assertIn("never ask Sami to do it (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a)", err)
-        route = ("`secret-run --reason '<what and why>' GITHUB_ADMIN_PAT -- "
+        route = ("`secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- "
                  "sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' gh pr merge 5 -R o/r --admin`")
         self.assertIn(route, err)
         self.assertIn("the same with GITHUB_PERSONAL_ADMIN_PAT in both places", err)
