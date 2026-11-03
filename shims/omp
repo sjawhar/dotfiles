@@ -93,18 +93,25 @@ fi
 # login (dispatch://INFRA-398; Sami, 2026-11-01 17:13Z, after the 12:35-16:20Z outage of the shared login). It
 # loads after omp/config.yml, so it wins on the roles it names, and before a caller's own overlays, so a `--config`
 # file still wins over both. A machine without the file is unchanged.
-# The default profile alone gets it: a named profile such as `pbc` bills another Anthropic account, and
-# config.yml's direct `anthropic/...` roles are what it must keep. A nested launch inherits PI_CONFIG_FILES from
-# its parent, so a profile launch drops the entry a default-profile parent added.
+# The default profile alone gets it: a named profile such as `pbc` bills another Anthropic account, so it gets
+# omp/config.<profile>.local.yml in the same place instead, when that file exists (on sami-rocqperf,
+# config.pbc.local.yml points the pbc roles at the gateway's `pbc/` groups, team verified-grader, which bill PBC;
+# Sami, 2026-11-03 14:31Z, dispatch://INFRA-481/ask/2a5a0149: "Just move our agents."). Without that file a named
+# profile keeps config.yml's direct `anthropic/...` roles. A nested launch inherits PI_CONFIG_FILES from its parent,
+# so a launch drops every local overlay the parent added before adding its own.
 local_overlay="$DOTFILES_DIR/omp/config.local.yml"
-if [[ -z "$profile" && -f "$local_overlay" ]]; then
+[[ -n "$profile" ]] && local_overlay="$DOTFILES_DIR/omp/config.$profile.local.yml"
+pi_files=""
+IFS=: read -ra pi_entries <<<"${PI_CONFIG_FILES:-}"
+for entry in "${pi_entries[@]}"; do
+    [[ "$entry" == "$DOTFILES_DIR"/omp/config.*local.yml && "$entry" != "$local_overlay" ]] && continue
+    pi_files="${pi_files:+$pi_files:}$entry"
+done
+export PI_CONFIG_FILES="$pi_files"
+if [[ -f "$local_overlay" ]]; then
     case ":${PI_CONFIG_FILES:-}:" in
         *":$local_overlay:"*) ;;
         *) export PI_CONFIG_FILES="${PI_CONFIG_FILES/"$overlay"/"$overlay:$local_overlay"}" ;;
-    esac
-elif [[ -n "$profile" ]]; then
-    case ":${PI_CONFIG_FILES:-}:" in
-        *":$local_overlay:"*) export PI_CONFIG_FILES="${PI_CONFIG_FILES/":$local_overlay"/}" ;;
     esac
 fi
 
