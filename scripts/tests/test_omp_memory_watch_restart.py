@@ -17,6 +17,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import socket
 import tempfile
 import time
 import unittest
@@ -535,6 +536,82 @@ class MoveLogTest(RestarterCase):
         self.assertEqual((self.splits, self.told), ([], []))
         self.assertIn("forgotten, the pane is gone", self.lines[-1])
         self.assertEqual(self.state.data["panes"], {})
+
+
+class MoveToTest(RestarterCase):
+    """`agentbox move --to <machine>` moves a session to ANOTHER machine. On 2026-11-03 at
+    04:10:57Z this watch resumed 01a19e3c on sami-rocqperf 6 s after its move to sami-devbox hung
+    it up: only the same-machine move log was read, so the move in flight looked like a crash."""
+
+    DEAD_PID = 2147483646  # above any pid_max: never a live process
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self.tmp.name)
+        self.active = root / "agentbox" / "move-to" / "active"
+        self.active.mkdir(parents=True)
+        self.index = root / "agentbox-moved"
+        for name, value in (("MOVE_LOG_DIR", root / "agentbox"), ("MOVED_INDEX", self.index)):
+            original = getattr(WATCH, name, None)
+            setattr(WATCH, name, value)
+            self.addCleanup(setattr, WATCH, name, original)
+
+    def moving(self, pid: int) -> None:
+        (self.active / SID).write_text(f"pid={pid}\ntarget=sami-devbox\nstart=1000\n")
+
+    def marker(self, path: Path, source: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"from={source}\nto=sami-devbox\ntime=2026-11-03T04:11:30Z\nsession={SID}\n")
+
+    def here(self) -> str:
+        return socket.gethostname().split(".")[0]
+
+    def test_a_move_to_another_machine_in_flight_owns_the_pane(self) -> None:
+        self.run_pass(self.host(), 1000.0)
+        self.moving(os.getpid())
+        note = self.run_pass(("idle", {}), 1006.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("wait: agentbox move --to sami-devbox owns it", self.lines[-1])
+        self.assertIn("1 held by agentbox move", note)
+        self.assertIn(PANE["id"], self.state.data["panes"])
+
+    def test_a_pane_gone_during_a_move_to_another_machine_is_kept(self) -> None:
+        self.run_pass(self.host(), 1000.0)
+        self.moving(os.getpid())
+        self.panes = []
+        self.run_pass(("idle", {}), 1006.0)
+        self.assertIn("kept: the pane is gone, and agentbox move --to sami-devbox owns it", self.lines[-1])
+        self.assertIn(PANE["id"], self.state.data["panes"])
+
+    def test_a_move_whose_relauncher_is_dead_owns_nothing(self) -> None:
+        self.run_pass(self.host(), 1000.0)
+        self.moving(self.DEAD_PID)
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(len(self.respawned), 1)
+
+    def test_a_session_moved_away_by_its_index_marker_is_left(self) -> None:
+        self.run_pass(self.host(), 1000.0)
+        self.marker(self.index / SID, self.here())
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("left: it moved to sami-devbox at 2026-11-03T04:11:30Z", self.lines[-1])
+        self.assertNotIn(PANE["id"], self.state.data["panes"])
+
+    def test_a_session_moved_away_by_its_transcript_marker_is_left(self) -> None:
+        self.run_pass(self.host(), 1000.0)
+        self.marker(self.transcript.with_suffix("") / "agentbox-moved", self.here())
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(self.respawned, [])
+        self.assertIn("left: it moved to sami-devbox", self.lines[-1])
+
+    def test_a_marker_from_another_machine_is_inert_here(self) -> None:
+        """agent-session's rule: a marker counts only on the machine it names as `from=`, so the
+        target can still resume the session it now runs."""
+        self.run_pass(self.host(), 1000.0)
+        self.marker(self.index / SID, "some-other-machine")
+        self.marker(self.transcript.with_suffix("") / "agentbox-moved", "some-other-machine")
+        self.run_pass(("idle", {}), 1030.0)
+        self.assertEqual(len(self.respawned), 1)
 
 
 class OpenPaneTest(unittest.TestCase):

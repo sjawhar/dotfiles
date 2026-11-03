@@ -2234,15 +2234,80 @@ MOVE_STEPS = (
 # "respawn pane failed" is tmux's own error, printed unstamped by the relauncher before 2026-11-02.
 MOVE_GAVE_UP = ("the session is DOWN", "is gone; nothing respawned")
 
+# `agentbox move --to <machine>` moves a session to ANOTHER machine. While its relauncher runs it
+# keeps <MOVE_LOG_DIR>/move-to/active/<session id>, lines `pid=<relauncher pid>`,
+# `target=<machine>`, `start=<epoch>`, and removes it when the move ends. On 2026-11-03 at
+# 04:10:57Z this watch resumed 01a19e3c on sami-rocqperf 6 s after its move to sami-devbox hung it
+# up, since the same-machine move log above says nothing of such a move.
+#
+# Once moved, the session runs on the target, and one session must never run on two machines
+# (dispatch://INFRA-993): the move leaves the marker `agentbox-moved` in the session's own
+# directory (its transcript path without `.jsonl`) and as MOVED_INDEX/<session id>, lines
+# `from=`, `to=`, `time=`. As in scripts/agent-session, it counts only on the machine its `from=`
+# names, so a copy that reaches the target is inert there.
+MOVED_MARKER = "agentbox-moved"
+MOVED_INDEX = Path.home() / ".omp" / "agentbox-moved"
+
+
+def key_values(path: Path) -> dict[str, str]:
+    """A file of `key=value` lines as a dict, or {} when it cannot be read."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return {}
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def move_to_claim(sid: str) -> dict:
+    """{"owner": "move", "at", "line", "why"} while an `agentbox move --to` of the session runs
+    here: its active file is present and its relauncher is alive. {} otherwise, so a move whose
+    relauncher died without removing the file holds nothing."""
+    directory = MOVE_LOG_DIR / "move-to" / "active"
+    path = directory / sid
+    if not path.exists():
+        found = sorted(directory.glob(f"{sid}*"))
+        if len(found) != 1:
+            return {}
+        path = found[0]
+    fields = key_values(path)
+    pid = fields.get("pid", "")
+    if not pid.isdigit() or not (PROC_ROOT / pid).exists():
+        return {}
+    try:
+        start = float(fields.get("start") or 0)
+    except ValueError:
+        start = 0.0
+    target = fields.get("target") or "another machine"
+    why = f"agentbox move --to {target} owns it (relauncher pid {pid}, since {iso(start)})"
+    return {"owner": "move", "at": start, "line": why, "why": why}
+
+
+def moved_away(marker: Path) -> str:
+    """Why the session must not be resumed here, when `marker` says it moved from this machine."""
+    fields = key_values(marker)
+    here = os.environ.get("AGENTBOX_HOST") or socket.gethostname().split(".")[0]
+    if not fields or fields.get("from") != here:
+        return ""
+    return (
+        f"it moved to {fields.get('to') or 'another machine'} at {fields.get('time') or 'an unknown time'}"
+        f" (marker {marker}) and runs there now"
+    )
+
+
+def owner_text(claim: dict) -> str:
+    """Who owns the session's respawn, in the words a `wait:` or `kept:` line uses."""
+    return claim.get("why") or f"agentbox move owns its respawn ({iso(claim['at'])}: {claim['line'][:120]})"
+
 
 def who_respawns(sid: str, since: float, now: float) -> dict:
     """Whether something other than this watch brings the session back. The one place that
     decides it.
 
-    {"owner": "move", "at", "line"}: an `agentbox move` is respawning the session, so a resume
-    now would give one transcript two writers. {"owner": "down", "at", "line", "record"}: the
-    move gave up, and `record` is what it was moving the session to (kind "box", its spec), which
-    is what the session is brought back as. {} when nothing else claims it.
+    {"owner": "move", "at", "line"}: an `agentbox move` is respawning the session, here or (with
+    "why") on another machine (`move_to_claim`), so a resume now would give one transcript two
+    writers. {"owner": "down", "at", "line", "record"}: the same-machine move gave up, and
+    `record` is what it was moving the session to (kind "box", its spec), which is what the
+    session is brought back as. {} when nothing else claims it.
 
     Only the session's latest move counts, and only its lines from `since` on (the record's last
     sight of the session running): a move this watch saw the session survive is history.
@@ -2251,6 +2316,9 @@ def who_respawns(sid: str, since: float, now: float) -> dict:
     stop, which all must be resumed (dispatch://INFRA-898, about 55 of 73 read). Today the move's
     own log says it; when omp records the sender's `intent` in session_exit.data, it is read here.
     """
+    claim = move_to_claim(sid)
+    if claim:
+        return claim
     paths = sorted(MOVE_LOG_DIR.glob(f"move-{sid}*.log"))
     if len(paths) != 1:
         return {}
@@ -2299,7 +2367,10 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
         return "left: the session it ran could not be read while it was alive", {}
     claim = who_respawns(sid, float(record.get("seen") or 0), now)
     if claim.get("owner") == "move":
-        return f"wait: agentbox move owns its respawn ({iso(claim['at'])}: {claim['line'][:120]})", {}
+        return f"wait: {owner_text(claim)}", {}
+    moved = moved_away(MOVED_INDEX / sid)
+    if moved:
+        return f"left: {moved}", {}
     resume = dict(claim["record"]) if claim else record
     if now - float(record.get("seen") or 0) > RESTART_STALE:
         return f"left: last seen running at {iso(record.get('seen'))}, more than {human(RESTART_STALE)} ago", {}
@@ -2315,6 +2386,9 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
     transcript = find_transcript(sid, holder)
     if not transcript:
         return "left: no transcript found, so whether it ended on purpose cannot be told", {}
+    moved = moved_away(Path(transcript).with_suffix("") / MOVED_MARKER)
+    if moved:
+        return f"left: {moved}", {}
     ended = holder.normal_exit_at(transcript)
     if ended:
         return f"left: the session ended normally at {ended}", {}
@@ -2412,8 +2486,7 @@ def restart_pass(
             waiting += 1
             if not old.get("gone_at"):
                 old["gone_at"] = now
-                log(f"{name}: kept: the pane is gone, and agentbox move owns its respawn"
-                    f" ({iso(claim['at'])}: {claim['line'][:120]})")
+                log(f"{name}: kept: the pane is gone, and {owner_text(claim)}")
             continue
         records.pop(pane_id)
         if not claim:

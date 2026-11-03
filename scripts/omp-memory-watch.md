@@ -143,6 +143,17 @@ is history.
   a window that is gone, gives way to a new window `omp-<first 8 of the id>` in the same tmux
   session (`tmux new-window -d -t <session>: -n omp-<id>`). Either way the box-health owner is
   told which move gave up and where the session now runs.
+- **A move to another machine is running** (`agentbox move --to <machine>`): its relauncher keeps
+  `~/.cache/omp/agentbox/move-to/active/<id>` (`pid=`, `target=`, `start=`) until the move ends.
+  While that file is there and its pid is alive, the pane is left with `wait: agentbox move --to
+  <machine> owns it`, and a gone pane is kept. On 2026-11-03 at 04:10:57Z this watch resumed
+  01a19e3c on sami-rocqperf 6 s after its move to sami-devbox hung it up, because it read only the
+  same-machine move log.
+- **The session moved to another machine**: the marker `agentbox-moved` in its transcript
+  directory, or `~/.omp/agentbox-moved/<id>`, names this machine as `from=`. It runs on the target
+  now and one session must not run on two machines, so it is left (`left: it moved to <machine> …`)
+  and the record dropped. As in `scripts/agent-session`, a marker whose `from=` is another machine
+  is inert here.
 
 Why a new pane and not an alert only: R3A (`01a16c67`) closed its pane %74 (`agents3:7.4` then)
 with its omp on 2026-11-02 at 10:20:48Z, the move then tried 40 times and logged DOWN at
