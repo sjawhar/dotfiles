@@ -53,8 +53,19 @@ class LegacyIsKeylessTest(unittest.TestCase):
         return d
 
     def keyless(self, d: Path) -> bool:
+        # From the temp directory, not the checkout: jq is a mise shim on a devbox, and mise refuses
+        # to run in a dotfiles clone whose mise.toml is not trusted (any clone but ~/.dotfiles), so
+        # jq failed there, the type read as empty and every case read as "not keyless" (sami-devbox,
+        # 2026-11-03). The failing cases then passed for the wrong reason.
         body = f'source <(sed \'/^case "${{1:-}}" in/,$d\' {SCRIPT}); legacy_is_keyless "$1"'
-        return subprocess.run(["bash", "-c", body, "test", str(d)], env=self.env, timeout=30).returncode == 0
+        return subprocess.run(["bash", "-c", body, "test", str(d)], env=self.env, cwd=self.root,
+                              timeout=30).returncode == 0
+
+    def test_jq_runs_where_the_check_runs(self) -> None:
+        # The failing cases below prove nothing unless jq answers here.
+        out = subprocess.run(["jq", "-r", ".type"], input='{"type": "t"}', env=self.env, cwd=self.root,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.strip(), "t", out.stderr)
 
     def test_keyless_external_account_passes(self) -> None:
         self.assertTrue(self.keyless(self.legacy({"adc.json": json.dumps(EXTERNAL)})))
