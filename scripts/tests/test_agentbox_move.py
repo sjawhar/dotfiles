@@ -2054,7 +2054,8 @@ class AgentboxMove(unittest.TestCase):
         (self.remote / "MISSING").write_text(f"{root}\n", encoding="utf-8")
         refused = self.move_to(own=999999941)
         self.assertEqual(refused.returncode, 1, refused.stdout)
-        self.assertIn(f"nothing was hung up: its working directory {root} is not on devbox", refused.stderr)
+        self.assertIn(f"nothing was hung up: these working directories are not on devbox", refused.stderr)
+        self.assertIn(f" {root} ", refused.stderr)
         self.assertEqual(self.jobs(), [])
         (self.remote / "MISSING").unlink()
         self.assertEqual(self.move_to(own=999999941).returncode, 0)
@@ -2062,7 +2063,7 @@ class AgentboxMove(unittest.TestCase):
         (self.remote / "MISSING").write_text(f"{root}\n", encoding="utf-8")
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
-        self.assertIn("refused, nothing was hung up: its working directory", run.stdout)
+        self.assertIn("refused, nothing was hung up: these working directories are not on", run.stdout)
         self.assertFalse((self.root / "RSYNC").exists())
 
     def test_a_path_no_offbox_refuses_is_never_copied_and_nothing_is_hung_up(self) -> None:

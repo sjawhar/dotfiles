@@ -1,0 +1,45 @@
+#!/bin/bash
+# The ssh entries a box needs for the other machines of this tailnet, written at box start
+# (agentbox/entrypoint.sh). A box has the key and the pinned known_hosts for sami-rocqperf
+# (agentbox/mounts) but no entry that names the user, the port and those files, so `ssh
+# sami-rocqperf` from a box connected as the box user on port 22 and was refused (the cost
+# tracking lead's box on sami-devbox, 2026-11-03 15:04Z).
+#
+#   box-ssh-config <home> [owner]
+#
+# For each machine whose key is mounted it writes <home>/.ssh/config.d/<host>.conf with the path
+# as the BOX sees it ($HOME, never ~, since the box's home is the host user's path), and puts one
+# `Include` line at the top of <home>/.ssh/config. It never writes over an entry that is there
+# already, and it is safe to run again.
+set -uo pipefail
+home="${1:-$HOME}"
+owner="${2:-}"
+hosts=(sami-rocqperf sami-leanperf)
+port="${AGENTBOX_SSH_PORT:-443}"
+user="${AGENTBOX_SSH_USER:-sami}"
+wrote=0
+for h in "${hosts[@]}"; do
+    key="$home/.ssh/$h"
+    [[ -r "$key" ]] || continue
+    conf="$home/.ssh/config.d/$h.conf"
+    [[ -e "$conf" ]] && continue
+    mkdir -p "$home/.ssh/config.d" || continue
+    {
+        printf 'Host %s\n' "$h"
+        printf '  User %s\n  Port %s\n  IdentityFile %s\n  IdentitiesOnly yes\n' "$user" "$port" "$key"
+        [[ -r "$home/.ssh/known_hosts.$h" ]] && printf '  UserKnownHostsFile %s\n' "$home/.ssh/known_hosts.$h"
+    } >"$conf" || continue
+    chmod 600 "$conf"
+    [[ -z "$owner" ]] || chown "$owner:$owner" "$conf" 2>/dev/null || true
+    wrote=$((wrote + 1))
+done
+include="Include $home/.ssh/config.d/*.conf"
+if [[ -d "$home/.ssh/config.d" ]] && ! grep -qxF "$include" "$home/.ssh/config" 2>/dev/null; then
+    tmp="$home/.ssh/config.agentbox.$$"
+    printf '%s\n' "$include" >"$tmp" || exit 1
+    [[ -r "$home/.ssh/config" ]] && cat "$home/.ssh/config" >>"$tmp"
+    mv "$tmp" "$home/.ssh/config" || exit 1
+    chmod 600 "$home/.ssh/config"
+    [[ -z "$owner" ]] || chown "$owner:$owner" "$home/.ssh/config" 2>/dev/null || true
+fi
+exit 0

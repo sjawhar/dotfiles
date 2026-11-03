@@ -4149,9 +4149,10 @@ move_to_dests_writable() {
 # box has, or a root of many sessions' trees, which a move never copies) must already be on the
 # target, since a box cannot start without its first --dir and --drop-gone-dirs never drops it.
 # Asked BEFORE the hang-up, so such a session is refused while it still runs; MOVE_TO_MIRROR and
-# MOVE_TO_MERGE must be built. Sets MOVE_TO_WHY and returns 1 for the first one missing.
+# MOVE_TO_MERGE must be built. Sets MOVE_TO_WHY with EVERY one missing (LANE-C: a refusal that
+# names one path at a time costs a round of work for each, 2026-11-03) and returns 1.
 move_to_cwds_present() {
-    local target="$1" cwd p covered
+    local target="$1" cwd p covered missing=()
     shift
     for cwd in "$@"; do
         covered=false
@@ -4159,11 +4160,12 @@ move_to_cwds_present() {
             if move_within "$cwd" "$p"; then covered=true; break; fi
         done
         $covered && continue
-        if ! move_remote "$target" "test -d $(printf '%q' "$cwd")" </dev/null >/dev/null 2>&1; then
-            MOVE_TO_WHY="its working directory $cwd is not on $target, and a move does not copy it (every box here has it, or it holds many sessions' trees); make it there first"
-            return 1
-        fi
+        move_remote "$target" "test -d $(printf '%q' "$cwd")" </dev/null >/dev/null 2>&1 || missing+=("$cwd")
     done
+    if (( ${#missing[@]} )); then
+        MOVE_TO_WHY="these working directories are not on $target, and a move does not copy them (every box here has them, or they hold many sessions' trees): $(printf '%s ' "${missing[@]}"); make them there first"
+        return 1
+    fi
     return 0
 }
 

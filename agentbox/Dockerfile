@@ -60,6 +60,7 @@ ENV PYTHONPATH=/opt/agentbox/python
 # metadata forwarder off the containers the box starts, relays the box's own
 # Envoy address to the host's Envoy forwarder, logs the inner docker into
 # ghcr.io as ubuntu, then drops to ubuntu for the session command.
+COPY box-ssh-config /usr/local/bin/box-ssh-config
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/box-ssh-config
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

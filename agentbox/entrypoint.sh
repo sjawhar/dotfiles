@@ -165,6 +165,13 @@ if [ -n "${AGENTBOX_CRED_HELPERS:-}" ] && [ "$AGENTBOX_CRED_HELPERS" != "{}" ]; 
     fi
 fi
 
+# An ssh config for the other machines a box talks to (agentbox/box-ssh-config): `ssh
+# sami-rocqperf` from a box connected as ubuntu on port 22 and was refused, since the box has the
+# key and the known_hosts file but no entry naming the user, the port and those files (the cost
+# lead's box on sami-devbox, 2026-11-03 15:04Z).
+/usr/local/bin/box-ssh-config "$HOME" "$AGENTBOX_USER" || \
+    echo "agentbox: no ssh config written; \`ssh sami-rocqperf\` from this box may be refused" >&2
+
 # The session runs as the mounted directories' owner with the launcher's
 # environment intact (setpriv keeps env unless told otherwise).
 exec setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups "$@"
