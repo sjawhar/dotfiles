@@ -11,34 +11,40 @@ import sys
 
 args = [x for x in sys.argv[1:] if x != "--records"]
 records = "--records" in sys.argv  # input is a find listing of `KIND SIZE PATH` records
-root, rules = args[0], args[1]
-paths, comps, names = [], set(), []
-with open(rules) as fh:
-    for ln in fh:
-        ln = ln.strip()
-        if not ln or ln.startswith("#"):
-            continue
-        kind, _, arg = ln.partition(" ")
-        if kind == "path":
-            paths.append(arg.rstrip("/").encode())
-        elif kind == "component":
-            comps.add(arg.encode())
-        elif kind == "name":
-            names.append(arg.lower().encode())
-        else:
-            sys.exit(f"bad rule: {ln}")
+root, rule_files = args[0], args[1:]
+paths, comps, names = set(), set(), []
+for rules in rule_files:  # EXCLUDE, then optional extra rule files (e.g. a scope cut list)
+    with open(rules) as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            kind, _, arg = ln.partition(" ")
+            if kind == "path":
+                paths.add(arg.rstrip("/").encode())
+            elif kind == "component":
+                comps.add(arg.encode())
+            elif kind == "name":
+                names.append(arg.lower().encode())
+            else:
+                sys.exit(f"bad rule: {ln}")
 if not (paths or comps or names):
     sys.exit("exclusion file has no rules")
 rootb = root.rstrip("/").encode()
 
 
 def excluded(rel):
-    full = os.path.join(rootb, rel)
-    if any(full == p or full.startswith(p + b"/") for p in paths):
-        return True
     parts = rel.split(b"/")
     if comps.intersection(parts):
         return True
+    # A path rule matches the entry or any directory above it: test each ancestor in the set.
+    full = rootb
+    if full in paths:
+        return True
+    for p in parts:
+        full += b"/" + p
+        if full in paths:
+            return True
     low = rel.lower()
     return any(n in low for n in names)
 

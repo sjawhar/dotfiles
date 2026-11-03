@@ -25,6 +25,10 @@ high=0 dhigh=0
 # Disk rule for the durable units (Main, 2026-11-03 03:40Z): freeze when DUR_DEV's await is above
 # 20 ms or its %util above 80 for 2 samples; thaw when both are under for 5 samples. It starts held.
 DUR_DEV=${DUR_DEV:-nvme0n2} dbusy=0 dcalm=0 dheld=1
+# Read-wait rule for the other copy units (Main, 2026-11-03 ~04:40Z): freeze when the read wait
+# of any disk they read (NV_DEVS: md127's members and the root disk) is above 20 ms for 2 samples;
+# thaw after 2 samples under. md127 itself reports no wait, so its members are sampled.
+NV_DEVS=${NV_DEVS:-"nvme0n1 nvme1n1 nvme2n1 nvme3n1 nvme4n1"} nbusy=0 ncalm=0 nheld=1
 read_stats() { awk -v d="$1" '$3==d{print $4, $6, $8, $10, $13, $7, $11}' /proc/diskstats; }
 declare -A PREV
 for d in "${DEVS[@]}"; do PREV[$d]=$(read_stats "$d"); done
@@ -32,6 +36,7 @@ pt=$(date +%s)
 while :; do
   sleep 60
   now=$(date +%s); dt=$((now - pt)); pt=$now; stats=""
+  nmax=0
   for d in "${DEVS[@]}"; do
     cur=($(read_stats "$d")); prev=(${PREV[$d]}); PREV[$d]="${cur[*]}"
     ios=$(( cur[0] - prev[0] + cur[2] - prev[2] ))
@@ -45,7 +50,14 @@ while :; do
       (( dbusy >= 2 )) && dheld=1
       (( dcalm >= ${DUR_CALM:-2} )) && dheld=0
     fi
+    if [[ " $NV_DEVS " == *" $d "* ]]; then
+      rd=$(( cur[0] - prev[0] )); raw=$(( rd > 0 ? (cur[5] - prev[5]) / rd : 0 ))
+      (( raw > nmax )) && nmax=$raw
+    fi
   done
+  if (( nmax > 20 )); then nbusy=$((nbusy + 1)); ncalm=0; else ncalm=$((ncalm + 1)); nbusy=0; fi
+  (( nbusy >= 2 )) && nheld=1
+  (( ncalm >= 2 )) && nheld=0
   psome=$(awk '/^some/{split($3,a,"=");print a[2]}' /proc/pressure/io)
   pfull=$(awk '/^full/{split($3,a,"=");print a[2]}' /proc/pressure/io)
   load=$(cut -d' ' -f1 /proc/loadavg)
@@ -79,7 +91,7 @@ while :; do
     if [[ " $DUR_UNITS " == *" $u "* ]]; then
       stop=$([[ -n $dwhy && $dwhy != devbox-unreachable\  ]] || (( dheld )) && echo 1 || echo 0)
     else
-      stop=$([[ -n $lwhy || $dwhy == *floor* ]] || (( high >= 5 )) && echo 1 || echo 0)
+      stop=$([[ -n $lwhy || $dwhy == *floor* ]] || (( high >= 5 || nheld )) && echo 1 || echo 0)
     fi
     if (( stop )); then sudo -n systemctl freeze "$u" 2>/dev/null; else sudo -n systemctl thaw "$u" 2>/dev/null; fi
   done
@@ -87,5 +99,5 @@ while :; do
   [[ -s $DIR/HOLD ]] && dwhy+="hold:$(head -c 80 "$DIR/HOLD" | tr -s ' \n' '_') "
   if [[ -z $dwhy ]]; then echo OK >"$DIR/gate.state.tmp"; else echo "PAUSE $dwhy" >"$DIR/gate.state.tmp"; fi
   mv "$DIR/gate.state.tmp" "$DIR/gate.state"
-  echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lwhy ]] && echo 1 || echo 0) high50=$high high95=$dhigh dbusy=$dbusy dcalm=$dcalm dheld=$dheld gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
+  echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lwhy ]] && echo 1 || echo 0) high50=$high high95=$dhigh dbusy=$dbusy dcalm=$dcalm dheld=$dheld nv_rawait_max=${nmax}ms nheld=$nheld gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
 done

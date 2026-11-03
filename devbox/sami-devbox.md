@@ -211,8 +211,11 @@ Test of 2026-11-03 (198,279 files, 11 GiB): with the reclaim first, one `inode_s
 in the 60 s after the stop and no hung umount.
 
 Data a lane owns may be marked `.no-offbox` or listed in `EXCLUDE`; `upload.sh` refuses to start
-without `EXCLUDE`, `exclude-filter.py` and `no-offbox`, and checks each shard with
-`no-offbox --root ROOT --from LIST`.
+without `EXCLUDE`, `exclude-filter.py`, `offbox-gate.py` and `no-offbox`, and checks each shard
+with `offbox-gate.py`, which runs `no-offbox --root ROOT --from LIST`. One exception, listed in
+`OFFBOX-EXCEPT`: inside `review-evidence`, an **empty** `.no-offbox` is a test fixture
+(SendGateReview12's replays) and copies as data; a marker with text still refuses and goes to
+LANE-C (LANE-C, 2026-11-03).
 
 ## Known issues
 

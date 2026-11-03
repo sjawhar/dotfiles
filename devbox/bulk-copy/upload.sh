@@ -12,14 +12,18 @@ LISTS=${DEVBOX_COPY_LISTS:-$DIR/lists}/$TREE
 LOG=$DIR/upload.log
 ERR=$DIR/err/$TREE
 mkdir -p "$ERR"
-# The permanent exclusion list (LANE-C embargo, 2026-11-02): no run without it.
+# The exclusion list (logins, rebuildable outputs): no run without it.
 EXCLUDE=${DEVBOX_COPY_EXCLUDE:-$DIR/EXCLUDE}
 FILTER=$(dirname "$(readlink -f "$0")")/exclude-filter.py
 [[ -s $EXCLUDE && -x $FILTER ]] || { echo "refusing to start: no exclusion file $EXCLUDE or filter $FILTER" >&2; exit 2; }
 # The off-box rule's checker (NoOffboxMarker, 2026-11-02): markers `.no-offbox` and its patterns.
 NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /home/sami/.dotfiles/scripts/no-offbox)}
 [[ -x $NO_OFFBOX ]] || { echo "refusing to start: no no-offbox checker" >&2; exit 2; }
-export BOX TREE ROOT DIR BUCKET LISTS LOG ERR EXCLUDE FILTER NO_OFFBOX
+# Path-scoped fixture exceptions to no-offbox (empty markers only); see offbox-gate.py.
+GATE=$(dirname "$(readlink -f "$0")")/offbox-gate.py
+OFFBOX_EXCEPT=${DEVBOX_COPY_OFFBOX_EXCEPT:-$DIR/OFFBOX-EXCEPT}
+[[ -x $GATE ]] || { echo "refusing to start: no $GATE" >&2; exit 2; }
+export BOX TREE ROOT DIR BUCKET LISTS LOG ERR EXCLUDE FILTER NO_OFFBOX GATE OFFBOX_EXCEPT
 
 feed() {  # the NUL-separated list of shard $1
   if [[ $LISTS == gs://* ]]; then gcloud storage cat "$LISTS/$1.list" 2>>"$ERR/$1.gcs"; else cat "$LISTS/$1.list"; fi
@@ -47,7 +51,7 @@ worker() {
       sleep 30; continue
     fi
     # Any status but 0 refuses the whole shard; it is not retried.
-    if ! sudo -n "$NO_OFFBOX" --root "$ROOT" --from "$list" -0 >"$ERR/$shard.offbox" 2>&1; then
+    if ! sudo -n python3 "$GATE" "$NO_OFFBOX" "$ROOT" "$list" "$OFFBOX_EXCEPT" >"$ERR/$shard.offbox" 2>&1; then
       rm -f "$list"
       echo "$BOX $TREE $shard refused no-offbox (see err/$TREE/$shard.offbox) at=$(date +%s)" >>"$LOG"
       return 1
