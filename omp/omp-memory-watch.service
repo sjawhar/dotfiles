@@ -11,7 +11,8 @@ IOSchedulingClass=idle
 # A run that cannot finish is killed; runs cannot pile up whatever this is, since a oneshot that
 # is still starting absorbs the next timer tick. The alerting is /proc and /sys reads (~0.3 s);
 # each acting pass stops itself at a time from the run's start: the oom bias at 6 s, the pane
-# restarter at 14 s, the scope adoption at 40 s (a systemd call is begun only with 10 s left).
+# restarter at 14 s, the scope adoption at 40 s, the broker scopes at 70 s (a systemd call is
+# begun only with 10 s left).
 # At load 350-450 on 2026-11-02 most runs took 1-2 s, some 13-16 s, and whole-box stalls in
 # which systemd itself logged nothing killed runs at the old 25 s. Until 13:20Z the restarter
 # also ran envoy-role-holder-watch's unbounded walk of the session root, which alone took

@@ -207,6 +207,59 @@ every scope not yet known, since a scope's policy and name never change. The
 pass stops 40 s after the run starts, and begins a systemd call only with 10 s left.
 `--no-adopt-scopes` turns it off; `--dry-run` logs `scope adopt: would move …` and moves nothing.
 
+## Action four: each worker broker, and each lane's services, get scopes of their own
+
+omp runs one worker broker per project directory (`omp __omp_worker_daemon_broker`, which renames
+itself `omp daemon brok`). The first session that needs one starts it as a plain detached child
+(`packages/coding-agent/src/launch/client.ts`, `#spawnBroker`), and a child keeps its parent's
+cgroup. So the broker, and every background service any session of that project starts through
+it (the bash tool's services, listed under `proc://`), ran in that first session's scope. On
+2026-11-03 the broker of one project checkout under `~/src` (pid 77103) held the services of 14
+sessions in the chief's `run-c01a13dcae9797264.scope`: they counted against the chief's 24 GiB,
+earlyoom's kill notices for them went to the chief, and 42 brokers on the box were each in some
+session's scope. Action three made it worse for 77103: it moved the chief's whole
+`OOMPolicy=stop` scope, broker included.
+
+A scope outlives its session: it stays while any process is in it, whether or not the process
+that made it is alive, and nothing in it is signalled when that process exits. Stopping the
+scope (`systemctl --user stop`, or `OOMPolicy=stop` after a kernel OOM kill in it) kills every
+process in it. Measured on sami-rocqperf on 2026-11-03 with a throwaway scope whose leader exited
+at once: its `setsid` child ran on and the scope stayed `active`; `systemctl --user stop` then
+killed the child.
+
+Each run finds every broker of this user on the host whose runtime dir is under `~/.omp` (a
+grading jail's broker has its own HOME, and its jail scope is its limit, so it stays; a broker in
+an agent box is the box's) and:
+
+- moves the broker into `omp-broker-<first 16 hex of sha256(its runtime dir)>.scope`, described
+  `omp worker broker for <project dir>`, with the ceiling the broker inherited
+  (`OMP_MEMORY_SCOPE`, else 24 GiB), `MemorySwapMax=0` and `OOMPolicy=continue`;
+- gives each direct child of the broker an owner: its `OMP_SESSION_ID` when that is not the
+  broker's own (a service runs with its owner's environment), else the `owner` of the live record
+  in `<runtime dir>/daemons/*/meta.json` whose `pid` it is (newest first; reading 1,020 records
+  took 8.6 s at load 400, so only these are read, once per process), else nobody once it has run a
+  minute (the shared headless browser, which carries the broker's id);
+- moves each owned child, with its descendants, into `run-c<first 16 hex of the owner>-svc.scope`,
+  one per owner, described exactly `omp session <owner id>`, with 24 GiB, `MemorySwapMax=0` and
+  `OOMPolicy=continue`. A child that serves nobody goes with the broker.
+
+Both are made with `Delegate=true`: systemd (255 here) adds a process to a running scope only when
+the scope is delegated, and refuses the rest with `Process migration not available on
+non-delegated units`. `Delegate` cannot be set on a running scope. The first live version of this
+pass (2026-11-03, 22:16-22:21Z) made 62 scopes without it and then failed 75-125 attaches a run,
+so it was taken out. A scope of the name that is not delegated keeps what it holds, and new
+processes go to the next `<name>-2.scope`, `-3` and so on, with the same Description.
+
+These are the names `earlyoom-kill-watch` reads: a kill in a `-svc` scope goes to the session its
+Description names, and one in a broker scope to the box-health owner. Only processes still in a
+cgroup the broker's tree inherited are moved (the scope the broker was in, or has been in since
+this watch first saw it); one a service put in a scope of its own is left. No process is
+signalled, and memory already held stays charged to the old cgroup. Action three never takes an
+omp worker for a session. The pass runs after action three and stops 70 s after the run starts;
+`--no-adopt-scopes` turns it off with action three, and `--dry-run` logs
+`broker scopes: would move …`. omp's own `proc://` lists every service of the project's broker,
+whoever owns it: that is omp's listing, not the cgroup, and this pass does not change it.
+
 ## What it measures, and why not RSS
 
 `shims/omp` starts each session under `systemd-run --user --scope -p MemoryMax=$OMP_MEMORY_MAX

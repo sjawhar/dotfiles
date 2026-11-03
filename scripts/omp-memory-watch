@@ -12,14 +12,17 @@ a session's own self-watch (for example /mnt/nvme/sami/tmp/verified-linux/handov
 which warns at 10 GiB of omp RSS) warns first and the session sheds its own lanes. This watch
 detects, and alerts the session itself and its stream lead.
 
-It acts in two bounded ways (Sami, 2026-11-02 01:00Z: kill the runaway subprocess instead of the
+It acts in three bounded ways (Sami, 2026-11-02 01:00Z: kill the runaway subprocess instead of the
 whole session, and restart the sessions that did die):
 
   * oom bias (`oom_bias_pass`, off with --no-oom-bias): every process in a capped omp scope except
     the session's own omp is raised to oom_score_adj +500, so when the scope reaches its ceiling
     the kernel kills the runaway child, not the session;
   * pane restart (`restart_pass`, off with --no-restart, a dry run with --restart-dry-run): a
-    tmux pane whose omp died without a normal `session_exit` is resumed in place.
+    tmux pane whose omp died without a normal `session_exit` is resumed in place;
+  * scopes (`scope_adopt_pass` and `broker_scope_pass`, off with --no-adopt-scopes): a session
+    with no capped OOMPolicy=continue scope gets one, and each omp worker broker and each lane's
+    broker services leave the session scope they inherited for scopes of their own.
 
 What the alerting part of one run does, with /proc and /sys reads only, no transcript reading
 and no model call:
@@ -69,6 +72,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import fcntl
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -1780,10 +1784,14 @@ def scope_adopt_pass(
         uptime = float((PROC_ROOT / "uptime").read_text().split()[0])
     except (OSError, ValueError, IndexError):
         uptime = 0.0
+    # omp's own workers (`omp __omp_worker_<name>`, such as the worker broker) are not sessions:
+    # their parent is init, but they name no session. A broker gets a scope of its own from
+    # broker_scope_pass instead.
     sessions = [
         (pid, cgroup) for pid, cgroup in sorted(omps)
         if cgroup.startswith(user) and parent_of(pid) not in every_omp
         and uptime - pid_start(pid) / ticks >= ADOPT_MIN_AGE
+        and not is_omp_worker(pid)
     ]
     live_run_scopes = {
         cgroup.rpartition("/")[2] for _, cgroup in sessions
@@ -1865,6 +1873,245 @@ def scope_adopt_pass(
         log(f"scope adopt: moved {what}; attached {done + 1}, {failed} gone, {left} left for the next run")
     verb = "would move" if dry_run else "moved"
     return f"scopes: {verb} {moved} session(s)" + (f" ({'; '.join(notes)})" if notes else "")
+
+# ------------------------------------- give each worker broker, and each lane's services, a scope
+#
+# omp starts one worker broker per project directory (`omp __omp_worker_daemon_broker`,
+# packages/coding-agent/src/launch/client.ts #spawnBroker) as a plain detached child of the first
+# session that needs one. A child keeps its parent's cgroup, so the broker, and every background
+# service any session starts through it (the bash tool's services, proc://), ran in that first
+# session's scope: on 2026-11-03 the broker of one project checkout (pid 77103) and the
+# services of 14 sessions sat in the chief's run-c01a13dcae9797264.scope, under the chief's 24 GiB
+# ceiling, with earlyoom's kill notices sent to the chief. That scope stays while any process is in
+# it, after its session has gone, and stopping it kills them all.
+#
+# This pass moves each broker into `omp-broker-<16 hex of its runtime dir>.scope`, and each service
+# the broker's `daemons/*/meta.json` records with an owner session (and the service's process
+# tree) into `run-c<16 hex of the owner>-svc.scope`, one per owner, described exactly
+# `omp session <owner id>`: the names earlyoom-kill-watch reads. A process the broker runs for no
+# session (the shared headless browser) stays with the broker. Both get shims/omp's ceiling and
+# OOMPolicy=continue. Only processes still in a cgroup the broker's tree inherited are moved: one
+# a service put in a scope of its own is left. No process is signalled, and memory already held
+# stays charged where it is (cgroup v2 moves a process, not its pages).
+BROKER_ARG = "__omp_worker_daemon_broker"
+OMP_HOME = str(Path.home() / ".omp") + "/"
+# When the pass must stop, in seconds from the run's start; it runs after the adoption pass.
+BROKER_DEADLINE = 70.0
+LIVE_DAEMON_STATES = ("starting", "running", "ready")
+
+
+def broker_unit(runtime_dir: str) -> str:
+    return "omp-broker-" + hashlib.sha256(runtime_dir.encode()).hexdigest()[:16] + ".scope"
+
+
+def service_unit(owner: str) -> str:
+    return "run-c" + owner.replace("-", "")[:16] + "-svc.scope"
+
+
+def broker_daemons(runtime_dir: str, unknown: set[int], deadline: float) -> tuple[dict[int, str], bool]:
+    """({pid: owner} for the live services of a broker whose pid is in `unknown`, whether every
+    record was read or every pid found). Newest meta.json first, stopping once every pid is
+    found: a broker's directory keeps every service it ever ran (1,015 for one broker on
+    2026-11-03), and a new service's record is the newest."""
+    found: dict[int, str] = {}
+    try:
+        metas = sorted(Path(runtime_dir, "daemons").glob("*/meta.json"),
+                       key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        return found, False
+    for meta in metas:
+        if not unknown - found.keys():
+            return found, True
+        if time.monotonic() > deadline - BUS_TIMEOUT:
+            return found, False
+        try:
+            daemon = json.loads(meta.read_text()).get("daemon") or {}
+        except (OSError, ValueError):
+            continue
+        pid = daemon.get("pid")
+        if isinstance(pid, int) and pid in unknown and daemon.get("state") in LIVE_DAEMON_STATES:
+            owner = daemon.get("owner")
+            found[pid] = owner if isinstance(owner, str) and UUID_RE.fullmatch(owner) else ""
+    return found, True
+
+
+def is_omp_worker(pid: int) -> bool:
+    """An omp process that runs one of omp's own workers (`omp __omp_worker_<name>`), not a session."""
+    return any(word.startswith("__omp_worker") for word in proc_words(pid, "cmdline")[1:3])
+
+
+def in_family(cgroup: str, app: str, unit: str) -> bool:
+    """Whether `cgroup` is `unit` in app.slice, or one of its `<unit>-N.scope` successors."""
+    if not cgroup.startswith(app):
+        return False
+    leaf = cgroup[len(app):]
+    stem = unit[: -len(".scope")]
+    return leaf == unit or bool(re.fullmatch(re.escape(stem) + r"-[0-9]+\.scope", leaf))
+
+
+def broker_scope_pass(state, options: argparse.Namespace, deadline: float = float("inf")) -> str:
+    """Move each host worker broker into its own scope, and its services into their owners'."""
+    dry_run = options.dry_run
+    uid = os.getuid()
+    user = f"/user.slice/user-{uid}.slice/"
+    app = f"{user}user@{uid}.service/app.slice/"
+    records: dict = state.data.setdefault("brokers", {})
+    ticks = os.sysconf("SC_CLK_TCK")
+    try:
+        uptime = float((PROC_ROOT / "uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = 0.0
+    brokers = []
+    # A broker renames itself (comm `omp daemon brok`), so omp_processes never lists it.
+    for entry in os.listdir(PROC_ROOT):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            if not (PROC_ROOT / entry / "comm").read_text().startswith("omp"):
+                continue
+        except OSError:
+            continue
+        cgroup = cgroup_of(pid)
+        # This user's shared host brokers: in a session scope, or in the login or tmux scope of a
+        # session that started without one. A broker in an agent box (a docker cgroup) is the
+        # box's, and one whose runtime dir is outside ~/.omp belongs to a sandbox with a HOME of
+        # its own (a grading jail's `env -i HOME=...`): its scope is that sandbox's limit, so it stays.
+        if cgroup.startswith(user) and BROKER_ARG in proc_words(pid, "cmdline")[1:3]:
+            env = dict(w.split("=", 1) for w in proc_words(pid, "environ") if "=" in w)
+            if env.get("OMP_DAEMON_RUNTIME_DIR", "").startswith(OMP_HOME):
+                brokers.append((pid, cgroup, env))
+    live = {str(pid) for pid, _, _ in brokers}
+    for key in set(records) - live:
+        records.pop(key)
+    children = children_by_parent() if brokers else {}
+    created: set[str] = set()
+    delegated: dict[str, bool] = {}
+    moved = failed = 0
+    notes: list[str] = []
+
+    def place(unit: str, description: str, ceiling: int, pids: list[int]) -> None:
+        nonlocal moved, failed
+        pids = list(pids)
+        if dry_run:
+            log(f"broker scopes: would move {len(pids)} process(es) into {unit} ({description})")
+            moved += len(pids)
+            return
+        # systemd adds a process to a running scope only when the scope is delegated ("Process
+        # migration not available on non-delegated units"), and Delegate cannot be set on a
+        # running unit. So a scope of this name without it (made before Delegate was asked for)
+        # keeps what it holds, and new processes go to the next free `<name>-N.scope`.
+        base, number = unit, 2
+        while True:
+            if unit in created:
+                break
+            if not (CGROUP_ROOT / app.strip("/") / unit).exists():
+                props = ["Description", "s", description, "Slice", "s", "app.slice", "Delegate", "b", "true",
+                         "OOMPolicy", "s", "continue", "MemoryMax", "t", str(ceiling), "MemorySwapMax", "t", "0"]
+                while pids:
+                    first = pids.pop(0)
+                    ok, out = systemd_user(BUS + ["StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
+                                                  str(len(props) // 3 + 1), *props, "PIDs", "au", "1", str(first), "0"])
+                    if ok:
+                        moved += 1
+                        break
+                    if (PROC_ROOT / str(first)).exists():
+                        log(f"broker scopes: FAILED to create {unit} for pid {first}: {out}")
+                        notes.append(f"{unit}: create failed")
+                        failed += 1
+                        return
+                else:
+                    return
+                break
+            if unit not in delegated:
+                ok, out = systemd_user(["systemctl", "--user", "show", "-p", "Delegate", "--value", unit])
+                delegated[unit] = ok and out.strip() == "yes"
+            if delegated[unit]:
+                break
+            unit, number = f"{base[:-len('.scope')]}-{number}.scope", number + 1
+        created.add(unit)
+        done, gone, left = attach(unit, pids, deadline)
+        moved, failed = moved + done, failed + gone
+        if left:
+            notes.append(f"{unit}: {left} left for the next run")
+
+    for broker, cgroup, env in brokers:
+        if time.monotonic() > deadline - BUS_TIMEOUT:
+            notes.append("out of time")
+            break
+        runtime_dir = env["OMP_DAEMON_RUNTIME_DIR"]
+        record = records.get(str(broker))
+        if not record or record.get("start") != pid_start(broker):
+            record = records[str(broker)] = {"start": pid_start(broker), "from": [], "daemons": {}}
+        own = broker_unit(runtime_dir)
+        if not in_family(cgroup, app, own) and cgroup not in record["from"]:
+            record["from"].append(cgroup)
+        # The cgroups a process of this broker's tree is in only because it was forked there.
+        inherited = set(record["from"]) | {cgroup}
+        ceiling = ceiling_bytes(env.get("OMP_MEMORY_SCOPE", "")) or ceiling_bytes(DEFAULT_CEILING)
+
+        # Who each direct child of the broker serves: a service's owner, "" for the broker's own.
+        known: dict = record["daemons"]
+        roots = children.get(broker, [])
+        for key in set(known) - {str(p) for p in roots}:
+            known.pop(key)
+        unknown = {p for p in roots if known.get(str(p), [None])[0] != pid_start(p)}
+        # A service runs with its owner's environment, so its OMP_SESSION_ID names the top-level
+        # session that owns it: the one omp process and Envoy session a kill notice can reach.
+        # The broker's record names the session or subagent that asked (a task subagent's own
+        # id, 01a19db5 for a service of 01a14126's subagent BuildClock, 2026-11-03). The environment
+        # is not enough when it carries the broker's own id: the broker carries the id of the
+        # session that started it, and so does every process it runs for nobody (the headless
+        # browser). Only those are looked up in the broker's records, to tell owned from nobody's;
+        # reading them cost 8.6 s for 1,020 records at load 400.
+        broker_sid = env.get("OMP_SESSION_ID", "")
+        env_sid: dict[int, str] = {}
+        ask: set[int] = set()
+        for pid in unknown:
+            sid = dict(w.split("=", 1) for w in proc_words(pid, "environ") if "=" in w).get("OMP_SESSION_ID", "")
+            env_sid[pid] = sid if UUID_RE.fullmatch(sid) else ""
+            if env_sid[pid] and sid != broker_sid:
+                known[str(pid)] = [pid_start(pid), sid]
+            else:
+                ask.add(pid)
+        found, complete = broker_daemons(runtime_dir, ask, deadline) if ask else ({}, True)
+        unplaced: set[int] = set()
+        for pid in ask:
+            if pid in found:
+                known[str(pid)] = [pid_start(pid), (env_sid[pid] or found[pid]) if found[pid] else ""]
+            elif complete and uptime - pid_start(pid) / ticks >= ADOPT_MIN_AGE:
+                known[str(pid)] = [pid_start(pid), ""]  # up a minute with no record: the broker's own
+            else:
+                unplaced.add(pid)  # its record not read yet, or not written yet: next run
+
+        plan: dict[str, list[int]] = {}
+        owners: dict[str, str] = {}
+        if not in_family(cgroup, app, own):
+            plan[own] = [broker]  # first: its scope must exist before its own children join it
+        for root in roots:
+            if root in unplaced:
+                continue
+            owner = known[str(root)][1]
+            unit = service_unit(owner) if owner else own
+            if owner:
+                owners[unit] = owner
+            stack = [root]
+            while stack:
+                pid = stack.pop()
+                stack.extend(children.get(pid, []))
+                where = cgroup_of(pid)
+                if where in inherited and not in_family(where, app, unit):
+                    plan.setdefault(unit, []).append(pid)
+        project = env.get("OMP_DAEMON_PROJECT_DIR", runtime_dir)
+        if own in plan:
+            place(own, f"omp worker broker for {project}", ceiling, plan.pop(own))
+        for unit, pids in plan.items():
+            place(unit, f"omp session {owners[unit]}", ceiling_bytes(DEFAULT_CEILING), pids)
+    state.commit(options)
+    verb = "would move" if dry_run else "moved"
+    return (f"brokers: {len(brokers)}, {verb} {moved} process(es)" + (f", {failed} failed" if failed else "")
+            + (f" ({'; '.join(notes)})" if notes else ""))
+
 
 # ------------------------------------------------------------ resume a pane whose omp died
 
@@ -3022,6 +3269,13 @@ def run_once(options: argparse.Namespace) -> int:
         except Exception as error:  # noqa: BLE001 -- the run's own record must still be written
             scope_note = f"scopes: adoption failed: {type(error).__name__}: {error}"
 
+    broker_note = "brokers: scopes off"
+    if options.adopt_scopes:
+        try:
+            broker_note = broker_scope_pass(state, options, run_clock + BROKER_DEADLINE)
+        except Exception as error:  # noqa: BLE001 -- the run's own record must still be written
+            broker_note = f"brokers: scopes failed: {type(error).__name__}: {error}"
+
     state.commit(options)
     state.close()
     log(
@@ -3034,7 +3288,7 @@ def run_once(options: argparse.Namespace) -> int:
             else f"{len(recent_wall)} in the last {human(options.wall_burst_window)}"
         )
         + (f", {pruned} old report(s) pruned" if pruned else "")
-        + f"; {bias_note}; {restart_note}; {scope_note}"
+        + f"; {bias_note}; {restart_note}; {scope_note}; {broker_note}"
     )
     return 0
 
@@ -3184,7 +3438,8 @@ def main() -> int:
         dest="adopt_scopes",
         action="store_false",
         help="do not move an omp session with no run-*.scope of its own, or one in an"
-        " OOMPolicy=stop scope, into a new run-c<session>.scope",
+        " OOMPolicy=stop scope, into a new run-c<session>.scope, and do not move omp worker"
+        " brokers and their services into omp-broker-*.scope and run-c<owner>-svc.scope",
     )
     parser.add_argument(
         "--restart-cooldown",
