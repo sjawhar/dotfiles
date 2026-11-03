@@ -2009,9 +2009,17 @@ move_config_dirs() {
 # distinct paths and a `$(…)` around this is a fork for each: at 84 sessions the forks, not the
 # reading, were what made a plan take six minutes.
 MOVE_RESOLVED=""
+# MOVE_EXACT: a move to ANOTHER machine copies what it infers, so a directory below a shared root
+# is kept as it is, the deepest one the session used, never bounded at the first directory below
+# the root: LINUX-1248's inference became /mnt/nvme/sami/tmp/verified-linux (other agents' trees,
+# ~20 unreadable paths) for a session that used verified-linux/LINUX-1248 (2026-11-03). A box on
+# THIS host is given the bounded one, since a bind costs nothing and a wider one survives a new
+# subdirectory.
+MOVE_EXACT=false
 move_resolve_dir_var() {
     local path="$1" root best="" rest
     if move_git_root_var "$path"; then MOVE_RESOLVED="$MOVE_GIT_ROOT"; return 0; fi
+    if $MOVE_EXACT; then MOVE_RESOLVED="$path"; return 0; fi
     move_shared_roots
     for root in "${MOVE_SHARED_ROOTS[@]}"; do
         if [[ "$path" == "$root"/* ]] && (( ${#root} > ${#best} )); then best="$root"; fi
@@ -2501,17 +2509,27 @@ move_dirs_why() {
     [[ -n "$pid" ]] && move_take_candidates < <(move_proc_dirs "$pid")
     if [[ -n "$sid" ]]; then
         # A record candidate may be a FILE, and may carry a read selector (`path:600-700`); the
-        # directory is what a box is given either way.
+        # directory is what a box is given either way. For a move to another machine (MOVE_EXACT)
+        # a file outside every git tree is copied as itself, not its directory: a file it read is
+        # not a tree it works in. They come out last, as "<file>\tFILE: <why>" lines.
+        local -A files_seen=()
         move_take_candidates < <(
             while IFS=$'\t' read -r path why; do
                 path="${path%%:[0-9]*}"
                 [[ -n "$path" ]] || continue
                 if [[ -d "$path" ]]; then printf '%s\tits own record today, %s\n' "$path" "$why"
-                elif [[ -f "$path" ]]; then printf '%s\tits own record today, %s\n' "${path%/*}" "$why"
+                elif [[ -f "$path" ]]; then printf '%s\tits own record today, %s\n' "$path" "$why"
                 fi
-            done < <(move_record_dirs "$sid")
+            done < <(move_record_dirs "$sid") | while IFS=$'\t' read -r path why; do
+                if [[ -f "$path" ]]; then
+                    if $MOVE_EXACT && ! move_git_root_var "${path%/*}"; then printf 'FILE\t%s\t%s\n' "$path" "$why" >&3; continue; fi
+                    path="${path%/*}"
+                fi
+                printf '%s\t%s\n' "$path" "$why"
+            done 3>"${MOVE_EXACT_FILES:-/dev/null}"
         )
-        if $MOVE_USE_PLAN; then
+        # Not for a move to another machine: the plan's paths are bounded ones, for boxes here.
+        if $MOVE_USE_PLAN && ! $MOVE_EXACT; then
             move_take_candidates < <(
                 while IFS=$'\t' read -r path why; do
                     [[ -d "$path" ]] || continue
@@ -2535,6 +2553,22 @@ move_dirs_why() {
     for ((cand = 0; cand < ${#MOVE_D[@]}; cand++)); do
         printf '%s\t%s\n' "${MOVE_D[cand]}" "${MOVE_W[cand]}"
     done
+    # The files a move to another machine copies as themselves: each one no kept path holds,
+    # once, and none the box has already or that is too broad to name.
+    if $MOVE_EXACT && [[ -s "$MOVE_EXACT_FILES" ]]; then
+        local tag f fwhy i in_kept
+        while IFS=$'\t' read -r tag f fwhy; do
+            [[ -z "${files_seen[$f]:-}" ]] || continue
+            files_seen[$f]=1
+            in_kept=false
+            for ((i = 0; i < ${#MOVE_D[@]}; i++)); do move_within "$f" "${MOVE_D[i]}" && { in_kept=true; break; }; done
+            $in_kept && continue
+            move_dir_in_box "$f" && continue
+            [[ "${f%/*}" == "$HOME" || -z "${f%/*}" ]] && continue
+            move_dir_dies_with_omp "$f" && continue
+            printf '%s\tFILE: %s\n' "$f" "$fwhy"
+        done <"$MOVE_EXACT_FILES"
+    fi
 }
 
 # The same, paths alone, one per line.
@@ -3962,8 +3996,18 @@ move_to_session_paths() {
         MOVE_PROC_MEMO="$(MOVE_PROC_KEEP_SRC=true move_proc_dirs "$pid")"
         MOVE_PROC_MEMO_PID="$pid"
     fi
+    # The deepest paths the session used, and files it named as themselves (MOVE_EXACT).
+    local MOVE_EXACT=true MOVE_EXACT_FILES dir_of
+    MOVE_EXACT_FILES="$(mktemp)"
     while IFS=$'\t' read -r path why; do
         [[ -n "$path" ]] || continue
+        if [[ "$why" == "FILE: "* ]]; then
+            # Copied as itself; the box is given its directory, which the copy creates.
+            MOVE_TO_COPY+=("merge	$path")
+            dir_of="${path%/*}"
+            [[ " ${MOVE_TO_DIRS[*]} " == *" $dir_of "* ]] || MOVE_TO_DIRS+=("$dir_of")
+            continue
+        fi
         MOVE_TO_DIRS+=("$path")
         if [[ "$path" == "$cwd" ]] && { move_dir_in_box "$path" || move_dir_too_broad "$path"; }; then
             # A git worktree of the session's own there is re-created on the target: mirrored,
@@ -3993,6 +4037,7 @@ move_to_session_paths() {
                 ;;
         esac
     done < <(move_dirs_why "$cwd" "$pid" "$sid" "$@" 2>/dev/null)
+    rm -f "$MOVE_EXACT_FILES"
     (( ${#MOVE_TO_DIRS[@]} )) || return 1
     while IFS=$'\t' read -r kind path; do
         MOVE_TO_COPY+=("$kind	$path")
@@ -4350,28 +4395,34 @@ move_to_session_record() {
         MT_COPY[$s]="$(printf '%s\n' ${MOVE_TO_COPY[@]+"${MOVE_TO_COPY[@]}"})"
     fi
 }
-# move_to_find_group SID [DIR…]: SID's group in MOVE_TO_GROUP (SID first). SID's trees are its
-# inferred git working trees (its record and plan included); another session's are the git trees
-# its own processes work in (move_to_process_trees). A session joins when one of its processes
-# has its working directory, or a file open for writing, in a tree of a member, until nothing is
-# added. Then each member's paths are inferred, in parallel. Inferring every session of this host
-# one after the other took 221 s at load 300 (2026-11-02), all of it before the hang-up. Needs
-# move_to_scan_processes. DIR… are SID's own --dir paths.
+# move_to_find_group SID [DIR…]: SID's group in MOVE_TO_GROUP (SID first). A member's trees are
+# the git trees its own LIVE processes work in (move_to_process_trees), plus, for SID, the tree of
+# the working directory it resumes in (--cwd). A session joins when one of its processes has its
+# working directory, or a file open for writing, in a tree of a member, until nothing is added.
+# Then each member's paths are inferred, in parallel. A tree a member only names - by --dir or in
+# its record - is copied but groups nobody: S3's --dir of ~/src/binary-equivalence-taiga, a
+# checkout many sessions work in, grew a group whose listing ran past 900 s (2026-11-03), and a
+# session that does not work in a tree now does not need its users moved. Inferring every session
+# of this host one after the other took 221 s at load 300 (2026-11-02), all of it before the
+# hang-up. Needs move_to_scan_processes. DIR… are SID's own --dir paths.
 move_to_find_group() {
-    local self="$1" s i=0 o link trees
+    local self="$1" s i=0 o link trees own_cwd_tree=""
     shift
     local queue=("$self")
     local -A in=([$self]=1)
     MOVE_USE_PLAN=true
     MOVE_TO_GROUP=()
     move_to_session_record "$self" "$@"
+    if [[ -n "$MOVE_SELF_CWD" ]] && move_git_root_var "$MOVE_SELF_CWD" && ! move_dir_too_broad "$MOVE_GIT_ROOT"; then
+        own_cwd_tree="$MOVE_GIT_ROOT"
+    fi
     while (( i < ${#queue[@]} )); do
         s="${queue[i]}"
         i=$((i + 1))
         [[ -n "${MT_ROW_OF[$s]:-}" ]] || continue
         MOVE_TO_GROUP+=("$s")
         trees="$(move_to_process_trees "$s")"
-        [[ -z "${MT_DONE[$s]:-}" ]] || trees+=$'\n'"${MT_SHARE[$s]}"
+        [[ "$s" != "$self" || -z "$own_cwd_tree" ]] || trees+=$'\n'"$own_cwd_tree"
         while IFS=$'\t' read -r o link; do
             [[ -z "${in[$o]:-}" ]] || continue
             move_to_writes "$link" || continue

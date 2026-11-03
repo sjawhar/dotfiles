@@ -1933,6 +1933,100 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(doc["members"][0]["spec"][:2], ["--dir", str(own)])
         self.assertTrue(any(p.startswith(str(repo / ".git")) for p in doc["merge"]), doc["merge"])
 
+    def test_a_move_to_another_machine_copies_what_the_session_used_not_its_shared_parent(self) -> None:
+        """LINUX-1248, 2026-11-03: its inference became the whole shared /mnt/nvme/sami/tmp/
+        verified-linux (other agents' trees, unreadable paths) for a session that worked in
+        verified-linux/LINUX-1248 and read one brief in verified-linux/voice-1102. A move to
+        another machine copies the deepest directories used and the files read, as themselves."""
+        verified = self.home / "tmp" / "verified-linux"
+        mine = verified / "LINUX-1248"
+        mine.mkdir(parents=True)
+        (mine / "notes.md").write_text("mine\n", encoding="utf-8")
+        (verified / "other" / "pod").mkdir(parents=True)
+        brief = verified / "voice-1102" / "brief-LINUX-1248.md"
+        brief.parent.mkdir()
+        brief.write_text("brief\n", encoding="utf-8")
+        (brief.parent / "someone-elses.md").write_text("x\n", encoding="utf-8")
+        self.make_proc(999999996, comm="bash", ppid=1, cwd=mine)
+        self.make_proc(999999997, ppid=999999996, cwd=mine, session=self.TO)
+        self.transcript(self.TO, [("read", {"path": str(brief)})], slug="-work")
+        self.set_pids(999999997)
+        self.set_panes({999999996: ("%96", "agents:9.6")})
+        self.target()
+        moved = self.move_to(own=999999997)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        copied = doc["mirror"] + doc["merge"]
+        self.assertIn(str(mine), copied)
+        self.assertIn(str(brief), copied)
+        self.assertNotIn(str(verified), copied)
+        self.assertNotIn(str(brief.parent), copied)
+        spec = doc["members"][0]["spec"]
+        self.assertEqual(spec[:2], ["--dir", str(mine)])
+        self.assertIn(str(brief.parent), spec)
+        self.assertNotIn(str(verified), spec)
+        # A box on THIS host is still given the bounded directory.
+        here = self.run_bash(f'move_dirs_why "{mine}" 999999997 {self.TO}')
+        self.assertIn(f"{verified}\t", here.stdout)
+
+    def test_sibling_dir_paths_are_copied_exactly_never_their_parent(self) -> None:
+        """S3, 2026-11-03: --dir …/frac-verify/s3, …/shared/leak-check and …/bet257/s3/p5e2e, with
+        its record naming files in s3, became all of /mnt/nvme/sami/frac-verify, whose S4 trees
+        it cannot read. Each --dir is copied as itself, and nothing joins them to their parent."""
+        fv = self.home / "tmp" / "frac-verify"
+        dirs = [fv / "s3", fv / "shared" / "leak-check", fv / "bet257" / "s3" / "p5e2e"]
+        for d in dirs:
+            d.mkdir(parents=True)
+            (d / "f").write_text("x\n", encoding="utf-8")
+        closed = fv / "s4" / "tmp" / "pytest-of-root"
+        closed.mkdir(parents=True)
+        closed.chmod(0)
+        try:
+            self.check_siblings(fv, dirs)
+        finally:
+            closed.chmod(0o700)
+
+    def check_siblings(self, fv: Path, dirs: list[Path]) -> None:
+        code = self.home / "Code"
+        code.mkdir(exist_ok=True)
+        self.make_proc(999999998, comm="bash", ppid=1, cwd=code)
+        self.make_proc(999999999, ppid=999999998, cwd=code, session=self.TO, writes=(fv / "s3" / "report.md",))
+        self.transcript(self.TO, [("read", {"path": str(fv / "s3" / "f")}),
+                                  ("read", {"path": str(fv / "bet257" / "s3" / "p5e2e" / "f")})], slug="-work")
+        self.set_pids(999999999)
+        self.set_panes({999999998: ("%97", "agents:9.7")})
+        self.target()
+        args = " ".join(f'--dir "{d}"' for d in dirs)
+        moved = self.move_to(f"--to devbox {args}", own=999999999)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        copied = doc["mirror"] + doc["merge"]
+        for d in dirs:
+            self.assertIn(str(d), copied)
+        for wide in (fv, fv / "bet257", fv / "shared", fv / "s4"):
+            self.assertNotIn(str(wide), copied)
+            self.assertNotIn(str(wide), doc["members"][0]["spec"])
+
+    def test_a_dir_naming_a_checkout_others_work_in_groups_nobody(self) -> None:
+        """S3, 2026-11-03: its --dir of a checkout many sessions work in grew a group whose listing
+        ran past 900 s. A tree the session only names is copied (through git when the target has a
+        clone); only trees its own live processes work in group it."""
+        shared = self.checkout("taiga")
+        self.moving_session()
+        self.make_proc(999999970, comm="bash", ppid=1, cwd=shared)
+        self.make_proc(999999971, ppid=999999970, cwd=shared, session=self.TO2)
+        self.set_pids(999999901, 999999971)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999970: ("%92", "agents:9.2")})
+        self.target()
+        moved = self.move_to(f'--to devbox --dir "{shared}"')
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        self.assertEqual([m["sid"] for m in doc["members"]], [self.TO])
+        self.assertIn(str(shared), doc["mirror"])
+
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own
         group, found as `move --to` finds it - and reads no other session's paths; --group names
