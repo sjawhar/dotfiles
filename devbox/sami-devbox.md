@@ -128,6 +128,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | N6 release asset | `gh release download --repo theorem-labs/oss-verify-proofs-internal <newest published tag> -p <its smallest asset>` through `shims/gh` as an agent call | the asset's size |
 | N6 disk-gate | `disk-gate status`; `disk-gate reserve 1 <name>`, `status`, `release <name>` | a floor of at least 2.25% of `/mnt/nvme` (369 GiB of 16,383); granted, listed, released |
 | N6 box paths (box only) | `findmnt --target` of `/mnt/nvme/sami/ossv-n6` and `~/.cache/ossv-n6-runs` | each a bind from the host (`scripts/agentbox`, `agentbox/mounts`) |
+| host sshd (box only) | `ssh -o BatchMode=yes sami-devbox true` | exit 0: the key `installers/agentbox-host-ssh.sh` makes (`~/.ssh/sami-devbox`, accepted only from the agentbox network) and `~/.ssh/known_hosts.sami-devbox`. A WAIT while `agentbox/mounts` does not name `.ssh/sami-devbox`, `.ssh/sami-devbox.pub` and `.ssh/known_hosts.sami-devbox` |
 
 ## A5 and A6 (the drill)
 

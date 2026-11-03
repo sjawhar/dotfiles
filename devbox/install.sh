@@ -142,4 +142,11 @@ fi
 # shares; ssh's UpdateHostKeys is off for this user (see installers/ssh-known-hosts.sh).
 bash "${DOTFILES_DIR}/installers/ssh-known-hosts.sh"
 
+# On a Google VM, the key agent boxes use to reach this host's own sshd (a box's connection to the
+# host's tailnet address reaches OpenSSH, not Tailscale SSH), made here, accepted only from the
+# agentbox network, and the host's pinned key (see installers/agentbox-host-ssh.sh).
+if "${DOTFILES_DIR}/scripts/on-google-vm"; then
+    bash "${DOTFILES_DIR}/installers/agentbox-host-ssh.sh"
+fi
+
 echo "--- Devbox setup complete ---"

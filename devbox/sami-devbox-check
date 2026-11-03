@@ -116,9 +116,29 @@ in_box() {
     github_check "in the box"
     tq_check "in the box"
     n6_check "in the box"
+    host_sshd_check
 
     echo "== box done, $fails failed, $(stamp)"
     return "$fails"
+}
+
+# The host's own sshd from the box: a box's connection to sami-devbox's tailnet address reaches
+# OpenSSH, which accepts the key installers/agentbox-host-ssh.sh makes only from the agentbox
+# network. The box has that key, its pinned host key and its ssh entry only once agentbox/mounts
+# names the three files (agentbox/box-ssh-config writes the entry); until then this is a WAIT.
+host_sshd_check() {
+    local h=sami-devbox f out rc=0 missing=""
+    for f in ".ssh/$h" ".ssh/$h.pub" ".ssh/known_hosts.$h"; do
+        awk -v p="$f" '!/^[[:space:]]*(#|$)/ && $2 == p { found = 1 } END { exit !found }' \
+            "$DOTFILES_DIR/agentbox/mounts" || missing+=" $f"
+    done
+    if [[ -n "$missing" ]]; then
+        echo "WAIT ssh box -> $h sshd: agentbox/mounts does not name$missing yet"
+        return
+    fi
+    out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$h" true </dev/null 2>&1)" || rc=$?
+    (( rc == 0 )) && ok "ssh box -> $h sshd: ssh -o BatchMode=yes $h true exits 0" \
+        || fail "ssh box -> $h sshd: exit $rc: $(tail -1 <<<"$out") (installers/agentbox-host-ssh.sh on the host; agentbox/box-ssh-config in the box)"
 }
 
 # Scripts written on sami-rocqperf (the cost lead's spend loaders, sre-reading, bqq) name
