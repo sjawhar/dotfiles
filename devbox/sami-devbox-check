@@ -698,15 +698,18 @@ leak_check_host_check() {
         || fail "public-leak-check: $here (sha256 ${out:0:12}) differs from sami-rocqperf's (sha256 ${there:0:12}); copy it again: sami-devbox-provision --from secrets"
 }
 
-# kubectl from a non-login shell or a system unit: the system PATH only, no ~/.local/bin or mise,
-# through the kubeconfig the ossv-job-farm uses. Its smoke failed there on 2026-11-03 11:35Z with
-# "Install gke-gcloud-auth-plugin"; installers/gcloud-sdk.sh links both into /usr/local/bin.
+# kubectl as a non-interactive ssh command gets it, through the kubeconfig the ossv-job-farm uses.
+# Its smoke failed on 2026-11-03 11:35Z with "Install gke-gcloud-auth-plugin": that PATH has
+# ~/.mise/shims but not ~/.local/bin, so installers/gcloud-sdk.sh links the plugin into
+# /usr/local/bin. SSH_PATH is `ssh sami@sami-devbox 'echo $PATH'` as read on 2026-11-03, and
+# MISE_DATA_DIR is set in that shell too (without it the shim installs a second kubectl).
+SSH_PATH="$HOME/.cargo/bin:$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.dotfiles/scripts:$HOME/.npm-global/bin:$HOME/.mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
 host_plain_path_kubectl() {
     local out rc=0
-    out="$(env -i HOME="$HOME" KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    out="$(env -i HOME="$HOME" MISE_DATA_DIR="$HOME/.mise" KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" PATH="$SSH_PATH" \
         kubectl --context "$KUBE_CONTEXT" -n "$N6_NAMESPACE" get jobs --chunk-size 1 -o name 2>&1)" || rc=$?
-    (( rc == 0 )) && ok "system-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit 0 ($(grep -c . <<<"$out") jobs)" \
-        || fail "system-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit $rc: $(tail -1 <<<"$out")"
+    (( rc == 0 )) && ok "ssh-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit 0 ($(grep -c . <<<"$out") jobs)" \
+        || fail "ssh-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit $rc: $(tail -1 <<<"$out")"
 }
 
 host() {

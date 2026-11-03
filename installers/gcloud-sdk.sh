@@ -65,15 +65,16 @@ fi
 # link is what agentbox/mounts' `.gcloud` entry relies on.
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gke-gcloud-auth-plugin" "$HOME/.local/bin/gke-gcloud-auth-plugin"
-# On a Google VM (sami-devbox, dispatch://INFRA-993) also link the plugin and kubectl into
-# /usr/local/bin: a non-login shell (ssh with a command, `env -i`) and a system unit have no
-# ~/.local/bin or mise on PATH, and there kubectl failed with "Install gke-gcloud-auth-plugin"
-# (the ossv-job-farm smoke, 2026-11-03 11:35Z). kubectl links to mise's install, not its shim:
-# with no MISE_DATA_DIR the shim installs a second copy under ~/.local/share/mise. A mise kubectl
-# bump leaves the link dangling until this runs again; devbox/sami-devbox-check A2 catches that.
+# On a Google VM (sami-devbox, dispatch://INFRA-993) also link the plugin into /usr/local/bin:
+# a system unit or an `env -i` caller has no ~/.local/bin on PATH, and there kubectl failed with
+# "Install gke-gcloud-auth-plugin" (the ossv-job-farm smoke, 2026-11-03 11:35Z). kubectl itself is
+# not linked: an ssh shell finds it through ~/.mise/shims, and a link to a versioned mise install
+# breaks at each mise bump. An earlier version of this installer made that link; remove it.
 if "$(dirname "${BASH_SOURCE[0]}")/../scripts/on-google-vm"; then
     sudo -n ln -sfn "$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gke-gcloud-auth-plugin" /usr/local/bin/gke-gcloud-auth-plugin
-    sudo -n ln -sfn "$(mise which kubectl)" /usr/local/bin/kubectl
+    if [[ "$(readlink /usr/local/bin/kubectl 2>/dev/null)" == "$HOME/.mise/installs/kubectl/"*/kubectl ]]; then
+        sudo -n rm -f /usr/local/bin/kubectl
+    fi
 fi
 
 kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
