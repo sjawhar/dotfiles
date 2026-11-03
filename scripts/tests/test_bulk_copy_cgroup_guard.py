@@ -97,6 +97,13 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertLess(int((self.cg / "memory.current").read_text()), 256 * MIB)
 
+    def test_the_command_reads_the_guard_stdin(self):
+        # rsync --server under --rsync-path speaks its protocol on stdin; on 2026-11-03 a guard that
+        # left the command /dev/null failed it with "error in rsync protocol data stream (code 12)".
+        r = self.guard("run", "--", "cat", input="protocol bytes\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "protocol bytes\n")
+
     def test_reclaims_while_running_when_the_slab_passes_the_bound(self):
         # 2 GiB of slab is over the 1 GiB bound (~800k inodes): reclaimed before the command ends.
         # The command waits up to 30 s for a reclaim, so a loaded box cannot fail it on timing.

@@ -66,7 +66,9 @@ drain() {
 run() {
   [[ ${1:-} == -- ]] && shift
   (( $# )) || { echo "usage: $0 run -- CMD [ARG...]" >&2; exit 2; }
-  "$@" &
+  # Without job control, bash gives a background job /dev/null as stdin; the explicit redirect
+  # keeps ours, so a command that reads stdin (rsync --server under --rsync-path) still works.
+  "$@" <&0 &
   local child=$! rc
   trap 'kill -TERM "$child" 2>/dev/null' INT TERM
   while kill -0 "$child" 2>/dev/null; do
