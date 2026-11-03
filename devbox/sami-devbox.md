@@ -66,13 +66,17 @@ keeps every `SECRET_FILES` path that git tracks (read from this list, not a seco
 refuses on any other change; it also refuses when main changes such a file
 (`scripts/dotfiles-follow.md`).
 
-The public-text leak check that `shims/gh` requires has no source repository: it lives,
-unversioned and edited in place, in sami-rocqperf's `/mnt/nvme/sami/frac-verify/shared/leak-check`,
-and the dotfiles do not carry it. The `secrets` step copies the files sami-rocqperf's
-`~/.config/public-leak-check/path` names into `~/.local/share/public-leak-check` here and points
-this machine's pointer at it; `agentbox/mounts` gives boxes that directory. `sami-devbox-check`
-compares its sha256 with sami-rocqperf's on every run and FAILs when they differ; then run
-`sami-devbox-provision --from secrets` again.
+The public-text leak check that `shims/gh` requires comes from a tag `leak-check-vN` of
+theorem-labs/agent-infra's `leak-check/`, installed as that tag's `leak-check/INSTALL.md` says.
+`devbox/leak-check-tag.env` names the tag, its commit and the sha256 of the three files this machine
+holds. The `leakcheck` step reads them from sami-rocqperf's agent-infra clone with `git show`,
+checks their sha256, requires that the shared path already holds them, installs them in
+`~/.local/share/public-leak-check` here, points this machine's pointer at it, and appends its
+TAKEN, INSTALLED and RELEASED lines to the live install record; `agentbox/mounts` gives boxes that
+directory. `sami-devbox-check` compares the three files with the sha256 in
+`devbox/leak-check-tag.env` on every run and FAILs when they differ; then run
+`sami-devbox-provision --only leakcheck`. To install a new tag, change `devbox/leak-check-tag.env`
+as its header says, then run that step.
 
 ## A2: each check, its command, what passes
 

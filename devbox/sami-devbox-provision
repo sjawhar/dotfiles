@@ -19,6 +19,9 @@
 #              linger. From here every step goes over Tailscale SSH.
 #   dotfiles   ~/.dotfiles cloned from GitHub (public, no login) onto the state disk, colocated jj.
 #   secrets    the secret files that are in no repository (SECRET_FILES below), over Tailscale SSH.
+#   leakcheck  the public-text leak check shims/gh requires, in ~/.local/share/public-leak-check
+#              (agentbox/mounts gives boxes that directory) with its pointer: the agent-infra tag
+#              devbox/leak-check-tag.env names, installed as the tag's leak-check/INSTALL.md says.
 #   tools      a first install.sh pass for mise's tools, then the secrets broker's host helper
 #              (installers/agent-secrets.sh). The pass is expected to stop at installers/omp.sh:
 #              its private marketplaces clone with a GitHub App token, which on this machine comes
@@ -113,7 +116,17 @@ EXTRA_INSTALLERS=(
 # agentAzureClientId). Not a secret: shims/az reads it from ~/.config/agent-azure/client-id.
 AGENT_AZURE_CLIENT_ID=6133297b-4afa-4f36-ab55-67413835961e
 
-STEPS=(vm host dotfiles secrets tools broker install image responder speed check)
+# The public-text leak check (step leakcheck): files come only from the tag that
+# devbox/leak-check-tag.env names, read from this machine's agent-infra clone, and each install
+# appends its TAKEN, INSTALLED and RELEASED lines to the live install record in the shared path,
+# which is also the install lock (agent-infra leak-check/INSTALL.md).
+AGENT_INFRA="${AGENT_INFRA:-$HOME/src/agent-infra}"
+LEAK_CHECK_SHARED="/mnt/nvme/$(id -un)/frac-verify/shared/leak-check"
+LEAK_CHECK_RECORD="$LEAK_CHECK_SHARED/.editor-slot/holder"
+# shellcheck source=leak-check-tag.env
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/leak-check-tag.env"
+
+STEPS=(vm host dotfiles secrets leakcheck tools broker install image responder speed check)
 
 stamp() { date -u +%FT%TZ; }
 say() { echo "$(stamp) == $*"; }
@@ -193,20 +206,60 @@ step_secrets() {
         printf '%s\n' $AGENT_AZURE_CLIENT_ID > ~/.config/agent-azure/client-id
         chmod 0644 ~/.config/agent-azure/client-id
         ls -l ~/.config/agent-azure/client-id"
-    # The public-text leak check shims/gh requires. It has no source repository (it lives
-    # unversioned in this machine's /mnt/nvme/sami/frac-verify/shared/leak-check), so the VM gets
-    # the bytes this machine's pointer names, in ~/.local/share/public-leak-check (agentbox/mounts
-    # gives boxes that directory), with its pointer. sami-devbox-check compares the sha256 with
-    # this machine's on every run; run `--from secrets` again when it differs.
-    local plc
-    plc="$(dirname "$(cat "$HOME/.config/public-leak-check/path")")" || die "no ~/.config/public-leak-check/path here"
-    rsync -a -e "ssh -o BatchMode=yes" "$plc/public-leak-check.sh" "$plc/README.md" "$plc/must-pass-lines.txt" "sami@$VM:/tmp/plc-stage/" \
-        || die "could not copy the public-text leak check from $plc"
-    remote 'set -e; d=$HOME/.local/share/public-leak-check; mkdir -p "$d" "$HOME/.config/public-leak-check"
-        for f in README.md must-pass-lines.txt; do install -m 0644 "/tmp/plc-stage/$f" "$d/.$f.new" && mv -f "$d/.$f.new" "$d/$f"; done
-        install -m 0555 /tmp/plc-stage/public-leak-check.sh "$d/.public-leak-check.sh.new" && mv -f "$d/.public-leak-check.sh.new" "$d/public-leak-check.sh"
+}
+
+step_leakcheck() {
+    local files=(public-leak-check.sh README.md must-pass-lines.txt) f stage who out
+    who="sami-devbox-provision ($(id -un)@$(hostname -s))"
+    git -C "$AGENT_INFRA" fetch -q origin tag "$LEAK_CHECK_TAG" tag "$LEAK_CHECK_PREV" \
+        || die "could not fetch $LEAK_CHECK_TAG and $LEAK_CHECK_PREV into $AGENT_INFRA"
+    f="$(git -C "$AGENT_INFRA" rev-parse "$LEAK_CHECK_TAG^{commit}")"
+    [[ "$f" == "$LEAK_CHECK_COMMIT" ]] || die "$LEAK_CHECK_TAG is commit $f, not $LEAK_CHECK_COMMIT (devbox/leak-check-tag.env)"
+    stage="$(mktemp -d)"
+    # $stage is local, so the trap expands it now.
+    # shellcheck disable=SC2064
+    trap "rm -rf '$stage'" EXIT
+    mkdir "$stage/prev"
+    for f in "${files[@]}"; do
+        git -C "$AGENT_INFRA" show "$LEAK_CHECK_TAG:leak-check/$f" > "$stage/$f"
+        git -C "$AGENT_INFRA" show "$LEAK_CHECK_PREV:leak-check/$f" > "$stage/prev/$f"
+    done
+    (cd "$stage/prev" && sha256sum "${files[@]}") > "$stage/prev.sha256"
+    rm -rf "$stage/prev"
+    printf '%s\n' "$LEAK_CHECK_HOME_SHA256" > "$stage/tag.sha256"
+    # No ruleset protects the tags: the files must be the bytes the tag's announcement gave.
+    (cd "$stage" && sha256sum -c tag.sha256) \
+        || die "$LEAK_CHECK_TAG's files are not the sha256 in devbox/leak-check-tag.env; stop and tell whoever sent the tag"
+    # INSTALL.md installs the shared path first; this machine follows it.
+    (cd "$LEAK_CHECK_SHARED" && sha256sum -c --quiet "$stage/tag.sha256") \
+        || die "$LEAK_CHECK_SHARED does not hold $LEAK_CHECK_TAG; install it there first (INSTALL.md)"
+    out="$(tail -n 1 "$LEAK_CHECK_RECORD")"
+    [[ "$out" == *"slot FREE" ]] || die "the leak-check install slot is held; $LEAK_CHECK_RECORD ends: ${out:0:300}"
+    echo "TAKEN $(stamp) by $who to install $LEAK_CHECK_TAG ($LEAK_CHECK_COMMIT)" >> "$LEAK_CHECK_RECORD"
+    remote 'rm -rf /tmp/plc-stage'
+    rsync -t -e "ssh -o BatchMode=yes" "${files[@]/#/$stage/}" "$stage/tag.sha256" "$stage/prev.sha256" "sami@$VM:/tmp/plc-stage/" \
+        || die "could not copy $LEAK_CHECK_TAG to $VM; the slot stays held (TAKEN line in $LEAK_CHECK_RECORD)"
+    # Copy only over the previous tag, or this one on a second run; a new machine has no files.
+    # Each file is written as .<name>.new and moved over the installed one only when all are written.
+    out="$(remote 'set -e; s=/tmp/plc-stage; d=$HOME/.local/share/public-leak-check
+        mkdir -p "$d" "$HOME/.config/public-leak-check"
+        have="$(cd "$d" && sha256sum public-leak-check.sh README.md must-pass-lines.txt 2>/dev/null || true)"
+        if [ -n "$have" ] && [ "$have" != "$(cat "$s/prev.sha256")" ] && [ "$have" != "$(cat "$s/tag.sha256")" ]; then
+            echo "$d holds neither the previous tag nor this one, so nothing was copied:"; echo "$have"; exit 1
+        fi
+        install -m 0555 "$s/public-leak-check.sh" "$d/.public-leak-check.sh.new"
+        install -m 0644 "$s/README.md" "$d/.README.md.new"
+        install -m 0644 "$s/must-pass-lines.txt" "$d/.must-pass-lines.txt.new"
+        for f in public-leak-check.sh README.md must-pass-lines.txt; do mv -f "$d/.$f.new" "$d/$f"; done
         printf "%s\n" "$d/public-leak-check.sh" > "$HOME/.config/public-leak-check/path"
-        rm -rf /tmp/plc-stage; sha256sum "$d/public-leak-check.sh"'
+        (cd "$d" && sha256sum -c "$s/tag.sha256")
+        test -x "$d/public-leak-check.sh"; echo "test -x public-leak-check.sh: exit 0"
+        rm -rf "$s"' 2>&1)" \
+        || { echo "$out"; die "the install on $VM failed; the slot stays held (TAKEN line in $LEAK_CHECK_RECORD)"; }
+    echo "$out"
+    echo "INSTALLED $(stamp) by $who: $LEAK_CHECK_TAG in $VM:~/.local/share/public-leak-check: $(tr '\n' ' ' <<<"$out")" >> "$LEAK_CHECK_RECORD"
+    echo "RELEASED $(stamp) by $who: checks run: $LEAK_CHECK_TAG is $LEAK_CHECK_COMMIT, its files have the sha256 of devbox/leak-check-tag.env, the shared path holds them, $VM sha256sum -c and test -x passed; slot FREE" >> "$LEAK_CHECK_RECORD"
+    say "$VM holds $LEAK_CHECK_TAG; record lines appended to $LEAK_CHECK_RECORD"
 }
 
 step_tools() {
