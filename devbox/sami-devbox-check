@@ -224,10 +224,9 @@ github_check() {
 # --- the N6 farm (the OSS Verify CI/CD lead's farm runs from sessions here) -----------------------
 # What bin/ossv-n6-farm and bin/ossv-job-farm need, checked as they use it, on the host and in a
 # box, since a session runs the farm in its box:
-#   1. the tools and the notes they read: ~/src/oss-verifier, a clone of ops of
-#      theorem-labs/oss-verify-proofs-internal (devbox/ossv-tree-follow), each file the bytes of
-#      the clone's commit; on the host also its follow timer, and sami-rocqperf's installed copies
-#      byte for byte (over ssh);
+#   1. the tools and the notes they read: ~/src/oss-verifier, the stream's live tree since the move
+#      of 2026-11-03 (dispatch://INFRA-993), each file there and not empty; on the host also that no
+#      ossv-tree-follow timer merges over it and that the stream's data copy has saved it within 2 h;
 #   2. the repository the farm stages from (`git archive`): ~/src/oss-verify-proofs-internal, whole
 #      (not shallow, not partial), on the state disk;
 #   3. both URL signers and both buckets: dev-sjawhar@ mints each signer's token and has it sign a
@@ -245,19 +244,13 @@ N6_SIGNERS=(build-io-signer ossv-runs-signer)
 N6_BUCKETS=(theorem-build-io theorem-ossv-runs)
 N6_NAMESPACE=builds-ossv
 n6_check() {
-    local where="$1" f want got differ="" head tok sig sa b prefix obj n tag asset size dir out
-    # 1. Each file against its blob in the clone's commit.
-    if head="$(git -C "$OSSV_TREE" rev-parse HEAD 2>&1)"; then
-        for f in "${OSSV_FILES[@]}"; do
-            want="$(git -C "$OSSV_TREE" show "HEAD:$f" 2>/dev/null | sha256sum | cut -c1-64)"
-            got="$(sha256sum <"$OSSV_TREE/$f" 2>/dev/null | cut -c1-64)"
-            [[ -n "$got" && "$got" == "$want" ]] || differ+=" $f"
-        done
-        [[ -z "$differ" ]] && ok "N6 tools $where: the ${#OSSV_FILES[@]} files of $OSSV_TREE are the bytes of its commit ${head:0:12}" \
-            || fail "N6 tools $where: these files of $OSSV_TREE are not the bytes of its commit ${head:0:12}:$differ"
-    else
-        fail "N6 tools $where: $OSSV_TREE is not a clone: $(tail -1 <<<"$head")"
-    fi
+    local where="$1" f got differ="" tok sig sa b prefix obj n tag asset size dir out
+    # 1. Each file in the live tree, readable and not empty.
+    for f in "${OSSV_FILES[@]}"; do
+        [[ -f "$OSSV_TREE/$f" && -r "$OSSV_TREE/$f" && -s "$OSSV_TREE/$f" ]] || differ+=" $f"
+    done
+    [[ -z "$differ" ]] && ok "N6 tools $where: the ${#OSSV_FILES[@]} files of the live tree $OSSV_TREE are there, readable and not empty" \
+        || fail "N6 tools $where: these files of the live tree $OSSV_TREE are missing, unreadable or empty:$differ"
     # 2. The repository the farm stages from.
     got="$(git -C "$OVPI_DIR" rev-parse --is-shallow-repository 2>&1) $(git -C "$OVPI_DIR" config --get remote.origin.promisor) $(git -C "$OVPI_DIR" config --get extensions.partialclone)"
     n="$(git -C "$OVPI_DIR" archive HEAD 2>/dev/null | tar -t 2>/dev/null | head -100 | wc -l)"
@@ -324,40 +317,40 @@ n6_check() {
     fi
 }
 
-# The host half of check 1: the clone follows ops (its timer is active and its last run, at most 15
-# minutes ago, succeeded and left HEAD at the ops it fetched), and its files are sami-rocqperf's.
+# The host half of check 1. ~/src/oss-verifier is the live tree: the stream's loops write it here, and
+# nothing may merge or reset over it, so no ossv-tree-follow timer runs (the follower kept it a clone
+# of ops until the freeze of 2026-11-03 22:59Z). Both trees are on the state disk.
 ossv_tree_host_check() {
-    local got head origin age f want differ="" out rc=0
+    local got f
     got="$(systemctl --user is-active ossv-tree-follow.timer 2>&1)"
-    [[ "$got" == active ]] || fail "N6 tools: ossv-tree-follow.timer is '$got', want active (devbox/install.sh arms it)"
-    got="$(systemctl --user show -p Result -p ExecMainStatus ossv-tree-follow.service 2>&1 | sort | tr '\n' ' ')"
-    age="$(systemctl --user show --timestamp=unix -p ExecMainExitTimestamp --value ossv-tree-follow.service 2>/dev/null)"
-    age="${age#@}"
-    [[ "$age" =~ ^[0-9]+$ ]] && age=$(( $(date +%s) - age )) || age=999999   # no run has ended yet
-    # Check 2's disk: both clones are on the state disk (through the /home bind), not on root.
+    [[ "$got" != active ]] && ok "N6 tools: no ossv-tree-follow timer runs (is-active: $got), so nothing merges over the live tree $OSSV_TREE" \
+        || fail "N6 tools: ossv-tree-follow.timer is active and merges ops over the live tree $OSSV_TREE; stop it: systemctl --user disable --now ossv-tree-follow.timer"
+    # Check 2's disk: both trees are on the state disk (through the /home bind), not on root.
     for f in "$OVPI_DIR" "$OSSV_TREE"; do
         [[ "$(stat -c %d "$f" 2>/dev/null)" == "$(stat -c %d /mnt/nvme)" ]] && ok "N6: $f is on the state disk /mnt/nvme ($(findmnt -n -o SOURCE --target "$f"))" \
             || fail "N6: $f is not on /mnt/nvme: $(findmnt -n -o SOURCE,TARGET --target "$f" 2>&1)"
     done
-    head="$(git -C "$OSSV_TREE" rev-parse HEAD 2>/dev/null)" origin="$(git -C "$OSSV_TREE" rev-parse refs/remotes/origin/ops 2>/dev/null)"
-    if [[ " $got" == *" ExecMainStatus=0 "* && " $got" == *" Result=success "* && "$age" -le 900 && -n "$head" && "$head" == "$origin" ]]; then
-        ok "N6 tools: ossv-tree-follow's last run, ${age}s ago, succeeded and left $OSSV_TREE at origin/ops ${head:0:12}"
+    data_copy_check
+}
+
+# data_copy_check [NOW] -- the stream's data copy (TOOLS's loop 6, /mnt/durable/sami/tools-loops/data-copy.sh)
+# saved the live tree to Cloud Storage within 2 h: after each verified snapshot it writes its UTC time to
+# OSSV_DATA_COPY_OK. The loop starts here in the freeze of 2026-11-03, so before OSSV_DATA_COPY_FROM the line
+# is a note, neither ok nor FAIL. NOW is the Unix time to judge at (default: now).
+OSSV_DATA_COPY_OK=/mnt/nvme/sami/oss-verifier/ops.git/ossv-data-copy.ok
+OSSV_DATA_COPY_FROM=2026-11-04T00:30:00Z
+data_copy_check() {
+    local now="${1:-$(date +%s)}" from got at
+    from="$(date -d "$OSSV_DATA_COPY_FROM" +%s)"
+    got="$(head -c 64 "$OSSV_DATA_COPY_OK" 2>/dev/null | tr -d '\n')"
+    at="$(date -d "$got" +%s 2>/dev/null)" || at=""
+    if [[ -n "$got" && -n "$at" ]] && (( now - at <= 7200 )); then
+        ok "data copy: $OSSV_DATA_COPY_OK says the live tree was saved at $got, $(( (now - at) / 60 )) min ago (at most 120)"
+    elif (( now < from )); then
+        note "data copy: $OSSV_DATA_COPY_OK reads '${got:-nothing}'; a stamp within 2 h is not expected yet (from $OSSV_DATA_COPY_FROM)"
     else
-        fail "N6 tools: ossv-tree-follow: '$got' (${age}s ago), HEAD ${head:-none}, origin/ops ${origin:-none} (want success at most 900 s ago, HEAD = origin/ops)"
+        fail "data copy: $OSSV_DATA_COPY_OK reads '${got:-nothing}', want a time at most 2 h old (TOOLS's loop 6)"
     fi
-    # sami-rocqperf's installed copies, byte for byte.
-    out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf "cd /home/sami/src/oss-verifier && sha256sum ${OSSV_FILES[*]}" </dev/null 2>&1)" || rc=$?
-    if (( rc != 0 )); then
-        fail "N6 tools: sha256sum of sami-rocqperf's copies: exit $rc: $(tail -1 <<<"$out")"
-        return
-    fi
-    for f in "${OSSV_FILES[@]}"; do
-        want="$(awk -v f="$f" '$2 == f { print $1 }' <<<"$out")"
-        got="$(sha256sum <"$OSSV_TREE/$f" 2>/dev/null | cut -c1-64)"
-        [[ -n "$want" && "$got" == "$want" ]] || differ+=" $f"
-    done
-    [[ -z "$differ" ]] && ok "N6 tools: the ${#OSSV_FILES[@]} files are byte for byte sami-rocqperf's /home/sami/src/oss-verifier copies" \
-        || fail "N6 tools: these files differ from sami-rocqperf's /home/sami/src/oss-verifier copies:$differ (ops ${head:0:12} here; a copy there that is not ops' is an edit not merged into ops)"
 }
 
 # The pins: knives is mise.toml's pin, and mise has every pin of mise.toml installed. The box half
