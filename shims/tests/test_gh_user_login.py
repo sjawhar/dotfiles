@@ -14,8 +14,8 @@ that hands gh the App's token, as `knives gh` does for a routed call.
 """
 
 import json
-import re
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -257,13 +257,44 @@ class UserLogin(unittest.TestCase):
         self.assert_never_the_user(sent)
         self.assertIn("gh shim: REFUSED by GitHub:", result.stderr)
 
-    def test_any_other_call_github_refuses_says_to_stop_and_tell_the_lead(self):
+    def test_an_admin_call_github_refuses_for_the_app_names_the_admin_token_route(self):
+        # Sami, five times 2026-10-25..11-03: an agent does a GitHub admin action itself with his admin
+        # token from the broker and never asks him to (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a).
         executable(self.bin / "knives", 'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
         result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path, **self.agent)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("`gh pr merge 5 -R o/r --admin`", result.stderr)
+        err = result.stderr
+        self.assertIn("`gh pr merge 5 -R o/r --admin`", err)
+        self.assertIn("Instead: if this is a GitHub admin action that work Sami already asked for needs", err)
+        self.assertIn("Never ask Sami to do it (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a)", err)
+        route = ("`secret-run --reason '<what and why>' GITHUB_ADMIN_PAT -- "
+                 "sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' gh pr merge 5 -R o/r --admin`")
+        self.assertIn(route, err)
+        self.assertIn("the same with GITHUB_PERSONAL_ADMIN_PAT in both places", err)
+        self.assertIn("For any other owner, or a call that is not such an admin action, stop and tell your lead", err)
+        self.assertNotIn("GH_SHIM_APPROVAL", err)
+
+    def test_the_admin_token_route_hands_the_token_to_gh_as_gh_token(self):
+        # The broker exports GITHUB_ADMIN_PAT under its own name; run the printed sh -c line as the
+        # broker would run it and check gh gets the token as GH_TOKEN with the refused call's argv.
+        executable(self.bin / "knives", 'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
+        result, _ = self.run_gh(["api", "-X", "PUT", "repos/o/r/branches/main/protection"], self.shim_path, **self.agent)
+        line = re.search(r"-- (sh -c '.*?' gh [^`]*)`", result.stderr).group(1)
+        fake = self.bin / "fake-gh-dir"
+        fake.mkdir()
+        executable(fake / "gh", 'printf "%s\\n" "$GH_TOKEN" "$*"')
+        ran = subprocess.run(["sh", "-c", line], env={"PATH": f"{fake}:/usr/bin:/bin", "GITHUB_ADMIN_PAT": "ghp_ADMIN"},
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(ran.stdout, "ghp_ADMIN\napi -X PUT repos/o/r/branches/main/protection\n")
+
+    def test_a_refusal_of_the_upstream_token_offers_no_admin_token(self):
+        executable(self.bin / "knives",
+                   'echo "gh-app-token: no App installation for owner o; using the personal token GH_PUBLIC_REPO_PAT'
+                   ' - this call will act as its user, not as the App" >&2\n'
+                   'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
+        result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path, **self.agent)
         self.assertIn("Instead: stop, and tell your lead which call GitHub refused", result.stderr)
-        self.assertNotIn("GH_SHIM_APPROVAL", result.stderr)
+        self.assertNotIn("GITHUB_ADMIN_PAT --", result.stderr)
 
     def test_a_refusal_of_an_inherited_token_names_that_token_not_the_app(self):
         # 2026-11-02: GH_TOKEN held a broker token made for theorem-labs; knives does not route a

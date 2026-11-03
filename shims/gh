@@ -153,13 +153,6 @@ gh_shim_refused_by_github() {
             [[ "$a" == *REQUEST_CHANGES* ]] && verdict="REQUEST_CHANGES"
         done
     fi
-    if [[ -n "$pr" ]]; then
-        instead="if the repository needs an approving review to merge (a comment does not count there), post the review as the legion-reviewer App: \`~/.dotfiles/scripts/post-review $pr <full 40-character head sha> $verdict <body-file> ${repo:-<owner/repo>}\`. Use that route only when your session did not author the pull request. Where a comment is enough, post the verdict as a pull-request comment from the App: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
-    elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" ]]; then
-        instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; an owner with no App installation gets his own upstream token, so the post goes out as him (shims/AGENTS.md). Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
-    else
-        instead="stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
-    fi
     token="$(sed -nE 's/.*using the personal token ([^ ]+) .*/\1/p' "$err" | head -n 1)"
     if [[ -n "${GH_TOKEN:-}" ]]; then
         who="the token in GH_TOKEN, inherited from the environment (${GH_TOKEN:0:4}…), so as that token's own GitHub user; nothing routed the call, and a broker token reaches only the repositories it was made for (GITHUB_ADMIN_PAT: theorem-labs)"
@@ -168,9 +161,21 @@ gh_shim_refused_by_github() {
     else
         who="the GitHub App this repository's owner routes agent calls to"
     fi
+    if [[ -n "$pr" ]]; then
+        instead="if the repository needs an approving review to merge (a comment does not count there), post the review as the legion-reviewer App: \`~/.dotfiles/scripts/post-review $pr <full 40-character head sha> $verdict <body-file> ${repo:-<owner/repo>}\`. Use that route only when your session did not author the pull request. Where a comment is enough, post the verdict as a pull-request comment from the App: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
+    elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" ]]; then
+        instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; an owner with no App installation gets his own upstream token, so the post goes out as him (shims/AGENTS.md). Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
+    elif [[ -z "${GH_TOKEN:-}" && -z "$token" ]]; then
+        # The App was refused. Sami said five times (2026-10-25 to 2026-11-03) that an agent does a
+        # GitHub admin action itself with his admin token and never asks him to; this block used to
+        # send every such refusal to the lead, who asked him.
+        instead="if this is a GitHub admin action that work Sami already asked for needs (an App permission or installation, a CODEOWNERS approval in his name, an admin merge, a repository or branch setting), do it yourself with his admin token from the credential broker. Never ask Sami to do it (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a). For a theorem-labs repository run \`secret-run --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT exec gh \"\$@\"' $(gh_shim_quote "$@")\`; for a repository of sjawhar's own, the same with GITHUB_PERSONAL_ADMIN_PAT in both places. The broker puts the token in the variable of its own name, which gh does not read, so the sh -c line gives it to gh as GH_TOKEN. Sami approves the grant once per session from the broker's card in Dispatch; that card is not an ask. For any other owner, or a call that is not such an admin action, stop and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
+    else
+        instead="stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
+    fi
     {
         echo "gh shim: REFUSED by GitHub: \`$(gh_shim_quote "$@")\` (exit $rc; GitHub's error is above)."
-        echo "  Identity: it ran as $who. Do not retry with another credential, token or gh binary. The legion-reviewer App, through scripts/post-review (below), is for a review verdict only."
+        echo "  Identity: it ran as $who. Do not retry with a token or gh binary you found yourself: every other credential to use is named below. The legion-reviewer App, through scripts/post-review (below), is for a review verdict only."
         echo "  Why: GitHub does not let that identity make this call (an App cannot approve or request changes on a pull request it opened, and an App installation or a token cannot use a permission or a repository it was not given)."
         echo "  Instead: $instead"
     } >&2
@@ -308,7 +313,7 @@ if agent_context; then
             exit 0
         fi
         gh_shim_refuse "gh auth ${2:-} reads or changes the user's own login, which no agent process may use or change." \
-            "Every other gh call is already routed to the GitHub App for the repository's owner: run the call itself (gh pr …, gh api repos/<owner>/<repo>/…) with -R <owner>/<repo>, and it gets the App's token. If that call is refused, stop and tell your lead which call and the error; do not look for another credential." \
+            "Every other gh call is already routed to the GitHub App for the repository's owner: run the call itself (gh pr …, gh api repos/<owner>/<repo>/…) with -R <owner>/<repo>, and it gets the App's token. If GitHub refuses that call, the shim's refusal names the route to take (for an admin action, Sami's admin token from the credential broker); do not look for another credential." \
             "$@"
     fi
     # A post Sami instructed goes out as him only on a citation: GH_SHIM_APPROVAL

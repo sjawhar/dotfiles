@@ -205,8 +205,9 @@ class SecretsShim(unittest.TestCase):
                 "dispatch://INFRA-223/ask/d2bfc2df-9399-42a9-90b8-35b9f5a46d66", stderr
             )
             self.assertIn(
-                "dispatch://INFRA-26/ask/1dc621e8-1e52-4b4c-ae1a-ac296d7f81f7", stderr
+                "dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a", stderr
             )
+            self.assertNotIn("1dc621e8", stderr)
             self.assertNotIn("omp --resume", stderr)
 
     def test_unregistered_session_gets_the_relaunch_line(self) -> None:
