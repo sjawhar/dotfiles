@@ -20,11 +20,20 @@ What it does, as one long-running user service (`omp/earlyoom-kill-watch.service
      line, finds the owner from step 1, keeps the `mem avail` line just before it, and adds the
      kill to that session's batch.
   3. A batch is sent one minute after its first kill, so several kills of one session in one
-     minute are one Envoy notice: what was killed, when, its RSS, the host's available memory,
-     and what to do next.
-  4. Every minute it logs one line, `kills_this_hour=N hour=YYYY-MM-DDTHHZ kills_prev_hour=M
-     unmatched_this_hour=U notices_this_hour=X tracked=T pending=P sample_ms=S`, for any reader
-     that wants the rate (`journalctl --user -u earlyoom-kill-watch -g kills_this_hour -n 1`).
+     minute are one Envoy notice of at most 600 characters: what was killed, when, its RSS, and
+     what to do next. The rest (the host's available memory at each kill, the full command
+     lines, how the owner was found) is in the report file the notice names last.
+  4. The box-level rate: when more than BOX_RATE (100) kills fall in a rolling hour, matched or
+     not, one message goes to the box-health owner -- the `lead-box-health` Envoy role, and the
+     SRE session only when nobody holds it. Again only when twice as many kills as it last told
+     come after that message (inside an hour), or once the rolling rate has fallen back to 100
+     and crosses again. 846 kills in 48 h on sami-rocqperf, 730 of them in the 00Z hour of
+     2026-11-03, sent nothing box-level before this; replayed under this rule they are two
+     messages (00:40:35Z at 103/h, 00:44:49Z when 214 more had come).
+  5. Every minute it logs one line, `kills_this_hour=N hour=YYYY-MM-DDTHHZ kills_prev_hour=M
+     unmatched_this_hour=U notices_this_hour=X tracked=T pending=P sample_ms=S box_rate_1h=R`,
+     for any reader that wants the rate (`journalctl --user -u earlyoom-kill-watch -g
+     kills_this_hour -n 1`).
 
 How the owner is found, best first (the notice says which one matched):
 
@@ -55,6 +64,7 @@ import argparse
 import fcntl
 import json
 import os
+import pwd
 import queue
 import re
 import signal
@@ -63,8 +73,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
+# A session's own notice goes to that session. The box-level rate goes to the box-health lead's
+# Envoy role (dispatch://INFRA-716), and to the SRE session only when nobody holds the role: the
+# pair load-swap-watch, disk-fill-watch and omp-memory-watch use.
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
 SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 ENVOY = Path(__file__).resolve().parent / "envoy"
 PROC_ROOT = Path("/proc")
@@ -74,6 +89,17 @@ DEFAULT_STATE = (
     if os.access("/mnt/nvme/sami/tmp", os.W_OK)
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "earlyoom-kill-watch/state.json"
 )
+# Report files go where every recipient can open them: an agent box binds /mnt/durable/<user>
+# whole, and has no /mnt/nvme/<user>/tmp (23 of the 197 notices of 2026-11-02 15:44Z-02:00Z went
+# to sessions in boxes).
+_DURABLE_TMP = Path("/mnt/durable") / pwd.getpwuid(os.getuid()).pw_name / "tmp"
+DEFAULT_REPORTS = (
+    _DURABLE_TMP / "earlyoom-kill-watch/reports" if os.access(_DURABLE_TMP, os.W_OK) else DEFAULT_STATE.parent / "reports"
+)
+MESSAGE_LIMIT = 600  # characters in one Envoy message; the detail goes to the report it names
+REPORT_DAYS = 7
+BOX_RATE = 100  # kills in a rolling hour, matched or not, that make one box-level message
+BOX_WINDOW = 3600.0
 
 SAMPLE_EVERY = 2.0  # seconds between /proc samples
 RSS_FLOOR = 64 << 20  # the smallest process worth recording; today's smallest victim had 190 MiB
@@ -181,12 +207,36 @@ def meminfo_available(proc_root: Path) -> str:
     return f"{100.0 * avail / total:.1f}% ({avail >> 10} of {total >> 10} MiB)"
 
 
+def bounded(text: str, tail: str) -> str:
+    """`text` then `tail`, at most MESSAGE_LIMIT characters: the tail (the report's path) is kept
+    whole and the text cut at its end, so the decision at its start always survives."""
+    room = MESSAGE_LIMIT - len(tail)
+    if len(text) > room:
+        text = text[: max(0, room - 2)].rstrip() + "… "
+    return text + tail
+
+
+def listed(items: list[str], room: int) -> str:
+    """As many of `items` as fit in `room` characters, then how many more the report lists."""
+    shown: list[str] = []
+    for i, item in enumerate(items):
+        rest = len(items) - i - 1
+        if len("; ".join(shown + [item]) + (f"; and {rest} more" if rest else "")) > room:
+            break
+        shown.append(item)
+    rest = len(items) - len(shown)
+    if not rest:
+        return "; ".join(shown)
+    return "; ".join(shown) + f"; and {rest} more" if shown else f"{rest} kills, each in the report"
+
+
 class Watch:
     def __init__(self, proc_root: Path = PROC_ROOT, state_path: Path = DEFAULT_STATE, send=envoy_send,
                  to: str = "", host: str = "", docker_session=docker_session, started: float = 0.0,
-                 replay: bool = False, describe=scope_description) -> None:
+                 replay: bool = False, describe=scope_description, reports_dir: Path = DEFAULT_REPORTS) -> None:
         self.proc_root = Path(proc_root)
         self.state_path = Path(state_path)
+        self.reports_dir = Path(reports_dir)
         self.send = send
         self.to = to
         self.host = host or socket.gethostname()
@@ -207,6 +257,11 @@ class Watch:
         self.hours: dict[str, dict] = state.get("hours") or {}
         self.pending: list[dict] = state.get("pending") or []
         self.avail: list | None = state.get("avail")
+        # The box-level rate: every kill of the last two hours as [at, session or "", comm, rss MiB],
+        # the storm's state ({"open", "told", "told_at"}), and its message not yet delivered.
+        self.box_kills: list[list] = state.get("box_kills") or []
+        self.box: dict = state.get("box") or {}
+        self.box_pending: dict | None = state.get("box_pending")
         # With no cursor, the journal is read from the hour's start for the count only: a kill
         # from before this watch started is not news.
         self.notify_after = 0.0 if (self.cursor or replay) else started
@@ -368,6 +423,12 @@ class Watch:
             self.hour(at)["kills"] += 1
             owner = self.owner_of(kill)
             kill.update(how=owner["how"], omp=owner["omp"], session=owner["session"])
+            # The box-level rate counts every kill, matched or not. A storm from before a first
+            # start is counted, not sent, like the per-session notices.
+            notify = at >= self.notify_after
+            self.box_step(at, notify)  # a fall to the threshold before this kill closes the storm
+            self.box_kills.append([at, owner["session"], kill["comm"], kill["rss_mib"]])
+            self.box_step(at, notify)
             if not owner["session"]:
                 self.hour(at)["unmatched"] += 1
                 log(f"{utc(at)} unmatched kill: pid {kill['pid']} uid {kill['uid']} \"{kill['comm']}\""
@@ -417,9 +478,131 @@ class Watch:
                         " for this session (no omp runs in it now)", "omp": 0}
         return {"session": "", "how": "", "omp": 0}
 
+    # ---------------------------------------------------------------- the box-level rate
+
+    def box_rate(self, t: float, since: float = 0.0) -> int:
+        """Kills in the hour to `t`, or only those after `since` when that is later."""
+        lo = max(t - BOX_WINDOW, since)
+        return sum(1 for k in self.box_kills if lo < k[0] <= t)
+
+    def box_step(self, t: float, notify: bool = True) -> None:
+        """Judge the box-level rate at time `t`: open a storm over BOX_RATE kills in the hour, tell
+        it again only when twice as many kills as last told came since, and close it, silently,
+        once the hour's count is back at BOX_RATE, so the next crossing is news."""
+        with self.lock:
+            self.box_kills = [k for k in self.box_kills if k[0] > t - 2 * BOX_WINDOW]
+            rate = self.box_rate(t)
+            box = self.box
+            if box.get("open"):
+                if rate <= BOX_RATE:
+                    log(f"{utc(t)} box kill rate back to {rate} in the hour (at most {BOX_RATE}): storm closed")
+                    self.box = {"open": False, "closed_at": t}
+                    return
+                since = self.box_rate(t, box["told_at"])
+                if since < 2 * box["told"]:
+                    return
+                due = {"kind": "doubled", "count": since, "prev": box["told"], "prev_at": box["told_at"]}
+                box.update(told=since, told_at=t)
+            elif rate > BOX_RATE:
+                due = {"kind": "crossed", "count": rate}
+                self.box = {"open": True, "opened_at": t, "told": rate, "told_at": t}
+            else:
+                return
+            log(f"{utc(t)} box kill rate {rate} in the hour: {due['kind']}{'' if notify else ' (before start: counted, not sent)'}")
+            if not notify:
+                return
+            due.update(rate=rate, at=t, retry_at=0)
+            pending = self.box_pending
+            if pending and not pending.get("sending"):
+                # The last message was never delivered: this one replaces it and tells what it would
+                # have, counted to now, and the next "doubled" is judged against what this one tells.
+                if pending["kind"] == "crossed":
+                    due.update(kind="crossed", count=rate)
+                else:
+                    due.update(kind="doubled", prev=pending["prev"], prev_at=pending["prev_at"],
+                               count=self.box_rate(t, pending["prev_at"]))
+                self.box.update(told=due["count"], told_at=t)
+            self.box_pending = due
+
+    def box_text(self, due: dict, report: str) -> str:
+        at, rate = due["at"], due["rate"]
+        window = [k for k in self.box_kills if at - BOX_WINDOW < k[0] <= at]
+        sessions = {k[1] for k in window if k[1]}
+        unmatched = sum(1 for k in window if not k[1])
+        top = ", ".join(f"{comm} {n}" for comm, n in Counter(k[2] for k in window).most_common(3))
+        free = meminfo_available(self.proc_root).split(" ")[0]
+        if due["kind"] == "doubled":
+            what = (f"rate doubled: {due['count']} kills since the last message at {utc(due['prev_at'])},"
+                    f" which told {due['prev']}; {rate} in the hour to {utc(at)}")
+        else:
+            what = f"{rate} kills in the hour to {utc(at)}, over {BOX_RATE}"
+        text = (
+            ("DRILL COPY of the box-level message (--to). " if self.to else "")
+            + f"EARLYOOM KILL RATE on {self.host}: {what}."
+            + (f" Memory available now {free}." if free else "")
+            + f" Box-health owner: find what holds the memory and slow it. {len(sessions)} sessions were told of"
+            f" their own kills; {unmatched} kills had no session. Most killed: {top}. Said again only when"
+            f" {2 * due['count']} more come within an hour, or after the hour's count falls to {BOX_RATE}"
+            " and crosses again. "
+        )
+        return bounded(text, f"Full report: {report}")
+
+    def box_report(self, due: dict) -> str:
+        at, rate = due["at"], due["rate"]
+        window = [k for k in self.box_kills if at - BOX_WINDOW < k[0] <= at]
+        by_comm: dict[str, list[int]] = {}
+        for _t, _session, comm, rss in window:
+            row = by_comm.setdefault(comm, [0, 0])
+            row[0] += 1
+            row[1] += rss
+        sessions = Counter(k[1] for k in window if k[1])
+        unmatched = sum(1 for k in window if not k[1])
+        lines = [
+            f"earlyoom-kill-watch on {self.host}, {utc(at)}: box-level earlyoom kill rate, {due['kind']}.",
+            f"{rate} kills in the hour to {utc(at)} (more than {BOX_RATE} is a storm)."
+            + (f" {due['count']} of them came after the last message at {utc(due['prev_at'])}, which told"
+               f" {due['prev']}." if due["kind"] == "doubled" else ""),
+            f"Host available memory now: {meminfo_available(self.proc_root) or 'not readable'}.",
+            "",
+            "Kills by command in that hour (count, summed VmRSS at the kill):",
+        ]
+        lines += [f"  {comm} {n} kills, {rss} MiB" for comm, (n, rss) in
+                  sorted(by_comm.items(), key=lambda item: -item[1][0])[:20]]
+        lines += ["", f"Sessions told of their own kills ({len(sessions)}; each had its own notice):"]
+        lines += [f"  {session} {n} kills" for session, n in sessions.most_common(30)]
+        lines += [f"{unmatched} kills had no session (system services, containers outside a box, processes"
+                  " younger than one 2 s sample): nobody was told of them.", "", "Kills per clock hour (this watch's count):"]
+        lines += [f"  {hour} {row.get('kills', 0)} kills, {row.get('unmatched', 0)} unmatched"
+                  for hour, row in sorted(self.hours.items())[-6:]]
+        lines += [
+            "",
+            "What to do: find the sessions that hold the memory now and slow them, e.g. `session-cpu-record top"
+            " --since 1h` (sessions by cores and peak RSS), `journalctl -u earlyoom --since -1h` (each kill),"
+            " `earlyoom-kill-watch --counts` (kills per hour). The kills themselves keep the omp sessions alive.",
+            f"Said again only when {2 * due['count']} more kills come within an hour of this message, or after the"
+            f" hour's count falls to {BOX_RATE} and crosses again. Nothing is sent when it falls.",
+        ]
+        return "\n".join(lines) + "\n"
+
     # ---------------------------------------------------------------- notices
 
-    def notice(self, batch: dict) -> str:
+    def notice(self, batch: dict, report: str) -> str:
+        kills = batch["kills"]
+        free = meminfo_available(self.proc_root).split(" ")[0]
+        head = (
+            (f"DRILL COPY for session {batch['session']} (--to). " if self.to else "")
+            + f"earlyoom on {self.host} stopped {len(kills)} of your processes (SIGTERM, host memory at 10%): "
+        )
+        advice = (
+            ". They exit 143 with no message; not a fault in your work. Before a rerun: run fewer jobs at once"
+            " or with less memory, or run it as a dispatch-cluster Job (skill://running-heavy-jobs)."
+            + (f" Memory available now {free}." if free else "") + " "
+        )
+        tail = f"Full report: {report}"
+        items = [f"{utc(k['at'])} pid {k['pid']} \"{k['comm']}\" {k['rss_mib']} MiB" for k in kills]
+        return bounded(head + listed(items, MESSAGE_LIMIT - len(head) - len(advice) - len(tail)) + advice, tail)
+
+    def notice_report(self, batch: dict) -> str:
         kills = batch["kills"]
         lines = []
         for kill in kills:
@@ -428,17 +611,13 @@ class Watch:
                 "host available memory not logged"
             lines.append(
                 f"- {utc(kill['at'])}: pid {kill['pid']} \"{kill['comm']}\", VmRSS {kill['rss_mib']} MiB,"
-                f" {memory}. Command: {kill['cmdline'][:200]}"
+                f" {memory}. Command: {kill['cmdline'][:2000]}"
             )
         hows = sorted({f"{k['how']} (omp pid {k['omp']})" if k["omp"] else k["how"] for k in kills})
         now_free = meminfo_available(self.proc_root)
-        drill = (
-            f"DRILL COPY: this notice was for session {batch['session']}; it came to you because the"
-            " watch runs with --to.\n" if self.to else ""
-        )
         return (
-            f"{drill}earlyoom-kill-watch on {self.host}: the host's earlyoom stopped {len(kills)} of your"
-            " processes with SIGTERM, because the host's available memory fell to 10%.\n"
+            f"earlyoom-kill-watch on {self.host}: the host's earlyoom stopped {len(kills)} processes of session"
+            f" {batch['session']} with SIGTERM, because the host's available memory fell to 10%.\n"
             + "\n".join(lines)
             + "\nA tool that earlyoom stopped exits with status 143 and gives no message. The kill keeps the"
             " omp sessions on this host alive; it is not a fault in your tool or your work.\n"
@@ -447,9 +626,31 @@ class Watch:
             " dispatch cluster (skill://running-heavy-jobs); (3) wait until the host's available memory"
             " is well above 10% (`grep MemAvailable /proc/meminfo`), then try again."
             + (f" Available now: {now_free}." if now_free else "")
-            + f"\nMatched to your session by: {'; '.join(hows)}. (An automated notice, not a person;"
-            " one notice per minute of kills.)"
+            + f"\nMatched to the session by: {'; '.join(hows)}. (An automated notice, not a person;"
+            " one notice per minute of kills.)\n"
         )
+
+    def write_report(self, kind: str, text: str, now: float) -> str:
+        """Write one report file and prune those older than REPORT_DAYS; its path, or why there is none."""
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+        path = self.reports_dir / f"{stamp}-{kind}.txt"
+        try:
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
+            n = 2
+            while path.exists():
+                path, n = self.reports_dir / f"{stamp}-{kind}-{n}.txt", n + 1
+            path.write_text(text)
+        except OSError as error:
+            log(f"report {path} not written: {error}")
+            return f"none ({path} not written: {error.strerror or error})"
+        cutoff = now - REPORT_DAYS * 86400
+        for old in self.reports_dir.glob("*.txt"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                continue
+        return str(path)
 
     def flush(self, now: float, force: bool = False) -> int:
         with self.lock:
@@ -457,10 +658,18 @@ class Watch:
                    if (force or now - b["opened"] >= BATCH) and now >= b.get("retry_at", 0) and not b.get("sending")]
             for batch in due:
                 batch["sending"] = True
+            box = self.box_pending
+            if box and (box.get("sending") or now < box.get("retry_at", 0)):
+                box = None
+            if box:
+                box["sending"] = True
         sent = 0
         for batch in due:
             target = self.to or batch["session"]
-            ok = self.send(target, self.notice(batch))
+            # Written once per batch: a retry names the same report.
+            if not batch.get("report"):
+                batch["report"] = self.write_report(f"notice-{batch['session'][:8]}", self.notice_report(batch), now)
+            ok = self.send(target, self.notice(batch, batch["report"]))
             with self.lock:
                 batch.pop("sending", None)
                 if ok:
@@ -470,7 +679,24 @@ class Watch:
                     log(f"notice sent to {target}: {len(batch['kills'])} kill(s) of session {batch['session']}")
                 else:
                     batch["retry_at"] = now + RETRY
+        if box:
+            sent += self.send_box(box, now)
         return sent
+
+    def send_box(self, box: dict, now: float) -> int:
+        if not box.get("report"):
+            box["report"] = self.write_report("box-rate", self.box_report(box), now)
+        text = self.box_text(box, box["report"])
+        told = next((t for t in ([self.to] if self.to else [BOX_HEALTH_ROLE_TOPIC, SRE]) if self.send(t, text)), "")
+        with self.lock:
+            box.pop("sending", None)
+            if not told:
+                box["retry_at"] = now + RETRY
+                return 0
+            if self.box_pending is box:
+                self.box_pending = None
+            log(f"box-level message sent to {told}: {box['rate']} kills in the hour ({box['kind']})")
+            return 1
 
     def counts_line(self, now: float) -> str:
         with self.lock:
@@ -480,6 +706,7 @@ class Watch:
                 f"kills_this_hour={this.get('kills', 0)} hour={hour_key(now)} kills_prev_hour={prev.get('kills', 0)}"
                 f" unmatched_this_hour={this.get('unmatched', 0)} notices_this_hour={this.get('notices', 0)}"
                 f" tracked={len(self.table)} pending={len(self.pending)} sample_ms={self.sample_ms}"
+                f" box_rate_1h={self.box_rate(now)}"
             )
 
     def save(self, now: float) -> None:
@@ -492,6 +719,8 @@ class Watch:
                 "cursor": self.cursor, "last_ts": self.last_ts, "recent": self.recent, "table": self.table,
                 "sessions": self.sessions, "hours": self.hours, "avail": self.avail,
                 "pending": [{k: v for k, v in b.items() if k != "sending"} for b in self.pending],
+                "box_kills": self.box_kills, "box": self.box,
+                "box_pending": {k: v for k, v in self.box_pending.items() if k != "sending"} if self.box_pending else None,
                 "saved_at": utc(now),
             }
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -536,7 +765,7 @@ def run_service(options: argparse.Namespace) -> int:
             log(f"DRY RUN: would send to {target}: {text}")
             return True
     now = time.time()
-    watch = Watch(state_path=options.state, send=send, to=options.to, started=now)
+    watch = Watch(state_path=options.state, send=send, to=options.to, started=now, reports_dir=options.reports)
     lines: queue.Queue = queue.Queue()
     journal = subprocess.Popen(journal_args(watch, now), stdout=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
 
@@ -547,7 +776,8 @@ def run_service(options: argparse.Namespace) -> int:
 
     threading.Thread(target=read_journal, daemon=True).start()
     sender: threading.Thread | None = None
-    log(f"earlyoom-kill-watch started: state {options.state}, route {'--to ' + options.to if options.to else 'owner'},"
+    log(f"earlyoom-kill-watch started: state {options.state}, reports {options.reports},"
+        f" route {'--to ' + options.to if options.to else 'owner; box rate to ' + BOX_HEALTH_ROLE_TOPIC},"
         f" {'from cursor' if watch.cursor else 'no cursor: counting from the hour, notifying from now'}")
     last_report = 0.0
 
@@ -578,7 +808,8 @@ def run_service(options: argparse.Namespace) -> int:
                 read += 1
             if read:
                 watch.save(now)
-            if watch.pending and (sender is None or not sender.is_alive()):
+            watch.box_step(now)  # the hour's count also falls with no kill at all
+            if (watch.pending or watch.box_pending) and (sender is None or not sender.is_alive()):
                 sender = threading.Thread(target=send_due, args=(now,), daemon=True)
                 sender.start()
             if now - last_report >= 60:
@@ -598,9 +829,10 @@ def run_replay(options: argparse.Namespace) -> int:
         log(f"WOULD SEND to {target}:\n{text}\n")
         return True
 
-    watch = Watch(state_path=options.state, send=envoy_send if options.send else show, to=options.to, replay=True)
+    watch = Watch(state_path=options.state, send=envoy_send if options.send else show, to=options.to, replay=True,
+                  reports_dir=options.reports)
     watch.cursor, watch.last_ts, watch.recent, watch.pending = None, 0, [], []
-    watch.hours = {}
+    watch.hours, watch.box_kills, watch.box, watch.box_pending = {}, [], {}, None
     watch.sample(time.time())
     args = journal_args(watch, time.time(), since=journal_time(options.since),
                         until=journal_time(options.until) if options.until else "", follow=False)
@@ -620,6 +852,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--to", default="", help="send every notice to this session id instead of its owner (a drill)")
     parser.add_argument("--dry-run", action="store_true", help="log the notices; send nothing")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--reports", type=Path, default=DEFAULT_REPORTS,
+                        help="where each message's full report goes (pruned after 7 days)")
     parser.add_argument("--replay", action="store_true", help="read a past window; send nothing unless --send")
     parser.add_argument("--since", default="", help="replay window start, e.g. 2026-11-02T15:00Z")
     parser.add_argument("--until", default="", help="replay window end")

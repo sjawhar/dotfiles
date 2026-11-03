@@ -1,5 +1,5 @@
 [Unit]
-Description=Tell a session over Envoy when the host's earlyoom kills one of its processes
+Description=Tell a session over Envoy when the host's earlyoom kills one of its processes, and the box-health owner when it kills over 100 an hour
 Documentation=file:%h/.dotfiles/scripts/earlyoom-kill-watch.md
 
 [Service]

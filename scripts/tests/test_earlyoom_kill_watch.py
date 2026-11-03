@@ -48,6 +48,25 @@ def entries(until: str, since: str = "00:00:00") -> list[dict]:
     return [e for e in FIXTURE if lo <= int(e["__REALTIME_TIMESTAMP"]) / 1e6 < hi + 1]
 
 
+def kill_entry(t: float, n: int, comm: str = "python3", cmdline: str = "") -> dict:
+    """A synthetic journal line of one earlyoom SIGTERM at epoch `t`, in earlyoom's own format."""
+    return {
+        "MESSAGE": f'sending SIGTERM to process {50000 + n} uid 1000 "{comm}": oom_score 900, VmRSS 900 MiB,'
+                   f' cmdline "{cmdline or f"{comm} job{n}.py"}"',
+        "__REALTIME_TIMESTAMP": str(int(t * 1e6)),
+        "__CURSOR": f"s=synthetic;i={n}",
+    }
+
+
+def report_of(case: unittest.TestCase, text: str) -> str:
+    """Every message names its report file last; the file exists and holds the detail."""
+    case.assertLessEqual(len(text), 600, text)
+    case.assertIn("Full report: ", text)
+    path = Path(text.rsplit("Full report: ", 1)[1].strip())
+    case.assertTrue(path.is_file(), path)
+    return path.read_text()
+
+
 class FakeProc:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -79,6 +98,7 @@ class KillWatchTest(unittest.TestCase):
         self.proc = FakeProc(Path(tmp.name) / "proc")
         self.proc.root.mkdir()
         self.state = Path(tmp.name) / "state.json"
+        self.reports = Path(tmp.name) / "reports"
         self.sent: list[tuple[str, str]] = []
         self.docker_calls: list[str] = []
         self.descriptions: dict[str, str] = {}
@@ -92,11 +112,13 @@ class KillWatchTest(unittest.TestCase):
             self.docker_calls.append(container)
             return ""
 
-        return WATCH.Watch(
+        w = WATCH.Watch(
             proc_root=self.proc.root, state_path=self.state, send=send, to=to,
             host="sami-rocqperf", docker_session=docker_session, started=started,
             describe=lambda unit: self.descriptions.get(unit, ""),
         )
+        w.reports_dir = self.reports
+        return w
 
     def test_scope_with_no_omp_left_is_matched_by_the_scope_description(self) -> None:
         """A session that moved into a box leaves its host scope behind, described by shims/omp's
@@ -111,7 +133,7 @@ class KillWatchTest(unittest.TestCase):
             w.on_entry(e, at("15:09:10"))
         w.flush(at("15:10:10"))
         self.assertEqual([t for t, _ in self.sent], [HOST_SESSION])
-        self.assertIn("its systemd scope run-u4242.scope", self.sent[0][1])
+        self.assertIn("its systemd scope run-u4242.scope", report_of(self, self.sent[0][1]))
 
     # -- the tree each kill came from ----------------------------------------------------------
 
@@ -163,9 +185,12 @@ class KillWatchTest(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         target, text = self.sent[0]
         self.assertEqual(target, HOST_SESSION, "the id of the transcript the omp holds, not its --resume id")
-        for needle in ("2026-11-02T15:09:09Z", "3405892", '"python3"', "9648 MiB", "9.36%", "19197 of 205180 MiB",
-                       "python3 enum_dbg.py", "143", "running-heavy-jobs", "process tree"):
+        for needle in ("2026-11-02T15:09:09Z", "3405892", '"python3"', "9648 MiB", "143", "running-heavy-jobs"):
             self.assertIn(needle, text)
+        report = report_of(self, text)
+        for needle in ("2026-11-02T15:09:09Z", "3405892", "9.36%", "19197 of 205180 MiB", "python3 enum_dbg.py",
+                       "143", "running-heavy-jobs", "process tree"):
+            self.assertIn(needle, report)
 
     def test_two_box_kills_in_one_minute_are_one_notice_and_the_next_is_another(self) -> None:
         """15:10:59Z and 15:11:50Z: simsci in RULING's box (uid 166536); 15:20:57Z: one more."""
@@ -188,9 +213,12 @@ class KillWatchTest(unittest.TestCase):
         target, text = self.sent[0]
         self.assertEqual(target, RULING)
         self.assertIn("2 of your processes", text)
-        for needle in ("2026-11-02T15:10:59Z", "3458528", "5966 MiB", "9.64%",
-                       "2026-11-02T15:11:50Z", "3731783", "5936 MiB", "9.24%", '"simsci"'):
+        for needle in ("2026-11-02T15:10:59Z", "3458528", "5966 MiB",
+                       "2026-11-02T15:11:50Z", "3731783", "5936 MiB", '"simsci"'):
             self.assertIn(needle, text)
+        report = report_of(self, text)
+        for needle in ("9.64%", "9.24%", "simsci baseline"):
+            self.assertIn(needle, report)
         self.assertEqual(self.docker_calls, [], "the box omp's --resume argument names the session")
 
         self.simsci(671743, 7000)
@@ -203,7 +231,7 @@ class KillWatchTest(unittest.TestCase):
         self.assertEqual(self.sent[1][0], RULING)
         self.assertIn("1 of your processes", self.sent[1][1])
         self.assertIn("5481 MiB", self.sent[1][1])
-        self.assertIn("9.91%", self.sent[1][1])
+        self.assertIn("9.91%", report_of(self, self.sent[1][1]))
 
     def test_a_process_reparented_out_of_the_tree_is_matched_by_its_box(self) -> None:
         self.ruling_box()
@@ -215,7 +243,7 @@ class KillWatchTest(unittest.TestCase):
             w.on_entry(e, at("15:11:00"))
         w.flush(at("15:12:00"))
         self.assertEqual([t for t, _ in self.sent], [RULING])
-        self.assertIn("same agent box", self.sent[0][1])
+        self.assertIn("same agent box", report_of(self, self.sent[0][1]))
 
     def test_session_tmp_path_names_the_omp_when_the_process_was_never_sampled(self) -> None:
         """15:09:07Z: an omp python runner under session-tmp/727012-*, the scratch dir agent-session
@@ -227,7 +255,7 @@ class KillWatchTest(unittest.TestCase):
             w.on_entry(e, at("15:09:08"))
         w.flush(at("15:10:10"))
         self.assertEqual([t for t, _ in self.sent], [RUNNER_SESSION])
-        self.assertIn("session-tmp", self.sent[0][1])
+        self.assertIn("session-tmp", report_of(self, self.sent[0][1]))
 
     def test_unmatched_kill_is_counted_and_sends_nothing(self) -> None:
         """15:09:08Z: an mlflow uvicorn nobody sampled, with no session path in its command line."""
@@ -306,7 +334,161 @@ class KillWatchTest(unittest.TestCase):
         w.flush(at("15:10:40"))
         w.flush(at("15:11:40"))
         self.assertEqual(len(self.sent), 2)
-        self.assertEqual(self.sent[0], self.sent[1])
+        self.assertEqual(self.sent[0], self.sent[1], "a retry sends the same notice, naming the same report")
+
+    # -- the box-level rate ---------------------------------------------------------------------
+
+    def feed(self, w, start: float, count: int, step: float, first: int = 0, comm: str = "python3") -> float:
+        """`count` kills `step` seconds apart from `start`, each read a second after it; the last kill's time."""
+        for i in range(count):
+            t = start + i * step
+            w.on_entry(kill_entry(t, first + i, comm), t + 1)
+        return start + (count - 1) * step
+
+    def box_messages(self) -> list[tuple[str, str]]:
+        return [(t, text) for t, text in self.sent if "EARLYOOM KILL RATE" in text]
+
+    def test_box_rate_over_100_an_hour_tells_the_box_health_role_once(self) -> None:
+        """846 kills in 48 h on sami-rocqperf, 730 of them in the 00Z hour of 2026-11-03, and no
+        box-level message: the SRE heard only of its own processes."""
+        w = self.watch()
+        last = self.feed(w, at("00:00:00"), 100, 20.0)
+        w.flush(last + 2)
+        self.assertEqual(self.box_messages(), [], "100 kills in an hour is at the threshold, not over it")
+        last = self.feed(w, last + 20, 1, 1.0, first=100)
+        w.flush(last + 2)
+        box = self.box_messages()
+        self.assertEqual([t for t, _ in box], [WATCH.BOX_HEALTH_ROLE_TOPIC])
+        self.assertIn("101 kills in the hour", box[0][1])
+        report = report_of(self, box[0][1])
+        self.assertIn("python3 101", report)
+        self.assertIn("101 kills had no session", report)
+
+        # 150 more in the same hour: the same storm, no new fact.
+        last = self.feed(w, last + 2, 150, 2.0, first=101)
+        w.flush(last + 2)
+        self.assertEqual(len(self.box_messages()), 1)
+
+        # 52 more: 202 since the message, twice the 101 it told. One message.
+        last = self.feed(w, last + 2, 52, 2.0, first=251)
+        w.flush(last + 2)
+        box = self.box_messages()
+        self.assertEqual(len(box), 2)
+        self.assertEqual(box[1][0], WATCH.BOX_HEALTH_ROLE_TOPIC)
+        self.assertIn("doubled", box[1][1])
+        self.assertIn("202", box[1][1])
+        report_of(self, box[1][1])
+        self.assertEqual(len([t for t, _ in self.sent if t != WATCH.BOX_HEALTH_ROLE_TOPIC]), 0,
+                         "unmatched kills reach no session")
+
+    def test_box_rate_sends_again_only_after_it_fell_to_the_threshold_and_crossed_again(self) -> None:
+        w = self.watch()
+        last = self.feed(w, at("00:00:00"), 101, 20.0)
+        w.flush(last + 2)
+        self.assertEqual(len(self.box_messages()), 1)
+        # An hour with no kills: the rolling rate falls to 0. Nothing is sent for that.
+        w.box_step(last + 3700)
+        w.flush(last + 3700)
+        self.assertEqual(len(self.box_messages()), 1)
+        self.assertIn("box_rate_1h=0", w.counts_line(last + 3700))
+        last = self.feed(w, last + 3800, 101, 10.0, first=101)
+        w.flush(last + 2)
+        box = self.box_messages()
+        self.assertEqual(len(box), 2)
+        self.assertNotIn("doubled", box[1][1])
+        self.assertIn("101 kills in the hour", box[1][1])
+
+    def test_box_message_goes_to_the_sre_session_only_when_nobody_holds_the_role(self) -> None:
+        w = self.watch()
+
+        def send(target, text):
+            self.sent.append((target, text))
+            return target != WATCH.BOX_HEALTH_ROLE_TOPIC
+
+        w.send = send
+        last = self.feed(w, at("00:00:00"), 101, 20.0)
+        w.flush(last + 2)
+        self.assertEqual([t for t, _ in self.box_messages()], [WATCH.BOX_HEALTH_ROLE_TOPIC, SRE])
+        w.flush(last + 60)
+        self.assertEqual(len(self.box_messages()), 2, "a message the SRE took is not sent again")
+
+    def test_an_undelivered_crossing_is_told_once_with_the_count_to_now(self) -> None:
+        w = self.watch()
+        ok = [False]
+
+        def send(target, text):
+            self.sent.append((target, text))
+            return ok[0]
+
+        w.send = send
+        last = self.feed(w, at("00:00:00"), 101, 20.0)
+        w.flush(last + 2)
+        self.assertEqual(len(self.box_messages()), 2, "the role and the SRE both refused")
+        last = self.feed(w, last + 3, 202, 1.0, first=101)
+        ok[0] = True
+        w.flush(last + 60)
+        w.flush(last + 120)
+        delivered = self.box_messages()[2:]
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("303 kills in the hour", delivered[0][1])
+        self.assertNotIn("doubled", delivered[0][1])
+        self.assertIn("606 more", delivered[0][1], "the next doubling is judged against what was told")
+
+    def test_storm_from_before_the_first_start_is_counted_not_sent(self) -> None:
+        start = at("00:40:00")
+        w = self.watch(started=start)
+        last = self.feed(w, at("00:00:00"), 120, 15.0)
+        w.flush(start + 1)
+        self.assertEqual(self.box_messages(), [])
+        self.assertIn("box_rate_1h=120", w.counts_line(last + 1))
+
+    def test_box_state_survives_a_restart(self) -> None:
+        w = self.watch()
+        last = self.feed(w, at("00:00:00"), 101, 20.0)
+        w.flush(last + 2)
+        w.save(last + 2)
+        again = self.watch()
+        self.feed(again, last + 5, 100, 2.0, first=101)
+        again.flush(last + 400)
+        self.assertEqual(len(self.box_messages()), 1, "a restart does not make the open storm news again")
+
+    def test_every_message_is_at_most_600_chars_and_names_its_report(self) -> None:
+        self.proc.add(727012, "omp", 1, ["omp"], HOST_SCOPE,
+                      session_file=f"/home/sami/.omp/agent/sessions/-x/2026-11-01T00-00-00-000Z_{RUNNER_SESSION}.jsonl")
+        w = self.watch(to=SRE)
+        w.host = "h" * 63
+        long_cmd = "python3 /tmp/session-tmp/727012-abcdefgh/" + "x" * 400 + ".py --flag " + "y" * 300
+        for i in range(30):
+            t = at("00:00:00") + i
+            w.on_entry(kill_entry(t, i, comm="averyverylongna", cmdline=long_cmd), t + 1)
+        for i in range(120):
+            t = at("00:01:00") + i
+            w.on_entry(kill_entry(t, 100 + i, comm=f"c{i:02d}-longname-xx"), t + 1)
+        w.flush(at("00:10:00"))
+        self.assertGreaterEqual(len(self.sent), 2)
+        for _target, text in self.sent:
+            report_of(self, text)
+        notice = [text for _, text in self.sent if "EARLYOOM KILL RATE" not in text][0]
+        self.assertIn(RUNNER_SESSION, notice, "the drill copy still names the session it was for")
+        self.assertIn("30 of your processes", notice)
+        self.assertIn("more", notice)
+        self.assertEqual(report_of(self, notice).count("averyverylongna"), 30, "the report lists every kill")
+
+    def test_reports_older_than_seven_days_are_pruned(self) -> None:
+        self.host_session()
+        self.reports.mkdir(parents=True)
+        old, recent = self.reports / "20261020T000000Z-box-rate.txt", self.reports / "20261028T000000Z-box-rate.txt"
+        for path, days in ((old, 8), (recent, 6)):
+            path.write_text("x")
+            os.utime(path, (at("15:00:00") - days * 86400,) * 2)
+        w = self.watch()
+        w.sample(at("15:09:05"))
+        self.proc.kill(3405892)
+        for e in entries("15:09:09", "15:09:09"):
+            w.on_entry(e, at("15:09:10"))
+        w.flush(at("15:10:10"))
+        self.assertFalse(old.exists())
+        self.assertTrue(recent.exists())
 
 
 if __name__ == "__main__":
