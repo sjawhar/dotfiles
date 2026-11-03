@@ -264,10 +264,44 @@ function sessionId(pid: number): string | undefined {
 	return newest ? SESSION_FILE.exec(newest.path)?.[1] : undefined;
 }
 
+// The Dispatch and Envoy environment of a host session, for the omp of a box: the pi-envoy
+// extension sets it in the omp it loads in, but a box's tool shells on sami-devbox had none of it
+// (BET-561 session 01a19e2e exported it by hand, 2026-11-03), so `dispatch` was not on PATH and
+// uploads failed. Each value already set wins: DISPATCH_HOST (omp), ENVOY_CONFIG_FILE (the
+// session's envoy.json, when it exists), DISPATCH_SESSION_ID (the id the launch resumes, from
+// its transcript path or a bare id), and the plugin's bin directory first on PATH.
+export function dispatchEnv(argv: string[], env: Record<string, string | undefined>): Record<string, string> {
+	const out: Record<string, string> = {};
+	const home = env.HOME ?? "";
+	const dotfiles = env.DOTFILES_DIR || `${home}/.dotfiles`;
+	if (!env.DISPATCH_HOST) out.DISPATCH_HOST = "omp";
+	if (!env.ENVOY_CONFIG_FILE) {
+		const file = `${env.XDG_CONFIG_HOME || `${home}/.config`}/legion/envoy.json`;
+		if (fs.existsSync(file)) out.ENVOY_CONFIG_FILE = file;
+	}
+	if (!env.DISPATCH_SESSION_ID) {
+		for (let i = 1; i < argv.length; i++) {
+			const arg = argv[i];
+			if (arg === "--") break;
+			let value: string | undefined;
+			if ((arg === "--resume" || arg === "-r" || arg === "--session") && i + 1 < argv.length) value = argv[i + 1];
+			else if (arg.startsWith("--resume=") || arg.startsWith("--session=")) value = arg.slice(arg.indexOf("=") + 1);
+			if (value === undefined) continue;
+			const id = /_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(value)?.[1] ??
+				/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(value)?.[1];
+			if (id) out.DISPATCH_SESSION_ID = id;
+		}
+	}
+	const bin = `${dotfiles}/omp/plugins/node_modules/@sjawhar/pi-envoy/bin`;
+	const path = env.PATH ?? "";
+	if (fs.existsSync(`${bin}/dispatch`) && !path.split(":").includes(bin)) out.PATH = path ? `${bin}:${path}` : bin;
+	return out;
+}
+
 function spawnOmp(argv: string[]) {
 	return Bun.spawn(argv, {
 		stdio: ["inherit", "inherit", "inherit"],
-		env: { ...process.env, AGENTBOX_RUNNER_PID: String(process.pid) },
+		env: { ...process.env, ...dispatchEnv(argv, process.env), AGENTBOX_RUNNER_PID: String(process.pid) },
 	});
 }
 

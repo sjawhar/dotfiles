@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { movedRefusal, OOM_BIAS_ADJ, oomBiasPass, relaunchArgv } from "./agentbox-run.ts";
+import { dispatchEnv, movedRefusal, OOM_BIAS_ADJ, oomBiasPass, relaunchArgv } from "./agentbox-run.ts";
 
 const resumedSessionId = "NEW";
 
@@ -141,5 +141,37 @@ describe("movedRefusal", () => {
 		expect(run.stderr.toString()).toContain("this session moved to sami-devbox");
 		expect(fs.existsSync(path.join(home, "OMP-RAN"))).toBe(false);
 		expect(fs.readFileSync(path.join(home, ".cache/omp/agentbox/agentbox-test.log"), "utf8")).toContain("refused:");
+	});
+});
+
+describe("dispatchEnv", () => {
+	const sid = "01a19e2e-0000-7000-8000-00000000a001";
+	function home(): { home: string; bin: string; envoy: string } {
+		const h = fs.mkdtempSync(path.join(os.tmpdir(), "agentbox-dispatch-"));
+		const bin = path.join(h, ".dotfiles/omp/plugins/node_modules/@sjawhar/pi-envoy/bin");
+		fs.mkdirSync(bin, { recursive: true });
+		fs.writeFileSync(path.join(bin, "dispatch"), "#!/bin/sh\n", { mode: 0o755 });
+		const envoy = path.join(h, ".config/legion/envoy.json");
+		fs.mkdirSync(path.dirname(envoy), { recursive: true });
+		fs.writeFileSync(envoy, "{}");
+		return { home: h, bin, envoy };
+	}
+
+	test("a box's omp gets the host session's dispatch environment (BET-561, 2026-11-03)", () => {
+		const { home: h, bin, envoy } = home();
+		const transcript = `${h}/.omp/agent/sessions/-x/2026-11-03T00-00-00-000Z_${sid}.jsonl`;
+		const env = dispatchEnv(["omp", "--resume", transcript], { HOME: h, PATH: "/usr/bin:/bin" });
+		expect(env).toEqual({ DISPATCH_HOST: "omp", ENVOY_CONFIG_FILE: envoy, DISPATCH_SESSION_ID: sid, PATH: `${bin}:/usr/bin:/bin` });
+		expect(dispatchEnv(["omp", "-r", sid], { HOME: h, PATH: "/bin" }).DISPATCH_SESSION_ID).toBe(sid);
+	});
+
+	test("a value already set wins, and nothing is invented", () => {
+		const { home: h, bin } = home();
+		const env = dispatchEnv(["omp"], {
+			HOME: h, PATH: `${bin}:/bin`, DISPATCH_HOST: "claude", ENVOY_CONFIG_FILE: "/x.json", DISPATCH_SESSION_ID: "set",
+		});
+		expect(env).toEqual({});
+		const bare = fs.mkdtempSync(path.join(os.tmpdir(), "agentbox-dispatch-none-"));
+		expect(dispatchEnv(["omp"], { HOME: bare, PATH: "/bin" })).toEqual({ DISPATCH_HOST: "omp" });
 	});
 });

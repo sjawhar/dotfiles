@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg git git-lfs openssh-client sudo jq iproute2 \
         python3 python3-jwt python3-cryptography build-essential pkg-config libssl-dev \
         tmux less procps xz-utils unzip zstd rsync file acl \
-        python3-pip python3-yaml python3-venv postgresql-client sqlite3 socat wget bc bsdextrautils \
+        python3-pip python3-yaml python3-venv postgresql-client sqlite3 socat wget bc bsdextrautils bubblewrap \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \
@@ -36,12 +36,18 @@ RUN echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu && chmod 0440 /
     && echo agentbox > /etc/agentbox-identity \
     && install -d -o ubuntu -g ubuntu /home/ubuntu/.cache /home/ubuntu/.config /home/ubuntu/.local /home/ubuntu/.local/share /home/ubuntu/.ssh
 
-# No bubblewrap: a sandbox test cannot run in a box. Sysbox handles every procfs mount in the box
-# itself, adding its own submounts, and fails a /proc mount made from a nested user namespace, so
-# a bwrap run that mounts its own /proc dies at "Can't mount proc on /newroot/proc" (agentbox/AGENTS.md,
-# "Sandbox tests"). Such tests skip, and pytest ends green. This pytest plugin, found by every
-# pytest in the box through PYTHONPATH and an entry point (none is loaded where a caller replaces
-# PYTHONPATH), prints a red banner after the summary that names how many skipped and why.
+# bubblewrap, setuid root (2026-11-03: BET-64's leak-check tests run the real gh inside
+# `bwrap --unshare-net`). Unprivileged, bwrap cannot run in a box: Sysbox refuses its loopback
+# setup in a new network namespace ("loopback: Failed RTM_NEWADDR: Operation not permitted") and
+# a /proc mount made from a nested user namespace ("Can't mount proc on /newroot/proc"). Setuid,
+# it takes no user namespace, and `bwrap --unshare-net --ro-bind / / --dev /dev --proc /proc` runs
+# as the box user. The box's root is not the host's (Sysbox maps it to an unprivileged host uid),
+# and the box user has sudo already, so the bit grants nothing new. A run that also asks for a
+# new user namespace (`--unshare-all`, `--unshare-user`) still fails in a box; such tests skip,
+# and this pytest plugin, found by every pytest in the box through PYTHONPATH and an entry point
+# (none is loaded where a caller replaces PYTHONPATH), prints a red banner after the summary that
+# names how many skipped and why.
+RUN chmod u+s /usr/bin/bwrap
 COPY agentbox_sandbox_skips.py /opt/agentbox/python/agentbox_sandbox_skips.py
 RUN install -d /opt/agentbox/python/agentbox_sandbox_skips-1.dist-info \
     && printf 'Metadata-Version: 2.1\nName: agentbox-sandbox-skips\nVersion: 1\n' \
