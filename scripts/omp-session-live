@@ -8,10 +8,17 @@
 # been killed (00:37Z).
 #
 # An omp runs a session when its own command line names it (`--resume <id>` or a path ending in
-# `_<id>.jsonl`), or when it holds that transcript open (a new session or one resumed by a
-# prefix). omp's helper processes (`__omp_worker_*`) are not sessions. A process inside an agent
-# box is seen by its command line; its descriptors are the box's. OMP_SESSION_LIVE_PROC replaces
-# /proc for the tests.
+# `_<id>.jsonl`), or when it holds that transcript open FOR WRITING (a new session or one
+# resumed by a prefix). omp's helper processes (`__omp_worker_*`) are not sessions. A process
+# inside an agent box is seen by its command line; its descriptors are the box's.
+# OMP_SESSION_LIVE_PROC replaces /proc for the tests.
+#
+# Only a writer runs a transcript. omp's session writer holds its file O_WRONLY|O_APPEND for its
+# life (flags 02102001 in /proc/<pid>/fdinfo/<fd> on every writer here), while an omp opens
+# ANOTHER session's transcript read-only whenever a tool reads it. At 2026-11-03 05:59:13Z omp
+# 2559955, which runs 01a170df, held 01a170e0's transcript read-only, and omp-dup-watch, which
+# used the descriptor alone, reported 01a170e0 as run by two omps. A read-only descriptor here
+# would refuse a legitimate resume, so the access mode is read too.
 #
 # A transcript path names one file, not every file of its session: scripts/omp-fork resumes a
 # copy of a live session in its own --session-dir, and from f007ab4d until this rule every such
@@ -60,6 +67,15 @@ for d in "$P"/[0-9]*; do
     c=""; read -r c 2>/dev/null <"$d/comm" || continue
     [[ "$c" == omp ]] && pids+=("${d##*/}")
 done
+# writer FD: true when the descriptor $P/<pid>/fd/<n> is open for writing: the access mode of the
+# octal `flags:` of its fdinfo is O_WRONLY (1) or O_RDWR (2), never O_RDONLY (0). A descriptor
+# closed between the find and this read has no fdinfo, and counts as no writer.
+writer() {
+    local flags
+    flags="$(awk '/^flags:/ { print $2 }' "${1/\/fd\//\/fdinfo\/}" 2>/dev/null)"
+    [[ "$flags" =~ ^[0-7]+$ ]] && (( (8#$flags & 3) != 0 ))
+}
+
 # Who holds the transcript open, for every omp at once: one `find`, not one per process. For a
 # path, which file each holds, by device and inode (one `stat`): the file itself, or another
 # transcript of the session (`other`).
@@ -69,7 +85,7 @@ if (( ${#pids[@]} )); then
     pattern="*/sessions/*_${want}*.jsonl"; [[ -n "$file" ]] && pattern="*_${want}.jsonl"
     links=()
     while IFS=$'\t' read -r l t; do
-        [[ "$t" =~ _(${uuid})\.jsonl$ && "${BASH_REMATCH[1]}" == "$want"* ]] || continue
+        [[ "$t" =~ _(${uuid})\.jsonl$ && "${BASH_REMATCH[1]}" == "$want"* ]] && writer "$l" || continue
         if [[ -n "$file" ]]; then links+=("$l"); else l="${l#"$P"/}"; holds[${l%%/*}]="$t"; fi
     done < <(find "${fds[@]}" -maxdepth 1 -type l -lname "$pattern" -printf '%p\t%l\n' 2>/dev/null || true)
     if (( ${#links[@]} )); then
@@ -89,8 +105,12 @@ box_holds() {
     cid="${BASH_REMATCH[1]}"
     ns="$(awk '/^NSpid:/ {print $NF}' "$P/$1/status" 2>/dev/null)"
     [[ "$ns" =~ ^[0-9]+$ ]] || return 0
-    timeout 10 docker exec "$cid" find "/proc/$ns/fd" -maxdepth 1 -type l -lname "*_${want}.jsonl" \
-        -exec stat -L -c %d:%i {} + 2>/dev/null
+    # The box's own fdinfo, the same rule: a descriptor the box holds read-only runs nothing.
+    timeout 10 docker exec "$cid" sh -c '
+        for fd in $(find "/proc/'"$ns"'/fd" -maxdepth 1 -type l -lname "*_'"$want"'.jsonl" 2>/dev/null); do
+            flags=$(awk "/^flags:/ { print \$2 }" "/proc/'"$ns"'/fdinfo/${fd##*/}" 2>/dev/null)
+            [ -n "$flags" ] && [ $(( 0$flags & 3 )) -ne 0 ] && stat -L -c %d:%i "$fd"
+        done' 2>/dev/null
 }
 for pid in ${pids[@]+"${pids[@]}"}; do
     [[ "$pid" == "$$" ]] && continue

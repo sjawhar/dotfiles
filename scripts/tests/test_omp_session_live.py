@@ -53,26 +53,38 @@ class OmpSessionLive(unittest.TestCase):
         shutil.copyfile(self.transcript, self.copy)
 
     def omp(self, pid: int, cmdline: list[str], holds: Path | None = None, comm: str = "omp",
-            cwd: Path | None = None) -> None:
+            cwd: Path | None = None, reads: Path | None = None) -> None:
+        """An omp in the fixture /proc. `holds` is the transcript it WRITES (fd 21, the flags
+        omp's session writer has here: O_WRONLY|O_APPEND|O_CLOEXEC|O_LARGEFILE). `reads` is a
+        transcript it holds open read-only (fd 22), as a tool call that reads one does."""
         d = self.proc / str(pid)
         (d / "fd").mkdir(parents=True)
+        (d / "fdinfo").mkdir()
         (d / "comm").write_text(comm + "\n", encoding="utf-8")
         (d / "cmdline").write_text("".join(a + "\0" for a in cmdline), encoding="utf-8")
-        if holds:
-            os.symlink(holds, d / "fd" / "21")
+        for fd, target, flags in ((21, holds, "02102001"), (22, reads, "02100000")):
+            if not target:
+                continue
+            os.symlink(target, d / "fd" / str(fd))
+            (d / "fdinfo" / str(fd)).write_text(f"pos:\t0\nflags:\t{flags}\nmnt_id:\t30\nino:\t1\n",
+                                                encoding="utf-8")
         if cwd:
             os.symlink(cwd, d / "cwd")
 
     def box(self, pid: int, nspid: int) -> Path:
         """Put omp PID in an agent box: its cgroup names the container, its status its pid there.
         A stub `docker` answers `docker exec BOX ...` from BOX's own /proc, box-proc/ here, where
-        the omp holds the transcript as fd 32; it logs each call to DOCKER."""
+        the omp writes the transcript on fd 32; it logs each call to DOCKER."""
         d = self.proc / str(pid)
         (d / "cgroup").write_text(f"0::/user.slice/user-1000.slice/user-1000-agentbox.slice/docker-{BOX}.scope/init.scope\n",
                                   encoding="utf-8")
         (d / "status").write_text(f"Name:\tomp\nNSpid:\t{pid}\t{nspid}\n", encoding="utf-8")
-        (self.root / "box-proc" / str(nspid) / "fd").mkdir(parents=True)
-        os.symlink(self.transcript, self.root / "box-proc" / str(nspid) / "fd" / "32")
+        box_proc = self.root / "box-proc" / str(nspid)
+        (box_proc / "fd").mkdir(parents=True)
+        (box_proc / "fdinfo").mkdir()
+        os.symlink(self.transcript, box_proc / "fd" / "32")
+        (box_proc / "fdinfo" / "32").write_text("pos:\t0\nflags:\t02102001\nmnt_id:\t30\nino:\t1\n",
+                                                encoding="utf-8")
         stubs = self.root / "stubs"
         stubs.mkdir()
         executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
@@ -102,6 +114,19 @@ class OmpSessionLive(unittest.TestCase):
         result = self.live(SID)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertEqual(result.stdout, "")
+
+    def test_an_omp_that_only_reads_another_sessions_transcript_does_not_make_it_live(self) -> None:
+        """An omp opens ANOTHER session's transcript read-only when a tool reads it: at
+        2026-11-03 05:59:13Z omp 2559955 (session 01a170df) held 01a170e0's transcript that way,
+        and omp-dup-watch, which used this rule, called 01a170e0 run twice. Only a writer runs a
+        transcript: omp's session writer keeps its file open O_WRONLY|O_APPEND for its life."""
+        self.omp(210, ["omp", "--resume", OTHER], holds=self.copy, reads=self.transcript)
+        self.assert_not_live(SID)
+        self.assert_not_live(SID[:13])
+        self.assert_not_live(str(self.transcript))
+        resumed = self.resume("--resume", SID)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn(f"LAUNCHED --resume {SID}", resumed.stdout)
 
     def scratch_dotfiles(self) -> Path:
         dotfiles = self.root / "dotfiles"
@@ -200,7 +225,11 @@ class OmpSessionLive(unittest.TestCase):
         self.assertIn(f"620\tit holds {self.real} open in its box", self.live(str(self.transcript), stubs).stdout)
         result = self.live(str(self.copy), stubs)
         self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
-        self.assertIn(f"exec {BOX} find /proc/884/fd", (self.root / "DOCKER").read_text(encoding="utf-8"))
+        # The box is asked for the descriptors of pid 884 AND for their access mode.
+        asked = (self.root / "DOCKER").read_text(encoding="utf-8")
+        self.assertIn(f"exec {BOX} sh -c", asked)
+        self.assertIn('find "/proc/884/fd"', asked)
+        self.assertIn("/proc/884/fdinfo/", asked)
 
     def test_an_omp_resumed_by_id_whose_transcript_cannot_be_seen_may_run_any_file_of_it(self) -> None:
         """No transcript of it in sight: an omp just started has not opened one yet, and a box
@@ -211,7 +240,9 @@ class OmpSessionLive(unittest.TestCase):
         stubs = self.box(610, 885)
         (self.root / "BOX_GONE").touch()
         self.assertIn(f"610\tits command line names {SID}", self.live(str(self.copy), stubs).stdout)
-        self.assertIn(f"exec {BOX} find /proc/885/fd", (self.root / "DOCKER").read_text(encoding="utf-8"))
+        asked = (self.root / "DOCKER").read_text(encoding="utf-8")
+        self.assertIn(f"exec {BOX} sh -c", asked)
+        self.assertIn('find "/proc/885/fd"', asked)
 
     def test_the_two_resumes_of_2026_11_03_are_still_refused(self) -> None:
         """00:30Z: a second tmux server's restore ran tmux-resurrect-omp's `omp --resume <id>` for
