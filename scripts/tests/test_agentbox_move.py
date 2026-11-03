@@ -1860,6 +1860,33 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(busy.returncode, 1)
         self.assertIn("still works in a tree it would --leave: pid 999999963", busy.stderr)
 
+    def test_leave_with_a_process_writing_elsewhere_moves_and_every_exit_says_why(self) -> None:
+        """LINUX-1248's dry run (2026-11-03) ended after its first progress line with no message:
+        the --leave check's loop ended on a file outside the left tree, and under pipefail and
+        set -e that ended the command. Its process writing elsewhere is no reason to refuse, and
+        an exit no refusal explains now says so."""
+        shared = self.checkout("shared2")
+        own = self.root / "wt" / "mine2"
+        self.git("worktree", "add", "-q", "-b", "mine2", str(own), cwd=shared)
+        transcript = self.home / ".omp/agent/sessions/-src-shared2" / f"2026-11-03T00-00-00-000Z_{self.TO}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.make_proc(999999980, comm="bash", ppid=1, cwd=shared)
+        self.make_proc(999999981, ppid=999999980, cwd=shared, writes=(transcript,))
+        self.make_proc(999999982, comm="python3", ppid=999999981, cwd=own, writes=(elsewhere / "log",))
+        self.set_pids(999999981)
+        self.set_panes({999999980: ("%93", "agents:9.3")})
+        self.target()
+        dry = self.move_to(f'--to devbox --cwd "{own}" --leave "{shared}" --dry-run', own=999999981)
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn("group g-01a19700, 1 session(s)", dry.stdout)
+        broken = self.run_bash("move_own_omp() { echo 999999981; }\nmove_to_scan_processes() { false; }\n"
+                               "cmd_move --to devbox --dry-run")
+        self.assertEqual(broken.returncode, 1)
+        self.assertIn("move --to stopped with exit 1 and no message of its own", broken.stderr)
+
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own
         group, found as `move --to` finds it - and reads no other session's paths; --group names

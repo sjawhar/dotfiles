@@ -215,11 +215,13 @@ mounts_of() {
     awk -v m="$1" '$1 == m { print $2 }' "${files[@]}"
 }
 
-die() { echo "agentbox: $*" >&2; exit 1; }
+# MOVE_SAID: a refusal was printed, so the exit is explained (cmd_move --to checks it).
+MOVE_SAID=""
+die() { MOVE_SAID=1; echo "agentbox: $*" >&2; exit 1; }
 
 # A limit the launcher will not set: exit 2, apart from every other refusal, so a caller can tell
 # "your value is out of range" from "this host cannot start a box".
-refuse() { echo "agentbox: $*" >&2; exit 2; }
+refuse() { MOVE_SAID=1; echo "agentbox: $*" >&2; exit 2; }
 
 # A docker size (b/k/m/g, 1024-based; no suffix means bytes) in bytes; non-zero on anything else.
 size_bytes() {
@@ -2672,8 +2674,17 @@ MOVE_SWEEP_RECORD="${AGENTBOX_SWEEP_RECORD:-$HOME/.local/share/omp-session-sql/d
 MOVE_DEEP_INDEX_DIR=""
 move_to_index_transcripts() {
     MOVE_DEEP_INDEX_DIR="$(mktemp -d)"
-    # shellcheck disable=SC2064  # the path is fixed now
-    trap "rm -rf '$MOVE_DEEP_INDEX_DIR'" EXIT
+}
+# The one EXIT trap of `agentbox move` (cmd_move): it removes the index, and for `--to` it says
+# why the command ended when no refusal did. A second `trap … EXIT` replaced the first and
+# silenced that message, so nothing else sets one.
+MOVE_FORM=""
+move_exit() {
+    local rc=$?
+    [[ -z "$MOVE_DEEP_INDEX_DIR" ]] || rm -rf "$MOVE_DEEP_INDEX_DIR"
+    if [[ "$MOVE_FORM" == --to ]] && (( rc != 0 )) && [[ -z "$MOVE_SAID" ]]; then
+        echo "agentbox: move --to stopped with exit $rc and no message of its own; nothing was hung up. This is a bug: report it with the command you ran." >&2
+    fi
 }
 move_transcript() {
     local pid="$1" sid="$2" fd link arg found=() dir
@@ -4466,8 +4477,8 @@ cmd_move_to() {
             | while IFS=$'\t' read -r link tgt; do
                 [[ "$link" == */cwd ]] && continue
                 tgt="${tgt%/*}"
-                move_to_left "$tgt" && move_to_writes "$link" && { l="${link#"$PROC"/}"; echo "pid ${l%%/*} ($tgt)"; }
-            done | sort -u | head -5)"
+                if move_to_left "$tgt" && move_to_writes "$link"; then l="${link#"$PROC"/}"; echo "pid ${l%%/*} ($tgt)"; fi
+            done | sort -u | head -5 || true)"
         [[ -z "$busy" ]] || die "this session still works in a tree it would --leave: $(paste -sd ';' <<<"$busy"); nothing was hung up"
         if [[ -n "$new_cwd" ]]; then
             local f=()
@@ -4913,11 +4924,15 @@ More than one `move --plan` may run at once: it writes only this host'"'"'s plan
 session, each renamed into place.'
 
 cmd_move() {
+    trap move_exit EXIT
     set_disk_bytes "the default disk limit"
     case "${1:-}" in
         --plan) shift; cmd_move_plan "$@" ;;
         --self) shift; cmd_move_self "$@" ;;
-        --to) cmd_move_to "$@" ;;
+        # A `move --to` never ends without saying why: an exit that is not 0 and that no refusal
+        # (die) explained says so (LINUX-1248's dry run, 2026-11-03, ended after 16 s with only its
+        # first progress line, from a pipeline whose last loop test failed under `set -e`).
+        --to) MOVE_FORM=--to; cmd_move_to "$@" ;;
         --to-run) shift; move_to_run "$@" ;;
         --relaunch) shift; move_relaunch "$@" ;;
         --wake) shift; move_wake "$@" ;;
