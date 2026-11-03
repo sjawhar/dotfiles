@@ -59,7 +59,10 @@ import argparse
 import fcntl
 import json
 import os
+import pickle
 import re
+import select
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -379,10 +382,115 @@ TRANSCRIPT_CACHE = "transcripts.json"
 # walked for again only this long after, so one such session does not bring the walk back on
 # every pass.
 TRANSCRIPT_REWALK = 600.0
-# The evidence after the credential store (processes, Envoy, transcripts) shares one budget per
-# pass, so a pass always reaches its decision, its state and its heartbeat well inside the
-# unit's 120 s, with the dispatch CLI's 60 s still to spare.
+# The evidence (the credential store, the processes, Envoy, the transcripts) shares one budget
+# per pass, so a pass always reaches its decision, its state and its heartbeat well inside the
+# unit's 120 s, with the dispatch CLI's 60 s still to spare. It counts from the moment the
+# process started, because systemd's TimeoutStartSec counts Python's own start-up too: 62.9 s of
+# it on 2026-11-03 (the pass started 07:37:56Z, 81.8 s in all), when this budget still counted
+# from the first step.
 EVIDENCE_SECONDS = 30.0
+
+# A clock the evidence checks itself is not enough. The pass started 09:40:33Z on 2026-11-03 was
+# killed at the unit's 120 s with no line logged: its steps check the budget between two
+# transcripts or two directories, and a read the box has stalled -- the credential store, a
+# /proc/<pid>/environ, a directory listing, a transcript tail -- never comes back to look. So
+# each evidence step runs in a forked child under a hard limit of its own (`bounded`), capped
+# by the evidence budget left. A step that does not answer is CUT: the pass logs it and exits 0,
+# and decides nothing that needs the sessions -- no crossing on their errors, no new fact, no
+# retry, no clear, no heartbeat. Only a crossing the credential store shows on its own (every
+# credential of a provider disabled) still opens, saying the sessions were not read; a cut store
+# read decides nothing at all. The next pass, a minute later, reads everything again.
+STORE_SECONDS = 10.0
+PROCESS_SECONDS = 15.0
+# The transcript steps stop themselves at the evidence deadline; this much more lets the child
+# that does so be heard before it is called cut.
+STEP_GRACE = 2.0
+# Under this, a step is not started at all.
+STEP_MINIMUM = 0.5
+# The whole pass, from the process's start: the unit's 120 s less 20 s for the state, the report
+# files, the exit and a journald that answers late under load.
+RUN_SECONDS = 100.0
+# What a dispatch call leaves for the two Envoy messages after it (8 s each at most).
+SEND_RESERVE = 16.0
+# A dispatch call that would get less than this is not started: the decision it was for waits
+# for the next pass, unrecorded, rather than being recorded as an ask that never went out.
+DISPATCH_MINIMUM = 10.0
+# This pass's end, wall clock (set by run_once), and the state file's locked descriptor, which a
+# child closes: a child the kernel holds past the pass would otherwise keep the lock, and the
+# next pass would wait on it until it too was killed.
+_PASS: dict = {"deadline": float("inf"), "lock_fd": None}
+
+
+def process_started() -> float:
+    """When this process started, from /proc; now when that cannot be read."""
+    try:
+        ticks = int(Path("/proc/self/stat").read_text().rpartition(")")[2].split()[19])
+        with open("/proc/stat") as handle:
+            boot = next(int(line.split()[1]) for line in handle if line.startswith("btime "))
+        return min(time.time(), boot + ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError, StopIteration):
+        return time.time()
+
+
+def bounded(name: str, seconds: float, function, *args):
+    """(finished, value) of `function(*args)`, run in a forked child under a hard limit.
+
+    A child that has not answered in `seconds` is sent SIGKILL and not waited for: one stuck in a
+    read the kernel will not interrupt goes with the unit's cgroup once the pass exits. What the
+    child raises is raised here, so a defect still fails the unit. A step not started or cut is
+    one log line, and (False, None).
+    """
+    if seconds <= STEP_MINIMUM:
+        log(f"  {name}: not started, {max(seconds, 0):.0f} s of this pass was left for it")
+        return False, None
+    sys.stdout.flush()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child: do the step, answer, and leave without running any exit handler
+        os.close(read_fd)
+        if _PASS["lock_fd"] is not None:
+            try:
+                os.close(_PASS["lock_fd"])
+            except OSError:
+                pass
+        try:
+            payload = pickle.dumps(("return", function(*args)))
+        except BaseException as error:  # noqa: BLE001 -- raised again in the pass, never here
+            try:
+                payload = pickle.dumps(("raise", error))
+            except Exception:  # noqa: BLE001
+                payload = pickle.dumps(("raise", RuntimeError(f"{type(error).__name__}: {error}")))
+        try:
+            with os.fdopen(write_fd, "wb") as answer:
+                answer.write(payload)
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    chunks: list[bytes] = []
+    answered = False
+    until = time.monotonic() + seconds
+    with os.fdopen(read_fd, "rb", buffering=0) as source:
+        while True:
+            remaining = until - time.monotonic()
+            if remaining <= 0 or not select.select([source], [], [], remaining)[0]:
+                break
+            chunk = source.read(1 << 16)
+            if not chunk:
+                answered = True
+                break
+            chunks.append(chunk)
+    if not answered:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        log(f"  {name}: cut after {seconds:.0f} s, still running (a disk or /proc read the box has stalled)")
+        return False, None
+    os.waitpid(pid, 0)  # it closed its end, so it is already leaving
+    kind, value = pickle.loads(b"".join(chunks))
+    if kind == "raise":
+        raise value
+    return True, value
 
 
 def load_cache(path: Path) -> dict:
@@ -510,6 +618,14 @@ def transcripts_of(
     return paths, how
 
 
+def transcripts_step(
+    sessions: dict[str, int], cache: dict, now: float, deadline: float
+) -> tuple[dict[str, Path], dict, dict]:
+    """`transcripts_of` and the cache it updated, which a step run in a child has to send back."""
+    paths, how = transcripts_of(sessions, cache, now, deadline)
+    return paths, how, cache
+
+
 def auth_errors(path: Path, since: float, tail_bytes: int) -> dict[str, int]:
     """Auth errors in the tail of one transcript, by provider ('' when the line names none).
 
@@ -582,6 +698,7 @@ class State(object):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("a+")
         fcntl.flock(self.handle, fcntl.LOCK_EX)
+        _PASS["lock_fd"] = self.handle.fileno()
         self.handle.seek(0)
         try:
             self.data = json.loads(self.handle.read() or "{}")
@@ -598,6 +715,7 @@ class State(object):
 
     def close(self) -> None:
         fcntl.flock(self.handle, fcntl.LOCK_UN)
+        _PASS["lock_fd"] = None
         self.handle.close()
 
 
@@ -640,10 +758,17 @@ def alert_text(incident: dict, now: float, repeat: bool = False, news: str = "")
             f"{incident['sessions_failing']} live session(s) report an auth error for {provider} "
             f"({incident.get('errors', 0)} error(s)) in the last {human(incident['window'])}."
         )
-    lines.append(
-        f"{incident['sessions_affected']} live omp process(es) on this box read that credential store; "
-        f"{incident['sessions_elsewhere']} use another store (a --profile login) and keep working."
-    )
+    if incident.get("unread"):
+        lines.append(
+            f"Session evidence was not read this pass ({incident['unread']} cut at its limit on a"
+            " stalled box), so how many live sessions this stops is not counted yet. The disabled"
+            " credentials above are the whole evidence, and they are enough on their own."
+        )
+    else:
+        lines.append(
+            f"{incident['sessions_affected']} live omp process(es) on this box read that credential store; "
+            f"{incident['sessions_elsewhere']} use another store (a --profile login) and keep working."
+        )
     lines.append("")
     lines.append(f"Only a person can fix this. In a terminal on {host}:")
     lines.append("")
@@ -673,7 +798,10 @@ def envoy_alert_text(incident: dict, now: float, news: str, asked: bool, report:
         evidence.append(f"all {len(incident['credentials'])} {provider} credential(s) are disabled")
     if incident.get("sessions_failing"):
         evidence.append(f"{incident['sessions_failing']} live session(s) report auth errors")
-    evidence.append(f"{incident['sessions_affected']} live omp process(es) use that store")
+    if incident.get("unread"):
+        evidence.append(f"session evidence not read this pass ({incident['unread']} cut)")
+    else:
+        evidence.append(f"{incident['sessions_affected']} live omp process(es) use that store")
     return short(
         f"{head} Evidence: {'; '.join(evidence)}. Only a person can fix it, with `omp login {provider}` "
         f"in a terminal on {host}; "
@@ -774,19 +902,34 @@ def dispatch_call(arguments: list[str], options: argparse.Namespace) -> tuple[bo
     environment["DISPATCH_SESSION_ID"] = options.dispatch_session or environment.get("DISPATCH_SESSION_ID", "")
     if not environment["DISPATCH_SESSION_ID"]:
         return False, "no DISPATCH_SESSION_ID for the dispatch CLI"
+    # The CLI runs in a child of its own (`bounded`): one killed at its timeout is waited for
+    # there, never in the pass, and its time comes out of what is left of the pass.
+    timeout = min(options.dispatch_timeout, _PASS["deadline"] - time.time() - SEND_RESERVE)
+    if timeout < 1:
+        return False, "not run: this pass has no time left for the dispatch CLI"
+    finished, answer = bounded(
+        f"dispatch {arguments[0]}", timeout + 5, run_command, [str(DISPATCH_CLI), *arguments], timeout, environment
+    )
+    if not finished:
+        return False, f"the dispatch CLI did not answer inside this pass's {timeout:.0f} s"
+    status, stdout, stderr = answer
+    return status == 0, " ".join((stdout + stderr).split())[:400]
+
+
+def run_command(command: list[str], timeout: float, environment: dict | None = None) -> tuple[int, str, str]:
+    """(exit status, stdout, stderr) of a command, -1 and the error when it could not finish."""
     try:
         done = subprocess.run(
-            [str(DISPATCH_CLI), *arguments],
+            command,
             capture_output=True,
             text=True,
-            timeout=options.dispatch_timeout,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
             env=environment,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        return False, str(error)
-    output = " ".join((done.stdout + done.stderr).split())[:400]
-    return done.returncode == 0, output
+        return -1, "", str(error)
+    return done.returncode, done.stdout, done.stderr
 
 
 def ask_id(output: str) -> str:
@@ -958,8 +1101,12 @@ def tell(
 def run_once(options: argparse.Namespace) -> int:
     now = time.time()
     started = mark = time.monotonic()
-    deadline = started + EVIDENCE_SECONDS
+    # Both clocks count from the process's start (see EVIDENCE_SECONDS and RUN_SECONDS).
+    startup = max(0.0, now - process_started())
+    deadline = started + EVIDENCE_SECONDS - startup
+    _PASS["deadline"] = now - startup + RUN_SECONDS
     phases: list[str] = []
+    cut: list[str] = []
 
     def lap(name: str) -> None:
         nonlocal mark
@@ -967,15 +1114,31 @@ def run_once(options: argparse.Namespace) -> int:
         phases.append(f"{name} {here - mark:.1f}s")
         mark = here
 
+    def step(name: str, cap: float | None, function, *args):
+        """One evidence step in a child (`bounded`): `cap` seconds or the evidence budget left,
+        whichever is less; a step that stops itself at the deadline (cap None) gets STEP_GRACE
+        more to say so. Nothing runs after a step is cut."""
+        if cut:
+            return False, None
+        left = deadline - time.monotonic()
+        finished, value = bounded(name, left + STEP_GRACE if cap is None else min(cap, left), function, *args)
+        if not finished:
+            cut.append(name)
+        return finished, value
+
     db = Path(options.db)
-    rows = credentials(db)
-    providers = model_providers(rows)
+    stored, rows = step("the credential store", STORE_SECONDS, credentials, db)
+    providers = model_providers(rows or [])
     down = down_providers(providers)
     lap("store")
-    sessions, unnamed_processes, elsewhere = omp_sessions(Path(options.sessions_store))
+    sessions: dict[str, int] = {}
+    unnamed_processes = elsewhere = 0
+    finished, found = step("the process scan", PROCESS_SECONDS, omp_sessions, Path(options.sessions_store))
+    if finished:
+        sessions, unnamed_processes, elsewhere = found
     lap("processes")
     envoy = None if options.dry_run and options.no_envoy else Envoy()
-    live = envoy.live_sessions() if envoy is not None else None
+    live = envoy.live_sessions() if envoy is not None and not cut else None
     if live is not None:
         known = {session: pid for session, pid in sessions.items() if session in live}
         if known:
@@ -983,22 +1146,66 @@ def run_once(options: argparse.Namespace) -> int:
     lap("envoy")
     cache_path = Path(options.state).parent / TRANSCRIPT_CACHE
     cache = load_cache(cache_path)
-    paths, how = transcripts_of(sessions, cache, now, deadline)
+    paths: dict[str, Path] = {}
+    how = {"held": 0, "known": 0, "walked": 0, "unfound": 0, "walk_cut": False}
+    looked, found = step("the transcript lookup", None, transcripts_step, sessions, cache, now, deadline)
+    if looked:
+        paths, how, cache = found
     lap("transcripts")
-    failing, errors, recent = failing_sessions(paths, options.window, now, options.tail_bytes, deadline)
-    lap("tails")
-    save_cache(cache_path, cache, set(sessions))
-    lap("cache")
-    log(
-        f"{len(providers)} model provider(s) in {db}, {len(down)} with no enabled credential; "
-        f"{len(sessions) + unnamed_processes} live omp process(es) on this store "
-        f"({unnamed_processes} with no session id), {elsewhere} on another; transcripts: "
-        f"{how['held']} held open, {how['known']} known, {how['walked']} walked for, "
-        f"{how['unfound']} not found, {recent} written in the window"
-        + ("; the walk stopped at the budget" if how["walk_cut"] else "")
-        + ("; the evidence stopped at its budget" if time.monotonic() > deadline else "")
-        + f"; {time.monotonic() - started:.1f}s ({', '.join(phases)})"
+    failing: dict[str, set[str]] = {}
+    errors: dict[str, int] = {}
+    recent = 0
+    finished, found = step(
+        "the transcript tails", None, failing_sessions, paths, options.window, now, options.tail_bytes, deadline
     )
+    if finished:
+        failing, errors, recent = found
+    # Read before the cache is saved: whether the tails stopped at the evidence deadline.
+    over = time.monotonic() > deadline
+    lap("tails")
+    if looked:
+        save_cache(cache_path, cache, set(sessions))
+    lap("cache")
+    timing = f"{time.monotonic() - started:.1f}s ({', '.join(phases)}; start-up {startup:.1f}s)"
+    # Steps cut at their limit: what the session evidence of this pass lacks.
+    unread = ", ".join(cut)
+    if cut and not stored:
+        # No credential store, no fact: nothing is decided and nothing is written -- not the
+        # state, not the heartbeat -- and the next pass reads it all again.
+        log(
+            f"evidence cut ({unread}): this pass opens, repeats and clears nothing and"
+            f" writes no state; the next pass reads it all again; {timing}"
+        )
+        return 0
+    if cut:
+        # The store's own fact stands alone: a provider whose every credential is disabled has no
+        # login whatever the sessions say, so that crossing opens and says the sessions were not
+        # read. Anything the sessions decide waits: no crossing on their errors, no new fact, no
+        # retry, no clear, and no heartbeat.
+        log(
+            f"evidence cut ({unread}): this pass opens only a crossing the credential store shows"
+            f" on its own ({len(down)} provider(s) with no enabled credential), and repeats and"
+            f" clears nothing; {timing}"
+        )
+    # A transcript the walk or the tails did not reach can only hide errors, never add them:
+    # enough sessions reporting them is still a crossing, but quiet is not established, so no
+    # crossing clears on this pass.
+    partial = (
+        f"the session evidence was not read ({unread} cut at its limit)" if cut
+        else "the walk for transcripts stopped at the budget" if how["walk_cut"]
+        else "the transcript tails stopped at the budget" if over else ""
+    )
+    if not cut:
+        log(
+            f"{len(providers)} model provider(s) in {db}, {len(down)} with no enabled credential; "
+            f"{len(sessions) + unnamed_processes} live omp process(es) on this store "
+            f"({unnamed_processes} with no session id), {elsewhere} on another; transcripts: "
+            f"{how['held']} held open, {how['known']} known, {how['walked']} walked for, "
+            f"{how['unfound']} not found, {recent} written in the window"
+            + ("; the walk stopped at the budget" if how["walk_cut"] else "")
+            + ("; the evidence stopped at its budget" if over else "")
+            + f"; {timing}"
+        )
 
     # A provider is in trouble when its credentials are all disabled, or when enough live
     # sessions report its auth errors inside the window.
@@ -1030,6 +1237,7 @@ def run_once(options: argparse.Namespace) -> int:
             "window": options.window,
             "reason": ", ".join(reason),
             "reasons": reasons,
+            "unread": unread,
         }
 
     # The state file comes before any alert: without it a standing outage cannot be told from a
@@ -1052,15 +1260,30 @@ def run_once(options: argparse.Namespace) -> int:
         raise SystemExit(1)
     opened = state.data["open"]
     alerts = 0
+
+    def dispatch_waits(what: str) -> bool:
+        """True, with one line, when this pass has no room left for the dispatch CLI: the step is
+        then neither taken nor recorded, and the next pass takes it."""
+        room = _PASS["deadline"] - time.time() - SEND_RESERVE
+        if options.dry_run or room >= DISPATCH_MINIMUM:
+            return False
+        log(f"{what} waits for the next pass: {max(room, 0):.0f} s of this pass is left for the dispatch CLI")
+        return True
+
     try:
         for provider, incident in sorted(trouble.items()):
             record = opened.get(provider)
             if record is None:
+                if dispatch_waits(f"CROSSING {provider}"):
+                    continue
                 incident["opened"] = now
                 log(f"CROSSING {provider}: {incident['reason']}")
                 tell(incident, now, options, envoy)
                 opened[provider] = incident
                 alerts += 1
+                continue
+            if cut:
+                # A standing crossing is neither repeated nor updated on unread session evidence.
                 continue
             record.update(
                 {
@@ -1074,6 +1297,7 @@ def run_once(options: argparse.Namespace) -> int:
                         "sessions_elsewhere",
                         "reason",
                         "reasons",
+                        "unread",
                     )
                 }
             )
@@ -1085,14 +1309,23 @@ def run_once(options: argparse.Namespace) -> int:
                 continue
             news = news_of(told, facts_of(record), options)
             if news:
+                if dispatch_waits(f"NEW FACT {provider}"):
+                    continue
                 log(f"NEW FACT {provider}: {news}, {human(now - record.get('opened', now))} on")
                 tell(record, now, options, envoy, news=news)
                 alerts += 1
             elif not record.get("delivered", True) and now - record.get("told", 0) >= options.repeat:
+                if dispatch_waits(f"RETRY {provider}"):
+                    continue
                 log(f"RETRY {provider}: the last ask did not reach Dispatch")
                 tell(record, now, options, envoy, retry=True)
                 alerts += 1
         for provider in [name for name in opened if name not in trouble]:
+            if partial:
+                log(f"CLEAR {provider} held: {partial}, so quiet is not established on this pass")
+                continue
+            if dispatch_waits(f"CLEAR {provider}"):
+                continue
             record = opened.pop(provider)
             enabled = [row for row in providers.get(provider, []) if not row.get("disabled_cause")]
             cause = (
@@ -1120,8 +1353,9 @@ def run_once(options: argparse.Namespace) -> int:
                 print(text)
         state.save()
         # The end of a completed pass: what --report-failure reads to tell a slow pass from a
-        # watch that has stopped.
-        heartbeat_path(options).touch()
+        # watch that has stopped. A pass that read no session evidence did not complete.
+        if not cut:
+            heartbeat_path(options).touch()
     finally:
         state.close()
     return alerts
@@ -1182,18 +1416,19 @@ def said_this_episode(options: argparse.Namespace, name: str) -> bool:
 
 
 def journal_tail(unit: str) -> str:
-    """The unit's last 30 journal lines, for the report; why not, when they cannot be read."""
-    try:
-        done = subprocess.run(
-            ["journalctl", "--user", "-u", unit, "-n", "30", "--no-pager", "-o", "short-iso"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        return f"(journalctl failed: {error})"
-    return done.stdout.strip() or f"(journalctl printed nothing: {done.stderr.strip()[:200]})"
+    """The unit's last 30 journal lines, for the report; why not, when they cannot be read. The
+    read runs in a child (`bounded`), so a journal the box has stalled costs the report 25 s at
+    most, inside the failure handler's own 60 s."""
+    finished, answer = bounded(
+        "the unit's journal", 25.0, run_command,
+        ["journalctl", "--user", "-u", unit, "-n", "30", "--no-pager", "-o", "short-iso"], 20.0,
+    )
+    if not finished:
+        return "(journalctl did not answer in 25 s)"
+    status, stdout, stderr = answer
+    if status == -1:
+        return f"(journalctl failed: {stderr})"
+    return stdout.strip() or f"(journalctl printed nothing: {stderr.strip()[:200]})"
 
 
 def report_failure(options: argparse.Namespace) -> int:

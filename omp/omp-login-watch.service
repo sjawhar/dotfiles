@@ -15,8 +15,11 @@ IOSchedulingClass=idle
 # One pass is a read-only sqlite read, a /proc read of the omp processes, one Envoy GET and the
 # tails of the transcripts written in the last five minutes, found from the files the sessions
 # hold open and a cache, not a walk of the session tree: 0.6-3.7 s at load 250 with 51 omp
-# processes (2026-11-03). The evidence stops at 30 s whatever the box does. A run that cannot
-# finish is killed, so runs never pile up on the 60 s period. The dispatch CLI gets 60 s of it.
+# processes (2026-11-03). The evidence stops at 30 s from the process's start whatever the box
+# does: each evidence read runs in a forked child under a hard limit, and a pass whose read is
+# cut opens only a crossing the credential store shows on its own, then exits 0. A run that
+# cannot finish is killed, so runs never pile up on the 60 s period. The dispatch CLI gets 60 s
+# of it, or what is left of the pass's 100 s.
 TimeoutStartSec=120
 # The dispatch CLI is how this watch reaches a person, and it is the only alert path here that
 # needs an environment: bun on PATH, the host it belongs to, and a session id to act as. The id

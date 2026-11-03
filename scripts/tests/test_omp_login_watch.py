@@ -15,6 +15,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import signal
 import sqlite3
 import tempfile
 import time
@@ -141,7 +142,7 @@ class WatchCase(unittest.TestCase):
             "omp_sessions": WATCH.omp_sessions,
             "log": WATCH.log,
         }
-        for name in ("journal_tail", "REPORT_FALLBACK"):
+        for name in ("journal_tail", "REPORT_FALLBACK", "process_started"):
             if hasattr(WATCH, name):
                 self.restore[name] = getattr(WATCH, name)
         WATCH.Envoy = FakeEnvoy
@@ -151,6 +152,8 @@ class WatchCase(unittest.TestCase):
         WATCH.log = lambda message: None
         WATCH.journal_tail = lambda unit: "(the unit's journal, not read in a test)"
         WATCH.REPORT_FALLBACK = self.tmp / "fallback-reports"
+        # A pass's budget counts from its process's start, which in a test is pytest's.
+        WATCH.process_started = time.time
 
     def tearDown(self) -> None:
         for name, value in self.restore.items():
@@ -647,15 +650,23 @@ class FindingTheTranscripts(WatchCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.walks: list[set] = []
+        # A file, not a list: a pass reads the transcripts in a forked child (`bounded`), and
+        # only a write outside the process comes back from there.
+        self.walk_record = self.tmp / "walks.jsonl"
+        self.walk_record.touch()
         real = WATCH.walk_for
         self.restore["walk_for"] = real
 
         def counted(wanted, deadline):
-            self.walks.append(set(wanted))
+            with open(self.walk_record, "a") as record:
+                record.write(json.dumps(sorted(wanted)) + "\n")
             return real(wanted, deadline)
 
         WATCH.walk_for = counted
+
+    @property
+    def walks(self) -> list[set]:
+        return [set(json.loads(line)) for line in self.walk_record.read_text().splitlines()]
 
     def test_a_transcript_found_once_is_not_walked_for_again(self) -> None:
         db = self.store("live.db", [("anthropic", None)])
@@ -733,6 +744,148 @@ class WhichStoreASessionReads(unittest.TestCase):
             WATCH.store_of(["omp"], {"PI_CODING_AGENT_DIR": "/tmp/elsewhere"}),
             Path("/tmp/elsewhere/agent/agent.db"),
         )
+
+
+class Stalled(Exception):
+    """The pass was still blocked in a stalled read when the safety net fired."""
+
+
+class AStalledReadEndsThePassOnTime(WatchCase):
+    """The pass started 09:40:33Z on 2026-11-03 was killed at the unit's 120 s having logged
+    nothing (dispatch://INFRA-672): its evidence checks a clock between two reads, and a read the
+    box has stalled never comes back to look. Each evidence step now runs in a child under a hard
+    limit; a cut step is one line, the pass decides nothing, and it exits on time.
+
+    A stalled read is played by a FIFO nobody writes: opening it for reading blocks as a stalled
+    read blocks, and no clock checked inside the step can end it. The SIGALRM safety net only
+    lets the script before this change -- which blocks in the pass itself -- fail here instead
+    of hanging the suite."""
+
+    STALL = 30
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.logged: list[str] = []
+        WATCH.log = self.logged.append
+        for name, value in (("PROCESS_SECONDS", 2.0), ("EVIDENCE_SECONDS", 4.0)):
+            self.restore[name] = getattr(WATCH, name, None)
+            setattr(WATCH, name, value)
+        self.fifo = self.tmp / "stalled"
+        os.mkfifo(self.fifo)
+
+        def stalled(signum, frame):
+            raise Stalled(f"the pass was still blocked in a stalled read after {self.STALL} s")
+
+        previous = signal.signal(signal.SIGALRM, stalled)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.alarm, 0)
+
+    def stall(self, store) -> tuple:
+        with open(self.fifo, "rb") as handle:
+            handle.read()
+        return {}, 0, 0
+
+    def run_pass(self, db: Path, **overrides) -> float:
+        began = time.monotonic()
+        signal.alarm(self.STALL)
+        try:
+            WATCH.run_once(options(self.tmp, db, **overrides))
+        except Stalled as error:
+            self.fail(f"{error}; it logged: {self.logged}")
+        finally:
+            signal.alarm(0)
+        return time.monotonic() - began
+
+    def test_a_finished_store_read_opens_the_crossing_when_the_process_scan_is_cut(self) -> None:
+        """Every row of the provider disabled is the store's own fact: it opens the crossing on its
+        own, and the ask says the session evidence was not read."""
+        db = self.store("down.db", [("anthropic", CAUSE)])
+        self.live = {SESSIONS[0]: 101}
+        WATCH.omp_sessions = self.stall
+
+        took = self.run_pass(db)
+
+        self.assertLess(took, 2.0 + 6.0, self.logged)
+        self.assertTrue(
+            any(line.startswith("  the process scan: cut after 2 s") for line in self.logged), self.logged
+        )
+        self.assertEqual(len(self.asks()), 1, "the person is asked on the store's fact alone")
+        question = self.asks()[0][self.asks()[0].index("--question") + 1]
+        self.assertIn("Session evidence was not read this pass (the process scan cut", question)
+        self.assertNotIn("0 live omp process(es)", question)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertIn("session evidence not read this pass", self.alerts()[0])
+        self.assertFalse((self.tmp / "heartbeat").exists(), "a pass that read no sessions did not complete")
+
+        WATCH.omp_sessions = lambda store: (dict(self.live), 0, 0)
+        self.run_pass(db)
+        self.assertEqual(len(self.asks()), 1, "the next full pass repeats nothing")
+        self.assertEqual(json.loads((self.tmp / "state.json").read_text())["open"]["anthropic"]["unread"], "")
+
+    def test_a_stalled_process_read_with_every_login_working_opens_nothing(self) -> None:
+        db = self.store("up.db", [("anthropic", None)])
+        WATCH.omp_sessions = self.stall
+
+        took = self.run_pass(db)
+
+        self.assertLess(took, 2.0 + 6.0, self.logged)
+        self.assertTrue(any(line.startswith("evidence cut (the process scan)") for line in self.logged))
+        self.assertEqual(self.asks(), [])
+        self.assertEqual(self.every_alert(), [])
+        self.assertFalse((self.tmp / "heartbeat").exists(), "nor says a pass completed")
+
+    def test_a_stalled_transcript_tail_does_not_clear_an_open_crossing(self) -> None:
+        db = self.store("live.db", [("anthropic", None)])
+        self.live = {session: 100 + index for index, session in enumerate(SESSIONS[:3])}
+        paths = [
+            transcript(self.sessions_root / "-src-project", session, 2, "No API key for provider: anthropic")
+            for session in SESSIONS[:3]
+        ]
+        self.run_pass(db)
+        self.assertEqual(len(self.asks()), 1)
+        paths[0].unlink()
+        os.mkfifo(paths[0])
+
+        took = self.run_pass(db)
+
+        self.assertLess(took, 4.0 + 2.0 + 6.0, self.logged)
+        self.assertTrue(any(line.startswith("evidence cut (the transcript tails)") for line in self.logged))
+        self.assertNotIn("resolve-ask", [call[0] for call in self.calls])
+        self.assertIn("anthropic", json.loads((self.tmp / "state.json").read_text())["open"])
+
+    def test_the_evidence_budget_counts_from_the_process_start(self) -> None:
+        """62.9 s of start-up on 2026-11-03 07:37:56Z: the budget is what is left after it."""
+        db = self.store("down.db", [("anthropic", CAUSE)])
+        self.live = {SESSIONS[0]: 101}
+        WATCH.process_started = lambda: time.time() - 3.8
+
+        self.run_pass(db)
+
+        self.assertTrue(
+            any(line.startswith("  the credential store: not started") for line in self.logged), self.logged
+        )
+        self.assertEqual(self.asks(), [])
+
+
+class APartialReadClearsNothing(WatchCase):
+    """A walk stopped at the budget leaves transcripts unread; they can only hide errors, so
+    quiet is not established and an open crossing stays open."""
+
+    def test_a_walk_stopped_at_its_budget_holds_the_clear(self) -> None:
+        db = self.store("live.db", [("anthropic", None)])
+        self.live = {session: 100 + index for index, session in enumerate(SESSIONS[:3])}
+        for session in SESSIONS[:3]:
+            transcript(self.sessions_root / "-src-project", session, 2, "No API key for provider: anthropic")
+        WATCH.run_once(options(self.tmp, db))
+        self.assertEqual(len(self.asks()), 1)
+        (self.tmp / "transcripts.json").unlink()
+        self.restore.setdefault("walk_for", WATCH.walk_for)
+        WATCH.walk_for = lambda wanted, deadline: ({}, False)
+
+        WATCH.run_once(options(self.tmp, db))
+
+        self.assertNotIn("resolve-ask", [call[0] for call in self.calls])
+        self.assertIn("anthropic", json.loads((self.tmp / "state.json").read_text())["open"])
 
 
 if __name__ == "__main__":

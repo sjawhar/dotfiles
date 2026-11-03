@@ -64,12 +64,45 @@ Now each live session's transcript is, in order: the `.jsonl` its omp holds open
 (`/proc/<pid>/fd`, in-kernel readlinks, 31 of 35 sessions on 2026-11-03), the path found on an
 earlier pass (`transcripts.json` beside the state file), or, for a session known neither way, a
 walk that stops once it has found them all. A session the whole walk did not find is not walked
-for again for 10 minutes. The processes, Envoy, the transcripts and their tails share a 30 s
-budget per pass, so a pass always reaches its decision, its state and its heartbeat. Measured at
-load 250 on 2026-11-03 at the unit's `Nice=15`: 3.7 s for a pass that walked for 4 new sessions,
-then 0.6-2.6 s; the old walk alone took 0.1-2.2 s at that load. Each pass logs its seconds per
-phase (`store, processes, envoy, transcripts, tails, cache`) and how each transcript was found,
-so the next slow pass names its slow step.
+for again for 10 minutes. The credential store, the processes, Envoy, the transcripts and their
+tails share a 30 s budget per pass, counted from the moment the process started, so a pass always
+reaches its decision, its state and its heartbeat. Measured at load 250 on 2026-11-03 at the
+unit's `Nice=15`: 3.7 s for a pass that walked for 4 new sessions, then 0.6-2.6 s; the old walk
+alone took 0.1-2.2 s at that load. Each pass logs its seconds per phase (`store, processes,
+envoy, transcripts, tails, cache; start-up`) and how each transcript was found, so the next slow
+pass names its slow step.
+
+### A read that never comes back
+
+That budget was a clock the steps checked between two reads, and a read the box has stalled
+never comes back to look at it. The pass started 09:40:33Z on 2026-11-03 was killed at 120 s
+having logged nothing, and the one started 07:37:56Z spent 62.9 s in Python's start-up before
+its budget began to count (81.8 s in all). So now:
+
+| Step | Runs | Hard limit |
+|---|---|---|
+| the credential store | forked child | 10 s (`STORE_SECONDS`), or the evidence budget left |
+| the process scan (`/proc/<pid>/{comm,cmdline,environ}` of every omp) | forked child | 15 s (`PROCESS_SECONDS`), or the budget left |
+| the transcript lookup (held fds, cached paths, the walk) | forked child | the budget left, plus 2 s for it to say it stopped |
+| the transcript tails | forked child | the budget left, plus 2 s |
+| each dispatch CLI call | forked child running the CLI | `--dispatch-timeout` (60 s), or what is left of the pass's 100 s (`RUN_SECONDS`) less 16 s for the Envoy sends |
+| the failure report's journal read (`--report-failure`) | forked child | 25 s, inside that unit's 60 s |
+
+A child that has not answered at its limit gets SIGKILL and is not waited for; one the kernel
+holds in a read goes with the unit's cgroup when the pass exits, and a dispatch child closes its
+copy of the state file's lock first, so the next pass is never left waiting on it. A cut
+evidence step is one line (`  the process scan: cut after 15 s, still running …`). When the
+credential store itself was cut, the pass then opens, repeats and clears nothing, writes no state
+and no heartbeat, and exits 0. When the store was read and a later step was cut, the store's own
+fact still stands: a provider whose every credential is disabled opens its crossing, and the ask
+and the Envoy message say that session evidence was not read this pass, in place of a count of
+affected sessions. Nothing the sessions decide is done on that pass -- no crossing on their
+errors, no new fact, no retry, no clear -- and it writes no heartbeat. The next pass reads it
+all again a minute later. A pass with no room left for the dispatch CLI does not take the step
+that needs it -- `CROSSING anthropic waits for the next pass` -- rather than recording an ask
+that never went out. And a pass whose walk or tails stopped at the budget opens crossings
+(unread transcripts can only hide errors) but clears none: `CLEAR anthropic held: … quiet is not
+established`.
 
 What it gives up: a session whose omp does not hold its transcript open and that moved to a new
 transcript file keeps being read at its old path, so its errors count only once its new file is
