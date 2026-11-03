@@ -4094,6 +4094,24 @@ move_to_preflight() {
     return 0
 }
 
+# move_to_target_worktrees TARGET: refuse a copy whose destination on the target is a git WORK
+# TREE while the source here is not the same repository's: rocqperf's ~/src/oss-verifier has no
+# .git of its own (its GIT_DIR is elsewhere), so a move copied it as a plain directory into the
+# target's clone and left 272 untracked files there (N6Ready, 2026-11-03). A source that is the
+# same repository (its own .git, or the worktree the move registers through git) is fine.
+move_to_target_worktrees() {
+    local target="$1" p bad=()
+    for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        [[ -d "$p" ]] || continue
+        [[ -e "$p/.git" ]] && continue
+        [[ -e "$p/HEAD" && -e "$p/objects" ]] && continue
+        move_remote "$target" "test -e $(printf '%q' "$p/.git")" </dev/null >/dev/null 2>&1 && bad+=("$p")
+    done
+    (( ${#bad[@]} == 0 )) && return 0
+    MOVE_TO_WHY="$target keeps a git clone at $(printf '%s ' "${bad[@]}")and this machine's copy is not that repository's work tree (no .git of its own, so its GIT_DIR is elsewhere): copying it would leave untracked files in the clone. Commit and push what you need, then move with --leave for each of those paths"
+    return 1
+}
+
 # move_to_dests_writable TARGET: every path the copy writes on the target must be writable by the
 # move's user: the path itself when it exists, else its nearest existing ancestor. An EMPTY
 # directory owned by root there is what docker leaves when a box is started with a --dir that did
@@ -4387,7 +4405,18 @@ move_to_session_paths() {
 # of its own there.
 MOVE_TO_GATE_BYTES="${AGENTBOX_MOVE_GATE_BYTES:-5000000000}"
 MOVE_TO_GATE_WAIT="${AGENTBOX_MOVE_GATE_WAIT:-20}"
+# The --dir paths of this move: named, so copied as themselves even when nothing infers them.
+MOVE_TO_NAMED=()
 MOVE_TO_UNASKED=()
+# Paths no move ever copies: the kernel's own filesystems and the machine's run directories. One
+# of them in a session's inferred paths would be copied into the target's /proc or /run.
+move_to_kernel_path() {
+    case "$1" in
+        /proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*) return 0 ;;
+    esac
+    return 1
+}
+
 move_to_gate() {
     local p a asked c real size
     local -a check=() keep_mirror=() keep_merge=()
@@ -4415,12 +4444,45 @@ move_to_gate() {
             | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_GATE_WAIT" du -sxb 2>/dev/null || true)
     fi
     for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
+        move_to_kernel_path "$p" && { MOVE_TO_UNASKED+=("$p (a kernel filesystem; never copied)"); continue; }
         if move_to_gate_drops "$p"; then continue; fi
         keep_mirror+=("$p")
     done
     for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        move_to_kernel_path "$p" && { MOVE_TO_UNASKED+=("$p (a kernel filesystem; never copied)"); continue; }
         if move_to_gate_drops "$p"; then continue; fi
         keep_merge+=("$p")
+    done
+    # (b) A path the session NAMED narrows an inferred parent: the parent goes, the named one
+    # stays, so `--dir <tree>/sub` never pulls in <tree>.
+    local keep=() q narrowed
+    for p in ${keep_mirror[@]+"${keep_mirror[@]}"}; do
+        narrowed=false
+        for q in "$@"; do
+            [[ -n "$q" && "$q" != "$p" ]] && move_within "$q" "$p" && { narrowed=true; break; }
+        done
+        $narrowed || keep+=("$p")
+    done
+    keep_mirror=(${keep[@]+"${keep[@]}"}); keep=()
+    for p in ${keep_merge[@]+"${keep_merge[@]}"}; do
+        narrowed=false
+        for q in "$@"; do
+            [[ -n "$q" && "$q" != "$p" ]] && move_within "$q" "$p" && { narrowed=true; break; }
+        done
+        $narrowed || keep+=("$p")
+    done
+    keep_merge=(${keep[@]+"${keep[@]}"})
+    # A path the session NAMED with --dir and that nothing else covers is copied as itself: it
+    # was asked for. A working directory is not re-added: one that holds other sessions' trees is
+    # made empty on the target, and one every box has must be there already.
+    for q in ${MOVE_TO_NAMED[@]+"${MOVE_TO_NAMED[@]}"}; do
+        [[ -n "$q" && -e "$q" ]] || continue
+        move_to_kernel_path "$q" && continue
+        for p in ${keep_mirror[@]+"${keep_mirror[@]}"} ${keep_merge[@]+"${keep_merge[@]}"} ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"}; do
+            move_within "$q" "$p" && { q=""; break; }
+        done
+        [[ -z "$q" ]] && continue
+        if move_git_root_var "$q" && [[ "$MOVE_GIT_ROOT" == "$q" ]]; then keep_mirror+=("$q"); else keep_merge+=("$q"); fi
     done
     MOVE_TO_MIRROR=(${keep_mirror[@]+"${keep_mirror[@]}"})
     MOVE_TO_MERGE=(${keep_merge[@]+"${keep_merge[@]}"})
@@ -4503,6 +4565,17 @@ move_to_copy_lists() {
     done
     MOVE_TO_MIRROR=() MOVE_TO_MERGE=() MOVE_TO_EXCLUDE=() MOVE_TO_MKDIR=()
     mapfile -t MOVE_TO_MKDIR < <(printf '%s\n' ${mkdirs[@]+"${mkdirs[@]}"} | sed '/^$/d' | sort -u)
+    # A directory made EMPTY on the target is never also copied: another reader of the same
+    # session may name it too (its record, its src trees), and the copy would bring the tree the
+    # mkdir exists to avoid.
+    local m
+    for m in ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"}; do
+        local kept=()
+        for p in ${mirror[@]+"${mirror[@]}"}; do [[ "$p" == "$m" ]] || kept+=("$p"); done
+        mirror=(${kept[@]+"${kept[@]}"}); kept=()
+        for p in ${merge[@]+"${merge[@]}"}; do [[ "$p" == "$m" ]] || kept+=("$p"); done
+        merge=(${kept[@]+"${kept[@]}"})
+    done
     local sorted=()
     mapfile -t sorted < <(printf '%s\n' "${mirror[@]+"${mirror[@]}"}" | sort -u)
     for p in "${sorted[@]}"; do
@@ -5316,11 +5389,13 @@ cmd_move_to() {
     move_step "measuring the inferred directories the session did not name"
     local -a asked=()
     mapfile -t asked < <(printf '%s\n' ${BOX_DIRS[@]+"${BOX_DIRS[@]}"} "${cwds[@]}" $tpaths | sed '/^$/d')
+    MOVE_TO_NAMED=(${BOX_DIRS[@]+"${BOX_DIRS[@]}"})
     move_to_gate "${asked[@]}"
     local not_carried
     not_carried="$(awk -F'\t' -v ids=" ${MOVE_TO_GROUP[*]} " 'index(ids, " " $1 " ") { print $2 "\t" $3 }' <<<"$MT_TOUCHES" | move_to_not_carried)"
     move_to_cwds_present "$target" "${cwds[@]}" || move_to_or_would "$MOVE_TO_WHY"
     move_to_dests_writable "$target" || move_to_or_would "$MOVE_TO_WHY"
+    move_to_target_worktrees "$target" || move_to_or_would "$MOVE_TO_WHY"
     move_to_offbox || move_to_or_would "$MOVE_TO_WHY"
     # What of THIS session dies with the hang-up; each other member asks its own when it runs this.
     move_orphans_gate "$MOVE_SELF_PID" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"
@@ -5403,6 +5478,7 @@ move_to_in_box() {
     # directory, the transcript - or inferred at its own size (move_to_gate).
     local -a asked=()
     mapfile -t asked < <(printf '%s\n' "${@}" "$cwd" $(cut -f2 <<<"$tpaths") | sed '/^$/d')
+    MOVE_TO_NAMED=("$@")
     move_to_gate "${asked[@]}"
     local touches="" p
     if [[ -n "${own:-}" ]]; then
@@ -5681,7 +5757,7 @@ move_to_run() {
     move_to_wait_flight "$group"
     MOVE_TO_STATE="checking $target"
     if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
-        || ! move_to_dests_writable "$target" || ! move_to_offbox; then
+        || ! move_to_dests_writable "$target" || ! move_to_target_worktrees "$target" || ! move_to_offbox; then
         say "refused, nothing was hung up: $MOVE_TO_WHY"
         for ((i = 0; i < n; i++)); do
             envoy send --source envoy "${sids[i]}" "agentbox: the move to $target did not start and this session was not hung up: $MOVE_TO_WHY. (An automated notice from agentbox.)" >/dev/null 2>&1 || true

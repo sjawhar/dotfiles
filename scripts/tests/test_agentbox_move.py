@@ -2746,6 +2746,47 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(started.returncode, 0, started.stderr)
         self.assertIn("handed to a detached relauncher", started.stdout)
 
+    def test_a_named_dir_narrows_an_inferred_parent_and_kernel_paths_never_travel(self) -> None:
+        """A `--dir <tree>/sub` must narrow the inferred <tree>, not widen to it, and /proc, /sys,
+        /dev and /run are never copied."""
+        tree = self.root / "lanework"
+        sub = tree / "mine"
+        sub.mkdir(parents=True)
+        (sub / "f").write_text("x", encoding="utf-8")
+        script = (f'MOVE_TO_MIRROR=()\nMOVE_TO_MERGE=("{tree}" "/proc/1/fd" "/run/user/1000")\nMOVE_TO_MKDIR=()\n'
+                  f'MOVE_TO_NAMED=("{sub}")\nmove_to_gate "{sub}"\nprintf "merge %s\\n" ${{MOVE_TO_MERGE[@]+"${{MOVE_TO_MERGE[@]}}"}}\n'
+                  'printf "unasked %s\\n" ${MOVE_TO_UNASKED[@]+"${MOVE_TO_UNASKED[@]}"}')
+        result = self.run_bash(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"merge {sub}\n", result.stdout)
+        self.assertNotIn(f"merge {tree}\n", result.stdout)
+        self.assertNotIn("merge /proc", result.stdout)
+        self.assertNotIn("merge /run", result.stdout)
+        self.assertIn("unasked /proc/1/fd (a kernel filesystem; never copied)", result.stdout)
+
+    def test_a_target_git_clone_is_never_written_by_a_plain_directory(self) -> None:
+        """N6Ready, 2026-11-03: rocqperf's ~/src/oss-verifier has no .git of its own (its GIT_DIR
+        is elsewhere), so a move copied it as a plain directory into sami-devbox's clone and left
+        272 untracked files there. The target's paths are mapped under `far`, as in the clone
+        tests, since the stub's target machine is this one."""
+        self.target()
+        far = self.root / "target-root"
+        plain = self.src / "ops"
+        plain.mkdir(parents=True)
+        (plain / "f").write_text("x", encoding="utf-8")
+        (far / "ops" / ".git").mkdir(parents=True)
+        check = ('move_remote() { local s="${2//$STUB_SRC/$STUB_FAR}"; bash -c "$s"; }\n'
+                 f'MOVE_TO_MIRROR=("{plain}")\nMOVE_TO_MERGE=()\n'
+                 'move_to_target_worktrees devbox || echo "WHY $MOVE_TO_WHY"')
+        env = {"STUB_SRC": str(self.src), "STUB_FAR": str(far)}
+        bad = self.run_bash(check, env)
+        self.assertEqual(bad.returncode, 0, bad.stderr)
+        self.assertIn(f"WHY devbox keeps a git clone at {plain}", bad.stdout)
+        self.assertIn("would leave untracked files in the clone", bad.stdout)
+        # A source that is its own work tree is this repository's, and is fine.
+        (plain / ".git").mkdir()
+        self.assertEqual(self.run_bash(check, env).stdout.strip(), "")
+
     def test_in_a_box_the_plan_is_this_session_s_own(self) -> None:
         """GRADE, boxed with `move --self`, got "no-pane (parent 96:bun …), which only a person can
         move" from `move --plan --to` (2026-11-03 13:30Z): inside a box the host census sees only
