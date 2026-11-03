@@ -392,7 +392,14 @@ skills:
     # procedure beside the reading skill. Only the scheduled cycle runs it, in
     # its own image; a session here reads the graph with ctx-memory.
     - ctx-memory-ingest
+# 1-hour prompt-cache entries (dispatch://INFRA-1058). Without it omp writes 5-minute entries on an API key, so a
+# session idle 5-60 minutes (waiting on a reviewer, a job, a subagent) writes its whole context again. Here, not in
+# the machine-local config.local.yml: shims/omp loads that file for the default profile only, so `--profile pbc`
+# never had it, and two rewrites of it on 2026-11-03 dropped it. It reaches every provider: omp/models.yml turns off
+# the per-token OpenAI flags `long` would change (12h/24h retention at a higher write price); openai-codex and Google
+# ignore it, and on Anthropic it marks `ttl: 1h` only where the model's compat has supportsLongCacheRetention.
 providers:
+  cacheRetention: long
   anthropic:
     serverSideFallback: true
     # Sent only when the primary is Fable/Mythos. Every entry must be in that

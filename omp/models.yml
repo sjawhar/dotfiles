@@ -1,4 +1,13 @@
 providers:
+  # omp/config.yml sets `providers.cacheRetention: long` for 1-hour Claude cache entries (dispatch://INFRA-1058), and
+  # that setting reaches every provider. On api.openai.com it would make GPT-5.6+ Responses requests send
+  # `prompt_cache_options.ttl: 12h` (cache writes at 2.5x input, not 1.25x) and older models
+  # `prompt_cache_retention: 24h`. Both flags off keeps per-token OpenAI requests exactly as under `auto`: omp sends
+  # no explicit prompt-cache policy, so nothing else reads them. Tracked, so it holds on every machine and profile.
+  openai:
+    compat:
+      supportsPromptCacheBreakpoints: false
+      supportsLongPromptCacheRetention: false
   anthropic:
     # Universal catalog patches only. Anything that targets one machine's network
     # or credentials — a gateway baseUrl, an `!command` apiKey — is machine-local
