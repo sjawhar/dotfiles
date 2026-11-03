@@ -11,6 +11,7 @@ manifest, so no marker can go inside them: they live under a marked parent.
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,46 @@ def stub(directory: Path, name: str, body: str) -> None:
     p = directory / name
     p.write_text("#!/usr/bin/env bash\n" + body + "\n", encoding="utf-8")
     p.chmod(0o755)
+
+
+# Runs no-offbox with os.scandir wrapped: right after the walk lists PARENT, and before it reaches
+# VICTIM, an entry of PARENT, MODE acts on VICTIM. "remove" deletes it, as another session's
+# `git worktree remove` did, so the walk's own read of it meets a real ENOENT. "eacces" makes the
+# check of its type fail with EACCES, as lstat does on a file system without d_type when PARENT may
+# be listed but not searched.
+RACE = r'''
+import errno, os, runpy, shutil, sys
+script, parent, victim, mode, *args = sys.argv[1:]
+real_scandir = os.scandir
+
+class Unsearchable:
+    def __init__(self, entry):
+        self.name, self.path = entry.name, entry.path
+    def is_dir(self, follow_symlinks=True):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), self.path)
+
+class Listing(list):
+    def __enter__(self):
+        return iter(self)
+    def __exit__(self, *exc):
+        return False
+
+def scandir(path="."):
+    if isinstance(path, int):  # shutil.rmtree's own reads
+        return real_scandir(path)
+    with real_scandir(path) as it:
+        entries = list(it)
+    if os.fspath(path) == parent:
+        if mode == "remove":
+            shutil.rmtree(victim)
+        else:
+            entries = [Unsearchable(e) if e.path == victim else e for e in entries]
+    return Listing(entries)
+
+os.scandir = scandir
+sys.argv = [script, *args]
+runpy.run_path(script, run_name="__main__")
+'''
 
 
 class NoOffbox(unittest.TestCase):
@@ -51,6 +92,14 @@ class NoOffbox(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "SUDO_USER"}
         env["HOME"] = str(self.home)
         return subprocess.run([str(SCRIPT), *args], capture_output=True, text=True, env=env, check=False, timeout=60)
+
+    def run_race(self, parent: Path, victim: Path, mode: str, *args: str) -> subprocess.CompletedProcess[str]:
+        """run_check, with MODE done to VICTIM between the walk's listing of PARENT and its read
+        of VICTIM (RACE)."""
+        env = {k: v for k, v in os.environ.items() if k != "SUDO_USER"}
+        env["HOME"] = str(self.home)
+        argv = [sys.executable, "-c", RACE, str(SCRIPT), os.path.realpath(parent), os.path.realpath(victim), mode, *args]
+        return subprocess.run(argv, capture_output=True, text=True, env=env, check=False, timeout=60)
 
     def tree(self, rel: str) -> Path:
         p = self.data / rel
@@ -181,6 +230,69 @@ class NoOffbox(unittest.TestCase):
         ok = self.root / "ok.list"
         ok.write_text("sami/ok/result.json\nsami/ok\n", encoding="utf-8")
         self.assertEqual(self.run_check("--root", str(self.data), "--from", str(ok)).returncode, 0)
+
+    def test_a_directory_removed_during_the_walk_is_skipped_and_counted(self) -> None:
+        """S3's move at 03:06Z on 2026-11-03: `no-offbox -- <repo>/.git` refused because another
+        session removed .git/worktrees/wt69 while the walk read the tree. A path that is gone holds
+        no marker: the walk skips it, counts it on stderr, and goes on."""
+        git = self.data / "repo/.git"
+        self.tree("repo/.git/worktrees/wt68")
+        wt69 = self.data / "repo/.git/worktrees/wt69"
+        for args in (("--", str(git)), ("--excludes", str(git))):
+            self.tree("repo/.git/worktrees/wt69/logs")
+            r = self.run_race(git / "worktrees", wt69, "remove", *args)
+            self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+            self.assertFalse(wt69.exists())
+            self.assertIn(f"no-offbox: {git}: skipped 1 path gone when read", r.stderr)
+        # The walk goes on past it: a marker in a sibling still refuses the tree.
+        m = self.mark(self.tree("repo/.git/worktrees/wt70"))
+        self.tree("repo/.git/worktrees/wt69/logs")
+        r = self.run_race(git / "worktrees", wt69, "remove", "--", str(git))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"REFUSED {git}: holds marker {m}", r.stdout)
+        self.assertNotIn("cannot read", r.stdout)
+
+    def test_a_symlink_that_leads_nowhere_is_allowed_and_counted(self) -> None:
+        """A PATH that is a dangling symlink or a symlink loop resolves to nothing, so it holds no
+        marker. A symlink below a PATH is not followed, dangling or not, and is not counted."""
+        dangling = self.data / "dangling"
+        dangling.symlink_to(self.data / "removed-target")
+        loop = self.data / "loop"
+        loop.symlink_to(loop)
+        for link in (dangling, loop):
+            r = self.run_check("--", str(link))
+            self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+            self.assertIn(f"no-offbox: {link}: skipped 1 path gone when read", r.stderr)
+        t = self.tree("links")
+        (t / "dangling").symlink_to(self.data / "removed-target")
+        (t / "loop").symlink_to(t / "loop")
+        r = self.run_check(str(t))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+    def test_an_unreadable_directory_still_refuses_beside_a_gone_one(self) -> None:
+        """EACCES is not a gone path: the directory is there and may hold a marker."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads every directory")
+        store = self.data / "store"
+        locked = self.tree("store/locked")
+        gone = self.tree("store/gone")
+        locked.chmod(0)
+        r = self.run_race(store, gone, "remove", "--", str(store))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"REFUSED {store}: cannot read {locked} (Permission denied)", r.stdout)
+        self.assertNotIn(str(gone), r.stdout)
+        self.assertIn(f"no-offbox: {store}: skipped 1 path gone when read", r.stderr)
+
+    def test_a_directory_whose_type_cannot_be_read_is_refused_not_skipped(self) -> None:
+        """On a file system without d_type the walk learns that an entry is a directory from
+        lstat, which fails with EACCES when its parent may be listed but not searched. That entry
+        may be a directory that holds a marker, so the tree is refused."""
+        store = self.data / "store"
+        hidden = self.tree("store/hidden")
+        r = self.run_race(store, hidden, "eacces", "--", str(store))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"REFUSED {store}: cannot read {hidden}", r.stdout)
+        self.assertNotIn("skipped", r.stderr)
 
 
     # ── the movers that call it ──────────────────────────────────────────────────────────────

@@ -13,7 +13,14 @@ A path may not leave this machine when:
     One pattern per line; `#` starts a comment line. A line with `*`, `?` or `[` is a shell
     glob matched against the whole absolute path (`*` matches `/` too); any other line is a
     substring. Both match without regard to case.
-  - a directory below it cannot be read, so no one can tell that it holds no marker.
+  - a directory below it cannot be read (EACCES, or any error but the gone ones below), so no
+    one can tell that it holds no marker.
+
+A path gone when read holds no marker, so it is skipped and counted, not refused as unreadable:
+a directory removed while the walk runs (another session's `git worktree remove` in a shared
+.git), a PATH that does not exist, or a symlink that leads nowhere (the errors ENOENT, ENOTDIR and
+ELOOP). The directories above a gone PATH are still checked. Each PATH with gone paths prints
+`no-offbox: <path>: skipped N path(s) gone when read ...` on stderr; the exit status is unchanged.
 
 Exit 0: every path may leave. Exit 1: at least one may not; each refusal is printed as a line,
 `no-offbox: REFUSED <path>: <why>`, the why naming the marker file or the pattern it found.
@@ -28,10 +35,12 @@ status but 0: the marker means refusal, never a prompt.
             directories above it and against the patterns, NOT walked: such a list names every
             file itself. A directory's marker check is done once for all its entries.
 
-Symlinks below a path are not followed (rsync -a and tar copy the link). A PATH that is a
-symlink is checked both as written and as resolved.
+Symlinks below a path are not followed (rsync -a and tar copy the link), so one that leads
+nowhere is copied as a link and not counted. A PATH that is a symlink is checked both as written
+and as resolved.
 """
 
+import errno
 import fnmatch
 import os
 import pwd
@@ -40,6 +49,9 @@ import sys
 
 MARKER = ".no-offbox"
 ME = "no-offbox"
+# The errors of a path gone when read: removed while the check runs, or a symlink that leads
+# nowhere. Such a path holds no marker. Every other error (EACCES) leaves its answer unknown.
+GONE = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
 
 
 def pattern_files():
@@ -94,17 +106,16 @@ class Checker:
         return None
 
     def marker_in(self, d):
-        """The marker file of directory d, '' when it has none, None when d cannot be searched."""
+        """The marker file of directory d, '' when it has none or is gone, None when d cannot be
+        searched."""
         if d in self.marker_cache:
             return self.marker_cache[d]
         m = os.path.join(d, MARKER)
         try:
             os.lstat(m)
             found = m
-        except (FileNotFoundError, NotADirectoryError):
-            found = ""
-        except PermissionError:
-            found = None
+        except OSError as e:
+            found = "" if e.errno in GONE else None
         self.marker_cache[d] = found
         return found
 
@@ -127,9 +138,18 @@ class Checker:
             d = os.path.dirname(d)
 
     def below(self, real, shown):
-        """[(exclude, why)] for each finding under directory `real`, walked without following
-        symlinks; each path is printed under `shown`, the PATH as given."""
-        out = []
+        """([(exclude, why)], gone): each finding under directory `real`, walked without following
+        symlinks, each path printed under `shown`, the PATH as given; and the count of paths gone
+        when read, which are skipped."""
+        out, gone = [], 0
+
+        def unread(path, err):
+            nonlocal gone
+            if err.errno in GONE:
+                gone += 1
+            else:
+                out.append((path, f"cannot read {path} ({err.strerror}), so cannot tell it holds no marker"))
+
         stack = [real]
         while stack:
             d = stack.pop()
@@ -137,8 +157,8 @@ class Checker:
             try:
                 with os.scandir(d) as it:
                     entries = list(it)
-            except OSError as e:
-                out.append((sd, f"cannot read {sd} ({e.strerror}), so cannot tell it holds no marker"))
+            except OSError as err:
+                unread(sd, err)
                 continue
             if any(e.name == MARKER for e in entries):
                 out.append((sd, f"holds marker {os.path.join(sd, MARKER)}"))
@@ -152,23 +172,24 @@ class Checker:
                 try:
                     if e.is_dir(follow_symlinks=False):
                         stack.append(e.path)
-                except OSError:
-                    pass
-        return out
+                except OSError as err:
+                    unread(sp, err)
+        return out, gone
 
     def tree(self, arg):
-        """[(exclude, why)] for one PATH: from above it first; only when nothing above refuses
-        it is the tree below walked, since the PATH goes whole otherwise."""
+        """([(exclude, why)], gone) for one PATH: from above it first; only when nothing above
+        refuses it is the tree below walked, since the PATH goes whole otherwise. gone counts the
+        paths gone when read: the PATH itself when it leads nowhere, or those the walk met."""
         lex = os.path.abspath(arg)
         real = os.path.realpath(arg)
         whys = []
         for p in dict.fromkeys((lex, real)):
             whys += self.above(p)
         if whys:
-            return [(lex, w) for w in dict.fromkeys(whys)]
+            return [(lex, w) for w in dict.fromkeys(whys)], 0
         if os.path.isdir(real):
             return self.below(real, lex)
-        return []
+        return [], int(not os.path.exists(real))
 
     def entry(self, path):
         """Findings for one entry of a --no-recursion list: the path and the directories above it."""
@@ -232,10 +253,13 @@ def main(argv):
     if not paths:
         usage("no PATH given")
     for arg in paths:
-        findings = chk.tree(arg)
+        findings, gone = chk.tree(arg)
         for exc, why in findings:
             refused = True
             print(f"{ME}: REFUSED {arg}: {why}", file=sys.stderr if excludes else sys.stdout)
+        if gone:
+            print(f"{ME}: {arg}: skipped {gone} path{'s' if gone > 1 else ''} gone when read (removed while the "
+                  "check ran, or a symlink that leads nowhere); a gone path holds no marker", file=sys.stderr)
         if excludes:
             for exc in dict.fromkeys(e for e, _ in findings):
                 sys.stdout.write(exc + ("\0" if nul else "\n"))
