@@ -3836,7 +3836,7 @@ move_to_cwds_present() {
     shift
     for cwd in "$@"; do
         covered=false
-        for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"} ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"}; do
             if move_within "$cwd" "$p"; then covered=true; break; fi
         done
         $covered && continue
@@ -3978,6 +3978,10 @@ move_to_own_git_tree() {
     if move_within "$MOVE_GIT_ROOT" "$dots" || move_within "$MOVE_GIT_ROOT" "$HOME/.dotfiles"; then return 1; fi
     printf '%s\n' "$MOVE_GIT_ROOT"
 }
+# move_to_holds_trees DIR: DIR, in no git tree itself, has a git tree below it.
+move_to_holds_trees() {
+    [[ -n "$(find "$1" -mindepth 2 -maxdepth 4 -name .git -print -quit 2>/dev/null)" ]]
+}
 MOVE_TO_DIRS=() MOVE_TO_SHARE=() MOVE_TO_COPY=()
 move_to_session_paths() {
     local pid="$1" sid="$2" cwd="$3" path why kind store
@@ -4020,6 +4024,14 @@ move_to_session_paths() {
                 continue
             fi
             echo "agentbox: $path (session $sid's working directory) is not copied: it holds many sessions' trees or every box has it; the target must have it already" >&2
+            continue
+        fi
+        # A working directory that holds other trees (a lead's root, ~/Code/personal/theorem with
+        # its worktrees, 881 MiB, for S3 on 2026-11-03) is made EMPTY on the target: the box starts
+        # there, and only what the session used inside it is copied into it.
+        if [[ "$path" == "$cwd" ]] && ! move_git_root_var "$path" && move_to_holds_trees "$path"; then
+            echo "agentbox: $path (session $sid's working directory) is made empty on the target: it holds other trees, so only the paths the session used inside it are copied" >&2
+            MOVE_TO_COPY+=("mkdir	$path")
             continue
         fi
         case "$why" in
@@ -4068,22 +4080,25 @@ move_to_session_paths() {
 # (copied with deletions) and MOVE_TO_MERGE (no deletion, nothing newer replaced), each the
 # smallest set of paths covering the others, with a symlink's target beside the link. A working
 # tree's own .git directory goes to MOVE_TO_MERGE, and MOVE_TO_EXCLUDE keeps the mirror off it.
-MOVE_TO_MIRROR=() MOVE_TO_MERGE=() MOVE_TO_EXCLUDE=()
+# "mkdir\t<path>" lines go to MOVE_TO_MKDIR: directories made EMPTY on the target, since the
+# session works in them but they hold other sessions' trees (move_to_holds_trees).
+MOVE_TO_MIRROR=() MOVE_TO_MERGE=() MOVE_TO_EXCLUDE=() MOVE_TO_MKDIR=()
 move_to_copy_lists() {
     local kind path real store p q keep
-    local -a mirror=() merge=()
+    local -a mirror=() merge=() mkdirs=()
     while IFS=$'\t' read -r kind path; do
         [[ -n "$path" ]] || continue
         [[ -e "$path" || -L "$path" ]] || continue
         for p in "$path" "$(readlink -f "$path" 2>/dev/null || true)"; do
             [[ -n "$p" && ( -e "$p" || -L "$p" ) ]] || continue
-            if [[ "$kind" == merge ]]; then merge+=("$p"); else mirror+=("$p"); fi
+            case "$kind" in merge) merge+=("$p") ;; mkdir) mkdirs+=("$p") ;; *) mirror+=("$p") ;; esac
         done
-        if [[ -d "$path" ]] && move_git_root_var "$path" && [[ "$MOVE_GIT_ROOT" == "$path" ]]; then
+        if [[ "$kind" != mkdir && -d "$path" ]] && move_git_root_var "$path" && [[ "$MOVE_GIT_ROOT" == "$path" ]]; then
             while IFS= read -r store; do merge+=("$store"); done < <(move_git_storage "$path")
         fi
     done
-    MOVE_TO_MIRROR=() MOVE_TO_MERGE=() MOVE_TO_EXCLUDE=()
+    MOVE_TO_MIRROR=() MOVE_TO_MERGE=() MOVE_TO_EXCLUDE=() MOVE_TO_MKDIR=()
+    mapfile -t MOVE_TO_MKDIR < <(printf '%s\n' ${mkdirs[@]+"${mkdirs[@]}"} | sed '/^$/d' | sort -u)
     local sorted=()
     mapfile -t sorted < <(printf '%s\n' "${mirror[@]+"${mirror[@]}"}" | sort -u)
     for p in "${sorted[@]}"; do
@@ -4110,6 +4125,9 @@ move_to_copy_lists() {
 # own absolute path on the target. No marker is ever copied.
 move_to_copy() {
     local target="$1" stamp="$2" excludes=() p
+    if (( ${#MOVE_TO_MKDIR[@]} )); then
+        move_remote "$target" "mkdir -p $(printf '%q ' "${MOVE_TO_MKDIR[@]}")" </dev/null || return 1
+    fi
     for p in ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"}; do
         if [[ -d "$p" ]]; then excludes+=("--exclude=$p/"); else excludes+=("--exclude=$p"); fi
     done
@@ -4488,8 +4506,9 @@ move_to_job() {
         --argjson mirror "$(move_json_array ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"})" \
         --argjson merge "$(move_json_array ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"})" \
         --argjson exclude "$(move_json_array ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"})" \
+        --argjson mkdir "$(move_json_array ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"})" \
         --argjson ssh "$(move_json_array "${MOVE_TO_SSH[@]}")" \
-        '{to: $to, group: $group, from: $from, ssh: $ssh, members: $members, mirror: $mirror, merge: $merge, exclude: $exclude}' \
+        '{to: $to, group: $group, from: $from, ssh: $ssh, members: $members, mirror: $mirror, merge: $merge, exclude: $exclude, mkdir: $mkdir}' \
         >"$job" || return 1
     printf '%s\n' "$job"
 }
@@ -4626,6 +4645,10 @@ cmd_move_to() {
     printf '  %s\n' ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}
     echo "merged into $target (git storage: nothing newer there replaced, nothing deleted):"
     printf '  %s\n' ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}
+    if (( ${#MOVE_TO_MKDIR[@]} )); then
+        echo "made EMPTY on $target (a working directory that holds other sessions' trees; only what is listed above is copied into it):"
+        printf '  %s\n' "${MOVE_TO_MKDIR[@]}"
+    fi
     for m in "${members[@]}"; do
         jq -r --arg t "$MOVE_TO_AGENTBOX" '"  \(.sid): tmux window moved:\(.sid[0:8]) on the target runs \($t) new \(.spec | join(" ")) -- omp --resume \(.resume)"' <<<"$m"
     done
@@ -4721,6 +4744,7 @@ move_to_run() {
     mapfile -t MOVE_TO_MIRROR < <(jq -r '.mirror[]' "$job")
     mapfile -t MOVE_TO_MERGE < <(jq -r '.merge[]' "$job")
     mapfile -t MOVE_TO_EXCLUDE < <(jq -r '.exclude[]' "$job")
+    mapfile -t MOVE_TO_MKDIR < <(jq -r '(.mkdir // [])[]' "$job")
     say() { echo "$(date -u +%FT%TZ) move-to $group: $*"; }
     member_spec() { mapfile -t MOVE_SPEC < <(jq -r ".members[$1].spec[]" "$job"); }
     member_tmux() {
@@ -4940,6 +4964,7 @@ cmd_move_plan_to() {
             copy+="${MT_COPY[$m]}"$'\n'
         done
         move_to_copy_lists <<<"$copy"
+        (( ${#MOVE_TO_MKDIR[@]} == 0 )) || text+=$'\n'"    made EMPTY on $target (it holds other trees; only the paths below are copied into it): ${MOVE_TO_MKDIR[*]}"
         g_name+=("$g")
         g_text+=("$text")
         g_mirror+=("$(printf '%s\n' ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"})")

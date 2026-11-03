@@ -2027,6 +2027,37 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual([m["sid"] for m in doc["members"]], [self.TO])
         self.assertIn(str(shared), doc["mirror"])
 
+    def test_a_working_directory_that_holds_other_trees_is_made_empty_not_copied(self) -> None:
+        """S3, 2026-11-03: its working directory ~/Code/personal/theorem holds 881 MiB of other
+        sessions' worktrees, and the move would have copied all of it. The target gets it empty;
+        only what the session used is copied."""
+        theorem = self.home / "Code" / "personal" / "theorem"
+        (theorem / "worktrees" / "other" / ".git").mkdir(parents=True)
+        (theorem / "big.bin").write_text("x" * 1000, encoding="utf-8")
+        mine = self.home / "tmp" / "frac-verify" / "s3"
+        mine.mkdir(parents=True)
+        self.make_proc(999999966, comm="bash", ppid=1, cwd=theorem)
+        self.make_proc(999999967, ppid=999999966, cwd=theorem, session=self.TO)
+        self.set_pids(999999967)
+        self.set_panes({999999966: ("%98", "agents:9.8")})
+        self.target()
+        moved = self.move_to(f'--to devbox --dir "{mine}"', own=999999967)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertIn(f"{theorem} (session {self.TO}'s working directory) is made empty on the target", moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        self.assertEqual(doc["mkdir"], [str(theorem)])
+        self.assertNotIn(str(theorem), doc["mirror"] + doc["merge"])
+        self.assertIn(str(mine), doc["mirror"] + doc["merge"])
+        self.assertEqual(doc["members"][0]["spec"][:2], ["--dir", str(theorem)])
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        ssh = (self.remote / "SSH").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(any("mkdir" in line and str(theorem) in line for line in ssh), ssh[-3:])
+        self.assertTrue(theorem.is_dir())
+        self.assertNotIn(str(theorem), (self.root / "RSYNC").read_text(encoding="utf-8"))
+
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own
         group, found as `move --to` finds it - and reads no other session's paths; --group names
