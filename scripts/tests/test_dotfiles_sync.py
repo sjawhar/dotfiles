@@ -505,5 +505,116 @@ class PublishUnderSessionGuard(Publish):
         self.assertEqual(self.run_ok("git", "show", f"{self.origin_main()}:other.txt", cwd=self.origin), "my edit\n")
 
 
+class PublishDivergent(DotfilesCheckout):
+    """A change held by two commits. On 2026-11-03 two `jj commit` runs raced and gave two
+    sessions' different work one change id. A copy may be dropped only when a copy on main@origin
+    has its tree byte for byte, it has no children, and the working copy is not built on it; any
+    other case is refused, and nothing is dropped or pushed."""
+
+    def origin_main(self) -> str:
+        return self.run_ok("git", "rev-parse", "main", cwd=self.origin).strip()
+
+    def publish(self, rev: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(PUBLISH), rev], env=self.env, capture_output=True, text=True)
+
+    def git(self, *args: str, **env: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=self.checkout, env={**self.env, **env}, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, f"git {args}: {result.stderr}")
+        return result.stdout.strip()
+
+    def copy_of(self, commit: str, other_txt: str | None = None) -> str:
+        """A commit with <commit>'s parent and change-id header, another committer time, and, when
+        other_txt is given, a tree whose other.txt holds it: the second commit of the change."""
+        tree = self.git("rev-parse", f"{commit}^{{tree}}")
+        if other_txt is not None:
+            index = str(Path(self.temp_dir.name) / "copy-index")
+            self.git("read-tree", commit, GIT_INDEX_FILE=index)
+            blob = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"], cwd=self.checkout, env=self.env,
+                input=other_txt, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            self.git("update-index", "--cacheinfo", f"100644,{blob},other.txt", GIT_INDEX_FILE=index)
+            tree = self.git("write-tree", GIT_INDEX_FILE=index)
+        lines = self.git("cat-file", "commit", commit).split("\n")
+        out = []
+        for line in lines:
+            if line.startswith("tree "):
+                line = f"tree {tree}"
+            elif line.startswith("committer "):
+                line = line.rsplit(" ", 2)[0] + " 1700000000 +0000"
+            out.append(line)
+        return subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=self.checkout, env=self.env,
+            input="\n".join(out) + "\n", capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def visible(self, change: str) -> set[str]:
+        return set(self.jj("log", "-r", f"change_id({change})", "--no-graph", "-T", 'commit_id ++ " "').split())
+
+    def test_two_copies_with_different_work_are_both_kept_and_nothing_is_pushed(self) -> None:
+        (self.checkout / "other.txt").write_text("my edit\n")
+        self.jj("commit", "--quiet", "-m", "mine", "other.txt")
+        mine = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+        change = self.jj("log", "-r", "@-", "--no-graph", "-T", "change_id")
+        theirs = self.copy_of(mine, other_txt="their edit\n")
+        self.git("update-ref", "refs/heads/race", theirs)
+        self.jj("git", "import", "--quiet")
+        self.assertEqual(self.visible(change), {mine, theirs})
+        upstream_head = self.origin_main()
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is divergent: 2 commits hold it", result.stderr)
+        self.assertIn(mine[:12], result.stderr)
+        self.assertIn(theirs[:12], result.stderr)
+        self.assertIn("abandons none of them", result.stderr)
+        self.assertIn("Publish each", result.stderr)
+        self.assertEqual(self.visible(change), {mine, theirs})
+        self.assertEqual(self.origin_main(), upstream_head)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+
+    def main_copy(self) -> tuple[str, str, str]:
+        """My commit, and a copy of it with the same tree pushed to main by another machine."""
+        (self.checkout / "other.txt").write_text("my edit\n")
+        self.jj("commit", "--quiet", "-m", "mine", "other.txt")
+        mine = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+        change = self.jj("log", "-r", "@-", "--no-graph", "-T", "change_id")
+        on_main = self.copy_of(mine)
+        self.git("push", "-q", "origin", f"{on_main}:refs/heads/main")
+        self.jj("git", "fetch", "--quiet")
+        self.assertEqual(self.visible(change), {mine, on_main})
+        return mine, on_main, change
+
+    def test_a_copy_main_holds_byte_for_byte_with_no_children_is_dropped(self) -> None:
+        mine, on_main, change = self.main_copy()
+        self.jj("new", "--quiet", on_main)
+        self.assertEqual(self.jj("log", "-r", f"children({mine})", "--no-graph", "-T", "commit_id"), "")
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("dropped the copies main@origin already holds byte for byte", result.stderr)
+        self.assertIn("already has", result.stdout)
+        self.assertEqual(self.visible(change), {on_main})
+        self.assertEqual(self.origin_main(), on_main)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "my edit\n")
+
+    def test_a_copy_main_holds_byte_for_byte_but_the_working_copy_is_built_on_is_refused(self) -> None:
+        mine, on_main, change = self.main_copy()
+        (self.checkout / "wip.txt").write_text("another session's edit\n")
+
+        result = self.publish(change)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is divergent", result.stderr)
+        self.assertIn("it has children", result.stderr)
+        self.assertEqual(self.visible(change), {mine, on_main})
+        self.assertEqual(self.origin_main(), on_main)
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "another session's edit\n")
+
+
 if __name__ == "__main__":
     unittest.main()

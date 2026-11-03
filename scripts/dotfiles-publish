@@ -25,6 +25,11 @@
 #     would drop them from the working copy, so from the files on disk. On 2026-11-02 at 15:46Z
 #     two such commits sat under an earlyoom-kill-watch commit and went into its push, which
 #     the leak check refused.
+#   - <commit>'s change is divergent (more than one commit holds it): a copy is dropped only when a
+#     copy on main@origin has its tree byte for byte, it has no children, and the working copy is
+#     not built on it; when every copy off main is such a copy, main already has the change and
+#     nothing is pushed. Any other case is refused, abandons nothing and pushes nothing: on
+#     2026-11-03 two `jj commit` runs raced and gave two sessions' different work one change id.
 # A refused or partial run leaves every file on disk as it was, and leaves no duplicate behind:
 # every copy this run makes and does not push is abandoned on any exit, with --ignore-immutable,
 # since a copy carries its original's description and so its session's trailer. On 2026-11-02 at
@@ -46,7 +51,10 @@ die() { echo "dotfiles-publish: $*" >&2; exit 1; }
 rev="$1"
 cd "${DOTFILES_DIR:-$HOME/.dotfiles}"
 [[ -d .jj ]] || die "$PWD is not a jj checkout"
-change="$(jj log -r "$rev" --no-graph -T 'change_id ++ "\n"' 2>/dev/null)" \
+# A divergent change id is no single revision to jj, so it is asked again as change_id(<id>), which
+# names each of its commits; they share the change, which settle_divergence below judges.
+change="$( { jj log -r "$rev" --no-graph -T 'change_id ++ "\n"' 2>/dev/null \
+    || jj log -r "change_id($rev)" --no-graph -T 'change_id ++ "\n"' 2>/dev/null; } | sort -u)" \
     || die "no single commit is named $rev"
 [[ "$change" =~ ^[k-z]{32}$ ]] || die "$rev names more than one commit"
 
@@ -67,6 +75,42 @@ current() {
         || die "change $change of $rev has no visible commit"
     [[ "$id" =~ ^[0-9a-f]{40}$ ]] || die "change $change of $rev is divergent (more than one commit); abandon the extra copies"
     echo "$id"
+}
+
+# A change held by more than one commit (two `jj commit` runs that raced, or a copy jj fetched)
+# is settled here, before anything moves. A copy is dropped ONLY when nothing unique is lost: its
+# tree is byte-identical to the tree of a copy already on main@origin, it has no children, and it
+# is not an ancestor of the working copy. When every copy off main is such a copy, they are
+# abandoned and the copy on main is what remains. Any other case is refused and drops nothing:
+# on 2026-11-03 two copies of one change held two sessions' different work, and abandoning either
+# would have lost it.
+settle_divergence() {
+    local ids on_main c m tree match why drop="" report="" n=0 keep=0
+    ids="$(jj log -r "change_id($change)" --no-graph -T 'commit_id ++ " "' 2>/dev/null)" || return 0
+    for c in $ids; do n=$((n + 1)); done
+    (( n > 1 )) || return 0
+    on_main="$(jj log -r "change_id($change) & ::main@origin" --no-graph -T 'commit_id ++ " "')"
+    for c in $ids; do
+        why=""
+        if [[ " $on_main " == *" $c "* ]]; then
+            why="on main@origin"
+        else
+            tree="$(git rev-parse "$c^{tree}")" match=""
+            for m in $on_main; do [[ "$(git rev-parse "$m^{tree}")" == "$tree" ]] && match="$m"; done
+            if [[ -z "$match" ]]; then why="its tree is not that of a copy on main@origin"
+            elif [[ -n "$(jj log -r "children($c)" --no-graph -T 'commit_id')" ]]; then why="it has children"
+            elif [[ -n "$(jj log -r "$c & ::@" --no-graph -T 'commit_id')" ]]; then why="the working copy is built on it"
+            else why="the same tree as ${match:0:12} on main@origin, no children: dropped" drop+="${drop:+|}$c"
+            fi
+            [[ "$why" == *dropped ]] || keep=$((keep + 1))
+        fi
+        report+="${report:+; }$(owned "$c") \"$(jj log -r "$c" --no-graph -T 'description.first_line()')\": $why"
+    done
+    if (( keep )) || [[ -z "$on_main" ]]; then
+        die "change $change of $rev is divergent: $n commits hold it ($report). They may hold different work, so this run abandons none of them and publishes nothing. Publish each: give all but one a change id of its own (\`jj metaedit --update-change-id <commit id>\`) and run dotfiles-publish on each, or cherry-pick each onto origin/main in a scratch clone and push it."
+    fi
+    jj abandon --quiet --ignore-immutable "$drop"
+    echo "dotfiles-publish: change $change of $rev was divergent ($report); dropped the copies main@origin already holds byte for byte" >&2
 }
 
 # on_main <commit>: true when main@origin already has <commit>'s change, as when it was published
@@ -90,8 +134,13 @@ attempt=0
 while :; do
     attempt=$((attempt + 1))
     jj git fetch --quiet
+    settle_divergence
     commit="$(current)"
     [[ "$(jj log -r "$commit" --no-graph -T 'empty')" != true ]] || die "$rev is empty: nothing to publish"
+    if [[ -n "$(jj log -r "$commit & ::main@origin" --no-graph -T 'commit_id')" ]]; then
+        echo "dotfiles-publish: main@origin already has $rev ($commit); nothing to publish"
+        exit 0
+    fi
     push="$commit"
     # Commits under <commit> that main does not have are someone else's unpublished work.
     below="$(jj log -r "::$commit- ~ ::main@origin" --no-graph -T 'commit_id ++ " "')"
