@@ -4,30 +4,54 @@
 # server too. A CTX_SERVER the caller set wins, and an empty one means a local tree
 # (`CTX_SERVER= ctx --memory <tree> …`), which ctx reads as unset.
 #
-# Which server depends on the omp profile. A session of the `personal` profile keeps Sami's own
-# life in his own tree on this machine, and must never read or write the team's: a search there
-# would send a contact's name over company infrastructure, and a write would commit a personal
-# fact into the company tree under his login. So the personal profile execs `pctx`, which names
-# the personal deployment, and every other profile gets the team server. Naming the personal
-# server in a skill or a habit is not enough, because the shared `ctx-memory` skill tells every
-# session to run plain `ctx`.
+# Two deployments. Sami's personal one keeps his own life in his own tree and must never reach
+# the team's: a search there would send a contact's name over company infrastructure, and a write
+# would commit a personal fact into the company tree under his login. The personal one is chosen
+# when the session runs in the `personal` omp profile, or when the caller names it with
+# CTX_PERSONAL_ROOT (the personal deployment's scripts do). Naming the personal server in a skill
+# or a habit is not enough, because the shared `ctx-memory` skill tells every session to run
+# plain `ctx`. Every other call gets the team server.
 #
-# Resolution: the mise pin ("github:sjawhar/ctx-memory" in mise.toml), looked up with
-# `mise which -C /` so a project's own mise configuration does not move it and mise's own shim,
-# which hands an unresolved call back to PATH, is never in the loop. It never execs itself.
+# The personal deployment describes itself in its root directory (CTX_PERSONAL_ROOT, else
+# $XDG_DATA_HOME/ctx-personal): `server-url` names its server, `ctx-version` the release it runs,
+# and an executable `bin/ctx` overrides that release while a change it needs is unreleased.
+#
+# The team deployment's binary is the mise pin ("github:sjawhar/ctx-memory" in mise.toml), looked
+# up with `mise which -C /` so a project's own mise configuration does not move it and mise's own
+# shim, which hands an unresolved call back to PATH, is never in the loop. It never execs itself.
 set -u
-
-if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal ]]; then
-	pctx="${DOTFILES_DIR:-$HOME/.dotfiles}/shims/pctx"
-	if [[ ! -x "$pctx" ]]; then
-		echo "ctx shim: the personal profile needs $pctx, which is missing" >&2
-		exit 127
-	fi
-	exec "$pctx" "$@"
-fi
 
 mise="$(command -v mise 2>/dev/null || true)"
 [[ -n "$mise" ]] || mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+
+if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-}" ]]; then
+	root="${CTX_PERSONAL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ctx-personal}"
+	real="$root/bin/ctx"
+	if [[ ! -x "$real" ]]; then
+		version="$(cat "$root/ctx-version" 2>/dev/null)"
+		dir=""
+		[[ -n "$version" ]] && dir="$("$mise" where -C / "github:sjawhar/ctx-memory@$version" 2>/dev/null)"
+		real="$dir/ctx"
+		if [[ -z "$dir" || ! -x "$real" ]]; then
+			echo "ctx shim: the personal deployment at $root names no installed ctx (bin/ctx or ctx-version '$version')" >&2
+			exit 127
+		fi
+	fi
+	if [[ -z "${CTX_SERVER+set}" ]]; then
+		CTX_SERVER="$(cat "$root/server-url" 2>/dev/null)"
+		if [[ -z "$CTX_SERVER" ]]; then
+			echo "ctx shim: the personal deployment at $root has no server-url" >&2
+			exit 127
+		fi
+	fi
+	export CTX_SERVER
+	export CTX_DATA_DIR="${CTX_DATA_DIR-$root/data}"
+	export CTX_STATE_DIR="${CTX_STATE_DIR-$root/state}"
+	# ctx refuses --memory beside a configured server, so a tree is named only for a local read.
+	if [[ -z "$CTX_SERVER" ]]; then export CTX_MEMORY="${CTX_MEMORY-$root/tree}"; else unset CTX_MEMORY; fi
+	exec "$real" "$@"
+fi
+
 real="$(MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}" "$mise" which -C / ctx --tool github:sjawhar/ctx-memory 2>/dev/null)" || real=""
 if [[ -z "$real" || ! -x "$real" ]]; then
 	echo "ctx shim: mise did not resolve the pinned github:sjawhar/ctx-memory; run \`mise install\`" >&2
