@@ -1994,7 +1994,6 @@ class GcloudSessionConfig(unittest.TestCase):
     def test_the_old_directory_where_this_does_not_apply(self) -> None:
         own = str(Path(self.tmp.name) / "own")
         self.assertEqual(self.run_shim(["auth", "list"], CLOUDSDK_CONFIG=own), own)
-        self.assertEqual(self.run_shim(["auth", "list"], AGENTBOX_SESSION="1"), "<unset>")
         self.assertEqual(self.run_shim(["auth", "list"], OMP_SESSION_ID=None), "<unset>")
         self.assertEqual(self.run_shim(["auth", "list"], AGENT_SESSION_SCRATCH=None), "<unset>")
         self.assertFalse(self.copy.exists())
@@ -2010,6 +2009,17 @@ class GcloudSessionConfig(unittest.TestCase):
                 self.assertEqual(self.run_shim(["auth", "list"]), str(self.copy))
                 self.assertEqual(self.rows(self.copy / "credentials.db"), ["-".join(args)])
         self.assertTrue(list(self.scratch.glob("gcloud.replaced.*")))
+
+    def test_an_agentbox_session_runs_on_a_copy_in_the_box_tmp(self) -> None:
+        box_tmp = Path(self.tmp.name) / "box-tmp"
+        box_tmp.mkdir()
+        box_copy = box_tmp / "agentbox-gcloud-session" / "gcloud"
+        got = self.run_shim(["storage", "ls"], AGENT_SESSION_SCRATCH=None, AGENTBOX_BOX="agentbox-0123", TMPDIR=str(box_tmp))
+        self.assertEqual(got, str(box_copy))
+        self.assertEqual(self.rows(box_copy / "credentials.db"), ["refresh-1"])
+        self.assertEqual(stat.S_IMODE(box_copy.parent.stat().st_mode), 0o700)
+        self.assertFalse(self.copy.exists())
+        self.assertEqual(self.rows(self.origin / "credentials.db"), ["refresh-1"], "the box's seed was written")
 
     def test_a_copy_that_cannot_be_made_leaves_the_call_on_the_shared_directory(self) -> None:
         (self.origin / "credentials.db").write_text("not a sqlite database")

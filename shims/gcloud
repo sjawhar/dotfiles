@@ -479,10 +479,13 @@ agent_context() {
 # locked` lines an hour. So an agent session's gcloud runs with CLOUDSDK_CONFIG at
 # $AGENT_SESSION_SCRATCH/gcloud: the session's own scratch directory (scripts/agent-session;
 # devbox/session-scratch-reap removes it when the session ends), seeded from ~/.config/gcloud at the
-# session's first call by scripts/gcloud-session-config. It is left alone when the caller set
-# CLOUDSDK_CONFIG (the Linux eval lane gives each attempt its own), in an agentbox, whose
-# container binds the host's .config/gcloud read-write, and where no copy can be made (the call
-# then runs on ~/.config/gcloud as before). A command whose change must outlive the session (a
+# session's first call by scripts/gcloud-session-config. An agentbox session has no such scratch;
+# its copy is at ${TMPDIR:-/tmp}/agentbox-gcloud-session/gcloud, the box's own /tmp (a loop disk at
+# /mnt/nvme/<user>/agentbox/disks/<box>.img on the host, gone with the box), seeded from the
+# host's ~/.config/gcloud that the box binds: boxes were 76 of about 120 processes still writing
+# that directory after the session copies went live (10:30Z). It is left alone when the caller set
+# CLOUDSDK_CONFIG (the Linux eval lane gives each attempt its own) and where no copy can be made
+# (the call then runs on ~/.config/gcloud as before). A command whose change must outlive the session (a
 # sign-in, a credential activated or revoked, a property, a configuration, `init`, or a path an
 # unknown flag makes ambiguous) still runs on ~/.config/gcloud, and the session's copy is set aside
 # so that its next call copies again and sees the change. Every rule below reads whichever
@@ -518,9 +521,13 @@ persists_config_change() {
 }
 use_session_config() { # ARGV
     agent_context || return 0
-    [[ -z "${CLOUDSDK_CONFIG:-}" && -z "${AGENTBOX_SESSION:-}" ]] || return 0
+    [[ -z "${CLOUDSDK_CONFIG:-}" ]] || return 0
     local scratch="${AGENT_SESSION_SCRATCH:-}" target origin
-    [[ -n "$scratch" && -d "$scratch" && -O "$scratch" ]] || return 0
+    if [[ -z "$scratch" && -n "${AGENTBOX_BOX:-}${AGENTBOX_SESSION:-}" ]]; then
+        scratch="${TMPDIR:-/tmp}/agentbox-gcloud-session"
+        [[ -d "$scratch" ]] || mkdir -m 0700 -- "$scratch" 2> /dev/null || return 0
+    fi
+    [[ -n "$scratch" && -d "$scratch" && ! -L "$scratch" && -O "$scratch" ]] || return 0
     target="$scratch/gcloud"
     if persists_config_change "$@"; then
         [[ -e "$target" ]] && { mv -f -- "$target" "$target.replaced.$$" 2> /dev/null || true; }
