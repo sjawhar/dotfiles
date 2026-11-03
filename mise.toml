@@ -132,7 +132,7 @@ agent-browser = "0.39.0"
 # Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
 # package for every tag: if the exact version is missing from npm, pin the nearest
 # published one after confirming packages/mnemopi is unchanged between the two tags.
-"npm:@oh-my-pi/pi-mnemopi" = "18.13.3"
+"npm:@oh-my-pi/pi-mnemopi" = "18.16.0"
 actionlint = "1.7.12"  # was "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
 "pipx:azure-cli" = { version = "2.90.0", uvx = "true" }  # `az`: Theorem's Azure credits (per-user resource groups)
