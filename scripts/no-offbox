@@ -16,6 +16,12 @@ A path may not leave this machine when:
   - a directory below it cannot be read (EACCES, or any error but the gone ones below), so no
     one can tell that it holds no marker.
 
+A marker inside a subtree listed in an allow file does not refuse: ~/.config/no-offbox/allow
+(and, run as root, that file in every /home user's home), one absolute directory per line, `#`
+starts a comment line. It is for `.no-offbox` files that are test fixtures, not data (the 47
+zero-byte fixtures under review-evidence/sendgate-review12-717ae825/replays). It lifts only the
+markers in or below the listed directory: a marker above it, and every pattern, still refuse.
+
 A path gone when read holds no marker, so it is skipped and counted, not refused as unreadable:
 a directory removed while the walk runs (another session's `git worktree remove` in a shared
 .git), a PATH that does not exist, or a symlink that leads nowhere (the errors ENOENT, ENOTDIR and
@@ -54,42 +60,58 @@ ME = "no-offbox"
 GONE = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
 
 
-def pattern_files():
+def config_files(name):
     homes = [os.path.expanduser("~")]
     if os.geteuid() == 0:
         # root (sudo, a system unit) answers for every person's rule: each login user's file.
         homes += [u.pw_dir for u in pwd.getpwall() if u.pw_uid >= 1000 and u.pw_dir.startswith("/home/")]
     seen = []
     for home in homes:
-        f = os.path.join(home, ".config", "no-offbox", "patterns")
+        f = os.path.join(home, ".config", "no-offbox", name)
         if f not in seen:
             seen.append(f)
     return seen
 
 
+def read_lines(f):
+    """The rule lines of one config file; [] when it does not exist; exit 2 when it cannot be read."""
+    try:
+        with open(f, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        print(f"{ME}: cannot read the {os.path.basename(f)} file {f}: {e.strerror}; refusing everything", file=sys.stderr)
+        sys.exit(2)
+    return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+
+
 def load_patterns():
     pats = []
-    for f in pattern_files():
-        try:
-            with open(f, encoding="utf-8") as fh:
-                lines = fh.read().splitlines()
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            print(f"{ME}: cannot read the patterns file {f}: {e.strerror}; refusing everything", file=sys.stderr)
-            sys.exit(2)
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+    for f in config_files("patterns"):
+        for line in read_lines(f):
             is_glob = any(c in line for c in "*?[")
             pats.append((line, line.lower(), is_glob, f))
     return pats
 
 
+def load_allow():
+    """The allowed directories, each as written and resolved: their markers do not refuse."""
+    allow = []
+    for f in config_files("allow"):
+        for line in read_lines(f):
+            if not os.path.isabs(line):
+                print(f"{ME}: {f}: '{line}' is not an absolute path; refusing everything", file=sys.stderr)
+                sys.exit(2)
+            for p in dict.fromkeys((os.path.normpath(line), os.path.realpath(line))):
+                allow.append(p)
+    return allow
+
+
 class Checker:
-    def __init__(self, patterns):
+    def __init__(self, patterns, allow=()):
         self.patterns = patterns
+        self.allow = list(allow)
         self.marker_cache = {}
         # One regex over every pattern, so a walk of millions of paths tests each path once; the
         # pattern it matched is found only for a path that matches.
@@ -105,11 +127,18 @@ class Checker:
                 return f"pattern '{raw}' (from {src})"
         return None
 
+    def allowed(self, d):
+        """Whether directory d is a listed allow directory or below one."""
+        return any(d == a or d.startswith(a.rstrip("/") + "/") for a in self.allow)
+
     def marker_in(self, d):
-        """The marker file of directory d, '' when it has none or is gone, None when d cannot be
-        searched."""
+        """The marker file of directory d, '' when it has none, is gone or is allowed, None when d
+        cannot be searched."""
         if d in self.marker_cache:
             return self.marker_cache[d]
+        if self.allowed(d):
+            self.marker_cache[d] = ""
+            return ""
         m = os.path.join(d, MARKER)
         try:
             os.lstat(m)
@@ -160,7 +189,7 @@ class Checker:
             except OSError as err:
                 unread(sd, err)
                 continue
-            if any(e.name == MARKER for e in entries):
+            if any(e.name == MARKER for e in entries) and not (self.allowed(d) or self.allowed(sd)):
                 out.append((sd, f"holds marker {os.path.join(sd, MARKER)}"))
                 continue
             for e in entries:
@@ -233,7 +262,7 @@ def main(argv):
         else:
             paths.append(a)
         i += 1
-    chk = Checker(load_patterns())
+    chk = Checker(load_patterns(), load_allow())
     refused = False
     if listfile is not None or root is not None:
         if listfile is None or root is None or paths or excludes:

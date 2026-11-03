@@ -210,6 +210,47 @@ class NoOffbox(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("cannot read the patterns file", r.stderr)
 
+    def allow(self, *lines: str) -> None:
+        (self.home / ".config/no-offbox/allow").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_markers_inside_an_allowed_subtree_do_not_refuse_and_a_sibling_still_does(self) -> None:
+        """The 47 zero-byte `.no-offbox` fixture files under sendgate-review12's replays are test
+        data, not embargoed evidence: an allow line for that subtree lets it go, while a marked
+        sibling outside it, a marker above it, and a pattern still refuse."""
+        replays = self.data / "review/replays"
+        fixtures = [self.tree(f"review/replays/r{i}_case") for i in (9, 10, 11)] + [self.tree("review/replays/assembler")]
+        for d in fixtures:
+            (d / ".no-offbox").write_text("", encoding="utf-8")
+        sibling = self.tree("review/other")
+        self.mark(sibling)
+        self.assertEqual(self.run_check(str(replays)).returncode, 1)
+        self.allow("# sendgate-review12 replay fixtures", str(replays))
+        r = self.run_check(str(replays))
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertEqual(self.run_check(str(fixtures[0])).returncode, 0)
+        # The parent holds the allowed subtree and a marked sibling: still refused, for the sibling.
+        parent = self.run_check(str(self.data / "review"))
+        self.assertEqual(parent.returncode, 1)
+        self.assertIn(f"holds marker {sibling / '.no-offbox'}", parent.stdout)
+        self.assertNotIn("replays", parent.stdout)
+        # A marker ABOVE the allowed subtree still refuses it.
+        self.mark(self.data / "review")
+        self.assertEqual(self.run_check(str(replays)).returncode, 1)
+
+    def test_a_pattern_still_refuses_inside_an_allowed_subtree(self) -> None:
+        t = self.tree("review/replays/bet357-run")
+        self.allow(str(self.data / "review/replays"))
+        self.patterns("bet357")
+        r = self.run_check(str(t))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("pattern 'bet357'", r.stdout)
+
+    def test_a_relative_allow_line_refuses_everything(self) -> None:
+        self.allow("review/replays")
+        r = self.run_check(str(self.tree("fine")))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("is not an absolute path", r.stderr)
+
     def test_a_tar_list_is_checked_entry_by_entry_without_a_walk(self) -> None:
         """The bulk copy's form: tar --no-recursion lists of paths relative to the root."""
         self.patterns("embargo")
