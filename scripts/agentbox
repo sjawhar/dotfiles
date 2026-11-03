@@ -2754,9 +2754,10 @@ MOVE_SWEEP_RECORD="${AGENTBOX_SWEEP_RECORD:-$HOME/.local/share/omp-session-sql/d
 MOVE_DEEP_INDEX_DIR=""
 move_to_index_transcripts() {
     # Under agentbox's own cache, not TMPDIR: a session's TMPDIR can be reaped mid-run, and the
-    # index went with it (SPEEDCOACH's plan, 2026-11-03).
-    mkdir -p "$MOVE_TO_JOBS" 2>/dev/null || true
-    MOVE_DEEP_INDEX_DIR="$(mktemp -d -p "$MOVE_TO_JOBS" index.XXXXXX 2>/dev/null || mktemp -d)"
+    # index went with it (SPEEDCOACH's plan, 2026-11-03). move_exit removes it, so a `move --plan`
+    # leaves nothing behind.
+    mkdir -p "$MOVE_TO_JOBS/index" 2>/dev/null || true
+    MOVE_DEEP_INDEX_DIR="$(mktemp -d -p "$MOVE_TO_JOBS/index" run.XXXXXX 2>/dev/null || mktemp -d)"
 }
 # Progress of `move --to` before its hand-off: one line a second on stderr naming the step
 # (move_step) and the seconds since the start, and a bound (AGENTBOX_MOVE_SCAN_LIMIT, 600 s) after
@@ -2774,8 +2775,13 @@ move_progress_start() {
     (( limit > 0 )) || limit=0
     (
         local start=$SECONDS step e
+        local st
         while sleep 1; do
             kill -0 "$main" 2>/dev/null || exit 0
+            # A main shell that has exited but is not reaped yet is a zombie, which kill -0 still
+            # finds; its caller may be waiting for this line's pipe to close before it reaps it.
+            st=""; read -r _ _ st _ 2>/dev/null <"/proc/$main/stat" || exit 0
+            [[ "$st" != Z ]] || exit 0
             step="$(cat "$MOVE_PROGRESS_FILE" 2>/dev/null)" || exit 0
             e=$((SECONDS - start))
             echo "agentbox: ${e}s: $step" >&2
@@ -2785,7 +2791,7 @@ move_progress_start() {
                 exit 0
             fi
         done
-    ) &
+    ) >/dev/null &
     MOVE_PROGRESS_PID=$!
     trap 'MOVE_SAID=1; exit 124' TERM
 }
@@ -2824,9 +2830,9 @@ move_transcript() {
         if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
     done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
     dir="$(move_agent_dir "$pid")/sessions"
-    # Then by name, at depth 2 only (<bucket>/<stamp>_<id>.jsonl), without following symlinks:
+    # Then by name, no deeper than <bucket>/<session dir>/<file>.jsonl, without following symlinks:
     # first in the bucket of the omp's working directory, which omp names after it, then in every
-    # bucket. `find -L … -maxdepth 4` over this host's 1,768 buckets, through every subagent log
+    # bucket, at depth 3 (a subagent's transcript is one level deeper, in its parent's directory). `find -L … -maxdepth 4` over this host's 1,768 buckets, through every subagent log
     # offloaded behind a symlink to /mnt/durable, ran past 20 minutes at load 300 for one idle
     # lead (2026-11-03) and held the whole `move --to` there; a glob at depth 3 took 80 s.
     local cwd bucket
@@ -2846,17 +2852,17 @@ move_transcript() {
         idx="$MOVE_DEEP_INDEX_DIR/$(printf '%s' "$dir" | md5sum | cut -c1-16)"
         if [[ ! -e "$idx" ]]; then
             mkdir -p "$MOVE_DEEP_INDEX_DIR" 2>/dev/null || true
-            if find "$dir" -mindepth 2 -maxdepth 2 -name '*_*.jsonl' >"$idx.$BASHPID" 2>/dev/null; then
+            if find "$dir" -mindepth 2 -maxdepth 3 -name '*_*.jsonl' >"$idx.$BASHPID" 2>/dev/null; then
                 mv -f "$idx.$BASHPID" "$idx" 2>/dev/null || true
             fi
         fi
         if [[ -r "$idx" ]]; then
             mapfile -t found < <(grep -- "_${sid}\.jsonl\$" "$idx" || true)
         else
-            mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 2 -name "*_${sid}.jsonl" 2>/dev/null)
+            mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 3 -name "*_${sid}.jsonl" 2>/dev/null)
         fi
     else
-        mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 2 -name "*_${sid}.jsonl" 2>/dev/null)
+        mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 3 -name "*_${sid}.jsonl" 2>/dev/null)
     fi
     if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
     if [[ -r "$MOVE_SWEEP_RECORD" ]]; then
@@ -3301,7 +3307,10 @@ MOVE_RESPAWN_WAIT="${AGENTBOX_RESPAWN_WAIT:-15}"
 # later forked normally, so a failure here is ridden out rather than taken as final: it tries
 # again, then types the launcher into the shell the pane still runs, which needs no pty of tmux's,
 # and when the pane has no process either it says so in the pane's title, since such a pane keeps
-# showing the dead session's last screen and looks alive.
+# showing the dead session's last screen and looks alive. It returns 1 when the pane is there and
+# refuses, and 2 when the server does not have the pane at all, which no retry can change: R3A's
+# rollback retried a gone pane 40 times over ten minutes of downtime, and its caller's own
+# fallback, a window of its own, never ran (2026-11-03).
 move_respawn() {
     local sid="$1" pane="$2" cwd="$3" inner="$4" what="$5" attempt=0 err run
     # An interactive bash, as scripts/agent-new starts a pane: the box launcher needs the
@@ -3315,6 +3324,12 @@ move_respawn() {
             return 0
         fi
         echo "$(date -u +%FT%TZ) move $sid: respawn of pane $pane failed (try $attempt of $MOVE_RESPAWN_TRIES): ${err:-tmux printed nothing}"
+        case "$err" in
+            *"find pane"*|*"no such pane"*|*"pane not found"*)
+                echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone from its server; not retried"
+                return 2
+                ;;
+        esac
         if (( attempt < MOVE_RESPAWN_TRIES )); then sleep "$MOVE_RESPAWN_WAIT"; fi
     done
     if [[ -n "$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" ]] \
@@ -3438,7 +3453,9 @@ move_relaunch() {
 # (CALLER, its ancestors and descendants). A server, a watcher or a dashboard started from a tool
 # call is a child of the omp, and a hang-up ends it: KNOTCURVE's dashboard, started by hand from
 # its session, died with the move at 16:21Z on 2026-11-02 and was down about four hours. One row
-# per top process, with how many processes are under it. A systemd unit is not under the omp.
+# per top process, with how many processes are under it. A process `setsid` detached - its own
+# session leader, so the pane's hang-up does not reach it - is not an orphan, and neither is what
+# it started; nor is a systemd unit, which is not under the omp at all.
 move_orphans() {
     local omp="$1" caller="${2:-}" p q cmd n
     local -A skip=()
@@ -3468,9 +3485,24 @@ move_orphans() {
         case "$cmd" in
             *__omp_worker*|*/omp-python-runner*/runner-*.py*) skip[$p]=helper ;;
         esac
+        # Field 6 of /proc/<pid>/stat is the session id: its own means `setsid`, and SIGHUP of the
+        # pane's session does not reach it.
+        if [[ -z "${skip[$p]:-}" ]]; then
+            local stat_line sess
+            if stat_line="$(<"$PROC/$p/stat")" 2>/dev/null; then
+                stat_line="${stat_line##*) }"
+                set -- $stat_line
+                sess="${4:-}"
+                [[ "$sess" == "$p" ]] && skip[$p]=detached
+            fi
+        fi
         if [[ -n "${skip[$p]:-}" ]]; then
-            read -r -a q <<<"${MOVE_KIDS[$p]:-}"
-            queue+=(${q[@]+"${q[@]}"})
+            # A detached process takes its own children with it: the hang-up reaches none of them.
+            # omp's helpers and the move's own chain do not, so what they started is still listed.
+            if [[ "${skip[$p]}" != detached ]]; then
+                read -r -a q <<<"${MOVE_KIDS[$p]:-}"
+                queue+=(${q[@]+"${q[@]}"})
+            fi
             continue
         fi
         n="$(move_descendants "$p" | wc -l)"
@@ -3494,7 +3526,7 @@ move_orphans_gate() {
     orphans="$(move_orphans "$1" "$2")"
     [[ -n "$orphans" ]] || return 0
     list="$(move_orphans_list "$orphans")"
-    MOVE_ORPHANS_WHY="these processes of this session are not systemd units, and the hang-up of the move ends them: $list. Make each one a unit (\`systemd-run --user --unit <name> …\` outlives the session), or stop it, or move anyway with --accept-orphans"
+    MOVE_ORPHANS_WHY="these processes of this session die with the hang-up of the move: $list. Start each one detached (\`setsid <command> </dev/null >>log 2>&1 &\`, which outlives the pane) or as an omp background job, or stop it, or move anyway with --accept-orphans, which ends exactly those pids"
     if $MOVE_ACCEPT_ORPHANS; then
         echo "agentbox: --accept-orphans: the hang-up of the move ends $list" >&2
         return 0
@@ -3760,7 +3792,7 @@ cmd_move_notify() {
         # What dies with the hang-up, so the session decides before it runs the move.
         local orphans
         orphans="$(move_orphans "$pid")"
-        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: they are not systemd units, and the hang-up ends them: $(move_orphans_list "$orphans"). Make each a unit (\`systemd-run --user --unit <name> …\`), stop it, or run the move with --accept-orphans."
+        [[ -z "$orphans" ]] || notice+=" Your move refuses until you deal with these: the hang-up ends them: $(move_orphans_list "$orphans"). Start each one detached (\`setsid <command> </dev/null >>log 2>&1 &\`) or as an omp background job, stop it, or run the move with --accept-orphans."
         if $dry; then
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
@@ -4924,7 +4956,10 @@ move_to_find_group() {
     if [[ -n "$MOVE_SELF_CWD" ]] && move_git_root_var "$MOVE_SELF_CWD" && ! move_dir_too_broad "$MOVE_GIT_ROOT"; then
         own_cwd_tree="$MOVE_GIT_ROOT"
     fi
-    trees="$(move_to_process_trees "$self")"$'\n'"$own_cwd_tree"$'\n'"${MT_SHARE[$self]:-}"
+    # Only the trees its own live processes work in, and the one it resumes in: a tree it merely
+    # NAMES (a --dir, or its record) is copied and groups nobody (S3's --dir of a checkout many
+    # sessions work in grew a group whose listing ran past 900 s, 2026-11-03).
+    trees="$(move_to_process_trees "$self")"$'\n'"$own_cwd_tree"
     while IFS=$'\t' read -r o link t; do
         [[ -n "${MT_ROW_OF[$o]:-}" && -z "${in[$o]:-}" ]] || continue
         move_to_writes "$link" || continue
@@ -5020,7 +5055,8 @@ move_to_job() {
         --argjson exclude "$(move_json_array ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"})" \
         --argjson mkdir "$(move_json_array ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"})" \
         --argjson ssh "$(move_json_array "${MOVE_TO_SSH[@]}")" \
-        '{to: $to, group: $group, from: $from, ssh: $ssh, members: $members, mirror: $mirror, merge: $merge, exclude: $exclude, mkdir: $mkdir}' \
+        --arg lead "${AGENTBOX_MOVE_LEAD:-}" \
+        '{to: $to, group: $group, from: $from, ssh: $ssh, lead: $lead, members: $members, mirror: $mirror, merge: $merge, exclude: $exclude, mkdir: $mkdir}' \
         >"$job" || return 1
     printf '%s\n' "$job"
 }
@@ -5207,7 +5243,11 @@ cmd_move_to() {
     job="$(move_to_job "$target" "$group" "${members[@]}")" || die "could not write the move's job file under $MOVE_TO_JOBS; nothing was hung up"
     log="$MOVE_TO_JOBS/$group.log"
     setsid "$(readlink -f "${BASH_SOURCE[0]}")" move --to-run "$job" </dev/null >>"$log" 2>&1 &
-    echo "agentbox: the move of group $group to $target is handed to a detached relauncher; log: $log. This session is hung up within seconds: end your turn now."
+    if (( MOVE_TO_HOLD_WAIT > 0 )); then
+        echo "agentbox: the move of group $group to $target is handed to a detached relauncher; log: $log. Go on with your work: it checks, clones and copies first, then tells you over Envoy to run \`agentbox move --go\` at your safe point; only that hangs this session up."
+    else
+        echo "agentbox: the move of group $group to $target is handed to a detached relauncher; log: $log. This session is hung up within seconds: end your turn now."
+    fi
 }
 
 # In a box: this session alone (a box cannot read the host's other sessions), with the paths the
@@ -5272,7 +5312,11 @@ move_to_in_box() {
     tmux run-shell -b -t "$pane" "$(printf 'setsid %q move --to-run %q </dev/null >>%q 2>&1' \
         "$(readlink -f "${BASH_SOURCE[0]}")" "$job" "$MOVE_TO_JOBS/$group.log")" \
         || die "could not start the relauncher through the host's tmux (is the relay up? \`tmux list-sessions\`); nothing was hung up"
-    echo "agentbox: the host checks $target and then hangs this box up; log: $MOVE_TO_JOBS/$group.log. End your turn now."
+    if (( MOVE_TO_HOLD_WAIT > 0 )); then
+        echo "agentbox: the host checks $target, clones and copies, then tells you over Envoy to run \`agentbox move --go\`; only that hangs this box up. Log: $MOVE_TO_JOBS/$group.log. Go on with your work."
+    else
+        echo "agentbox: the host checks $target and then hangs this box up; log: $MOVE_TO_JOBS/$group.log. End your turn now."
+    fi
 }
 
 # The relauncher of `move --to`, detached on the host: `move --to-run <job>`. Every member is in
@@ -5288,6 +5332,52 @@ move_to_in_box() {
 MOVE_TO_ACTIVE="$MOVE_TO_JOBS/active"
 MOVE_TO_MAX_FLIGHT="${AGENTBOX_MOVE_MAX_FLIGHT:-2}"
 MOVE_TO_FLIGHT_POLL="${AGENTBOX_MOVE_FLIGHT_POLL:-10}"
+# The hold before the hang-up: once everything before it is done (checks, clones, branches, the
+# first copy), the relauncher writes $MOVE_TO_HOLD/<sid> for each member, tells each session over
+# Envoy, and hangs up only after every member's own `agentbox move --go` removed its file; after
+# MOVE_TO_HOLD_WAIT seconds (1800; 0 for no hold) it refuses with nothing hung up, and the first
+# copy stays on the target for the next try. S3 restarted its 14 lanes during a 66-minute first
+# copy, and its move had to be stopped by hand before the hang-up (2026-11-03 08:18Z).
+MOVE_TO_HOLD="$MOVE_TO_JOBS/hold"
+MOVE_TO_HOLD_WAIT="${AGENTBOX_MOVE_HOLD_WAIT:-1800}"
+move_to_hold() {
+    local target="$1" s left deadline start=$SECONDS
+    shift
+    (( MOVE_TO_HOLD_WAIT > 0 )) || return 0
+    mkdir -p "$MOVE_TO_HOLD"
+    deadline=$((SECONDS + MOVE_TO_HOLD_WAIT))
+    for s in "$@"; do
+        printf 'target=%s\ndeadline=%s\npid=%s\n' "$target" "$(( $(date +%s) + MOVE_TO_HOLD_WAIT ))" "$BASHPID" >"$MOVE_TO_HOLD/$s"
+        envoy send --source envoy "$s" "agentbox: your move to $target is ready to hang you up (checks, clones and the first copy are done). Run \`agentbox move --go\` at your safe point within $((MOVE_TO_HOLD_WAIT / 60)) min; it hangs this session up and resumes it on $target. If you do not, the move is refused with nothing hung up, and the copy stays on $target for the next try. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+    done
+    say "holding before the hang-up: waiting up to $((MOVE_TO_HOLD_WAIT / 60)) min for \`agentbox move --go\` from $*"
+    while :; do
+        left=""
+        for s in "$@"; do [[ -e "$MOVE_TO_HOLD/$s" ]] && left+="$s "; done
+        if [[ -z "$left" ]]; then
+            say "every member ran \`agentbox move --go\` after $((SECONDS - start))s; hanging up"
+            return 0
+        fi
+        if (( SECONDS >= deadline )); then
+            for s in "$@"; do rm -f "$MOVE_TO_HOLD/$s"; done
+            MOVE_TO_WHY="no \`agentbox move --go\` from ${left% } within $((MOVE_TO_HOLD_WAIT / 60)) min of the hold; the first copy stays on $target for the next try"
+            return 1
+        fi
+        sleep "$((MOVE_TO_POLL > 0 ? MOVE_TO_POLL : 1))"
+    done
+}
+
+# `agentbox move --go`: run by a session whose move holds before the hang-up (move_to_hold). Its
+# id is OMP_SESSION_ID, on the host and in a box (where ~/.cache/omp is the host's).
+cmd_move_go() {
+    local sid="${OMP_SESSION_ID:-}" f target
+    [[ -n "$sid" ]] || die "no OMP_SESSION_ID here: run \`agentbox move --go\` from the session's own bash tool"
+    f="$MOVE_TO_HOLD/$sid"
+    [[ -e "$f" ]] || die "no move of session $sid is waiting for --go (nothing under $MOVE_TO_HOLD); run \`agentbox move --to <machine>\` first"
+    target="$(sed -n 's/^target=//p' "$f")"
+    rm -f "$f"
+    echo "agentbox: --go: the move to ${target:-the target} hangs this session up within seconds and resumes it there. End your turn now."
+}
 # move_to_in_flight GROUP: the other groups with a live relauncher's active claim, space-separated.
 move_to_in_flight() {
     local f pid job g
@@ -5303,6 +5393,22 @@ move_to_in_flight() {
     done
     printf '%s ' "${!groups[@]}"
 }
+# move_to_wait_flight GROUP: at most MOVE_TO_MAX_FLIGHT moves in flight from this host (default 2):
+# ~35 sessions move themselves at once tonight, and each copy competes for the same disks and
+# link. Waits while that many OTHER groups hold active claims with live relaunchers, logging
+# each change through `say` (the caller's), and returns when fewer do.
+move_to_wait_flight() {
+    local group="$1" flight said_flight=""
+    while flight="$(move_to_in_flight "$group")" && (( $(wc -w <<<"$flight") >= MOVE_TO_MAX_FLIGHT )); do
+        if [[ "$flight" != "$said_flight" ]]; then
+            say "waiting: $(wc -w <<<"$flight") moves in flight: $flight"
+            said_flight="$flight"
+        fi
+        MOVE_TO_STATE="waiting for one of the moves in flight ($flight) to end"
+        sleep "$MOVE_TO_FLIGHT_POLL"
+    done
+}
+
 move_to_run() {
     local job="$1" target group n i stamp me reason=""
     MOVE_TO_STATE="reading the job"
@@ -5342,9 +5448,24 @@ move_to_run() {
         fi
         [[ -n "$MOVE_TMUX_BIN" ]] || MOVE_TMUX_BIN=tmux
     }
-    # Each member back in a box on this machine, in its own pane; none that runs on the target.
+    # A member that is DOWN: said in the log, and told at once to the session, to the lead that
+    # asked for the move (MOVE_LEAD_SESSION in the job) and to the box-health role. R3A was down
+    # 15 min with no alert on 2026-11-03, and its line read "rolled back … resume here".
+    move_down() {
+        local sid="$1" why="$2" text lead
+        text="agentbox: the move of session $sid to $target FAILED and the session is DOWN on $me: $why (An automated notice from agentbox.)"
+        say "$sid: DOWN: $why"
+        envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true
+        envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
+        lead="$(jq -r '.lead // empty' "$job" 2>/dev/null || true)"
+        [[ -z "$lead" ]] || envoy send --source envoy "$lead" "$text" >/dev/null 2>&1 || true
+    }
+
+    # Each member back in a box on this machine, in its own pane, or in a window of its own when
+    # its pane is gone; none that runs on the target. MOVE_TO_RESUMED holds those that came back.
+    MOVE_TO_RESUMED=()
     resume_here() {
-        local j inner
+        local j inner rc
         for j in "$@"; do
             member_spec "$j"
             member_tmux "$j"
@@ -5354,14 +5475,24 @@ move_to_run() {
                     && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
                         bash -i -c "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i" 2>/dev/null; then
                     say "${sids[j]}: pane ${panes[j]} is gone; resumed here in a new window of tmux session ${ats[j]%%:*}"
+                    MOVE_TO_RESUMED+=("${sids[j]}")
                 else
-                    say "${sids[j]}: pane ${panes[j]} is gone; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- omp --resume ${resumes[j]}"
+                    move_down "${sids[j]}" "pane ${panes[j]} is gone and no window could be opened; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- omp --resume ${resumes[j]}"
                 fi
                 continue
             fi
             inner="$(move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")"
-            move_respawn "${sids[j]}" "${panes[j]}" "${cwds[j]}" "$inner" "${MOVE_SPEC[*]}" \
-                || say "${sids[j]}: pane ${panes[j]} would not respawn; the session is DOWN: $inner"
+            move_respawn "${sids[j]}" "${panes[j]}" "${cwds[j]}" "$inner" "${MOVE_SPEC[*]}" && { MOVE_TO_RESUMED+=("${sids[j]}"); continue; }
+            rc=$?
+            # The pane went while the move ran: a window of its own on the same tmux session.
+            if (( rc == 2 )) && [[ -n "${ats[j]}" ]] \
+                && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
+                    bash -i -c "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i" 2>/dev/null; then
+                say "${sids[j]}: pane ${panes[j]} is gone; resumed here in a new window of tmux session ${ats[j]%%:*}"
+                MOVE_TO_RESUMED+=("${sids[j]}")
+                continue
+            fi
+            move_down "${sids[j]}" "pane ${panes[j]} would not respawn; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- omp --resume ${resumes[j]}"
         done
     }
     log_all() {
@@ -5381,7 +5512,7 @@ move_to_run() {
     MOVE_TO_ACTIVE_SIDS=("${sids[@]}")
     move_to_active_clear() {
         local s
-        for s in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do rm -f "$MOVE_TO_ACTIVE/$s"; done
+        for s in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do rm -f "$MOVE_TO_ACTIVE/$s" "$MOVE_TO_HOLD/$s"; done
     }
     move_to_run_exit() { move_to_active_clear; move_exit; }
     move_to_run_signal() {
@@ -5396,18 +5527,7 @@ move_to_run() {
     trap 'move_to_run_signal HUP 129' HUP
     # The ready files are spent: a member that comes back here starts its next move afresh.
     for ((i = 0; i < n; i++)); do rm -f "$MOVE_TO_JOBS/ready/${sids[i]}"; done
-    # At most MOVE_TO_MAX_FLIGHT moves in flight from this host (default 2): ~35 sessions move
-    # themselves at once tonight, and each copy competes for the same disks and link. A move
-    # waits while that many OTHER groups hold active claims with live relaunchers.
-    local flight said_flight=""
-    while flight="$(move_to_in_flight "$group")" && (( $(wc -w <<<"$flight") >= MOVE_TO_MAX_FLIGHT )); do
-        if [[ "$flight" != "$said_flight" ]]; then
-            say "waiting: $(wc -w <<<"$flight") moves in flight: $flight"
-            said_flight="$flight"
-        fi
-        MOVE_TO_STATE="waiting for one of the moves in flight ($flight) to end"
-        sleep "$MOVE_TO_FLIGHT_POLL"
-    done
+    move_to_wait_flight "$group"
     MOVE_TO_STATE="checking $target"
     if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
         || ! move_to_dests_writable "$target" || ! move_to_offbox; then
@@ -5443,6 +5563,11 @@ move_to_run() {
         for ((i = 0; i < n; i++)); do
             envoy send --source envoy "${sids[i]}" "agentbox: the move to $target did not start and this session was not hung up: $MOVE_TO_WHY. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
         done
+        return 2
+    fi
+    MOVE_TO_STATE="holding before the hang-up (agentbox move --go)"
+    if ! move_to_hold "$target" "${sids[@]}"; then
+        say "refused, nothing was hung up: $MOVE_TO_WHY"
         return 2
     fi
     MOVE_TO_STATE="hanging up ${sids[*]}"
@@ -5544,6 +5669,7 @@ move_to_run() {
     # The rollback. The target's windows close, and nothing of the group may still run there
     # before a member resumes here.
     say "$reason; rolling the group back"
+    MOVE_TO_RESUMED=()
     MOVE_TO_STATE="rolling back to this machine ($reason)"
     local w left
     for w in ${windows[@]+"${windows[@]}"}; do
@@ -5563,8 +5689,12 @@ move_to_run() {
     fi
     for ((i = 0; i < n; i++)); do move_to_unmark "${sids[i]}" "${resumes[i]}"; done
     resume_here "${all[@]}"
-    log_all "$reason" "${all[@]}"
-    say "rolled back: ${sids[*]} resume here"
+    local back=() down=() j
+    for ((j = 0; j < n; j++)); do
+        if [[ " ${MOVE_TO_RESUMED[*]-} " == *" ${sids[j]} "* ]]; then back+=("$j"); else down+=("$j"); fi
+    done
+    (( ${#back[@]} == 0 )) || { log_all "$reason" "${back[@]}"; say "rolled back: $(for j in "${back[@]}"; do printf '%s ' "${sids[j]}"; done)resume here"; }
+    (( ${#down[@]} == 0 )) || { log_all "DOWN after $reason" "${down[@]}"; say "NOT rolled back, DOWN: $(for j in "${down[@]}"; do printf '%s ' "${sids[j]}"; done)"; }
     return 1
 }
 
@@ -5666,6 +5796,9 @@ cmd_move_plan_to() {
     echo
     echo "${#g_name[@]} group(s), ${#MT_ROW[@]} session(s), $refused refused; $(numfmt --to=iec "$total") in all"
     echo "a session moves with its group: each runs \`agentbox move --to $target\` at its own safe point, and the last one moves them all"
+    # Its own index goes with it: a plan changes nothing and leaves nothing.
+    [[ -z "$MOVE_DEEP_INDEX_DIR" ]] || rm -rf "$MOVE_DEEP_INDEX_DIR"
+    MOVE_DEEP_INDEX_DIR=""
 }
 
 # One usage text for every form of `move`, so no refusal prints a stale one (`move --help` and
@@ -5698,6 +5831,8 @@ MOVE_USAGE='usage:
                                                     Tailscale SSH and resumes there in boxes, with
                                                     the same ids (the last of the group to run it
                                                     moves them all)
+  agentbox move --go                               run by a session whose move to another machine is
+                                                    holding before the hang-up: hang up now
   agentbox move --to <machine> --clear-halt        the box-health lead lets moves to <machine> go
                                                     on after a halt (two failed moves in a row, or
                                                     a session found running on both machines)
@@ -5718,6 +5853,7 @@ cmd_move() {
         # first progress line, from a pipeline whose last loop test failed under `set -e`).
         --to) MOVE_FORM=--to; cmd_move_to "$@" ;;
         --to-run) shift; move_to_run "$@" ;;
+        --go) shift; cmd_move_go "$@" ;;
         --relaunch) shift; move_relaunch "$@" ;;
         --wake) shift; move_wake "$@" ;;
         -h|--help|help) echo "$MOVE_USAGE" ;;

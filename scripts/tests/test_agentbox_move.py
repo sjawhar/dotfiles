@@ -115,6 +115,7 @@ class AgentboxMove(unittest.TestCase):
         writes: tuple[Path | str, ...] = (),
         reads: tuple[Path | str, ...] = (),
         environ: dict[str, str] | None = None,
+        session_leader: bool = False,
     ) -> None:
         """One process in the fixture /proc: stat, comm, cmdline, cgroup, cwd and its open files.
 
@@ -124,7 +125,9 @@ class AgentboxMove(unittest.TestCase):
         directory = self.proc / str(pid)
         (directory / "fd").mkdir(parents=True)
         (directory / "fdinfo").mkdir(parents=True)
-        (directory / "stat").write_text(f"{pid} ({comm}) S {ppid} {ppid} 0 0 -1 0\n", encoding="utf-8")
+        # Field 4 after the state is the session id; its own pid means `setsid`-detached.
+        (directory / "stat").write_text(
+            f"{pid} ({comm}) S {ppid} {ppid} {pid if session_leader else 0} 0 -1 0\n", encoding="utf-8")
         (directory / "comm").write_text(comm + "\n", encoding="utf-8")
         (directory / "cmdline").write_text(cmdline.replace(" ", "\0") + "\0", encoding="utf-8")
         (directory / "cgroup").write_text(cgroup + "\n", encoding="utf-8")
@@ -1314,6 +1317,8 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_MOVE_TARGET_AGENTBOX": "/target/agentbox",
             # No test waits for the target's health check unless it asks to.
             "AGENTBOX_MOVE_READY_WAIT": "0",
+            # Nor holds before the hang-up for `agentbox move --go`, unless it asks to.
+            "AGENTBOX_MOVE_HOLD_WAIT": "0",
             "AGENTBOX_MOVE_SETTLE": "0",
             "AGENTBOX_MOVE_POLL": "0",
             "AGENTBOX_MOVE_START_WAIT": "0",
@@ -1722,57 +1727,6 @@ class AgentboxMove(unittest.TestCase):
         self.assertFalse(old.exists())
         self.assertEqual(len(list(sessions.glob(f"*/*_{self.TO}.jsonl"))), 1)
 
-    def test_an_inferred_directory_over_the_limit_is_not_copied_unless_named(self) -> None:
-        """PROCS, 2026-11-03 07:09Z: its copy held all of /mnt/nvme/sami/wt, 323 GB of every
-        session's worktrees, for one file and one worktree of its own there. An inferred directory
-        in no git tree over the limit leaves the copy and is listed; a --dir carries it."""
-        self.moving_session()
-        self.set_pids(999999901)
-        self.set_panes({999999900: ("%81", "agents:4.1")})
-        self.target()
-        (self.lane / "big.bin").write_bytes(b"x" * 4096)
-        self.env["AGENTBOX_MOVE_GATE_BYTES"] = "1000"
-        self.env["AGENTBOX_MOVE_SCAN_LIMIT"] = "0"
-        dry = self.move_to("--to devbox --dry-run")
-        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
-        self.assertIn("WOULD COPY, NOT ASKED FOR", dry.stdout)
-        self.assertIn(f"  {self.lane} (", dry.stdout)
-        self.assertNotIn(f"  merge   {self.lane}\n", dry.stdout)
-        self.assertIn("CARRIED to devbox (say yes to this list):", dry.stdout)
-        self.assertIn(f"  mirror  {self.worktree}\n", dry.stdout)
-        # The session's processes use the lane, and it is not carried: the owner sees it.
-        self.assertIn("NOT CARRIED (the session will not see these on devbox", dry.stdout)
-        self.assertIn(f"\n  {self.lane}\n", dry.stdout.split("NOT CARRIED")[1])
-        named = self.move_to(f'--to devbox --dry-run --dir "{self.lane}"')
-        self.assertIn(f"  merge   {self.lane}\n", named.stdout)
-        self.assertNotIn("WOULD COPY, NOT ASKED FOR", named.stdout)
-
-    def test_a_relauncher_waits_while_two_other_moves_are_in_flight(self) -> None:
-        """~35 sessions move themselves tonight: at most two moves run at once from a host."""
-        self.moving_session()
-        self.set_pids(999999901)
-        self.set_panes({999999900: ("%81", "agents:4.1")})
-        self.target()
-        self.assertEqual(self.move_to().returncode, 0)
-        [job] = self.jobs()
-        self.set_pids()
-        active = self.root / "cache/omp/agentbox/move-to/active"
-        active.mkdir(parents=True)
-        holders = [subprocess.Popen(["sleep", "8"]) for _ in range(2)]
-        for k, h in enumerate(holders):
-            (active / f"01a1aaaa-0000-7000-8000-00000000000{k}").write_text(
-                f"pid={h.pid}\ntarget=devbox\nstart=0\njob=/x/g-other{k}-20261103T070000Z-1.json\n", encoding="utf-8")
-        self.env["AGENTBOX_MOVE_FLIGHT_POLL"] = "1"
-        start = time.time()
-        run = self.run_bash(f'move_to_run "{job}"')
-        for h in holders:
-            h.wait()
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn("waiting: 2 moves in flight:", run.stdout)
-        self.assertIn("g-other0", run.stdout)
-        self.assertGreater(time.time() - start, 5)
-        self.assertLess(run.stdout.index("waiting: 2 moves"), run.stdout.index("hung up after"))
-
     def test_an_archived_transcript_is_found_through_its_open_file(self) -> None:
         """SPEEDCOACH's 01a16c67 (2026-11-03): its transcript is open at its target under
         /mnt/durable/<user>/omp-sessions-moved, a path with no `sessions/` part."""
@@ -1821,6 +1775,159 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("refs/heads/w1:refs/heads/w1", pushes[0])
         self.assertIn("refs/heads/w2:refs/heads/w2", pushes[0])
         self.assertIn(f"pushed 3 branch(es) of {repo}/.git before the hang-up", result.stdout)
+
+    def test_a_move_holds_before_the_hang_up_until_the_session_runs_go(self) -> None:
+        """S3 restarted its 14 lanes during a 66-minute first copy (2026-11-03). The relauncher now
+        holds after everything before the hang-up, tells the session, and hangs up only after the
+        session's own `agentbox move --go`."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.env["AGENTBOX_MOVE_HOLD_WAIT"] = "120"
+        self.env["AGENTBOX_MOVE_POLL"] = "1"
+        held = self.move_to()
+        self.assertIn("run `agentbox move --go` at your safe point", held.stdout)
+        [job] = self.jobs()
+        self.set_pids()
+        log = self.root / "relauncher.log"
+        proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nmove_to_run "{job}"'],
+                                env=self.env, stdout=log.open("w"), stderr=subprocess.STDOUT)
+        hold = self.root / "cache/omp/agentbox/move-to/hold" / self.TO
+        for _ in range(1200):
+            if hold.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(hold.exists(), log.read_text(encoding="utf-8"))
+        time.sleep(2)
+        self.assertNotIn("hung up after", log.read_text(encoding="utf-8"))
+        self.assertIn("ready to hang you up", (self.root / "STUB_ENVOY").read_text(encoding="utf-8"))
+        go = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(go.returncode, 0, go.stderr)
+        self.assertIn("hangs this session up within seconds", go.stdout)
+        self.assertEqual(proc.wait(timeout=600), 0, log.read_text(encoding="utf-8"))
+        text = log.read_text(encoding="utf-8")
+        self.assertLess(text.index("ran `agentbox move --go`"), text.index("hung up after"))
+        self.assertIn("moved:", text)
+
+    def test_a_hold_that_gets_no_go_refuses_with_nothing_hung_up(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        self.env["AGENTBOX_MOVE_HOLD_WAIT"] = "2"
+        self.env["AGENTBOX_MOVE_POLL"] = "1"
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("refused, nothing was hung up: no `agentbox move --go` from", run.stdout)
+        self.assertNotIn("hung up after", run.stdout)
+        self.assertFalse((self.root / "cache/omp/agentbox/move-to/hold" / self.TO).exists())
+        self.assertFalse((self.root / "cache/omp/agentbox/move-to/active" / self.TO).exists())
+        # Nothing was moved, so the move log counts no failed attempt toward a halt.
+        self.assertFalse(any("refused" in line[5] for line in self.move_log()), self.move_log())
+        no_hold = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(no_hold.returncode, 1)
+        self.assertIn("is waiting for --go", no_hold.stderr)
+
+    def test_an_inferred_directory_over_the_limit_is_not_copied_unless_named(self) -> None:
+        """PROCS, 2026-11-03 07:09Z: its copy held all of /mnt/nvme/sami/wt, 323 GB of every
+        session's worktrees, for one file and one worktree of its own there. An inferred directory
+        in no git tree over the limit leaves the copy and is listed; a named one stays. The gate
+        and the lists are tested as functions, so the test takes the same seconds at any load."""
+        big = self.root / "wt"
+        big.mkdir()
+        (big / "big.bin").write_bytes(b"x" * 4096)
+        small = self.root / "lane-small"
+        small.mkdir()
+        (small / "f").write_text("x", encoding="utf-8")
+        tree = self.checkout("kept")
+        script = (f'MOVE_TO_MIRROR=("{tree}")\nMOVE_TO_MERGE=("{big}" "{small}")\nMOVE_TO_MKDIR=()\n'
+                  'move_to_gate {asked}\n'
+                  f'move_to_print_lists devbox "$(printf \'%s\\t%s\\n\' /proc/1/cwd "{big}" /proc/1/cwd "{tree}" | move_to_not_carried)"')
+        env = {"AGENTBOX_MOVE_GATE_BYTES": "1000"}
+        listed = self.run_bash(script.replace("{asked}", ""), env)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("WOULD COPY, NOT ASKED FOR", listed.stdout)
+        self.assertIn(f"  {big} (", listed.stdout)
+        self.assertIn(f"  mirror  {tree}\n", listed.stdout)
+        self.assertIn(f"  merge   {small}\n", listed.stdout)
+        self.assertNotIn(f"  merge   {big}\n", listed.stdout)
+        self.assertIn(f"\n  {big}\n", listed.stdout.split("NOT CARRIED")[1])
+        self.assertNotIn(str(tree), listed.stdout.split("NOT CARRIED")[1])
+        named = self.run_bash(script.replace("{asked}", f'"{big}"'), env)
+        self.assertIn(f"  merge   {big}\n", named.stdout)
+        self.assertNotIn("WOULD COPY, NOT ASKED FOR", named.stdout)
+
+    def test_a_relauncher_waits_while_two_other_moves_are_in_flight(self) -> None:
+        """~35 sessions move themselves tonight: at most two moves run at once from a host. The
+        wait is tested as a function, on claims held by processes the test ends itself once the
+        wait is seen, so it takes the same steps at any load."""
+        active = self.root / "cache/omp/agentbox/move-to/active"
+        active.mkdir(parents=True)
+        holders = [subprocess.Popen(["sleep", "600"]) for _ in range(2)]
+        self.addCleanup(lambda: [h.kill() for h in holders])
+        for k, h in enumerate(holders):
+            (active / f"01a1aaaa-0000-7000-8000-00000000000{k}").write_text(
+                f"pid={h.pid}\ntarget=devbox\nstart=0\njob=/x/g-other{k}-20261103T070000Z-1.json\n", encoding="utf-8")
+        # A claim of the mover's own group never counts.
+        (active / "01a1aaaa-0000-7000-8000-000000000009").write_text(
+            f"pid={os.getpid()}\ntarget=devbox\nstart=0\njob=/x/g-mine-20261103T070000Z-1.json\n", encoding="utf-8")
+        proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nsay() {{ echo "$*"; }}\nmove_to_wait_flight g-mine\necho DONE'],
+                                env={**self.env, "AGENTBOX_MOVE_FLIGHT_POLL": "0.2", "XDG_CACHE_HOME": str(self.root / "cache")},
+                                stdout=subprocess.PIPE, text=True)
+        first = proc.stdout.readline()
+        self.assertIn("waiting: 2 moves in flight:", first)
+        self.assertIn("g-other0", first)
+        self.assertNotIn("g-mine", first)
+        holders[0].kill()
+        holders[0].wait()
+        rest = proc.communicate(timeout=600)[0]
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(rest.strip(), "DONE")
+
+    def test_a_gone_pane_is_not_retried_and_a_session_left_down_is_alerted(self) -> None:
+        """R3A, 2026-11-03: its rollback retried a gone pane 40 times over 10 minutes, never took
+        the new-window path, logged "rolled back … resume here" while the session was down, and
+        alerted nobody. A pane its server does not have is not retried; a member that did not come
+        back is logged DOWN and the session, the lead and the box-health role are told."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target(resume=False)
+        self.env["AGENTBOX_MOVE_LEAD"] = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+        # The real budget, to show a gone pane is tried once and not 40 times.
+        self.env["AGENTBOX_RESPAWN_TRIES"] = "40"
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        # Its pane is gone from the server, and no window can be opened either.
+        tries = self.root / "RESPAWN_TRIES"
+        write_stub(self.stubs, "tmux", "\n".join([
+            'case " $* " in',
+            '  *" list-panes "*) cat "$STUB_TMUX" 2>/dev/null; exit 0 ;;',
+            f'  *" respawn-pane "*) echo "$*" >>"{tries}"; echo "no such pane: %81" >&2; exit 1 ;;',
+            '  *" new-window "*) echo "no window" >&2; exit 1 ;;',
+            '  *" display-message "*) printf "42507\\n" ;;',
+            "esac",
+            f'printf "%s\\n" "$*" >>"{self.local_tmux}"',
+            "exit 0",
+        ]))
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual(len(tries.read_text(encoding="utf-8").splitlines()), 1, tries.read_text(encoding="utf-8"))
+        self.assertIn("is gone from its server; not retried", run.stdout)
+        self.assertIn(f"{self.TO}: DOWN: pane %81 would not respawn", run.stdout)
+        self.assertIn("NOT rolled back, DOWN:", run.stdout)
+        self.assertNotIn("rolled back: ", run.stdout)
+        [line] = self.move_log()
+        self.assertTrue(line[5].startswith("DOWN after failed:"), line)
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
+        self.assertIn("01a18385-f8c8-74a9-b6ff-694fb5fe87a7", sent)
+        self.assertIn("notifications.role.lead-box-health", sent)
+        self.assertIn("the session is DOWN on", sent)
 
     def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
         transcript = self.moving_session()
@@ -2196,6 +2303,11 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(1104, comm="python3", ppid=1101, cwd=lane,
                        cmdline="/usr/bin/python3 -u /t/omp-python-runner-1000/runner-ab12.py")
         self.make_proc(1105, comm="python3", ppid=1104, cwd=lane, cmdline="python3 serve.py")
+        # A watcher the session started with `setsid`, and what that watcher started: the pane's
+        # hang-up reaches neither, so neither is an orphan. Agents make no systemd units
+        # (Sami, dispatch://INFRA-26/comment/615d0105-4ad1-4a2e-ae1c-01a1d8894b5c).
+        self.make_proc(1106, comm="python3", ppid=1101, cwd=lane, cmdline="python3 watch.py", session_leader=True)
+        self.make_proc(1107, comm="python3", ppid=1106, cwd=lane, cmdline="python3 watch-child.py")
         self.set_pids(1101)
         self.set_panes({1100: ("%90", "agents:9.1")})
 
@@ -2205,11 +2317,15 @@ class AgentboxMove(unittest.TestCase):
         refused = self.run_bash(env + "cmd_move_self")
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertNotIn("HANDED-OFF", refused.stdout)
-        self.assertIn("nothing was hung up: these processes of this session are not systemd units", refused.stderr)
+        self.assertIn("nothing was hung up: these processes of this session die with the hang-up", refused.stderr)
         self.assertIn("sleep 1000 (pid 1102)", refused.stderr)
         self.assertIn("python3 serve.py (pid 1105)", refused.stderr)
         self.assertNotIn("__omp_worker", refused.stderr)
         self.assertNotIn("runner-ab12", refused.stderr)
+        self.assertNotIn("watch.py", refused.stderr)
+        self.assertNotIn("watch-child.py", refused.stderr)
+        self.assertIn("Start each one detached (`setsid <command> </dev/null >>log 2>&1 &`", refused.stderr)
+        self.assertNotIn("systemd-run", refused.stderr)
         dry = self.run_bash(env + "cmd_move_self --dry-run")
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertIn("the move would refuse: these processes", dry.stdout)
@@ -2233,7 +2349,7 @@ class AgentboxMove(unittest.TestCase):
         self.target()
         refused = self.move_to(accept=False)
         self.assertEqual(refused.returncode, 1, refused.stdout)
-        self.assertIn("nothing was hung up: these processes of this session are not systemd units", refused.stderr)
+        self.assertIn("nothing was hung up: these processes of this session die with the hang-up", refused.stderr)
         self.assertEqual(self.jobs(), [])
 
     def test_a_member_s_readiness_lapses_after_ten_minutes(self) -> None:
@@ -2385,9 +2501,10 @@ class AgentboxMove(unittest.TestCase):
         brief.parent.mkdir()
         brief.write_text("brief\n", encoding="utf-8")
         (brief.parent / "someone-elses.md").write_text("x\n", encoding="utf-8")
+        # The omp holds its own transcript open, as a live omp does; the record is read from it.
+        record = self.transcript(self.TO, [("read", {"path": str(brief)})], slug="-work")
         self.make_proc(999999996, comm="bash", ppid=1, cwd=mine)
-        self.make_proc(999999997, ppid=999999996, cwd=mine, session=self.TO)
-        self.transcript(self.TO, [("read", {"path": str(brief)})], slug="-work")
+        self.make_proc(999999997, ppid=999999996, cwd=mine, writes=(record,))
         self.set_pids(999999997)
         self.set_panes({999999996: ("%96", "agents:9.6")})
         self.target()
@@ -2569,7 +2686,9 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("1 group(s), 1 session(s), 0 refused", plan.stdout)
         self.assertFalse((self.remote / "SSH").exists())
         self.assertFalse(self.plan_dir.exists())
-        self.assertFalse((self.root / "cache/omp/agentbox/move-to").exists())
+        # The plan writes no job and leaves no index behind (it makes one under the move cache).
+        self.assertEqual(list((self.root / "cache/omp/agentbox/move-to").glob("*.json")), [])
+        self.assertEqual(list((self.root / "cache/omp/agentbox/move-to/index").glob("run.*")), [])
 
     def test_a_session_in_a_box_hands_its_move_to_the_host(self) -> None:
         transcript = self.moving_session()
