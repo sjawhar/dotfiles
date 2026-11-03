@@ -1284,6 +1284,8 @@ class AgentboxMove(unittest.TestCase):
             'host="$1"; shift',
             'printf "%s\\t%s\\n" "$host" "$*" >>"$STUB_REMOTE/SSH"',
             '[[ -e "$STUB_REMOTE/DOWN" ]] && exit 255',
+            # A rollback's cancel of the pending box start, refused on its own.
+            '[[ -e "$STUB_REMOTE/CANCEL_FAIL" && "$*" == *"/starting/"* ]] && exit 255',
             # git push runs `git-receive-pack '<dir>'` over ssh: run it as it is.
             '[[ "$*" == "bash -lc "* ]] || { export PATH="$STUB_REMOTE/bin:$PATH"; exec bash -c "$*"; }',
             'cmd="$*"; cmd="${cmd#bash -lc }"',
@@ -1928,6 +1930,72 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("01a18385-f8c8-74a9-b6ff-694fb5fe87a7", sent)
         self.assertIn("notifications.role.lead-box-health", sent)
         self.assertIn("the session is DOWN on", sent)
+
+    def test_a_rollback_cancels_the_target_s_pending_box_start(self) -> None:
+        """PUB and PEER, 2026-11-03: a rollback killed the target's windows, and four `agentbox
+        new` launchers waited behind a stuck umount until a person ended them. The rollback now
+        kills each launcher's process group, removes a box it made, and refuses to resume the
+        session here while one will not die."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target(resume=False)
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        # The launcher the start left behind on the target, and the box it made.
+        starting = self.cutover / "starting"
+        starting.mkdir(parents=True, exist_ok=True)
+        launcher = subprocess.Popen(["sleep", "600"], start_new_session=True)
+        self.addCleanup(launcher.kill)
+        (starting / self.TO).write_text(f"pid={launcher.pid}\nbox=agentbox-stuck\nwindow=%7\n", encoding="utf-8")
+        docker = self.root / "DOCKER"
+        write_stub(self.stubs, "docker", f'echo "$*" >>"{docker}"; case "$1" in ps) echo agentbox-stuck ;; inspect) echo "[\"omp\",\"--resume\",\"{self.TO}\"]" ;; esac; exit 0')
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual(launcher.poll(), -15, "the launcher was not ended")
+        self.assertIn("rm -f agentbox-stuck", docker.read_text(encoding="utf-8"))
+        self.assertFalse((starting / self.TO).exists())
+        self.assertIn("rolled back:", run.stdout)
+
+    def test_a_pending_box_start_that_will_not_die_stops_the_rollback(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target(resume=False)
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        starting = self.cutover / "starting"
+        starting.mkdir(parents=True, exist_ok=True)
+        # The target stops answering while the rollback tries to cancel the start.
+        (starting / self.TO).write_text("pid=999999999\nbox=\nwindow=%7\n", encoding="utf-8")
+        (self.remote / "CANCEL_FAIL").write_text("", encoding="utf-8")
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("could not be cancelled", run.stdout)
+        self.assertIn("is NOT resumed here", run.stdout)
+        self.assertIn("DOWN", run.stdout)
+        self.assertEqual(self.move_log()[-1][5], "both-machines")
+
+    def test_a_respawn_that_leaves_two_omp_of_one_session_is_refused(self) -> None:
+        """`tmux respawn-pane -k` did not always end the old omp at once (the INFRA-681 double
+        loop). A respawn waits for the old omp by pid and, when two remain, says so and does not
+        report the session resumed."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target(resume=False)
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        # The old omp outlives the respawn: two of them hold the session while the rollback runs.
+        self.make_proc(999999902, ppid=1, cwd=self.worktree, session=self.TO)
+        self.set_pids(999999901, 999999902)
+        run = self.run_bash(f'AGENTBOX_ONE_OMP_WAIT=1\nmove_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("TWO omp processes hold this session after the respawn", run.stdout + run.stderr)
+        self.assertIn(f"{self.TO}: DOWN: two omp processes hold this session here", run.stdout)
+        self.assertNotIn("rolled back:", run.stdout)
 
     def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
         transcript = self.moving_session()
@@ -2612,6 +2680,28 @@ class AgentboxMove(unittest.TestCase):
         self.assertTrue(any("mkdir" in line and str(theorem) in line for line in ssh), ssh[-3:])
         self.assertTrue(theorem.is_dir())
         self.assertNotIn(str(theorem), (self.root / "RSYNC").read_text(encoding="utf-8"))
+
+    def test_in_a_box_the_plan_is_this_session_s_own(self) -> None:
+        """GRADE, boxed with `move --self`, got "no-pane (parent 96:bun …), which only a person can
+        move" from `move --plan --to` (2026-11-03 13:30Z): inside a box the host census sees only
+        the box's own processes and reads the omp's agentbox-run.ts parent as no pane. In a box the
+        plan is the one its own move would carry, and it changes nothing."""
+        transcript = self.moving_session()
+        self.target()
+        env = {"AGENTBOX_BOX": "agentbox-0123456789ab", "AGENTBOX_DIRS": str(self.lane),
+               "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
+        plan = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.lane}"\ncmd_move_plan --to devbox', env)
+        self.assertEqual(plan.returncode, 0, plan.stdout + plan.stderr)
+        self.assertNotIn("only a person can move", plan.stdout + plan.stderr)
+        self.assertIn(f"session {self.TO}, in box agentbox-0123456789ab, moves to devbox", plan.stdout)
+        self.assertIn("CARRIED to devbox", plan.stdout)
+        self.assertIn(str(transcript), plan.stdout)
+        self.assertIn("--dry-run: nothing was hung up, copied or sent", plan.stdout)
+        self.assertEqual(self.jobs(), [])
+        for flag in ("--all", f"--group {self.TO}"):
+            refused = self.run_bash(f'cd "{self.lane}"\ncmd_move_plan --to devbox {flag}', env)
+            self.assertEqual(refused.returncode, 1, flag)
+            self.assertIn("plans this session only", refused.stderr)
 
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own

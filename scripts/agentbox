@@ -3308,11 +3308,31 @@ MOVE_RESPAWN_WAIT="${AGENTBOX_RESPAWN_WAIT:-15}"
 # again, then types the launcher into the shell the pane still runs, which needs no pty of tmux's,
 # and when the pane has no process either it says so in the pane's title, since such a pane keeps
 # showing the dead session's last screen and looks alive. It returns 1 when the pane is there and
-# refuses, and 2 when the server does not have the pane at all, which no retry can change: R3A's
+# refuses, 3 when two omp hold the session after it, and 2 when the server does not have the pane
+# at all, which no retry can change: R3A's
 # rollback retried a gone pane 40 times over ten minutes of downtime, and its caller's own
 # fallback, a window of its own, never ran (2026-11-03).
+# move_one_omp SID [WAIT]: wait up to WAIT seconds (default MOVE_ONE_OMP_WAIT) until exactly one
+# live omp on THIS machine runs SID, and print those pids when more than one is left. `tmux
+# respawn-pane -k` does not always end the old omp before the new one starts, and the session
+# then ran twice (the INFRA-681 double loop); a respawn waits for the old one before it reports
+# success. Status 0 when one or none runs, 1 when more than one does.
+MOVE_ONE_OMP_WAIT="${AGENTBOX_ONE_OMP_WAIT:-60}"
+move_one_omp() {
+    local sid="$1" wait_for="${2:-$MOVE_ONE_OMP_WAIT}" waited=0 running
+    while :; do
+        running="$(move_to_running "" "$sid")"
+        (( $(grep -c . <<<"${running:-}") <= 1 )) && return 0
+        (( waited < wait_for )) || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    printf '%s\n' "$running"
+    return 1
+}
+
 move_respawn() {
-    local sid="$1" pane="$2" cwd="$3" inner="$4" what="$5" attempt=0 err run
+    local sid="$1" pane="$2" cwd="$3" inner="$4" what="$5" attempt=0 err run two
     # An interactive bash, as scripts/agent-new starts a pane: the box launcher needs the
     # session environment .bashrc sets up (shims first on PATH). The shell that stays behind is
     # what makes a box that ends leave a usable pane instead of a dead one.
@@ -3321,6 +3341,10 @@ move_respawn() {
         attempt=$((attempt + 1))
         if err="$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$run" 2>&1)"; then
             echo "$(date -u +%FT%TZ) move $sid: pane $pane respawned into agentbox new $what"
+            if ! two="$(move_one_omp "$sid")"; then
+                echo "$(date -u +%FT%TZ) move $sid: TWO omp processes hold this session after the respawn: $(tr '\n' ' ' <<<"$two"); end the older one by its pid" >&2
+                return 3
+            fi
             return 0
         fi
         echo "$(date -u +%FT%TZ) move $sid: respawn of pane $pane failed (try $attempt of $MOVE_RESPAWN_TRIES): ${err:-tmux printed nothing}"
@@ -3908,10 +3932,12 @@ move_to_running() {
     else
         out="$(move_census | awk -F"$SEP" -v OFS=$'\x1f' '$3 != "" { print $2, "", "", $3 }')"
     fi
+    # Every omp that holds the session, not the first: two of them is exactly what the callers
+    # look for (one session must not run twice on a machine).
     for sid in "$@"; do
         while IFS=$'\x1f' read -r pid _st cmd fds; do
             [[ -n "$pid" ]] || continue
-            if [[ " $cmd $fds " == *"$sid"* ]]; then printf '%s\t%s\n' "$sid" "$pid"; break; fi
+            if [[ " $cmd $fds " == *"$sid"* ]]; then printf '%s\t%s\n' "$sid" "$pid"; fi
         done <<<"$out"
     done
     return 0
@@ -4749,6 +4775,48 @@ rm -rf \"\$s\"
 printf '%s\\n' \"\$new\"" </dev/null
 }
 
+# move_to_cancel_start TARGET SID…: cancel and reap what a rollback leaves behind on the target -
+# the `agentbox new` launcher of each session, whose window was just killed, and the box it may
+# have made. A launcher that is only waiting for its window's shell to die goes with the window;
+# one stuck in a mount or a pull does not, and four such launchers sat on sami-devbox until a
+# person ended them (2026-11-03). Returns 1 with MOVE_TO_WHY when one will not go, so the
+# rollback does not resume the session here while the target may still start it.
+move_to_cancel_start() {
+    local target="$1" out
+    shift
+    # shellcheck disable=SC2016  # expanded on the target
+    out="$(printf '%s\0' "$@" | move_remote "$target" '
+        left=""
+        while IFS= read -r -d "" sid; do
+            f="'"$MOVE_TO_CUTOVER"'/starting/$sid"
+            pid=""; box=""
+            [ -r "$f" ] && { pid=$(sed -n "s/^pid=//p" "$f"); box=$(sed -n "s/^box=//p" "$f"); }
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && { kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; }
+            # The box the launcher made, if it got that far: an agentbox container whose command
+            # names this session (its `omp --resume <path>`), and the name the launcher recorded.
+            for c in $(docker ps -a --filter "name=^agentbox-" --format "{{.Names}}" 2>/dev/null); do
+                docker inspect -f "{{json .Config.Cmd}}" "$c" 2>/dev/null | grep -q "$sid" && docker rm -f "$c" >/dev/null 2>&1
+            done
+            [ -n "$box" ] && docker rm -f "$box" >/dev/null 2>&1
+            n=0
+            while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$n" -lt 30 ]; do sleep 1; n=$((n + 1)); done
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+                sleep 2
+                # A process that has exited but whose parent has not reaped it is a zombie, which
+                # kill -0 still finds; it runs nothing and starts no box.
+                st=$(awk "{print \$3}" "/proc/$pid/stat" 2>/dev/null)
+                if [ -n "$st" ] && [ "$st" != Z ]; then echo "STUCK $sid launcher pid $pid"; left=1; fi
+            fi
+            rm -f "$f"
+        done
+        exit 0')" || { MOVE_TO_WHY="the pending box starts on $target could not be cancelled (the target did not answer)"; return 1; }
+    local stuck
+    stuck="$(grep '^STUCK ' <<<"$out" || true)"
+    [[ -z "$stuck" ]] || { MOVE_TO_WHY="a pending box start on $target will not die: $(tr '\n' '; ' <<<"$stuck")"; return 1; }
+    return 0
+}
+
 move_to_mark() {
     local sid="$1" t="$2" target="$3" there="${4:-$2}" body
     body="from=${AGENTBOX_HOST:-$(hostname -s)}
@@ -4778,6 +4846,13 @@ move_to_start() {
     log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
     run="$(printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' "$MOVE_TO_AGENTBOX" "$sid" "$log" \
         "$(printf '%q ' "$MOVE_TO_AGENTBOX" new --drop-gone-dirs "$@" -- omp --resume "$resume")")"
+    # The launcher names itself in $MOVE_TO_CUTOVER/starting/<sid> on the target - its pid, the
+    # window and the box it will make - so a rollback can cancel and reap it (PUB and PEER,
+    # 2026-11-03: four `agentbox new` launchers on sami-devbox waited behind a stuck umount after
+    # their windows were killed, and a person ended them). It removes the file when it ends.
+    local started="$MOVE_TO_CUTOVER/starting/$sid"
+    run="$(printf 'mkdir -p %q; printf "pid=%%s\\nbox=%%s\\nwindow=%%s\\n" "$$" "${AGENTBOX_BOX:-}" "${TMUX_PANE:-}" >%q; trap "rm -f %q" EXIT; %s' \
+        "${started%/*}" "$started" "$started" "$run")"
     run="$run; echo; echo 'agentbox: the box has exited; this window is a shell again'; exec bash -i"
     script="s=$(printf '%q' "$MOVE_TO_TMUX_SESSION") n=$(printf '%q' "${sid:0:8}") c=$(printf '%q' "$cwd") r=$(printf '%q' "$run")
 mkdir -p \"\$(dirname $(printf '%q' "$log"))\"
@@ -5484,6 +5559,10 @@ move_to_run() {
             inner="$(move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")"
             move_respawn "${sids[j]}" "${panes[j]}" "${cwds[j]}" "$inner" "${MOVE_SPEC[*]}" && { MOVE_TO_RESUMED+=("${sids[j]}"); continue; }
             rc=$?
+            if (( rc == 3 )); then
+                move_down "${sids[j]}" "two omp processes hold this session here after the respawn; end the older one by its pid"
+                continue
+            fi
             # The pane went while the move ran: a window of its own on the same tmux session.
             if (( rc == 2 )) && [[ -n "${ats[j]}" ]] \
                 && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
@@ -5649,6 +5728,17 @@ move_to_run() {
         for ((i = 0; i < n; i++)); do [[ -n "${MOVE_TO_OK[${there[i]}]:-}" ]] || reason+=" ${sids[i]}"; done
     fi
     if [[ -z "$reason" ]]; then
+        # Exactly one omp per session on the TARGET too, not just none here.
+        local twice=() t_running
+        t_running="$(move_to_running "$target" "${sids[@]}")" || t_running=""
+        for ((i = 0; i < n; i++)); do
+            (( $(grep -c "^${sids[i]}	" <<<"$t_running") <= 1 )) || twice+=("${sids[i]}")
+        done
+        if (( ${#twice[@]} )); then
+            say "more than one omp holds ${twice[*]} on $target; moves are halted"
+            log_all "both-machines" "${all[@]}"
+            return 1
+        fi
         local both
         both="$(move_to_running "" "${sids[@]}")"
         if [[ -n "$both" ]]; then
@@ -5675,6 +5765,12 @@ move_to_run() {
     for w in ${windows[@]+"${windows[@]}"}; do
         [[ -n "$w" ]] && move_remote "$target" "tmux kill-window -t $(printf '%q' "$w") 2>/dev/null || true" </dev/null || true
     done
+    if ! move_to_cancel_start "$target" "${sids[@]}"; then
+        say "$MOVE_TO_WHY; the group is NOT resumed here, since $target may still start it"
+        log_all "both-machines" "${all[@]}"
+        for ((i = 0; i < n; i++)); do move_down "${sids[i]}" "$MOVE_TO_WHY"; done
+        return 1
+    fi
     waited=0
     left="$(move_to_running "$target" "${sids[@]}")" || left="unknown"
     while [[ -n "$left" ]] && (( waited < MOVE_TO_HANGUP_WAIT )); do
@@ -5711,7 +5807,18 @@ move_to_run() {
 # object stores) kept the plan of 2026-11-02 running past 50 minutes.
 MOVE_TO_SIZE_WAIT="${AGENTBOX_MOVE_SIZE_WAIT:-30}"
 cmd_move_plan_to() {
-    local target="$1" mode="$2" who="${3:-}" s g m err p x size total=0 refused=0 bytes i line order=() hits=()
+    local target="$1" mode="$2" who="${3:-}"
+    # In a box, the plan is this session's own: the box sees only its own processes, and its omp's
+    # parent there is agentbox-run.ts, which the host census reads as "no pane" (GRADE, boxed with
+    # `move --self`, 2026-11-03 13:30Z). move_to_in_box plans exactly what a move from the box
+    # would carry, and changes nothing.
+    if [[ -n "${AGENTBOX_BOX:-}" || -e /etc/agentbox-identity ]]; then
+        [[ "$mode" != group ]] || die "in a box, \`move --plan --to\` plans this session only; --group is for a host session"
+        [[ "$mode" != all ]] || die "in a box, \`move --plan --to\` plans this session only; --all is for a host session, where it reads every session"
+        move_to_in_box "$target" true
+        return $?
+    fi
+    local s g m err p x size total=0 refused=0 bytes i line order=() hits=()
     move_to_index_transcripts
     local -A done_=() sizes=()
     local g_name=() g_text=() g_mirror=() g_merge=() g_exclude=() paths=()
