@@ -1311,6 +1311,8 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_HOST": "oldbox",
             "AGENTBOX_MOVE_CUTOVER": str(self.cutover),
             "AGENTBOX_MOVE_TARGET_AGENTBOX": "/target/agentbox",
+            # No test waits for the target's health check unless it asks to.
+            "AGENTBOX_MOVE_READY_WAIT": "0",
             "AGENTBOX_MOVE_SETTLE": "0",
             "AGENTBOX_MOVE_POLL": "0",
             "AGENTBOX_MOVE_START_WAIT": "0",
@@ -1427,6 +1429,95 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(len(respawn), 1, respawn)
         self.assertIn("-t %81", respawn[0])
         self.assertIn(f"session {self.TO} moved to devbox", respawn[0])
+
+    def clone_fixture(self) -> tuple[Path, Path, Path]:
+        """A checkout with an origin, and a `target` whose paths are the same ones under another
+        root: move_remote is replaced in the test shell by one that maps the first root onto the
+        second and runs the script here, since the stub's target machine is this one."""
+        origin = self.root / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        repo = self.checkout("cloneme")
+        self.git("remote", "add", "origin", "https://github.com/x/cloneme", cwd=repo)
+        self.git("push", "-q", str(origin), "HEAD:refs/heads/main", cwd=repo)
+        far = self.root / "target-root"
+        far.mkdir()
+        write_stub(self.stubs, "git", "\n".join([
+            f'if [ "$1 $2" = "clone --quiet" ]; then exec /usr/bin/git clone --quiet "{origin}" "$4"; fi',
+            'exec /usr/bin/git "$@"',
+        ]))
+        return origin, repo, far
+
+    def clone_run(self, repo: Path, far: Path) -> subprocess.CompletedProcess[str]:
+        """move_to_clone_missing for one mirrored tree, against the mapped target."""
+        return self.run_bash(
+            'move_remote() { local s="${2//$STUB_SRC/$STUB_FAR}"; bash -c "$s"; }\n'
+            f'MOVE_TO_MIRROR=("{repo}")\nmove_to_clone_missing devbox',
+            {"STUB_SRC": str(self.src), "STUB_FAR": str(far)})
+
+    def test_a_repository_the_target_lacks_is_cloned_there_before_the_hang_up(self) -> None:
+        """The object store is the big part of a tree, so the clone is made before the hang-up and
+        the tree then goes through git."""
+        _origin, repo, far = self.clone_fixture()
+        cloned = self.clone_run(repo, far)
+        self.assertEqual(cloned.returncode, 0, cloned.stderr)
+        # The message names the path as the TARGET has it; the fixture maps that under far.
+        self.assertRegex(cloned.stdout, rf"cloned https://github.com/x/cloneme into {repo} on devbox \(\d+s")
+        self.assertTrue((far / "cloneme" / ".git" / "objects").is_dir())
+        # Run again: the path is there now, so nothing is cloned over it.
+        again = self.clone_run(repo, far)
+        self.assertEqual(again.stdout, "", again.stdout)
+
+    def test_a_path_that_exists_on_the_target_is_never_cloned_over(self) -> None:
+        _origin, repo, far = self.clone_fixture()
+        (far / "cloneme").mkdir()
+        (far / "cloneme" / "someone-elses-file").write_text("keep\n", encoding="utf-8")
+        result = self.clone_run(repo, far)
+        self.assertIn("the path exists on the target already", result.stdout)
+        self.assertIn(f"{repo} is copied with rsync", result.stdout)
+        self.assertEqual((far / "cloneme" / "someone-elses-file").read_text(encoding="utf-8"), "keep\n")
+        self.assertFalse((far / "cloneme" / ".git").exists())
+
+    def test_a_clone_that_fails_leaves_the_tree_to_rsync(self) -> None:
+        _origin, repo, far = self.clone_fixture()
+        write_stub(self.stubs, "git", 'if [ "$1 $2" = "clone --quiet" ]; then echo "fatal: auth" >&2; exit 128; fi\nexec /usr/bin/git "$@"')
+        failed = self.clone_run(repo, far)
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.assertIn("git clone failed", failed.stdout)
+        self.assertIn(f"{repo} is copied with rsync", failed.stdout)
+        # And one with no usable origin.
+        self.git("remote", "set-url", "origin", "/some/local/path", cwd=repo)
+        local = self.clone_run(repo, far)
+        self.assertIn("which the target may not be able to clone", local.stdout)
+
+    def test_a_mirrored_tree_with_no_commit_is_copied_not_pushed(self) -> None:
+        """LINUX-1248, 2026-11-03: its omp's working directory ~/src/machcsl-riscv was on an UNBORN
+        branch (everything staged), and once the target had a clone of that repository the push
+        failed AFTER the hang-up and the move rolled back. Such a tree is mirrored instead; its
+        .git is neither pushed nor merged over the target's clone, and a worktree of the same
+        repository still goes through git."""
+        self.target()  # the stub target has the repository (it is this machine)
+        repo = self.checkout("unborn")
+        self.git("checkout", "-q", "--orphan", "fresh", cwd=repo)
+        (repo / "staged.txt").write_text("work\n", encoding="utf-8")
+        self.git("add", "staged.txt", cwd=repo)
+        self.assertNotEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", "HEAD"],
+                                           capture_output=True).returncode, 0)
+        worktree = repo / ".worktrees" / "wt"
+        self.git("worktree", "add", "-q", "-b", "wtb", str(worktree), "main", cwd=repo)
+        result = self.run_bash(
+            f'MOVE_TO_MIRROR=("{repo}" "{worktree}")\nMOVE_TO_MERGE=("{repo}/.git")\n'
+            'move_to_git_native_plan devbox\n'
+            'printf "native %s\\n" "${MOVE_TO_NATIVE[@]}"\nprintf "unborn %s\\n" "${MOVE_TO_UNBORN[@]}"\n'
+            'printf "merge %s\\n" ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}\n'
+            'printf "exclude %s\\n" "${MOVE_TO_EXCLUDE[@]}"\n'
+            'move_to_git_native_push devbox || echo "PUSH FAILED: $MOVE_TO_WHY"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("PUSH FAILED", result.stdout)
+        self.assertIn(f"native {worktree}\t{repo}/.git\n", result.stdout)
+        self.assertIn(f"unborn {repo}/.git\n", result.stdout)
+        self.assertNotIn(str(repo), result.stdout.split("merge ")[1].split("\n")[0] + "x")
+        self.assertIn(f"exclude {worktree}/.git\n", result.stdout)
+        self.assertIn(f"exclude {repo}/.git\n", result.stdout)
 
     def test_a_tree_whose_repository_the_target_lacks_copies_its_storage(self) -> None:
         """Without a clone of the repository on the target there is nothing to push into, so the
@@ -1597,6 +1688,42 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(self.jobs(), [])
         self.assertEqual(dry.returncode, 1)
         self.assertIn("the move would REFUSE now, before any hang-up: the copy cannot write on devbox", dry.stderr)
+
+    def test_a_move_waits_for_a_health_check_in_flight_and_says_so_when_it_gives_up(self) -> None:
+        """devbox/sami-devbox-check deletes target-ready when it starts and writes it again only
+        after a run with no failure, and a run takes about 6 min, so a missing marker usually means
+        a check is in flight (DevboxProvision, 2026-11-03)."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        ready = self.cutover / "target-ready"
+        ready.unlink()
+        # It comes back while the move waits: a shell that writes it after a moment.
+        # Long enough that the move reaches its check before the marker is back (the fixture's
+        # census takes a few seconds), short enough to keep the test quick.
+        writer = subprocess.Popen(["bash", "-c", f'sleep 12; date -u +%FT%TZ >"{ready}"'])
+        self.addCleanup(writer.wait)
+        self.env["AGENTBOX_MOVE_READY_WAIT"] = "30"
+        self.env["AGENTBOX_MOVE_POLL"] = "1"
+        waited = self.move_to()
+        self.assertEqual(waited.returncode, 0, waited.stdout + waited.stderr)
+        self.assertIn("its health check deletes it while it runs (about 6 min), so this waits up to", waited.stderr)
+        self.assertIn(f"{ready} is back on devbox after", waited.stderr)
+        self.assertEqual(len(self.jobs()), 1)
+        # Still missing when the wait runs out: the refusal says what to do.
+        ready.unlink()
+        self.env["AGENTBOX_MOVE_READY_WAIT"] = "2"
+        gone = self.move_to()
+        self.assertEqual(gone.returncode, 1)
+        self.assertIn("Run the move again in about 6 minutes; if it is still missing then, the last check FAILED", gone.stderr)
+        # A dry run never waits.
+        self.env["AGENTBOX_MOVE_READY_WAIT"] = "600"
+        start = time.time()
+        dry = self.move_to("--to devbox --dry-run")
+        self.assertLess(time.time() - start, 120)
+        self.assertEqual(dry.returncode, 1)
+        self.assertIn("the move would REFUSE now, before any hang-up: devbox has no", dry.stderr)
 
     def test_nothing_is_hung_up_when_the_target_is_not_ready_or_does_not_answer(self) -> None:
         self.moving_session()

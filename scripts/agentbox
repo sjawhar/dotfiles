@@ -3700,6 +3700,9 @@ MOVE_TO_HANGUP_WAIT="${AGENTBOX_MOVE_HANGUP_WAIT:-180}"
 # on 2026-11-03, when a 2 h window could have done exactly that); one whose file is older is
 # asked again.
 MOVE_TO_READY_TTL="${AGENTBOX_MOVE_READY_TTL:-600}"
+# How long a move waits for the target's health check to write target-ready again (a run takes
+# about 6 min); a dry run sets it to 0 and says what it would wait for.
+MOVE_TO_READY_WAIT="${AGENTBOX_MOVE_READY_WAIT:-420}"
 # Under ~/.cache/omp, which every box mounts at the same path, so a job a box writes is read by
 # the host's relauncher.
 MOVE_TO_JOBS="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-to"
@@ -3803,9 +3806,26 @@ move_to_preflight() {
         MOVE_TO_WHY="$target does not answer \`${MOVE_TO_SSH[*]} $MOVE_TO_USER@$target\`"
         return 1
     fi
+    # The target's health check (devbox/sami-devbox-check) DELETES this marker when it starts and
+    # writes it again only after a run with no failure, and a run takes about 6 minutes. A missing
+    # marker is therefore usually a check in flight, not a target that failed, so the move waits
+    # for it (MOVE_TO_READY_WAIT, 0 in a dry run, which says what it would wait for).
     if ! move_remote "$target" "test -e $(printf '%q' "$MOVE_TO_READY")" </dev/null >/dev/null 2>&1; then
-        MOVE_TO_WHY="$target has no $MOVE_TO_READY, which its provisioning writes when every check has passed"
-        return 1
+        local waited=0
+        while (( waited < MOVE_TO_READY_WAIT )); do
+            (( waited == 0 )) && echo "agentbox: $target has no $MOVE_TO_READY; its health check deletes it while it runs (about 6 min), so this waits up to $((MOVE_TO_READY_WAIT / 60)) min for it" >&2
+            sleep "$MOVE_TO_POLL"
+            waited=$((waited + MOVE_TO_POLL))
+            if move_remote "$target" "test -e $(printf '%q' "$MOVE_TO_READY")" </dev/null >/dev/null 2>&1; then
+                echo "agentbox: $MOVE_TO_READY is back on $target after ${waited}s; the move goes on" >&2
+                waited=-1
+                break
+            fi
+        done
+        if (( waited >= 0 )); then
+            MOVE_TO_WHY="$target has no $MOVE_TO_READY. Its health check (devbox/sami-devbox-check) deletes that file when it starts and writes it again only after a run with no failure, and a run takes about 6 minutes, so this usually means a check is in flight$( (( MOVE_TO_READY_WAIT > 0 )) && echo " (waited ${waited}s)"). Run the move again in about 6 minutes; if it is still missing then, the last check FAILED and the box-health lead decides"
+            return 1
+        fi
     fi
     halted="$(move_to_halted "$target")" || { MOVE_TO_WHY="the move log on $target cannot be read"; return 1; }
     if [[ -n "$halted" ]]; then
@@ -4188,29 +4208,96 @@ move_to_copy() {
 # other tree keeps the rsync of its storage.
 # MOVE_TO_NATIVE holds "<tree>\t<common dir>" for each tree moved this way.
 MOVE_TO_NATIVE=()
+# move_to_clone_missing TARGET: for each mirrored git tree whose repository the target lacks,
+# clone it from its origin ON THE TARGET, before the hang-up, so move_to_git_native_plan can push
+# into it and the object store stays out of the downtime (a full clone: the source checkouts are
+# blob:none partial clones, so a clone from this host would lack blobs). Only into a path that is
+# absent or an empty directory there - an empty root-owned one is removed as
+# move_to_dests_writable does. A clone that fails says why and leaves that tree to rsync; it
+# never refuses the move. Each clone's time and the repository's size on the target are logged.
+# $2 is a function that logs one line.
+move_to_clone_missing() {
+    local target="$1" log="${2:-echo}" w common dir url out
+    for w in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
+        [[ -d "$w" && -e "$w/.git" ]] || continue
+        common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
+        [[ "$common" == */.git ]] || continue
+        dir="${common%/.git}"
+        move_remote "$target" "test -d $(printf '%q' "$common/objects")" </dev/null >/dev/null 2>&1 && continue
+        url="$(git -C "$w" remote get-url origin 2>/dev/null)" || url=""
+        if [[ -z "$url" ]]; then
+            "$log" "$dir has no origin on $target and no origin remote here, so $w is copied with rsync"
+            continue
+        fi
+        if [[ "$url" != https://github.com/* && "$url" != git@github.com:* ]]; then
+            "$log" "the origin of $w is $url, which the target may not be able to clone, so it is copied with rsync"
+            continue
+        fi
+        if out="$(move_remote "$target" "set -e
+d=$(printf '%q' "$dir") u=$(printf '%q' "$url")
+if [ -e \"\$d\" ]; then
+    if [ -d \"\$d\" ] && [ -z \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
+        [ -w \"\$d\" ] || sudo -n rmdir \"\$d\" 2>/dev/null || { echo 'the path exists and is an empty directory this user cannot remove'; exit 3; }
+        [ -e \"\$d\" ] && rmdir \"\$d\"
+    else
+        echo 'the path exists on the target already'; exit 3
+    fi
+fi
+s=\$(date +%s)
+git clone --quiet \"\$u\" \"\$d\" 2>&1 || { echo 'git clone failed'; exit 4; }
+echo \"CLONED \$((\$(date +%s) - s))s \$(du -sh \"\$d/.git\" 2>/dev/null | cut -f1)\"" </dev/null 2>&1)"; then
+            "$log" "cloned $url into $dir on $target (${out#CLONED }), so $w goes through git"
+        else
+            "$log" "no clone of $url into $dir on $target ($(tr '\n' ' ' <<<"$out")); $w is copied with rsync"
+        fi
+    done
+    return 0
+}
+
+# MOVE_TO_UNBORN holds the common dirs of mirrored trees with NO commit: their files go by the
+# plain mirror (nothing to push), but their storage still leaves the merge, since the target's
+# clone of that repository must never be overwritten by one .git over another. LINUX-1248's
+# ~/src/machcsl-riscv was such a tree on 2026-11-03 - an unborn branch, everything staged - and
+# the push failed AFTER the hang-up, which rolled the move back.
+MOVE_TO_UNBORN=()
 move_to_git_native_plan() {
     local target="$1" w common keep p n
-    local -a merge=() mirror_excl=()
-    MOVE_TO_NATIVE=()
+    local -a merge=()
+    MOVE_TO_NATIVE=() MOVE_TO_UNBORN=()
     for w in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
         [[ -d "$w" && -e "$w/.git" ]] || continue
         common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
         move_remote "$target" "test -d $(printf '%q' "$common/objects")" </dev/null >/dev/null 2>&1 || continue
+        if ! git -C "$w" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+            MOVE_TO_UNBORN+=("$common")
+            continue
+        fi
         MOVE_TO_NATIVE+=("$w	$common")
     done
-    (( ${#MOVE_TO_NATIVE[@]} )) || return 0
+    (( ${#MOVE_TO_NATIVE[@]} + ${#MOVE_TO_UNBORN[@]} )) || return 0
     # The target's repository is not overwritten: its storage leaves the merge, and each tree's
     # .git (a directory or a worktree's pointer file) leaves the mirror.
     for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
         keep=1
-        for n in "${MOVE_TO_NATIVE[@]}"; do
+        for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"} ${MOVE_TO_UNBORN[@]+"${MOVE_TO_UNBORN[@]}"}; do
             common="${n#*$'\t'}"
             if move_within "$p" "$common" || move_within "$p" "$(readlink -f "$common/objects")"; then keep=0; break; fi
         done
         (( keep )) && merge+=("$p")
     done
     MOVE_TO_MERGE=(${merge[@]+"${merge[@]}"})
-    for n in "${MOVE_TO_NATIVE[@]}"; do MOVE_TO_EXCLUDE+=("${n%%$'\t'*}/.git"); done
+    for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do MOVE_TO_EXCLUDE+=("${n%%$'\t'*}/.git"); done
+    # An unborn tree keeps its own .git out of the mirror too: the target's clone is the
+    # repository there, and one .git over another is exactly what the merge rule forbids.
+    local u w native_paths=" "
+    for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do native_paths+="${n%%$'\t'*} "; done
+    for u in ${MOVE_TO_UNBORN[@]+"${MOVE_TO_UNBORN[@]}"}; do
+        for w in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
+            [[ "$native_paths" != *" $w "* && -e "$w/.git" ]] || continue
+            [[ "$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" == "$u" ]] \
+                && MOVE_TO_EXCLUDE+=("$w/.git")
+        done
+    done
     return 0
 }
 
@@ -4656,6 +4743,8 @@ cmd_move_to() {
     # A dry run goes on past a refusal of the target's checks and says each one at the end, so
     # the copy list is seen even while the target is not ready; a real run stops at the first.
     local would=()
+    # A dry run never waits for the target; it says what the move would wait for.
+    $dry && MOVE_TO_READY_WAIT=0
     move_to_or_would() { if $dry; then would+=("$1"); else die "no move to $target; nothing was hung up: $1"; fi; }
     move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || move_to_or_would "$MOVE_TO_WHY"
     local copy="" cwds=()
@@ -4847,6 +4936,9 @@ move_to_run() {
         done
         return 2
     fi
+    # Clone a repository the target lacks BEFORE the hang-up: the object store is the big part of
+    # a tree, and once the clone is there git sends only what the target misses.
+    move_to_clone_missing "$target" say
     # 1. The hang-up, of every member, before anything is copied.
     local down=() alive=() waited
     for ((i = 0; i < n; i++)); do
