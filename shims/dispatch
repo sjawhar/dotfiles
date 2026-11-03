@@ -1,0 +1,15 @@
+#!/bin/sh
+# Puts the Dispatch CLI on PATH at all: every shell that has this dir (a login shell, a plain
+# `ssh host cmd`, a box) finds `dispatch`, not only an omp session, which adds the plugin's bin dir
+# itself. The CLI is the omp plugin pin's (@sjawhar/pi-envoy in omp/plugins/package.json). Its
+# bin/dispatch finds dist/ from its own path, so it is execed by that path: a symlink to it breaks.
+set -eu
+
+here=$(dirname "$(readlink -f "$0")")
+cli="$here/../omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch"
+if [ ! -x "$cli" ]; then
+    echo "dispatch: $cli is missing; run bun install --frozen-lockfile in omp/plugins" >&2
+    exit 127
+fi
+
+exec "$cli" "$@"

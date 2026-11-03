@@ -258,6 +258,12 @@ before handing the call to the real one.
   instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
   entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses, and
   turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
+- **`dispatch`** puts the Dispatch CLI on PATH at all. omp adds the pi-envoy plugin's bin dir to a
+  session's PATH, but a login shell, a plain `ssh sami-devbox dispatch …` and a unit have no such
+  entry. It execs `omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch` by its path: that
+  script finds `dist/` from its own path, so a symlink to it fails with "dist/dispatch.js is
+  missing" (sami-devbox, 2026-11-03). `devbox/sami-devbox-check` runs `dispatch --help` on the
+  host and in a box.
 - **`ctx`** reaches one of two memory graphs. Sami's personal deployment is chosen when the omp
   profile is `personal` or the caller sets `CTX_PERSONAL_ROOT`: its root (that variable, else
   `ctx-personal` under an absolute `$XDG_DATA_HOME`, else `~/.local/share`) names its server in

@@ -106,6 +106,7 @@ in_box() {
     got="$(DISPATCH_HOST="${DISPATCH_HOST:-omp}" DISPATCH_SESSION_ID="${DISPATCH_SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}" \
         "$DOTFILES_DIR/omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch" read --issue INFRA-993 2>&1 | head -1)"
     [[ "$got" == "Title: sami-devbox"* ]] && ok "Dispatch: dispatch read --issue INFRA-993 -> ${got:0:60}" || fail "Dispatch: dispatch read --issue INFRA-993 -> $got"
+    dispatch_cli_check "in the box"
 
     # MLflow, the company tracking server (tailnet Service svc:mlflow).
     got="$(curl -sS -m 10 "http://mlflow.$TAILNET/health" 2>&1)"
@@ -970,6 +971,18 @@ host_plain_path_kubectl() {
         || fail "ssh-PATH kubectl: env -i kubectl -n $N6_NAMESPACE get jobs: exit $rc: $(tail -1 <<<"$out")"
 }
 
+# The Dispatch CLI by name, as a shell omp did not start finds it (shims/dispatch): on the host with
+# the plain ssh command's PATH (SSH_PATH), in a box with the box's own PATH.
+dispatch_cli_check() {
+    local where="$1" out rc=0
+    if [[ "$where" == "on the host" ]]; then
+        out="$(env -i HOME="$HOME" MISE_DATA_DIR="$HOME/.mise" PATH="$SSH_PATH" dispatch --help 2>&1)" || rc=$?
+    else
+        out="$(dispatch --help 2>&1)" || rc=$?
+    fi
+    (( rc == 0 )) && ok "dispatch --help $where: exit 0" || fail "dispatch --help $where: exit $rc: $(head -1 <<<"$out")"
+}
+
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
@@ -981,6 +994,7 @@ host() {
     host_bwrap
     host_nofile
     host_plain_path_kubectl
+    dispatch_cli_check "on the host"
     local missing
     mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
