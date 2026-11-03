@@ -27,8 +27,10 @@ _gh_cache_root() {
         _gh_root="${XDG_CACHE_HOME:-$HOME/.cache}/gh-read-cache"
     fi
 }
+# _gh_call_log EV ARGV…: one line with event EV ("call", "unrouted-refused") for this call.
 _gh_call_log() {
-    local dir a s out='' hour
+    local ev="$1" dir a s out='' hour
+    shift
     _gh_cache_root
     dir="$_gh_root/log"
     if [[ ! -d "$dir" ]]; then
@@ -47,12 +49,12 @@ _gh_call_log() {
     now="${now/,/.}"
     [[ -n "$now" ]] || now="$(date -u +%s)"
     TZ=UTC0 printf -v hour '%(%Y%m%d%H)T' -1
-    printf '{"t":%s,"pid":%s,"sid":"%s","cwd":"%s","ev":"call","argv":[%s]}\n' \
-        "$now" "$$" "${OMP_SESSION_ID:-}" "${PWD//\"/}" "${out:1}" \
+    printf '{"t":%s,"pid":%s,"sid":"%s","cwd":"%s","ev":"%s","argv":[%s]}\n' \
+        "$now" "$$" "${OMP_SESSION_ID:-}" "${PWD//\"/}" "$ev" "${out:1}" \
         >> "$dir/$hour.jsonl" 2> /dev/null || true
 }
 if [[ -z "${KNIVES_GH_SHIM_DEPTH:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${GH_SHIM_INNER:-}" && "${GH_READ_CACHE_LOG:-}" != 0 ]]; then
-    _gh_call_log "$@" || true
+    _gh_call_log call "$@" || true
 fi
 
 # Agent context: an omp session (its bash tool carries OMP_SESSION_ID, its
@@ -186,19 +188,6 @@ gh_shim_refused_by_github() {
     } >&2
     exit "$rc"
 }
-# gh_shim_no_target RC ARGV…: knives found no repository to route on, so gh ran
-# with the agent config's placeholder login and GitHub answered 401. That is not
-# a refusal of the App: no App was asked.
-gh_shim_no_target() {
-    local rc="$1"
-    shift
-    {
-        echo "gh shim: NOT ROUTED: \`$(gh_shim_quote "$@")\` (exit $rc). knives found no repository to route on (its line above), so no GitHub App or upstream token was used; GitHub's 401 is for the placeholder login, not a refusal of the App."
-        echo "  Instead: name the repository and run the call again: -R <owner>/<repo> (gh pr/issue/repo), the owner in the path (gh api repos/<owner>/<repo>/…), or GH_REPO=<owner>/<repo> before the command."
-        echo "  A call with no repository of its own (gh api markdown, search/code, search/issues, /organizations/…): set GH_REPO to the repository your work is in. The call then runs as that owner's GitHub App, or with the upstream token for an owner without an App (shims/AGENTS.md); GitHub's search answers only for what that token can read."
-    } >&2
-    exit "$rc"
-}
 # What GitHub answers when a credential's request budget is spent: the primary
 # limit ("API rate limit exceeded for user ID …", HTTP 403 or 429) or a
 # secondary limit. The call is allowed; the budget is not there now. Read
@@ -279,6 +268,12 @@ if agent_context; then
     _agent_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh-agent"
     [[ -f "$_agent_cfg/hosts.yml" && -e "$_agent_cfg/config.yml" ]] || _agent_cfg="$("$_dotfiles/scripts/gh-agent-config")"
     export GH_CONFIG_DIR="$_agent_cfg"
+    # Here gh runs only with the token knives routed (scripts/gh-routed-only, as
+    # KNIVES_REAL_GH below): a call that needs GitHub and got none could only get
+    # the placeholder login's 401, so it is refused before it reaches GitHub, with
+    # exit 4 and one line naming the fix. On 2026-11-03 a lane's 18 mutations from
+    # a directory with no repository each got a 401 it never read (stderr dropped).
+    _routed_only=1
     # `gh auth status` would describe the placeholder login of the agent config
     # directory, never the user's own, while routed calls work. Here it answers
     # for what an agent call uses instead: it names the routing and, inside a
@@ -355,13 +350,16 @@ if agent_context; then
                 >> "$_approved_log" 2> /dev/null || true
         fi
         _refused=0
-        _no_target=0
+        _unrouted=0
         _limited=0
         if ((_rc != 0)); then
-            grep -q '^knives gh: no target repository' "$_err" && _no_target=1
-            ((!_no_target)) && grep -qiE "$GH_SHIM_RATE_LIMITED" "$_err" && _limited=1
-            ((!_no_target && !_limited)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
+            # Not routed: refused before GitHub by scripts/gh-routed-only (exit 4), or
+            # knives' own no-target line; neither is GitHub refusing the App.
+            grep -q '^gh shim: NOT ROUTED\|^knives gh: no target repository' "$_err" && _unrouted=1
+            ((!_unrouted)) && grep -qiE "$GH_SHIM_RATE_LIMITED" "$_err" && _limited=1
+            ((!_unrouted && !_limited)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
         fi
+        ((_rc == 4 && _unrouted)) && { _gh_call_log unrouted-refused "$@" || true; }
         if ((_limited || _refused)); then
             set +e
             if ((_limited)); then
@@ -374,7 +372,6 @@ if agent_context; then
             exit "$_rc"
         fi
         rm -f "$_err"
-        ((_no_target)) && gh_shim_no_target "$_rc" "$@"
         exit "$_rc"
     fi
     # An inherited GH_TOKEN wins over everything below: knives skips minting and
@@ -564,6 +561,10 @@ if [[ -z "${KNIVES_GH_BYPASS:-}" ]] && command -v knives > /dev/null 2>&1; then
         echo "gh shim: re-entered $_depth times — knives gh is looping through this shim" >&2
         echo "gh shim: refusing to recurse; KNIVES_GH_BYPASS=1 runs $_real directly" >&2
         exit 70
+    fi
+    if [[ -n "${_routed_only:-}" && -x "$_dotfiles/scripts/gh-routed-only" ]]; then
+        GH_SHIM_REAL_GH="$_real" KNIVES_GH_SHIM_DEPTH=$((_depth + 1)) KNIVES_REAL_GH="$_dotfiles/scripts/gh-routed-only" \
+            exec knives gh -- "$@"
     fi
     KNIVES_GH_SHIM_DEPTH=$((_depth + 1)) KNIVES_REAL_GH="$_real" exec knives gh -- "$@"
 fi

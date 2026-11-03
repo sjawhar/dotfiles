@@ -256,11 +256,15 @@ class UserLogin(unittest.TestCase):
         self.assertIn("`VERDICT: REQUEST_CHANGES at", result.stderr)
         self.assertIn("post-review 7 <full 40-character head sha> REQUEST_CHANGES <body-file> o/r`", result.stderr)
 
-    def test_an_unrouted_call_reaches_github_without_the_user_and_says_to_stop(self):
+    def test_an_unrouted_call_is_not_sent_and_says_to_name_a_repository(self):
+        # Since 2026-11-03 gh runs only with a routed token in an agent session (scripts/gh-routed-only):
+        # nothing reaches GitHub, so the user's login cannot either.
         result, sent = self.run_gh(REVIEW, self.shim_path, KNIVES_UNROUTED="1", **self.agent)
-        self.assertNotEqual(result.returncode, 0)
-        self.assert_never_the_user(sent)
-        self.assertIn("gh shim: REFUSED by GitHub:", result.stderr)
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertEqual(sent, [])
+        self.assertIn("gh shim: NOT ROUTED, so not sent (exit 4)", result.stderr)
+        self.assertIn("GH_REPO=<owner>/<repo>", result.stderr)
+        self.assertNotIn("REFUSED", result.stderr)
 
     def test_an_admin_call_github_refuses_for_the_app_names_the_admin_token_route(self):
         # Sami, five times 2026-10-25..11-03: an agent does a GitHub admin action itself with his admin
@@ -396,13 +400,14 @@ class UserLogin(unittest.TestCase):
         self.assertNotIn("code_search 9", result.stderr)  # a budget with requests left is not the cause
 
     def test_a_call_knives_could_not_route_says_to_name_a_repository_not_to_stop(self):
-        # 2026-11-02: `gh api markdown` outside a checkout; knives names no target and gh's 401 follows.
+        # 2026-11-02: `gh api markdown` outside a checkout; knives names no target and gh's 401 follows (a gh past
+        # scripts/gh-routed-only, e.g. with GITHUB_TOKEN set). Knives' own line names the fix; the shim must not call
+        # it a refusal of the App, which sends agents looking for another credential.
         executable(self.bin / "knives",
                    'echo "knives gh: no target repository (no -R/--repo flag, ...), or set GH_REPO=<owner>/<repo>." >&2\n'
                    'echo "gh: Bad credentials (HTTP 401)" >&2; exit 1')
         result, _ = self.run_gh(["api", "markdown", "--input", "-"], self.shim_path, **self.agent)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("gh shim: NOT ROUTED: `gh api markdown --input -`", result.stderr)
         self.assertIn("GH_REPO=<owner>/<repo>", result.stderr)
         self.assertNotIn("REFUSED", result.stderr)
         self.assertNotIn("tell your lead", result.stderr)

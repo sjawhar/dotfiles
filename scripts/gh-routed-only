@@ -1,0 +1,39 @@
+#!/bin/bash
+# gh-routed-only ARGV…: the gh that knives runs for an agent's call (shims/gh sets it as
+# KNIVES_REAL_GH, and the real gh as GH_SHIM_REAL_GH). knives hands gh the token it routed in
+# GH_TOKEN. With no token, an agent's gh has only the agent config's placeholder login, so a call
+# that needs GitHub can only get a 401: it is refused here, before any request, with exit 4 and one
+# line naming the fix. On 2026-11-03 a lane's 18 GraphQL mutations by node id, run from a
+# directory with no repository, each got a 401 it never read (it dropped stderr). A token the
+# caller set (GH_TOKEN, GITHUB_TOKEN) runs as it did, and so does a command gh answers without
+# GitHub: help, version, completion, config, alias, extension list, and any -h/--help/--version.
+set -euo pipefail
+real="${GH_SHIM_REAL_GH:-}"
+if [[ -z "$real" || ! -x "$real" ]]; then
+    echo "gh-routed-only: GH_SHIM_REAL_GH does not name the real gh" >&2
+    exit 127
+fi
+[[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] && exec "$real" "$@"
+
+local_command() {
+    local arg first="" second=""
+    for arg in "$@"; do
+        case "$arg" in
+            --) break ;;
+            -h | --help | --version) return 0 ;;
+            -*) ;;
+            *)
+                if [[ -z "$first" ]]; then first="$arg"; elif [[ -z "$second" ]]; then second="$arg"; fi
+                ;;
+        esac
+    done
+    case "$first" in
+        "" | help | version | completion | config | alias | auth) return 0 ;;
+        extension | extensions | ext) [[ "$second" == list || "$second" == ls ]] && return 0 ;;
+    esac
+    return 1
+}
+local_command "$@" && exec "$real" "$@"
+
+echo "gh shim: NOT ROUTED, so not sent (exit 4): knives routed no token for this call (its line above says why), and GitHub answers an unrouted agent call with 401. Name the repository: GH_REPO=<owner>/<repo> before the command, -R <owner>/<repo>, the owner in the api path, or run it in a checkout of that repository." >&2
+exit 4

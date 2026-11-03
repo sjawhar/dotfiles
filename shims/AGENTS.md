@@ -11,7 +11,15 @@ before handing the call to the real one.
   token from the secrets store (`gh-app.agent.fallback-secret`, `GH_PUBLIC_REPO_PAT`). No
   agent process reaches the user's own login, through this shim or past it: gh runs with
   `GH_CONFIG_DIR` at `scripts/gh-agent-config`'s directory, whose placeholder login stands
-  where the user's would be, so gh never reads his token from `hosts.yml` or the keyring;
+  where the user's would be, so gh never reads his token from `hosts.yml` or the keyring.
+  There gh runs only with the token knives routed (`scripts/gh-routed-only`, which the shim
+  gives knives as its gh): a call that needs GitHub and got none (no repository in the call,
+  in `GH_REPO` or in the directory's remote) is not sent; it exits 4 with one
+  `gh shim: NOT ROUTED, so not sent` line naming the fix, and the call log records
+  `unrouted-refused`. It could only have got the placeholder login's 401, which a caller that
+  drops stderr never reads (2026-11-03, 18 mutations by node id from a directory with no
+  repository). A token the caller set, and help/version/completion/config/alias, run as before
+  (`shims/tests/test_gh_unrouted.py`);
   `scripts/agent-session` and `omp/extensions/session-env.ts` export that directory for the
   whole session (and omp's eval kernels, through `eval.envPassthrough`), and `mise.toml`'s
   `_.path` puts this dir first in every PATH mise builds, since mise's python3 shim put mise's
