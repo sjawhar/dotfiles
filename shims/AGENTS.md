@@ -195,9 +195,10 @@ before handing the call to the real one.
   profile's links, then execs omp through `scripts/agent-session` (below). It sets no
   Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
   come from the profile's `models.yml` (`omp/AGENTS.md`). Each session runs in a transient
-  systemd user scope with a hard memory cap and swap off: `OMP_MEMORY_MAX=<size>`, 24G by default
-  (dispatch://INFRA-898; the largest of 44 sessions measured on 2026-10-31 held 17.8 GiB), a
-  caller's value clamped at 96G. The shim waits for the session instead of exec'ing, and says on
+  systemd user scope with a hard memory cap and swap off: `OMP_MEMORY_MAX=<size>`, by default the
+  larger of 24G and MemTotal/20 in whole GiB (dispatch://INFRA-898: the largest of 44 sessions
+  measured on 2026-10-31 held 17.8 GiB; dispatch://INFRA-993: 24G on sami-rocqperf, 109G on
+  sami-devbox), a caller's value clamped at four times the default. The shim waits for the session instead of exec'ing, and says on
   the pane when the cap was what killed it. A session inside such a scope exports
   `OMP_MEMORY_SCOPE`, so an omp it starts takes no default and shares the parent's scope. One
   session reached 138.0 GiB on 2026-10-26 and the box-wide OOM

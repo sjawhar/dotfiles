@@ -88,7 +88,8 @@ class BrokerPassTest(unittest.TestCase):
         self.calls: list[list[str]] = []
         for name, value in (("PROC_ROOT", self.tree.proc), ("CGROUP_ROOT", self.tree.cgroup),
                             ("OMP_HOME", str(self.tree.runtime.parents[1]) + "/"),
-                            ("systemd_user", self.systemd), ("log", lambda line: None)):
+                            ("systemd_user", self.systemd), ("log", lambda line: None),
+                            ("mem_total", lambda: 263897780 << 10)):  # sami-rocqperf: 24 GiB default
             original = getattr(WATCH, name)
             setattr(WATCH, name, value)
             self.addCleanup(setattr, WATCH, name, original)

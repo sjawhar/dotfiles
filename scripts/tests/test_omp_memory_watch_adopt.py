@@ -79,8 +79,10 @@ class AdoptPassTest(unittest.TestCase):
         self.tree = Tree(Path(self.tmp.name))
         self.calls: list[list[str]] = []
         self.policy = {"run-u4242.scope": "stop"}
+        self.mem_total = 263897780 << 10  # sami-rocqperf's MemTotal: the 24 GiB default
         for name, value in (("PROC_ROOT", self.tree.proc), ("CGROUP_ROOT", self.tree.cgroup),
-                            ("systemd_user", self.systemd), ("log", lambda line: None)):
+                            ("systemd_user", self.systemd), ("log", lambda line: None),
+                            ("mem_total", lambda: self.mem_total)):
             original = getattr(WATCH, name)
             setattr(WATCH, name, value)
             self.addCleanup(setattr, WATCH, name, original)
@@ -140,6 +142,26 @@ class AdoptPassTest(unittest.TestCase):
         self.run_pass()
 
         self.assertIn(f"MemoryMax t {24 << 30}", " ".join(self.bus("StartTransientUnit")[0]))
+
+    def test_the_default_scales_with_the_host(self) -> None:
+        """dispatch://INFRA-993: the larger of 24 GiB and MemTotal/20, in whole GiB."""
+        self.mem_total = 2303551644 << 10  # sami-devbox's MemTotal, 2.1 TiB
+        self.tree.process(500, "omp", 1, LOGIN, ["/x/bin/omp"], {"OMP_SESSION_ID": SID})
+
+        self.run_pass()
+
+        self.assertIn(f"MemoryMax t {109 << 30}", " ".join(self.bus("StartTransientUnit")[0]))
+
+    def test_default_ceiling_and_its_clamp(self) -> None:
+        for mem_total, want in ((263897780 << 10, 24), (2303551644 << 10, 109), (0, 24),
+                                ((24 * 20 << 30) - 1, 24), (24 * 20 << 30, 24), (25 * 20 << 30, 25)):
+            self.mem_total = mem_total
+            self.assertEqual(WATCH.default_ceiling(), want << 30, mem_total)
+            self.assertEqual(WATCH.ceiling_cap(), 4 * want << 30, mem_total)
+        self.mem_total = 263897780 << 10
+        self.assertEqual(WATCH.ceiling_bytes("200G"), 96 << 30)
+        self.mem_total = 2303551644 << 10
+        self.assertEqual(WATCH.ceiling_bytes("200G"), 200 << 30)
 
     def test_a_dry_run_moves_nothing(self) -> None:
         self.unscoped_session()

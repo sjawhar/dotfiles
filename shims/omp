@@ -239,7 +239,7 @@ fi
 # that hard memory cap and swap off. A session that runs away is then killed inside its own cgroup
 # instead of the kernel picking a victim anywhere on the box: on 2026-10-26 at 05:47Z one omp
 # session reached 138.0 GiB and the global OOM killer took two of the box's coredns pods with it.
-# Unset, the default below applies (24G). A scope is transient, so
+# Unset, the default below applies (the larger of 24G and a twentieth of the host's RAM). A scope is transient, so
 # it leaves no unit file behind. OMP_MEMORY_MAX is removed from the session's own environment, so
 # subprocesses do not each ask for a scope of their own; they share this one and count against it.
 # If systemd-run is missing or refuses (a container with no user manager), the session starts
@@ -256,20 +256,29 @@ fi
 # and systemd then stopped the session with its 40 subagents. Agent boxes already run this way
 # (their docker scopes are OOMPolicy=continue). If omp itself is the one killed, the wrapper says so.
 # The default ceiling (dispatch://INFRA-898, answered on its ask on 2026-10-31): 24 GiB per session,
-# above every session measured that day (the largest of 44 held 17.8 GiB at 17:07Z). A caller's own
-# value stays, clamped at 96G. A session already inside a ceiling's scope (OMP_MEMORY_SCOPE, set
-# below) takes no default of its own: an omp it starts shares its scope and counts against it.
+# above every session measured that day (the largest of 44 held 17.8 GiB at 17:07Z). It scales
+# with the host (dispatch://INFRA-993): the larger of 24 GiB and MemTotal/20, in whole GiB, read
+# from /proc/meminfo when the scope is made. On sami-rocqperf (251 GiB) that is 24G; on
+# sami-devbox (2.1 TiB) it is 109G, where Rust and TypeScript builds reached 24 GiB every few
+# minutes on 2026-11-02. A caller's own value stays, clamped at four times the default (96G at the
+# floor). A session already inside a ceiling's scope (OMP_MEMORY_SCOPE, set below) takes no
+# default of its own: an omp it starts shares its scope and counts against it.
+# OMP_MEMINFO names another meminfo file, for the tests.
 if [[ -z "${OMP_MEMORY_SCOPE:-}" ]]; then
-    : "${OMP_MEMORY_MAX:=24G}"
+    mem_total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "${OMP_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)
+    mem_default_g=$(( ${mem_total_kb:-0} / 20 >> 20 ))
+    ((mem_default_g >= 24)) || mem_default_g=24
+    mem_clamp_g=$((mem_default_g * 4))
+    : "${OMP_MEMORY_MAX:=${mem_default_g}G}"
     if [[ "$OMP_MEMORY_MAX" =~ ^([0-9]+)([KMGT]?)$ ]]; then
         mem_bytes=${BASH_REMATCH[1]}
         case "${BASH_REMATCH[2]}" in
             K) mem_bytes=$((mem_bytes << 10)) ;; M) mem_bytes=$((mem_bytes << 20)) ;;
             G) mem_bytes=$((mem_bytes << 30)) ;; T) mem_bytes=$((mem_bytes << 40)) ;;
         esac
-        if ((mem_bytes > 96 << 30)); then
-            echo "omp: OMP_MEMORY_MAX=$OMP_MEMORY_MAX is above the 96G ceiling for one session; using 96G." >&2
-            OMP_MEMORY_MAX=96G
+        if ((mem_bytes > mem_clamp_g << 30)); then
+            echo "omp: OMP_MEMORY_MAX=$OMP_MEMORY_MAX is above the ${mem_clamp_g}G ceiling for one session; using ${mem_clamp_g}G." >&2
+            OMP_MEMORY_MAX=${mem_clamp_g}G
         fi
     fi
 fi

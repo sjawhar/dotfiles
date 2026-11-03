@@ -1772,8 +1772,20 @@ def oom_bias_note(counts: dict[str, int], adj: int, dry_run: bool) -> str:
 # This pass moves both into a new delegated `run-c<16 hex of the session>.scope` with
 # OOMPolicy=continue. No process is signalled, and the memory each one already holds stays
 # charged where it is: cgroup v2 moves a process, not its pages.
-DEFAULT_CEILING = "24G"  # shims/omp's default, dispatch://INFRA-898
-CEILING_CAP = 96 << 30  # shims/omp's clamp for one session
+CEILING_FLOOR = 24 << 30  # shims/omp's smallest default, dispatch://INFRA-898
+
+
+def default_ceiling() -> int:
+    """shims/omp's default ceiling: the larger of 24 GiB and MemTotal/20, in whole GiB
+    (dispatch://INFRA-993). 24 GiB on sami-rocqperf (251 GiB), 109 GiB on sami-devbox (2.1 TiB)."""
+    return max(CEILING_FLOOR, (mem_total() // 20) >> 30 << 30)
+
+
+def ceiling_cap() -> int:
+    """shims/omp's clamp for one session: four times its default."""
+    return 4 * default_ceiling()
+
+
 # When the pass must stop, in seconds from the run's start; a systemd call is begun only with
 # BUS_TIMEOUT left before it.
 ADOPT_DEADLINE = 40.0
@@ -1804,12 +1816,12 @@ def proc_words(pid: int, name: str) -> list[str]:
 
 
 def ceiling_bytes(text: str) -> int | None:
-    """`24G`, `512M`, a byte count -> bytes, clamped at CEILING_CAP; None when it is not one."""
+    """`24G`, `512M`, a byte count -> bytes, clamped at ceiling_cap(); None when it is not one."""
     match = re.fullmatch(r"([0-9]+)([KMGT]?)", (text or "").strip())
     if not match:
         return None
     value = int(match.group(1)) << {"": 0, "K": 10, "M": 20, "G": 30, "T": 40}[match.group(2)]
-    return min(value, CEILING_CAP) if value > 0 else None
+    return min(value, ceiling_cap()) if value > 0 else None
 
 
 def adopt_session_id(pid: int) -> str:
@@ -1953,7 +1965,7 @@ def scope_adopt_pass(
             env = dict(word.split("=", 1) for word in proc_words(pid, "environ") if "=" in word)
             # shims/omp exports the ceiling it asked for before it falls back, so a session keeps
             # its own value; anything else gets the shim's default.
-            ceiling = ceiling_bytes(env.get("OMP_MEMORY_SCOPE", "")) or ceiling_bytes(DEFAULT_CEILING)
+            ceiling = ceiling_bytes(env.get("OMP_MEMORY_SCOPE", "")) or default_ceiling()
             children = children if children is not None else children_by_parent()
             members = tree_in(pid, cgroup, children)
             rss = sum(rss_of(member) for member in members)
@@ -2168,7 +2180,7 @@ def broker_scope_pass(state, options: argparse.Namespace, deadline: float = floa
             record["from"].append(cgroup)
         # The cgroups a process of this broker's tree is in only because it was forked there.
         inherited = set(record["from"]) | {cgroup}
-        ceiling = ceiling_bytes(env.get("OMP_MEMORY_SCOPE", "")) or ceiling_bytes(DEFAULT_CEILING)
+        ceiling = ceiling_bytes(env.get("OMP_MEMORY_SCOPE", "")) or default_ceiling()
 
         # Who each direct child of the broker serves: a service's owner, "" for the broker's own.
         known: dict = record["daemons"]
@@ -2226,7 +2238,7 @@ def broker_scope_pass(state, options: argparse.Namespace, deadline: float = floa
         if own in plan:
             place(own, f"omp worker broker for {project}", ceiling, plan.pop(own))
         for unit, pids in plan.items():
-            place(unit, f"omp session {owners[unit]}", ceiling_bytes(DEFAULT_CEILING), pids)
+            place(unit, f"omp session {owners[unit]}", default_ceiling(), pids)
     state.commit(options)
     verb = "would move" if dry_run else "moved"
     return (f"brokers: {len(brokers)}, {verb} {moved} process(es)" + (f", {failed} failed" if failed else "")
@@ -2452,7 +2464,7 @@ RESUME_WAKE_NOTICE = (
 def own_scope_memory_max(pid: int) -> int | None:
     """The memory.max of the transient scope this omp runs in, read each pass, else None.
 
-    A resume through `shims/omp` takes its 24G default unless OMP_MEMORY_MAX says otherwise, so a
+    A resume through `shims/omp` takes its host-scaled default unless OMP_MEMORY_MAX says otherwise, so a
     session whose scope had been raised came back lower than it was using: 01a19336 ran at a
     40 GiB ceiling, was resumed into 24 GiB on 2026-11-02 at 09:18:48Z, and its last peak was
     34 GiB. Only a `run-*.scope` of its own counts: a session in the login scope has no ceiling to

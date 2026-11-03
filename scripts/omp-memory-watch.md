@@ -190,7 +190,7 @@ has run for at least a minute) whose cgroup is a `session-*.scope` or `tmux-spaw
 - From a login or tmux scope it moves **the session's own process tree only** (the omp and its
   descendants still in that cgroup), never the rest of the login scope. The ceiling is the one
   the session asked for (`OMP_MEMORY_SCOPE`, which the shim exports before it falls back), else
-  the shim's 24 GiB default, with `MemorySwapMax=0`. A tree whose RSS is already at or above
+  the shim's default (the larger of 24 GiB and MemTotal/20), with `MemorySwapMax=0`. A tree whose RSS is already at or above
   that ceiling is left, and the run says so.
 - From an `OOMPolicy=stop` scope it moves every process in the scope and keeps the scope's
   `MemoryMax`, `MemorySwapMax` and `TasksMax`.
@@ -233,14 +233,14 @@ an agent box is the box's) and:
 
 - moves the broker into `omp-broker-<first 16 hex of sha256(its runtime dir)>.scope`, described
   `omp worker broker for <project dir>`, with the ceiling the broker inherited
-  (`OMP_MEMORY_SCOPE`, else 24 GiB), `MemorySwapMax=0` and `OOMPolicy=continue`;
+  (`OMP_MEMORY_SCOPE`, else the shim's default), `MemorySwapMax=0` and `OOMPolicy=continue`;
 - gives each direct child of the broker an owner: its `OMP_SESSION_ID` when that is not the
   broker's own (a service runs with its owner's environment), else the `owner` of the live record
   in `<runtime dir>/daemons/*/meta.json` whose `pid` it is (newest first; reading 1,020 records
   took 8.6 s at load 400, so only these are read, once per process), else nobody once it has run a
   minute (the shared headless browser, which carries the broker's id);
 - moves each owned child, with its descendants, into `run-c<first 16 hex of the owner>-svc.scope`,
-  one per owner, described exactly `omp session <owner id>`, with 24 GiB, `MemorySwapMax=0` and
+  one per owner, described exactly `omp session <owner id>`, with the shim's default, `MemorySwapMax=0` and
   `OOMPolicy=continue`. A child that serves nobody goes with the broker.
 
 Both are made with `Delegate=true`: systemd (255 here) adds a process to a running scope only when
