@@ -14,7 +14,8 @@
 #                                   after each fast-forward. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
-# box, Google Cloud as dev-sjawhar@, the build pool, the secrets broker, Envoy, Dispatch, MLflow,
+# box, Google Cloud as dev-sjawhar@ (also through a gcloud config dir a session brought from an
+# Azure box), the build pool, the grade pool, the secrets broker, Envoy, Dispatch, MLflow,
 # the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
 # mounted disk. Both halves also clone-check private theorem-labs repositories over https
 # (github_check). The box half is run through `agentbox new`, the same launcher a session goes
@@ -30,6 +31,10 @@ TAILNET=tail12ec1c.ts.net
 ACCOUNT="dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
 DEV_BOX="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
+# S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
+GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
+# Where the box identity writes a scratch object: the prefix LINUX-1248's red-team runs write.
+GCS_PROBE_PREFIX=gs://theorem-build-io/out/linux/redteam
 # The file names A2 lists. A2's list names credentialed_accounts.db, which gcloud does not
 # write; the store that holds a gcloud login is credentials.db, one row per account with its
 # refresh token (googlecloudsdk/core/credentials/store.py), so host_logins also reads every
@@ -63,6 +68,10 @@ in_box() {
     # The build pool: the GKE cluster the builds run in, through the box's ~/.kube.
     got="$(kubectl --context "$KUBE_CONTEXT" -n builds auth can-i create jobs 2>&1)"
     [[ "$got" == yes ]] && ok "build pool: kubectl -n builds auth can-i create jobs: yes" || fail "build pool: kubectl -n builds auth can-i create jobs: $got"
+    got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
+    [[ "$got" == yes ]] && ok "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes" || fail "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: $got"
+
+    moved_gcloud_config_check
 
     # The secrets broker: the box's own enrolment, which the broker made through the host's
     # machine login, and its front door. A read through the broker needs a person's grant, so the
@@ -101,6 +110,46 @@ in_box() {
 
     echo "== box done, $fails failed, $(stamp)"
     return "$fails"
+}
+
+# A session moved here from sami-rocqperf can bring a gcloud config dir of its own (CLOUDSDK_CONFIG)
+# that holds the Azure box credential, which fails on this machine until shims/gcloud removes it
+# (LINUX-1248, 2026-11-03). So the check builds such a dir the way gcloud stores it on an Azure
+# box, and through it writes and deletes a scratch object as dev-sjawhar@: the repair and the
+# box identity's write to the bucket, as a moved session needs both.
+moved_gcloud_config_check() {
+    local dir object out
+    dir="$(mktemp -d)"
+    python3 - "$dir" "$ACCOUNT" <<'PY'
+import json, os, sqlite3, sys
+config_dir, account = sys.argv[1:]
+os.makedirs(os.path.join(config_dir, "configurations"))
+with open(os.path.join(config_dir, "active_config"), "w") as f:
+    f.write("default")
+with open(os.path.join(config_dir, "configurations", "config_default"), "w") as f:
+    f.write(f"[core]\naccount = {account}\n")
+azure = {"type": "external_account",
+         "audience": "//iam.googleapis.com/projects/805240912354/locations/global/workloadIdentityPools/azure/providers/entra",
+         "subject_token_type": "urn:ietf:params:oauth:token-type:jwt", "token_url": "https://sts.googleapis.com/v1/token",
+         "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+                                              f"{account}:generateAccessToken",
+         "credential_source": {"url": "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01"
+                                      "&resource=https://management.azure.com/",
+                               "headers": {"Metadata": "True"},
+                               "format": {"type": "json", "subject_token_field_name": "access_token"}}}
+db = sqlite3.connect(os.path.join(config_dir, "credentials.db"))
+with db:
+    db.execute('CREATE TABLE "credentials" (account_id TEXT PRIMARY KEY, value BLOB)')
+    db.execute("INSERT INTO credentials VALUES (?, ?)", (account, json.dumps(azure)))
+PY
+    object="$GCS_PROBE_PREFIX/devbox-gcloud-probe-$(date -u +%Y%m%dT%H%M%SZ)-${AGENTBOX_BOX:-box}"
+    if out="$(echo "sami-devbox-check $(stamp)" | CLOUDSDK_CONFIG="$dir" gcloud storage cp - "$object" 2>&1)" &&
+        out="$(CLOUDSDK_CONFIG="$dir" gcloud storage rm "$object" 2>&1)"; then
+        ok "moved gcloud config: a CLOUDSDK_CONFIG holding the Azure box credential writes and deletes $object as $(CLOUDSDK_CONFIG="$dir" gcloud config get account 2>/dev/null)"
+    else
+        fail "moved gcloud config: write or delete of $object through a CLOUDSDK_CONFIG holding the Azure box credential: $(grep -m1 -E 'ERROR|error' <<<"$out" || tail -1 <<<"$out")"
+    fi
+    rm -rf "$dir"
 }
 
 # Private theorem-labs repositories over https: each must answer `git ls-remote <url> HEAD` with a
