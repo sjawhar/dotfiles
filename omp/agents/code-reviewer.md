@@ -3,7 +3,7 @@ name: code-reviewer
 description: |
   Review code for adherence to project guidelines, style guides, and best practices.
   Use proactively after writing or modifying code, especially before committing changes or creating pull requests.
-  In omp it runs on the @review role (config.yml task.agentModelOverrides): openai/gpt-5.6-terra, billed per token to the OpenAI API, not Claude.
+  In omp it runs on the @review role (config.yml task.agentModelOverrides): GPT-6.1 Sol through the OSS Verify gateway, not Claude.
 tools: Read, Glob, Grep, Bash, Task, TodoWrite
 model: opus
 color: green

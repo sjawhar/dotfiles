@@ -3,7 +3,7 @@ name: test-analyzer
 description: |
   Review test coverage quality and completeness for recent changes.
   Use after creating or updating code to ensure tests adequately cover new functionality and edge cases.
-  In omp it runs on the @review role (config.yml task.agentModelOverrides): openai/gpt-5.6-terra, billed per token to the OpenAI API, not Claude.
+  In omp it runs on the @review role (config.yml task.agentModelOverrides): GPT-6.1 Sol through the OSS Verify gateway, not Claude.
 tools: Read, Glob, Grep, Bash, TodoWrite
 model: opus
 color: cyan

@@ -3,7 +3,7 @@ name: bug-finder
 description: |
   Find subtle bugs, edge cases, and potential failure modes in recently written code.
   Use after implementing a feature to stress-test the logic. Excels at adversarial thinking.
-  In omp it runs on the @review role (config.yml task.agentModelOverrides): openai/gpt-5.6-terra, billed per token to the OpenAI API, not Claude.
+  In omp it runs on the @review role (config.yml task.agentModelOverrides): GPT-6.1 Sol through the OSS Verify gateway, not Claude.
 tools: Read, Edit, Write, Glob, Grep, Bash, WebFetch, WebSearch, TodoWrite
 model: opus
 color: red

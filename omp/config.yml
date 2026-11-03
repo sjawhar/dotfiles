@@ -10,16 +10,22 @@ modelRoles:
   slow: openai-codex/gpt-5.6-terra:xhigh
   task: anthropic/claude-opus-5-5
   vision: google/gemini-3.7-flash:medium
-  # The review gates and the oracle advisors run on the OpenAI API lane rather
-  # than the Codex subscription, because the subscription's window is spent
-  # until 2026-11-04T06:35Z and a gate that answers from Claude is a
-  # same-family read wearing a cross-family label. `openai/gpt-5.6-terra` has
-  # its own chain below (6.1-terra, 6.1-sol, then the subscription when it
-  # reopens) and no Anthropic link, so a gate with nothing reachable refuses
-  # instead of answering. Measured 2026-10-30: astra-api served
-  # openai/gpt-6-astra and gpt-api served openai/gpt-5.6-terra, each read back
-  # from the subagent's own transcript.
-  review: openai/gpt-5.6-terra:xhigh
+  # The review gates and the oracle advisors run cross-family on GPT-6.1 Sol
+  # through the OSS Verify gateway (team `box`, no per-token OpenAI key), not
+  # the Codex subscription, whose window is spent until 2026-11-04T06:35Z: a
+  # gate that answers from Claude is a same-family read wearing a
+  # cross-family label. Until 2026-11-03 they ran per-token
+  # openai/gpt-5.6-terra, about $560-1,065/day in telemetry (which sees about
+  # half the key's bill; agent_spend.spend_daily, 11-01 to 11-03), moved with
+  # Astra (dispatch://INFRA-165, Sami's Sol preference dispatch://BET-545).
+  # A role may list models; the first one the machine declares is used:
+  # sami-rocqperf's id first, then sami-devbox's (measured 2026-11-03 on
+  # devbox: code-reviewer on this list was served by
+  # ossv-gateway/openai/gpt-6.1-sol). Their chains below end on Codex Sol and
+  # name no Anthropic model, so a gate with nothing reachable refuses.
+  review:
+    - ossv-gateway-openai/openai/gpt-6.1-sol:xhigh
+    - ossv-gateway/openai/gpt-6.1-sol:xhigh
   # The Legion plugin's agents name these two roles: oracle for oracle and
   # plan-gap-analyst, deep for deep-worker. Unmapped, those agents fail with
   # "No model selected". Same models as omp/agents/oracle.md and deep.md (@slow).
@@ -30,8 +36,10 @@ modelRoles:
   # spend decision rather than a routing one. While the window is spent they
   # fall to Anthropic and are therefore same-family -- which their own agent
   # descriptions say, and which a caller who needs a cross-family read answers
-  # by dispatching astra-api or gpt-api by name.
-  oracle: openai/gpt-5.6-terra:high
+  # by dispatching sol by name.
+  oracle:
+    - ossv-gateway-openai/openai/gpt-6.1-sol:high
+    - ossv-gateway/openai/gpt-6.1-sol:high
   deep: openai-codex/gpt-5.6-terra:xhigh
   advisor: anthropic/claude-sonnet-5-5:medium
   # pi-envoy's AskGate asks this role (else `default`) before each Dispatch write.
@@ -59,16 +67,14 @@ modelRoles:
 # The boundary that comes with it, and where it does not hold. No wildcard
 # chain routes to an OpenAI model: `openai/*: []` below stops every OpenAI
 # model that is not one of the named ones from inheriting the Anthropic
-# `default` chain, and a plain `task` subagent serves Claude. But these spend
-# per-token API money: the `review` and `oracle` roles above name
-# openai/gpt-5.6-terra, so every agent on @review spends it (bug-finder,
-# code-reviewer, comment-analyzer and test-analyzer through
-# `task.agentModelOverrides` below, and both thermonuclear-* agents), as does
-# the oracle agent; and the `astra` agent's chain (openai-codex/gpt-6-astra
-# below) moves it to openai/gpt-6-astra when omp's usage preflight finds the
-# Codex window spent or at its reserve (measured 2026-11-02 12:21Z and 12:28Z).
-# No setting enforces the pause, so a stream that must stay off the OpenAI API
-# avoids those agents by name.
+# `default` chain, and a plain `task` subagent serves Claude. Since 2026-11-03
+# (dispatch://INFRA-165) no role, agent or chain here names a per-token
+# `openai/` model as a target: the `review` and `oracle` roles, the astra
+# chains, astra-api, gpt-api and oracle all run GPT-6.1 Sol through the OSS
+# Verify gateway, which still calls OpenAI (billed to team `box`). A stream
+# that must stay off OpenAI entirely avoids every cross-family agent and the
+# @review agents (bug-finder, code-reviewer, comment-analyzer, test-analyzer,
+# both thermonuclear-*) by name.
 # The model-spend records of installers/agent-spend.sh (one per model call) carry
 # the spend. openai-codex (the Codex subscription) is a separate provider and
 # was never paused.
@@ -164,9 +170,9 @@ retry:
       - ossv-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     openai/gpt-5.6-terra:
-      - openai/gpt-6.1-terra
-      - openai/gpt-6.1-sol
-      - openai-codex/gpt-6-astra
+      - ossv-gateway-openai/openai/gpt-6.1-sol
+      - ossv-gateway/openai/gpt-6.1-sol
+      - openai-codex/gpt-6.1-sol
     # The `sol` agent (agents/sol.md), the default cross-family subagent since
     # Sami's preference of 2026-11-02 (dispatch://BET-545). Its model is
     # GPT-6.1 Sol through the OSS Verify gateway, a provider only this box's

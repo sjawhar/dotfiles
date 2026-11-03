@@ -3,12 +3,13 @@ name: oracle
 description: |
   Strategic technical advisor on a non-Anthropic model. Read-only. Use for architecture
   decisions, hard tradeoffs, and complex debugging where correctness matters more than
-  speed. Consulted by the sdd workflow for strategy questions. Billed to the OpenAI API:
-  its chain degrades to GPT-6.1 Terra, then GPT-6.1 Sol, then the Codex subscription when
-  its window reopens, and never to Anthropic -- so a refusal means no non-Anthropic model
+  speed. Consulted by the sdd workflow for strategy questions. Runs GPT-6.1 Sol through the
+  OSS Verify gateway, then Sol on the Codex subscription when its window is open, and never
+  Anthropic -- so a refusal means no non-Anthropic model
   was reachable, and the caller should run a Claude reader and label that read same-family.
 model:
-  - "openai/gpt-5.6-terra:high"
+  - "ossv-gateway-openai/openai/gpt-6.1-sol:high"
+  - "ossv-gateway/openai/gpt-6.1-sol:high"
 tools: read, glob, grep, bash, todo
 color: cyan
 ---
