@@ -64,9 +64,17 @@ RESERVE_TTL_S="${DISK_GATE_TTL:-7200}"
 # alerts on, and / needs more headroom than its 18 GiB floor because a full root
 # stops every session on the box at once (2026-10-27T00:00:31Z: rsyslog,
 # journald and dockerd's exec went together).
+#
+# The floor is room for the writes no reservation covers: every session's
+# transcripts, worktrees and caches on the disk. Those grow with what the disk
+# holds, so on a disk larger than sami-rocqperf's 3,464 GiB array /mnt/nvme keeps
+# the same share of itself that 78 GiB is there, 2.25%, rounded up. On sami-devbox
+# that is 369 GiB of its 16,383 GiB state disk, which is also /home there, so a
+# full disk stops every session at once, as a full root does. sami-rocqperf keeps
+# 78 GiB.
 floor_gib() {
 	case "$1" in
-	/mnt/nvme) echo 78 ;;
+	/mnt/nvme) df -B1 --output=size "$1" | tail -1 | awk '{f = $1 / 1073741824 * 0.0225; f = (f == int(f)) ? f : int(f) + 1; print (f > 78) ? f : 78}' ;;
 	/) echo 40 ;;
 	*) echo 20 ;;
 	esac

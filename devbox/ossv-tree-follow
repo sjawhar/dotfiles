@@ -1,0 +1,52 @@
+#!/bin/bash
+# ossv-tree-follow: keep ~/src/oss-verifier on a Google VM (sami-devbox, dispatch://INFRA-993) a clone of
+# branch ops of theorem-labs/oss-verify-proofs-internal, at ops' head. The OSS Verify stream's tools
+# (bin/ossv-n6-farm, bin/ossv-job-farm and the rest) and the notes they read are reviewed and merged
+# into ops, and sami-rocqperf's /home/sami/src/oss-verifier holds the merged bytes; this keeps the
+# same files at the same path here, where the stream's sessions and the N6 farm run. Its timer runs
+# it every 5 minutes (devbox/ossv-tree-follow.timer).
+#
+#   - No clone yet: clone ops (objects taken from ~/src/oss-verify-proofs-internal when it is there,
+#     then copied, so neither clone depends on the other), into a staging name, renamed into place
+#     when complete; a clone killed in the middle leaves only the staging name, which the next run
+#     replaces.
+#   - A clone: fetch ops, then `git merge --ff-only`. git refuses, and changes nothing, when the clone
+#     has commits ops lacks, or when a new commit changes a file that holds a local change or adds a
+#     path an untracked file holds. A local change no new commit touches (a farm run's
+#     notes/ossv-n6-peaks.tsv, say) stays as it is, and the tools still follow.
+# Any refusal exits non-zero, so the unit fails and unit-health-watch tells the box-health owner.
+# lane VMs keep the same tree with the stream's own agentvm/ossv-tree-sync, which stops on any local
+# change outside notes/status/; on this machine the stream's sessions write ledgers into the tree.
+set -euo pipefail
+
+tree="${OSSV_TREE_FOLLOW_TREE:-$HOME/src/oss-verifier}"
+remote="${OSSV_TREE_FOLLOW_REMOTE:-https://github.com/theorem-labs/oss-verify-proofs-internal}"
+branch=ops
+reference="${OSSV_TREE_FOLLOW_REFERENCE:-$HOME/src/oss-verify-proofs-internal}"
+
+say() { printf 'ossv-tree-follow: %s\n' "$*"; }
+die() { say "$*" >&2; exit 1; }
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ossv-tree-follow.lock"
+flock -n 9 || { say "another run holds the lock; nothing to do"; exit 0; }
+
+if [[ ! -e "$tree" ]]; then
+    stage="$tree.cloning"
+    rm -rf -- "$stage"
+    ref=()
+    [[ -d "$reference/.git" ]] && ref=(--reference "$reference" --dissociate)
+    timeout 540 git clone -q --branch "$branch" --single-branch "${ref[@]}" "$remote" "$stage"
+    mv -T -- "$stage" "$tree"
+    say "cloned $branch at $(git -C "$tree" rev-parse HEAD) into $tree"
+    exit 0
+fi
+
+[[ -d "$tree/.git" && ! -L "$tree" ]] || die "$tree is not a clone of its own (or is a symlink); not touched"
+got="$(git -C "$tree" symbolic-ref --short -q HEAD || true)"
+[[ "$got" == "$branch" ]] || die "$tree is on '${got:-a detached HEAD}', not $branch; not touched"
+before="$(git -C "$tree" rev-parse HEAD)"
+timeout 120 git -C "$tree" fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+timeout 120 git -C "$tree" merge -q --ff-only "origin/$branch" \
+    || die "$tree stays at $before: git refused to fast-forward it to origin/$branch $(git -C "$tree" rev-parse "origin/$branch") (above)"
+after="$(git -C "$tree" rev-parse HEAD)"
+[[ "$after" == "$before" ]] && say "$tree is at origin/$branch $after" || say "$tree moved $before -> $after"

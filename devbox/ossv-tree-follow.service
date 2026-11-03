@@ -1,0 +1,18 @@
+[Unit]
+Description=Keep ~/src/oss-verifier a fast-forward clone of ops of theorem-labs/oss-verify-proofs-internal
+Documentation=file:%h/.dotfiles/devbox/ossv-tree-follow
+
+[Service]
+Type=oneshot
+Nice=5
+IOSchedulingClass=idle
+# git's https helper is shims/gh, which answers through the GitHub App (installers/gh-app-host.sh):
+# it needs the dotfiles' shims and bin/ and the tools mise installs, as dotfiles-follow does.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
+# A first clone took 93 s on 2026-11-03 (3.7 GiB of history, objects from the local clone) and is
+# bounded at 540 s, a fetch and a merge at 120 s each; the unit's own bound is under two periods,
+# so unit-health-watch never reads a run as one that never ends.
+TimeoutStartSec=590
+ExecStart=%h/.dotfiles/devbox/ossv-tree-follow

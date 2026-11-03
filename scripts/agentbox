@@ -1405,6 +1405,17 @@ cmd_new() {
         mkdir -p "$gate_state"
         box_dir_have "$gate_state" || box_add_mount "$gate_state"
     fi
+    # The OSS Verify N6 farm's work root on the state disk (bin/ossv-n6-farm, N6_WORK_NVME): a run
+    # that disk-gate admits there keeps its directory in it, and `collect`, `peaks` and `clean` of
+    # that run read it later, often from another session. A box that cannot see it stages into its
+    # own overlay, which goes with the box; the run index that names it is in the allow-list
+    # (.cache/ossv-n6-runs). Made here when absent, as the gate's state is.
+    local n6_work
+    n6_work="/mnt/nvme/$(id -un)/ossv-n6"
+    if [[ -d "${n6_work%/*}" ]]; then
+        mkdir -p "$n6_work"
+        box_dir_have "$n6_work" || box_add_mount "$n6_work"
+    fi
     set_resource_args "$mem_from" "$cpu_from"
     set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \

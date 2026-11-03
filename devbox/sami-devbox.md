@@ -85,6 +85,10 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`modelRoles.slow`, `.deep`, `task.agentModelOverrides.astra`, `["sami-proxy"]`) and of `~/.omp/agent/models.yml` | each names `ossv-gateway/openai/<id>`; ossv-gateway declares 4 or more `openai/` models |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 | ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0; a time-out is a WAIT while the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending (dispatch://INFRA-734) |
+| N6 tools follow ops | `systemctl --user is-active ossv-tree-follow.timer`, `systemctl --user show ossv-tree-follow.service`, `git -C ~/src/oss-verifier rev-parse HEAD refs/remotes/origin/ops` | timer active; last run succeeded at most 15 min ago; HEAD = origin/ops (`devbox/ossv-tree-follow`) |
+| N6 tools are rocqperf's | `sha256sum` of `bin/ossv-{n6-farm,n6-shards,n6-pod,job,job-farm}` and `notes/{ossv-n6-peaks.tsv,ossv-n6.md,ossv-job.md}` here and on sami-rocqperf over ssh | equal, file by file |
+| N6 clones on the state disk | `stat -c %d` of `~/src/oss-verify-proofs-internal`, `~/src/oss-verifier` and `/mnt/nvme` | one device |
+| N6 farm, host | the box half's N6 lines below, run on the host | as below |
 
 Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-box`):
 
@@ -101,6 +105,14 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-b
 | openai through the gateway | `omp -p "say ok" --model @slow`, and `--model ossv-gateway/openai/gpt-6-astra:xhigh` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
 | Azure | `az account show` | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
+| N6 tools | `sha256sum` of each of the 8 files above in `~/src/oss-verifier` against `git show HEAD:<file>` | equal |
+| N6 repository | `git -C ~/src/oss-verify-proofs-internal rev-parse --is-shallow-repository`, `config remote.origin.promisor`, `extensions.partialclone`; `git archive HEAD \| tar -t \| head -100` | `false`, unset, unset; 100 entries |
+| N6 signers | for `build-io-signer@` and `ossv-runs-signer@`: `gcloud auth print-access-token --impersonate-service-account=<sa>`; `gcloud iam service-accounts sign-blob --iam-account=<sa>` | a token; a signature |
+| N6 buckets | `gcloud storage cat -r 0-63` of one object under the newest `out/ossv/` prefix of `gs://theorem-build-io` and of `gs://theorem-ossv-runs` | bytes from each |
+| N6 farm namespace | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds-ossv auth can-i create jobs` | `yes` |
+| N6 release asset | `gh release download --repo theorem-labs/oss-verify-proofs-internal <newest published tag> -p <its smallest asset>` through `shims/gh` as an agent call | the asset's size |
+| N6 disk-gate | `disk-gate status`; `disk-gate reserve 1 <name>`, `status`, `release <name>` | a floor of at least 2.25% of `/mnt/nvme` (369 GiB of 16,383); granted, listed, released |
+| N6 box paths (box only) | `findmnt --target` of `/mnt/nvme/sami/ossv-n6` and `~/.cache/ossv-n6-runs` | each a bind from the host (`scripts/agentbox`, `agentbox/mounts`) |
 
 ## A5 and A6 (the drill)
 

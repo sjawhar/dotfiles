@@ -36,6 +36,10 @@ rw .cache/hawk-token
 # shims/git reads it to decide whether a jj push needs the check, and the check writes each
 # visibility it reads through gh into it, from inside a box as on the host, so it is rw.
 rw .cache/public-leak-check
+# The OSS Verify N6 farm's run index (bin/ossv-n6-farm, N6_RUN_INDEX): one file per run naming the
+# work root its directory is in. `collect`, `peaks` and `clean` of a run find it here, often from
+# another session than the one that staged it, so it outlives a box.
+rw .cache/ossv-n6-runs
 
 # cloud access (AWS by design)
 rw .aws

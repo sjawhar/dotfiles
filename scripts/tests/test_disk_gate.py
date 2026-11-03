@@ -35,7 +35,14 @@ def other_disk(than: Path) -> Path | None:
 
 SCRIPT = Path(__file__).resolve().parents[1] / "disk-gate"
 
+# The filesystem's size answers `--output=size` (the gate scales /mnt/nvme's floor by it); any
+# other call is the free space.
 FAKE_DF = """#!/usr/bin/env bash
+if [[ " $* " == *" --output=size "* ]]; then
+    echo 1B-blocks
+    awk -v g="${FAKE_SIZE_GIB:-3464}" 'BEGIN {printf "%d\\n", g * 1073741824}'
+    exit
+fi
 echo Avail
 awk -v g="$FAKE_FREE_GIB" 'BEGIN {printf "%d\\n", g * 1073741824}'
 """
@@ -72,8 +79,8 @@ class DiskGateAccountingTest(unittest.TestCase):
         now = int(time.time())
         self.ledger.write_text("".join(f"{name}\t{gib}\t{now}\n" for name, gib in holders))
 
-    def gate(self, *args: str, free: float = FREE_1621) -> subprocess.CompletedProcess:
-        env = dict(self.env, FAKE_FREE_GIB=str(free))
+    def gate(self, *args: str, free: float = FREE_1621, size: float = 3464) -> subprocess.CompletedProcess:
+        env = dict(self.env, FAKE_FREE_GIB=str(free), FAKE_SIZE_GIB=str(size))
         return subprocess.run([str(SCRIPT), *args], env=env, capture_output=True, text=True, timeout=30)
 
     def status_line(self, free: float = FREE_1621) -> str:
@@ -190,6 +197,18 @@ class DiskGateAccountingTest(unittest.TestCase):
         self.assertEqual(self.gate("release", "lane").returncode, 1)
         self.assertEqual(self.gate("reserve", "x", "lane").returncode, 2)
         self.assertEqual(self.gate("reserve", "7", "lane", "--written", "lots").returncode, 2)
+
+    def test_nvme_floor_scales_with_a_disk_larger_than_rocqperfs(self) -> None:
+        # sami-rocqperf's 3,464 GiB array keeps 78 GiB; a smaller disk keeps 78 GiB too.
+        self.assertIn("78 GiB floor", self.gate("status", size=3464).stdout)
+        self.assertIn("78 GiB floor", self.gate("status", size=500).stdout)
+        # sami-devbox's 16,383 GiB state disk keeps 2.25% of itself, rounded up: 369 GiB.
+        status = self.gate("status", free=9061, size=16383)
+        self.assertIn("9061.0 GiB free, 0 GiB reserved, 369 GiB floor, 8692.0 GiB available", status.stdout)
+        refused = self.gate("reserve", "8693", "too-big", free=9061, size=16383)
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn("under the 369 GiB floor", refused.stdout)
+        self.assertEqual(self.gate("reserve", "8692", "fits", free=9061, size=16383).returncode, 0)
 
 
 class DiskGateMeasurementTest(unittest.TestCase):

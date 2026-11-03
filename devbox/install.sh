@@ -96,6 +96,13 @@ if "${DOTFILES_DIR}/scripts/on-google-vm"; then
     arm_user_timer devbox dotfiles-follow
 fi
 
+# On a Google VM, every 5 min: keep ~/src/oss-verifier a fast-forward clone of ops of
+# theorem-labs/oss-verify-proofs-internal, the OSS Verify stream's tools and notes at the path
+# sami-rocqperf holds them (devbox/ossv-tree-follow). It clones on its first run.
+if "${DOTFILES_DIR}/scripts/on-google-vm"; then
+    arm_user_timer devbox ossv-tree-follow
+fi
+
 # Every 10 min, tell the box-health owner over Envoy when the transcript store's newest entry from
 # this host is over 45 min old on two checks in a row (scripts/transcript-lag-watch.md). Quiet on a
 # machine with no transcript-import unit and no transcript-store config. BOX_HEALTH_OWNER, when

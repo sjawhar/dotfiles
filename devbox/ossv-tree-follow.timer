@@ -1,0 +1,10 @@
+[Unit]
+Description=Fast-forward ~/src/oss-verifier to ops every 5 min
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
