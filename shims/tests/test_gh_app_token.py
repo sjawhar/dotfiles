@@ -313,12 +313,12 @@ class GhAppTokenTests(unittest.TestCase):
 
         def raced_covered_owners(app_id):
             try:
-                read_started.wait(timeout=1)
+                read_started.wait(timeout=60)
             except threading.BrokenBarrierError:
                 return original_covered_owners(app_id)
             covered = original_covered_owners(app_id)
             try:
-                reads_complete.wait(timeout=1)
+                reads_complete.wait(timeout=60)
             except threading.BrokenBarrierError:
                 pass
             return covered
@@ -326,7 +326,7 @@ class GhAppTokenTests(unittest.TestCase):
         def raced_write_cache_file(path, data):
             if path == coverage_file and not read_started.broken:
                 if first_owner in data:
-                    if not second_write.wait(timeout=1):
+                    if not second_write.wait(timeout=60):
                         raise RuntimeError("second coverage write did not run")
                 else:
                     original_write_cache_file(path, data)
@@ -356,8 +356,8 @@ class GhAppTokenTests(unittest.TestCase):
             second = threading.Thread(target=cache_miss, args=(second_owner,))
             first.start()
             second.start()
-            first.join(timeout=5)
-            second.join(timeout=5)
+            first.join(timeout=300)
+            second.join(timeout=300)
 
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())

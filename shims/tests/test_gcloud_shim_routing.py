@@ -45,6 +45,28 @@ def stub_argv(result: subprocess.CompletedProcess[str]) -> list[str]:
     return [line.removeprefix("ARG=") for line in result.stdout.splitlines() if line.startswith("ARG=")]
 
 
+def wait_for_child(pid: int, comm: str, limit: float = 600) -> bool:
+    """True once process `pid` has a child named `comm`; False when `pid` is gone first or `limit`
+    seconds pass (a bound for a hang, far above what a loaded machine needs)."""
+    deadline = time.monotonic() + limit
+    children = Path(f"/proc/{pid}/task/{pid}/children")
+    while time.monotonic() < deadline:
+        try:
+            if Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] == "Z":
+                return False
+            kids = children.read_text(encoding="utf-8").split()
+        except OSError:
+            return False
+        for kid in kids:
+            try:
+                if Path(f"/proc/{kid}/comm").read_text(encoding="utf-8").strip() == comm:
+                    return True
+            except OSError:
+                continue
+        time.sleep(0.05)
+    return False
+
+
 def shim_array(name: str) -> list[str]:
     """One of the shim's own flag tables, read by sourcing it."""
     result = subprocess.run(
@@ -617,16 +639,26 @@ class GcloudRouting(unittest.TestCase):
 
     def test_thousands_of_unknown_flags_are_refused_cleanly(self):
         """The walk is a loop, not recursion: 3000 choice points before `auth login`
-        are weighed exactly and refused, with no stack overflow and in little time."""
+        are weighed exactly and refused, with no stack overflow, and the work grows in
+        proportion to the flags. The work is counted in the commands bash traces, not in
+        seconds, which a loaded machine stretches (load 300-380 on 2026-11-03)."""
         self.stub_gcloud_that_must_not_run()
         args = ["--future-flag", "x"] * 3000 + ["auth", "login"]
-        started = time.monotonic()
         result = self.run_shim(args=args)
-        elapsed = time.monotonic() - started
         self.assertEqual(result.returncode, 1, result.stderr[-500:])
         self.assertIn("ambiguous", result.stderr)
         self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
-        self.assertLess(elapsed, 10)
+
+        def traced_commands(flags: int) -> int:
+            trace = subprocess.run(["bash", "-x", str(SHIMS / "gcloud"), *(["--future-flag", "x"] * flags),
+                                    "auth", "login"], capture_output=True, text=True,
+                                   env={**self.env, "PS4": "+"}, check=False)
+            self.assertEqual(trace.returncode, 1)
+            return sum(1 for line in trace.stderr.splitlines() if line.startswith("+"))
+
+        small, large = traced_commands(500), traced_commands(1000)
+        self.assertGreater(small, 500)
+        self.assertLess(large, 2.2 * small)
 
     def test_unknown_flags_only_after_a_decided_path_change_nothing(self):
         """Many unknown flags after `auth login` cannot move it: the login is routed."""
@@ -1547,21 +1579,38 @@ class GcloudLockedStoreRetry(unittest.TestCase):
                     self.assertIn("NOTE-3", result.stderr)
                     self.assertEqual(self.call_count(), 3)
 
-    def bound_retries(self, seconds: int = 10) -> None:
-        """A short deadline, and a sleep that takes 0.2 s whatever the delay asked, so the loop
-        runs many attempts and its count is bounded. The shim runs no attempt whose delay would
-        pass the deadline, and its clock counts whole seconds."""
-        self.env["GCLOUD_LOCK_RETRY_SECONDS"] = str(seconds)
-        write_stub(self.stub_dir, "sleep", f'echo "$1" >> "{self.stub_dir}/sleeps"; /bin/sleep 0.2')
+    DEADLINE = 60
+
+    def bound_retries(self) -> None:
+        """A clock that only the stub `sleep` moves, by the delay the shim asked for
+        (GCLOUD_LOCK_RETRY_CLOCK), so the attempts that fit before the deadline follow from the
+        backoff alone and not from the machine's load: with a real clock, load 300-380 let only
+        4-6 attempts into 10 s (2026-11-03). Each delay of attempt a is under 0.6*a s and at most
+        6 s, so 7 repeats take at most 16.8 s of the clock plus 1 s of rounding each, well inside
+        60 s; each delay is at least 0.2*a s (2 s once capped), so the attempts are few."""
+        self.env["GCLOUD_LOCK_RETRY_SECONDS"] = str(self.DEADLINE)
+        self.clock_ms = self.stub_dir / "clock-ms"
+        self.clock_ms.write_text("0\n", encoding="utf-8")
+        write_stub(self.stub_dir, "fake-clock", f'echo $(( $(cat "{self.clock_ms}") / 1000 ))')
+        self.env["GCLOUD_LOCK_RETRY_CLOCK"] = str(self.stub_dir / "fake-clock")
+        # The shim asks for <s>.<ms> seconds; the stub adds that many milliseconds to the clock.
+        write_stub(self.stub_dir, "sleep",
+                   f'echo "$1" >> "{self.stub_dir}/sleeps"; ms=${{1/./}}; '
+                   f'echo $(( $(cat "{self.clock_ms}") + 10#$ms )) > "{self.clock_ms}"')
+
+    def assert_bounded(self, calls: int) -> None:
+        """More attempts than the old limit of 6, none begun past the deadline, and a count the
+        smallest delays allow: 0.2*a s each until the 6 s cap, then at least 2 s."""
+        self.assertGreater(calls, 6)
+        self.assertLessEqual(calls, 30)
+        self.assertLessEqual(int(self.clock_ms.read_text(encoding="utf-8")), self.DEADLINE * 1000)
 
     def test_storage_retry_is_bounded(self):
         self.bound_retries()
         self.stub_gcloud_crashing(times=1000, crash=LOCK_TASK_ERROR, partial=False)
-        started = time.monotonic()
         result = self.run_shim(["storage", "rsync", "gs://b/d", str(self.stub_dir)])
-        self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(result.returncode, 1)
-        self.assertGreater(self.call_count(), 6)
+        self.assert_bounded(self.call_count())
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr.count(LOCK_TASK_ERROR), self.call_count())
 
@@ -1595,10 +1644,12 @@ class GcloudLockedStoreRetry(unittest.TestCase):
             fcntl.flock(holder, fcntl.LOCK_EX)
             proc = subprocess.Popen([str(SHIMS / "gcloud"), "auth", "print-access-token"], stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True, env=self.env)
-            time.sleep(2)
+            # Waiting means the shim's flock(1) child is blocked on the held slot: wait for that
+            # child, however long a loaded machine takes to reach it, rather than for a fixed time.
+            self.assertTrue(wait_for_child(proc.pid, "flock"), "the repeat attempt never waited for the slot")
             self.assertIsNone(proc.poll())
             self.assertEqual(self.call_count(), 1)
-        out, err = proc.communicate(timeout=30)
+        out, err = proc.communicate(timeout=600)
         self.assertEqual((proc.returncode, out), (0, "OK\n"), err)
         self.assertEqual(self.call_count(), 2)
         self.assertNotIn("9", fds.read_text(encoding="utf-8").split())
@@ -1642,7 +1693,7 @@ class GcloudLockedStoreRetry(unittest.TestCase):
             assert proc.stdout is not None
             self.assertEqual(proc.stdout.read(8), b"\x00\x01first\n")
             go.touch()
-            out, err = proc.communicate(timeout=30)
+            out, err = proc.communicate(timeout=600)
         finally:
             go.touch()
             proc.kill()
@@ -1703,7 +1754,7 @@ class GcloudLockedStoreRetry(unittest.TestCase):
         result = self.run_shim(["config", "config-helper", "--format=json"])
         self.assertEqual(result.returncode, 1)
         calls = self.call_count()
-        self.assertGreater(calls, 6)
+        self.assert_bounded(calls)
         self.assertEqual(result.stdout, f"PARTIAL-{calls}\n")
         self.assertEqual(result.stderr.count(LOCK_CRASH), 1)
         delays = [float(d) for d in (self.stub_dir / "sleeps").read_text(encoding="utf-8").split()]
@@ -1775,6 +1826,7 @@ class GcloudLockLog(unittest.TestCase):
     tearDown = GcloudLockedStoreRetry.tearDown
     stub_gcloud_crashing = GcloudLockedStoreRetry.stub_gcloud_crashing
     run_shim = GcloudLockedStoreRetry.run_shim
+    DEADLINE = GcloudLockedStoreRetry.DEADLINE
     bound_retries = GcloudLockedStoreRetry.bound_retries
 
     def log_rows(self) -> list[list[str]]:
@@ -1871,7 +1923,7 @@ class GcloudShimCopiesOnPath(unittest.TestCase):
                 # timeout ends rather than a growing tree.
                 for first in (copy / "gcloud", SHIMS / "gcloud"):
                     result = subprocess.run([str(first), "version"], capture_output=True, text=True, env=env,
-                                            timeout=60, check=False)
+                                            timeout=300, check=False)
                     self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
 
 

@@ -14,6 +14,7 @@ that hands gh the App's token, as `knives gh` does for a routed call.
 """
 
 import json
+import re
 import os
 import shutil
 import socketserver
@@ -78,11 +79,13 @@ class Handler(BaseHTTPRequestHandler):
             query = json.loads(raw).get("query", "") if raw else ""
         except ValueError:
             query = ""
+        # The reset this reply names goes into the log, so a test reads it instead of taking the
+        # clock again after the call: on a loaded machine the minute can turn in between.
+        reset = int(time.time()) + RESET_IN
         with open(self.log_path, "a") as log:
-            log.write(json.dumps({"path": self.path, "token": token,
+            log.write(json.dumps({"path": self.path, "token": token, "reset": reset,
                                   "mutation": query.lstrip().startswith("mutation")}) + "\n")
         if self.path.split("?")[0].endswith("/rate_limit"):
-            reset = int(time.time()) + RESET_IN
             return self._reply(200, {"resources": {
                 "core": {"limit": 5000, "used": 5000, "remaining": 0, "reset": reset},
                 "graphql": {"limit": 5000, "used": 10, "remaining": 4990, "reset": reset + 1800}}})
@@ -296,9 +299,16 @@ class UserLogin(unittest.TestCase):
         self.assertIn("use one GraphQL query", result.stderr)
         # The reset comes from the rate_limit endpoint, read on the call's own route.
         self.assertIn("/rate_limit", [r["path"].split("?")[0] for r in sent])
-        want = time.strftime("%H:%M", time.gmtime(time.time() + RESET_IN))
-        self.assertRegex(result.stderr, r"Limit: core 0 of 5000 left; it resets at \d\d:\d\d:\d\dZ \(in 1[01] min\)")
-        self.assertIn(f"resets at {want}", result.stderr)
+        wants = [time.strftime("%H:%M:%SZ", time.gmtime(r["reset"])) for r in sent
+                 if r["path"].split("?")[0].endswith("/rate_limit")]
+        shown = re.search(r"Limit: core 0 of 5000 left; it resets at (\d\d:\d\d:\d\dZ) \(in \d+ min\)", result.stderr)
+        self.assertIsNotNone(shown, result.stderr)
+        want = shown.group(1)
+        self.assertIn(want, wants)
+        # Minutes from when the shim read its clock: up to 11 (rounded up), fewer the longer a
+        # loaded machine took between the reply and that read.
+        minutes = int(re.search(rf"resets at {want} \(in (\d+) min\)", result.stderr).group(1))
+        self.assertTrue(1 <= minutes <= 11, minutes)
         self.assertNotIn("graphql 4990", result.stderr)  # a budget with requests left is not the cause
         return result.stderr
 

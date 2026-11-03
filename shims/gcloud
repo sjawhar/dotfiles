@@ -926,6 +926,20 @@ GCLOUD_LOCK_ERROR='^\.*ERROR: (gcloud crashed \(OperationalError\): )?database i
 GCLOUD_LOCK_RETRY_SECONDS="${GCLOUD_LOCK_RETRY_SECONDS:-300}"
 GCLOUD_LOCK_RETRY_SLOTS="${GCLOUD_LOCK_RETRY_SLOTS:-8}"
 
+# The retry's clock, in whole seconds, in GCLOUD_LOCK_NOW: bash's SECONDS, or what the command
+# GCLOUD_LOCK_RETRY_CLOCK prints when that is set. The tests set it to a clock that only their
+# stub `sleep` moves, so the number of attempts before the deadline follows from the backoff
+# alone, not from the machine's load: on sami-rocqperf at load 300-380 (2026-11-03) a real clock
+# let only 4-6 attempts into a 10 s deadline, and the tests that bound the retry failed.
+GCLOUD_LOCK_NOW=0
+lock_retry_clock() {
+    if [[ -n "${GCLOUD_LOCK_RETRY_CLOCK:-}" ]]; then
+        GCLOUD_LOCK_NOW="$("$GCLOUD_LOCK_RETRY_CLOCK")"
+    else
+        GCLOUD_LOCK_NOW=$SECONDS
+    fi
+}
+
 # True for a command that running again repeats nothing, and that reads no stdin. The command
 # words are read as read_command_words reads them, to the fourth word; a `-` anywhere, as an
 # entry or a value, or a --flags-file can mean stdin, and is never retried.
@@ -1144,7 +1158,8 @@ take_retry_slot() {
         ((GCLOUD_LOCK_RETRY_SLOTS > 0)) || return 0
     fi
     while :; do
-        wait=$((deadline - SECONDS))
+        lock_retry_clock
+        wait=$((deadline - GCLOUD_LOCK_NOW))
         ((wait > 0)) || return 1
         ((wait > 5)) && wait=5
         slot="${GCLOUD_LOCK_SLOT_DIR}/$((RANDOM % GCLOUD_LOCK_RETRY_SLOTS))"
@@ -1161,7 +1176,9 @@ take_retry_slot() {
 # only the shim holds a slot.
 GCLOUD_RETRY_DIR=""
 run_with_lock_retry() {
-    local status attempt=1 delay_ms retry deadline=$((SECONDS + GCLOUD_LOCK_RETRY_SECONDS))
+    local status attempt=1 delay_ms retry deadline
+    lock_retry_clock
+    deadline=$((GCLOUD_LOCK_NOW + GCLOUD_LOCK_RETRY_SECONDS))
     GCLOUD_RETRY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gcloud-shim.XXXXXX")" || exec "$@"
     # A printed token sits in that directory until gcloud's attempt ends; remove it on every exit.
     trap 'rm -rf "$GCLOUD_RETRY_DIR"' EXIT
@@ -1192,7 +1209,8 @@ run_with_lock_retry() {
         delay_ms=$((200 * attempt + RANDOM % (400 * attempt)))
         ((delay_ms > 6000)) && delay_ms=$((2000 + RANDOM % 4000))
         retry=0
-        if ((SECONDS + (delay_ms + 999) / 1000 < deadline)); then
+        lock_retry_clock
+        if ((GCLOUD_LOCK_NOW + (delay_ms + 999) / 1000 < deadline)); then
             printf 'gcloud shim: another gcloud held a sqlite store in the configuration directory past the SDK busy timeout (attempt %d; running it again for up to %d s in all); next attempt in %d.%03d s.\n' \
                 "$attempt" "$GCLOUD_LOCK_RETRY_SECONDS" "$((delay_ms / 1000))" "$((delay_ms % 1000))" >&2
             sleep "$((delay_ms / 1000)).$(printf '%03d' "$((delay_ms % 1000))")"

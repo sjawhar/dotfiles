@@ -74,7 +74,7 @@ class TmuxGuard(unittest.TestCase):
         proc = subprocess.Popen([str(SHIM), *args], env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
-            out, err = proc.communicate(timeout=10)
+            out, err = proc.communicate(timeout=300)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate()

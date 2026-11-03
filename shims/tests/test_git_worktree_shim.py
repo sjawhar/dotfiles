@@ -274,7 +274,7 @@ class GitWorktreeShimTest(unittest.TestCase):
         env = {**self.agent, "PATH": f"{wrapper}{os.pathsep}{self.agent['PATH']}"}
         direct = subprocess.run(["/usr/bin/git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         try:
-            result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, env=env, capture_output=True, text=True, check=False, timeout=10)
+            result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, env=env, capture_output=True, text=True, check=False, timeout=300)
         except subprocess.TimeoutExpired:
             self.fail("the shim chose the wrapper above it and the two exec each other forever")
         self.assertEqual(result.stdout, direct)

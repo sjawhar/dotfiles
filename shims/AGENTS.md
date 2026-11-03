@@ -299,7 +299,9 @@ before handing the call to the real one.
   gcloud's hold on `credentials.db`, past the SDK's 5 s busy timeout, failed with exactly `ERROR:
   gcloud crashed (OperationalError): database is locked`, or with a `gcloud storage` worker's
   `ERROR: database is locked` line, runs again until 300 s after the call began
-  (`GCLOUD_LOCK_RETRY_SECONDS`), 0.2-6 s apart with jitter, and a repeat attempt first takes one
+  (`GCLOUD_LOCK_RETRY_SECONDS`; its clock is bash's `SECONDS`, or the command
+  `GCLOUD_LOCK_RETRY_CLOCK` names, which the tests set to a clock only their stub `sleep` moves,
+  so their attempt counts do not depend on load), 0.2-6 s apart with jitter, and a repeat attempt first takes one
   of 8 host-wide slots per configuration directory (`GCLOUD_LOCK_RETRY_SLOTS`; flock(1) on
   `<config dir>/.gcloud-shim-retry-slots/<n>`, waiting in the kernel), so a stalled store queues
   its repeats instead of starting hundreds of SDK processes (2026-11-03 00:38Z: 67 calls gave up
