@@ -83,6 +83,8 @@
 # through to a different one.
 set -euo pipefail
 
+# dotfiles gcloud shim: find_real_gcloud skips any file that holds this exact line.
+
 # The configuration that holds the user's own Google login: his plain login on a box goes
 # there. This shim writes its name nowhere else.
 USER_LOGIN_CONFIGURATION=theorem
@@ -589,11 +591,20 @@ refuse_adc_write_in_agent_session() {
     exit 1
 }
 
+# The real gcloud: the first `gcloud` on PATH that is not this shim nor a copy of it. A copy is a
+# file with the same bytes, or one that holds the marker line at the top of this file (a copy of
+# another version). Each copy would take the other for the real one: at 06:23Z on 2026-11-03 a
+# scratch copy put ahead of shims/ on PATH and the installed shim called each other until the agent
+# box's 8192 processes were used up, and the box's omp stopped (dispatch://INFRA-993).
+GCLOUD_SHIM_MARKER="# dotfiles gcloud shim: find_real_gcloud skips any file that holds this exact line."
 find_real_gcloud() {
-    local self candidate
+    local self candidate resolved
     self="$(readlink -f "${BASH_SOURCE[0]}")"
     while IFS= read -r candidate; do
-        [[ "$(readlink -f "$candidate")" == "$self" ]] && continue
+        resolved="$(readlink -f "$candidate")"
+        [[ "$resolved" == "$self" ]] && continue
+        cmp -s "$resolved" "$self" && continue
+        grep -qxF "$GCLOUD_SHIM_MARKER" "$resolved" 2>/dev/null && continue
         printf '%s\n' "$candidate"
         return 0
     done < <(type -ap gcloud)
