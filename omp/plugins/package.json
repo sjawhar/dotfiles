@@ -4,7 +4,7 @@
   "dependencies": {
     "@bopstack/pi-codegraph": "^0.1.1",
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.2.3",
-    "@sjawhar/pi-envoy": "15.1.2",
+    "@sjawhar/pi-envoy": "15.5.0",
     "@sjawhar/pi-legion": "16.3.0",
     "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
