@@ -33,15 +33,34 @@
 # rewrites it (this box's own audit did, on 2026-10-30), so it reports a 60-hour-old tree as
 # fresh and makes the window mean nothing.
 #
+# A pass has a deadline: TMP_REAP_RUN_SECONDS from its start, which the service sets inside its
+# own TimeoutStartSec. The run checks it before each top-level entry it lists, before each walk
+# and before each removal, and every one of those disk steps runs in a child under a hard limit of
+# the time left, read through a pipe with the same timeout, so a stat or an unlink stuck on a
+# stalled disk is left behind instead of waited for. At the deadline the run stops at the entry it
+# was on, logs one line saying how far it got, keeps that entry as its cursor (TMP_REAP_STATE) and
+# exits 0. The next pass starts at the cursor and goes on in name order, wrapping at the end, so
+# no entry waits more than one full turn. A removal the deadline cuts leaves its rest under the
+# name .tmp-stale-reap-removing.*, which the next pass removes first, so no name of /tmp is ever
+# left half-empty. A hand run has no deadline unless TMP_REAP_RUN_SECONDS is set.
+#
 # A hand run reports and removes nothing; --apply removes, and is what the service passes.
-# TMP_REAP_ROOT, TMP_REAP_AGE_HOURS, TMP_REAP_KEEP, TMP_REAP_PROBE_SECONDS and
-# TMP_REAP_IO_PRESSURE_MAX override the defaults, so a test can run it against a scratch root.
+# TMP_REAP_ROOT, TMP_REAP_AGE_HOURS, TMP_REAP_KEEP, TMP_REAP_PROBE_SECONDS,
+# TMP_REAP_IO_PRESSURE_MAX, TMP_REAP_RUN_SECONDS, TMP_REAP_STATE and TMP_REAP_PROC override the
+# defaults, so a test can run it against a scratch root and a scratch /proc.
 set -euo pipefail
+# Byte order for the name order the cursor walks: `sort` and bash's own `<` agree only in C.
+export LC_ALL=C
 
 root="${TMP_REAP_ROOT:-/tmp}"
 age_hours="${TMP_REAP_AGE_HOURS:-48}"
 probe_timeout="${TMP_REAP_PROBE_SECONDS:-120}"
 pressure_max="${TMP_REAP_IO_PRESSURE_MAX:-20}"
+run_seconds="${TMP_REAP_RUN_SECONDS:-}"
+state_dir="${TMP_REAP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/tmp-stale-reap}"
+proc="${TMP_REAP_PROC:-/proc}"
+# What a removal the deadline cut leaves behind is renamed to this prefix, inside $root.
+remains_prefix=.tmp-stale-reap-removing.
 
 # Never removed, whatever their age and whoever owns them. The socket directories of X11, the ICE
 # session bus, the font server and the toolkit self-test; systemd's per-service private trees;
@@ -65,6 +84,12 @@ case "${1:-}" in
         exit 2
         ;;
 esac
+for knob in TMP_REAP_PROBE_SECONDS="$probe_timeout" TMP_REAP_RUN_SECONDS="${run_seconds:-1}"; do
+    if [[ ! "${knob#*=}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "tmp-stale-reap: ${knob%%=*} must be a whole number of seconds, not '${knob#*=}'" >&2
+        exit 2
+    fi
+done
 
 if [[ ! -d "$root" ]]; then
     echo "tmp-stale-reap: $root is absent; nothing to reap"
@@ -75,8 +100,8 @@ root="${root%/}"
 # Deleting under IO pressure hangs every shell on the box (skill://disk-hygiene). The next run is
 # an hour away, so skipping a period costs nothing.
 pressure=0
-if [[ -r /proc/pressure/io ]]; then
-    pressure="$(sed -n 's/^full .*avg10=\([0-9.]*\).*/\1/p' /proc/pressure/io)"
+if [[ -r "$proc/pressure/io" ]]; then
+    pressure="$(sed -n 's/^full .*avg10=\([0-9.]*\).*/\1/p' "$proc/pressure/io")"
     pressure="${pressure:-0}"
 fi
 if [[ -n "$apply" ]] && awk -v p="$pressure" -v m="$pressure_max" 'BEGIN{exit !(p+0 > m+0)}'; then
@@ -85,13 +110,16 @@ if [[ -n "$apply" ]] && awk -v p="$pressure" -v m="$pressure_max" 'BEGIN{exit !(
 fi
 
 uid="$(id -u)"
-now="$(date +%s)"
+start=$EPOCHSECONDS
+now=$start
+# Ten years stands for no deadline at all: a hand run without TMP_REAP_RUN_SECONDS.
+deadline=$((start + ${run_seconds:-315360000}))
 # awk, not $((…)): TMP_REAP_AGE_HOURS takes a fraction, which is how the test in
 # devbox/tmp-stale-reap.md gets a window of seconds instead of waiting two days for one.
 cutoff="$(awk -v n="$now" -v h="$age_hours" 'BEGIN{printf "%d", n - h*3600}')"
 
 kept_other_owner=0 kept_pattern=0 kept_type=0 kept_young=0 kept_live=0 kept_unsure=0 kept_foreign=0
-removed=0 failed=0 removed_bytes=0
+removed=0 failed=0 removed_bytes=0 checked=0
 
 # Integer arithmetic, not awk: a hand run calls this once per entry, 17,458 times on this box.
 hours() { printf '%d.%d' $(($1 / 3600)) $((($1 % 3600) * 10 / 3600)); }
@@ -104,25 +132,142 @@ size() { # the line a complaint is answered from, so the small entries stay read
     }'
 }
 
+# bounded [-e] LIMIT CMD...: run CMD under a hard limit of LIMIT seconds; its stdout goes in $out
+# and its status is returned, or 124 once the limit has passed. The wait is a `read -t` on the
+# child's pipe, never a wait on the child: a stat or an unlink on a stalled disk sleeps where
+# SIGKILL does not reach it, and `timeout` then waits on it as well. Such a child is left behind,
+# and the unit's cgroup takes it when the run exits. stderr is dropped, as every walk here always
+# did; -e keeps it in $out instead.
+bounded() {
+    local errors=/dev/null limit ends status="" rc=0
+    if [[ "$1" == -e ]]; then
+        errors=/dev/stdout
+        shift
+    fi
+    limit=$1
+    shift
+    out=""
+    ((limit > 0)) || return 124
+    # Two seconds past the child's own limit, so that its status, not this read, ends the wait.
+    ends=$((EPOCHSECONDS + limit + 2))
+    {
+        IFS= read -r -d '' -t "$((ends - EPOCHSECONDS))" out &&
+            IFS= read -r -t "$((ends > EPOCHSECONDS ? ends - EPOCHSECONDS : 1))" status
+    } < <(
+        exec 2>"$errors"
+        timeout -s KILL "$limit" "$@" || rc=$?
+        printf '\0%d\n' "$rc"
+    ) || return 124
+    out="${out%$'\n'}"
+    # `timeout -s KILL` reports its own kill as 128+9.
+    ((status != 137)) || return 124
+    return "$status"
+}
+
+# stream LIMIT DELIM CMD...: what CMD writes, under a hard limit of LIMIT seconds, then one last
+# record `\1end<TAB>STATUS` ended by DELIM, so that next_record can tell a finished listing from
+# one cut short. It runs as the process substitution a loop reads.
+stream() {
+    local limit=$1 delim=$2 rc=0
+    shift 2
+    exec 2>/dev/null
+    if ((limit > 0)); then
+        timeout -s KILL "$limit" "$@" || rc=$?
+    else
+        rc=137
+    fi
+    printf '\1end\t%d%b' "$rc" "$delim"
+}
+
+# next_record DELIM: the next record of the stream on stdin, in $record, read within the deadline.
+# It fails at the stream's last record, with that stream's status in $stream_end, and at the
+# deadline, with "deadline" there.
+next_record() {
+    local wait=$((deadline - EPOCHSECONDS)) rc=0
+    stream_end=deadline
+    ((wait > 0)) || return 1
+    IFS= read -r -d "$1" -t "$wait" record || rc=$?
+    if ((rc != 0)); then
+        # Past 128 the read timed out; below it the stream ended without its last record.
+        ((rc > 128)) || stream_end=lost
+        return 1
+    fi
+    if [[ "$record" == $'\1end\t'* ]]; then
+        stream_end="${record#*$'\t'}"
+        return 1
+    fi
+}
+
+# save_cursor PATH: where the next pass starts; empty for the first entry. Only an --apply run
+# moves it. A child writes it under a limit, like every other disk step: $HOME is on the same root
+# disk whose stalls the deadline is for.
+save_cursor() {
+    [[ -n "$apply" ]] || return 0
+    local status=0
+    # shellcheck disable=SC2016  # the child shell expands $1 and $2
+    bounded 10 sh -c 'mkdir -p -- "$1" && printf "%s" "$2" >"$1/cursor.new" && mv -f -- "$1/cursor.new" "$1/cursor"' \
+        sh "$state_dir" "$1" || status=$?
+    ((status == 0)) || echo "tmp-stale-reap: could not save the cursor in $state_dir/cursor (status $status)"
+}
+
+# stop NEXT [STEP]: the deadline has come. NEXT is the first candidate this pass did not finish.
+# Only the walk of pass 3 moves the cursor to it, and only with --apply; a stop in an earlier STEP
+# leaves the cursor where it was. Say how far this pass got, and exit 0 unless a removal failed.
+stop() {
+    local next=$1 step=${2:-} note=""
+    if [[ -n "$step" ]]; then
+        note=" (the deadline came during $step)"
+    elif [[ -z "$apply" ]]; then
+        note=" (this dry run stopped at ${next:-the first entry}; a dry run moves no cursor)"
+        next=$cursor
+    else
+        save_cursor "$next"
+    fi
+    echo "tmp-stale-reap: $root: stopped at its deadline after ${removed} removals, ${checked} entries checked; next pass resumes at ${next:-the first entry of $root}$note"
+    exit $((failed > 0))
+}
+
+# Where the last pass stopped. Unreadable or another root's, it is the first entry.
+cursor=""
+if bounded 10 cat -- "$state_dir/cursor" && [[ "$out" == "$root"/* ]]; then
+    cursor=$out
+fi
+
 # rm -rf does not chmod, so a directory whose owner left it read-only keeps its own children.
 # The retry is bounded to an entry this run has already proved dead by every rule above, and
 # without it the service fails on that entry every hour and hides the next real failure. It
 # cannot save a directory another user owns - that is the veto in pass 3, not a case for here.
+# Every step gets the time left before the deadline: 0 is removed, 124 is cut by the deadline,
+# and anything else failed, with rm's own message in $out.
 remove() {
+    local status=0
     # Quiet on the first try: a read-only directory is expected here, and only the second
     # attempt's message means the entry really is stuck.
-    rm -rf -- "$1" 2>/dev/null && return 0
-    chmod -R u+rwX -- "$1" 2>/dev/null || true
-    rm -rf -- "$1"
+    bounded "$((deadline - EPOCHSECONDS))" rm -rf -- "$1" || status=$?
+    ((status != 0 && status != 124)) || return "$status"
+    status=0
+    bounded "$((deadline - EPOCHSECONDS))" chmod -R u+rwX -- "$1" || status=$?
+    ((status != 124)) || return 124
+    bounded -e "$((deadline - EPOCHSECONDS))" rm -rf -- "$1"
 }
 
 # Pass 1: one stat of the directory itself - owner, type, name and the entry's own timestamps.
 # Only what survives this costs a /proc pass or a tree walk. One find, not one stat per entry:
 # /tmp held 17,458 entries on 2026-10-30. A hand run (no --apply) names every entry it keeps and
 # why; the service, which would write 14,000 of those lines an hour into the journal, names only
-# the keeps a complaint is ever about - the live ones and the keep list.
+# the keeps a complaint is ever about - the live ones and the keep list. Records end in NUL, so
+# a name holding a newline is still one name.
 declare -A candidate=()
-while IFS=$'\t' read -r type owner mtime ctime name; do
+remains=()
+while next_record ''; do
+    type="${record%%$'\t'*}"
+    rest="${record#*$'\t'}"
+    owner="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    mtime="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    ctime="${rest%%$'\t'*}"
+    name="${rest#*$'\t'}"
     [[ -n "$name" ]] || continue
     skip=""
     for pattern in "${keep_patterns[@]}"; do
@@ -145,25 +290,54 @@ while IFS=$'\t' read -r type owner mtime ctime name; do
         kept_other_owner=$((kept_other_owner + 1))
         continue
     fi
+    if [[ "$name" == "$remains_prefix"* ]]; then
+        remains+=("$root/$name")
+        continue
+    fi
     if ((mtime > cutoff || ctime > cutoff)); then
         [[ -n "$apply" ]] || echo "tmp-stale-reap: keep $root/$name (changed $(hours $((now - (mtime > ctime ? mtime : ctime))))h ago, inside the ${age_hours}h window)"
         kept_young=$((kept_young + 1))
         continue
     fi
     candidate["$root/$name"]=1
-done < <(find "$root" -mindepth 1 -maxdepth 1 -ignore_readdir_race \
-    -printf '%y\t%U\t%Ts\t%Cs\t%f\n' 2>/dev/null)
+done < <(stream "$((deadline - EPOCHSECONDS))" '\0' find "$root" -mindepth 1 -maxdepth 1 \
+    -ignore_readdir_race -printf '%y\t%U\t%Ts\t%Cs\t%f\0')
+((EPOCHSECONDS < deadline)) || stop "$cursor" "the listing of $root"
+
+# What an earlier pass's removal left when its deadline cut it. That pass proved the entry dead by
+# every rule below and renamed what was left, so it is removed here without being judged again.
+for entry in "${remains[@]}"; do
+    ((EPOCHSECONDS < deadline)) || stop "$cursor" "the removal of what an earlier pass left"
+    if [[ -z "$apply" ]]; then
+        echo "tmp-stale-reap: would remove $entry (what an earlier pass's removal left at its deadline)"
+        removed=$((removed + 1))
+        continue
+    fi
+    status=0
+    remove "$entry" || status=$?
+    if ((status == 0)); then
+        echo "tmp-stale-reap: removed $entry (what an earlier pass's removal left at its deadline)"
+        removed=$((removed + 1))
+    elif ((status == 124)); then
+        stop "$cursor" "the removal of $entry"
+    else
+        echo "tmp-stale-reap: FAILED to remove $entry${out:+: $out}" >&2
+        failed=$((failed + 1))
+    fi
+done
 
 if ((${#candidate[@]} == 0)); then
     echo "tmp-stale-reap: $root: nothing is both this user's and older than ${age_hours}h; ${kept_young} too young, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_type} not a plain file or directory"
-    exit 0
+    exit $((failed > 0))
 fi
 
 # Pass 2: the processes. Three reads of /proc for the whole candidate set, never one per
 # candidate: every symlink under /proc/<pid>/ (fd, cwd, exe, root) in one find, then the mapped
 # files, then TMPDIR and AGENT_SESSION_SCRATCH. Only this user's /proc entries are readable from
 # here, so another user's process holding one of these is invisible; the owner gate in pass 1 and
-# the age window are what cover that (devbox/tmp-stale-reap.md).
+# the age window are what cover that (devbox/tmp-stale-reap.md). A read of a process's maps or
+# environ waits on that process's memory lock, which a process stuck in a page fault on a stalled
+# disk holds, so each read is a stream under the deadline too.
 declare -A held=()
 mark() { # mark PID HOW PATH
     local path="$3" top
@@ -173,48 +347,85 @@ mark() { # mark PID HOW PATH
     [[ -n "${candidate["$top"]:-}" ]] || return 0
     held["$top"]="pid $1 via $2"
 }
+# A scan that did not finish leaves liveness unknown, and nothing is removed on an unknown.
+proc_scan_done() {
+    ((EPOCHSECONDS < deadline)) || stop "$cursor" "the scan of $proc"
+    if [[ ! "$stream_end" =~ ^[0-9]+$ || "$stream_end" == 137 ]]; then
+        echo "tmp-stale-reap: $root: the scan of $proc ended early ($stream_end); nothing removed in this pass" >&2
+        exit 1
+    fi
+}
 
-while IFS=$'\t' read -r link target; do
-    pid="${link#/proc/}"
+while next_record $'\n'; do
+    link="${record%%$'\t'*}"
+    target="${record#*$'\t'}"
+    pid="${link#"$proc"/}"
     pid="${pid%%/*}"
     kind="${link##*/}"
     [[ "$kind" =~ ^[0-9]+$ ]] && kind="an open file"
     mark "$pid" "$kind" "$target"
-done < <(find /proc/[0-9]*/fd /proc/[0-9]*/cwd /proc/[0-9]*/exe /proc/[0-9]*/root \
-    -maxdepth 1 -ignore_readdir_race -type l -printf '%p\t%l\n' 2>/dev/null)
+done < <(stream "$((deadline - EPOCHSECONDS))" '\n' \
+    find "$proc"/[0-9]*/fd "$proc"/[0-9]*/cwd "$proc"/[0-9]*/exe "$proc"/[0-9]*/root \
+    -maxdepth 1 -ignore_readdir_race -type l -printf '%p\t%l\n')
+proc_scan_done
 
-while IFS= read -r line; do
-    pid="${line#/proc/}"
+while next_record $'\n'; do
+    pid="${record#"$proc"/}"
     pid="${pid%%/*}"
-    mark "$pid" "a mapped file" "${line#*:}"
-done < <(grep -Ho -- "${root}/[^[:space:]]*" /proc/[0-9]*/maps 2>/dev/null || true)
+    mark "$pid" "a mapped file" "${record#*:}"
+done < <(stream "$((deadline - EPOCHSECONDS))" '\n' grep -Ho -- "${root}/[^[:space:]]*" "$proc"/[0-9]*/maps)
+proc_scan_done
 
-while IFS= read -r -d '' line; do
-    pid="${line#/proc/}"
+while next_record ''; do
+    pid="${record#"$proc"/}"
     pid="${pid%%/*}"
-    value="${line#*:}"
+    value="${record#*:}"
     mark "$pid" "${value%%=*}" "${value#*=}"
-done < <(grep -zaoH -E "(TMPDIR|AGENT_SESSION_SCRATCH)=${root}/[^[:space:]]*" \
-    /proc/[0-9]*/environ 2>/dev/null || true)
+done < <(stream "$((deadline - EPOCHSECONDS))" '\0' \
+    grep -zaoH -E "(TMPDIR|AGENT_SESSION_SCRATCH)=${root}/[^[:space:]]*" "$proc"/[0-9]*/environ)
+proc_scan_done
 
 # Pass 3: the tree. One walk per candidate that stops at the first thing vetoing it, so a live
 # tree costs almost nothing and only a tree that is really going is walked in full. A walk that
 # runs past TMP_REAP_PROBE_SECONDS, or that fails, keeps the entry: neither is proof of death.
-for entry in "${!candidate[@]}"; do
+# The candidates go in name order from the cursor, wrapping at the end, so a pass the deadline
+# stops is carried on by the next one and every entry gets its turn.
+mapfile -d '' -t order < <(printf '%s\0' "${!candidate[@]}" | sort -z)
+total=${#order[@]}
+first=0
+if [[ -n "$cursor" ]]; then
+    while ((first < total)) && [[ "${order[first]}" < "$cursor" ]]; do
+        first=$((first + 1))
+    done
+    ((first < total)) || first=0
+fi
+# The size walk's arithmetic: the newest mtime or ctime in the tree, and its bytes.
+# shellcheck disable=SC2016  # an awk program; its $1 $2 $3 are awk's fields
+newest_and_size='{ if ($1 > m) m = $1; if ($2 > m) m = $2; s += $3 } END { printf "%d %d\n", m + 0, s + 0 }'
+
+for ((k = 0; k < total; k++)); do
+    entry="${order[(first + k) % total]}"
+    ((EPOCHSECONDS < deadline)) || stop "$entry"
     if [[ -n "${held["$entry"]:-}" ]]; then
         echo "tmp-stale-reap: keep $entry (live: ${held["$entry"]})"
         kept_live=$((kept_live + 1))
+        checked=$((checked + 1))
         continue
     fi
 
-    # `|| status=$?`, not `if ! …`: after a negated condition $? is the negation's 0, not the
-    # walk's own status, and the keep line has to name what actually went wrong.
+    # A walk gets its own limit or the time left, whichever is shorter. One that the deadline cut
+    # has not answered, so the pass stops on this entry and the next one walks it again.
     status=0
-    probe="$(timeout "$probe_timeout" find "$entry" -xdev -ignore_readdir_race \
+    bounded $((deadline - EPOCHSECONDS < probe_timeout ? deadline - EPOCHSECONDS : probe_timeout)) \
+        find "$entry" -xdev -ignore_readdir_race \
         \( \( -type s -printf 'socket\t%p\n' \) -o \
         \( ! -uid "$uid" -printf 'foreign\t%p, uid %U\n' \) -o \
         \( \( -newermt "@$cutoff" -o -newerct "@$cutoff" \) -printf 'fresh\t%p\n' \) \) \
-        -quit 2>/dev/null)" || status=$?
+        -quit || status=$?
+    probe=$out
+    if ((status == 124 && EPOCHSECONDS >= deadline)); then
+        stop "$entry"
+    fi
     if ((status != 0)); then
         if ((status == 124)); then
             echo "tmp-stale-reap: keep $entry (the walk of it ran past ${probe_timeout}s)"
@@ -222,6 +433,7 @@ for entry in "${!candidate[@]}"; do
             echo "tmp-stale-reap: keep $entry (the walk of it failed, exit $status)"
         fi
         kept_unsure=$((kept_unsure + 1))
+        checked=$((checked + 1))
         continue
     fi
     if [[ -n "$probe" ]]; then
@@ -239,30 +451,75 @@ for entry in "${!candidate[@]}"; do
                 kept_young=$((kept_young + 1))
                 ;;
         esac
+        checked=$((checked + 1))
         continue
     fi
 
     # The line this entry's removal is answered from. One walk for both numbers, and no
     # `sort | head`: head quitting SIGPIPEs the writer, which under pipefail ends the run at
     # the first entry it reports (seen 2026-10-30, exit 141, 87 entries in).
-    newest=0 bytes=0
-    read -r newest bytes < <(find "$entry" -xdev -ignore_readdir_race -printf '%Ts\t%Cs\t%s\n' \
-        2>/dev/null | awk -F'\t' '{ if ($1 > m) m = $1; if ($2 > m) m = $2; s += $3 }
-            END { printf "%d %d\n", m + 0, s + 0 }')
+    status=0
+    # shellcheck disable=SC2016  # the child shell expands $1 and $2
+    bounded $((deadline - EPOCHSECONDS < probe_timeout ? deadline - EPOCHSECONDS : probe_timeout)) \
+        sh -c 'find "$1" -xdev -ignore_readdir_race -printf "%Ts\t%Cs\t%s\n" | awk -F"\t" "$2"' \
+        sh "$entry" "$newest_and_size" || status=$?
+    if ((status == 124 && EPOCHSECONDS >= deadline)); then
+        stop "$entry"
+    fi
+    if ((status != 0)); then
+        why="failed, exit $status"
+        ((status != 124)) || why="ran past ${probe_timeout}s"
+        echo "tmp-stale-reap: keep $entry (the size walk of it $why)"
+        kept_unsure=$((kept_unsure + 1))
+        checked=$((checked + 1))
+        continue
+    fi
+    newest="${out%% *}"
+    bytes="${out#* }"
     age="$(hours $((now - (newest > 0 ? newest : now))))"
     if [[ -z "$apply" ]]; then
         echo "tmp-stale-reap: would remove $entry ($(size "$bytes"), ${age}h since the newest file in it, no live process)"
         removed=$((removed + 1))
         removed_bytes=$((removed_bytes + bytes))
-    elif remove "$entry"; then
+        checked=$((checked + 1))
+        continue
+    fi
+    status=0
+    remove "$entry" || status=$?
+    checked=$((checked + 1))
+    if ((status == 0)); then
         echo "tmp-stale-reap: removed $entry ($(size "$bytes"), ${age}h since the newest file in it, no live process)"
         removed=$((removed + 1))
         removed_bytes=$((removed_bytes + bytes))
+    elif ((status == 124)); then
+        # The deadline cut this removal. Its rest goes under a name of its own, so the name
+        # never stays behind half-empty, and the next pass removes that first.
+        remainder="$root/$remains_prefix$EPOCHSECONDS.$$"
+        status=0
+        bounded 10 mv -T -- "$entry" "$remainder" || status=$?
+        if ((status == 0)); then
+            echo "tmp-stale-reap: the deadline cut the removal of $entry; what is left of it is now $remainder, which the next pass removes first"
+        else
+            echo "tmp-stale-reap: the deadline cut the removal of $entry, and renaming what is left of it failed (status $status); a later pass judges it again"
+        fi
+        next=""
+        ((k + 1 == total)) || next="${order[(first + k + 1) % total]}"
+        stop "$next"
     else
-        echo "tmp-stale-reap: FAILED to remove $entry" >&2
+        echo "tmp-stale-reap: FAILED to remove $entry${out:+: $out}" >&2
         failed=$((failed + 1))
     fi
 done
 
-echo "tmp-stale-reap: $root: ${removed} $([[ -z "$apply" ]] && echo "would be removed" || echo "removed") ($(size "$removed_bytes")), ${kept_live} live, ${kept_young} written inside the ${age_hours}h window, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_foreign} holding another user's files, ${kept_type} not a plain file or directory, ${kept_unsure} unreadable; ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free on $root"
+# Every candidate had its turn, so the next pass starts at the first entry again.
+[[ -z "$cursor" ]] || save_cursor ""
+
+free="free space on $root not read"
+status=0
+bounded $((deadline - EPOCHSECONDS < 10 ? deadline - EPOCHSECONDS : 10)) df -h --output=avail "$root" || status=$?
+if ((status == 0)); then
+    free="${out##*$'\n'}"
+    free="${free// /} free on $root"
+fi
+echo "tmp-stale-reap: $root: ${removed} $([[ -z "$apply" ]] && echo "would be removed" || echo "removed") ($(size "$removed_bytes")), ${kept_live} live, ${kept_young} written inside the ${age_hours}h window, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_foreign} holding another user's files, ${kept_type} not a plain file or directory, ${kept_unsure} unreadable; ${failed} failed; ${free}"
 ((failed == 0))

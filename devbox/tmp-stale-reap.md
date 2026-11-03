@@ -8,7 +8,8 @@ nothing in it has been written for 48 hours.
 |---|---|
 | Script | `devbox/tmp-stale-reap` (`--dry-run` by default, `--apply` removes) |
 | Units | `devbox/tmp-stale-reap.service`, `.timer` (hourly), armed by `devbox/install.sh` |
-| Knobs | `TMP_REAP_ROOT`, `TMP_REAP_AGE_HOURS`, `TMP_REAP_KEEP`, `TMP_REAP_PROBE_SECONDS`, `TMP_REAP_IO_PRESSURE_MAX` |
+| Knobs | `TMP_REAP_ROOT`, `TMP_REAP_AGE_HOURS`, `TMP_REAP_KEEP`, `TMP_REAP_PROBE_SECONDS`, `TMP_REAP_IO_PRESSURE_MAX`, `TMP_REAP_RUN_SECONDS` (the pass's deadline; the service sets 1680), `TMP_REAP_STATE` (where the cursor is kept), `TMP_REAP_PROC` (a scratch `/proc` for tests) |
+| Tests | `scripts/tests/test_tmp_stale_reap.py` |
 
 ## Why it exists
 
@@ -159,7 +160,10 @@ the test below gets a window of seconds.
   dry run of 2026-10-30 kept `/tmp/tmux-fix`, somebody's scratch directory, on `tmux-*`. A
   scratch directory that survives costs disk; a server socket that does not costs a session.
 - **Anything outside `/tmp`'s own filesystem** (`find -xdev`) and anything below the top level: it
-  removes whole entries of `/tmp` or nothing, never a file out of someone's tree.
+  removes whole entries of `/tmp` or nothing, never a file out of someone's tree. A removal the
+  deadline cuts is no exception: what is left of the entry is renamed to
+  `.tmp-stale-reap-removing.<time>.<pid>` at once, so its name never stays behind half-empty, and
+  the next pass removes that first.
 - **Anything at all, when `/proc/pressure/io` `full avg10` is over 20**, because deleting under IO
   pressure hangs every shell on the box. The next run is an hour away.
 - **Anything, on a hand run.** `devbox/tmp-stale-reap` with no argument reports and removes
@@ -228,12 +232,45 @@ cannot `chmod` or unlink (`Operation not permitted`, 16:43:23Z). It stays. Rule 
 the next run from touching another one like it, and keeps the service out of `failed` every
 hour over something it can never remove.
 
+## A pass has a deadline
+
+At load 500 on 2026-11-03 the pass that started at 08:16:48Z was killed by systemd at its
+30-minute `TimeoutStartSec`, at 08:46:48Z, 265 removals in. The listing of `/tmp` and the `/proc`
+scan took 7 minutes (the first removal was at 08:23:53Z), and every removal after that about 5 s.
+Of the two passes in the 2.1 h to 09:29Z, neither completed. The service record then said
+"failed", and the next pass started again from an arbitrary order of the same candidates.
+
+A pass now ends itself:
+
+| | |
+|---|---|
+| Deadline | `TMP_REAP_RUN_SECONDS` after the script starts. The service sets 1680 (28 min), 2 min inside its 30-min `TimeoutStartSec`, which stays as the backstop. A hand run has no deadline unless it sets one |
+| Checked | before each top-level entry of the listing, each candidate, each walk and each removal |
+| Every disk step | the listing, the three `/proc` reads, each tree walk, each `rm`, the cursor write and `df` run in a child under `timeout -s KILL` with the time left, or the step's own limit when that is shorter. The run reads the child's answer through a pipe with `read -t` of that time plus 2 s and never waits on the child itself: a `stat` or an `unlink` stuck on a stalled disk sleeps where no signal reaches it, and `timeout` then waits on it too. Such a child is left behind, and the unit's cgroup takes it when the run exits |
+| At the deadline | one line, the cursor saved, exit 0 (1 only when a removal really failed, as before): `tmp-stale-reap: /tmp: stopped at its deadline after N removals, M entries checked; next pass resumes at /tmp/<name>`. M counts the candidates pass 3 finished, kept or removed |
+| The cursor | `${XDG_STATE_HOME:-~/.local/state}/tmp-stale-reap/cursor`: the first candidate the pass did not finish. Pass 3 takes the candidates in byte order of their names, starting at the cursor and wrapping round at the end, so every candidate gets its turn within one full turn of the order, whatever the deadline cuts. A pass that gets through all of them clears it. Only `--apply` moves it |
+| A cut removal | what is left is renamed to `/tmp/.tmp-stale-reap-removing.<time>.<pid>` (10 s limit), which the next pass removes first without judging it again: this pass already proved it dead by every rule. The cursor moves past it |
+| A cut listing or `/proc` scan | nothing is removed past it, the cursor stays where it was, and the line ends `(the deadline came during the listing of /tmp)` or `(… the scan of /proc)`. Liveness is read fresh each pass, so both are paid in full every time; a `/proc` scan that ends early for any other reason is an unknown, and that pass removes nothing and fails |
+
+The 2 minutes between the deadline and `TimeoutStartSec` hold the step the deadline cuts (left
+behind at once), the rename of a cut removal (10 s), the cursor write (10 s), and the unit's own
+start, which is slow at load 500.
+
+`scripts/tests/test_tmp_stale_reap.py` holds the proof, with a `find`, `rm` or `timeout` shim
+first on `PATH` playing the stalled disk and a scratch `/proc`: a walk that stalls stops the pass
+at its deadline with the line and exit 0, and the next pass resumes at that entry and wraps round
+to the one before it; a removal that stalls leaves its rest renamed and the next pass removes it
+first; a child no signal ends does not hold the pass past its deadline; a stalled listing stops
+before any entry and keeps the cursor; and every keep of the proof above still holds.
+
 ## Running it by hand
 
 ```sh
 devbox/tmp-stale-reap                    # decide and print, remove nothing
 devbox/tmp-stale-reap --dry-run          # the same thing, said out loud
-devbox/tmp-stale-reap --apply            # remove
+devbox/tmp-stale-reap --apply            # remove, with no deadline
+TMP_REAP_RUN_SECONDS=1680 devbox/tmp-stale-reap --apply   # remove, as the service does
+cat ~/.local/state/tmp-stale-reap/cursor # where the next pass starts
 journalctl --user -u tmp-stale-reap.service -n 200
 ```
 

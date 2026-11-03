@@ -15,6 +15,10 @@ IOSchedulingClass=idle
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # --apply, because a hand run of this script reports and removes nothing.
 ExecStart=%h/.dotfiles/devbox/tmp-stale-reap --apply
-# One walk of /tmp took 4m on 2026-10-30; a run that is still going after half an hour is stuck
-# on something, and the next hourly run is the retry.
+# The script stops itself at TMP_REAP_RUN_SECONDS (28 min) and the next hourly pass carries on
+# from its cursor; TimeoutStartSec is only the backstop. At load 500 on 2026-11-03 a pass ran
+# 08:16:48Z to its kill at 08:46:48Z, 7 min of listing and /proc scan and then ~5 s per removal.
+# The 2 min between the two covers a step the deadline cuts (its child is abandoned at once),
+# renaming the rest of a cut removal (10 s), writing the cursor (10 s), and the unit's start.
+Environment=TMP_REAP_RUN_SECONDS=1680
 TimeoutStartSec=30min
