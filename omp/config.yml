@@ -159,6 +159,24 @@ retry:
       - openai/gpt-6.1-terra
       - openai/gpt-6.1-sol
       - openai-codex/gpt-6-astra
+    # The `sol` agent (agents/sol.md), the default cross-family subagent since
+    # Sami's preference of 2026-11-02 (dispatch://BET-545). Its model is
+    # GPT-6.1 Sol through the OSS Verify gateway, a provider only this box's
+    # omp/models.local.yml declares; its one fallback is GPT-6.1 Sol on the
+    # Codex subscription, and the two keys name each other as the astra pair
+    # does. `ossv-gateway-openai/*: []` keeps any other model on that provider
+    # off the Anthropic `default` chain, and the codex key keeps Codex Sol off
+    # `openai-codex/*` below, which ends on Claude. No per-token `openai/` link:
+    # the gateway already bills OpenAI under team `box`'s budget. Measured
+    # 2026-11-03 03:42-03:45Z from scratch sessions: the gateway served
+    # `openai/gpt-6.1-sol` through a bash tool call; with the gateway
+    # unreachable, and on a machine without the provider, the spawn fell to
+    # Codex Sol and refused (`usage_limit_reached`) instead of answering.
+    ossv-gateway-openai/openai/gpt-6.1-sol:
+      - openai-codex/gpt-6.1-sol
+    ossv-gateway-openai/*: []
+    openai-codex/gpt-6.1-sol:
+      - ossv-gateway-openai/openai/gpt-6.1-sol
     # openai-codex/gpt-5.5 was retired from the catalog; the resolver already
     # matched it to gpt-5.6-terra, which has its own chain below.
     openai-codex/gpt-5.6-sol:
