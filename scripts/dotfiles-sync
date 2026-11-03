@@ -30,14 +30,35 @@ MACHINES=(
   sami-rocqperf=sami@sami-rocqperf
 )
 
+# hunks: a -U0 patch on stdin, written as one line per hunk (its path, then its - and + lines, no
+# line numbers) and one per mode change, sorted. A binary change prints `binary`, which no hunk on
+# main matches.
+hunks() {
+  awk '
+    function flush() { if (rec != "") print rec; rec = "" }
+    /^diff --git / { flush(); hdr = 1; path = substr($0, index($0, " b/") + 3); next }
+    hdr && /^(old|new|deleted file|new file) mode / { print path "\037" $0; next }
+    hdr && /^(Binary files|GIT binary patch)/ { print "binary"; next }
+    /^@@/ { flush(); hdr = 0; rec = path; next }
+    !hdr && /^[-+\\]/ { rec = rec "\037" $0 }
+    END { flush() }' | LC_ALL=C sort -u
+}
+
 # on_main <commit>: true when $main already has <commit>'s change, as when dotfiles-publish pushed
 # a copy of it and left the original under the working copy: applying it to main changes nothing,
-# or a commit on main since the fork point ($main_patches) carries the same patch.
+# or a commit on main since the fork point ($main_patches) carries the same patch, or every hunk of
+# <commit>, read without context lines or line numbers, is one that a commit on main since the fork
+# point made ($main_hunks). The last case is a copy whose lines main changed again after the push:
+# on 2026-11-03 four such originals under sami-rocqperf's working copy (their copies 317e320e,
+# ded161f2, 261cb431 and 74bf4ce7 on main) stopped every sync there as UNPUBLISHED.
 on_main() {
-  local tree
+  local tree own
   tree=$(git merge-tree --write-tree --merge-base="$1^" "$main" "$1" 2>/dev/null) \
     && [ "$tree" = "$(git rev-parse "$main^{tree}")" ] && return 0
-  [ -n "$main_patches" ] && grep -qx "$(git diff-tree -p "$1" | git patch-id --stable | cut -d' ' -f1)" <<<"$main_patches"
+  [ -n "$main_patches" ] && grep -qx "$(git diff-tree -p "$1" | git patch-id --stable | cut -d' ' -f1)" <<<"$main_patches" && return 0
+  own=$(git diff-tree -p -U0 --no-renames "$1" | hunks)
+  [ -n "$own" ] && [ -n "$main_hunks" ] && ! grep -qx binary <<<"$own" \
+    && [ -z "$(LC_ALL=C comm -23 <(printf '%s\n' "$own") <(printf '%s\n' "$main_hunks"))" ]
 }
 
 sync_here() {
@@ -62,11 +83,13 @@ sync_here() {
     # Moving the working copy alone onto main would drop their changes from the files on disk, so
     # one whose change main does not have stops the run; the others, originals dotfiles-publish
     # left when it pushed a copy, are abandoned once the working copy is on main.
-    local main="" main_patches="" c below="" published="" unpublished=""
+    local main="" main_patches="" main_hunks="" fork c below="" published="" unpublished=""
     [ -n "$old" ] || below=$(jj log -r "::@- ~ ::main@origin" --no-graph -T 'commit_id ++ " "')
     if [ -n "$below" ]; then
       main=$(jj log -r main@origin --no-graph -T 'commit_id')
-      main_patches=$(git log -p --no-merges "$(git merge-base "$main" "$(jj log -r @- --no-graph -T 'commit_id')")..$main" | git patch-id --stable | cut -d' ' -f1) || main_patches=""
+      fork=$(git merge-base "$main" "$(jj log -r @- --no-graph -T 'commit_id')")
+      main_patches=$(git log -p --no-merges "$fork..$main" | git patch-id --stable | cut -d' ' -f1) || main_patches=""
+      main_hunks=$(git rev-list --no-merges "$fork..$main" | git diff-tree --stdin -p -U0 --no-renames | hunks) || main_hunks=""
       for c in $below; do
         if on_main "$c"; then published+="${published:+|}$c"; else unpublished+="${unpublished:+|}$c"; fi
       done

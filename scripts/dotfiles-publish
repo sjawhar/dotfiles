@@ -113,14 +113,33 @@ settle_divergence() {
     echo "dotfiles-publish: change $change of $rev was divergent ($report); dropped the copies main@origin already holds byte for byte" >&2
 }
 
+# hunks: a -U0 patch on stdin, written as one line per hunk (its path, then its - and + lines, no
+# line numbers) and one per mode change, sorted. A binary change prints `binary`, which no hunk on
+# main matches. The same as in scripts/dotfiles-sync.
+hunks() {
+    awk '
+        function flush() { if (rec != "") print rec; rec = "" }
+        /^diff --git / { flush(); hdr = 1; path = substr($0, index($0, " b/") + 3); next }
+        hdr && /^(old|new|deleted file|new file) mode / { print path "\037" $0; next }
+        hdr && /^(Binary files|GIT binary patch)/ { print "binary"; next }
+        /^@@/ { flush(); hdr = 0; rec = path; next }
+        !hdr && /^[-+\\]/ { rec = rec "\037" $0 }
+        END { flush() }' | LC_ALL=C sort -u
+}
+
 # on_main <commit>: true when main@origin already has <commit>'s change, as when it was published
 # as a copy and the original stayed: applying it to main changes nothing, or a commit on main
-# since the fork point carries the same patch.
+# since the fork point carries the same patch, or every hunk of <commit>, read without context
+# lines or line numbers, is one that a commit on main since the fork point made (a copy whose lines
+# main changed again after the push). scripts/dotfiles-sync decides the same way.
 on_main() {
-    local tree
+    local tree own
     tree="$(git merge-tree --write-tree --merge-base="$1^" "$main" "$1" 2>/dev/null)" \
         && [[ "$tree" == "$(git rev-parse "$main^{tree}")" ]] && return 0
-    [[ -n "$main_patches" ]] && grep -qx "$(git diff-tree -p "$1" | git patch-id --stable | cut -d' ' -f1)" <<<"$main_patches"
+    [[ -n "$main_patches" ]] && grep -qx "$(git diff-tree -p "$1" | git patch-id --stable | cut -d' ' -f1)" <<<"$main_patches" && return 0
+    own="$(git diff-tree -p -U0 --no-renames "$1" | hunks)"
+    [[ -n "$own" && -n "$main_hunks" ]] && ! grep -qx binary <<<"$own" \
+        && [[ -z "$(LC_ALL=C comm -23 <(printf '%s\n' "$own") <(printf '%s\n' "$main_hunks"))" ]]
 }
 
 # owned <revset>: each commit as `<short id> (<its Omp-Session>)`, space-separated.
@@ -178,7 +197,9 @@ while :; do
         blocked="$above"
         if [[ -n "$below" ]]; then
             main="$(jj log -r main@origin --no-graph -T 'commit_id')"
-            main_patches="$(git log -p --no-merges "$(git merge-base "$main" "$commit")..$main" | git patch-id --stable | cut -d' ' -f1)"
+            fork="$(git merge-base "$main" "$commit")"
+            main_patches="$(git log -p --no-merges "$fork..$main" | git patch-id --stable | cut -d' ' -f1)"
+            main_hunks="$(git rev-list --no-merges "$fork..$main" | git diff-tree --stdin -p -U0 --no-renames | hunks)"
             unpublished="" published=""
             for c in $below; do
                 if on_main "$c"; then published+="${published:+|}$c"; else unpublished+="${unpublished:+|}$c"; fi

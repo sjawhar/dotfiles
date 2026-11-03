@@ -169,6 +169,58 @@ class SyncHere(DotfilesCheckout):
             self.jj("log", "-r", "@", "--no-graph", "-T", "commit_id"),
         )
 
+    def published_then_edited_on_main(self, also: dict[str, str]) -> str:
+        """A commit under the working copy changes line 2 of other.txt (and each path in `also`).
+        Main gets a copy of the line-2 change on a base whose line 1 differs, then changes line 2
+        again: the copy's full patch differs from the original's, and the original no longer applies."""
+        (self.upstream / "other.txt").write_text("1\n2\n3\n")
+        self.commit_upstream("three lines")
+        self.jj("git", "fetch", "--quiet")
+        self.jj("new", "--quiet", "main@origin")
+        (self.checkout / "other.txt").write_text("1\nX\n3\n")
+        for path, text in also.items():
+            (self.checkout / path).write_text(text)
+        self.jj("commit", "--quiet", "-m", "published as a copy", "other.txt", *also)
+        (self.checkout / "wip.txt").write_text("local edit\n")
+        (self.upstream / "other.txt").write_text("one\n2\n3\n")
+        self.commit_upstream("main changes line 1")
+        (self.upstream / "other.txt").write_text("one\nX\n3\n")
+        self.commit_upstream("the copy")
+        (self.upstream / "other.txt").write_text("one\nY\n3\n")
+        self.commit_upstream("main changes line 2 again")
+        return self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+
+    def test_a_published_commit_whose_lines_main_changed_again_is_dropped(self) -> None:
+        # 2026-11-03: four such originals under sami-rocqperf's working copy stopped every sync
+        # there as UNPUBLISHED although their copies were on main.
+        self.published_then_edited_on_main({})
+
+        result = self.sync()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "one\nY\n3\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "local edit\n")
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+        self.assertEqual(
+            self.jj("log", "-r", "all() ~ ::main@origin", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "@", "--no-graph", "-T", "commit_id"),
+        )
+
+    def test_a_published_commit_with_one_hunk_main_never_made_is_refused_and_no_file_moves(self) -> None:
+        parent = self.published_then_edited_on_main({"shared.txt": "only here\n"})
+
+        result = self.sync()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNPUBLISHED", result.stderr)
+        self.assertEqual((self.checkout / "other.txt").read_text(), "1\nX\n3\n")
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "only here\n")
+        self.assertEqual((self.checkout / "wip.txt").read_text(), "local edit\n")
+        self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), parent)
+
     def test_a_published_commit_another_commit_builds_on_stays_and_that_commit_is_not_rewritten(self) -> None:
         # On 2026-11-02 at 20:29Z the abandon rebased eight commits that sat on published
         # originals off the working copy's line, three of them into conflicts.
