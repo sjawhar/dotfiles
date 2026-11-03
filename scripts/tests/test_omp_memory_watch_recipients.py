@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Who hears a crossing of omp-memory-watch: the session itself and the box-health owner.
+"""Who hears a crossing of omp-memory-watch: the session itself, and the box-health owner only
+when the session cannot settle it.
 
 Box health on these boxes belongs to the SRE session, not to the chief of staff (Sami,
 2026-10-31: "There's an SRE. They can handle it."), so the box-health owner is addressed by the
-`lead-box-health` Envoy role, and the SRE session hears it when nobody holds the role. No
-message of a crossing may reach the chief of staff's session.
+`lead-box-health` Envoy role, and the SRE session hears it when nobody holds the role. It hears
+a crossing only when the scope is still rising after 10 minutes, never its first alert or its
+clear (dispatch://INFRA-672: 14 of the 20 alerts it was copied on in 48 h cleared within 4 min).
+No message of a crossing may reach the chief of staff's session.
 
 Every cgroup here is a synthetic directory tree, so the tests read no real cgroup.
 """
@@ -69,7 +72,8 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "escalate": 0.0,
         "wall_fraction": 0.98,
         "wall_cooldown": 900.0,
-        "wall_digest": 900.0,
+        "wall_burst": 3,
+        "wall_burst_window": 900.0,
         "wall_top": 3,
         "wall_pending_max": 400,
         "wall_digest_mode": "send",
@@ -144,19 +148,17 @@ class CrossingRecipientsTest(unittest.TestCase):
         published = [row for envoy in FakeEnvoy.instances for row in envoy.published]
         return sent, published
 
-    def test_the_first_alert_goes_to_the_session_and_the_box_health_role(self) -> None:
+    def test_the_first_alert_goes_to_the_session_only(self) -> None:
         self.run_pass(20 * GIB)
         sent, published = self.everything()
         self.assertEqual([SESSION], [who for who, _ in sent])
-        self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], [topic for topic, _ in published])
+        self.assertEqual([], published)
 
     def test_the_escalation_goes_to_the_box_health_role(self) -> None:
         self.run_pass(20 * GIB)
         self.run_pass(21 * GIB)
         sent, published = self.everything()
-        self.assertEqual(
-            [False, True], [("STILL RISING" in text) for _, text in published]
-        )
+        self.assertEqual([True], [("STILL RISING" in text) for _, text in published])
         self.assertEqual({WATCH.BOX_HEALTH_ROLE_TOPIC}, {topic for topic, _ in published})
         self.assertEqual([SESSION], [who for who, _ in sent])
 
@@ -169,7 +171,7 @@ class CrossingRecipientsTest(unittest.TestCase):
             [WATCH.SRE], [who for who, text in sent if "STILL RISING" in text]
         )
 
-    def test_the_clear_reaches_each_recipient_once(self) -> None:
+    def test_the_clear_reaches_the_session_and_never_the_role(self) -> None:
         self.run_pass(20 * GIB)
         self.run_pass(21 * GIB)
         self.run_pass(2 * GIB)
@@ -177,7 +179,7 @@ class CrossingRecipientsTest(unittest.TestCase):
         clears_sent = [who for who, text in sent if "CLEARED" in text]
         clears_published = [topic for topic, text in published if "CLEARED" in text]
         self.assertEqual([SESSION], clears_sent)
-        self.assertEqual([WATCH.BOX_HEALTH_ROLE_TOPIC], clears_published)
+        self.assertEqual([], clears_published)
 
     def test_no_message_of_a_whole_cycle_reaches_the_chief_or_the_infra_lead(self) -> None:
         """Alert, escalation and clear, with the role held and then unheld."""
@@ -213,7 +215,7 @@ class BoxHealthOwnerTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def test_alert_escalation_and_clear_all_go_to_the_owner_and_nothing_is_published(self) -> None:
+    def test_only_the_escalation_goes_to_the_owner_and_nothing_is_published(self) -> None:
         self.run_pass(20 * GIB)
         self.run_pass(21 * GIB)
         self.run_pass(2 * GIB)
@@ -221,9 +223,7 @@ class BoxHealthOwnerTest(unittest.TestCase):
         self.assertEqual([], published)
         self.assertEqual({SESSION, self.OWNER}, {who for who, _ in sent})
         owned = [text for who, text in sent if who == self.OWNER]
-        self.assertTrue([text for text in owned if "STILL RISING" not in text and "CLEARED" not in text])
-        self.assertTrue([text for text in owned if "STILL RISING" in text])
-        self.assertTrue([text for text in owned if "CLEARED" in text])
+        self.assertEqual([True], ["STILL RISING" in text for text in owned])
 
     def test_an_unusable_owner_is_refused_at_start(self) -> None:
         with unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": "lead-box-health"}):

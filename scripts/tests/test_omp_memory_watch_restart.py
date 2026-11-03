@@ -413,6 +413,15 @@ class MoveLogTest(RestarterCase):
         self.states += list(states)
         return WATCH.restart_pass(self.options(**overrides), self.state, [], now, envoy=object())
 
+    def report_of(self, message: str) -> str:
+        """A message to the box-health owner is at most 600 characters and ends with the report
+        that holds the detail; returns that report."""
+        self.assertLessEqual(len(message), 600, message)
+        head, _, path = message.rpartition("\nFull report: ")
+        self.assertTrue(head and path, message)
+        self.assertEqual(Path(path).parent, self.state.path.parent / "reports")
+        return Path(path).read_text()
+
     def test_a_pane_idle_during_a_healthy_move_is_left_to_the_move(self) -> None:
         work = self.session(HEALTHY_SID, HEALTHY_CWD, HEALTHY_LOG)
         self.pass_at("2026-11-02T12:09:10Z", ("host", {"pid": 777, "start": 1, "sid": HEALTHY_SID, "cwd": str(work)}))
@@ -469,6 +478,7 @@ class MoveLogTest(RestarterCase):
         self.assertIn("RESUMED in new pane %900 (window @7)", self.lines[-1])
         self.assertEqual(len(self.told), 1)
         self.assertIn(f"agentbox move could not bring session {DOWN_SID} back (2026-11-02T10:32:00Z", self.told[0])
+        self.assertIn(command, self.report_of(self.told[0]))
         self.assertNotIn("%74", self.state.data["panes"])
         # Once: the next run finds it resumed less than an hour ago.
         self.pass_at("2026-11-02T10:32:50Z")
@@ -483,9 +493,10 @@ class MoveLogTest(RestarterCase):
         self.pass_at("2026-11-02T10:32:20Z")
         self.assertEqual(len(self.told), 1)
         self.assertIn(f"session {DOWN_SID} is down and was NOT resumed", self.told[0])
-        self.assertIn("no new pane could be opened: split-window -t @7: can't find window: @7; new-window", self.told[0])
-        self.assertIn(f"Resume it from a host session: tmux new-window -n omp-01a16c67 -c {work} bash -i -c ", self.told[0])
-        self.assertIn(f"omp --resume {DOWN_SID}; exec bash -i", self.told[0])
+        report = self.report_of(self.told[0])
+        self.assertIn("no new pane could be opened: split-window -t @7: can't find window: @7; new-window", report)
+        self.assertIn(f"Resume it from a host session: tmux new-window -n omp-01a16c67 -c {work} bash -i -c ", report)
+        self.assertIn(f"omp --resume {DOWN_SID}; exec bash -i", report)
 
     def test_dry_run_names_the_new_pane_and_opens_none(self) -> None:
         work = self.session(DOWN_SID, DOWN_CWD, DOWN_LOG)
@@ -505,6 +516,7 @@ class MoveLogTest(RestarterCase):
         self.assertIn(f"agentbox new --drop-gone-dirs --dir {work} -- omp --resume {DOWN_SID}", self.respawned[0][2])
         self.assertIn("agentbox move gave up (2026-11-01T17:47:36Z: respawn pane failed", self.lines[-1])
         self.assertEqual(len(self.told), 1)
+        self.assertIn(self.respawned[0][2], self.report_of(self.told[0]))
 
     def test_a_session_resumed_by_hand_after_the_move_gave_up_is_its_own_again(self) -> None:
         """R3A came back by hand on the host in pane %1641: its next death is not the move's."""

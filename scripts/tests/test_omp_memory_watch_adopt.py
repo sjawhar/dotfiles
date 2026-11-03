@@ -197,6 +197,42 @@ class AdoptPassTest(unittest.TestCase):
 
         self.assertEqual(self.bus("StartTransientUnit"), [])
 
+    def refuse_the_create(self, exit_first: bool) -> list[str]:
+        """StartTransientUnit fails as systemd answers when the pid it names is gone; with
+        `exit_first` the omp has exited by then. Returns the logged lines."""
+        lines: list[str] = []
+        WATCH.log = lines.append
+        plain = self.systemd
+
+        def systemd(argv: list[str], timeout: float = 10.0) -> tuple[bool, str]:
+            if "StartTransientUnit" in argv:
+                self.calls.append(argv)
+                if exit_first:
+                    for entry in (self.tree.proc / "500").iterdir():
+                        entry.unlink()
+                    (self.tree.proc / "500").rmdir()
+                return False, "Call failed: Failed to set unit properties: No such process"
+            return plain(argv, timeout)
+
+        WATCH.systemd_user = systemd
+        self.tree.process(500, "omp", 1, OLD, ["/x/bin/omp"])
+        self.note = self.run_pass()
+        return lines
+
+    def test_an_omp_that_exits_before_its_move_is_a_normal_outcome(self) -> None:
+        """15 `FAILED to create` lines in 6 h on sami-rocqperf (2026-11-03), every one for a
+        short-lived omp that had exited between the listing and the create."""
+        lines = self.refuse_the_create(exit_first=True)
+        self.assertEqual(len(self.bus("StartTransientUnit")), 1)
+        self.assertEqual([line for line in lines if "FAILED" in line], [])
+        self.assertNotIn("create failed", self.note)
+        self.assertEqual(self.state.data.get("adopted"), {})
+
+    def test_a_create_refused_for_a_live_omp_is_still_a_failure(self) -> None:
+        lines = self.refuse_the_create(exit_first=False)
+        self.assertEqual(len([line for line in lines if "FAILED to create" in line]), 1)
+        self.assertIn("create failed", self.note)
+
 
 if __name__ == "__main__":
     unittest.main()

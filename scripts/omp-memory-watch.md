@@ -187,10 +187,12 @@ has run for at least a minute) whose cgroup is a `session-*.scope` or `tmux-spaw
 The scope is made with `StartTransientUnit` holding the omp, then each other process is added
 with `AttachProcessesToUnit`, one pid a call (a pid that has exited fails the whole call). Each
 move is one journal line (`scope adopt: moved omp <pid> (<session>, N process(es)) from <old>
-into <new> …`). No process is signalled, and memory a process already holds stays charged to the
-old cgroup: cgroup v2 moves processes, not pages. A process left over (out of time, or born in
-the old cgroup since) is attached on a later run. Each scope's `OOMPolicy` is read once, with one
-`systemctl show` for every scope not yet known, since a scope's policy and name never change. The
+into <new> …`). An omp that exits before its scope is made is left with no line and no retry;
+a create refused for an omp still running logs `scope adopt: FAILED to create …`. No process is
+signalled, and memory a process already holds stays charged to the old cgroup: cgroup v2 moves
+processes, not pages. A process left over (out of time, or born in the old cgroup since) is
+attached on a later run. Each scope's `OOMPolicy` is read once, with one `systemctl show` for
+every scope not yet known, since a scope's policy and name never change. The
 pass stops 40 s after the run starts, and begins a systemd call only with 10 s left.
 `--no-adopt-scopes` turns it off; `--dry-run` logs `scope adopt: would move …` and moves nothing.
 
@@ -281,13 +283,15 @@ So a capped scope is also reported when, since the last poll, either
 - its **`memory.peak`** rises to `--wall-fraction` (default 0.98) of the ceiling.
 
 No hold, no grace, no rate. One report per scope per `--wall-cooldown` (default 15 min); touches
-inside the cooldown are counted and the next report says how many it covers. Its **headline**
-says how much of the ceiling is reclaimable page cache (`memory.current` less the unreclaimable
-part), because that one number decides whether the rest of the report means anything. It then
-names the scope, the session, the `ossv-worker` name, `memory.peak`, `memory.current`, the
-unreclaimable number, the `oom`/`oom_kill` counters, the **`memory.stat` split** (`anon`,
-`file`, `shmem`, `kernel`, `sock`, largest first), the **process count and the RSS sum of every
-process in the scope**, and the **three largest by RSS with their command lines**.
+inside the cooldown are counted and the next report says how many it covers. The **message**
+(at most 600 characters, see [Who hears about it](#who-hears-about-it)) says the scope, the
+session, the peak against the ceiling, how much of the ceiling is reclaimable page cache
+(`memory.current` less the unreclaimable part, the one number that decides whether the rest
+means anything), the verdict in one sentence, and what to do. Its **report file** names the
+scope, the session, the `ossv-worker` name, `memory.peak`, `memory.current`, the unreclaimable
+number, the `oom`/`oom_kill` counters, the **`memory.stat` split** (`anon`, `file`, `shmem`,
+`kernel`, `sock`, largest first), the **process count and the RSS sum of every process in the
+scope**, the **three largest by RSS with their command lines**, the whole verdict and the advice.
 
 ### How urgent the report says it is
 
@@ -321,13 +325,12 @@ The report's verdict therefore follows the counters, in this order:
 | `oom` > 0 | **urgent** — reclaim has already failed at `memory.max`; the next failure is the kill |
 | `memory.stat` unreadable | **urgent**, conservatively — no part of the charge can be shown reclaimable |
 | unreclaimable ≥ `--fraction` of the ceiling (0.70) | **urgent** — at or past the level this watch already calls a session near its limit, so reclaim is nearly out of material |
-| `anon` ≥ `--wall-urgent-anon` of the peak (0.50) | **urgent** — the shape that already skips the digest |
+| `anon` ≥ `--wall-urgent-anon` of the peak (0.50) | **urgent** — the shape a collect-mode box sends the box-health owner at once |
 | otherwise | **not urgent** — the pressure is page cache the kernel drops on demand; do not kill builds, halve a shared gate, or abandon a measurement on this report |
 
-The urgent side is a **superset** of what `urgent_reason` escalates to the box-health owner, so
-the owner's report and that immediate note can never contradict each other. None of this changes
-**whether** a report is sent: every threshold that gates a report — `--fraction`, `--grace`,
-`--clear-fraction`, `--wall-fraction`, `--wall-cooldown`, `--wall-urgent-anon` — is untouched.
+The urgent side is a **superset** of what `urgent_reason` sends a collect-mode box's
+box-health owner at once, so the owner's report and that immediate note can never contradict
+each other. The verdict changes the words, never **whether** or **to whom** a report is sent.
 
 **"Write your handover files first" is unconditional.** It costs seconds and it is right in
 every state, so it leads the `DO` line whatever the counters say.
@@ -391,6 +394,16 @@ itself logged nothing):
 5. Independently, a capped scope's `memory.events` and `memory.peak` are compared with the last
    poll's: a rise is a wall touch and is reported at once, with no hold.
 
+**Failed runs.** In the 40 h to 2026-11-03T02:40Z systemd killed 194 runs at the start timeout.
+191 of them came before 2026-11-02T14:00Z, under the old 25 s `TimeoutStartSec`, which loaded
+runs overran even after 37b2af5 bounded the passes at 01:51Z; f7359dd set 90 s. The other 3
+(2026-11-02 at 15:33Z, 18:15Z and 18:18Z) came in user-manager stalls, not from a slow step
+here: no timer fired from 18:10:36Z to 18:14:46Z, and the manager logged `Starting` only 20 s and
+11 s before its 90 s timeout fired, since systemd 255 arms `TimeoutStartSec` from its event
+loop's cached wake-up time (`sd_event_now`), not from the fork. Nothing in this script can bound
+that. In the last 6 h of that window, the 00:36-00:52Z memory-pressure episode included, 410
+runs took at most 4.41 s and none failed.
+
 The session id is read **from the process** — a session id on its command line, else the
 `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl` it holds open — and is resolved only when an alert
 is about to be sent, which is what keeps a run to a handful of file reads. When it cannot be
@@ -398,13 +411,41 @@ established the alert says "session unknown" and goes to the box-health owner al
 
 ## Who hears about it
 
-Agent sessions only, never a person:
+Agent sessions only, never a person. Every message is at most 600 characters: its first ~200 say
+what, where, how bad and who acts, and its last line is `Full report: <path>`, a file under
+`reports/` beside the state file (`/mnt/nvme/sami/tmp/omp-memory-watch/reports/<UTC stamp>-<kind>.txt`)
+that holds the whole detail. Each run deletes the reports older than 7 days.
 
-- **the session itself**, because it owns the shedding;
-- the **box-health owner** — the holder of the `lead-box-health` Envoy role
-  (`notifications.role.lead-box-health`), and the SRE session
-  (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) when nobody holds it — on every alert, and again on
-  the escalation, when a crossing is still open **and still rising** 10 minutes after its alert.
+| What happened | The session | The box-health owner |
+|---|---|---|
+| a crossing (NEAR) | the alert | only when no session can be named |
+| still rising `--escalate` (10 min) after the alert | — | a copy, once |
+| an OOM kill in the scope while its crossing is open | — | a copy, once |
+| the crossing cleared | one line | never |
+| a wall touch | one message | only when no live session on this box owns the scope |
+| `--wall-burst` (3) touches on the box inside `--wall-burst-window` (15 min) | — | one message, again only when the count doubles; none when the role already heard every touch in it |
+| a session this watch could not resume, or resumed after `agentbox move` gave up | — | one message |
+
+The box-health owner is the holder of the `lead-box-health` Envoy role
+(`notifications.role.lead-box-health`), and the SRE session
+(`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) when nobody holds it. A burst episode ends when 15 min
+pass with no touch, so a count that dips under 3 and comes back is not news.
+
+Why (dispatch://INFRA-672; sami-rocqperf, the 48 h to 2026-11-03): the box-health owner got 95
+messages from this watch. 52 were wall messages (38 digests, 14 immediate notes, 13 of the 14
+repeated by a digest within 2 min; 41 of the 52 had no reaction); 39 were copies of session
+NEAR and CLEARED messages (14 of the 20 alerts cleared within 4 min, and every clear said "No
+action is needed"); 4 were resume messages, which stay. A NEAR alert was about 2 KB.
+
+Expected after, to the box-health owner: wall messages about 3 a day, from about 26 (in the
+journal's 40 h, 6 of 22 touches had no owning session and one 15-min window held 3); crossing
+copies about 1 a day, from about 20 (2 escalations in 40 h); resume messages unchanged. Each
+session gets what it got before, shorter. What this gives up: the box-health owner no longer
+sees a single wall touch whose scope has a live owner, even an urgent one (anon above half the
+peak, or an oom_kill), unless it is part of a burst; it learns of a near-OOM only when the scope
+keeps rising or the kernel kills in it; it never sees a clear. The OOM kill is read from the
+scope's `memory.events`, so a scope already gone when the next run reads it (every process in it
+dead) is not reported as one.
 
 Neither the chief of staff nor the INFRA lead hears a box alert (Sami, 2026-10-31): the INFRA
 lead owned this detector and handed box health to the SRE.
@@ -415,46 +456,24 @@ alone, with no role publish, while the session's own messages are unchanged — 
 OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring owner instead of
 to this box's role holder. An invalid value stops the watch at start.
 
-Duplicates are dropped, so a session that is also one of those recipients gets one message.
+### Lane VMs: one digest an hour for the fleet
 
-A **wall touch** goes to the scope's own session — the owner, who does the shedding — with the
-whole report. The box-health owner gets a **digest**: one line a scope, not one message a
-scope. A box can have tens of scopes at the ceiling at once (31 of 95 on ossv-agent-open on
-2026-10-30), and a message each would bury that session rather than inform it.
+`--wall-digest-mode` decides how wall touches reach the box-health owner:
 
-Each line is **time, box, worker, peak, page cache, anonymous, session** — nothing else. The
-process count, the RSS sum, the whole `memory.stat` split, the advice and the three largest
-processes stay in the scope owner's own report, which is where someone acts on them.
-
-### One digest an hour for the fleet, and the two touches that do not wait
-
-`--wall-digest-mode` decides who sends it:
-
-- **`send`** (default): this box sends its own digest every `--wall-digest` window. The devbox
-  and any box with no collector run this way.
-- **`collect`**: this box sends **no** digest. Its touches wait in the state file until a
-  collector drains them with `--wall-pending-json`, which prints them as JSON and clears them
-  under the watch's own lock, and sends **one** message for the whole fleet. Every lane VM runs
-  this way: eight boxes each sending their own every 15 minutes was 32 messages an hour into
-  one session (Sami, 2026-10-31). The collector is
+- **`send`** (default): as in the table above. sami-rocqperf, the devbox and any box with no
+  collector run this way.
+- **`collect`**: this box sends no orphan message and no burst. Every touch waits in the state
+  file (`wall_pending`) until a collector drains it with `--wall-pending-json`, which prints the
+  touches as JSON and clears them under the watch's own lock, and sends **one** message for the
+  whole fleet, one line a scope (`wall_digest_text`: time, box, worker, peak, page cache,
+  anonymous, session). Every lane VM runs this way: eight boxes each sending their own every 15
+  minutes was 32 messages an hour into one session (Sami, 2026-10-31). The collector is
   `oss-verifier/agents/agentvm/wall-digest-collect.sh` on sami-rocqperf, hourly.
 
-Two shapes never wait for either, in both modes. They are sent to the box-health owner the
-moment they are seen, as one message about one scope:
-
-- **anon at or above `--wall-urgent-anon` of the peak** (default 0.50). Anonymous memory is
-  what the kernel cannot give back, so a scope at its wall holding mostly anon has nothing left
-  to reclaim: the next allocation is the OOM killer's.
-- **`memory.events` `oom_kill` above zero.** That is not a forecast at all.
-
-A scope at its wall on page cache — the common case, which the kernel drops and carries on —
-rides the digest. So collect mode loses no danger, only its share of a list.
-
-Each alert names the session, the pid and its RSS, the scope, the unreclaimable memory, the
-ceiling and where it comes from, the percentage and the headroom left, the measured rise rate
-and the minutes that headroom buys, how much of the pressure is omp and how much is its tool
-subprocesses, whether a self-watch was found, and what to do: write handover files, stop
-spawning lanes, shed or finish the lanes you can, restart on your own terms.
+In collect mode two shapes do not wait for the hour: **anon at or above `--wall-urgent-anon` of
+the peak** (default 0.50; anonymous memory is what the kernel cannot give back) and
+**`memory.events` `oom_kill` above zero** (not a forecast at all). Each goes to the box-health
+owner the moment it is seen, as one message naming the touch's own report.
 
 ## One alert per crossing
 
@@ -469,8 +488,12 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
   holds several `omp` processes (the session and its js-eval helper), and a flip between them
   must not look like a new scope and report the whole backlog again. A key is dropped when its
   scope is gone, and `systemd-run --scope` never reuses a name;
-- `wall_pending` holds the touches waiting for the INFRA lead's next digest, newest last, at
-  most `--wall-pending-max` (400);
+- `wall_recent` holds the touches of the last `--wall-burst-window` and `wall_burst` the count
+  the box-health owner was last told, in send mode; `wall_pending` holds the touches waiting for
+  the fleet collector, newest last, at most `--wall-pending-max` (400), in collect mode. A send
+  mode run drops `wall_pending` and `wall_digest_at` left by the version with a 15-min digest:
+  every touch in them already reached its owner;
+- `reports/` beside it holds every message's whole detail, 7 days;
 - `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
 
 ## Inputs
@@ -486,7 +509,8 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 | Top processes (wall report only) | `cgroup.procs`, `/proc/<pid>/statm`, `/proc/<pid>/cmdline` |
 | Self-watch (alert only) | the command lines of the other processes in the scope, or of a process naming this pid |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Samples, open crossings, wall memory, omp panes, resumes | `/mnt/nvme/sami/tmp/omp-memory-watch/state.json` |
+| Samples, open crossings, wall memory, recent touches, omp panes, resumes | `/mnt/nvme/sami/tmp/omp-memory-watch/state.json` |
+| OOM kill during a crossing | `memory.events` `oom_kill` of the crossing's scope, against its value when the crossing opened |
 | OOM bias | `cgroup.procs` of each capped omp scope, `/proc/<pid>/comm`, `/proc/<pid>/stat` (parent), `/proc/<pid>/oom_score_adj` (read, and written upward) |
 | Panes | `tmux list-panes -a`, `/proc/<pid>/task/*/children` below each pane, an omp's open session file or `--resume` id, `docker exec` into one box when nothing else names its session |
 | Whether a session ended on purpose | the last entry of its transcript, by `normal_exit_at` in `envoy-role-holder-watch` |
@@ -495,9 +519,10 @@ spawning lanes, shed or finish the lanes you can, restart on your own terms.
 ## Running it by hand
 
 ```sh
-scripts/omp-memory-watch --dry-run --print-alert          # decide and print, send nothing
+scripts/omp-memory-watch --dry-run --print-alert          # decide and print each message, send nothing
 scripts/omp-memory-watch --fraction 0.70 --grace 60       # the unit's crossing defaults
 scripts/omp-memory-watch --wall-fraction 0.98 --wall-cooldown 900 --wall-top 3   # wall defaults
+scripts/omp-memory-watch --wall-burst 3 --wall-burst-window 900                  # burst defaults
 scripts/omp-memory-watch --dry-run                         # also: bias counts it would raise, panes it would resume
 scripts/omp-memory-watch --restart-dry-run                 # live alerts and bias, panes only named
 

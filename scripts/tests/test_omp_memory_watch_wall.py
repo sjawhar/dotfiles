@@ -71,7 +71,8 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "escalate": 600.0,
         "wall_fraction": 0.98,
         "wall_cooldown": 900.0,
-        "wall_digest": 900.0,
+        "wall_burst": 3,
+        "wall_burst_window": 900.0,
         "wall_top": 3,
         "wall_pending_max": 400,
         "wall_digest_mode": "send",
@@ -606,13 +607,23 @@ class RunOnceTest(unittest.TestCase):
         WATCH.run_once(options(self.state, **overrides))
         return FakeEnvoy.instances[-1]
 
-    def digest(self, envoy: "FakeEnvoy") -> str:
-        """The wall digest, which goes to the box-health role rather than to any session."""
-        texts = [
-            text for topic, text in envoy.published if topic == WATCH.BOX_HEALTH_ROLE_TOPIC
-        ]
-        self.assertTrue(texts, "no digest was published")
-        return texts[0]
+    def report_of(self, text: str) -> str:
+        """The report a message names; the message itself is at most 600 characters."""
+        self.assertLessEqual(len(text), 600, text)
+        head, _, path = text.rpartition("\nFull report: ")
+        self.assertTrue(head and path, text)
+        return Path(path).read_text()
+
+    def fleet_digest(self) -> str:
+        """What oss-verifier's wall-digest-collect.sh renders from this box's drained touches."""
+        import contextlib
+        import io
+        import json
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            WATCH.drain_pending(options(self.state, wall_pending_json=True))
+        return WATCH.wall_digest_text(json.loads(out.getvalue())["touches"], 3600.0, "1 lane VM(s)")
 
     def test_cold_start_is_silent_then_every_new_touch_reaches_its_owner(self) -> None:
         self.scopes({"run-ra1.scope": 4, "run-rb2.scope": 0})
@@ -629,33 +640,8 @@ class RunOnceTest(unittest.TestCase):
                 "00000002-0000-0000-0000-000000000002",
             ],
         )
-        digest = self.digest(envoy)
-        self.assertIn("2 touch(es) on 1 box(es)", digest)
-        # One line per scope: box, worker, peak, page cache, anonymous, session. Not the scope
-        # name, not the process list -- the scope's own owner has those.
-        self.assertIn("w1", digest)
-        self.assertIn("w2", digest)
-        self.assertNotIn("run-ra1.scope", digest)
-
-    def test_the_lead_digest_waits_but_loses_no_touch(self) -> None:
-        self.scopes({"run-ra1.scope": 1})
-        self.run_pass()
-        self.scopes({"run-ra1.scope": 2})
-        self.run_pass()
-        # The digest just went out; a second scope touching now waits for the next window.
-        self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
-        envoy = self.run_pass()
-        self.assertEqual([session for session, _ in envoy.sent], ["00000002-0000-0000-0000-000000000002"])
-        import json
-
-        kept = json.loads(self.state.read_text())
-        self.assertEqual([entry["scope"] for entry in kept["wall_pending"]], ["run-rb2.scope"])
-
-        self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
-        envoy = self.run_pass(wall_digest=0.0)
-        digest = self.digest(envoy)
-        self.assertIn("w2", digest)
-        self.assertNotIn("w1", digest)
+        # Two touches are each their own owner's: the box-health owner hears 3 or more in 15 min.
+        self.assertEqual(envoy.published, [])
 
     def test_dry_run_sends_nothing(self) -> None:
         self.scopes({"run-ra1.scope": 1})
@@ -694,9 +680,9 @@ class RunOnceTest(unittest.TestCase):
             sorted(session for session, _ in envoy.sent),
             ["00000001-0000-0000-0000-000000000001"],
         )
-        self.assertTrue(self.digest(envoy))
+        self.assertEqual(envoy.published, [])
 
-    def test_the_digest_is_one_line_a_scope_and_not_the_owners_report(self) -> None:
+    def test_the_fleet_digest_is_one_line_a_scope_and_not_the_owners_report(self) -> None:
         """A per-box digest every 15 min was eight messages an hour saying the same thing.
 
         The reader wants the shape of the fleet; each scope's own owner keeps the detail.
@@ -704,10 +690,10 @@ class RunOnceTest(unittest.TestCase):
         WATCH.rss_of = lambda pid: {1: 9 * GIB}.get(pid, 2 * GIB)
         WATCH.cmdline_of = lambda pid: f"omp @/home/sami/work/.ossv-workers/w{pid}/message.md --lane {pid}"
         self.scopes({"run-ra1.scope": 1})
-        self.run_pass()
+        self.run_pass(wall_digest_mode="collect")
         self.scopes({"run-ra1.scope": 6})
-        envoy = self.run_pass()
-        digest = self.digest(envoy)
+        envoy = self.run_pass(wall_digest_mode="collect")
+        digest = self.fleet_digest()
         rows = [line for line in digest.splitlines() if line.startswith("  2026")]
         self.assertEqual(len(rows), 1)
         self.assertIn("w1", rows[0])
@@ -717,26 +703,22 @@ class RunOnceTest(unittest.TestCase):
         self.assertNotIn("pid 1", digest)
         self.assertNotIn(".ossv-workers/w1/message.md", digest)
         # The owner's own report still has everything.
-        report = [text for session, text in envoy.sent if session.startswith("00000001")][0]
+        report = self.report_of([text for session, text in envoy.sent if session.startswith("00000001")][0])
         self.assertIn("9.00 GiB  pid 1", report)
 
     def test_a_touch_that_waits_on_disk_keeps_the_split_the_row_needs(self) -> None:
-        """A touch waits in the state file through JSON before its digest window comes."""
+        """In collect mode a touch waits in the state file, through JSON, for the collector."""
         import json
 
         self.scopes({"run-ra1.scope": 1})
-        self.run_pass()
-        self.scopes({"run-ra1.scope": 2})
-        self.run_pass()
-        self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
-        self.run_pass()
+        self.run_pass(wall_digest_mode="collect")
+        self.scopes({"run-ra1.scope": 1, "run-rb2.scope": 5})
+        self.run_pass(wall_digest_mode="collect")
         kept = json.loads(self.state.read_text())
         waiting = kept["wall_pending"][0]
         self.assertTrue(waiting["stats"]["file"])
         self.assertEqual(waiting["worker"], "w2")
-        self.scopes({"run-ra1.scope": 2, "run-rb2.scope": 5})
-        envoy = self.run_pass(wall_digest=0.0)
-        digest = self.digest(envoy)
+        digest = self.fleet_digest()
         self.assertIn("w2", digest)
         self.assertIn("file 1.50 GiB", digest)
 
@@ -758,11 +740,11 @@ class RunOnceTest(unittest.TestCase):
         envoy = self.run_pass()
         owners = [session for session, _ in envoy.sent]
         self.assertEqual(owners, [live])
-        report = [text for session, text in envoy.sent if session == live][0]
+        report = self.report_of([text for session, text in envoy.sent if session == live][0])
         self.assertIn("is not live on this box", report)
         self.assertIn(f"so this went to {live}", report)
 
-    def test_a_stale_id_with_no_live_owner_here_is_sent_to_nobody(self) -> None:
+    def test_a_stale_id_with_no_live_owner_here_goes_to_the_box_health_owner(self) -> None:
         FakeEnvoy.live = [
             {"session_id": "01a14b84-6cd3-71af-918c-db534cd8d762", "host": WATCH.socket.gethostname()},
             {"session_id": "01a18c6a-ffcd-719e-92a0-31ace0ee6b81", "host": WATCH.socket.gethostname()},
@@ -772,8 +754,10 @@ class RunOnceTest(unittest.TestCase):
         self.scopes({"run-ra1.scope": 4})
         envoy = self.run_pass()
         self.assertEqual([session for session, _ in envoy.sent], [])
-        digest = self.digest(envoy)
-        self.assertIn("session unknown", digest)
+        told = [text for topic, text in envoy.published if topic == WATCH.BOX_HEALTH_ROLE_TOPIC]
+        self.assertEqual(len(told), 1)
+        self.assertIn("no live session on this box owns it", told[0])
+        self.assertIn("no live session here could be matched to it", self.report_of(told[0]))
 
     def test_a_live_id_is_sent_to_unchanged_and_says_nothing_extra(self) -> None:
         claim = "00000001-0000-0000-0000-000000000001"
@@ -782,7 +766,7 @@ class RunOnceTest(unittest.TestCase):
         self.run_pass()
         self.scopes({"run-ra1.scope": 4})
         envoy = self.run_pass()
-        report = [text for session, text in envoy.sent if session == claim][0]
+        report = self.report_of([text for session, text in envoy.sent if session == claim][0])
         self.assertNotIn("not live on this box", report)
 
     def test_an_envoy_that_cannot_list_sessions_still_tells_the_owner(self) -> None:

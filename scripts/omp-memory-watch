@@ -51,14 +51,17 @@ and no model call:
      this whenever the pressure is reclaimable: on ossv-agent-open on 2026-10-30, 31 of 95
      worker scopes had touched their 24 GiB wall while every one of them sat under the 45%
      sampling level on unreclaimable memory, and only 4 were ever reported. A touch is rate
-     limited to one report per scope per `--wall-cooldown` (default 15 min); the session owning
-     the scope gets the whole report, and the box-health owner gets one batched digest of every
-     touch per `--wall-digest` window, so no touch is lost and no lane storms the owner.
+     limited to one report per scope per `--wall-cooldown` (default 15 min) and is ONE message,
+     to the session owning the scope.
 
-Alerts go over Envoy to agent sessions only, never to a person: the session itself (so it can
-checkpoint and shed on its own terms) and the box-health owner -- the holder of the
-`lead-box-health` Envoy role, and the SRE session when nobody holds it. The escalation, when a
-crossing is still open and still rising 10 minutes later, goes to the same owner.
+Alerts go over Envoy to agent sessions only, never to a person, and each is at most 600
+characters ending in `Full report: <path>` (the whole detail, under reports/ beside the state
+file, kept 7 days). The session itself hears its crossing, its clear and its wall touches: it
+owns the shedding. The box-health owner -- the holder of the `lead-box-health` Envoy role, and
+the SRE session when nobody holds it -- hears only what the session cannot settle: a crossing
+still rising 10 minutes after its alert, an OOM kill during a crossing, a crossing or wall
+touch whose session cannot be named, and 3 or more wall touches on the box inside 15 minutes.
+It never hears a clear.
 """
 
 from __future__ import annotations
@@ -79,16 +82,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-# Kept ONLY for omp-box-memory-guard's --protect list and its own alerts, which import it as
-# watch.INFRA_LEAD: this watch tells the INFRA lead nothing. It owned this detector and handed
-# box health to the SRE on 2026-10-31.
-INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
-
-# Kept ONLY for omp-box-memory-guard's --protect list, which imports it as watch.CHIEF_OF_STAFF:
-# this watch tells the chief of staff nothing. Box health is the SRE session's (Sami,
-# 2026-10-31: "There's an SRE. They can handle it.").
-CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
 
 # Box health belongs to the box-health lead's Envoy role (dispatch://INFRA-716), and to the SRE
 # session when nobody holds that role.
@@ -148,6 +141,71 @@ def human(seconds: float) -> str:
 
 def gib(value: float) -> str:
     return f"{value / GIB:.2f} GiB"
+
+
+# Every Envoy message this watch sends is at most MESSAGE_MAX characters and ends with
+# `Full report: <path>`; the detail goes in that file (dispatch://INFRA-672). Measured on
+# sami-rocqperf over 48 h to 2026-11-03: a NEAR alert was about 2 KB, a wall digest about 800
+# characters, and the first ~200 characters of each already carried the decision.
+MESSAGE_MAX = 600
+REPORT_KEEP = 7 * 86400
+
+
+def reports_dir(options: argparse.Namespace) -> Path:
+    """`reports/` beside the state file: the watch's own directory."""
+    return Path(options.state).parent / "reports"
+
+
+def write_report(options: argparse.Namespace, kind: str, body: str, now: float) -> str:
+    """Write one message's whole detail to reports/<UTC stamp>-<kind>.txt; return its path.
+
+    A report that cannot be written is named as such, so the message never sends its reader to
+    a file that is not there; the message itself still goes.
+    """
+    directory = reports_dir(options)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    path = directory / f"{stamp}-{kind}.txt"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        number = 2
+        while path.exists():
+            path, number = directory / f"{stamp}-{kind}-{number}.txt", number + 1
+        path.write_text(body.rstrip("\n") + "\n")
+    except OSError as error:
+        log(f"  report {path} not written: {error}")
+        return f"{path} (NOT WRITTEN: {error.strerror or error})"
+    return str(path)
+
+
+def prune_reports(options: argparse.Namespace, now: float) -> int:
+    """Delete the reports older than REPORT_KEEP; return how many went."""
+    try:
+        entries = list(os.scandir(reports_dir(options)))
+    except OSError:
+        return 0
+    gone = 0
+    for entry in entries:
+        try:
+            if entry.is_file() and now - entry.stat().st_mtime > REPORT_KEEP:
+                os.unlink(entry.path)
+                gone += 1
+        except OSError:
+            continue
+    return gone
+
+
+def short_message(head: str, report: str) -> str:
+    """`head`, then `Full report: <report>`, in at most MESSAGE_MAX characters.
+
+    Each head is written to fit; the cut is the guarantee for an id, path or error text that is
+    longer than expected.
+    """
+    tail = f"\nFull report: {report}"
+    head = head.strip()
+    room = MESSAGE_MAX - len(tail)
+    if len(head) > room:
+        head = head[: max(room - 3, 0)].rstrip() + "..."
+    return head + tail
 
 
 # --------------------------------------------------------------------------- Envoy transport
@@ -296,7 +354,8 @@ def verify_touch_session(envoy: Envoy, touch: dict) -> None:
     elif claim:
         touch["session_note"] = (
             f" The id {claim} on this scope's processes is not live on this box and no live"
-            " session here could be matched to it, so nobody was told directly."
+            " session here could be matched to it, so no session was told: the box-health owner"
+            " hears of it instead."
         )
     else:
         touch["session_note"] = ""
@@ -844,6 +903,73 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
     return "\n".join(lines)
 
 
+def near_where(key: str, incident: dict) -> str:
+    """`session <id>, scope <scope> on <box>`: who and where, as every crossing message opens."""
+    session = incident.get("session") or "unknown"
+    return f"session {session}, scope {incident.get('scope') or key} on {socket.gethostname()}"
+
+
+def near_level(incident: dict, usage: int) -> str:
+    """How close: the measured number against its ceiling, and what is left."""
+    limit = max(int(incident.get("limit") or 0), 1)
+    if not incident.get("limited", True):
+        return (
+            f"its omp holds {gib(usage)} RSS with no scope of its own, past the"
+            f" {gib(incident.get('warn_at') or 0)} a capped session is warned at; only the box's RAM caps it"
+        )
+    return (
+        f"{gib(usage)} unreclaimable of its {gib(limit)} ceiling ({100 * usage / limit:.0f}%,"
+        f" {gib(limit - usage)} left)"
+    )
+
+
+def near_head(key: str, incident: dict, now: float, crossing: int) -> str:
+    """The session's first alert: who, how close, how fast, and what to do, in one paragraph."""
+    usage = int(incident.get("usage") or incident.get("peak") or 0)
+    rate = incident.get("rate")
+    pace = ""
+    if rate is not None and rate > 0.05 and incident.get("limited", True):
+        left = int(incident.get("limit") or 0) - usage
+        pace = f"; rising {rate:.2f} GiB/min, about {left / GIB / rate:.0f} min of headroom"
+    head = (
+        f"OMP SESSION NEAR ITS MEMORY LIMIT: {near_where(key, incident)}: {near_level(incident, usage)};"
+        f" over {gib(incident.get('warn_at') or 0)} for {human(now - (incident.get('opened_at') or now))}{pace}."
+    )
+    if crossing >= 2:
+        head += f" Crossing {crossing} for this session."
+    if incident.get("session"):
+        head += (
+            " DO now: write handover files, stop spawning lanes, shed what you can, then"
+            " `omp --resume <your id>` in your pane. This watch kills nothing."
+        )
+    else:
+        head += (
+            " No session could be named from its processes, so the box-health owner hears it: find"
+            " who runs this scope (the report names its omp pid)."
+        )
+    return head
+
+
+def rising_head(key: str, incident: dict, usage: int, now: float) -> str:
+    """The box-health owner's copy: the session was told and the scope kept rising."""
+    return (
+        f"OMP SESSION STILL RISING {human(now - incident['alerted_at'])} AFTER ITS MEMORY ALERT:"
+        f" {near_where(key, incident)}: {gib(incident.get('alert_usage') or 0)} at the alert"
+        f" ({iso(incident['alerted_at'])}), now {near_level(incident, usage)}; nobody has shed."
+        " Check that the session is alive and shedding, or tell its lead."
+    )
+
+
+def oom_head(key: str, incident: dict, before: int, after: int) -> str:
+    """The box-health owner's copy: the kernel OOM-killed in a scope its session was warned about."""
+    return (
+        f"OMP SCOPE OOM KILL DURING A MEMORY ALERT: the kernel killed {after - before} process(es)"
+        f" in {near_where(key, incident)} (memory.events oom_kill {before} -> {after}). Its session"
+        f" was told it was near its limit at {iso(incident.get('alerted_at'))}. Check whether the"
+        " session's omp still runs; the report has the alert it was sent."
+    )
+
+
 def reclaimable_bytes(touch: dict) -> int | None:
     """The part of this scope's charge the kernel can give back, or None when it cannot be told.
 
@@ -903,6 +1029,12 @@ def reclaimable_clause(touch: dict) -> str:
 
 def wall_state(touch: dict) -> tuple[str, str]:
     """("urgent" or "normal", the sentence saying which and why, from this scope's counters)."""
+    state, _short, verdict = wall_verdict(touch)
+    return state, verdict
+
+
+def wall_verdict(touch: dict) -> tuple[str, str, str]:
+    """("urgent" or "normal", the verdict in one short sentence for the message, the whole of it)."""
     limit = max(int(touch.get("limit") or 0), 1)
     peak = max(int(touch.get("peak") or 0), 1)
     usage = int(touch.get("usage") or 0)
@@ -910,13 +1042,17 @@ def wall_state(touch: dict) -> tuple[str, str]:
     oom = int(touch.get("events_oom") or 0)
     killed = int(touch.get("events_oom_kill") or 0)
     # The level this watch already calls a session near its limit (--fraction, 0.70: 16.8 GiB of
-    # 24 GiB, measured in omp-memory-watch.md), and the anon share that already skips the digest
-    # (--wall-urgent-anon, 0.50). Both are read from the touch so one run has one set of levels.
+    # 24 GiB, measured in omp-memory-watch.md), and the anon share a collect-mode box sends the
+    # box-health owner at once (--wall-urgent-anon, 0.50). Both are read from the touch so one run
+    # has one set of levels.
     warn_fraction = float(touch.get("warn_fraction") or 0.70)
     urgent_anon = float(touch.get("urgent_anon") or 0.50)
     free = reclaimable_bytes(touch)
     if killed:
         return "urgent", (
+            f"URGENT, not a forecast: memory.events oom_kill is {killed}, so the kernel has already"
+            " killed in this scope."
+        ), (
             f"URGENT, and not a forecast: memory.events oom_kill is {killed}. The memcg OOM"
             " killer has ALREADY killed a process in this scope, so reclaim has run out here"
             " before. The next allocation it cannot satisfy takes another process, and an OOM"
@@ -924,6 +1060,9 @@ def wall_state(touch: dict) -> tuple[str, str]:
         )
     if oom:
         return "urgent", (
+            f"URGENT: memory.events oom is {oom}: reclaim already failed at memory.max; the next"
+            " failure is a kill."
+        ), (
             f"URGENT: memory.events oom is {oom}. Reclaim has already failed at memory.max in"
             " this scope and an allocation was about to fail -- the kernel's own condition for"
             " invoking the memcg OOM killer is a usage that reaches the limit and cannot be"
@@ -932,11 +1071,17 @@ def wall_state(touch: dict) -> tuple[str, str]:
         )
     if free is None:
         return "urgent", (
+            "URGENT, conservatively: memory.stat could not be read, so none of the charge can be"
+            " shown reclaimable."
+        ), (
             "URGENT, conservatively: this scope's memory.stat could not be read, so no part of"
             " its charge can be shown to be page cache. Read it as if none of it is reclaimable."
         )
     if usage >= warn_fraction * limit:
         return "urgent", (
+            f"URGENT: {gib(usage)} ({100 * usage / limit:.0f}%) of the ceiling is unreclaimable,"
+            " so reclaim is nearly out of material."
+        ), (
             f"URGENT: {gib(usage)} of the {gib(limit)} ceiling is unreclaimable"
             f" (anon+shmem+kernel+sock), {100 * usage / limit:.0f}% of it, and only {gib(free)}"
             " is page cache the kernel can drop. That is at or past the"
@@ -946,12 +1091,18 @@ def wall_state(touch: dict) -> tuple[str, str]:
         )
     if anon >= urgent_anon * peak:
         return "urgent", (
+            f"URGENT: anon is {gib(anon)}, {100 * anon / peak:.0f}% of the peak, which the kernel"
+            " cannot reclaim."
+        ), (
             f"URGENT: anonymous memory is {gib(anon)}, {100 * anon / peak:.0f}% of the"
             f" {gib(peak)} peak, and anon is what the kernel cannot hand back. A scope at its"
             " wall holding mostly anon has little left to reclaim, and when reclaim fails the"
             " memcg OOM killer runs."
         )
     return "normal", (
+        "NOT URGENT: oom 0 and oom_kill 0, so reclaim brought it back every time; do not kill"
+        " builds or halve a shared gate on this."
+    ), (
         f"NOT URGENT: {gib(free)} of this scope's {gib(limit)} ceiling --"
         f" {100 * free / limit:.0f}% -- is page cache, which the kernel reclaims on demand, and"
         f" memory.events oom is 0 with oom_kill 0. So every one of the {touch.get('events_max', 0)}"
@@ -1043,15 +1194,72 @@ def wall_text(touch: dict) -> str:
     return "\n".join(lines)
 
 
+def wall_head(touch: dict) -> str:
+    """One touch in one paragraph: where, how full, the verdict, and who acts.
+
+    To the scope's own session; or, when no live session on this box owns the scope, to the
+    box-health owner, since nobody else would hear it.
+    """
+    state, short, _verdict = wall_verdict(touch)
+    owner = touch.get("session") or ""
+    who = f"session {owner}" if owner else "no live session on this box owns it"
+    worker = f", ossv-worker {touch['worker']}" if touch.get("worker") else ""
+    act = (
+        "DO: write your handover files now; shed only what the report names."
+        if owner
+        else "So the box-health owner hears it: find who runs this scope (its processes are in the report)."
+    )
+    return (
+        f"OMP SCOPE AT ITS MEMORY WALL ({'URGENT' if state == 'urgent' else 'not urgent'}): scope"
+        f" {touch['scope']} on {socket.gethostname()} ({who}{worker}) reached {gib(touch.get('peak') or 0)}"
+        f" of its {gib(touch.get('limit') or 0)} memory.max{reclaimable_clause(touch)}. {short} {act}"
+    )
+
+
+def wall_burst_head(recent: list[dict], window: float) -> str:
+    """The box-health owner's one message for several scopes at their wall in one window."""
+    scopes = len({touch.get("scope") for touch in recent})
+    urgent = sum(1 for touch in recent if touch.get("urgent"))
+    orphans = sum(1 for touch in recent if not touch.get("session"))
+    count = f"{scopes} scopes" + (f" ({len(recent)} touches)" if len(recent) != scopes else "")
+    return (
+        f"MEMORY WALL BURST on {socket.gethostname()}: {count} reached their memory.max in the last"
+        f" {human(window)}; {urgent} urgent by their own counters"
+        + (f", {orphans} with no live owning session" if orphans else "")
+        + ". Each owning session has its own report. Look for one cause behind them: a build or gate"
+        " shared across lanes, or the box itself short of memory."
+    )
+
+
+def wall_burst_report(recent: list[dict], window: float, level: int) -> str:
+    """The burst's report: one row a touch, then each touch's own report file."""
+    lines = [
+        wall_burst_head(recent, window),
+        "",
+        "Columns: time, box, worker, peak of ceiling, page cache, anonymous, session.",
+    ]
+    ordered = sorted(recent, key=lambda touch: touch.get("at") or 0)
+    lines.extend(digest_row(touch) for touch in ordered)
+    lines.append("")
+    lines.append("Each touch's whole report (the memory.stat split, the processes, the verdict, the advice):")
+    lines.extend(f"  {touch.get('scope')}: {touch.get('report') or 'none written'}" for touch in ordered)
+    lines.append(
+        f"This box-health message is sent when {level} or more touches on this box reach their"
+        " wall in one window, and again only when that count doubles; a single touch goes to its own"
+        " session, or here when no live session owns the scope. From omp-memory-watch"
+        f" ({SELF_PATH}) on {socket.gethostname()}."
+    )
+    return "\n".join(lines)
+
 
 def urgent_reason(touch: dict, options: argparse.Namespace) -> str:
-    """Why this touch cannot wait for the hourly digest, or "".
+    """Why this touch cannot wait for the fleet collector's hourly digest, or "" (collect mode).
 
     Two shapes end in a kill rather than in reclaim. Anonymous memory is the memory the kernel
     cannot give back, so a scope at its wall holding mostly anon has nothing left to reclaim:
     the next allocation is the OOM killer's. And an oom_kill that has already happened is not a
     forecast at all. Everything else -- a scope at its wall on page cache, which the kernel
-    drops and carries on -- rides the digest.
+    drops and carries on -- waits for the collector.
     """
     if int((touch.get("stats") or {}).get("anon", 0)) >= options.wall_urgent_anon * max(int(touch.get("peak") or 0), 1):
         return (
@@ -1065,17 +1273,14 @@ def urgent_reason(touch: dict, options: argparse.Namespace) -> str:
 
 
 def urgent_text(touch: dict, reason: str) -> str:
-    """The one touch that is sent the moment it is seen, to the box-health owner."""
+    """The head of a collect-mode touch sent the moment it is seen, to the box-health owner."""
     worker = touch.get("worker") or "no worker name"
     session = touch.get("session") or "session unknown"
     return (
         f"SCOPE AT ITS MEMORY WALL, NOT WAITING FOR THE DIGEST, on {socket.gethostname()}:"
         f" {touch.get('scope')} ({worker}, {session}) reached {gib(touch.get('peak') or 0)} of"
-        f" {gib(touch.get('limit') or 0)}. Why this one is immediate: {reason}.\n"
-        + digest_row(touch)
-        + "\nIts owner has the whole report: the memory.stat split, the process count and RSS"
-        " sum, and the three largest processes with their command lines. From omp-memory-watch"
-        f" on {socket.gethostname()}."
+        f" {gib(touch.get('limit') or 0)}. Why this one is immediate: {reason}. Its owner has"
+        " the same report."
     )
 
 
@@ -1095,14 +1300,13 @@ def digest_row(touch: dict) -> str:
 
 
 def wall_digest_text(pending: list[dict], window: float, scope_of_text: str = "") -> str:
-    """The box-health owner's batched view: one line per scope that reached its wall.
+    """The fleet collector's batched view: one line per scope that reached its wall.
 
-    Every scope's own owner already has the whole report -- the memory.stat split, the process
-    count and RSS sum, and the three largest processes with their command lines -- which is
-    where the shedding happens. This reader wants the shape of the fleet, not each scope's
-    detail: a per-box digest every 15 minutes was eight messages an hour saying the same thing
-    (Sami, 2026-10-31). So one line each, and the two shapes that end in a kill -- anon above
-    half the peak, and an oom_kill that already happened -- do not wait for it at all.
+    Only collect mode feeds it: oss-verifier's wall-digest-collect.sh drains each lane VM with
+    --wall-pending-json and renders this, one message an hour for the fleet (Sami, 2026-10-31:
+    a per-box digest every 15 minutes was eight messages an hour saying the same thing). Each
+    scope's own owner already has the whole report, and the two shapes that end in a kill --
+    anon above half the peak, and an oom_kill that already happened -- do not wait for it.
     """
     where = scope_of_text or socket.gethostname()
     boxes = sorted({str(touch.get("box") or socket.gethostname().split(".")[0]) for touch in pending})
@@ -1205,7 +1409,6 @@ def wall_touch(
     )
 
 
-
 def clear_text(scope: str, incident: dict, cause: str, now: float) -> str:
     opened = incident.get("opened_at") or now
     session = incident.get("session") or "unknown"
@@ -1215,6 +1418,15 @@ def clear_text(scope: str, incident: dict, cause: str, now: float) -> str:
         f"The crossing opened at {iso(opened)}, cleared at {iso(now)}, lasted {human(now - opened)},"
         f" and peaked at {gib(incident.get('peak') or 0)} of a {gib(incident.get('limit') or 0)} ceiling. "
         "No action is needed. From omp-memory-watch on " + socket.gethostname() + "."
+    )
+
+
+def clear_head(scope: str, incident: dict, cause: str) -> str:
+    """A clear in one line: who, what level, and why it cleared."""
+    return (
+        f"OMP SESSION MEMORY CLEARED: session {incident.get('session') or 'unknown'}, scope"
+        f" {incident.get('scope') or scope}, is back under {gib(incident.get('warn_at') or 0)}:"
+        f" {cause}. No action is needed."
     )
 
 
@@ -1264,15 +1476,53 @@ def tell(envoy: Envoy, target: str, text: str) -> bool:
 
 
 def send_clear(envoy: Envoy, options: argparse.Namespace, scope: str, incident: dict, cause: str, now: float) -> bool:
+    """Tell the session that heard the alert that its crossing cleared, in one line.
+
+    Never the box-health owner: a clear asks nothing of it. In the 48 h to 2026-11-03 it got 19
+    clears, every one saying "No action is needed", 14 of them within 4 min of their alert.
+    """
     if not incident.get("alerted_at") or incident.get("cleared_at"):
         return False
     incident["cleared_at"] = now
-    targets = incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]
-    text = clear_text(scope, incident, cause, now)
-    for target in targets:
-        if not options.dry_run:
-            tell(envoy, target, text)
-    log(f"{scope}: CLEARED ({cause}); told {len(targets)} recipients")
+    session = incident.get("session") or ""
+    if not session or session not in (incident.get("told") or [session]):
+        log(f"{scope}: CLEARED ({cause}); nobody told: no session heard the alert")
+        return True
+    report = write_report(options, "cleared", clear_text(scope, incident, cause, now), now)
+    text = short_message(clear_head(scope, incident, cause), report)
+    if not options.dry_run:
+        envoy.send(session, text)
+    log(f"{scope}: CLEARED ({cause}); told session {session}")
+    if options.print_alert:
+        print(text)
+    return True
+
+
+def oom_copy(
+    envoy: Envoy, options: argparse.Namespace, state, key: str, incident: dict, oom_kill: int, now: float
+) -> bool:
+    """Copy the box-health owner, once a crossing, when the kernel OOM-kills in a scope whose
+    session was told it was near its limit: the forecast came true, and the session may be gone.
+
+    `oom_kill` is the scope's memory.events counter now; the crossing keeps the value it had when
+    it opened. A crossing opened by a version of this watch that kept none starts its count here.
+    """
+    base = incident.get("oom_kill_base")
+    if base is None:
+        incident["oom_kill_base"] = oom_kill
+        return False
+    if oom_kill <= int(base) or incident.get("oom_told_at"):
+        return False
+    incident["oom_told_at"] = now
+    head = oom_head(key, incident, int(base), oom_kill)
+    body = (
+        f"{head}\n\nThe alert its session was sent: {incident.get('report') or '(no report recorded)'}"
+        f"\n\nThe crossing as this run reads it:\n{alert_text(key, incident, now, 'at the OOM kill')}"
+    )
+    text = short_message(head, write_report(options, "oom-kill", body, now))
+    state.commit(options)
+    heard = "(dry run)" if options.dry_run else tell_box_health(envoy, text)
+    log(f"{key}: OOM KILL during the crossing (oom_kill {base} -> {oom_kill}) -> {heard or 'nobody: every route refused it'}")
     if options.print_alert:
         print(text)
     return True
@@ -1601,8 +1851,12 @@ def scope_adopt_pass(
         ok, out = systemd_user(BUS + ["StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail",
                                       str(len(props) // 3 + 1), *props, "PIDs", "au", "1", str(pid), "0"])
         if not ok:
-            log(f"scope adopt: FAILED to create {unit} for omp {pid} in {old}: {out}")
-            notes.append(f"{old}: create failed")
+            # An omp that exited between the listing and this call makes systemd answer "No such
+            # process": nothing is left to move and nothing to retry (15 such FAILED lines in
+            # 6 h on sami-rocqperf, 2026-11-03). A refusal for an omp still running is a failure.
+            if (PROC_ROOT / str(pid)).exists():
+                log(f"scope adopt: FAILED to create {unit} for omp {pid} in {old}: {out}")
+                notes.append(f"{old}: create failed")
             continue
         adopted[unit] = {"pid": pid, "start": pid_start(pid), "from": cgroup, "kind": kind, "sid": sid, "at": now}
         state.commit(options)
@@ -2073,18 +2327,34 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
 
 
 def resume_failed_text(sid: str, why: str, how: str) -> str:
-    """The box-health owner's alert for a session this watch decided to resume and could not."""
+    """The report of a session this watch decided to resume and could not: why, and the command."""
     return (
         f"omp-memory-watch: session {sid} is down and was NOT resumed: {why}. Resume it from a host"
         f" session: {how}"
     )
 
 
+def resume_failed_head(sid: str, why: str) -> str:
+    """The box-health owner's message for it: the session, why, and where the command is."""
+    return (
+        f"omp-memory-watch: session {sid} is down and was NOT resumed: {why[:300]}. Resume it from a"
+        " host session with the command in the report."
+    )
+
+
 def down_resumed_text(sid: str, gave_up: str, where: str, command: str) -> str:
-    """The box-health owner's notice that a session `agentbox move` left down was resumed."""
+    """The report of a session `agentbox move` left down and this watch resumed."""
     return (
         f"omp-memory-watch: agentbox move could not bring session {sid} back ({gave_up}). This watch"
         f" resumed it {where}: {command}"
+    )
+
+
+def down_resumed_head(sid: str, gave_up: str, where: str) -> str:
+    """The box-health owner's notice for it: which move gave up, and where the session runs now."""
+    return (
+        f"omp-memory-watch: agentbox move could not bring session {sid} back ({gave_up[:120]}). This"
+        f" watch resumed it {where}; nothing to do unless it goes down again."
     )
 
 
@@ -2125,8 +2395,12 @@ def restart_pass(
     budget = {"scans": SCAN_BUDGET, "deadline": deadline}
     present = {pane["id"] for pane in panes}
 
-    def report(text: str) -> str:
-        return (tell_box_health(envoy, text) if envoy is not None else "") or "nobody: every route refused it"
+    def report(kind: str, head: str, body: str) -> str:
+        """Tell the box-health owner `head`, with `body` as its report; say who heard it."""
+        heard = ""
+        if envoy is not None:
+            heard = tell_box_health(envoy, short_message(head, write_report(options, kind, body, now)))
+        return heard or "nobody: every route refused it"
 
     for pane_id in [pane_id for pane_id in records if pane_id not in present]:
         old = records[pane_id]
@@ -2164,11 +2438,16 @@ def restart_pass(
         state.commit(options)
         ok, out, where = open_pane(window, tmux_session, title, resume["cwd"], command)
         if ok:
-            heard = report(down_resumed_text(resume["sid"], resume["gave_up"], f"in new pane {out} ({where}), since pane {pane_id} is gone", command))
+            place = f"in new pane {out} ({where}), since pane {pane_id} is gone"
+            heard = report(
+                "resumed", down_resumed_head(resume["sid"], resume["gave_up"], place),
+                down_resumed_text(resume["sid"], resume["gave_up"], place, command),
+            )
             log(f"{name}: RESUMED in new pane {out} ({where}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}: {command} -> {heard}")
             resumed += 1
         else:
-            heard = report(resume_failed_text(resume["sid"], f"agentbox move gave up ({resume['gave_up']}), its pane {pane_id} is gone, and no new pane could be opened: {out}", how))
+            why = f"agentbox move gave up ({resume['gave_up']}), its pane {pane_id} is gone, and no new pane could be opened: {out}"
+            heard = report("resume-failed", resume_failed_head(resume["sid"], why), resume_failed_text(resume["sid"], why, how))
             log(f"{name}: no new pane could be opened: {out} -> {heard}")
             left += 1
     # A run that runs out of RESTART_BUDGET stops where it is, and the next run starts there, so
@@ -2253,13 +2532,20 @@ def restart_pass(
         state.commit(options)
         ok, error = respawn_pane(pane["id"], resume["cwd"], command)
         if ok:
-            heard = report(down_resumed_text(resume["sid"], resume["gave_up"], f"in its pane {pane['id']}", command)) if resume.get("gave_up") else ""
+            heard = ""
+            if resume.get("gave_up"):
+                place = f"in its pane {pane['id']}"
+                heard = report(
+                    "resumed", down_resumed_head(resume["sid"], resume["gave_up"], place),
+                    down_resumed_text(resume["sid"], resume["gave_up"], place, command),
+                )
             log(f"{name}: RESUMED: {why}: {command}" + (f" -> {heard}" if heard else ""))
             old["seen"] = now
             resumed += 1
         else:
             how = f"tmux respawn-pane -k -t {pane['id']} -c {shlex.quote(resume['cwd'])} bash -i -c {shlex.quote(command + '; exec bash -i')}"
-            heard = report(resume_failed_text(resume["sid"], f"tmux respawn-pane -k -t {pane['id']} failed: {error}", how))
+            failure = f"tmux respawn-pane -k -t {pane['id']} failed: {error}"
+            heard = report("resume-failed", resume_failed_head(resume["sid"], failure), resume_failed_text(resume["sid"], failure, how))
             log(f"{name}: respawn-pane failed: {error} -> {heard}")
             left += 1
     verb = "would resume" if dry else "resumed"
@@ -2267,6 +2553,106 @@ def restart_pass(
     if unread:
         note += f", {unread} not read this run (out of time; the next run starts there)"
     return note
+
+
+def tell_wall_touch(
+    envoy: Envoy, options: argparse.Namespace, state: State, touch: dict, pending_wall: list,
+    recent_wall: list, now: float,
+) -> bool:
+    """Report one wall touch as one message, to the scope's own session; True when it is urgent.
+
+    The box-health owner hears a single touch only when no live session on this box owns the
+    scope (send mode), and, in collect mode, when it has one of the two shapes that end in a kill,
+    since there its only other view is the collector's hourly fleet digest. Several touches in
+    one window reach it as one burst (`tell_wall_burst`). In the 48 h to 2026-11-03 the box-health
+    owner got 52 wall messages, 13 of 14 immediate notes were repeated by the 15-minute digest
+    within 2 min, and 41 of the 52 had no reaction (dispatch://INFRA-672).
+    """
+    collect = options.wall_digest_mode == "collect"
+    # Before the text exists: a report sent to an id that is not live here reaches whoever holds
+    # it elsewhere, not a silent owner.
+    verify_touch_session(envoy, touch)
+    body = wall_text(touch) + (touch.get("session_note") or "")
+    if touch["suppressed"]:
+        body += (
+            f"\nIt also touched the wall {touch['suppressed']} more time(s) inside the"
+            f" last {human(options.wall_cooldown)}, which this one report covers."
+        )
+    report = write_report(options, "wall", body, now)
+    verdict = wall_verdict(touch)[0]
+    entry = {
+        name: touch[name]
+        for name in (
+            "at", "scope", "session", "session_claim", "worker", "peak", "limit", "events_delta",
+            "top", "task_count", "rss_sum", "stats", "current", "events_oom_kill",
+        )
+    }
+    if collect:
+        pending_wall.append(entry)
+        del pending_wall[: max(0, len(pending_wall) - options.wall_pending_max)]
+    else:
+        row = {name: entry[name] for name in ("at", "scope", "session", "worker", "peak", "limit", "stats", "events_oom_kill")}
+        recent_wall.append(dict(row, urgent=verdict == "urgent", report=report, role_told=False))
+    state.commit(options)
+    text = short_message(wall_head(touch), report)
+    owner = touch["session"]
+    if owner:
+        heard = owner if options.dry_run or envoy.send(owner, text) else ""
+    elif collect:
+        heard = "the collector's fleet digest"
+    else:
+        heard = "(dry run)" if options.dry_run else tell_box_health(envoy, text)
+        recent_wall[-1]["role_told"] = bool(heard)
+    who = (
+        f"session {owner}" + (f" (claim {touch['session_claim']} is not live here)" if touch.get("session_claim") else "")
+        if owner
+        else "no live session on this box could be matched"
+    )
+    log(
+        f"{touch['key']}: WALL ({gib(touch['peak'])} peak of {gib(touch['limit'])}, memory.events max"
+        f" +{touch['events_delta']}, {verdict}; {who}) -> {heard or 'nobody: every route refused it'}"
+    )
+    if options.print_alert:
+        print(text)
+    reason = urgent_reason(touch, options) if collect else ""
+    if reason:
+        note = short_message(urgent_text(touch, reason), report)
+        heard = "(dry run)" if options.dry_run else tell_box_health(envoy, note)
+        log(f"{touch['key']}: URGENT ({reason}) -> {heard or 'nobody: every route refused it'}")
+        if options.print_alert:
+            print(note)
+    return verdict == "urgent"
+
+
+def tell_wall_burst(envoy: Envoy, options: argparse.Namespace, state: State, recent_wall: list, now: float) -> bool:
+    """Tell the box-health owner once when --wall-burst touches land on this box inside one
+    --wall-burst-window, and again only when that count doubles.
+
+    A burst is the box-level fact one touch is not: one cause -- a build or gate shared across
+    lanes, or the box itself short of memory -- behind several scopes. The episode ends when the
+    window holds no touch, so a count that dips under the level and comes back is not news. A
+    burst made only of touches the owner already heard one by one (scopes with no owning
+    session) is not sent again as a digest of themselves.
+    """
+    window = options.wall_burst_window
+    recent_wall[:] = [touch for touch in recent_wall if now - float(touch.get("at") or 0) < window]
+    if not recent_wall:
+        state.data.pop("wall_burst", None)
+        return False
+    told = int((state.data.get("wall_burst") or {}).get("count") or 0)
+    if len(recent_wall) < max(options.wall_burst, 2 * told) or all(touch.get("role_told") for touch in recent_wall):
+        return False
+    report = write_report(options, "wall-burst", wall_burst_report(recent_wall, window, options.wall_burst), now)
+    text = short_message(wall_burst_head(recent_wall, window), report)
+    state.data["wall_burst"] = {"at": now, "count": len(recent_wall)}
+    for touch in recent_wall:
+        touch["role_told"] = True
+    state.commit(options)
+    heard = "(dry run)" if options.dry_run else tell_box_health(envoy, text)
+    log(f"wall burst: {len(recent_wall)} touch(es) in {human(window)} -> {heard or 'nobody: every route refused it'}")
+    if options.print_alert:
+        print(text)
+    return True
 
 
 def run_once(options: argparse.Namespace) -> int:
@@ -2282,8 +2668,8 @@ def run_once(options: argparse.Namespace) -> int:
     # --scope` never reuses a name), and the omp pid and its start time are kept with it so a
     # different process in the same scope starts over.
     incidents: dict = state.data.setdefault("incidents", {})
-    # How many separate crossings each SESSION has had. The second one goes to the chief of
-    # staff: one session that keeps coming back is a lane problem, not a spike.
+    # How many separate crossings each SESSION has had. The alert says the number: one session
+    # that keeps coming back is a lane problem, not a spike.
     crossings: dict = state.data.setdefault("crossings", {})
     # Whether this state file has no WALL memory at all. On such a run -- the first after this
     # trigger was added, or the first after the state file was lost -- every scope's counters
@@ -2298,9 +2684,16 @@ def run_once(options: argparse.Namespace) -> int:
     # The wall memory, keyed by scope name and NOT reset with the pid: `systemd-run --scope`
     # never reuses a name, so a key lives exactly as long as the scope does.
     walls: dict = state.data.setdefault("walls", {})
-    # Touches waiting for the box-health owner's next digest. They accumulate across runs, so a
-    # digest window never loses one.
-    pending_wall: list = state.data.setdefault("wall_pending", [])
+    # collect: the touches waiting for the fleet collector (--wall-pending-json). send: the
+    # touches of the last --wall-burst-window, which decide whether the box-health owner hears a
+    # burst. Nothing waits for a digest in send mode: each touch was told when it was seen.
+    collect = options.wall_digest_mode == "collect"
+    pending_wall: list = state.data.setdefault("wall_pending", []) if collect else []
+    recent_wall: list = [] if collect else state.data.setdefault("wall_recent", [])
+    if not collect:
+        # Left by the version with a 15-minute digest: every one of them reached its owner.
+        state.data.pop("wall_pending", None)
+        state.data.pop("wall_digest_at", None)
 
     # What each omp process is measured against. Two shapes exist on this box:
     #
@@ -2374,53 +2767,7 @@ def run_once(options: argparse.Namespace) -> int:
             touch = wall_touch(target, walls, options, started, cold_start)
             if touch:
                 walls_hit += 1
-                # Before the text exists: a report sent to an id that is not live here reaches
-                # whoever holds it elsewhere, not a silent owner.
-                verify_touch_session(envoy, touch)
-                text = wall_text(touch) + (touch.get("session_note") or "")
-                if touch["suppressed"]:
-                    text += (
-                        f"\nIt also touched the wall {touch['suppressed']} more time(s) inside the"
-                        f" last {human(options.wall_cooldown)}, which this one report covers."
-                    )
-                entry = {
-                    name: touch[name]
-                    for name in (
-                        "at", "scope", "session", "session_claim", "worker", "peak", "limit",
-                        "events_delta", "top", "task_count", "rss_sum", "stats", "current",
-                        "events_oom_kill",
-                    )
-                }
-                pending_wall.append(entry)
-                del pending_wall[: max(0, len(pending_wall) - options.wall_pending_max)]
-                state.commit(options)
-                if touch["session"] and not options.dry_run:
-                    envoy.send(touch["session"], text)
-                # A touch the hourly digest must not wait for. Everything else rides the
-                # digest; these two are the shapes that end in a kill.
-                reason = urgent_reason(touch, options)
-                if reason:
-                    urgent += 1
-                    note = urgent_text(touch, reason)
-                    if not options.dry_run:
-                        heard = tell_box_health(envoy, note)
-                    else:
-                        heard = "(dry run)"
-                    log(f"{key}: URGENT ({reason}) -> {heard or 'nobody: every route refused it'}")
-                    if options.print_alert:
-                        print(note)
-                log(
-                    f"{key}: WALL ({gib(touch['peak'])} peak of {gib(limit)}, memory.events max"
-                    f" +{touch['events_delta']}) -> "
-                    + (
-                        f"session {touch['session']}"
-                        + (f" (claim {touch['session_claim']} is not live here)" if touch.get("session_claim") else "")
-                        if touch["session"]
-                        else "no live session on this box could be matched"
-                    )
-                )
-                if options.print_alert:
-                    print(text)
+                urgent += tell_wall_touch(envoy, options, state, touch, pending_wall, recent_wall, started)
         warn_at = limit * options.fraction
         if not target["limited"]:
             # Nothing caps this session, so "a fraction of the ceiling" would be a number no
@@ -2447,6 +2794,9 @@ def run_once(options: argparse.Namespace) -> int:
             samples.clear()
 
         incident = incidents.get(key)
+        if incident and incident.get("alerted_at") and target["limited"]:
+            # Before any clear: an OOM kill can be what ended the session's omp.
+            oom_copy(envoy, options, state, key, incident, int(target["events"].get("oom_kill", 0)), started)
         if usage < clear_at or (incident and incident.get("pid") != pid):
             if incident:
                 cause = (
@@ -2468,6 +2818,9 @@ def run_once(options: argparse.Namespace) -> int:
 
         incident = incidents.setdefault(key, {})
         incident.setdefault("opened_at", started)
+        if target["limited"]:
+            incident["cgroup"] = cgroup
+            incident.setdefault("oom_kill_base", int(target["events"].get("oom_kill", 0)))
         incident["pid"] = pid
         incident["scope"] = scope
         incident["limit"] = limit
@@ -2498,37 +2851,32 @@ def run_once(options: argparse.Namespace) -> int:
             count = crossings.get(session or key, 0) + 1
             crossings[session or key] = count
             incident["crossing_number"] = count
-            # The session hears first: it owns the shedding. One session can be two of these
-            # (the box-health owner's own session, say), and nobody needs the same alert twice.
-            # The box-health role is a recipient like any other here, so its holder is told once.
-            recipients: list[tuple[str, str]] = []
-            for who, why in (
-                (session, "the session itself"),
-                (BOX_HEALTH_ROLE_TOPIC, "box-health owner"),
-            ):
-                if who and who not in {already for already, _ in recipients}:
-                    recipients.append((who, why))
-            text = alert_text(key, incident, started, "first alert")
+            # The session alone: it owns the shedding, and 14 of the 20 alerts the box-health
+            # owner was copied on in the 48 h to 2026-11-03 cleared within 4 min. That owner hears
+            # a crossing only when nobody else can: no session could be named, the scope is
+            # still rising --escalate after the alert, or the kernel OOM-kills in it (oom_copy).
+            recipient = session or BOX_HEALTH_ROLE_TOPIC
+            body = alert_text(key, incident, started, "first alert")
             if count >= 2:
-                text += f"\nThis is crossing number {count} for this session since this watch began counting."
+                body += f"\nThis is crossing number {count} for this session since this watch began counting."
             if not session:
-                text += (
+                body += (
                     "\nThe session id could not be resolved from /proc, so the session itself could"
                     " not be told: only the box-health owner has this."
                 )
+            incident["report"] = write_report(options, "near", body, started)
+            text = short_message(near_head(key, incident, started, count), incident["report"])
             # On disk before a single message leaves: a resent first alert is worse than a late one.
             incident["alerted_at"] = started
             incident["alert_usage"] = usage
-            incident["told"] = [who for who, _ in recipients]
+            incident["told"] = [recipient]
             state.commit(options)
-            told = []
-            for who, why in recipients:
-                if options.dry_run or tell(envoy, who, text):
-                    told.append(who)
-                    log(f"  -> {who} ({why})")
-            incident["told"] = told or incident["told"]
+            sent = options.dry_run or tell(envoy, recipient, text)
             alerts += 1
-            log(f"{key}: ALERT ({gib(usage)} of {gib(limit)}) sent to {len(told)} recipients")
+            log(
+                f"{key}: ALERT ({gib(usage)} of {gib(limit)}) -> "
+                + (recipient if sent else f"nobody: {recipient} refused it")
+            )
             if options.print_alert:
                 print(text)
         elif (
@@ -2536,20 +2884,20 @@ def run_once(options: argparse.Namespace) -> int:
             and not incident.get("escalated_at")
             and usage > (incident.get("alert_usage") or 0)
         ):
-            text = alert_text(key, incident, started, "STILL RISING after 10 minutes")
-            text += (
+            body = alert_text(key, incident, started, f"STILL RISING {human(started - incident['alerted_at'])} after the alert")
+            body += (
                 f"\nNobody has shed anything since the first alert at {iso(incident['alerted_at'])}:"
                 f" it was {gib(incident.get('alert_usage') or 0)} then and is {gib(usage)} now."
+                f" The alert the session was sent: {incident.get('report') or '(no report recorded)'}"
             )
+            text = short_message(rising_head(key, incident, usage, started), write_report(options, "still-rising", body, started))
             incident["escalated_at"] = started
             state.commit(options)
-            if not options.dry_run:
-                # Whoever hears a crossing must hear its clear, and only once per message: the
-                # role is added to "told" when it is not already a recipient of the alert.
-                heard = tell_box_health(envoy, text)
-                if heard and heard not in (incident.get("told") or []):
-                    incident["told"] = (incident.get("told") or []) + [heard]
-            log(f"{key}: ESCALATED to the box-health owner")
+            # A copy only: the clear still goes to the session alone, never here.
+            heard = "(dry run)" if options.dry_run else tell_box_health(envoy, text)
+            log(f"{key}: ESCALATED -> {heard or 'nobody: every route refused it'}")
+            if options.print_alert:
+                print(text)
         else:
             log(f"{key}: over for {human(over_for)}, already alerted at {iso(incident.get('alerted_at'))}")
         state.commit(options)
@@ -2563,6 +2911,12 @@ def run_once(options: argparse.Namespace) -> int:
     for key in list(incidents):
         if key not in live_keys:
             incident = incidents[key]
+            if incident.get("alerted_at") and incident.get("limited") and incident.get("cgroup"):
+                # The omp is gone and its scope may still be there, holding the counter that
+                # says whether the kernel took it.
+                events = memory_events(incident["cgroup"])
+                if events:
+                    oom_copy(envoy, options, state, key, incident, int(events.get("oom_kill", 0)), started)
             if send_clear(envoy, options, key, incident, "the omp process ended: the session is no longer running", started):
                 clears += 1
             incidents.pop(key, None)
@@ -2570,31 +2924,16 @@ def run_once(options: argparse.Namespace) -> int:
         if key not in live_keys:
             walls.pop(key, None)
 
-    # The box-health owner's batched view. The per-scope reports have already gone to their
-    # owners; this is one message per window however many scopes touched their wall in it.
-    #
-    # In `collect` mode this box sends NO digest: its touches wait in the state file until a
-    # collector drains them with --wall-pending-json and sends ONE message for the whole fleet.
-    # Eight lane VMs each sending their own every 15 minutes was 32 messages an hour into one
-    # session (Sami, 2026-10-31). Urgent touches never wait for either, so collect mode loses
-    # no danger, only its share of a list.
-    digests = 0
-    if options.wall_digest_mode == "collect":
+    # Several scopes at their wall at once reach the box-health owner as one message. In collect
+    # mode this box sends none: its touches wait in the state file until the fleet collector
+    # drains them with --wall-pending-json and sends ONE message for every lane VM (Sami,
+    # 2026-10-31: eight boxes each sending their own every 15 minutes was 32 messages an hour).
+    if collect:
         if pending_wall:
-            log(f"wall digest: collect mode, {len(pending_wall)} touch(es) held for the collector")
-    elif pending_wall and started - (state.data.get("wall_digest_at") or 0) >= options.wall_digest:
-        text = wall_digest_text(pending_wall, options.wall_digest)
-        state.data["wall_digest_at"] = started
-        sent = pending_wall[:]
-        del pending_wall[:]
-        state.commit(options)
-        heard = BOX_HEALTH_ROLE_TOPIC
-        if not options.dry_run:
-            heard = tell_box_health(envoy, text)
-        digests = len(sent)
-        log(f"wall digest: {digests} touch(es) -> {heard or 'nobody: every route refused it'}")
-        if options.print_alert:
-            print(text)
+            log(f"wall: collect mode, {len(pending_wall)} touch(es) held for the collector")
+    else:
+        tell_wall_burst(envoy, options, state, recent_wall, started)
+    pruned = prune_reports(options, started)
 
     restart_note = "panes: restarter off"
     if options.restart:
@@ -2615,8 +2954,14 @@ def run_once(options: argparse.Namespace) -> int:
     log(
         f"checked {len(targets)} omp session(s), {watched} close enough to sample, in "
         f"{time.time() - started:.2f}s; {alerts} alert(s), {clears} clear(s),"
-        f" {walls_hit} wall touch(es) ({urgent} urgent), {len(pending_wall)} waiting for the digest;"
-        f" {bias_note}; {restart_note}; {scope_note}"
+        f" {walls_hit} wall touch(es) ({urgent} urgent), "
+        + (
+            f"{len(pending_wall)} held for the collector"
+            if collect
+            else f"{len(recent_wall)} in the last {human(options.wall_burst_window)}"
+        )
+        + (f", {pruned} old report(s) pruned" if pruned else "")
+        + f"; {bias_note}; {restart_note}; {scope_note}"
     )
     return 0
 
@@ -2657,7 +3002,10 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=24, help="samples kept per scope (24 x 30 s = 12 min of rise)")
     parser.add_argument("--unlimited-warn", type=float, default=16.8, help="GiB at which an UNCAPPED scope alerts")
     parser.add_argument("--grace", type=float, default=60.0, help="seconds over the threshold before it alerts")
-    parser.add_argument("--escalate", type=float, default=600.0, help="seconds after an alert before the box-health owner is told")
+    parser.add_argument(
+        "--escalate", type=float, default=600.0,
+        help="seconds after an alert at which a scope still rising is copied to the box-health owner",
+    )
     parser.add_argument(
         "--wall-fraction",
         type=float,
@@ -2668,25 +3016,32 @@ def main() -> int:
         "--wall-cooldown", type=float, default=900.0, help="seconds between wall reports for one scope"
     )
     parser.add_argument(
-        "--wall-digest", type=float, default=900.0, help="seconds between the box-health owner's batched wall digests"
+        "--wall-burst", type=int, default=3,
+        help="send mode: this many wall touches on the box inside --wall-burst-window are told to"
+        " the box-health owner as one message, and again when the count doubles",
+    )
+    parser.add_argument(
+        "--wall-burst-window", type=float, default=900.0, help="seconds over which --wall-burst counts touches"
     )
     parser.add_argument("--wall-top", type=int, default=3, help="processes by RSS named in a wall report")
     parser.add_argument(
-        "--wall-pending-max", type=int, default=400, help="touches kept waiting for a digest before the oldest are dropped"
+        "--wall-pending-max", type=int, default=400,
+        help="collect mode: touches kept waiting for the fleet collector before the oldest are dropped",
     )
     parser.add_argument(
         "--wall-digest-mode",
         choices=("send", "collect"),
         default="send",
-        help="send: this box sends its own digest. collect: it holds its touches for a"
-        " fleet collector to drain with --wall-pending-json and send as one message",
+        help="send: a touch with no owning session, and a burst, go to the box-health owner from"
+        " this box. collect: it holds every touch for a fleet collector to drain with"
+        " --wall-pending-json and send as one message",
     )
     parser.add_argument(
         "--wall-urgent-anon",
         type=float,
         default=0.50,
-        help="a touch whose anon is at least this fraction of the peak is sent at once, not"
-        " held for the digest (an oom_kill always is)",
+        help="a touch whose anon is at least this fraction of the peak is urgent; in collect mode"
+        " it is sent to the box-health owner at once, not held for the collector (an oom_kill always is)",
     )
     parser.add_argument(
         "--wall-pending-json",
