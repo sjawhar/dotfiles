@@ -2919,5 +2919,49 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(moved.returncode, 0, moved.stderr)
         self.assertIn(f"-- omp --resume {swept}\n", moved.stdout)
 
+    def agent_db(self, home: Path, rows: list[tuple[str, str | None]]) -> None:
+        """An omp agent.db under `home` holding credential rows (provider, disabled_cause)."""
+        path = home / ".omp/agent/agent.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        script = "create table auth_credentials (id integer primary key, provider text, credential_type text," \
+            " data text, disabled_cause text);"
+        for provider, cause in rows:
+            cause_sql = "null" if cause is None else f"'{cause}'"
+            script += f"insert into auth_credentials (provider, credential_type, data, disabled_cause)" \
+                f" values ('{provider}', 'oauth', 'secret-never-read', {cause_sql});"
+        subprocess.run(["sqlite3", str(path), script], check=True)
+
+    def test_a_move_warns_of_mcp_logins_the_target_lacks(self) -> None:
+        """omp keeps MCP OAuth logins per machine. The chief of staff moved to sami-devbox, which had
+        no Slack login, and its Slack tools silently never mounted (2026-11-03). The move must say
+        which servers the target lacks a login for, and never print a credential's data."""
+        slack = "mcp_oauth:profile:default:https://mcp.slack.com/mcp"
+        other = "mcp_oauth:profile:default:https://mcp.example.com/mcp"
+        self.agent_db(self.home, [(slack, None), (other, None), ("anthropic", None),
+                                  ("mcp_oauth:profile:default:https://old.example.com/mcp", "replaced")])
+        target_home = self.root / "target-home"
+        self.agent_db(target_home, [(other, None), (slack, "replaced by newer credential")])
+        remote = f'move_remote() {{ HOME="{target_home}" bash -c "$2"; }}\n'
+
+        warned = self.run_bash(remote + "move_to_warn_mcp_logins sami-devbox")
+        self.assertEqual(warned.returncode, 0, warned.stderr)
+        self.assertIn("holds no login for the MCP server(s) https://mcp.slack.com/mcp -", warned.stderr)
+        self.assertIn("/mcp reauth <server>", warned.stderr)
+        self.assertNotIn("mcp.example.com", warned.stderr)
+        self.assertNotIn("old.example.com", warned.stderr)
+        self.assertNotIn("secret-never-read", warned.stderr + warned.stdout)
+
+        # A target holding every login, and a host holding none, say nothing.
+        self.agent_db(target_home / "full", [(slack, None), (other, None)])
+        full = f'move_remote() {{ HOME="{target_home / "full"}" bash -c "$2"; }}\n'
+        self.assertEqual(self.run_bash(full + "move_to_warn_mcp_logins sami-devbox").stderr, "")
+        (self.home / ".omp/agent/agent.db").unlink()
+        self.assertEqual(self.run_bash(remote + "move_to_warn_mcp_logins sami-devbox").stderr, "")
+
+        # A target whose agent.db cannot be read lacks every login.
+        absent = f'move_remote() {{ HOME="{self.root / "nowhere"}" bash -c "$2"; }}\n'
+        self.agent_db(self.home, [(slack, None)])
+        self.assertIn("https://mcp.slack.com/mcp", self.run_bash(absent + "move_to_warn_mcp_logins t").stderr)
+
 if __name__ == "__main__":
     unittest.main()

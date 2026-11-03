@@ -4112,6 +4112,35 @@ move_to_target_worktrees() {
     return 1
 }
 
+# move_to_mcp_logins TARGET: the MCP servers this machine's omp holds an OAuth login for and TARGET's
+# does not, one server URL per line. omp keeps those logins in each machine's own
+# ~/.omp/agent/agent.db, which every box on that machine binds, so a session moved to a machine
+# without one loses the server: it answers HTTP 401 when the session starts and its tools never
+# mount (the chief of staff's Slack tools after its move to sami-devbox, 2026-11-03). Only the
+# credential names are read, never their data. A login stays per machine: two machines refreshing
+# copies of one rotating refresh token would revoke each other's, so the remedy is one sign-in on
+# the target, which every box there then shares.
+MCP_LOGINS_SQL="select distinct provider from auth_credentials where provider like 'mcp_oauth:%' and disabled_cause is null"
+move_to_mcp_logins() {
+    local target="$1" here there
+    here="$(sqlite3 -readonly "$HOME/.omp/agent/agent.db" "$MCP_LOGINS_SQL" 2>/dev/null)" || return 0
+    [[ -n "$here" ]] || return 0
+    # A target whose agent.db cannot be read holds no login a session could use there.
+    there="$(move_remote "$target" "sqlite3 -readonly \"\$HOME/.omp/agent/agent.db\" $(printf '%q' "$MCP_LOGINS_SQL")" </dev/null 2>/dev/null)" || there=""
+    comm -23 <(sort -u <<<"$here") <(sort -u <<<"$there") | sed 's/^mcp_oauth:profile:[^:]*://; s/^mcp_oauth://'
+}
+
+# move_to_warn_mcp_logins TARGET: say on stderr which MCP servers a session moved to TARGET will not
+# reach for want of a login there, and the one step that fixes it. A warning, not a refusal: the
+# session still moves, and once someone signs in on TARGET the session gets the server back when
+# it restarts or runs `/mcp reconnect <server>`.
+move_to_warn_mcp_logins() {
+    local target="$1" missing
+    missing="$(move_to_mcp_logins "$target")"
+    [[ -n "$missing" ]] || return 0
+    echo "agentbox: warning: omp on $target holds no login for the MCP server(s) $(tr '\n' ' ' <<<"$missing")- a session moved there gets none of their tools until someone signs in on $target once: start omp there and run \`/mcp reauth <server>\` (every box on $target shares that login)" >&2
+}
+
 # move_to_dests_writable TARGET: every path the copy writes on the target must be writable by the
 # move's user: the path itself when it exists, else its nearest existing ancestor. An EMPTY
 # directory owned by root there is what docker leaves when a box is started with a --dir that did
@@ -5378,6 +5407,7 @@ cmd_move_to() {
     move_to_or_would() { if $dry; then would+=("$1"); else die "no move to $target; nothing was hung up: $1"; fi; }
     move_step "asking $target: ready, halts, the same sessions there"
     move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || move_to_or_would "$MOVE_TO_WHY"
+    move_to_warn_mcp_logins "$target"
     local copy="" cwds=() tpaths="" t
     for s in "${MOVE_TO_GROUP[@]}"; do
         copy+="${MT_COPY[$s]}"$'\n'
