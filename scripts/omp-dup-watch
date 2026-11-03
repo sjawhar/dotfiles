@@ -297,10 +297,30 @@ def process_table(
     return table, True
 
 
+def opened_for_writing(fdinfo: Path) -> bool:
+    """Whether the descriptor is open for writing: O_WRONLY or O_RDWR in the access mode of the
+    octal `flags:` line of /proc/<pid>/fdinfo/<fd>. False when the line cannot be read (the
+    descriptor closed in between)."""
+    for line in (read_text(fdinfo) or "").splitlines():
+        if line.startswith("flags:"):
+            try:
+                return int(line.split()[1], 8) & os.O_ACCMODE != os.O_RDONLY
+            except (IndexError, ValueError):
+                return False
+    return False
+
+
 def held_session(base: Path) -> tuple[str, str, bool]:
-    """(session id, transcript, readable): the newest session transcript the process holds open,
-    as tmux-resurrect-omp's open_session picks it, at any depth (SESSION_PATH). A transcript
-    deleted under a live omp (the sweep's move to Cloud SQL) still names the session it runs."""
+    """(session id, transcript, readable): the newest session transcript the process holds open
+    FOR WRITING, as tmux-resurrect-omp's open_session picks it, at any depth (SESSION_PATH). A
+    transcript deleted under a live omp (the sweep's move to Cloud SQL) still names the session
+    it runs.
+
+    Only a writer runs a transcript. omp's session writer holds its file O_WRONLY|O_APPEND
+    (flags 02102001 on every writer here on 2026-11-03), and an omp also opens OTHER sessions'
+    transcripts read-only when a tool reads them: at 05:59:13Z omp 2559955 (session 01a170df)
+    held 01a170e0's transcript read-only, that file was its newest, and this watch reported
+    01a170e0 as run twice. A read-only descriptor names no session."""
     best: tuple[float, str, str] | None = None
     try:
         with os.scandir(base / "fd") as entries:
@@ -312,7 +332,7 @@ def held_session(base: Path) -> tuple[str, str, bool]:
                 if target.endswith(" (deleted)"):
                     target = target[: -len(" (deleted)")]
                 found = SESSION_PATH.search(target)
-                if not found:
+                if not found or not opened_for_writing(base / "fdinfo" / entry.name):
                     continue
                 try:
                     mtime = os.stat(target).st_mtime

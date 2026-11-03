@@ -49,9 +49,16 @@ for the next way it happens.
 
    | Source | Rule |
    | --- | --- |
-   | the transcript it holds open | `…/sessions/…/<stamp>Z_<id>.jsonl` in its `fd` table, newest first; a transcript the sweep deleted still names the session |
+   | the transcript it holds open **for writing** | `…/sessions/…/<stamp>Z_<id>.jsonl` in its `fd` table whose `fdinfo` flags carry `O_WRONLY` or `O_RDWR`, newest first; a transcript the sweep deleted still names the session |
    | this watch's own last run | the same pid and start time, seen holding that transcript: omp opens the file only to write, so an idle session closes nothing but keeps running |
    | its own command line | `--resume`/`--restore`/`-r` with a transcript path, a full id, or the id prefix omp accepts |
+
+   Only a writer runs a transcript. omp's session writer holds its own file `O_WRONLY|O_APPEND`
+   (flags `02102001` on every writer here on 2026-11-03), and an omp opens ANOTHER session's
+   transcript read-only when a tool reads it. At 05:59:13Z the first live version of this watch
+   reported session `01a170e0-e386` as run by two omps: its own, and omp 2559955, which runs
+   `01a170df-c9fd` and held `01a170e0`'s transcript read-only for a moment. That file was the
+   newer one, so it won the "newest first" rule. A read-only descriptor now names no session.
 
    The id must come from the file **name**, at any depth: three live omps here resume
    `…/<bucket>/<stamp>_<other id>/<stamp>_<id>.jsonl`, while a subagent's transcript

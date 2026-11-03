@@ -66,6 +66,7 @@ class FakeProc:
         argv: tuple[str, ...] = (),
         cwd: str | None = None,
         holds: tuple[str, ...] = (),
+        reads: tuple[str, ...] = (),
         cgroup: str = HOST_CGROUP,
         environ: dict[str, str] | None = None,
         box: bool = False,
@@ -81,20 +82,27 @@ class FakeProc:
             return
         os.symlink(cwd or "/home/sami", d / "cwd")
         (d / "fd").mkdir()
-        os.symlink("/dev/null", d / "fd" / "0")
-        for n, target in enumerate(holds, start=20):
-            os.symlink(target, d / "fd" / str(n))
+        (d / "fdinfo").mkdir()
+        # The flags the kernel shows in /proc/<pid>/fdinfo/<fd>, in octal: omp's transcript
+        # writer is O_WRONLY|O_APPEND|O_CLOEXEC|O_LARGEFILE (02102001, every writer on
+        # sami-rocqperf on 2026-11-03); a reader is O_RDONLY|O_CLOEXEC|O_LARGEFILE.
+        fds = [("/dev/null", "0100002")] + [(t, "02102001") for t in holds] + [(t, "02100000") for t in reads]
+        for n, (target, flags) in enumerate(fds, start=19):
+            name = "0" if n == 19 else str(n)
+            os.symlink(target, d / "fd" / name)
+            (d / "fdinfo" / name).write_text(f"pos:\t0\nflags:\t{flags}\nmnt_id:\t30\nino:\t1\n")
         if environ:
             (d / "environ").write_bytes(b"".join(f"{k}={v}".encode() + b"\0" for k, v in environ.items()))
 
     def drop_fds(self, pid: int) -> None:
-        for link in (self.root / str(pid) / "fd").iterdir():
-            if link.name != "0":
-                link.unlink()
+        for sub in ("fd", "fdinfo"):
+            for link in (self.root / str(pid) / sub).iterdir():
+                if link.name != "0":
+                    link.unlink()
 
     def remove(self, pid: int) -> None:
         d = self.root / str(pid)
-        for sub in ("fd",):
+        for sub in ("fd", "fdinfo"):
             if (d / sub).is_dir():
                 for link in (d / sub).iterdir():
                     link.unlink()
@@ -121,13 +129,15 @@ class FakeProc:
     def host_omp(
         self, pid: int, server: int, argv: tuple[str, ...] = (OMP,), holds: tuple[str, ...] = (),
         start: int = 1000, cwd: str = "/home/sami/src/repo", pane: str = "%5",
+        reads: tuple[str, ...] = (),
     ) -> None:
-        """An omp in a tmux pane: server -> bash -> omp, with the pane's TMUX in its environment."""
+        """An omp in a tmux pane: server -> bash -> omp, with the pane's TMUX in its environment.
+        `holds` are transcripts it writes; `reads` are files it holds open read-only."""
         shell = pid - 1
         self.add(shell, "bash", ppid=server, start=start, argv=("-bash",))
         socket = self.socket_of[server]
         self.add(
-            pid, "omp", ppid=shell, start=start, argv=argv, cwd=cwd, holds=holds,
+            pid, "omp", ppid=shell, start=start, argv=argv, cwd=cwd, holds=holds, reads=reads,
             environ={"TMUX": f"{socket},{server},0", "TMUX_PANE": pane},
         )
 
@@ -328,6 +338,31 @@ class OmpDupWatchTest(unittest.TestCase):
             WATCH, "process_table", return_value=({**table, 1301: ("omp", state, parent, start)}, True)
         ):
             self.assertEqual(self.run_once(), [])
+
+    def test_an_omp_reading_another_sessions_transcript_is_not_a_second_copy(self) -> None:
+        """2026-11-03 05:59:13Z, the live watch's false positive: omp 2559955 runs session
+        01a170df and writes its transcript; for a moment it also held 01a170e0's transcript open
+        read-only, and 01a170e0's file was the newer one, so the watch took it as 2559955's
+        session and reported 01a170e0 as run twice. An omp runs a transcript only when it holds it
+        open for writing (O_WRONLY or O_RDWR in fdinfo's flags)."""
+        sessions = self.base / "home/.omp/agent/sessions/-Code-personal-theorem"
+        sessions.mkdir(parents=True)
+        own = sessions / f"2026-10-25T02-24-36-861Z_{X}.jsonl"
+        other = sessions / f"2026-10-25T02-25-48-934Z_{Y}.jsonl"
+        own.write_text("{}\n")
+        other.write_text("{}\n")
+        os.utime(own, (time.time() - 600, time.time() - 600))  # the other session's file is newer
+        self.proc.host_omp(1101, 500, holds=(str(other),), argv=(OMP, "--resume", str(other)))
+        self.proc.host_omp(1001, 500, holds=(str(own),), reads=(str(other),), argv=(OMP, "--resume", str(own)))
+        self.assertEqual(self.run_once(), [])
+
+    def test_an_idle_omp_reading_another_sessions_transcript_keeps_its_own_id(self) -> None:
+        """The same reader with its own transcript closed (idle) and no id on its command line
+        (a session resumed in-app): a read-only descriptor names no session, so it is not
+        counted as a copy of the session it reads."""
+        self.proc.host_omp(1101, 500, holds=(transcript(Y),))
+        self.proc.host_omp(1001, 500, reads=(transcript(Y),))
+        self.assertEqual(self.run_once(), [])
 
     def test_a_process_resumed_from_a_subagent_transcript_names_no_session(self) -> None:
         """2026-11-01: two omps resumed from `…/<stamp>_<parent>/<stamp>_<id>/ArityLane.jsonl`."""
