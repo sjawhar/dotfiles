@@ -94,7 +94,7 @@ class VerdictTest(unittest.TestCase):
 
     def full(self, **overrides) -> argparse.Namespace:
         values = {
-            "cpu_stall": WATCH.CPU_STALL, "queue_per_core": 3.0, "swap_used": 0.85,
+            "cpu_stall": WATCH.CPU_STALL, "cpu_rule": True, "queue_per_core": 3.0, "swap_used": 0.85,
             "mem_floor": 8 * GIB, "mem_floor_fraction": 0.10, "mem_floor_cap": 0.25,
             "horizon": 7200.0, "rate_window": 3600.0, "clear_factor": 0.7,
         }

@@ -2,7 +2,7 @@
 """Regression tests for load-swap-watch's decisions, attribution and alert routing.
 
 The box-health lead owns box resources (dispatch://INFRA-716), so a crossing goes to that Envoy
-role, and to the INFRA lead's session only when the role is held by nobody.
+role, and to the SRE session only when the role is held by nobody.
 """
 
 import argparse
@@ -53,6 +53,8 @@ class FakeEnvoy:
 def options(state: Path, **overrides) -> argparse.Namespace:
     values = {
         "cpu_stall": WATCH.CPU_STALL,
+        "cpu_rule": True,
+        "io_hold": WATCH.IO_HOLD,
         "queue_per_core": 3.0,
         "swap_used": 0.85,
         "mem_floor": 8 * GIB,
@@ -61,7 +63,7 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "horizon": 7200.0,
         "rate_window": 3600.0,
         "grace": 600.0,
-        "escalate": 1800.0,
+        "recheck": 1800.0,
         "clear_factor": 0.7,
         "sample_seconds": 0.01,
         "top": 5,
@@ -221,20 +223,24 @@ class RoutingTest(unittest.TestCase):
         self.state = Path(self.tmp.name) / "state.json"
         self.envoy = FakeEnvoy()
         self.sample = starved()
+        # The command that tops every condition's consumers. A STILL line needs a new fact, and
+        # a command newly at the top is the one these tests use.
+        self.top = "omp"
 
-        original_envoy = WATCH.Envoy
-        original_sample = WATCH.sample_box
-        original_consumers = WATCH.consumers_text
-        WATCH.Envoy = lambda timeout=8.0: self.envoy
-        WATCH.sample_box = lambda: dict(self.sample, at=time.time())
-        WATCH.consumers_text = lambda options, envoy=None: "consumers: (none in this test)"
+        patches = {
+            "Envoy": lambda timeout=8.0: self.envoy,
+            "sample_box": lambda: dict(self.sample, at=time.time()),
+            "measure_consumers": lambda options: {"ranked": {kind: [(self.top, 1.0, 1)] for kind in WATCH.KINDS}},
+            "consumers_text": lambda options, envoy=None, measured=None: "consumers: (none in this test)",
+        }
+        for name, replacement in patches.items():
+            self.addCleanup(setattr, WATCH, name, getattr(WATCH, name))
+            setattr(WATCH, name, replacement)
 
-        def restore() -> None:
-            WATCH.Envoy = original_envoy
-            WATCH.sample_box = original_sample
-            WATCH.consumers_text = original_consumers
-
-        self.addCleanup(restore)
+    def worse(self) -> argparse.Namespace:
+        """Options for a run in which every open crossing has a new fact: a new top consumer."""
+        self.top = "python3"
+        return options(self.state, grace=0.0, recheck=0.0)
 
     def published(self, needle: str) -> list[str]:
         return [text for _, text in self.envoy.published if needle in text]
@@ -244,73 +250,77 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(self.envoy.published, [])
         self.assertEqual(self.envoy.sent, [])
 
-    def test_each_condition_gets_its_own_message(self) -> None:
+    def test_each_condition_gets_its_own_line_in_one_message(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual(len(self.envoy.published), 2)
-        topics = {topic for topic, _ in self.envoy.published}
-        self.assertEqual({WATCH.BOX_HEALTH_ROLE_TOPIC}, topics)
-        cpu = self.published("BOX SHORT OF CPU")
-        swap = self.published("BOX OUT OF SWAP")
+        self.assertEqual(1, len(self.envoy.published))
+        topic, text = self.envoy.published[0]
+        self.assertEqual(WATCH.BOX_HEALTH_ROLE_TOPIC, topic)
+        lines = text.splitlines()
+        cpu = [line for line in lines if line.startswith("BOX SHORT OF CPU")]
+        swap = [line for line in lines if line.startswith("BOX OUT OF SWAP")]
         self.assertEqual(1, len(cpu))
         self.assertEqual(1, len(swap))
-        self.assertNotIn("SWAP", cpu[0].splitlines()[0])
-        self.assertNotIn("CPU", swap[0].splitlines()[0])
-        self.assertIn("Do not restart an agent on this signal", cpu[0])
-        self.assertIn("about the NEXT memory squeeze", swap[0])
-        self.assertIn("kills nothing", swap[0])
+        self.assertNotIn("SWAP", cpu[0])
+        self.assertNotIn("CPU", swap[0])
+        self.assertIn("restart no agent", text)
+        # The long form of each condition's meaning and action is in the report the message names.
+        report = Path(text.rsplit("Full report: ", 1)[1]).read_text()
+        self.assertIn("Do not restart an agent on this signal", report)
+        self.assertIn("about the NEXT memory squeeze", report)
+        self.assertIn("kills nothing", report)
 
-    def test_one_alert_per_condition_per_crossing(self) -> None:
+    def test_one_message_per_crossing(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual(len(self.envoy.published), 2)
+        self.assertEqual(1, len(self.envoy.published))
 
     def test_an_unheld_role_falls_back_to_the_sre_session(self) -> None:
         self.envoy.publish_ok = False
         WATCH.run_once(options(self.state, grace=0.0))
-        self.assertEqual(
-            [WATCH.SRE, WATCH.SRE], [session for session, _ in self.envoy.sent]
-        )
+        self.assertEqual([WATCH.SRE], [session for session, _ in self.envoy.sent])
 
-    def test_a_recovered_condition_is_never_carried_into_an_escalation(self) -> None:
+    def test_a_recovered_condition_is_never_carried_into_a_still_line(self) -> None:
         """The 01:32Z defect: CPU recovered, swap did not, and the headline said both."""
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
-        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
-        escalations = self.published("STILL OUT OF SWAP")
-        self.assertEqual(1, len(escalations))
-        self.assertNotIn("CPU", escalations[0].splitlines()[0])
+        WATCH.run_once(self.worse())
+        self.assertEqual(2, len(self.envoy.published))
+        lines = self.envoy.published[1][1].splitlines()
+        still = [line for line in lines if line.startswith("STILL OUT OF SWAP")]
+        self.assertEqual(1, len(still))
+        self.assertNotIn("CPU", still[0])
+        self.assertFalse([line for line in lines if line.startswith("STILL SHORT OF CPU")])
+        self.assertTrue([line for line in lines if line.startswith("BOX SHORT OF CPU CLEARED")])
         self.assertEqual([], self.envoy.sent)
-        self.assertEqual(1, len(self.published("BOX SHORT OF CPU CLEARED")))
 
-    def test_an_escalation_goes_to_the_box_health_role(self) -> None:
+    def test_a_still_line_goes_to_the_box_health_role(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
-        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        WATCH.run_once(self.worse())
         topics = {topic for topic, text in self.envoy.published if "STILL OUT OF SWAP" in text}
         self.assertEqual({WATCH.BOX_HEALTH_ROLE_TOPIC}, topics)
         self.assertEqual([], self.envoy.sent)
 
-    def test_an_unheld_role_sends_an_escalation_to_the_sre_session(self) -> None:
+    def test_an_unheld_role_sends_a_still_line_to_the_sre_session(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         self.envoy.publish_ok = False
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
-        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
-        escalations = [
-            session for session, text in self.envoy.sent if "STILL OUT OF SWAP" in text
-        ]
-        self.assertEqual([WATCH.SRE], escalations)
+        WATCH.run_once(self.worse())
+        stills = [session for session, text in self.envoy.sent if "STILL OUT OF SWAP" in text]
+        self.assertEqual([WATCH.SRE], stills)
 
     def test_no_message_of_a_whole_cycle_reaches_the_chief_or_the_infra_lead(self) -> None:
         """Box health is the SRE session's (Sami, 2026-10-31), and nobody else's."""
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
-        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        WATCH.run_once(self.worse())
         self.sample = box()
         WATCH.run_once(options(self.state, grace=0.0))
         self.envoy.publish_ok = False
         self.sample = starved()
         WATCH.run_once(options(self.state, grace=0.0))
-        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        self.top = "omp"
+        WATCH.run_once(self.worse())
         addressed = [session for session, _ in self.envoy.sent] + [
             topic for topic, _ in self.envoy.published
         ]
@@ -318,20 +328,22 @@ class RoutingTest(unittest.TestCase):
         self.assertNotIn(CHIEF_OF_STAFF, addressed)
         self.assertNotIn(INFRA_LEAD, addressed)
 
-    def test_recovery_clears_each_condition_and_says_so(self) -> None:
+    def test_recovery_clears_each_condition_in_one_message(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box()
         WATCH.run_once(options(self.state, grace=0.0))
+        self.assertEqual(2, len(self.envoy.published))
         self.assertEqual(1, len(self.published("BOX SHORT OF CPU CLEARED")))
         self.assertEqual(1, len(self.published("BOX OUT OF SWAP CLEARED")))
 
-    def test_dry_run_sends_nothing(self) -> None:
+    def test_dry_run_sends_nothing_and_writes_no_report(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0, dry_run=True))
         self.assertEqual(self.envoy.published, [])
         self.assertEqual(self.envoy.sent, [])
+        self.assertFalse((self.state.parent / "reports").exists())
 
-    def test_a_refused_escalation_is_never_reported_as_told(self) -> None:
-        """An escalation that says it was told while every route refused it is a silent failure."""
+    def test_a_refused_still_is_never_reported_as_told(self) -> None:
+        """A message that says it was told while every route refused it is a silent failure."""
         WATCH.run_once(options(self.state, grace=0.0))
         self.envoy.publish_ok = False
         self.envoy.send_ok = False
@@ -339,25 +351,23 @@ class RoutingTest(unittest.TestCase):
         original_log = WATCH.log
         WATCH.log = said.append
         try:
-            WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+            WATCH.run_once(self.worse())
         finally:
             WATCH.log = original_log
-        self.assertEqual(
-            [WATCH.SRE, WATCH.SRE], [session for session, _ in self.envoy.sent]
-        )
+        self.assertEqual([WATCH.SRE], [session for session, _ in self.envoy.sent])
         self.assertFalse([line for line in said if line.startswith("told ")])
         self.assertTrue([line for line in said if "NOBODY HEARD IT" in line])
 
-    def test_a_delivered_escalation_says_who_heard_it(self) -> None:
+    def test_a_delivered_still_says_who_heard_it(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         said = []
         original_log = WATCH.log
         WATCH.log = said.append
         try:
-            WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+            WATCH.run_once(self.worse())
         finally:
             WATCH.log = original_log
-        self.assertIn(f"told {WATCH.BOX_HEALTH_ROLE_TOPIC}", said)
+        self.assertTrue([line for line in said if line.startswith(f"told {WATCH.BOX_HEALTH_ROLE_TOPIC}: ")])
 
 
 class BoxHealthOwnerTest(unittest.TestCase):
@@ -373,17 +383,18 @@ class BoxHealthOwnerTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def test_alert_escalation_and_clear_all_go_to_the_owner_and_nothing_is_published(self) -> None:
+    def test_alert_still_and_clear_all_go_to_the_owner_and_nothing_is_published(self) -> None:
         WATCH.run_once(options(self.state, grace=0.0))
         self.sample = box(swap_free=0, swap_used_fraction=1.0)
-        WATCH.run_once(options(self.state, grace=0.0, escalate=0.0))
+        self.top = "python3"
+        WATCH.run_once(options(self.state, grace=0.0, recheck=0.0))
         self.sample = box()
         WATCH.run_once(options(self.state, grace=0.0))
         self.assertEqual(self.envoy.published, [])
         self.assertEqual({self.OWNER}, {session for session, _ in self.envoy.sent})
         texts = [text for _, text in self.envoy.sent]
         self.assertTrue([text for text in texts if "BOX OUT OF SWAP" in text])
-        self.assertTrue([text for text in texts if "STILL" in text.upper()])
+        self.assertTrue([text for text in texts if "STILL OUT OF SWAP" in text])
         self.assertTrue([text for text in texts if "CLEARED" in text])
 
     def test_an_unusable_owner_is_refused_at_start(self) -> None:

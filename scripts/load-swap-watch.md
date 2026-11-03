@@ -32,15 +32,29 @@ No instrument on the box watched either number. `disk-fill-watch` watches filesy
 `omp-memory-watch` watches one session against its own memcg ceiling and says nothing about a
 box carrying a hundred of them. This watch is the missing one.
 
-## Each condition on its own
+## Each condition on its own, in one message
 
-CPU, swap and memory are judged apart and said apart: each has its own crossing, grace, alert,
-escalation and clear, and one message never names two of them. On 2026-10-30T01:32Z an
-escalation from `ossv-agent-open` read **"STILL OUT OF CPU+SWAP"** while that box carried
-**load 27 on 32 cores with `cpu some avg60` at 7%** — a working box. The swap half was true; the
-CPU half had recovered half an hour earlier, and the old code named the union of everything the
-crossing had ever been. A headline that overstates one half makes the next true alert cheaper
-to dismiss, which is what six lanes on that same machine had already paid for the night before.
+CPU, swap and memory are judged apart: each has its own crossing, grace, alert, new-fact check
+and clear, and **no line ever names two of them**. On 2026-10-30T01:32Z an escalation from
+`ossv-agent-open` read **"STILL OUT OF CPU+SWAP"** while that box carried **load 27 on 32 cores
+with `cpu some avg60` at 7%** — a working box. The swap half was true; the CPU half had recovered
+half an hour earlier, and the old code named the union of everything the crossing had ever been.
+A headline that overstates one half makes the next true alert cheaper to dismiss, which is what
+six lanes on that same machine had already paid for the night before.
+
+The verdicts of one run share **one message**, one line each, worst first:
+
+```text
+BOX SHORT OF CPU on sami-rocqperf: cpu some avg60 58% (rule 35%) at load 349/286/159 on 64 cores; 130 runnable, 12 blocked.
+BOX OUT OF SWAP: 95.5% used, 5.0 GiB free of 112.0 GiB (rule 85%).
+BOX SHORT OF MEMORY: MemAvailable 18.0 GiB under the 25.2 GiB floor.
+DO (box-health owner): cut the concurrent agents here; move new work to another box; restart no agent; stop finished sessions by exact pid, owner asked first.
+Full report: /mnt/nvme/sami/tmp/load-swap-watch/reports/20261103T030207Z-alert.txt
+```
+
+Separate messages were the other half of the same fault: on 2026-11-01T16:36Z this watch sent
+`BOX SHORT OF CPU` and `BOX OUT OF SWAP` as two messages of 5.6 and 6 KB in the same minute, with
+the same load line and the same consumer table in both.
 
 ## The rules, and why each number
 
@@ -53,6 +67,15 @@ to dismiss, which is what six lanes on that same machine had already paid for th
   visibly slow at the low end; `ossv-agent-open2` 55% at load 76/32. The lowest starved reading
   is 42% and the highest healthy one is 7%, so 35% sits in that empty band, below every starved
   reading with margin and five times the highest healthy one.
+
+  **Not on every box.** `HOST_SETTINGS` in the script turns the CPU rule off per host, and it is
+  off on `sami-leanperf`: a 160-vCPU Lean timing-benchmark box whose bursts hold every core by
+  design (p95 92% of 160 vCPU over 1,055 ten-minute samples, peak 1-minute load 1,246 —
+  [leanperf-load.md](dispatch://INFRA-993/artifact/leanperf-load-md)). Its 7 CPU messages in the
+  48 h to 2026-11-03 (`cpu some avg60` 76–83% at load 195/160) drew no reaction. A higher bar
+  would not help: at those peaks `cpu some` nears 100%, so any bar in the band fires too. Swap
+  and memory still alert there — an OOM kill is nobody's plan. The setting is in git, where a
+  reviewer sees it, not in a drop-in on one machine; `--cpu-rule on|off` overrides it by hand.
 - **Run queue per core ≥ 3** (`--queue-per-core`), only on a kernel without PSI. Coarser: it
   says how many tasks want a CPU, not how long any waited.
 - **Swap ≥ 85% used** (`--swap-used`), with **no CPU condition at all**. Zero free swap is worth
@@ -80,20 +103,58 @@ to dismiss, which is what six lanes on that same machine had already paid for th
   burst does not hold the bar for ten minutes; the incident held 80% for seventy.
 - **Clear at 0.7 of each rule** (`--clear-factor`), per condition, so a crossing never flaps on
   its threshold — and CPU also clears the moment the load fits on the cores again.
+- **A CPU crossing never clears while the box is stalled** (`--io-hold`, default 50): not while
+  more tasks are blocked than the box has cores, and not while `io some avg60` is at or over the
+  hold. `cpu some` counts tasks that are *runnable*; tasks stuck in uninterruptible sleep are
+  neither runnable nor done, so a box waiting on its disk reads as a box with CPU to spare. Four
+  of the five CPU clears sami-rocqperf sent in the 48 h to 2026-11-03 were that false reading:
+  **2026-11-02T10:25Z "CLEARED … load 851/598/449 on 64 cores, 97 runnable, 723 blocked"**
+  (`io some` 94%), 11-03T00:32Z (329 blocked, io 91%), 00:36Z (167 blocked, io 93%) and 01:39Z
+  (io 68%; the crossing re-opened 8 minutes later). The one true clear, 11-01T12:45Z, had
+  `io some` 6%, and the box was at load 8 by 14:20Z. 50% sits between the two groups.
 
-## What an alert says
+## What the message says, and what the report holds
 
-One line of box state (load, runnable vs blocked, all three PSI figures, swap, MemAvailable),
-then why it fired, then the consumers:
+**The message is at most 600 characters** and ends with `Full report: <path>`. Its first ~200
+characters are the decision — what, where, how bad — then what the box-health owner does, then
+the pressures and the top consumer of each condition that spoke. It is read in a notification,
+where nothing below the first lines is seen; the messages it replaces were **4.9–6 KB**, of
+which the first 200 characters already carried the decision.
 
+Everything else goes in the report, written to `<state dir>/reports/<UTC stamp>-<kind>.txt`
+(so `/mnt/nvme/sami/tmp/load-swap-watch/reports/` here), with reports older than 7 days deleted
+in the same run:
+
+- the full box state line and the full reason each verdict fired;
+- when the crossing opened, when it was first said, and the worst figures already said;
+- what the condition looks like from a pane and what to do about it, per condition;
 - the agent census — how many `omp` processes the box carries and what they hold, because on a
   lane box the dial that causes this is the number of concurrent workers, not any one of them;
 - CPU by command and by process over a 10 s delta, never a single `ps` reading: every top-CPU
   pid in a snapshot taken at 23:52Z on the incident box was already gone a minute later, because
   the load was thousands of short-lived `git`, `python3` and `gzip` children;
-- swap held, by command and by process;
+- swap held and RSS held, by command and by process;
 - each process named by its lane worker, its agent session, its **working directory** and its
   **tmux pane**, all read from the process and never guessed.
+
+A report that cannot be written (a full disk is one reason a box is in trouble) never stops the
+message: the message goes, and names the report as not written and why.
+
+## Said again only on a new fact
+
+While a crossing stays open, the watch speaks again **only when the box is clearly worse than
+the worst it has already said** about that crossing:
+
+- load, or tasks blocked past the core count, at least **doubled**;
+- swap free, or `MemAvailable`, at least **halved** (and by at least 1% of the total, so a figure
+  already near zero cannot halve its way into a message every run);
+- a **command newly at the top** of that condition's consumers, looked for every `--recheck`
+  (30 min) and never more often, because finding it costs a 10-second CPU sample.
+
+Never because time passed. The old rule sent a `STILL …` at 30 minutes by the clock: of the four
+it sent in the 48 h to 2026-11-03, the SRE acted on none. The marks ratchet, so a level already
+reported is not news again: on 2026-11-02 "369 blocked" was said at 00:20Z, the load doubled at
+08:10Z while 67 were blocked, and the old code then called 182 blocked at 09:16Z a new fact.
 
 ### Which session, and how it is checked
 
@@ -119,17 +180,17 @@ or from the box having exactly one live session. An Envoy that does not answer l
 id unverified and named as before: a lookup failure must never read as "nobody is live".
 
 The working directory and the pane are there for the same reason: neither can be inherited from
-a session on another machine. Both are read once per alert — one `tmux list-panes`, one Envoy
+a session on another machine. Both are read once per report — one `tmux list-panes`, one Envoy
 GET — and never on a quiet period.
 
-It also says what the condition looks like from a pane, because the wrong reaction is the
-expensive one: every agent still runs, still answers and still writes its transcript, so a lane
-reads as frozen, and restarting it costs its turn and adds another working set to the same box.
+The report also says what the condition looks like from a pane, because the wrong reaction is
+the expensive one: every agent still runs, still answers and still writes its transcript, so a
+lane reads as frozen, and restarting it costs its turn and adds another working set to the box.
 
 ## Where alerts go
 
-The box-health lead's Envoy role (`notifications.role.lead-box-health`): the first alert, the
-escalation when a crossing is still open 30 minutes after it (`--escalate`), and the clear.
+The box-health lead's Envoy role (`notifications.role.lead-box-health`): the alert, a new fact
+while the crossing stays open, and the clear — one message per run, whichever of them it carries.
 Nobody holds the role? The SRE session (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) hears it
 instead. Agent sessions only, never a person; neither the chief of staff nor the INFRA lead
 hears a box alert (Sami, 2026-10-31).
@@ -139,11 +200,18 @@ the service's environment: every message then goes to that session alone, with n
 this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
 owner instead of to this box's role holder. An invalid value stops the watch at start.
 
-## What it will not catch
+## What it will not catch, and what these rules give up
 
 - **A box that is slow for another reason.** A hung mount, a saturated disk or a network stall
-  shows up in `io some`, which the alert prints but does not fire on; `disk-fill-watch` owns the
-  disk.
+  shows up in `io some`, which the message prints but does not fire on; `disk-fill-watch` owns
+  the disk. Since 2026-11-03 a high `io some` also holds a CPU crossing open, so a box that is
+  IO-bound keeps a CPU crossing it would once have cleared out of: that crossing is reported
+  once, not once per flap, and its clear waits for the stall to end.
+- **CPU on `sami-leanperf`.** Nothing there says the benchmark box is saturated; its swap and
+  memory rules still speak. A CPU shortage on that box has to be read from its own run.
+- **A crossing that stays bad without getting worse.** It is said once. A reader who wants the
+  current state runs `load-swap-watch --consumers`, and every run is in
+  `journalctl --user -u load-swap-watch`.
 - **One session's own memory.** `omp-memory-watch` owns that; this watch sees the box.
 - **A lane that is stuck rather than starved.** A worker waiting on a peer, a dead role holder
   or an empty queue looks identical from `/proc`. `envoy-role-holder-watch` covers the holder
@@ -151,13 +219,21 @@ owner instead of to this box's role holder. An invalid value stops the watch at 
 - **The last few seconds.** Its instrument is a 60-second average, so a 10-second spike is
   invisible by design.
 
+## How much it says
+
+Measured by replaying this box's own journal state lines (2026-11-01T09:50Z → 2026-11-03T02:52Z,
+947 samples, 41 h) through both versions: **19 messages before, 12 after** — 11/day to 7/day on
+sami-rocqperf, and 0 instead of ~3.5/day on sami-leanperf. The longest message a run can produce
+(three verdicts at once) is 581 characters; the old alerts were 4.9–6 KB.
+
 ## Running it by hand
 
 ```bash
 load-swap-watch --consumers              # who is using the CPU and holding the swap, now
 load-swap-watch --consumers --json       # the same, as one JSON object
-load-swap-watch --dry-run --print-alert  # decide and print; send nothing, write no state
-load-swap-watch --dry-run --print-alert --grace 0   # render the alert for a crossing that just opened
+load-swap-watch --dry-run --print-alert  # decide; print the message and the report it would write
+load-swap-watch --dry-run --print-alert --grace 0   # the same for a crossing that just opened
+load-swap-watch --dry-run --print-alert --grace 0 --cpu-rule off   # as sami-leanperf judges it
 ```
 
 Turn it off with `systemctl --user disable --now load-swap-watch.timer`; nothing re-arms it
