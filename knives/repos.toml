@@ -183,3 +183,183 @@ base = "v9.0"
 [repos.rocq.series."9.2"]
 base = "v9.2+typewise-isomorphism"
 base_remote = "origin"
+
+# Forks registered 2026-11-03 (Sami: dispatch://LINUX-1/ask/efee3fc7, "all the different repos that we work on
+# forks of"). Bases are the parents' default branches; theorem-labs forks share the sjawhar ledger, as lean4 does.
+[repos.talleyrand]
+upstream = "https://github.com/Sage-Future/Talleyrand"
+origin = "https://github.com/sjawhar/Talleyrand"
+base = "develop"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.brpc]
+upstream = "https://github.com/apache/brpc"
+origin = "https://github.com/sjawhar/brpc"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.brush]
+upstream = "https://github.com/reubeno/brush"
+origin = "https://github.com/sjawhar/brush"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.compound-engineering-plugin]
+upstream = "https://github.com/EveryInc/compound-engineering-plugin"
+origin = "https://github.com/sjawhar/compound-engineering-plugin"
+release_branch = "sami"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.connectbot]
+upstream = "https://github.com/connectbot/connectbot"
+origin = "https://github.com/sjawhar/connectbot"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.cosmic-greeter]
+upstream = "https://github.com/pop-os/cosmic-greeter"
+origin = "https://github.com/sjawhar/cosmic-greeter"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.gws-multi-account]
+upstream = "https://github.com/indentcorp/gws-multi-account"
+origin = "https://github.com/sjawhar/gws-multi-account"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.iced]
+upstream = "https://github.com/pop-os/iced"
+origin = "https://github.com/sjawhar/iced"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.leangz]
+upstream = "https://github.com/digama0/leangz"
+origin = "https://github.com/sjawhar/leangz"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.libdiginet]
+upstream = "https://github.com/FreeMixer/libdiginet"
+origin = "https://github.com/sjawhar/libdiginet"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.libreac]
+upstream = "https://github.com/FreeREAC/libreac"
+origin = "https://github.com/sjawhar/libreac"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.moddable]
+upstream = "https://github.com/Moddable-OpenSource/moddable"
+origin = "https://github.com/sjawhar/moddable"
+base = "public"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.omx-clap-core]
+upstream = "https://github.com/FreeMixer/omx-clap-core"
+origin = "https://github.com/sjawhar/omx-clap-core"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.oss-verify]
+upstream = "https://github.com/FreeREAC/oss-verify"
+origin = "https://github.com/sjawhar/oss-verify"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.plugin-hostd]
+upstream = "https://github.com/FreeMixer/plugin-hostd"
+origin = "https://github.com/sjawhar/plugin-hostd"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.pulumi-docker-build]
+upstream = "https://github.com/pulumi/pulumi-docker-build"
+origin = "https://github.com/sjawhar/pulumi-docker-build"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.reac-pw]
+upstream = "https://github.com/FreeREAC/reac-pw"
+origin = "https://github.com/sjawhar/reac-pw"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.slack-mcp-server]
+upstream = "https://github.com/korotovsky/slack-mcp-server"
+origin = "https://github.com/sjawhar/slack-mcp-server"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.sysbox-fs]
+upstream = "https://github.com/nestybox/sysbox-fs"
+origin = "https://github.com/sjawhar/sysbox-fs"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.termlib]
+upstream = "https://github.com/connectbot/termlib"
+origin = "https://github.com/sjawhar/termlib"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.tmux-builds]
+upstream = "https://github.com/tmux/tmux-builds"
+origin = "https://github.com/sjawhar/tmux-builds"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.coq-dpdgraph]
+upstream = "https://github.com/rocq-community/coq-dpdgraph"
+origin = "https://github.com/theorem-labs/coq-dpdgraph"
+base = "coq-master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.coq-elpi]
+upstream = "https://github.com/LPCIC/coq-elpi"
+origin = "https://github.com/theorem-labs/coq-elpi"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.jsoncons]
+upstream = "https://github.com/danielaparker/jsoncons"
+origin = "https://github.com/theorem-labs/jsoncons"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.lean-sail]
+upstream = "https://github.com/rems-project/lean-sail"
+origin = "https://github.com/theorem-labs/lean-sail"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.lean-zip]
+upstream = "https://github.com/kim-em/lean-zip"
+origin = "https://github.com/theorem-labs/lean-zip"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.lean-zip-common]
+upstream = "https://github.com/kim-em/lean-zip-common"
+origin = "https://github.com/theorem-labs/lean-zip-common"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.metarocq]
+upstream = "https://github.com/MetaRocq/metarocq"
+origin = "https://github.com/theorem-labs/metarocq"
+base = "9.1"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.rocq-opam]
+upstream = "https://github.com/rocq-prover/opam"
+origin = "https://github.com/theorem-labs/opam"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.rocq-lean-import]
+upstream = "https://github.com/rocq-community/rocq-lean-import"
+origin = "https://github.com/theorem-labs/rocq-lean-import"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.strongswan]
+upstream = "https://github.com/strongswan/strongswan"
+origin = "https://github.com/theorem-labs/strongswan"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.univalent_parametricity]
+upstream = "https://github.com/CoqHott/univalent_parametricity"
+origin = "https://github.com/theorem-labs/univalent_parametricity"
+base = "master"
+ledger = "sjawhar/.knives-ledger"
