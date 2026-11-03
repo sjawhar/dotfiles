@@ -258,11 +258,16 @@ before handing the call to the real one.
   instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
   entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses, and
   turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
-- **`ctx`** sets `CTX_SERVER` to the team memory graph's server when the caller has none, so a
-  session, pane or unit whose environment predates `.bashrc`'s line reaches the server too; an
-  empty `CTX_SERVER` is kept and means a local tree (`CTX_SERVER= ctx --memory <tree> …`). It execs
-  the mise pin (`"github:sjawhar/ctx-memory"` in `mise.toml`), found with `mise which -C /`, as
-  `shims/knives` finds knives, so mise's own shim never hands the call back to it.
+- **`ctx`** reaches one of two memory graphs. Sami's personal deployment is chosen when the omp
+  profile is `personal` or the caller sets `CTX_PERSONAL_ROOT`: its root (that variable, else
+  `ctx-personal` under an absolute `$XDG_DATA_HOME`, else `~/.local/share`) names its server in
+  `server-url` and its release in `ctx-version` (an executable `bin/ctx` overrides it), and the
+  shim sets `CTX_DATA_DIR` and `CTX_STATE_DIR` under it. An inherited `CTX_SERVER` is ignored
+  there, because every shell inherits the team URL from `.bashrc`; only an empty one is kept, for
+  a local tree read. Every other call gets the team server when the caller names none (an empty
+  `CTX_SERVER` again means a local tree) and the mise pin (`"github:sjawhar/ctx-memory"` in
+  `mise.toml`), found with `mise which -C /`, as `shims/knives` finds knives, so mise's own shim
+  never hands the call back to it.
 - **`pulumi`** names a state backend only when the CLI would otherwise find none. Pulumi CLI
   3.268.0 that reaches no backend at all, and recognizes a coding agent around it (it reads
   `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_*`, `GEMINI_CLI`, `OPENCODE`, `AI_AGENT` and others),

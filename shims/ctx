@@ -28,7 +28,12 @@ mise="$(command -v mise 2>/dev/null || true)"
 export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
 
 if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-}" ]]; then
-	root="${CTX_PERSONAL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ctx-personal}"
+	# The XDG data home counts only as an absolute path, as the XDG Base Directory spec says.
+	case "${XDG_DATA_HOME:-}" in
+	/*) data_home="$XDG_DATA_HOME" ;;
+	*) data_home="$HOME/.local/share" ;;
+	esac
+	root="${CTX_PERSONAL_ROOT:-$data_home/ctx-personal}"
 	real="$root/bin/ctx"
 	if [[ ! -x "$real" ]]; then
 		version="$(cat "$root/ctx-version" 2>/dev/null)"
@@ -40,7 +45,13 @@ if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-
 			exit 127
 		fi
 	fi
-	if [[ -z "${CTX_SERVER+set}" ]]; then
+	# The server is always the deployment's own. An inherited CTX_SERVER never counts here: every
+	# shell inherits the team server's URL from .bashrc, and honouring it would send a personal
+	# search or write to the company tree. Only an empty CTX_SERVER (`CTX_SERVER= ctx --memory …`)
+	# is honoured, and it means a local tree read with no server at all.
+	if [[ -n "${CTX_SERVER+set}" && -z "$CTX_SERVER" ]]; then
+		:
+	else
 		CTX_SERVER="$(cat "$root/server-url" 2>/dev/null)"
 		if [[ -z "$CTX_SERVER" ]]; then
 			echo "ctx shim: the personal deployment at $root has no server-url" >&2
