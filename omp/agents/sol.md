@@ -11,6 +11,7 @@ description: |
   reports with evidence.
 model:
   - "ossv-gateway-openai/openai/gpt-6.1-sol:xhigh"
+  - "ossv-gateway/openai/gpt-6.1-sol:xhigh"
 color: green
 ---
 

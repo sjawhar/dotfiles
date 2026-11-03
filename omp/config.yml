@@ -141,21 +141,28 @@ retry:
     # it — measured 2026-10-30, astra-api on a typo'd id refused with
     # `retry.fallbackChains["openai/*"] is empty`, and on its real id with both
     # OpenAI providers disabled it refused naming all three of its own links.
-    # openai-codex/gpt-6-astra and openai/gpt-6-astra name each other; omp
-    # resolves that by alternating models, one retry attempt per hop, until the
-    # retry budget ends the turn ("Two keys is the whole walk per attempt",
-    # packages/coding-agent/src/session/turn-recovery.ts).
+    # 2026-11-03 (INFRA cost cut, dispatch://INFRA-165): per-token
+    # openai/gpt-6-astra cost about $19.8k/day once the Codex window was spent
+    # (11-02 ~21:00Z), since it was the astra chain's first link. Both astra
+    # keys now go to GPT-6.1 Sol through the OSS Verify gateway (Sami's
+    # preference, dispatch://BET-545), then Codex Sol, and never to a per-token
+    # `openai/` model. Codex Astra stays the `astra` agent's own model: a
+    # subscription, not per-token, used whenever its window is open. The
+    # gateway Sol id differs per machine: sami-rocqperf declares it as
+    # `ossv-gateway-openai/openai/gpt-6.1-sol`, sami-devbox as
+    # `ossv-gateway/openai/gpt-6.1-sol` (devbox/sami-devbox-model-routes); each
+    # chain names both, and a machine skips the id it does not declare.
     openai-codex/gpt-6-astra:high:
       - anthropic/claude-opus-5-5:xhigh
     openai-codex/gpt-6-astra:
-      - openai/gpt-6-astra
-      - openai/gpt-6.1-sol
-      - openai/gpt-6-sol
+      - ossv-gateway-openai/openai/gpt-6.1-sol
+      - ossv-gateway/openai/gpt-6.1-sol
+      - openai-codex/gpt-6.1-sol
     openai/*: []
     openai/gpt-6-astra:
-      - openai/gpt-6.1-sol
-      - openai/gpt-6-sol
-      - openai-codex/gpt-6-astra
+      - ossv-gateway-openai/openai/gpt-6.1-sol
+      - ossv-gateway/openai/gpt-6.1-sol
+      - openai-codex/gpt-6.1-sol
     openai/gpt-5.6-terra:
       - openai/gpt-6.1-terra
       - openai/gpt-6.1-sol
@@ -174,10 +181,15 @@ retry:
     # unreachable, and on a machine without the provider, the spawn fell to
     # Codex Sol and refused (`usage_limit_reached`) instead of answering.
     ossv-gateway-openai/openai/gpt-6.1-sol:
+      - ossv-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     ossv-gateway-openai/*: []
+    ossv-gateway/openai/gpt-6.1-sol:
+      - ossv-gateway-openai/openai/gpt-6.1-sol
+      - openai-codex/gpt-6.1-sol
     openai-codex/gpt-6.1-sol:
       - ossv-gateway-openai/openai/gpt-6.1-sol
+      - ossv-gateway/openai/gpt-6.1-sol
     # openai-codex/gpt-5.5 was retired from the catalog; the resolver already
     # matched it to gpt-5.6-terra, which has its own chain below.
     openai-codex/gpt-5.6-sol:
