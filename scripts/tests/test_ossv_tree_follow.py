@@ -112,6 +112,26 @@ class OssvTreeFollowTest(unittest.TestCase):
         self.assertTrue((self.tree / "briefs" / "new.md").exists())
         self.assertNotIn("note:", run.stdout)
 
+    def test_a_path_ops_deletes_does_not_stop_the_run(self) -> None:
+        # 2026-11-03 12:00Z: clear_same's `read` met a deleted path and the run exited 1, silently.
+        git(self.work, "rm", "-q", "peaks.tsv")
+        (self.work / "notes.tsv").write_text("a\nb\n")
+        git(self.work, "commit", "-q", "-am", "ops deletes peaks.tsv")
+        tip = git(self.work, "rev-parse", "HEAD")
+        (self.tree / "notes.tsv").write_text("a\nb\n")
+        run = self.follow()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.head(), tip)
+        self.assertFalse((self.tree / "peaks.tsv").exists())
+
+    def test_an_unexpected_failure_says_why(self) -> None:
+        self.advance()
+        # The fetch fails: the remote is gone. set -e stops the run; the journal must say where.
+        git(self.tree, "remote", "set-url", "origin", str(self.work.parent / "gone"))
+        run = self.follow()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertRegex(run.stderr, r"ossv-tree-follow: stopped at line \d+: `.*git -C .* fetch .*` exited \d+")
+
 
 if __name__ == "__main__":
     unittest.main()

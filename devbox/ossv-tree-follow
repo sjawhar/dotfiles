@@ -26,7 +26,7 @@
 # Any refusal exits non-zero, so the unit fails and unit-health-watch tells the box-health owner.
 # lane VMs keep the same tree with the stream's own agentvm/ossv-tree-sync, which stops on any local
 # change outside notes/status/; on this machine the stream's sessions write ledgers into the tree.
-set -euo pipefail
+set -Eeuo pipefail
 
 tree="${OSSV_TREE_FOLLOW_TREE:-$HOME/src/oss-verifier}"
 remote="${OSSV_TREE_FOLLOW_REMOTE:-https://github.com/theorem-labs/oss-verify-proofs-internal}"
@@ -35,6 +35,11 @@ reference="${OSSV_TREE_FOLLOW_REFERENCE:-$HOME/src/oss-verify-proofs-internal}"
 
 say() { printf 'ossv-tree-follow: %s\n' "$*"; }
 die() { say "$*" >&2; exit 1; }
+# Every exit that set -e makes says why, in the journal. On 2026-11-03 a `read` that met a path ops
+# had deleted returned 1 inside clear_same, and every run from about 12:00Z exited 1 in under a
+# second with no word of its own.
+on_err() { say "stopped at line $2: \`$3\` exited $1" >&2; }
+trap 'on_err $? $LINENO "$BASH_COMMAND"' ERR
 
 exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ossv-tree-follow.lock"
 flock -n 9 || { say "another run holds the lock; nothing to do"; exit 0; }
@@ -63,7 +68,8 @@ clear_same() {
     local p mode type oid
     git -C "$tree" merge-base --is-ancestor HEAD "origin/$branch" || return 0
     while IFS= read -r -d '' p; do
-        read -r mode type oid _ < <(git -C "$tree" ls-tree "origin/$branch" -- "$p")
+        # A path ops deletes has no entry there: nothing to clear.
+        read -r mode type oid _ < <(git -C "$tree" ls-tree "origin/$branch" -- "$p") || continue
         [[ "$type" == blob && ( "$mode" == 100644 || "$mode" == 100755 ) ]] || continue
         [[ -f "$tree/$p" && ! -L "$tree/$p" ]] || continue
         [[ "$(git -C "$tree" hash-object -- "$p")" == "$oid" ]] || continue
