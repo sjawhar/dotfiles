@@ -111,7 +111,11 @@ machine survives; earlier ones print nowhere.
 
 Speed: a session file whose mtime is before --since is never opened; in a file over 1 MB a
 binary search on byte offsets (probing only "message" entries, which omp stamps as it writes
-them) skips to 30 minutes before --since, and reading stops 30 minutes after --until.
+them) skips to 30 minutes before --since, and reading stops 30 minutes after --until. Files and
+directories are read 16 at a time. The whole session tree (rules 1 and 9) is walked once, and
+walked and read for rule 9 from the start when the prompt history has a row in the window; a
+directory whose mtime has not changed since an earlier run is not listed again: its listing is
+kept in $XDG_RUNTIME_DIR/sami-said-<uid>/ (else the temporary directory).
 """
 
 from __future__ import annotations
@@ -125,13 +129,17 @@ import re
 import socket
 import sqlite3
 import ssl
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -172,6 +180,11 @@ NAMED_PATH = re.compile(r"(?<![\w.~/-])(?:~/|/)[\w.@%+~/-]*\w")
 SCRIPT_PATH = re.compile(r"(?:\.(?:sh|bash|py)|/(?:bin|scripts)/[\w.@%+-]+)$")
 SCRIPT_PATH_BYTES = re.compile(rb"(?<![\w.~/-])(?:~/|/)[\w.@%+~/-]*(?:\.(?:sh|bash|py)|/(?:bin|scripts)/[\w.@%+-]+)(?![\w.~/-])")
 SCRIPT_HINTS = (b".sh", b".bash", b".py", b"/bin/", b"/scripts/")
+# Files and directories read at once. Under load the disk answers each read late but many reads together: on
+# 2026-11-02 (load 400, io pressure 70%) walking the session tree took 957 s one directory at a time, 86 s 64 at once.
+# More threads lose to each other for the interpreter lock: a walk from kept listings took 29-34 s on 64, 4-10 s on 16.
+IO_WORKERS = 16
+WALK_RACY_NS = 2 * 10**9  # walk_jsonl keeps no listing of a directory changed this recently (timestamps move in ticks)
 
 MESSAGE_LINE = b'{"type":"message"'
 ENTRY_TS = re.compile(rb'"timestamp":"(\d{4}-\d\d-\d\dT[\d:.]+Z)"')
@@ -336,20 +349,29 @@ def history_match(ad: AgentDir, text: str, sid: str) -> list[int]:
 # ---------------------------------------------------------------- session files
 
 
+def pmap(fn, items) -> list:
+    """fn over items on IO_WORKERS threads, results in the order of items. The box's disks answer
+    one read at a time slowly under load but many at once nearly as fast (see IO_WORKERS)."""
+    items = list(items)
+    if len(items) < 2:
+        return [fn(x) for x in items]
+    with ThreadPoolExecutor(min(IO_WORKERS, len(items))) as pool:
+        return list(pool.map(fn, items))
+
+
 def list_sessions(root: Path) -> list[tuple[Path, float, str]]:
     """Every top-level session file under root/sessions: (path, mtime, session id)."""
-    out = []
     try:
-        dirs = list(os.scandir(root / "sessions"))
+        dirs = [d for d in os.scandir(root / "sessions") if d.is_dir(follow_symlinks=False)]
     except OSError:
-        return out
-    for d in dirs:
-        if not d.is_dir(follow_symlinks=False):
-            continue
+        return []
+
+    def one(d) -> list[tuple[Path, float, str]]:
+        out = []
         try:
             files = list(os.scandir(d.path))
         except OSError:
-            continue
+            return out
         for f in files:
             name = f.name
             if not name.endswith(".jsonl") or "_" not in name:
@@ -359,7 +381,162 @@ def list_sessions(root: Path) -> list[tuple[Path, float, str]]:
             except OSError:
                 continue
             out.append((Path(f.path), st.st_mtime, name[name.index("_") + 1 : -len(".jsonl")]))
-    return out
+        return out
+
+    return [x for found in pmap(one, dirs) for x in found]
+
+
+@dataclass
+class JsonlFile:
+    path: Path
+    mtime: float | None  # None when it cannot be stat'ed (a broken symlink)
+    depth: int  # 1: in sessions/, 2: a top-level session file in sessions/<cwd>/, 3 and more: nested
+
+
+_walks: dict[Path, Future] = {}
+_walks_lock = threading.Lock()
+
+
+def start_walk(sessions: Path) -> Future:
+    """walk_jsonl(sessions), begun on a thread of its own once per run, so that it can run while the
+    session files are scanned and Dispatch is read."""
+    with _walks_lock:
+        if sessions not in _walks:
+            _walks[sessions] = ThreadPoolExecutor(1).submit(_walk_jsonl, sessions)
+        return _walks[sessions]
+
+
+def walk_cache_path(sessions: Path) -> Path:
+    """Where the walk of `sessions` keeps its directory listings between runs: the user's runtime
+    directory (tmpfs, emptied at boot), else the temporary directory."""
+    base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / f"sami-said-{os.getuid()}"
+    return base / f"walk-{hashlib.sha1(str(sessions).encode()).hexdigest()[:16]}.json"
+
+
+def walk_jsonl(sessions: Path) -> list[JsonlFile]:
+    return start_walk(sessions).result()
+
+
+def _walk_jsonl(sessions: Path) -> list[JsonlFile]:
+    """Every .jsonl below sessions, nested ones included, symlinks followed (moved sessions are
+    symlinks; each directory is entered once), in path order.
+
+    On 2026-11-02 the tree had 16,989 directories holding 408,711 entries (mostly tool-output
+    artifacts) and 20,573 .jsonl files, 19,318 of them symlinks to transcripts moved to
+    /mnt/durable. The root disk that holds the tree answered a read in 108 ms on average under the
+    box's load, and reading every directory took 957 s one at a time, 77 s 64 at a time. So
+    directories are read IO_WORKERS at a time, and each directory's subdirectories and .jsonl
+    entries are kept in walk_cache_path, with the target of each symlink among them: a directory
+    whose device, inode and mtime are unchanged has the same entries (creating, removing, renaming
+    or replacing one sets its mtime, and a symlink cannot be changed in place), so it is not read
+    again, only stat'ed, and a symlink is stat'ed at its target without reading the link on the
+    root disk. Each .jsonl is still stat'ed every run. A listing read within WALK_RACY_NS of the
+    directory's mtime is not kept: an entry added in the same timestamp tick would not move it."""
+    cache_file = walk_cache_path(sessions)
+    try:
+        cache = json.loads(cache_file.read_text())
+        cache = cache if isinstance(cache, dict) and cache.get("version") == 2 else {}
+    except (OSError, ValueError):
+        cache = {}
+    old: dict = cache.get("dirs") or {}
+    new: dict = {}
+    found: list[JsonlFile] = []
+    seen: set[tuple[int, int]] = set()  # directories entered, by device and inode
+    lock = threading.Lock()
+
+    def listing(real: str) -> list[list]:
+        """The subdirectories ("d") and .jsonl entries ("j") of a directory, as [name, kind, the
+        symlink's target or None]."""
+        out = []
+        for e in os.scandir(real):
+            try:
+                is_dir = e.is_dir()
+            except OSError:
+                is_dir = False
+            if not is_dir and not e.name.endswith(".jsonl"):
+                continue
+            target = None
+            if e.is_symlink():
+                try:
+                    target = os.path.join(real, os.readlink(e.path))
+                except OSError:
+                    continue
+            out.append([e.name, "d" if is_dir else "j", target])
+        return out
+
+    def visit(path: str, real: str, depth: int) -> list[tuple[str, str, int]]:
+        """One directory: `path` as the walk names it, `real` where it is read (a symlink's target)."""
+        try:
+            st = os.stat(real)
+        except OSError:
+            return []
+        with lock:
+            if (st.st_dev, st.st_ino) in seen:
+                return []
+            seen.add((st.st_dev, st.st_ino))
+        sig = [st.st_dev, st.st_ino, st.st_mtime_ns]
+        known = old.get(path)
+        if isinstance(known, list) and known[:3] == sig:
+            entries = known[3]
+            keep = True
+        else:
+            keep = time.time_ns() - st.st_mtime_ns >= WALK_RACY_NS
+            try:
+                entries = listing(real)
+            except OSError:
+                return []
+        subs, local = [], []
+        for name, kind, target in entries:
+            sub, subreal = os.path.join(path, name), target or os.path.join(real, name)
+            if kind == "d":
+                subs.append((sub, subreal, depth + 1))
+                continue
+            try:
+                fst = os.stat(subreal)
+                mtime = fst.st_mtime if stat.S_ISREG(fst.st_mode) else None
+            except OSError:
+                mtime = None
+            local.append(JsonlFile(Path(sub), mtime, depth))
+        with lock:
+            found.extend(local)
+            if keep:
+                new[path] = sig + [entries]
+        return subs
+
+    # Each worker queues the subdirectories it finds. (A loop of concurrent.futures.wait over the
+    # pending set costs time in its size per finished directory, thousands of times over.)
+    left, done, failed = [0], threading.Event(), []
+
+    def run(pool: ThreadPoolExecutor, path: str, real: str, depth: int) -> None:
+        subs = []
+        try:
+            subs = visit(path, real, depth)
+        except BaseException as e:
+            failed.append(e)
+        with lock:
+            left[0] += len(subs) - 1
+            for sub in subs:
+                pool.submit(run, pool, *sub)
+            if not left[0]:
+                done.set()
+
+    if sessions.is_dir():
+        with ThreadPoolExecutor(IO_WORKERS) as pool:
+            left[0] = 1
+            pool.submit(run, pool, str(sessions), str(sessions), 1)
+            done.wait()
+        if failed:
+            raise failed[0]
+    if new != old:
+        try:
+            cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"version": 2, "dirs": new}))
+            os.replace(tmp, cache_file)
+        except OSError as e:
+            warn(f"cannot keep the session tree's listings in {cache_file}: {e}")
+    found.sort(key=lambda j: str(j.path))
+    return found
 
 
 SESSION_NAME = re.compile(r"[^_/]+_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl")
@@ -369,31 +546,22 @@ def find_nested(root: Path, wanted: set[str], since: float) -> dict[str, Path]:
     """Session files below a top-level session's directory whose session id is in wanted: a
     subagent or lane someone typed into. A file named <time>_<id>.jsonl is matched by its name; any
     other .jsonl only when modified since `since`, by the id in its header."""
+    named: dict[Path, str] = {}
+    unnamed: list[Path] = []
+    for j in walk_jsonl(root / "sessions"):
+        if j.depth < 3:
+            continue  # the top-level files list_sessions already holds
+        m = SESSION_NAME.fullmatch(j.path.name)
+        if m:
+            named[j.path] = m.group(1)
+        elif j.mtime is not None and j.mtime >= since:
+            unnamed.append(j.path)
+    named.update(zip(unnamed, (s.sid for s in pmap(lambda p: read_header(p, ""), unnamed))))
     found: dict[str, Path] = {}
-    for top in (root / "sessions").iterdir() if (root / "sessions").is_dir() else ():
-        if not top.is_dir():
-            continue
-        for dirpath, _dirs, files in os.walk(top, followlinks=True):  # moved sessions are symlinks
-            if dirpath == str(top):
-                continue  # the top-level files list_sessions already holds
-            for name in files:
-                if not name.endswith(".jsonl"):
-                    continue
-                path = Path(dirpath) / name
-                m = SESSION_NAME.fullmatch(name)
-                if m:
-                    sid = m.group(1)
-                else:
-                    try:
-                        if path.stat().st_mtime < since:
-                            continue
-                    except OSError:
-                        continue
-                    sid = read_header(path, "").sid
-                if sid in wanted and sid not in found:
-                    found[sid] = path
-                    if len(found) == len(wanted):
-                        return found
+    for path in sorted(named, key=str):
+        sid = named[path]
+        if sid in wanted and sid not in found:
+            found[sid] = path
     return found
 
 
@@ -566,36 +734,21 @@ def typing_key(text: str) -> str:
 
 def recent_jsonl(root: Path, cut: float) -> list[Path]:
     """Every .jsonl below root, nested ones included, modified at or after cut."""
-    minutes = int((time.time() - cut) // 60) + 2
-    try:
-        run = subprocess.run(["find", "-L", str(root), "-name", "*.jsonl", "-type", "f", "-mmin", f"-{minutes}"],
-                             capture_output=True, text=True, timeout=120)
-        if run.returncode == 0 or run.stdout:  # a broken symlink makes find exit 1 after a full listing
-            return [Path(p) for p in run.stdout.splitlines()]
-    except (OSError, subprocess.SubprocessError):
-        pass
-    found = []
-    for dirpath, _dirs, files in os.walk(root, followlinks=True):
-        for name in files:
-            path = Path(dirpath) / name
-            try:
-                if name.endswith(".jsonl") and path.stat().st_mtime >= cut:
-                    found.append(path)
-            except OSError:
-                continue
-    return found
+    return [j.path for j in walk_jsonl(root) if j.mtime is not None and j.mtime >= cut]
 
 
 def named_file(token: str, files: dict[str, str | None]) -> str | None:
-    """The text of a small file a tool call names by absolute or ~ path, as it is on disk now."""
+    """The text of a small file a tool call names by absolute or ~ path, as it is on disk now. Threads
+    share `files`: an entry is stored only once its text is known, so none reads a half-made one."""
     if token not in files:
-        files[token] = None
+        text = None
         try:
             path = Path(token).expanduser()
             if path.is_file() and path.stat().st_size <= NAMED_FILE_MAX:
-                files[token] = path.read_bytes().decode("utf-8", "replace")
+                text = path.read_bytes().decode("utf-8", "replace")
         except (OSError, RuntimeError, ValueError):
             pass
+        files[token] = text
     return files[token]
 
 
@@ -635,44 +788,50 @@ def agent_typing_calls(roots: list[Path], start: datetime, end: datetime) -> lis
     """Rule 9's calls in [start, end), from the session files, nested ones included. The transcript
     store is not used: it cuts a call's arguments at 4000 characters, and the 2026-10-25 wind-down
     cell named send-keys after that."""
-    calls: list[TypingCall] = []
     files: dict[str, str | None] = {}
     target = start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     stop = end.strftime("%Y-%m-%dT%H:%M:%S.000Z").encode()
     names = tuple(f'"name":"{tool}"'.encode() for tool in TYPING_TOOLS)
-    for root in roots:
-        for path in recent_jsonl(root / "sessions", start.timestamp()):
-            header = read_header(path, "")
-            try:
-                fh = open(path, "rb")
-            except OSError:
-                continue
-            with fh:
-                size = os.fstat(fh.fileno()).st_size
-                fh.seek(seek_start(fh, size, target) if size > SEEK_MIN_BYTES else 0)
-                for line in fh:
-                    if not line.startswith(MESSAGE_LINE):
-                        continue
-                    stamp = ENTRY_TS.search(line, 0, 300)
-                    if stamp and stamp.group(1) > stop:
-                        break
-                    if b'"role":"assistant"' not in line or not any(n in line for n in names):
-                        continue
-                    if not any(v in line for v in TYPING_VERB_BYTES) and not any(
-                            types_into_pane(named_file(p.decode(errors="replace"), files)) for p in set(script_paths(line))):
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    t = parse_ts(e.get("timestamp"))
-                    if t is None or t < start or (header.forked is not None and t < header.forked):
-                        continue  # out of the window, or a fork's copy of its parent's call
-                    for part in (e.get("message") or {}).get("content") or ():
-                        call = typing_call(part, t, header.sid, files) if isinstance(part, dict) else None
-                        if call is not None:
-                            calls.append(call)
-    return calls
+
+    def scan(path: Path) -> list[TypingCall]:
+        calls: list[TypingCall] = []
+        header = None  # read only for a file that holds a typing call: most hold none
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            return calls
+        with fh:
+            size = os.fstat(fh.fileno()).st_size
+            fh.seek(seek_start(fh, size, target) if size > SEEK_MIN_BYTES else 0)
+            for line in fh:
+                if not line.startswith(MESSAGE_LINE):
+                    continue
+                stamp = ENTRY_TS.search(line, 0, 300)
+                if stamp and stamp.group(1) > stop:
+                    break
+                if b'"role":"assistant"' not in line or not any(n in line for n in names):
+                    continue
+                if not any(v in line for v in TYPING_VERB_BYTES) and not any(
+                        types_into_pane(named_file(p.decode(errors="replace"), files)) for p in set(script_paths(line))):
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                t = parse_ts(e.get("timestamp"))
+                if t is None or t < start:
+                    continue  # out of the window
+                header = header or read_header(path, "")
+                if header.forked is not None and t < header.forked:
+                    continue  # a fork's copy of its parent's call
+                for part in (e.get("message") or {}).get("content") or ():
+                    call = typing_call(part, t, header.sid, files) if isinstance(part, dict) else None
+                    if call is not None:
+                        calls.append(call)
+        return calls
+
+    paths = [path for root in roots for path in recent_jsonl(root / "sessions", start.timestamp())]
+    return [call for found in pmap(scan, paths) for call in found]
 
 
 def typing_calls_for(m: Message, calls: list[TypingCall]) -> list[TypingCall]:
@@ -1236,42 +1395,55 @@ def main() -> int:
     stats = {"files": 0, "read": 0, "launch": 0, "agent": 0, "resumed": 0}
     consumed: set[tuple[Path, int]] = set()  # history rows a transcript message in the window was sent as
     dirs = [load_history(d) for d in agent_dirs(args.agent_dir)]
+    early_calls: Future | None = None
+    if any(since <= row.created < until for ad in dirs for row in ad.history or ()):
+        # Someone typed in a terminal in the window, so rules 1 and 9 will almost surely need the
+        # session tree and its typing calls: read them while the session files are scanned and
+        # Dispatch is read. Every rule 9 window lies in this one (its texts are in [since, until)),
+        # and a call outside a text's window matches nothing, so this reads a superset.
+        for ad in dirs:
+            start_walk(ad.root / "sessions")
+        early_calls = ThreadPoolExecutor(1).submit(agent_typing_calls, [ad.root for ad in dirs],
+                                                   since - TYPED_BEFORE, until + TYPED_AFTER)
     shakes: dict = {}
 
-    def take(ad: AgentDir, path: Path, sid: str) -> None:
-        stats["read"] += 1
-        session, found = scan_file(path, sid, since, until, shakes)
-        sessions[session.sid] = session
-        for m in found:
-            m.agent_dir = ad.root
-            if m.source == "terminal":
-                if ad.history is None:
-                    continue
-                m.history_ids = history_match(ad, m.text, session.sid)
-                if not m.history_ids:
-                    stats["launch"] += not m.beyond
-                    continue
-                consumed.update((ad.root, h) for h in m.history_ids)
-                if agent_typed(m.text):
-                    stats["agent"] += not m.beyond
-                    continue
-            typed.append(m)
+    def take(ad: AgentDir, files: list[tuple[Path, str]]) -> None:
+        """Scan the files (path, session id) at once, then keep their messages in the files' order."""
+        stats["read"] += len(files)
+        for session, found in pmap(lambda f: scan_file(f[0], f[1], since, until, shakes), files):
+            sessions[session.sid] = session
+            for m in found:
+                m.agent_dir = ad.root
+                if m.source == "terminal":
+                    if ad.history is None:
+                        continue
+                    m.history_ids = history_match(ad, m.text, session.sid)
+                    if not m.history_ids:
+                        stats["launch"] += not m.beyond
+                        continue
+                    consumed.update((ad.root, h) for h in m.history_ids)
+                    if agent_typed(m.text):
+                        stats["agent"] += not m.beyond
+                        continue
+                typed.append(m)
 
     for ad in dirs:
         if ad.history is None:
             warn(f"no readable history.db in {ad.root}: its terminal messages cannot be confirmed and are left out")
+        top = []
         for path, mtime, sid in list_sessions(ad.root):
             stats["files"] += 1
             paths.setdefault(sid, path)
             if mtime >= since.timestamp() and wanted(sid):
-                take(ad, path, sid)
+                top.append((path, sid))
+        take(ad, top)
         # Rule 1's exception: a session below another one's directory that the prompt history says
         # someone typed into during the window.
         nested = {row.sid for row in ad.history or () if since <= row.created < until and row.sid
                   and row.sid not in paths and wanted(row.sid)}
-        for sid, path in find_nested(ad.root, nested, since.timestamp()).items() if nested else ():
-            paths[sid] = path
-            take(ad, path, sid)
+        below = find_nested(ad.root, nested, since.timestamp()) if nested else {}
+        paths.update(below)
+        take(ad, [(path, sid) for sid, path in below.items()])
 
     # Prompt history with no transcript copy in the window.
     for ad in dirs:
@@ -1300,7 +1472,13 @@ def main() -> int:
     pauses = [m for m in typed if m.source == PAUSE_SOURCE]
     if suspects:  # a resume is attributed only through a text the same call typed into that session
         times = [m.time for m in suspects + pauses]
-        calls = agent_typing_calls([ad.root for ad in dirs], min(times) - TYPED_BEFORE, max(times) + TYPED_AFTER)
+        start, end = min(times) - TYPED_BEFORE, max(times) + TYPED_AFTER
+        if early_calls is not None:
+            # Read a file up to the last entry stamped at end, whole seconds, as agent_typing_calls does.
+            last = end.replace(microsecond=0)
+            calls = [c for c in early_calls.result() if start <= c.time <= last]
+        else:
+            calls = agent_typing_calls([ad.root for ad in dirs], start, end)
         dropped: set[int] = set()
         typed_into: set[tuple[str, int]] = set()  # (session id, id of a call that typed into it)
         for m in suspects:

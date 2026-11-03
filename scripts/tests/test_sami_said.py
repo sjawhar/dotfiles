@@ -206,8 +206,9 @@ class Store:
 
 
 def run(root: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    # The walk keeps its directory listings in XDG_RUNTIME_DIR: the fixture's own temporary directory.
     return subprocess.run([str(SCRIPT), "--agent-dir", str(root), *WINDOW, *args], capture_output=True, text=True,
-                          env={**os.environ, **(env or {})}, timeout=60)
+                          env={**os.environ, "XDG_RUNTIME_DIR": str(root.parent), **(env or {})}, timeout=60)
 
 
 def rows(root: Path, *args: str, env: dict | None = None) -> list[dict]:
@@ -486,6 +487,36 @@ class LargeFile(unittest.TestCase):
                           filler + [user(at(1), TYPED), assistant(at(200), "after the window"), user(at(201), "late")])
             write_history(root, [(TYPED, at(1), LEAD), ("late", at(201), LEAD)])
             self.assertEqual([r["text"] for r in rows(root)], [TYPED])
+
+
+class WalkCache(unittest.TestCase):
+    def test_a_kept_listing_still_finds_a_subagent_added_after_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            Store(root)
+            lead_dir = root / "sessions" / "-src-machcsl-riscv" / f"2026-10-21T17-57-29-198Z_{LEAD}"
+            moved = Path(tmp) / "durable" / "GuardLane.jsonl"  # a transcript moved off the disk, behind a symlink
+            moved.parent.mkdir()
+            (lead_dir / "GuardLane.jsonl").rename(moved)
+            (lead_dir / "GuardLane.jsonl").symlink_to(moved)
+            old = at(-120).timestamp()
+            for d in [root / "sessions", *(p for p in (root / "sessions").rglob("*") if p.is_dir())]:
+                os.utime(d, (old, old))  # old enough for the first run to keep every listing
+            self.assertIn(LANE, {r["session"] for r in rows(root)})
+            kept = json.loads(next(Path(tmp).glob("sami-said-*/walk-*.json")).read_text())["dirs"]
+            self.assertIn(["GuardLane.jsonl", "j", str(moved)], kept[str(lead_dir)][3])
+            self.assertIn(LANE, {r["session"] for r in rows(root)})  # read through the kept target
+            new_lane = "01a17652-0000-7000-8000-00000000000a"
+            (lead_dir / "NewLane.jsonl").write_text(
+                line({"type": "session", "version": 3, "id": new_lane, "timestamp": stamp(at(-60)), "cwd": "/src", "title": "NewLane"})
+                + line(user(at(32), "and what does the new lane do?")))
+            con = sqlite3.connect(root / "history.db")
+            con.execute("INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, ?, ?, ?)",
+                        ("and what does the new lane do?", int(at(32).timestamp()), "/src", new_lane))
+            con.commit()
+            con.close()
+            new = next(r for r in rows(root) if r["session"] == new_lane)
+            self.assertEqual((new["source"], new["title"]), ("terminal", "NewLane"))
 
 
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
