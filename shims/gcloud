@@ -664,6 +664,40 @@ route_get_credentials_kubeconfig() {
     echo "gcloud shim: writing ${cluster}'s credentials to ${KUBECONFIG}, not ~/.kube/config (every session on this machine shares that file and its current-context). Use it with: export KUBECONFIG=${KUBECONFIG}" >&2
 }
 
+# A config dir copied from an Azure box to a Google VM keeps the Azure box credential that gcloud
+# stored (an external_account entry whose subject token comes from the Azure metadata service), and
+# gcloud reads it before it asks the Google metadata server, so every call fails with "Unable to
+# retrieve Identity Pool subject token ... gcloud auth login". On 2026-11-03 the agent session of
+# LINUX-1248, moved from sami-rocqperf to sami-devbox (dispatch://INFRA-993), brought such a dir as
+# its own CLOUDSDK_CONFIG. installers/gcloud-box.sh repairs ~/.config/gcloud once; this repairs
+# whichever dir a call uses, through the same scripts/gcloud-drop-azure-credential. The checks run
+# cheapest first, so a call elsewhere pays a file test and at most one grep: the store holds the
+# Azure path's bytes, this machine can be a Google VM (an agent box on one has GCE_METADATA_HOST,
+# set by scripts/agentbox; the VM itself has Google's DMI product name), and scripts/on-google-vm
+# says it is one. On an Azure box the second check stops it, so no call there waits for the
+# metadata lookup. The removal's report goes to stderr; a failed removal is reported and the call
+# runs anyway, and gcloud then says what is wrong.
+AZURE_IMDS_TOKEN_PATH=/metadata/identity/oauth2/token
+drop_azure_credential_on_google_vm() {
+    local dir dmi="" bin
+    if [[ -n "${CLOUDSDK_CONFIG:-}" ]]; then
+        dir="$CLOUDSDK_CONFIG"
+    elif resolve_user_home; then
+        dir="${GCLOUD_USER_HOME}/.config/gcloud"
+    else
+        return 0
+    fi
+    [[ -f "$dir/credentials.db" ]] || return 0
+    grep -qaF "$AZURE_IMDS_TOKEN_PATH" "$dir/credentials.db" 2>/dev/null || return 0
+    if [[ -z "${GCE_METADATA_HOST:-}" ]]; then
+        [[ -r /sys/class/dmi/id/product_name ]] && dmi="$(</sys/class/dmi/id/product_name)"
+        [[ "$dmi" == "Google Compute Engine" ]] || return 0
+    fi
+    bin="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts"
+    "$bin/on-google-vm" || return 0
+    "$bin/gcloud-drop-azure-credential" "$dir" 2>&1 | sed 's/^/gcloud shim: /' >&2 || true
+}
+
 # gcloud writes one log file per call into <config dir>/logs and never prunes it: on
 # sami-rocqperf that was 8,356 files in ~/.config/gcloud/logs and 18,213 in a second
 # configuration directory in one day (2026-10-25, dispatch://INFRA-6), tens of GB. It also
@@ -674,6 +708,7 @@ exec_real_gcloud() {
     local real_gcloud="$1"
     shift
     export CLOUDSDK_CORE_DISABLE_FILE_LOGGING="${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-1}"
+    drop_azure_credential_on_google_vm
     limit_storage_parallelism "$real_gcloud" "$@"
     local -a launcher=("$real_gcloud")
     if needs_forward_browser; then

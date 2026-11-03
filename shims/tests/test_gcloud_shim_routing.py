@@ -13,6 +13,7 @@ the tests never read or write Sami's real ~/.config/gcloud.
 import fcntl
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -1186,6 +1187,102 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
                 self.assertIn("Set KUBECONFIG", result.stderr)
+
+
+class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
+    """A config dir copied from an Azure box to a Google VM keeps the Azure box credential gcloud
+    stored, and gcloud reads it before the metadata server: LINUX-1248's own CLOUDSDK_CONFIG, moved
+    from sami-rocqperf to sami-devbox on 2026-11-03, failed every call with "Unable to retrieve
+    Identity Pool subject token". On a Google VM the shim removes that entry from whichever dir the
+    call uses, and nothing else; elsewhere it changes nothing."""
+
+    ACCOUNT = "dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
+    PERSON = "someone@example.com"
+    AZURE = {"type": "external_account", "audience": "//iam.googleapis.com/projects/1/locations/global/"
+             "workloadIdentityPools/azure/providers/entra", "token_url": "https://sts.googleapis.com/v1/token",
+             "credential_source": {"url": "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01",
+                                   "headers": {"Metadata": "True"}}}
+    # Another federation's entry is not the Azure box's, so it stays.
+    AWS = {"type": "external_account", "credential_source": {"url": "http://169.254.169.254/latest/meta-data/iam"}}
+    USER_LOGIN = {"type": "authorized_user", "refresh_token": "fake"}
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        write_stub(root, "gcloud", 'echo "REAL-GCLOUD-RAN"')
+        self.config = root / "lane-gcloud"
+        self.config.mkdir()
+        with sqlite3.connect(self.config / "credentials.db") as db:
+            db.execute('CREATE TABLE "credentials" (account_id TEXT PRIMARY KEY, value BLOB)')
+            for account, value in ((self.ACCOUNT, self.AZURE), ("aws@x.iam.gserviceaccount.com", self.AWS),
+                                   (self.PERSON, self.USER_LOGIN)):
+                db.execute("INSERT INTO credentials VALUES (?, ?)", (account, json.dumps(value)))
+        with sqlite3.connect(self.config / "access_tokens.db") as db:
+            db.execute('CREATE TABLE "access_tokens" (account_id TEXT PRIMARY KEY, access_token TEXT)')
+            db.executemany("INSERT INTO access_tokens VALUES (?, 'cached')", [(self.ACCOUNT,), (self.PERSON,)])
+        self.env = {"PATH": f"{root}:{SHIMS}:/usr/bin:/bin", "HOME": str(root / "home"),
+                    "CLOUDSDK_CONFIG": str(self.config)}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def run_shim(self, extra_env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+        env = {k: v for k, v in {**self.env, **extra_env}.items() if v is not None}
+        return subprocess.run([str(SHIMS / "gcloud"), "auth", "print-access-token"], capture_output=True,
+                              text=True, env=env, check=False)
+
+    def rows(self, db: str, table: str) -> set[str]:
+        with sqlite3.connect(self.config / db) as conn:
+            return {account for (account,) in conn.execute(f"SELECT account_id FROM {table}")}
+
+    def test_on_a_google_vm_the_azure_entry_goes_and_nothing_else(self) -> None:
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        result = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # stdout is gcloud's alone: a token printed there is read by callers.
+        self.assertEqual(result.stdout, "REAL-GCLOUD-RAN\n")
+        self.assertIn(f"gcloud shim: removed the stored external_account credential of {self.ACCOUNT} (an Azure one)",
+                      result.stderr)
+        self.assertEqual(self.rows("credentials.db", "credentials"), {"aws@x.iam.gserviceaccount.com", self.PERSON})
+        self.assertEqual(self.rows("access_tokens.db", "access_tokens"), {self.PERSON})
+        # No copy of the entry stays in the file, so the next call stops at the shim's grep.
+        self.assertNotIn(b"/metadata/identity/oauth2/token", (self.config / "credentials.db").read_bytes())
+        again = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual((again.returncode, again.stdout, again.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+
+    def test_the_default_config_dir_is_repaired_too(self) -> None:
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        home_config = Path(self.env["HOME"]) / ".config" / "gcloud"
+        home_config.parent.mkdir(parents=True)
+        self.config.rename(home_config)
+        self.config = home_config
+        result = self.run_shim({"GCE_METADATA_HOST": server.host, "CLOUDSDK_CONFIG": None})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.ACCOUNT, self.rows("credentials.db", "credentials"))
+
+    def test_off_a_google_vm_nothing_changes(self) -> None:
+        before = (self.config / "credentials.db").read_bytes()
+        # A closed port: on-google-vm says no. Unset: an Azure box, where the DMI name is not Google's.
+        for host in ("127.0.0.1:9", None):
+            with self.subTest(host=host):
+                result = self.run_shim({"GCE_METADATA_HOST": host})
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+                self.assertEqual((self.config / "credentials.db").read_bytes(), before)
+
+    def test_a_store_it_cannot_change_is_reported_and_the_call_runs(self) -> None:
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        (self.config / "credentials.db").chmod(0o400)
+        self.config.chmod(0o500)
+        try:
+            result = self.run_shim({"GCE_METADATA_HOST": server.host})
+        finally:
+            self.config.chmod(0o700)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "REAL-GCLOUD-RAN\n")
+        self.assertIn("gcloud shim: gcloud-drop-azure-credential: cannot change", result.stderr)
 
 
 class GcloudStorageParallelism(unittest.TestCase):

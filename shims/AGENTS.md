@@ -263,6 +263,13 @@ before handing the call to the real one.
   attached one, and gcloud and every client library take its tokens from the metadata server,
   so the shim also refuses `auth application-default login|revoke` there whenever `box` is
   active, since the well-known file it would write must stay absent.
+  On a Google VM, a config dir whose credential store still holds the Azure box credential (a
+  copy of an Azure box's dir, such as a session's own `CLOUDSDK_CONFIG` that a session moved from
+  sami-rocqperf brought along: LINUX-1248, 2026-11-03) loses that entry before the call runs,
+  through `scripts/gcloud-drop-azure-credential`, and gcloud then takes the VM account's token
+  from the metadata server; the shim reports the removal on stderr. Off Google nothing changes,
+  and an Azure box pays no metadata lookup for it (`shims/tests/test_gcloud_shim_routing.py`,
+  `GcloudAzureCredentialOnGoogleVm`).
   In an agent session the shim refuses, on every route, each call that writes or removes the
   well-known file: `auth application-default login|revoke`, and an `auth login` with
   `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,

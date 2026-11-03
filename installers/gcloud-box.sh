@@ -15,11 +15,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #     auth/access_token_file are unset. gcloud checks those two properties and
 #     then its own credential store before it asks the metadata server, for an
 #     account the metadata server lists (lib/googlecloudsdk/core/credentials/
-#     store.py, _Load and GceCredentialProvider), so a stored entry for that
-#     account that is not a metadata-server one (the Azure branch's
-#     external_account, in a config dir carried over from an Azure machine) is
-#     removed from credentials.db and access_tokens.db; no other stored entry
-#     is touched.
+#     store.py, _Load and GceCredentialProvider), so a stored Azure
+#     external_account entry (the Azure branch's, in a config dir carried over
+#     from an Azure machine) is removed from credentials.db and access_tokens.db
+#     by scripts/gcloud-drop-azure-credential; no other stored entry is touched.
+#     shims/gcloud runs the same removal on any other config dir it is given.
 #   - ADC: no box_credential_config.json and no well-known
 #     application_default_credentials.json, so google-auth and every other
 #     Google client library fall through to the metadata server. A well-known
@@ -142,29 +142,9 @@ if [[ "$branch" == google ]]; then
         echo "gcloud-box: removed ${CRED_FILE} (the Azure branch's credential; a Google VM needs none)"
     fi
 
-    # 1b. A stored external_account entry for the VM's account would win over the metadata server.
-    removed="$(python3 - "$GCLOUD_DIR" "$BOX_ACCOUNT" <<'PY'
-import json, os, sqlite3, sys
-config_dir, account = sys.argv[1:]
-store = os.path.join(config_dir, "credentials.db")
-if os.path.isfile(store):
-    db = sqlite3.connect(store)
-    row = db.execute("SELECT value FROM credentials WHERE account_id = ?", (account,)).fetchone()
-    if row and json.loads(row[0]).get("type") == "external_account":
-        with db:
-            db.execute("DELETE FROM credentials WHERE account_id = ?", (account,))
-        tokens = os.path.join(config_dir, "access_tokens.db")
-        if os.path.isfile(tokens):
-            tdb = sqlite3.connect(tokens)
-            with tdb:
-                if tdb.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'access_tokens'").fetchone():
-                    tdb.execute("DELETE FROM access_tokens WHERE account_id = ?", (account,))
-        print("yes")
-PY
-)"
-    if [[ "$removed" == yes ]]; then
-        echo "gcloud-box: removed the stored external_account credential of ${BOX_ACCOUNT}, so gcloud asks the metadata server"
-    fi
+    # 1b. A stored Azure external_account entry (a config dir carried over from an Azure box) would
+    #     win over the metadata server; scripts/gcloud-drop-azure-credential removes it.
+    "$(dirname "${BASH_SOURCE[0]}")/../scripts/gcloud-drop-azure-credential" "$GCLOUD_DIR" | sed 's/^/gcloud-box: /'
 
     # 2. Configuration `box`: the VM's account, the box project, no credential override.
     ensure_box_configuration
