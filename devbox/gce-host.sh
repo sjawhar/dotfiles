@@ -54,8 +54,12 @@ devbox_user="$(getent passwd "$DEVBOX_UID" | cut -d: -f1)"
 # gdb, stress-ng, keyutils, libuv1-dev, postgresql-client: lanes' debugging, load runs, kernel
 #   keyring, libuv builds and psql to the shared Postgres, as on sami-rocqperf;
 # xvfb, qemu-utils, qemu-system-x86: lanes' headless X and VM images and runs, as on sami-rocqperf;
+# postgresql-16: the server binaries in /usr/lib/postgresql/16/bin (initdb, postgres, pg_ctl), for
+#   tests that start a private cluster of their own (the librarian's E1 case,
+#   installers/librarian-harness-host.sh). No server runs: the drop-in below stops the package
+#   from making and starting its default cluster;
 # the Chrome libraries: agent-browser's Chrome for Testing on the host, which its installer only
-#   downloads (installers/agent-browser.sh).
+#   downloads (installers/agent-browser.sh), and Playwright's Chromium.
 export DEBIAN_FRONTEND=noninteractive
 # Lists first: a fresh image ships none, and the headers' meta package is looked up below.
 apt-get update -qq
@@ -67,7 +71,7 @@ packages=(
     rsync sqlite3 zstd git-lfs
     python3-pip python3-venv
     opam m4 bubblewrap libgmp-dev
-    gdb stress-ng keyutils libuv1-dev postgresql-client
+    gdb stress-ng keyutils libuv1-dev postgresql-client postgresql-16
     xvfb qemu-utils qemu-system-x86
     sysstat
     libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libgbm1 libxkbcommon0
@@ -82,6 +86,10 @@ packages+=("linux-headers-$(uname -r)")
 if apt-cache show "linux-headers-${kernel_flavour}" >/dev/null 2>&1; then
     packages+=("linux-headers-${kernel_flavour}")
 fi
+# Before postgresql-16's first install: pg_createcluster reads createcluster.d, so the package makes
+# no `16 main` cluster and starts no server.
+install -d -m 0755 /etc/postgresql-common/createcluster.d
+printf 'create_main_cluster = false\n' >/etc/postgresql-common/createcluster.d/no-main-cluster.conf
 missing=()
 for p in "${packages[@]}"; do
     dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p")
