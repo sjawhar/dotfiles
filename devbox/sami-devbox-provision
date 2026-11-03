@@ -106,9 +106,9 @@ EXTRA_INSTALLERS=(
     # The box gateway token: sami-rocqperf (Azure) does not need it; a Google VM mints it from its
     # own attached account.
     ossv-box-gateway-token
-    # The box gateway key, read by the VM's own account: until dispatch://INFRA-1099 grants that
-    # account the secret, the installer prints a WAIT line and arms nothing. omp does not need it
-    # (it signs in with the dev-box@ token above); a Claude Code apiKeyHelper does.
+    # The box gateway key, read through the gateway VM with bin/ossv-vm, as on sami-rocqperf (the
+    # ossv-vm key comes from the secrets broker). omp does not need it (it signs in with the dev-box@
+    # token above); a Claude Code apiKeyHelper does.
     ossv-box-gateway-key
     # What the librarian's test harnesses need on the host beyond mise.toml: the exact omp build
     # their runs are compared at, and Playwright's Chromium (installers/librarian-harness-host.sh).
