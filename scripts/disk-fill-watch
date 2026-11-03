@@ -2340,7 +2340,7 @@ def iops_clear_message(
 # `guard-disk-writers` runs as root and attributes DISK GROWTH to a session. It cannot send
 # over Envoy, and no agent hears a journal line, so this watch -- the agent path to a disk
 # alert on these boxes -- forwards the three lines its self-test writes to the journal
-# (decided by Sami through sami-proxy, option B, relayed 2026-11-03; agent-infra branch
+# (chosen by sami-proxy (option B), 2026-11-03; agent-infra branch
 # guard-disk-writers-root-selftest). Expected volume: about 0 a day.
 GUARD_UNIT = "guard-disk-writers.service"
 GUARD_WATCH_PREFIX = "disk-writers: WATCH "

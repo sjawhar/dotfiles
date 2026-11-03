@@ -402,8 +402,8 @@ unchanged: they always go to the box-health owner.
 
 `guard-disk-writers` is the root unit that attributes disk GROWTH to a session over an hour.
 It writes only to the journal and cannot send over Envoy, and one event must have one source,
-so **this watch forwards the three lines its self-test writes** (Sami through sami-proxy,
-option B, relayed 2026-11-03; agent-infra branch `guard-disk-writers-root-selftest`):
+so **this watch forwards the three lines its self-test writes** (chosen by sami-proxy (option
+B), 2026-11-03; agent-infra branch `guard-disk-writers-root-selftest`):
 
 | Line | What it means |
 |---|---|
