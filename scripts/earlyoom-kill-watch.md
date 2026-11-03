@@ -73,18 +73,29 @@ is gone, and earlyoom's configuration is the guard's, so the watch reads the jou
 
 ## How a kill is matched to a session, and how good that is
 
-Best first; the notice names the rule that matched.
+Best first; the notice's report names the rule that matched. "Live here" means `envoy ps --json`
+lists the session on this host, or in an agent box that runs on this host (Envoy names a box's host
+as its docker container is named). A systemd scope outlives the session that made it, so a scope
+alone never sends a notice to a session that moved to another machine or ended: on 2026-11-03 at
+20:28Z session `01a14126`'s loky python, left in the chief's old `run-c01a13dcae9797264.scope`
+after the chief moved, reached the chief.
 
-| Rule | What it reads |
-| --- | --- |
-| process tree | the nearest `omp` ancestor of the process (omp's `__omp_worker*` helpers skipped). The host sees a box's processes with shifted uids (166536), and a box tool's ancestors run through the box's omp, so boxes need nothing else. |
-| same agent box / same systemd scope | a process reparented away from its omp (a daemonized tool): the one session omp in the same docker scope, or in the same `run-*.scope` that `shims/omp` starts. |
-| session-tmp path | a process never sampled whose command line holds `session-tmp/<pid>-XXXXXXXX`: `scripts/agent-session` makes that directory as `$$-XXXXXXXX` and then execs omp, so `<pid>` is the omp. |
-| systemd scope description | a process left in a `run-*.scope` that no omp runs in now (its session moved into a box): systemd describes the scope by its command, `.../agent-session omp --resume <id>`. |
+| Step | Rule | What it reads |
+| --- | --- | --- |
+| 1 | same agent box / same systemd scope | the one session `omp` in the process's docker scope or `run-*.scope`, if that omp still runs. Shown as "process tree" when that omp is also an ancestor. |
+| 2 | process tree | the nearest `omp` ancestor that still runs (omp's `__omp_worker*` helpers skipped). The host sees a box's processes with shifted uids (166536), and a box tool's ancestors run through the box's omp. |
+| 2 | environment | `OMP_SESSION_ID` (live here), else the omp pid of `AGENT_SESSION_SCRATCH` (`session-tmp/<omp pid>-XXXXXXXX`), from `/proc/<pid>/environ` at the first sample or while earlyoom's pid still lives. omp's shared broker runs every session's tools in the scope of the session that started it, but each tool's environment names its own session. |
+| 2 | the other processes of its cgroup | when the process's own environment is unreadable: the one live-here session every other readable process of the same cgroup names. |
+| 2 | session-tmp path | `session-tmp/<pid>-XXXXXXXX` in the command line: `scripts/agent-session` makes that directory as `$$-XXXXXXXX` and then execs omp, so `<pid>` is the omp. |
+| 2 | a session's directory | in the command line, then the working directory: a full live-here session id, or a directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`) when exactly one live-here session id starts with those 8 hex. |
+| 3 | `-svc` scope Description | `run-c<16 hex>-svc.scope`, where omp-memory-watch moves a session's broker services, described `omp session <uuid> ...`: that session, if live here. |
+| 4 | the scope's original session | a `run-*.scope` no omp runs in now: the id in its Description (`omp session <uuid> ...`, or shims/omp's `agent-session omp --resume <uuid>`), else the 16 hex of `run-c<16 hex>.scope`; only if live here. |
+| - | owner unknown | the process sat in a session's scope (`run-*.scope`, an agent box, or an `omp-broker-*.scope` that several sessions share) and no step above found a live-here session. One notice a minute goes to the box-health owner (the `lead-box-health` role, else the SRE session), marked `OWNER UNKNOWN`, with each command line; its report says why (for example, which session moved or ended). |
 
 The session id of an omp is the transcript it holds open (`.../<time>Z_<id>.jsonl`, the rule
 `scripts/agentbox` uses), else its own `--resume`/`--restore` argument, else, for a box omp the
 host cannot read, `docker exec <box>` reading the box omp's open files (only when a notice needs it).
+`envoy ps --json` and `docker ps` are read only at a kill, and reused for a minute.
 
 Measured on sami-rocqperf at 15:45Z on 2026-11-02: of 247 processes at or above 64 MiB (omp
 itself left out), 226 (92%) had an owner: 189 by process tree, 37 by scope. The 21 without one
@@ -93,8 +104,8 @@ services a session started with `systemd-run` (`resolve-f1-*.service`, whose env
 no session), and containers started outside an agent box (a `clickhouse-server` test
 container). A kill of one of those is **unmatched**: it is counted (`unmatched_this_hour`) and
 logged with its command line, and nobody is told, because a guessed recipient is worse than
-none. A process that starts and is killed within one 2 s sample, with no session-tmp path in its
-command line, is unmatched too.
+none. A process that starts and is killed within one 2 s sample, with no session path in its
+command line, is unmatched too. Owner-unknown kills count as unmatched too.
 
 After a restart the state file (`/mnt/nvme/sami/tmp/earlyoom-kill-watch/state.json`, else
 `$XDG_STATE_HOME/earlyoom-kill-watch/state.json`) gives the journal cursor, the records, the

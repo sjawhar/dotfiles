@@ -34,6 +34,13 @@ BOX_SCOPE = (
     "docker-0ddb669c048c21d0c544893d29500b13e944b5c180c47e487e0a48f17643e528.scope/init.scope"
 )
 HOST_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u4242.scope"
+# 2026-11-03: the chief (moved to another machine) and EFF, whose loky python sat in the chief's old scope.
+CHIEF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+EFF = "01a14126-ae14-7525-98b7-6b1ac6cefd80"
+CHIEF_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-c01a13dcae9797264.scope"
+BROKER_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/omp-broker-3f2a9c.scope"
+LOKY = ("/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/wt/tasks/.venv/bin/python -m loky.backend.popen_loky_posix"
+        " --process-name LokyProcess-2 --pipe 20")
 PAGE = os.sysconf("SC_PAGE_SIZE")
 
 
@@ -72,7 +79,8 @@ class FakeProc:
         self.root = root
 
     def add(self, pid: int, comm: str, ppid: int, argv: list[str], cgroup: str, rss_mib: int = 1,
-            start: int = 1000, session_file: str = "", uid_readable: bool = True) -> None:
+            start: int = 1000, session_file: str = "", uid_readable: bool = True, env: dict | None = None,
+            cwd: str = "") -> None:
         d = self.root / str(pid)
         d.mkdir(parents=True)
         fields = ["S", str(ppid)] + ["0"] * 17 + [str(start), "0", str(rss_mib * 1048576 // PAGE)] + ["0"] * 30
@@ -83,6 +91,10 @@ class FakeProc:
             (d / "fd").mkdir()
             if session_file:
                 os.symlink(session_file, d / "fd" / "7")
+            if env:
+                (d / "environ").write_bytes(b"".join(f"{k}={v}".encode() + b"\0" for k, v in env.items()))
+            if cwd:
+                os.symlink(cwd, d / "cwd")
 
     def kill(self, pid: int) -> None:
         d = self.root / str(pid)
@@ -102,6 +114,7 @@ class KillWatchTest(unittest.TestCase):
         self.sent: list[tuple[str, str]] = []
         self.docker_calls: list[str] = []
         self.descriptions: dict[str, str] = {}
+        self.live: dict[str, str] = {}
 
     def watch(self, to: str = "", started: float = 0.0):
         def send(target, text):
@@ -115,16 +128,18 @@ class KillWatchTest(unittest.TestCase):
         w = WATCH.Watch(
             proc_root=self.proc.root, state_path=self.state, send=send, to=to,
             host="sami-rocqperf", docker_session=docker_session, started=started,
-            describe=lambda unit: self.descriptions.get(unit, ""),
+            describe=lambda unit: self.descriptions.get(unit, ""), live=lambda: self.live,
         )
         w.reports_dir = self.reports
         return w
 
     def test_scope_with_no_omp_left_is_matched_by_the_scope_description(self) -> None:
-        """A session that moved into a box leaves its host scope behind, described by shims/omp's
-        command (seen 2026-11-02: run-r602e682e91424bbf894544c84a240159.scope, 15.7G, no omp)."""
+        """Step 4: a scope no omp runs in now, described by shims/omp's command (seen 2026-11-02:
+        run-r602e682e91424bbf894544c84a240159.scope, 15.7G, no omp), reaches its session while that
+        session is live on this host."""
         self.descriptions["run-u4242.scope"] = (
             f"/home/sami/.dotfiles/scripts/agent-session omp --resume {HOST_SESSION}")
+        self.live[HOST_SESSION] = "sami-rocqperf"
         self.proc.add(3405892, "python3", 1, ["python3", "enum_dbg.py"], HOST_SCOPE, rss_mib=9000)
         w = self.watch()
         w.sample(at("15:09:05"))
@@ -134,6 +149,183 @@ class KillWatchTest(unittest.TestCase):
         w.flush(at("15:10:10"))
         self.assertEqual([t for t, _ in self.sent], [HOST_SESSION])
         self.assertIn("its systemd scope run-u4242.scope", report_of(self, self.sent[0][1]))
+
+    # -- a scope that outlived its session (2026-11-03) -----------------------------------------
+
+    def left_behind(self, pid: int, cmdline: str, scope: str = CHIEF_SCOPE, **extra) -> None:
+        """A process left in a session's scope, reparented to init, as the 20:28Z loky python was."""
+        argv = cmdline.split()
+        self.proc.add(pid, argv[0].rsplit("/", 1)[-1][:15], 1, argv, scope, rss_mib=1900, **extra)
+
+    def kill_one(self, w, pid: int, cmdline: str, comm: str = "") -> None:
+        """earlyoom kills `pid` at 20:28:22Z; the notice goes out a minute later."""
+        if (self.proc.root / str(pid)).exists():
+            w.sample(at("20:28:20"))
+            self.proc.kill(pid)
+        name = comm or cmdline.split()[0].rsplit("/", 1)[-1][:15]
+        w.on_entry(kill_entry(at("20:28:22"), pid - 50000, name, cmdline), at("20:28:23"))
+        w.flush(at("20:29:30"))
+
+    def test_chief_case_path_names_the_live_session_not_the_moved_scope_owner(self) -> None:
+        """2026-11-03T20:28:22Z: session 01a14126's loky python, left in the chief's old scope
+        run-c01a13dcae9797264.scope after the chief moved to another machine, reached the chief.
+        Its command line names /mnt/nvme/sami/tmp/TwoPartStage1-01a14126/, and 01a14126 is live here."""
+        self.descriptions["run-c01a13dcae9797264.scope"] = (
+            f"omp session {CHIEF} (moved from run-r72ce86c44ff741318560790740180240.scope for OOMPolicy=continue)")
+        self.live.update({EFF: "sami-rocqperf", HOST_SESSION: "sami-rocqperf"})
+        self.left_behind(50001, LOKY)
+        w = self.watch()
+        self.kill_one(w, 50001, LOKY)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+        self.assertIn("a session's directory in its command line", report_of(self, self.sent[0][1]))
+
+    def test_chief_case_never_sampled_still_reaches_the_session_its_path_names(self) -> None:
+        self.live[EFF] = "sami-rocqperf"
+        w = self.watch()
+        self.kill_one(w, 50001, LOKY, comm="python")
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+
+    def test_moved_scope_owner_is_never_told_and_the_box_health_owner_hears_owner_unknown(self) -> None:
+        """Step 4 refused: the chief's scope, the chief not live here, nothing else names an owner."""
+        self.descriptions["run-c01a13dcae9797264.scope"] = f"omp session {CHIEF} (moved from x for OOMPolicy=continue)"
+        self.live[HOST_SESSION] = "sami-rocqperf"
+        cmd = "/usr/bin/python3 -m http.server 8080"
+        self.left_behind(50002, cmd)
+        w = self.watch()
+        self.kill_one(w, 50002, cmd, comm="python3")
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC])
+        text = self.sent[0][1]
+        self.assertIn("OWNER UNKNOWN", text)
+        self.assertIn(cmd, text, "the notice names the command line")
+        self.assertNotIn(CHIEF, text)
+        report = report_of(self, text)
+        self.assertIn(f"session {CHIEF} has moved off this host or ended", report)
+        self.assertIn(cmd, report)
+        self.assertIn("unmatched_this_hour=1", w.counts_line(at("20:29:30")))
+
+    def test_owner_unknown_goes_to_the_sre_session_when_nobody_holds_the_role(self) -> None:
+        cmd = "/usr/bin/python3 -m http.server 8080"
+        self.left_behind(50002, cmd)
+        w = self.watch()
+        w.send = lambda target, text: self.sent.append((target, text)) or target != WATCH.BOX_HEALTH_ROLE_TOPIC
+        self.kill_one(w, 50002, cmd, comm="python3")
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC, SRE])
+        self.assertEqual(w.pending, [])
+
+    def test_run_c_scope_with_no_description_is_its_session_only_while_live(self) -> None:
+        """Step 4 from the unit name alone: run-c<first 16 hex of the session id>.scope."""
+        cmd = "/usr/bin/python3 train.py"
+        self.left_behind(50003, cmd)
+        self.live[CHIEF] = "agentbox-0123456789ab"
+        w = self.watch()
+        self.kill_one(w, 50003, cmd, comm="python3")
+        self.assertEqual([t for t, _ in self.sent], [CHIEF], "a session in a box on this host is live here")
+        self.assertIn("named for this session", report_of(self, self.sent[0][1]))
+
+    def test_environment_names_the_owner_inside_a_shared_scope(self) -> None:
+        """Step 2: omp's shared broker runs every session's tools in the scope of the session that
+        started it; each tool's OMP_SESSION_ID still names its own session."""
+        self.live.update({EFF: "sami-rocqperf", CHIEF: "sami-rocqperf"})
+        self.descriptions["run-c01a13dcae9797264.scope"] = f"omp session {CHIEF}"
+        cmd = "python3 qa.py"
+        self.left_behind(50004, cmd, env={"OMP_SESSION_ID": EFF, "AGENT_SESSION_SCRATCH": "/mnt/nvme/sami/session-tmp/56969-GXaSuFiC"})
+        w = self.watch()
+        self.kill_one(w, 50004, cmd)
+        self.assertEqual([t for t, _ in self.sent], [EFF], "the environment comes before the scope's original session")
+        self.assertIn("OMP_SESSION_ID", report_of(self, self.sent[0][1]))
+
+    def test_environment_scratch_names_the_omp(self) -> None:
+        self.proc.add(727012, "omp", 1, ["omp"], HOST_SCOPE,
+                      session_file=f"/home/sami/.omp/agent/sessions/-x/2026-11-01T00-00-00-000Z_{RUNNER_SESSION}.jsonl")
+        cmd = "python3 job.py"
+        self.left_behind(50005, cmd, scope=BROKER_SCOPE, env={"AGENT_SESSION_SCRATCH": "/mnt/nvme/sami/session-tmp/727012-abcdEFGH"})
+        w = self.watch()
+        self.kill_one(w, 50005, cmd)
+        self.assertEqual([t for t, _ in self.sent], [RUNNER_SESSION])
+        self.assertIn("AGENT_SESSION_SCRATCH", report_of(self, self.sent[0][1]))
+
+    def test_environment_naming_a_moved_session_is_owner_unknown(self) -> None:
+        cmd = "python3 qa.py"
+        self.left_behind(50004, cmd, env={"OMP_SESSION_ID": CHIEF})
+        w = self.watch()
+        self.kill_one(w, 50004, cmd)
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC])
+        self.assertIn(f"its environment names session {CHIEF}, not live on this host", report_of(self, self.sent[0][1]))
+
+    def test_other_processes_of_the_cgroup_name_the_owner(self) -> None:
+        """Step 2: the killed process's environment is unreadable; the rest of its cgroup agrees."""
+        self.live[EFF] = "sami-rocqperf"
+        scope = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u777.scope"
+        self.proc.add(60001, "bash", 1, ["bash", "loop.sh"], scope, env={"OMP_SESSION_ID": EFF})
+        cmd = "python3 big.py"
+        self.left_behind(50006, cmd, scope=scope, uid_readable=False)
+        w = self.watch()
+        self.kill_one(w, 50006, cmd)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+        self.assertIn("other processes of its cgroup", report_of(self, self.sent[0][1]))
+
+    def test_svc_scope_description_names_the_owner_while_live(self) -> None:
+        """Step 3: omp-memory-watch moves a session's broker services into run-c<owner>-svc.scope,
+        described `omp session <uuid>`."""
+        unit = "run-c01a14126ae147525-svc.scope"
+        self.descriptions[unit] = f"omp session {EFF} services (moved by omp-memory-watch)"
+        cmd = "node server.js"
+        self.left_behind(50007, cmd, scope=f"/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}")
+        self.live[EFF] = "sami-rocqperf"
+        w = self.watch()
+        self.kill_one(w, 50007, cmd)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+        self.assertIn(f"its systemd scope {unit}, whose Description names the session", report_of(self, self.sent[0][1]))
+        self.live.clear()
+        self.sent.clear()
+        self.left_behind(50008, cmd, scope=f"/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}")
+        w = self.watch()
+        self.kill_one(w, 50008, cmd)
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC], "an ended -svc owner is not told")
+
+    def test_broker_scope_kill_with_no_owner_goes_to_the_box_health_owner(self) -> None:
+        cmd = "python3 orphan.py"
+        self.left_behind(50009, cmd, scope=BROKER_SCOPE)
+        w = self.watch()
+        self.kill_one(w, 50009, cmd)
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC])
+        self.assertIn("omp broker scope", report_of(self, self.sent[0][1]))
+
+    def test_scope_live_omp_comes_before_paths(self) -> None:
+        """Step 1: the one live session omp of the scope wins over a path naming another session."""
+        self.proc.add(4000000, "omp", 1, ["omp"], HOST_SCOPE,
+                      session_file=f"/home/sami/.omp/agent/sessions/-src/2026-11-02T10-00-00-000Z_{HOST_SESSION}.jsonl")
+        self.live.update({EFF: "sami-rocqperf", HOST_SESSION: "sami-rocqperf"})
+        self.left_behind(50001, LOKY, scope=HOST_SCOPE)
+        w = self.watch()
+        self.kill_one(w, 50001, LOKY)
+        self.assertEqual([t for t, _ in self.sent], [HOST_SESSION])
+        self.assertIn("same systemd scope", report_of(self, self.sent[0][1]))
+
+    def test_nearest_live_ancestor_omp_when_the_nearer_one_ended(self) -> None:
+        """Step 2: two omps in one scope (no single scope owner); the inner one ended before the kill."""
+        outer_file = f"/home/sami/.omp/agent/sessions/-src/2026-11-02T10-00-00-000Z_{HOST_SESSION}.jsonl"
+        inner_file = f"/home/sami/.omp/agent/sessions/-src/2026-11-02T11-00-00-000Z_{RUNNER_SESSION}.jsonl"
+        self.proc.add(4000000, "omp", 1, ["omp"], HOST_SCOPE, session_file=outer_file)
+        self.proc.add(4000100, "bash", 4000000, ["bash"], HOST_SCOPE)
+        self.proc.add(4000200, "omp", 4000100, ["omp"], HOST_SCOPE, session_file=inner_file)
+        cmd = "python3 deep.py"
+        self.proc.add(50010, "python3", 4000200, cmd.split(), HOST_SCOPE, rss_mib=1900)
+        w = self.watch()
+        w.sample(at("20:28:20"))
+        self.proc.kill(4000200)
+        self.proc.kill(50010)
+        w.on_entry(kill_entry(at("20:28:22"), 10, "python3", cmd), at("20:28:23"))
+        w.flush(at("20:29:30"))
+        self.assertEqual([t for t, _ in self.sent], [HOST_SESSION])
+        self.assertIn("process tree (omp pid 4000000)", report_of(self, self.sent[0][1]))
+
+    def test_path_prefix_shared_by_two_live_sessions_names_neither(self) -> None:
+        twin = "01a14126-0000-7000-8000-000000000000"
+        self.live.update({EFF: "sami-rocqperf", twin: "sami-rocqperf"})
+        w = self.watch()
+        self.kill_one(w, 50001, LOKY, comm="python")
+        self.assertEqual(self.sent, [], "never sampled, no scope: unmatched, nobody told")
 
     # -- the tree each kill came from ----------------------------------------------------------
 

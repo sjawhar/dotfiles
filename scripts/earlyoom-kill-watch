@@ -35,19 +35,36 @@ What it does, as one long-running user service (`omp/earlyoom-kill-watch.service
      for any reader that wants the rate (`journalctl --user -u earlyoom-kill-watch -g
      kills_this_hour -n 1`).
 
-How the owner is found, best first (the notice says which one matched):
+How the owner is found, best first (the notice says which one matched). "Live here" means
+`envoy ps --json` lists the session on this host, or in an agent box (a docker container named as
+the box's host) that runs on this host. A systemd scope outlives the session that made it: after a
+session moves to another machine or ends, every process left in its scope would otherwise reach a
+session that cannot act (2026-11-03 20:28Z: session 01a14126's loky python, left in the chief's
+old run-c01a13dcae9797264.scope, reached the chief).
 
-  * process tree: the nearest `omp` ancestor of the process (omp's `__omp_worker*` helpers
-    skipped). In an agent box the tool's ancestors run through the box's omp too, since the host
-    sees the box's processes with shifted uids (166536). This covers almost every kill today.
-  * same agent box / same systemd scope: a process reparented away from its omp (a daemonized
-    tool) is matched by its cgroup: the box's docker scope, or the `run-*.scope` shims/omp starts,
-    when exactly one session's omp runs in it.
-  * session-tmp path: a process never sampled (younger than one sample, or below 64 MiB until
-    the end) whose command line holds `session-tmp/<pid>-...`, the scratch directory
-    scripts/agent-session makes as `$$-XXXXXXXX` before it execs omp, so <pid> is the omp.
-  * otherwise unmatched: counted and logged, and nobody is told. Sending it to a guessed
-    session would be worse than silence.
+  1. the scope's live omp: the one session `omp` that runs in the process's agent box (docker
+     scope) or `run-*.scope` and is still alive.
+  2. the process itself: the nearest `omp` ancestor still alive (omp's `__omp_worker*` helpers
+     skipped; in an agent box the tool's ancestors run through the box's omp too, since the host
+     sees the box's processes with shifted uids, 166536); else the session its environment
+     names (`OMP_SESSION_ID`, else the omp pid in `AGENT_SESSION_SCRATCH`), read when it was
+     first sampled or while earlyoom's pid still lives, live here; else the one live-here
+     session that every other process of its cgroup names in its environment; else a path in
+     its command line or working directory: `session-tmp/<omp pid>-XXXXXXXX` (the scratch
+     directory scripts/agent-session makes before it execs omp), a full session id, or a
+     directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`)
+     when exactly one live-here session starts so.
+  3. a `run-c<16 hex>-svc.scope` whose Description starts `omp session <uuid>` (omp-memory-watch
+     moves a session's broker services there): that session, when it is live here.
+  4. the scope's original session: the session id in a `run-*.scope`'s Description (`omp session
+     <uuid> ...`, or shims/omp's `agent-session omp --resume <uuid>`), else the 16 hex of
+     `run-c<16 hex>.scope`, only when that session is live here.
+  * otherwise, when the process sat in a session's scope (a `run-*.scope`, an agent box, or an
+    `omp-broker-*.scope` that serves several sessions): "owner unknown", one notice a minute to
+    the box-health owner (the `lead-box-health` role, else the SRE session) with each command
+    line, never to a session that moved or ended.
+  * otherwise unmatched (system services, containers outside a box, a process never sampled with
+    no session path): counted and logged, and nobody is told. The box-level rate covers them.
 
 The session id of an omp: the transcript it holds open (`.../<time>Z_<id>.jsonl`, the same rule
 scripts/agentbox uses), else its own `--resume`/`--restore` argument, else, for a box whose omp
@@ -123,8 +140,15 @@ UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 TRANSCRIPT_RE = re.compile(r"/sessions/.*/[0-9T:-]*Z_(" + UUID + r")\.jsonl$")
 ARG_RE = re.compile(r"(?:^|/[0-9T:-]*Z_)(" + UUID + r")(?:\.jsonl)?$")
 SESSION_TMP_RE = re.compile(r"/session-tmp/(\d+)-[A-Za-z0-9]{8}(?:/|\s|$)")
+SESSION_UUID_RE = re.compile(r"(?<![0-9a-f])(" + UUID + r")(?![0-9a-f])")
+# A directory a session names after itself: `<Name>-<first 8 hex of its id>`, e.g.
+# /mnt/nvme/sami/tmp/TwoPartStage1-01a14126/. Session ids are UUIDv7 of 2026, so `01`.
+SESSION_DIR_RE = re.compile(r"/[A-Za-z][\w.]*-(01[0-9a-f]{6})(?=[/\s\"']|$)")
 DOCKER_RE = re.compile(r"/docker-([0-9a-f]{64})\.scope")
-SCOPE_RE = re.compile(r"^(.*?/(?:run-[^/]+|session-[^/]+|tmux-spawn-[^/]+)\.scope)")
+SCOPE_RE = re.compile(r"^(.*?/(?:run-[^/]+|session-[^/]+|tmux-spawn-[^/]+|omp-broker-[^/]+)\.scope)")
+RUN_C_RE = re.compile(r"^run-c([0-9a-f]{16})(-svc)?\.scope$")
+DESCRIPTION_RE = re.compile(r"^omp session (" + UUID + r")")
+LIVE_TTL = 60.0  # seconds a read of `envoy ps --json` is reused
 
 
 def log(message: str) -> None:
@@ -186,6 +210,28 @@ def scope_description(unit: str) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
+def local_sessions(host: str) -> dict[str, str]:
+    """{session id: host} of every session `envoy ps --json` lists on this host, or in an agent
+    box that runs here (Envoy names a box's host as its docker container is named)."""
+    try:
+        done = subprocess.run([str(ENVOY), "ps", "--json"], capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+        rows = json.loads(done.stdout) if done.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        log(f"envoy ps failed: {error}")
+        rows = []
+    rows = rows if isinstance(rows, list) else (rows.get("sessions") or [])
+    here = {host}
+    try:
+        done = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True,
+                              timeout=30, stdin=subprocess.DEVNULL)
+        here |= set(done.stdout.split())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {r["session_id"]: r.get("host") or "" for r in rows
+            if isinstance(r, dict) and r.get("session_id") and r.get("host") in here}
+
+
 def envoy_send(target: str, text: str) -> bool:
     try:
         done = subprocess.run([str(ENVOY), "send", "--source", "envoy", "--message-file", "-", target],
@@ -233,7 +279,8 @@ def listed(items: list[str], room: int) -> str:
 class Watch:
     def __init__(self, proc_root: Path = PROC_ROOT, state_path: Path = DEFAULT_STATE, send=envoy_send,
                  to: str = "", host: str = "", docker_session=docker_session, started: float = 0.0,
-                 replay: bool = False, describe=scope_description, reports_dir: Path = DEFAULT_REPORTS) -> None:
+                 replay: bool = False, describe=scope_description, reports_dir: Path = DEFAULT_REPORTS,
+                 live=None) -> None:
         self.proc_root = Path(proc_root)
         self.state_path = Path(state_path)
         self.reports_dir = Path(reports_dir)
@@ -242,6 +289,10 @@ class Watch:
         self.host = host or socket.gethostname()
         self.docker_session = docker_session
         self.describe = describe
+        # The sessions live on this host ({id: host}), read at kill time only and reused LIVE_TTL s.
+        self.live = live or (lambda: local_sessions(self.host))
+        self._live: dict[str, str] = {}
+        self._live_at = -LIVE_TTL
         self.replay = replay
         self.lock = threading.RLock()
         state: dict = {}
@@ -267,6 +318,7 @@ class Watch:
         self.notify_after = 0.0 if (self.cursor or replay) else started
         self.sample_ms = 0
         self.procs: dict[int, tuple[str, int, int, int]] = {}
+        self._omp_cgroups: dict[tuple[int, int], str] | None = None
 
     # ---------------------------------------------------------------- /proc
 
@@ -313,6 +365,30 @@ class Watch:
     def is_session_omp(self, pid: int, comm: str) -> bool:
         return comm == "omp" and not any("__omp_worker" in w for w in self.cmdline(pid)[:3])
 
+    def environ(self, pid: int) -> dict:
+        """The session a process's environment names: OMP_SESSION_ID and AGENT_SESSION_SCRATCH (omp
+        sets both for every tool it runs, through its shared broker too). Unreadable for another
+        uid, e.g. a box's processes."""
+        found = {}
+        for item in self.read(pid, "environ").split(b"\0"):
+            for key, name in ((b"OMP_SESSION_ID=", "session"), (b"AGENT_SESSION_SCRATCH=", "scratch")):
+                if item.startswith(key):
+                    found[name] = item[len(key):].decode("utf8", "replace")
+        return found
+
+    def cwd(self, pid: int) -> str:
+        try:
+            return os.readlink(self.proc_root / str(pid) / "cwd")
+        except OSError:
+            return ""
+
+    def scope_omps(self, scope: str, procs: dict) -> list[tuple[int, int]]:
+        """(pid, start) of each session omp whose cgroup lies in `scope`; cgroups read once a sample."""
+        if self._omp_cgroups is None:
+            self._omp_cgroups = {(pid, row[2]): self.cgroup(pid) for pid, row in procs.items()
+                                 if row[0] == "omp" and self.is_session_omp(pid, "omp")}
+        return [key for key, cgroup in self._omp_cgroups.items() if scope in cgroup]
+
     # ---------------------------------------------------------------- sessions
 
     def session_of(self, pid: int, start: int, container: str = "", docker: bool = False) -> str:
@@ -345,31 +421,34 @@ class Watch:
         return session
 
     def owner_live(self, pid: int, procs: dict) -> dict:
-        """Who owns a live process: its nearest session omp, else the one omp of its box or scope."""
+        """What a live process tells of its owner, kept until its kill: the one session omp of its
+        box or scope, its session omp ancestors (nearest first), its environment, working directory
+        and scope unit. owner_of weighs them at the kill, when some may have gone."""
         cgroup = self.cgroup(pid)
         docker = DOCKER_RE.search(cgroup)
         container = docker[1] if docker else ""
+        tree = []
         node, steps = procs.get(pid, (None, 0, 0, 0))[1], 0
         while node and node > 1 and steps < 64:
             row = procs.get(node) or self.stat(node)
             if not row:
                 break
             if self.is_session_omp(node, row[0]):
-                return {"omp": node, "omp_start": row[2], "container": container, "how": "process tree",
-                        "session": self.session_of(node, row[2], container)}
+                tree.append({"omp": node, "omp_start": row[2], "session": self.session_of(node, row[2], container)})
             node, steps = row[1], steps + 1
-        scope = docker[0] if docker else (SCOPE_RE.match(cgroup)[1] if SCOPE_RE.match(cgroup) else "")
+        scope_match = SCOPE_RE.match(cgroup)
+        scope = docker[0] if docker else (scope_match[1] if scope_match else "")
+        scope_omp = None
         if scope:
-            owners = {}
-            for other, row in procs.items():
-                if row[0] == "omp" and other != pid and scope in self.cgroup(other) and self.is_session_omp(other, "omp"):
-                    owners[(other, row[2])] = self.session_of(other, row[2], container)
+            owners = {key: self.session_of(key[0], key[1], container)
+                      for key in self.scope_omps(scope, procs) if key[0] != pid}
             if len(set(owners.values())) == 1:
                 (omp, omp_start), session = next(iter(owners.items()))
-                how = "same agent box" if docker else "same systemd scope"
-                return {"omp": omp, "omp_start": omp_start, "container": container, "how": how, "session": session}
-        unit = scope.rsplit("/", 1)[-1] if scope.endswith(".scope") and "/run-" in scope else ""
-        return {"omp": 0, "omp_start": 0, "container": container, "how": "", "session": "", "scope": unit}
+                scope_omp = {"omp": omp, "omp_start": omp_start, "session": session,
+                             "how": "same agent box" if docker else "same systemd scope"}
+        unit = scope.rsplit("/", 1)[-1] if not docker and re.search(r"/(?:run|omp-broker)-[^/]+\.scope$", scope) else ""
+        return {"container": container, "cgroup": cgroup, "scope": unit, "scope_omp": scope_omp, "tree": tree,
+                "env": self.environ(pid), "cwd": self.cwd(pid)}
 
     # ---------------------------------------------------------------- sampling
 
@@ -378,6 +457,7 @@ class Watch:
         procs = self.scan()
         with self.lock:
             self.procs = procs
+            self._omp_cgroups = None
             for pid, (comm, _ppid, start, rss) in procs.items():
                 # omp and its broker are the sessions themselves, and earlyoom's --ignore spares them.
                 if rss < RSS_FLOOR or comm in ("omp", "omp daemon brok"):
@@ -423,6 +503,8 @@ class Watch:
             self.hour(at)["kills"] += 1
             owner = self.owner_of(kill)
             kill.update(how=owner["how"], omp=owner["omp"], session=owner["session"])
+            if owner.get("unknown"):
+                kill["unknown"] = owner["unknown"]
             # The box-level rate counts every kill, matched or not. A storm from before a first
             # start is counted, not sent, like the per-session notices.
             notify = at >= self.notify_after
@@ -431,13 +513,18 @@ class Watch:
             self.box_step(at, notify)
             if not owner["session"]:
                 self.hour(at)["unmatched"] += 1
-                log(f"{utc(at)} unmatched kill: pid {kill['pid']} uid {kill['uid']} \"{kill['comm']}\""
-                    f" {kill['rss_mib']} MiB: {kill['cmdline'][:160]}")
-                return
-            log(f"{utc(at)} kill: pid {kill['pid']} \"{kill['comm']}\" {kill['rss_mib']} MiB -> session"
-                f" {owner['session']} ({owner['how']})")
+                if not owner.get("unknown"):
+                    log(f"{utc(at)} unmatched kill: pid {kill['pid']} uid {kill['uid']} \"{kill['comm']}\""
+                        f" {kill['rss_mib']} MiB: {kill['cmdline'][:160]}")
+                    return
+                log(f"{utc(at)} kill: pid {kill['pid']} \"{kill['comm']}\" {kill['rss_mib']} MiB -> box-health owner,"
+                    f" owner unknown ({owner['unknown']}): {kill['cmdline'][:160]}")
+            else:
+                log(f"{utc(at)} kill: pid {kill['pid']} \"{kill['comm']}\" {kill['rss_mib']} MiB -> session"
+                    f" {owner['session']} ({owner['how']})")
             if at < self.notify_after or (not self.replay and now - at > STALE):
                 return
+            # Kills of no known owner are one batch, session "", for the box-health owner.
             for batch in self.pending:
                 if batch["session"] == owner["session"] and at - batch["opened"] < BATCH:
                     batch["kills"].append(kill)
@@ -445,38 +532,147 @@ class Watch:
             else:
                 self.pending.append({"session": owner["session"], "opened": at, "kills": [kill], "retry_at": 0})
 
+    def live_here(self) -> dict[str, str]:
+        now = time.monotonic()
+        if now - self._live_at >= LIVE_TTL:
+            self._live, self._live_at = self.live() or {}, now
+        return self._live
+
+    def live_omp_session(self, rec: dict | None, container: str = "") -> str:
+        """The session of a recorded omp that still runs (same pid and start time), else ""."""
+        if not rec or not rec.get("omp"):
+            return ""
+        omp = self.stat(rec["omp"])
+        if not omp or omp[2] != rec.get("omp_start"):
+            return ""
+        if not rec.get("session"):
+            rec["session"] = self.session_of(rec["omp"], omp[2], container, docker=True)
+        return rec["session"]
+
+    def tmp_session(self, text: str) -> tuple[str, int]:
+        """(session, omp pid) from a `session-tmp/<omp pid>-XXXXXXXX` path whose omp still runs."""
+        match = SESSION_TMP_RE.search(text + " ")
+        if match:
+            omp_pid = int(match[1])
+            omp = self.stat(omp_pid)
+            if omp and omp[0] == "omp":
+                return self.session_of(omp_pid, omp[2]), omp_pid
+        return "", 0
+
+    def path_session(self, text: str) -> str:
+        """A live-here session that a path names: its full id, or a `<Name>-<8 hex>` directory when
+        exactly one live-here session id starts with those 8 hex."""
+        ids = {m[1] for m in SESSION_UUID_RE.finditer(text)}
+        prefixes = {m[1] for m in SESSION_DIR_RE.finditer(text)}
+        if not ids and not prefixes:
+            return ""
+        live = self.live_here()
+        found = ids & set(live)
+        if not found:
+            for prefix in prefixes:
+                found |= {s for s in live if s.startswith(prefix)}
+        return found.pop() if len(found) == 1 else ""
+
+    def cgroup_session(self, cgroup: str, pid: int) -> str:
+        """The one live-here session every other readable process of `cgroup` names in its environment."""
+        if not cgroup:
+            return ""
+        found = set()
+        for other in self.procs:
+            if other != pid and self.cgroup(other) == cgroup:
+                session = self.environ(other).get("session")
+                if session:
+                    found.add(session)
+        return found.pop() if len(found) == 1 and next(iter(found)) in self.live_here() else ""
+
+    def scope_session(self, unit: str) -> tuple[str, str]:
+        """(session, rule) a scope names: a `-svc` scope's Description `omp session <uuid>` (step 3),
+        else the original session of a `run-*.scope` (step 4); the session may have moved or ended."""
+        if not unit.startswith("run-"):
+            return "", ""
+        description = self.describe(unit)
+        named = DESCRIPTION_RE.match(description)
+        run_c = RUN_C_RE.match(unit)
+        if run_c and run_c[2]:
+            return (named[1], f"its systemd scope {unit}, whose Description names the session") if named else ("", "")
+        if named:
+            return named[1], f"its systemd scope {unit}, made for this session (no omp runs in it now)"
+        found = {m[1] for m in map(ARG_RE.search, description.split()) if m}
+        if len(found) == 1:
+            return found.pop(), f"its systemd scope {unit}, which shims/omp started for this session (no omp runs in it now)"
+        if run_c:
+            hex16 = run_c[1]
+            ids = {s for s in self.live_here() if s.replace("-", "").startswith(hex16)}
+            if len(ids) == 1:
+                return ids.pop(), f"its systemd scope {unit}, named for this session (no omp runs in it now)"
+            return f"{hex16[:8]}-{hex16[8:12]}-{hex16[12:]}…", ""
+        return "", ""
+
     def owner_of(self, kill: dict) -> dict:
+        """The session to tell, in the order of the module's doc. A session that has moved off this
+        host or ended is never told: such a kill goes to the box-health owner as "owner unknown"."""
         pid, comm = kill["pid"], kill["comm"]
         # earlyoom logs before it signals, so the process is sometimes still here. Not in a replay:
         # by then the pid may be another process with the same name.
         row = None if self.replay else self.stat(pid)
         if row and row[0] == comm:
-            entry = self.table.get(f"{pid}:{row[2]}") or self.owner_live(pid, self.scan())
+            entry = self.table.get(f"{pid}:{row[2]}")
+            if entry is None:
+                self._omp_cgroups = None
+                entry = self.owner_live(pid, self.scan())
+            elif not entry.get("env"):
+                entry["env"] = self.environ(pid)
         else:
             known = [e for e in self.table.values() if e["pid"] == pid and e["comm"] == comm]
-            entry = max(known, key=lambda e: e.get("last_seen", 0)) if known else None
-        if entry and entry.get("omp"):
-            if not entry.get("session"):
-                omp = self.stat(entry["omp"])
-                if omp and omp[2] == entry["omp_start"]:
-                    entry["session"] = self.session_of(entry["omp"], omp[2], entry.get("container", ""), docker=True)
-            if entry.get("session"):
-                return {"session": entry["session"], "how": entry["how"], "omp": entry["omp"]}
-        match = SESSION_TMP_RE.search(kill["cmdline"])
-        if match:
-            omp_pid = int(match[1])
-            omp = self.stat(omp_pid)
-            if omp and omp[0] == "omp":
-                session = self.session_of(omp_pid, omp[2])
-                if session:
-                    return {"session": session, "how": "session-tmp path in its command line", "omp": omp_pid}
-        if entry and entry.get("scope"):
-            words = self.describe(entry["scope"]).split()
-            found = {m[1] for m in map(ARG_RE.search, words) if m}
-            if len(found) == 1:
-                return {"session": found.pop(), "how": f"its systemd scope {entry['scope']}, which shims/omp started"
-                        " for this session (no omp runs in it now)", "omp": 0}
-        return {"session": "", "how": "", "omp": 0}
+            entry = max(known, key=lambda e: e.get("last_seen", 0)) if known else {}
+        container = entry.get("container", "")
+        # `envoy ps` takes seconds, so it is read only past the omp rules (most kills stop there).
+        # 1. the scope's live omp
+        scope_omp = entry.get("scope_omp")
+        session = self.live_omp_session(scope_omp, container)
+        if session:
+            ancestor = any(r.get("omp") == scope_omp["omp"] for r in entry.get("tree") or [])
+            return {"session": session, "how": "process tree" if ancestor else scope_omp["how"], "omp": scope_omp["omp"]}
+        # 2. the process: its nearest live omp ancestor, its environment, its cgroup's, its paths
+        for rec in entry.get("tree") or []:
+            session = self.live_omp_session(rec, container)
+            if session:
+                return {"session": session, "how": "process tree", "omp": rec["omp"]}
+        env = entry.get("env") or {}
+        if env.get("session") and env["session"] in self.live_here():
+            return {"session": env["session"], "how": "its environment (OMP_SESSION_ID)", "omp": 0}
+        session, omp_pid = self.tmp_session(env.get("scratch", ""))
+        if session:
+            return {"session": session, "how": "its environment (AGENT_SESSION_SCRATCH)", "omp": omp_pid}
+        if not env.get("session"):
+            session = self.cgroup_session(entry.get("cgroup", ""), pid)
+            if session:
+                return {"session": session, "how": "the environment of the other processes of its cgroup", "omp": 0}
+        session, omp_pid = self.tmp_session(kill["cmdline"])
+        if session:
+            return {"session": session, "how": "session-tmp path in its command line", "omp": omp_pid}
+        for where, text in (("command line", kill["cmdline"]), ("working directory", entry.get("cwd", ""))):
+            session = self.path_session(text)
+            if session:
+                return {"session": session, "how": f"a session's directory in its {where}", "omp": 0}
+        # 3. and 4. what its scope names, only when that session is live here
+        unit = entry.get("scope", "")
+        session, how = self.scope_session(unit)
+        if session and session in self.live_here():
+            return {"session": session, "how": how, "omp": 0}
+        if unit.startswith("omp-broker-"):
+            why = f"it ran in {unit}, the omp broker scope several sessions share, and named no live session"
+        elif session:
+            why = f"it ran in {unit}, whose session {session} has moved off this host or ended"
+        elif unit:
+            why = f"it ran in {unit}, which names no session"
+        elif container:
+            why = f"it ran in agent box {container[:12]}, whose omp no longer runs"
+        else:
+            return {"session": "", "how": "", "omp": 0}
+        if env.get("session"):
+            why += f"; its environment names session {env['session']}, not live on this host"
+        return {"session": "", "how": "", "omp": 0, "unknown": why}
 
     # ---------------------------------------------------------------- the box-level rate
 
@@ -571,7 +767,9 @@ class Watch:
         lines += ["", f"Sessions told of their own kills ({len(sessions)}; each had its own notice):"]
         lines += [f"  {session} {n} kills" for session, n in sessions.most_common(30)]
         lines += [f"{unmatched} kills had no session (system services, containers outside a box, processes"
-                  " younger than one 2 s sample): nobody was told of them.", "", "Kills per clock hour (this watch's count):"]
+                  " younger than one 2 s sample, or left behind by a session that moved or ended): no session was"
+                  " told of them; those left in a session's scope came to the box-health owner as owner unknown.",
+                  "", "Kills per clock hour (this watch's count):"]
         lines += [f"  {hour} {row.get('kills', 0)} kills, {row.get('unmatched', 0)} unmatched"
                   for hour, row in sorted(self.hours.items())[-6:]]
         lines += [
@@ -587,6 +785,8 @@ class Watch:
     # ---------------------------------------------------------------- notices
 
     def notice(self, batch: dict, report: str) -> str:
+        if not batch["session"]:
+            return self.unknown_notice(batch, report)
         kills = batch["kills"]
         free = meminfo_available(self.proc_root).split(" ")[0]
         head = (
@@ -602,6 +802,19 @@ class Watch:
         items = [f"{utc(k['at'])} pid {k['pid']} \"{k['comm']}\" {k['rss_mib']} MiB" for k in kills]
         return bounded(head + listed(items, MESSAGE_LIMIT - len(head) - len(advice) - len(tail)) + advice, tail)
 
+    def unknown_notice(self, batch: dict, report: str) -> str:
+        """Kills of no live owner, for the box-health owner: each command line, as many as fit."""
+        kills = batch["kills"]
+        head = (
+            ("DRILL COPY of the owner-unknown notice (--to). " if self.to else "")
+            + f"OWNER UNKNOWN: earlyoom on {self.host} stopped {len(kills)} processes (SIGTERM, host memory at 10%)"
+            " whose session is not live on this host (it moved or ended), so no session was told."
+            " Box-health owner: find who runs them; stop them if nobody does. "
+        )
+        tail = f" Full report: {report}"
+        items = [f"{utc(k['at'])} pid {k['pid']} {k['rss_mib']} MiB: {k['cmdline'][:120]}" for k in kills]
+        return bounded(head + listed(items, MESSAGE_LIMIT - len(head) - len(tail)), tail)
+
     def notice_report(self, batch: dict) -> str:
         kills = batch["kills"]
         lines = []
@@ -615,6 +828,18 @@ class Watch:
             )
         hows = sorted({f"{k['how']} (omp pid {k['omp']})" if k["omp"] else k["how"] for k in kills})
         now_free = meminfo_available(self.proc_root)
+        if not batch["session"]:
+            whys = sorted({k.get("unknown", "") for k in kills})
+            return (
+                f"earlyoom-kill-watch on {self.host}: OWNER UNKNOWN. The host's earlyoom stopped {len(kills)}"
+                " processes with SIGTERM, because the host's available memory fell to 10%. No live session on"
+                " this host owns them, so no session was told; a session that moved or ended is never told.\n"
+                + "\n".join(lines)
+                + "\nWhy no owner: " + "; ".join(whys) + ".\n"
+                "Box-health owner: find who runs these commands (the paths often name the session) and tell"
+                " them, or stop the work if nobody owns it."
+                + (f" Available now: {now_free}." if now_free else "") + "\n"
+            )
         return (
             f"earlyoom-kill-watch on {self.host}: the host's earlyoom stopped {len(kills)} processes of session"
             f" {batch['session']} with SIGTERM, because the host's available memory fell to 10%.\n"
@@ -665,18 +890,23 @@ class Watch:
                 box["sending"] = True
         sent = 0
         for batch in due:
-            target = self.to or batch["session"]
+            # Kills of no live owner go to the box-health owner: its role, else the SRE session.
+            targets = [self.to] if self.to else [batch["session"]] if batch["session"] else [BOX_HEALTH_ROLE_TOPIC, SRE]
             # Written once per batch: a retry names the same report.
             if not batch.get("report"):
-                batch["report"] = self.write_report(f"notice-{batch['session'][:8]}", self.notice_report(batch), now)
-            ok = self.send(target, self.notice(batch, batch["report"]))
+                kind = f"notice-{batch['session'][:8]}" if batch["session"] else "owner-unknown"
+                batch["report"] = self.write_report(kind, self.notice_report(batch), now)
+            text = self.notice(batch, batch["report"])
+            target = next((t for t in targets if self.send(t, text)), "")
+            ok = bool(target)
             with self.lock:
                 batch.pop("sending", None)
                 if ok:
                     self.pending.remove(batch)
                     self.hour(now)["notices"] += 1
                     sent += 1
-                    log(f"notice sent to {target}: {len(batch['kills'])} kill(s) of session {batch['session']}")
+                    log(f"notice sent to {target}: {len(batch['kills'])} kill(s) of"
+                        f" {('session ' + batch['session']) if batch['session'] else 'no live owner (owner unknown)'}")
                 else:
                     batch["retry_at"] = now + RETRY
         if box:
