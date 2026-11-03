@@ -208,11 +208,20 @@ gh_shim_rate_limited() {
     else
         who="the GitHub App installation${owner:+ for owner $owner}, which every agent session shares"
     fi
+    # Which budget the call spends: GitHub keeps one each for REST (core), GraphQL,
+    # search and code search. A search call that hit its 30-a-minute limit was
+    # reported against core, which had thousands left (2026-11-03).
+    case "${1:-} ${2:-}" in
+        'search code') want=code_search ;;
+        search\ *) want=search ;;
+    esac
     for a in "$@"; do
         case "$prev" in -R | --repo) repo="$a" ;; esac
         case "$a" in
             --repo=*) repo="${a#--repo=}" ;;
             graphql) [[ "${1:-}" == api ]] && want=graphql ;;
+            search/code* | /search/code*) [[ "${1:-}" == api ]] && want=code_search ;;
+            search/* | /search/*) [[ "${1:-}" == api ]] && want=search ;;
         esac
         [[ -z "$repo" && "$a" =~ ^/?repos/([^/]+/[^/?]+) ]] && repo="${BASH_REMATCH[1]}"
         prev="$a"
@@ -225,7 +234,7 @@ gh_shim_rate_limited() {
     done < <(
         if [[ -n "$repo" ]]; then export GH_REPO="$repo"; fi
         GH_SHIM_INNER=1 GH_READ_CACHE=0 GH_READ_CACHE_LOG=0 timeout 30 "$0" api rate_limit \
-            --jq '.resources | to_entries[] | select(.key == "core" or .key == "graphql") | "\(.key) \(.value.remaining) \(.value.limit) \(.value.reset)"' \
+            --jq '.resources | to_entries[] | select(.key == "core" or .key == "graphql" or .key == "search" or .key == "code_search" or .value.remaining == 0) | "\(.key) \(.value.remaining) \(.value.limit) \(.value.reset)"' \
             2> /dev/null || true
     )
     {

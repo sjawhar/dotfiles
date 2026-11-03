@@ -24,7 +24,15 @@ before handing the call to the real one.
   `scripts/post-review <pr> <head sha> APPROVE|REQUEST_CHANGES <body-file> <owner/repo>`,
   since a comment does not count as an approval; elsewhere a verdict goes out as an App
   comment beginning `VERDICT: <verdict> at <head sha>`; anything
-  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). Outside an agent
+  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). A call GitHub stops
+  for a spent budget (`API rate limit exceeded`, a secondary limit, HTTP 429) ends instead with
+  a `gh shim: RATE LIMITED` block: the identity, the budget the call spends (core, graphql,
+  search or code_search, read from the free `rate_limit` endpoint on the same route, with at
+  most 30 s for that read) and every budget at 0 with its reset time, and the advice to wait
+  for the reset rather than look for another credential. The shim does not retry; gh itself
+  does not either, so the call fails in seconds (measured 2026-11-03: 3.5 s through the shim,
+  0.2 s for gh alone). Until 2026-11-03 the block named only core and graphql, so a spent
+  search budget read as core with thousands left. Outside an agent
   session, `gh auth git-credential` (git's helper in `~/.gitconfig`) goes to the user's login,
   except where the machine's own git config file, `~/.config/git/config` (not the shared
   `~/.gitconfig`, not a repository's), names `gh-app.host-profile` (a machine with no person's

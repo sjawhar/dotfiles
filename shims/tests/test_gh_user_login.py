@@ -88,7 +88,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?")[0].endswith("/rate_limit"):
             return self._reply(200, {"resources": {
                 "core": {"limit": 5000, "used": 5000, "remaining": 0, "reset": reset},
-                "graphql": {"limit": 5000, "used": 10, "remaining": 4990, "reset": reset + 1800}}})
+                "graphql": {"limit": 5000, "used": 10, "remaining": 4990, "reset": reset + 1800},
+                "search": {"limit": 30, "used": 30, "remaining": 0, "reset": reset},
+                "code_search": {"limit": 10, "used": 1, "remaining": 9, "reset": reset}}})
         if "ratelimited" in self.path:
             return self._reply(403, {"message": "API rate limit exceeded for user ID 1. If you reach out to GitHub "
                                      "Support for help, please include the request ID.",
@@ -325,6 +327,17 @@ class UserLogin(unittest.TestCase):
             'echo "gh-app-token: minting token for profile agent (owner=o) through the broker..." >&2\n'
             f'export GH_TOKEN={APP_TOKEN}')
         self.assertIn("the GitHub App installation for owner o, which every agent session shares", err)
+
+    def test_a_spent_search_budget_names_the_search_budget(self):
+        # 2026-11-03: a search call's 30-a-minute budget ran out and the block named only core's.
+        executable(self.bin / "knives", '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n'
+                   f'export GH_TOKEN={APP_TOKEN}\nexec "$KNIVES_REAL_GH" "$@"')
+        result, _ = self.run_gh(["api", "search/issues?q=ratelimited"], self.shim_path,
+                                **{**self.agent, "GH_REPO": "o/r"})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("gh shim: RATE LIMITED:", result.stderr)
+        self.assertRegex(result.stderr, r"Limit: search 0 of 30 left; it resets at \d\d:\d\d:\d\dZ")
+        self.assertNotIn("code_search 9", result.stderr)  # a budget with requests left is not the cause
 
     def test_a_call_knives_could_not_route_says_to_name_a_repository_not_to_stop(self):
         # 2026-11-02: `gh api markdown` outside a checkout; knives names no target and gh's 401 follows.
