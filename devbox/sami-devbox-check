@@ -18,8 +18,9 @@
 # Azure box), the build pool, the grade pool, the secrets broker, Envoy, Dispatch, MLflow,
 # the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
 # mounted disk. Both halves also clone-check private theorem-labs repositories over https
-# (github_check). The box half is run through `agentbox new`, the same launcher a session goes
-# through, so a check passes only with what a real box gets: its mounts, its relays, its env.
+# (github_check) and read the transcript store with `tq` (tq_check). The box half is run through
+# `agentbox new`, the same launcher a session goes through, so a check passes only with what a
+# real box gets: its mounts, its relays, its env.
 #
 # Each line is `ok`, `FAIL` or `note`, with what was expected and what was read, so the log is
 # the evidence. The log goes to CUTOVER_DIR/a2-<UTC time>.log as well as to stdout.
@@ -110,6 +111,7 @@ in_box() {
     azure_check
     tools_check
     github_check "in the box"
+    tq_check "in the box"
     n6_check "in the box"
 
     echo "== box done, $fails failed, $(stamp)"
@@ -452,6 +454,17 @@ azure_check() {
     fi
 }
 
+# The transcript store, as a session reads it: `tq` through the front door
+# (https://transcript-store.$TAILNET, agent-infra transcript-store/), which names this machine by
+# its tailnet tag, tag:sami-devbox, with no password (dispatch://INFRA-913). A read-only count of
+# the sessions table must give a positive number.
+tq_check() {
+    local where="$1" out
+    # uv tool install puts tq in ~/.local/bin, which a non-login shell's PATH lacks.
+    out="$(PATH="$HOME/.local/bin:$PATH" timeout 60 tq sql 'SELECT count() FROM sessions' 2>&1 | tail -1)"
+    [[ "$out" =~ ^[0-9]+$ && "$out" -gt 0 ]] && ok "transcript store $where: tq sql count of sessions -> $out" || fail "transcript store $where: tq sql 'SELECT count() FROM sessions': $out"
+}
+
 # --- the host half ---------------------------------------------------------------------------
 host_disks() {
     local src fstype
@@ -760,6 +773,7 @@ host() {
     [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
     host_logins
     github_check "on the host"
+    tq_check "on the host"
     rocqperf_check
     leak_check_host_check
     ossv_tree_host_check
