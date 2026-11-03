@@ -1189,44 +1189,6 @@ class GcloudRouting(unittest.TestCase):
                 self.assertIn("Set KUBECONFIG", result.stderr)
 
 
-class GcloudShimCopiesOnPath(unittest.TestCase):
-    """Two copies of the shim on PATH must not take each other for the real gcloud: at 06:23Z on
-    2026-11-03 a scratch copy ahead of shims/ and the installed shim called each other until an
-    agent box's 8192 processes were used up (dispatch://INFRA-993). A copy is skipped when it has
-    the same bytes or holds the shim's marker line (another version), and the real one runs."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.real = self.root / "sdk"
-        self.real.mkdir()
-        write_stub(self.real, "gcloud", 'echo "REAL-GCLOUD-RAN"')
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
-    def copy_of_shim(self, name: str, extra: str = "") -> Path:
-        directory = self.root / name
-        directory.mkdir()
-        copy = directory / "gcloud"
-        copy.write_text((SHIMS / "gcloud").read_text(encoding="utf-8") + extra, encoding="utf-8")
-        copy.chmod(0o755)
-        return directory
-
-    def test_a_second_copy_ahead_on_path_reaches_the_real_gcloud(self) -> None:
-        for name, extra in (("same-bytes", ""), ("other-version", "# a later edit\n")):
-            with self.subTest(copy=name):
-                copy = self.copy_of_shim(name, extra)
-                env = {"PATH": f"{copy}:{SHIMS}:{self.real}:/usr/bin:/bin", "HOME": str(self.root / "home"),
-                       "GCE_METADATA_HOST": "127.0.0.1:9"}
-                # `version` runs by exec, not by the lock retry, so a loop is one process the
-                # timeout ends rather than a growing tree.
-                for first in (copy / "gcloud", SHIMS / "gcloud"):
-                    result = subprocess.run([str(first), "version"], capture_output=True, text=True, env=env,
-                                            timeout=60, check=False)
-                    self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
-
-
 class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
     """A config dir copied from an Azure box to a Google VM keeps the Azure box credential gcloud
     stored, and gcloud reads it before the metadata server: LINUX-1248's own CLOUDSDK_CONFIG, moved
@@ -1809,6 +1771,43 @@ class GcloudLockLog(unittest.TestCase):
         result = self.run_shim(["auth", "print-access-token"])
         self.assertEqual((result.returncode, result.stdout), (0, "OK-2\n"), result.stderr)
 
+
+class GcloudShimCopiesOnPath(unittest.TestCase):
+    """Two copies of the shim on PATH must not take each other for the real gcloud: at 06:23Z on
+    2026-11-03 a scratch copy ahead of shims/ and the installed shim called each other until an
+    agent box's 8192 processes were used up (dispatch://INFRA-993). A copy is skipped when it has
+    the same bytes or holds the shim's marker line (another version), and the real one runs."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.real = self.root / "sdk"
+        self.real.mkdir()
+        write_stub(self.real, "gcloud", 'echo "REAL-GCLOUD-RAN"')
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def copy_of_shim(self, name: str, extra: str = "") -> Path:
+        directory = self.root / name
+        directory.mkdir()
+        copy = directory / "gcloud"
+        copy.write_text((SHIMS / "gcloud").read_text(encoding="utf-8") + extra, encoding="utf-8")
+        copy.chmod(0o755)
+        return directory
+
+    def test_a_second_copy_ahead_on_path_reaches_the_real_gcloud(self) -> None:
+        for name, extra in (("same-bytes", ""), ("other-version", "# a later edit\n")):
+            with self.subTest(copy=name):
+                copy = self.copy_of_shim(name, extra)
+                env = {"PATH": f"{copy}:{SHIMS}:{self.real}:/usr/bin:/bin", "HOME": str(self.root / "home"),
+                       "GCE_METADATA_HOST": "127.0.0.1:9"}
+                # `version` runs by exec, not by the lock retry, so a loop is one process the
+                # timeout ends rather than a growing tree.
+                for first in (copy / "gcloud", SHIMS / "gcloud"):
+                    result = subprocess.run([str(first), "version"], capture_output=True, text=True, env=env,
+                                            timeout=60, check=False)
+                    self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
 
 
 if __name__ == "__main__":
