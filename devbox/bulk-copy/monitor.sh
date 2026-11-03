@@ -22,7 +22,10 @@ if [[ $HOST == sami-rocqperf ]]; then
 fi
 DEVBOX_FLOORS="/:$((50 * 1024 ** 3)) /mnt/nvme:$((400 * 1024 ** 3)) /mnt/scratch:$((500 * 1024 ** 3)) /mnt/durable:$((200 * 1024 ** 3))"
 high=0 dhigh=0
-read_stats() { awk -v d="$1" '$3==d{print $4, $6, $8, $10, $13}' /proc/diskstats; }
+# Disk rule for the durable units (Main, 2026-11-03 03:40Z): freeze when DUR_DEV's await is above
+# 20 ms or its %util above 80 for 2 samples; thaw when both are under for 5 samples. It starts held.
+DUR_DEV=${DUR_DEV:-nvme0n2} dbusy=0 dcalm=0 dheld=1
+read_stats() { awk -v d="$1" '$3==d{print $4, $6, $8, $10, $13, $7, $11}' /proc/diskstats; }
 declare -A PREV
 for d in "${DEVS[@]}"; do PREV[$d]=$(read_stats "$d"); done
 pt=$(date +%s)
@@ -31,9 +34,17 @@ while :; do
   now=$(date +%s); dt=$((now - pt)); pt=$now; stats=""
   for d in "${DEVS[@]}"; do
     cur=($(read_stats "$d")); prev=(${PREV[$d]}); PREV[$d]="${cur[*]}"
+    ios=$(( cur[0] - prev[0] + cur[2] - prev[2] ))
+    aw=$(( ios > 0 ? (cur[5] - prev[5] + cur[6] - prev[6]) / ios : 0 ))
+    ut=$(( (cur[4] - prev[4]) / dt / 10 ))
     stats+="$d r/s=$(( (cur[0] - prev[0]) / dt )) rMB/s=$(( (cur[1] - prev[1]) * 512 / dt / 1000000 ))"
     stats+=" w/s=$(( (cur[2] - prev[2]) / dt )) wMB/s=$(( (cur[3] - prev[3]) * 512 / dt / 1000000 ))"
-    stats+=" util=$(( (cur[4] - prev[4]) / dt / 10 ))% "
+    stats+=" await=${aw}ms util=${ut}% "
+    if [[ $d == "$DUR_DEV" ]]; then
+      if (( aw > 20 || ut > 80 )); then dbusy=$((dbusy + 1)); dcalm=0; else dcalm=$((dcalm + 1)); dbusy=0; fi
+      (( dbusy >= 2 )) && dheld=1
+      (( dcalm >= ${DUR_CALM:-2} )) && dheld=0
+    fi
   done
   psome=$(awk '/^some/{split($3,a,"=");print a[2]}' /proc/pressure/io)
   pfull=$(awk '/^full/{split($3,a,"=");print a[2]}' /proc/pressure/io)
@@ -61,10 +72,12 @@ while :; do
   awk -v p="$psome" -v l="$IO_LIMIT" 'BEGIN{exit !(p>l)}' && high=$((high + 1)) || high=0
   awk -v p="$psome" -v l="$DUR_IO_LIMIT" 'BEGIN{exit !(p>l)}' && dhigh=$((dhigh + 1)) || dhigh=0
   (( dhigh >= 5 )) && dwhy+="io-pressure-5min>$DUR_IO_LIMIT:$psome "
+  # The disk rule freezes only the durable units; it does not touch gate.state, which the
+  # /mnt/nvme/sami workers also read (they read md127, not nvme0n2).
   units=$(systemctl list-units --plain --no-legend 'devbox-copy-up-*' 'devbox-copy-find-*' | awk '{print $1}')
   for u in $units; do
     if [[ " $DUR_UNITS " == *" $u "* ]]; then
-      stop=$([[ -n $dwhy && $dwhy != devbox-unreachable\  ]] && echo 1 || echo 0)
+      stop=$([[ -n $dwhy && $dwhy != devbox-unreachable\  ]] || (( dheld )) && echo 1 || echo 0)
     else
       stop=$([[ -n $lwhy || $dwhy == *floor* ]] || (( high >= 5 )) && echo 1 || echo 0)
     fi
@@ -72,5 +85,5 @@ while :; do
   done
   if [[ -z $dwhy ]]; then echo OK >"$DIR/gate.state.tmp"; else echo "PAUSE $dwhy" >"$DIR/gate.state.tmp"; fi
   mv "$DIR/gate.state.tmp" "$DIR/gate.state"
-  echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lwhy ]] && echo 1 || echo 0) high50=$high high95=$dhigh gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
+  echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lwhy ]] && echo 1 || echo 0) high50=$high high95=$dhigh dbusy=$dbusy dcalm=$dcalm dheld=$dheld gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
 done
