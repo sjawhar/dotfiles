@@ -4,7 +4,7 @@
 # to run again. It refuses any machine that is not a Google VM (scripts/on-google-vm).
 #
 #   1. the apt packages the dotfiles' installers and scripts expect and a bare Ubuntu 24.04
-#      image lacks;
+#      image lacks, and the AppArmor profile that lets bwrap make its user namespace;
 #   2. devbox/gce-disks and its unit, enabled and run now: state disk at /mnt/nvme, cold disk at
 #      /mnt/durable, /home and Docker's, containerd's and Sysbox's data bound from the state disk,
 #      the local-SSD RAID with its swap at /mnt/scratch; and the drop-in that keeps the user
@@ -86,6 +86,21 @@ if ((${#missing[@]})); then
     apt-get install -y --no-install-recommends "${missing[@]}"
 else
     echo "gce-host.sh: every package already installed"
+fi
+
+# bwrap's AppArmor profile (devbox/apparmor-bwrap, the bytes of sami-rocqperf's): Ubuntu 24.04 sets
+# kernel.apparmor_restrict_unprivileged_userns=1, and without the profile a bwrap sandbox with its
+# own network namespace fails with "loopback: Failed RTM_NEWADDR: Operation not permitted". After
+# the packages, which install bubblewrap. Loaded only when the file changed or the kernel does not
+# hold the profile; apparmor.service loads it at each boot.
+bwrap_profile=/etc/apparmor.d/bwrap
+if ! cmp -s "$DEVBOX_DIR/apparmor-bwrap" "$bwrap_profile" \
+    || ! grep -qx 'bwrap (unconfined)' /sys/kernel/security/apparmor/profiles; then
+    install -m 0644 "$DEVBOX_DIR/apparmor-bwrap" "$bwrap_profile"
+    apparmor_parser -r "$bwrap_profile"
+    echo "gce-host.sh: installed and loaded $bwrap_profile"
+else
+    echo "gce-host.sh: $bwrap_profile unchanged and loaded"
 fi
 
 # --- 2. the disks ---------------------------------------------------------------------------------

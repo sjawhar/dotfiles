@@ -666,6 +666,28 @@ host_packages() {
     [[ -z "$missing" ]] && ok "lane packages: opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64 resolve" || fail "lane packages: missing command(s):$missing"
 }
 
+# bwrap makes its network namespace as sami: the AppArmor profile devbox/gce-host.sh installs
+# (Ubuntu 24.04 denies unprivileged user namespaces without it) is byte for byte the dotfiles'
+# copy, and a bwrap sandbox with its own network namespace and / read-only runs `true`. That
+# command line is in the private repository theorem-labs/sami, cloned at .secrets, one line of
+# arguments: the public-text leak check refuses bubblewrap options in this public repository.
+BWRAP_SMOKE_FILE="$DOTFILES_DIR/.secrets/dotfiles/devbox/bwrap-smoke"
+host_bwrap() {
+    local want got out rc=0
+    local -a args=()
+    want="$(sha256sum "$DOTFILES_DIR/devbox/apparmor-bwrap" 2>&1)" && want="${want%% *}"
+    got="$(sha256sum /etc/apparmor.d/bwrap 2>&1)" && got="${got%% *}"
+    if [[ "$want" =~ ^[0-9a-f]{64}$ && "$got" == "$want" ]]; then
+        ok "bwrap AppArmor profile: /etc/apparmor.d/bwrap is devbox/apparmor-bwrap (sha256 ${want:0:12})"
+    else
+        fail "bwrap AppArmor profile: /etc/apparmor.d/bwrap ($(tail -1 <<<"$got")) is not devbox/apparmor-bwrap ($(tail -1 <<<"$want")); run sudo devbox/gce-host.sh"
+    fi
+    read -ra args 2>/dev/null <"$BWRAP_SMOKE_FILE"
+    (( ${#args[@]} )) || { fail "bwrap sandbox: no command line in $BWRAP_SMOKE_FILE (git -C $DOTFILES_DIR/.secrets pull)"; return; }
+    out="$(bwrap "${args[@]}" 2>&1)" || rc=$?
+    (( rc == 0 )) && ok "bwrap ${args[*]}: exit 0" || fail "bwrap ${args[*]}: exit $rc: $(tail -1 <<<"$out")"
+}
+
 # Movers (S3 and others) run scripts on sami-rocqperf over ssh after the move, so this machine
 # must reach it. While the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending
 # (dispatch://INFRA-734) the connection times out, which is a WAIT; any other error is a FAIL.
@@ -719,6 +741,7 @@ host() {
     host_units
     host_follow
     host_packages
+    host_bwrap
     host_plain_path_kubectl
     local missing
     mise_check

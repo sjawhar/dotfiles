@@ -1,0 +1,14 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Ubuntu 24.04+ denies unprivileged user namespaces to unconfined programs
+# (kernel.apparmor_restrict_unprivileged_userns=1). This is the distribution's
+# own profile shape for bwrap: it grants only the userns capability and leaves
+# the sandboxed program unconfined, as it was before that restriction.
+# Added 2026-10-31 for the LINUX-1216 maintainer-persona study sandbox.
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/bwrap>
+}
