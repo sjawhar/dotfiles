@@ -1,5 +1,5 @@
 [Unit]
-Description=Check every 5 min that the SPEEDCOACH root omp session is not hung on a tool call
+Description=Check every 5 min that the Rocq speed lead's root omp session is not hung on a tool call
 
 [Timer]
 OnActiveSec=1min

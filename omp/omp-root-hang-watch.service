@@ -1,5 +1,5 @@
 [Unit]
-Description=Tell the chief of staff once when the SPEEDCOACH root omp session hangs on a tool call
+Description=Tell the box-health owner once when the Rocq speed lead's root omp session hangs on a tool call
 Documentation=file:%h/.dotfiles/scripts/omp-root-hang-watch.md
 
 [Service]
@@ -8,9 +8,15 @@ Type=oneshot
 # starts a minute late changes nothing.
 Nice=15
 IOSchedulingClass=idle
-# A quiet run took 5-14 s on sami-rocqperf at load ~400 on 2026-11-02, mostly python3 start-up;
-# an alert adds one `envoy send` (60 s cap in the script). A run that cannot finish is killed.
-TimeoutStartSec=120
+# A quiet run costs about 0.4 s of CPU and 1-2 s wall on sami-rocqperf at load 215
+# (2026-11-03): python3 start-up, one GET /v1/sessions (0.15 s), one stat. Its 4 failures in 40 h
+# were all kills at the old 120 s limit during box-wide stalls (2026-11-02 18:15Z and 22:16Z,
+# 2026-11-03 00:32Z and 00:37Z), when omp-memory-watch, envoy-role-holder-watch, omp-login-watch
+# and disk-fill-watch timed out in the same minutes and `systemctl --user` itself answered
+# "Connection timed out"; the 00:32Z run had used 1.0 s of CPU in its 120 s. 240 s rides out such
+# a stall and still ends before the next 5-minute start; an alert adds one `envoy send` (60 s
+# cap in the script).
+TimeoutStartSec=240
 # `envoy` is a bash script that needs the same tools a shell gives it.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
