@@ -823,6 +823,14 @@ def exec_passthrough(args: list[str]) -> None:
     env = dict(os.environ)
     env["GH_READ_CACHE_BYPASS"] = "1"
     cmd = child_command(args)
+    # Python ignores SIGPIPE and SIGXFSZ, and an exec keeps an ignored signal, so the
+    # shim, its leak check, knives and gh would run with SIGPIPE ignored: a writer
+    # whose reader has gone then gets EPIPE instead of ending quietly, and every such
+    # call printed `tr: write error: Broken pipe` (2026-11-03). Popen restores both
+    # (restore_signals); do the same here.
+    for name in ("SIGPIPE", "SIGXFSZ", "SIGXFZ"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), signal.SIG_DFL)
     try:
         os.execvpe(cmd[0], cmd, env)
     except OSError:

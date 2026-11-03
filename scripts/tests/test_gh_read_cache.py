@@ -2,6 +2,7 @@
 """scripts/gh-read-cache against a stub gh that counts the calls it receives."""
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -603,6 +604,44 @@ class GhReadCacheTest(unittest.TestCase):
         r = self.run_cache("pr", "view", "5", "-R", "o/r", GH_READ_CACHE_PARENT=1)
         self.assertEqual(r.returncode, 143)
         self.assertEqual(self.calls(), [])
+
+    # -- the gh the cache starts gets default signal dispositions --------------
+
+    def test_every_gh_the_cache_starts_has_sigpipe_at_its_default(self):
+        """Python ignores SIGPIPE and an exec keeps that. When the pass-through exec
+        did, the shim's leak check ran `tr ... | head` with SIGPIPE ignored and every
+        call printed `tr: write error: Broken pipe` (2026-11-03). A pass-through, a
+        miss and a write each start gh with SIGPIPE and SIGXFSZ at their defaults,
+        and a writer whose reader has gone ends quietly: stderr stays empty, and so
+        does a hit's."""
+        stub = self.dir / "sig-gh"
+        stub.write_text(
+            "#!/bin/bash\n"
+            'awk \'/^SigIgn:/ { print $2 }\' /proc/$$/status >> "$SIG_LOG"\n'
+            "LC_ALL=C tr -dc A-Za-z0-9 < /dev/urandom | head -c 40 > /dev/null\n"
+            'if [[ " $* " == *" --include "* ]]; then printf \'HTTP/2.0 200 OK\\r\\nEtag: W/"e"\\r\\n\\r\\n\'; fi\n'
+            'echo "{\\"state\\": \\"OPEN\\"}"\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        sig_log = self.dir / "sig.log"
+        cases = [
+            ("pass-through", ["api", "rate_limit"]),
+            ("miss", ["pr", "view", "5", "-R", "o/r", "--json", "state"]),
+            ("hit", ["pr", "view", "5", "-R", "o/r", "--json", "state"]),
+            ("write", ["pr", "comment", "5", "-R", "o/r", "--body", "x"]),
+        ]
+        for name, args in cases:
+            with self.subTest(name):
+                r = self.run_cache(*args, GH_READ_CACHE_GH=str(stub), SIG_LOG=str(sig_log))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stderr, "", name)
+        masks = sig_log.read_text(encoding="utf-8").split()
+        self.assertEqual(len(masks), 3, "the hit must not start gh")
+        for mask in masks:
+            ignored = int(mask, 16)
+            self.assertFalse(ignored & (1 << (signal.SIGPIPE - 1)), "SIGPIPE ignored in gh: " + mask)
+            self.assertFalse(ignored & (1 << (signal.SIGXFSZ - 1)), "SIGXFSZ ignored in gh: " + mask)
 
 
 if __name__ == "__main__":
