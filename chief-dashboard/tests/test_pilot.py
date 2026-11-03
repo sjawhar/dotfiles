@@ -187,6 +187,70 @@ def test_omp_panes_finds_omp_behind_the_bash_shim_and_not_agent_news_trailing_ba
     assert pilot.omp_panes(processes, panes) == {"%78"}
 
 
+MOVED = "01a1d00d-0000-0000-0000-000000000000"
+GONE = "01a1dead-0000-0000-0000-000000000000"
+
+
+def moved_pane_command(session: str) -> str:
+    """What `agentbox move --to` respawned SHORT's old pane in agents:tasks with (recorded 2026-11-03)."""
+    return (f"bash -i -c \"echo 'agentbox: session {session} moved to sami-devbox at 2026-11-03T11:55:11Z; it runs "
+            "there in tmux session moved, window 01a16551 (@4). This pane is a shell.'; exec bash -i\"")
+
+
+def test_machine_census_reads_the_streams_windows_and_the_sessions_moved_from_them_and_nothing_in_a_box(monkeypatch):
+    monkeypatch.delenv("AGENTBOX_BOX", raising=False)
+    panes = [
+        {"pane": "%35", "pid": 10, "tmux": "agents", "window": "rocq", "start": moved_pane_command(MOVED), "title": ""},
+        {"pane": "%36", "pid": 11, "tmux": "agents", "window": "tasks", "start": moved_pane_command(GONE), "title": ""},
+        {"pane": "%37", "pid": 12, "tmux": "agents", "window": "rocq", "start": "bash", "title": "π > ROCQ"},
+    ]
+    processes = [{"pid": 12, "ppid": 1, "uid": 1000, "argv": ["bash"], "cgroup": ""},
+                 {"pid": 13, "ppid": 12, "uid": 1000, "argv": ["omp", "--resume", SESSION], "cgroup": ""}]
+    monkeypatch.setattr(pilot.sessions, "read_panes", lambda: panes)
+    monkeypatch.setattr(pilot.sessions, "read_processes", lambda: processes)
+    monkeypatch.setattr(pilot.sessions, "read_containers", lambda: {})
+    findings: list[str] = []
+
+    assert pilot._machine_census("INFRA-167", findings) == ({SESSION}, {MOVED})
+    assert findings == []
+
+    monkeypatch.setenv("AGENTBOX_BOX", "agentbox-0123")
+    assert pilot._machine_census("INFRA-167", findings) is None
+    assert findings == ["in agent box agentbox-0123: this machine's windows not read, sessions counted from "
+                        "members.txt and Envoy"]
+
+
+def test_stream_sessions_counts_its_sessions_on_every_machine_while_envoy_lists_them(tmp_path):
+    tmp_path.joinpath("members.txt").write_text(f"{GONE}\n")
+    live = [
+        {"session_id": SESSION, "host": "sami-rocqperf", "title": "in the window"},
+        {"session_id": MOVED, "host": "agentbox-04921df9ec32", "title": "moved to sami-devbox"},
+        {"session_id": OTHER, "host": "agentbox-161f233fba59", "title": "pilot session"},
+        {"session_id": "01a1f00d-0000-0000-0000-000000000000", "host": "sami-devbox", "title": "another stream's"},
+    ]
+
+    found = pilot.stream_sessions(tmp_path, ({SESSION}, {MOVED}), live, {OTHER})
+
+    assert [(item["session"], item["host"]) for item in found] == [
+        (SESSION, "sami-rocqperf"), (OTHER, "agentbox-161f233fba59"), (MOVED, "agentbox-04921df9ec32")]
+    # The record keeps what this machine saw, for a reader that cannot see the windows; GONE stays, uncounted.
+    assert tmp_path.joinpath("members.txt").read_text() == f"{SESSION}\n{MOVED}\n{GONE}\n"
+    # In an agent box on sami-devbox: no window reading, and the record and Envoy still count them.
+    assert [item["session"] for item in pilot.stream_sessions(tmp_path, None, live, set())] == [SESSION, MOVED]
+    # Envoy down: only what this machine sees in the windows, live by that reading.
+    found = pilot.stream_sessions(tmp_path, ({SESSION}, set()), None, {OTHER})
+    assert [(item["session"], item["host"]) for item in found] == [(SESSION, pilot.socket.gethostname())]
+
+
+def test_live_omp_panes_reads_nothing_in_an_agent_box(monkeypatch):
+    monkeypatch.setenv("AGENTBOX_BOX", "agentbox-0123")
+    monkeypatch.setattr(pilot.sessions, "read_panes", lambda: pytest.fail("a box's pids name no host pane"))
+    findings: list[str] = []
+
+    assert pilot._live_omp_panes(findings) == set()
+    assert findings == ["in agent box agentbox-0123: started panes not checked, a start counts for 2 hours"]
+
+
 def test_scheduler_coalesces_daily_and_equal_dues_and_records_all_due_keys():
     at = datetime(2026, 11, 1, 14, 30, tzinfo=UTC)
     fires = [
@@ -651,7 +715,8 @@ class FactsDispatch:
                 **self.issues.get(key, {})}
 
 
-def fake_commands(monkeypatch, panes: set[str], sessions: list[dict] | None) -> list[list[str]]:
+def fake_commands(monkeypatch, panes: set[str], sessions: list[dict] | None,
+                  machine: tuple[set[str], set[str]] | None = None) -> list[list[str]]:
     """Answer what facts reads from the machine: `envoy ps --json`, and the panes that run omp (PANES). Records each
     read. SESSIONS None makes `envoy ps` fail as it does when its hub is unreachable (exit 1)."""
     import json
@@ -666,12 +731,13 @@ def fake_commands(monkeypatch, panes: set[str], sessions: list[dict] | None) -> 
         assert command[0] == "envoy", command
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(sessions), stderr="")
 
-    def live_panes():
+    def live_panes(findings):
         ran.append(["omp panes"])
         return set(panes)
 
     monkeypatch.setattr(pilot.subprocess, "run", run)
     monkeypatch.setattr(pilot, "_live_omp_panes", live_panes)
+    monkeypatch.setattr(pilot, "_machine_census", lambda stream, findings: machine)
     return ran
 
 
@@ -682,7 +748,8 @@ def test_facts_reports_role_holders_unknown_when_envoy_cannot_be_read(monkeypatc
 
     assert [(r["role"], r["holder_live"], r["live_holder"]) for r in result["roles"]] == [
         ("lead-pilot", None, None), ("missing-role", None, None)]
-    assert any(f.startswith("Envoy unavailable, role holders not read: ") for f in result["findings"])
+    assert any(f.startswith("Envoy unavailable, role holders and sessions off this machine not read: ")
+               for f in result["findings"])
     assert not any(f.startswith("role has no live holder") for f in result["findings"])
 
 
@@ -864,10 +931,25 @@ def test_summary_dry_run_prints_the_bounded_omp_command_and_runs_nothing(monkeyp
 
     printed = capsys.readouterr().out
     assert printed.startswith("omp -p --no-title --max-time 30m --max-cost 15 ")
-    for part in (str(facts_file), "INFRA-167", "tmux window rocq", str(tmp_path / "INFRA-167" / "started.tsv"),
+    for part in (str(facts_file), "INFRA-167", "`agent-new --box --window rocq`",
+                 str(tmp_path / "INFRA-167" / "started.tsv"),
                  "ISSUE<TAB>pending<TAB>UTC_ISO", "skill://stream-lead/references/summary.md"):
         assert part in printed
     assert not list((tmp_path / "INFRA-167").glob("summary-*.log"))
+
+
+def test_facts_and_the_dry_run_list_the_streams_live_sessions(monkeypatch, tmp_path, capsys):
+    fake_commands(monkeypatch, set(), [{"session_id": MOVED, "host": "agentbox-04921df9ec32", "title": "SHORT",
+                                        "roles": []}], machine=(set(), {MOVED}))
+
+    result, _ = pilot.facts(FactsDispatch(STARTED_RECORD), "INFRA-167", tmp_path, datetime(2026, 11, 1, 18, tzinfo=UTC))
+
+    assert result["sessions"] == [{"session": MOVED, "host": "agentbox-04921df9ec32", "title": "SHORT"}]
+    monkeypatch.setattr(pilot, "facts", lambda *args: (result, tmp_path / "facts.json"))
+    assert pilot.summary(object(), "INFRA-167", tmp_path, "rocq", dry_run=True) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert printed[0] == f"session {MOVED}\tagentbox-04921df9ec32\tSHORT"
+    assert printed[1].startswith("omp -p ")
 
 
 def test_summary_dry_run_without_a_record_says_it_skips(monkeypatch, tmp_path, capsys):

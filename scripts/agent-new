@@ -14,7 +14,9 @@
 #           elsewhere and runs `omp` on the host. A brief outside <dir>, ~/src and
 #           /mnt/durable/<user> gives the box its directory as one more --dir.
 # --window  split a pane in this tmux window. Each stream has one window on sami-rocqperf
-#           (dispatch://INFRA-202, "Windows on sami-rocqperf").
+#           (dispatch://INFRA-202, "Windows on sami-rocqperf"). A window that does not exist
+#           yet is made, as --session S --name W would make it (S:W; a bare W is in the caller's
+#           tmux session): on sami-devbox the stream windows are made by their first start.
 # --session open the pane as a new window named N in this tmux session, made if absent.
 #           Without --window or --session, a host session splits the caller's window, and a boxed
 #           session, or any session started outside tmux, opens a new window in the caller's
@@ -112,6 +114,18 @@ in_tmux=0
 [[ -n "${TMUX_PANE:-}" ]] && in_tmux=1
 if [[ -z "$window" && -z "$session" ]] && ((in_tmux)) && ! ((box)); then
     window="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_index}')"
+fi
+# A --window that does not exist yet is made (see --window). `tmux display-message -t` cannot tell: tmux 3.8 prints
+# an empty line and exits 0 for a session that does not exist (measured on sami-devbox, 2026-11-03).
+if [[ -n "$window" ]]; then
+    if [[ "$window" == *:* ]]; then wsession="${window%%:*}" wname="${window#*:}"; else wsession="" wname="$window"; fi
+    if [[ -z "$wsession" ]]; then
+        if ((in_tmux)); then wsession="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}')"; else wsession=agents; fi
+    fi
+    if ! tmux list-windows -t "=$wsession" -F '#{window_index}'$'\t''#{window_name}' 2>/dev/null \
+        | awk -F '\t' -v w="$wname" '$1 == w || $2 == w { found = 1 } END { exit !found }'; then
+        session="$wsession" name="$wname" window=""
+    fi
 fi
 
 if [[ -n "$window" ]]; then

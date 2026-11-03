@@ -72,12 +72,15 @@ per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary`
   `pending_offline` lists the lines of `offline-ledger.md` and `pending_offline_decisions` the entries of
   `offline-decisions.md`. An issue with no `stream.md` gives `record: null` and the copy is removed. While Dispatch is
   down the snapshot uses the saved copy and the offline files, reads nothing else from Dispatch, marks no row ready and
-  leaves `last-facts` alone; an unreachable Envoy gives role liveness `null`.
+  leaves `last-facts` alone; an unreachable Envoy gives role liveness `null`. `sessions` lists the stream's live
+  sessions on every machine, each with its Envoy host and title, as `census` counts them. In an agent box, started
+  panes are not checked (its /proc shows no host process), so a start counts for its 2 hours only.
 - `summary --stream KEY --state DIR --window WINDOW [--dry-run]` runs `facts`, then
   `omp -p --no-title --max-time 30m --max-cost 15` in `DIR/KEY`, logging to `DIR/KEY/summary-<UTC>.log` and exiting
-  with omp's code. The prompt tells the session to append `ISSUE<TAB>pending<TAB>UTC` to `started.tsv` before each
-  `agent-new` and `ISSUE<TAB>PANE<TAB>UTC` after. With no record it starts nothing and logs
-  `no stream record, skipped`. `--dry-run` prints the command instead.
+  with omp's code. The prompt tells the session to start sessions only with `agent-new --box --window WINDOW` (which
+  makes the window on a machine that has none yet) and to append `ISSUE<TAB>pending<TAB>UTC` to `started.tsv` before
+  each `agent-new` and `ISSUE<TAB>PANE<TAB>UTC` after. With no record it starts nothing and logs
+  `no stream record, skipped`. `--dry-run` prints the stream's live sessions and the command instead.
 - `schedule --jobs FILE --state DIR [--max-jobs N]` runs until stopped. Start it as a named omp background service,
   not a systemd unit. Each job fires at each local `at` time and, with `dues_from`, at each `due` in that stream's
   record. Every cycle re-reads the jobs file and the record from Dispatch (an outage keeps the saved copy; a 404
@@ -93,8 +96,13 @@ per stream. Nothing here writes to Dispatch or sends an Envoy message: `summary`
   the scheduler (an error, SIGTERM, the heartbeat's death) first kills and reaps every running group. A thread writes
   `DIR/heartbeat` (UTC time, pid) every 60 s; the process exits 1 if that thread dies, so a file older than 15
   minutes means the scheduler is down.
-- `census --stream KEY [--out FILE]` prints the session ids of the live top-level sessions in the stream's tmux
-  windows (`sessions.py`), one per line, to freeze a baseline.
+- `census --stream KEY --state DIR [--out FILE]` prints the session ids of the stream's live top-level sessions on
+  every machine, one per line, to freeze a baseline. A session is the stream's when this machine sees it in one of the
+  stream's tmux windows (`sessions.py`), or sees its old pane there, which `agentbox move --to` leaves saying where
+  the session went; when an earlier read saw either (`DIR/KEY/members.txt`, which each read extends); or when it is
+  in `pilot-sessions.txt`. One in a window here is live by that reading, any other while `envoy ps` lists it. The
+  record is what counts the stream on sami-devbox, where a moved session runs in tmux session `moved` in a window
+  named for its id, and from an agent box, which sees no host process. What could not be read goes to stderr.
 - `measure --stream KEY --start ISO --end ISO [--sessions-file FILE] [--json]` counts, per session and over
   [start, end) in INFRA, BET, LINUX and OSSV: issues claimed and created, sub-issues of its own work, work moved
   (`LEDGER handoff`, a claim released before done), dones with an own child still open, dones without evidence, asks

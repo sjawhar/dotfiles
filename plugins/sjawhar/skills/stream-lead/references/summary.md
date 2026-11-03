@@ -30,8 +30,9 @@ lead's rounds once, from records, then end. You decide nothing for an owner and 
 7. For each issue the facts mark `ready_no_owner`, start one task session, at most two per run. Before each start,
    append `<ISSUE>\tpending\t<UTC ISO>` to `started.tsv` in the working directory; after it, append
    `<ISSUE>\t<pane id agent-new printed>\t<UTC ISO>`. The facts program treats such an issue as started for 2 hours,
-   and after that while omp still runs in that pane, so no later run starts it twice:
-   `agent-new --window <window> "Read skill://one-issue-session first. Your issue is <https link>. Read it with dispatch read --issue <KEY>, claim it, and take it to done."`
+   and after that while omp still runs in that pane, so no later run starts it twice. Every session starts in an agent
+   box, and agent-new makes the window when the machine has none yet:
+   `agent-new --box --window <window> "Read skill://one-issue-session first. Your issue is <https link>. Read it with dispatch read --issue <KEY>, claim it, and take it to done."`
    Before the start, run `ctx search "<the issue's title>"` and `ctx dossier "<name>"` for each person, customer or
    vendor the issue names, and append to that text `memory graph:` and the records that bear on the work (at most 5,
    each its path and one line), or `memory graph: no records`.

@@ -20,6 +20,7 @@ import queue
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -241,8 +242,8 @@ def _recent_starts(path: Path, now: dt.datetime, live_panes: set[str]) -> dict[s
 
 
 def _envoy_sessions(findings: list[str]) -> list[dict] | None:
-    """Live Envoy sessions and their held roles, read once per facts snapshot; None, with a finding, when the hub
-    cannot be read, so a role check never stops the stream's summary."""
+    """Live Envoy sessions on every machine, their hosts and held roles, read once per facts snapshot; None, with a
+    finding, when the hub cannot be read, so neither a role check nor the stream census stops the summary."""
     try:
         completed = subprocess.run(["envoy", "ps", "--json"], text=True, capture_output=True, check=True)
         value = json.loads(completed.stdout)
@@ -251,7 +252,8 @@ def _envoy_sessions(findings: list[str]) -> list[dict] | None:
         return value
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         detail = getattr(error, "stderr", None) or ""
-        findings.append(f"Envoy unavailable, role holders not read: {error} {detail}".rstrip())
+        findings.append(f"Envoy unavailable, role holders and sessions off this machine not read: {error} {detail}"
+                        .rstrip())
         return None
 
 
@@ -259,7 +261,8 @@ def omp_panes(processes: list[dict], panes: list[dict]) -> set[str]:
     """The ids of the tmux panes an omp process runs under (`sessions.is_omp`, its ancestors up to the pane's
     process). `#{pane_current_command}` cannot tell: `omp` here is the bash shim ~/.dotfiles/shims/omp, so a live
     session's pane and agent-new's trailing bash both report `bash`. An omp inside an agent box is not a descendant of
-    its pane and is not found; agent-new, which starts every pane in `started.tsv`, never uses a box."""
+    its pane and is not found, so a boxed start (`agent-new --box`) counts as started for its first 2 hours only;
+    after that, the claim its one-issue session takes keeps the issue from being started again."""
     by_pid = {p["pid"]: p for p in processes}
     pane_of = {pane["pid"]: pane["pane"] for pane in panes}
     live: set[str] = set()
@@ -277,9 +280,19 @@ def omp_panes(processes: list[dict], panes: list[dict]) -> set[str]:
     return live
 
 
-def _live_omp_panes() -> set[str]:
-    """The panes omp runs in now, read from /proc and `tmux list-panes -a` as `chief-dashboard sessions` reads them."""
-    return omp_panes(sessions.read_processes(), sessions.read_panes())
+def _live_omp_panes(findings: list[str]) -> set[str]:
+    """The panes omp runs in now, read from /proc and `tmux list-panes -a` as `chief-dashboard sessions` reads them;
+    empty, with a finding, in an agent box (its /proc holds only the box's processes, whose pids name no host pane)
+    or when tmux cannot be read."""
+    if os.environ.get("AGENTBOX_BOX"):
+        findings.append(f"in agent box {os.environ['AGENTBOX_BOX']}: started panes not checked, "
+                        "a start counts for 2 hours")
+        return set()
+    try:
+        return omp_panes(sessions.read_processes(), sessions.read_panes())
+    except (OSError, subprocess.SubprocessError) as error:
+        findings.append(f"tmux unreadable, started panes not checked: {getattr(error, 'stderr', '') or error}".strip())
+        return set()
 
 
 def _state_dir(state: Path, stream: str) -> Path:
@@ -375,11 +388,12 @@ def facts(api, stream: str, state: Path, now: dt.datetime, pilot_start: dt.datet
     issue = read_issue(stream) if down is None else None
     agents = ({agent.get("session_id"): agent for agent in api.get("/api/v1/agents") if agent.get("session_id")}
               if down is None else {})
-    roles = parse_roles(record, _envoy_sessions(findings)) if record else []
+    live = _envoy_sessions(findings)
+    roles = parse_roles(record, live) if record else []
     for role in roles:
         if role["holder_live"] is False:
             findings.append(f"role has no live holder: {role['role']}")
-    recent_starts = _recent_starts(directory / "started.tsv", now, _live_omp_panes())
+    recent_starts = _recent_starts(directory / "started.tsv", now, _live_omp_panes(findings))
     commitments = parse_commitments(record or "", now)
     for commitment in commitments:
         if commitment["overdue"]:
@@ -468,6 +482,8 @@ def facts(api, stream: str, state: Path, now: dt.datetime, pilot_start: dt.datet
             })
             findings.append(f"multi-claim: {session} ({', '.join(sorted(claimed['issues']))})")
 
+    stream_live = stream_sessions(directory, _machine_census(stream, findings), live, pilot_sessions)
+
     result = {
         "stream": stream,
         "at": utc_text(now),
@@ -479,6 +495,7 @@ def facts(api, stream: str, state: Path, now: dt.datetime, pilot_start: dt.datet
         "ledger": ledger,
         "multi_claim": multi_claim,
         "roles": roles,
+        "sessions": stream_live,
         "pending_offline": pending_offline,
         "pending_offline_decisions": pending_offline_decisions,
         "findings": findings,
@@ -502,13 +519,15 @@ def summary(api, stream: str, state: Path, window: str, dry_run: bool = False) -
         return 0
     starts = directory / "started.tsv"
     prompt = (
-        f"Read the facts at {facts_path}, then summarize stream issue {stream}. Start any sessions only in tmux window "
-        f"{window}. For each session you start for an issue: before you run agent-new, append the line "
-        f"`ISSUE<TAB>pending<TAB>UTC_ISO` to {starts}; after it starts, append `ISSUE<TAB>TMUX_PANE_ID<TAB>UTC_ISO`. "
-        f"Follow skill://stream-lead/references/summary.md exactly."
+        f"Read the facts at {facts_path}, then summarize stream issue {stream}. Start any sessions only with "
+        f"`agent-new --box --window {window}`. For each session you start for an issue: before you run agent-new, "
+        f"append the line `ISSUE<TAB>pending<TAB>UTC_ISO` to {starts}; after it starts, append "
+        f"`ISSUE<TAB>TMUX_PANE_ID<TAB>UTC_ISO`. Follow skill://stream-lead/references/summary.md exactly."
     )
     command = ["omp", "-p", "--no-title", "--max-time", "30m", "--max-cost", "15", prompt]
     if dry_run:
+        for item in snapshot.get("sessions") or []:
+            print(f"session {item['session']}\t{item['host'] or '-'}\t{item['title'] or '-'}")
         print(shlex.join(command))
         return 0
     completed = subprocess.run(command, cwd=directory, text=True, capture_output=True, check=False)
@@ -819,10 +838,64 @@ def census_ids(measured: dict, stream: str) -> list[str]:
     return sorted(ids)
 
 
-def census(stream: str, out: Path | None = None) -> list[str]:
-    """Measure the machine once and optionally freeze the stream's session ids for later before/after measurement."""
-    measured = sessions.measure(sessions.read_processes(), sessions.read_panes(), sessions.read_containers())
-    ids = census_ids(measured, stream)
+def _machine_census(stream: str, findings: list[str]) -> tuple[set[str], set[str]] | None:
+    """On this machine: the live sessions in STREAM's tmux windows (`census_ids`) and the sessions moved off it from
+    those windows (`sessions.moved_from`). None, with a finding, in an agent box, whose /proc holds only the box's
+    processes, or when /proc or tmux cannot be read."""
+    if os.environ.get("AGENTBOX_BOX"):
+        findings.append(f"in agent box {os.environ['AGENTBOX_BOX']}: this machine's windows not read, "
+                        "sessions counted from members.txt and Envoy")
+        return None
+    try:
+        processes, panes = sessions.read_processes(), sessions.read_panes()
+    except (OSError, subprocess.SubprocessError) as error:
+        findings.append(f"this machine's windows not read: {getattr(error, 'stderr', '') or error}".strip())
+        return None
+    try:
+        containers = sessions.read_containers()
+    except (OSError, subprocess.SubprocessError):
+        containers = {}  # a box's session is then counted without its window, as `chief-dashboard sessions` does
+    windows = set(sessions.stream_windows(stream))
+    moved = {sid for sid, window in sessions.moved_from(panes).items() if window in windows}
+    return set(census_ids(sessions.measure(processes, panes, containers), stream)), moved
+
+
+def stream_sessions(directory: Path, machine: tuple[set[str], set[str]] | None, live: list[dict] | None,
+                    pilot_sessions: set[str]) -> list[dict]:
+    """The stream's live sessions on every machine, each with its Envoy host (a machine, or `agentbox-<id>` for a
+    box) and title.
+
+    A session is the stream's when this machine sees it in one of the stream's tmux windows or as moved off this
+    machine from one (MACHINE, `_machine_census`), when an earlier read saw either (`members.txt` in DIRECTORY, which
+    this call extends), or when it posted `LEDGER start` on the stream issue (PILOT_SESSIONS). The record is what
+    counts a session on a machine whose windows say nothing: `agentbox move --to` starts a moved session in tmux
+    session `moved` on the target, in a window named for its id, and a reader in an agent box sees no host process.
+    One in a window here is live by that reading; any other is live while Envoy (LIVE) lists it."""
+    path = directory / "members.txt"
+    members = set(path.read_text().split()) if path.exists() else set()
+    here, moved = machine or (set(), set())
+    if (here | moved) - members:
+        members |= here | moved
+        path.write_text("".join(f"{session}\n" for session in sorted(members)))
+    by_id = {item["session_id"]: item for item in live or [] if item.get("session_id")}
+    ids = here | ((members | pilot_sessions) & by_id.keys())
+    this_machine = socket.gethostname()
+    return [{"session": session,
+             "host": by_id.get(session, {}).get("host") or (this_machine if session in here else None),
+             "title": by_id.get(session, {}).get("title")} for session in sorted(ids)]
+
+
+def census(stream: str, state: Path, out: Path | None = None) -> list[str]:
+    """The stream's live session ids on every machine (`stream_sessions`), optionally frozen for later before/after
+    measurement. What could not be read goes to stderr."""
+    directory = _state_dir(state, stream)
+    findings: list[str] = []
+    pilot_path = directory / "pilot-sessions.txt"
+    pilot_sessions = set(pilot_path.read_text().split()) if pilot_path.exists() else set()
+    found = stream_sessions(directory, _machine_census(stream, findings), _envoy_sessions(findings), pilot_sessions)
+    for finding in findings:
+        print(f"census: {finding}", file=sys.stderr)
+    ids = [item["session"] for item in found]
     text = "".join(f"{session}\n" for session in ids)
     if out:
         out.write_text(text)
@@ -1148,6 +1221,7 @@ def main(argv: list[str] | None = None, api: Dispatch | None = None) -> int:
                                  help=f"jobs that may run at once (1-64, default {MAX_CONCURRENT_JOBS})")
     census_parser = command.add_parser("census")
     census_parser.add_argument("--stream", required=True)
+    census_parser.add_argument("--state", type=Path, required=True)
     census_parser.add_argument("--out", type=Path)
     measure_parser = command.add_parser("measure")
     measure_parser.add_argument("--stream", required=True)
@@ -1161,7 +1235,7 @@ def main(argv: list[str] | None = None, api: Dispatch | None = None) -> int:
             schedule(args.jobs, args.state, max_jobs=args.max_jobs)
             return 0
         if args.command == "census":
-            census(args.stream, args.out)
+            census(args.stream, args.state, args.out)
             return 0
         reader = api or Dispatch()
         if args.command == "facts":

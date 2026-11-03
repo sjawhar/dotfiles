@@ -50,9 +50,15 @@ CONTAINER_CGROUP = re.compile(r"docker-([0-9a-f]{64})\.scope")
 SESSION_ARG = re.compile(rf"(?:^|_)({UUID})(?:\.jsonl)?$")
 # omp's pane title: "π", then a spinner frame (a braille character) or ">" when idle, then the agent's own title.
 TITLE_PREFIX = re.compile(r"^π\s*[\u2800-\u28ff>]?\s*")
+# omp's pane title last: it is free text and may hold a tab, so it takes what the split leaves.
 PANE_FORMAT = "\t".join(
-    ["#{pane_id}", "#{pane_pid}", "#{session_name}", "#{session_group}", "#{window_name}", "#{pane_title}"]
+    ["#{pane_id}", "#{pane_pid}", "#{session_name}", "#{session_group}", "#{window_name}", "#{pane_start_command}",
+     "#{pane_title}"]
 )
+# What `agentbox move --to` respawns a moved session's old pane with (scripts/agentbox, move_to_member): a shell
+# that says where the session went. The old pane stays in its window on the machine the session left, so it is the
+# one record of which window, and so which stream, a moved session came from.
+MOVED_PANE = re.compile(rf"agentbox: session ({UUID}) moved to \S+ at ")
 
 
 # ------------------------------------------------------------------------------------------------- reading
@@ -91,11 +97,12 @@ def read_panes() -> list[dict]:
                           check=True)
     panes = []
     for line in done.stdout.splitlines():
-        parts = line.split("\t", 5)
-        if len(parts) != 6:
+        parts = line.split("\t", 6)
+        if len(parts) != 7:
             continue
-        pane, pid, name, group, window, title = parts
-        panes.append({"pane": pane, "pid": int(pid), "tmux": group or name, "window": window, "title": title})
+        pane, pid, name, group, window, start, title = parts
+        panes.append({"pane": pane, "pid": int(pid), "tmux": group or name, "window": window, "start": start,
+                      "title": title})
     return panes
 
 
@@ -155,7 +162,9 @@ def record(processes: list[dict], panes: list[dict], containers: dict[str, str])
                 a.startswith("-") or a.startswith("__omp_worker_") or SESSION_ARG.search(a))]
         return {**p, "argv": [a.replace(home, "~") for a in cut]}
 
-    cut = [pn for pn in panes if pn["pid"] in keep or pn["tmux"] == AGENTS_TMUX]
+    # A pane's start command can hold a prompt; the measurement never reads it.
+    cut = [{k: v for k, v in pn.items() if k != "start"}
+           for pn in panes if pn["pid"] in keep or pn["tmux"] == AGENTS_TMUX]
     raw = {"processes": [scrub(p) for p in processes if p["pid"] in keep], "panes": cut, "containers": containers}
     if measure(raw["processes"], cut, containers, "") != measure(processes, panes, containers, ""):
         raise ValueError("the scrubbed reading measures differently from the live one")
@@ -309,6 +318,17 @@ def stream_counts(census: dict | None) -> dict[str, int]:
 
 def stream_windows(issue: str) -> list[str]:
     return [w for w, i in WINDOW_STREAMS.items() if i == issue]
+
+
+def moved_from(panes: list[dict]) -> dict[str, str]:
+    """{session id: window} for each session moved off this machine from a window of the agents session, read from
+    the shell `agentbox move --to` left in its old pane (MOVED_PANE)."""
+    out: dict[str, str] = {}
+    for pn in panes:
+        m = MOVED_PANE.search(pn.get("start") or "")
+        if m and pn["tmux"] == AGENTS_TMUX:
+            out[m.group(1)] = pn["window"]
+    return out
 
 
 def ungrouped_count(census: dict | None) -> int:
