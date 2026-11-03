@@ -3643,7 +3643,11 @@ MOVE_TO_START_WAIT="${AGENTBOX_MOVE_START_WAIT:-300}"
 MOVE_TO_SETTLE="${AGENTBOX_MOVE_SETTLE:-30}"
 MOVE_TO_POLL="${AGENTBOX_MOVE_POLL:-5}"
 MOVE_TO_HANGUP_WAIT="${AGENTBOX_MOVE_HANGUP_WAIT:-180}"
-MOVE_TO_READY_TTL="${AGENTBOX_MOVE_READY_TTL:-7200}"
+# A member's ready file counts for 10 min. A member that ran `move --to` and then went back to
+# work must not be hung up when the last member runs it hours later (asked of LINUX-1248's group
+# on 2026-11-03, when a 2 h window could have done exactly that); one whose file is older is
+# asked again.
+MOVE_TO_READY_TTL="${AGENTBOX_MOVE_READY_TTL:-600}"
 # Under ~/.cache/omp, which every box mounts at the same path, so a job a box writes is read by
 # the host's relauncher.
 MOVE_TO_JOBS="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-to"
@@ -4356,7 +4360,7 @@ move_to_job() {
 }
 
 # The notice to a member of a group that has not said it is at its safe point.
-MOVE_TO_NOTICE='agentbox: this session moves to %TARGET% with its group (sessions %GROUP%), which shares a working tree with it (dispatch://INFRA-993). Do not stop, delay or shorten any work for it. The next time none of YOUR jobs is running (`pstree -p %PID%` shows them; ignore the bash tool you run it in), write your handover into the transcript, run `agentbox move --to %TARGET%` from your bash tool, and then end your turn and start no new work: the last session of the group to run it moves the whole group, and hangs up every session in it. You come back on %TARGET% with the same session id, transcript and trees, uncommitted work included. If this session is finished or is ending, do not move it: end as you planned, and tell the session that sent this. (An automated notice from agentbox, not a person.)'
+MOVE_TO_NOTICE='agentbox: this session moves to %TARGET% with its group (sessions %GROUP%), which shares a working tree with it (dispatch://INFRA-993). Do not stop, delay or shorten any work for it. The next time none of YOUR jobs is running (`pstree -p %PID%` shows them; ignore the bash tool you run it in), write your handover into the transcript, run `agentbox move --to %TARGET%` from your bash tool, and then end your turn and start no new work for 10 minutes (after that your readiness lapses and you are asked again): the last session of the group to run it moves the whole group, and hangs up every session in it. You come back on %TARGET% with the same session id, transcript and trees, uncommitted work included. If this session is finished or is ending, do not move it: end as you planned, and tell the session that sent this. (An automated notice from agentbox, not a person.)'
 
 # A ready file says one session is at its safe point for a move to one target.
 move_to_ready_mark() { mkdir -p "$MOVE_TO_JOBS/ready" && printf '%s\t%s\n' "$2" "$(date +%s)" >"$MOVE_TO_JOBS/ready/$1"; }

@@ -1777,6 +1777,27 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("nothing was hung up: these processes of this session are not systemd units", refused.stderr)
         self.assertEqual(self.jobs(), [])
 
+    def test_a_member_s_readiness_lapses_after_ten_minutes(self) -> None:
+        """A member that ran `move --to` and went back to work is not hung up by a later run: its
+        ready file counts for 10 minutes, and after that it is asked again."""
+        self.moving_session()
+        self.make_proc(999999910, comm="bash", ppid=1, cwd=self.worktree)
+        self.make_proc(999999911, ppid=999999910, cwd=self.worktree, session=self.TO2)
+        self.set_pids(999999901, 999999911)
+        self.set_panes({999999900: ("%81", "agents:4.1"), 999999910: ("%82", "agents:5.1")})
+        self.target()
+        ready = self.root / "cache/omp/agentbox/move-to/ready"
+        ready.mkdir(parents=True)
+        (ready / self.TO2).write_text(f"devbox\t{int(time.time()) - 11 * 60}\n", encoding="utf-8")
+        stale = self.move_to()
+        self.assertEqual(stale.returncode, 0, stale.stderr)
+        self.assertIn(f"the group moves when {self.TO2} run(s)", stale.stdout)
+        self.assertEqual(self.jobs(), [])
+        (ready / self.TO2).write_text(f"devbox\t{int(time.time()) - 9 * 60}\n", encoding="utf-8")
+        fresh = self.move_to()
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        self.assertEqual(len(self.jobs()), 1)
+
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own
         group, found as `move --to` finds it - and reads no other session's paths; --group names
