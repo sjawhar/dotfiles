@@ -1875,5 +1875,96 @@ class GcloudShimCopiesOnPath(unittest.TestCase):
                     self.assertEqual((result.returncode, result.stdout), (0, "REAL-GCLOUD-RAN\n"), result.stderr)
 
 
+class GcloudSessionConfig(unittest.TestCase):
+    """An agent session's gcloud runs on its own copy of ~/.config/gcloud, at $AGENT_SESSION_SCRATCH/gcloud, made at
+    the session's first call: the shared sqlite stores on the root disk took 2,148 fsyncs in 300 s and gave 2,000-4,200
+    `database is locked` lines an hour (2026-11-03). A caller's CLOUDSDK_CONFIG, an agentbox, a process outside an agent
+    session, and a session with no scratch directory keep the old directory; so does a command whose change must last,
+    which also sets the session's copy aside so the next call copies again."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        write_stub(root, "gcloud", 'echo "CLOUDSDK_CONFIG=${CLOUDSDK_CONFIG:-<unset>}"\nprintf "ARG=%s\\n" "$@"')
+        self.origin = root / "home" / ".config" / "gcloud"
+        (self.origin / "configurations").mkdir(parents=True)
+        (self.origin / "configurations" / "config_default").write_text("[core]\naccount = a@example.com\n")
+        (self.origin / "active_config").write_text("default")
+        for name in ("logs", ".gcloud-shim-retry-slots", "cache"):
+            (self.origin / name).mkdir()
+            (self.origin / name / "x").write_text("x")
+        self.store("credentials.db", "refresh-1")
+        self.store("access_tokens.db", "token-1")
+        (self.origin / "credentials.db-journal").write_text("")  # an empty (cold) journal: a sidecar, not copied
+        self.scratch = root / "scratch"
+        self.scratch.mkdir(mode=0o700)
+        self.copy = self.scratch / "gcloud"
+        self.env = {"PATH": f"{root}:{SHIMS}:/usr/bin:/bin", "HOME": str(root / "home"),
+                    "GCE_METADATA_HOST": "127.0.0.1:9", "OMP_SESSION_ID": "01a00000-0000-7000-8000-000000000000",
+                    "AGENT_SESSION_SCRATCH": str(self.scratch)}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def store(self, name: str, value: str) -> None:
+        with sqlite3.connect(self.origin / name) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
+            db.execute("DELETE FROM t")
+            db.execute("INSERT INTO t VALUES (?)", (value,))
+
+    def rows(self, path: Path) -> list[str]:
+        with sqlite3.connect(path) as db:
+            return [row[0] for row in db.execute("SELECT v FROM t")]
+
+    def run_shim(self, args: list[str], **extra: str | None) -> str:
+        env = {k: v for k, v in {**self.env, **extra}.items() if v is not None}
+        result = subprocess.run([str(SHIMS / "gcloud"), *args], capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(x for x in result.stdout.splitlines() if x.startswith("CLOUDSDK_CONFIG="))
+        return line.removeprefix("CLOUDSDK_CONFIG=")
+
+    def test_an_agent_session_call_runs_on_its_own_copy(self) -> None:
+        self.assertEqual(self.run_shim(["auth", "print-access-token"]), str(self.copy))
+        self.assertEqual(self.rows(self.copy / "credentials.db"), ["refresh-1"])
+        self.assertEqual((self.copy / "active_config").read_text(), "default")
+        self.assertTrue((self.copy / "configurations" / "config_default").is_file())
+        self.assertTrue((self.copy / ".gcloud-session-copied").is_file())
+        for left_out in ("logs", ".gcloud-shim-retry-slots", "cache", "access_tokens.db", "credentials.db-journal"):
+            self.assertFalse((self.copy / left_out).exists(), left_out)
+        self.assertEqual(stat.S_IMODE(self.copy.stat().st_mode), 0o700)
+
+    def test_the_copy_is_made_once(self) -> None:
+        self.run_shim(["config", "config-helper"])
+        self.store("credentials.db", "refresh-2")
+        self.assertEqual(self.run_shim(["storage", "ls"]), str(self.copy))
+        self.assertEqual(self.rows(self.copy / "credentials.db"), ["refresh-1"])
+
+    def test_the_old_directory_where_this_does_not_apply(self) -> None:
+        own = str(Path(self.tmp.name) / "own")
+        self.assertEqual(self.run_shim(["auth", "list"], CLOUDSDK_CONFIG=own), own)
+        self.assertEqual(self.run_shim(["auth", "list"], AGENTBOX_SESSION="1"), "<unset>")
+        self.assertEqual(self.run_shim(["auth", "list"], OMP_SESSION_ID=None), "<unset>")
+        self.assertEqual(self.run_shim(["auth", "list"], AGENT_SESSION_SCRATCH=None), "<unset>")
+        self.assertFalse(self.copy.exists())
+
+    def test_a_change_that_must_last_runs_on_the_shared_directory_and_resets_the_copy(self) -> None:
+        self.run_shim(["auth", "list"])
+        for args in (["config", "set", "project", "p"], ["config", "unset", "project"],
+                     ["config", "configurations", "activate", "default"], ["init"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_shim(args), "<unset>")
+                self.assertFalse(self.copy.exists())
+                self.store("credentials.db", "-".join(args))
+                self.assertEqual(self.run_shim(["auth", "list"]), str(self.copy))
+                self.assertEqual(self.rows(self.copy / "credentials.db"), ["-".join(args)])
+        self.assertTrue(list(self.scratch.glob("gcloud.replaced.*")))
+
+    def test_a_copy_that_cannot_be_made_leaves_the_call_on_the_shared_directory(self) -> None:
+        (self.origin / "credentials.db").write_text("not a sqlite database")
+        self.assertEqual(self.run_shim(["auth", "list"]), "<unset>")
+        self.assertFalse(self.copy.exists())
+        self.assertEqual([p for p in self.scratch.iterdir()], [], "a partial copy was left behind")
+
+
 if __name__ == "__main__":
     unittest.main()

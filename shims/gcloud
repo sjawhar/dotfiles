@@ -471,6 +471,70 @@ agent_context() {
     return 1
 }
 
+# One configuration directory per agent session (2026-11-03). gcloud keeps credentials and access
+# tokens in sqlite files in its configuration directory, with a 5 s busy timeout, and every gcloud
+# on the box shared ~/.config/gcloud on the root disk: in 300 s on 2026-11-03 (06:27-06:32Z) its
+# access_tokens.db and credentials.db took 2,148 fsyncs and 238 s of fsync time, gcloud led the
+# processes blocked on that disk (46 at 08:50Z), and this shim logged 2,000-4,200 `database is
+# locked` lines an hour. So an agent session's gcloud runs with CLOUDSDK_CONFIG at
+# $AGENT_SESSION_SCRATCH/gcloud: the session's own scratch directory (scripts/agent-session;
+# devbox/session-scratch-reap removes it when the session ends), seeded from ~/.config/gcloud at the
+# session's first call by scripts/gcloud-session-config. It is left alone when the caller set
+# CLOUDSDK_CONFIG (the Linux eval lane gives each attempt its own), in an agentbox, whose
+# container binds the host's .config/gcloud read-write, and where no copy can be made (the call
+# then runs on ~/.config/gcloud as before). A command whose change must outlive the session (a
+# sign-in, a credential activated or revoked, a property, a configuration, `init`, or a path an
+# unknown flag makes ambiguous) still runs on ~/.config/gcloud, and the session's copy is set aside
+# so that its next call copies again and sees the change. Every rule below reads whichever
+# directory this picks.
+GCLOUD_SESSION_COPIED=.gcloud-session-copied
+# persists_config_change ARGV: the first two words of the command path, past global flags and one release track
+# (read_command_words stops once a path cannot be a protected `auth` command, so for `config set` it holds only
+# `config`), name a change that must outlive the session; or the path is ambiguous.
+persists_config_change() {
+    ((GCLOUD_COMMAND_AMBIGUOUS)) && return 0
+    local arg track_stripped=0
+    local -a words=()
+    while (($#)) && ((${#words[@]} < 2)); do
+        arg="$1"
+        shift
+        case "$arg" in
+            -?*) if is_value_flag "$arg" && [[ "$arg" != *=* ]] && (($#)); then shift; fi ;;
+            *)
+                if ((${#words[@]} == 0 && !track_stripped)) && contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    track_stripped=1
+                    continue
+                fi
+                words+=("$arg")
+                ;;
+        esac
+    done
+    case "${words[0]:-} ${words[1]:-}" in
+        "auth login" | "auth activate-service-account" | "auth revoke" | "auth application-default" | \
+            "auth configure-docker" | "auth enterprise-certificate-config" | \
+            "config set" | "config unset" | "config configurations" | "init "*) return 0 ;;
+    esac
+    return 1
+}
+use_session_config() { # ARGV
+    agent_context || return 0
+    [[ -z "${CLOUDSDK_CONFIG:-}" && -z "${AGENTBOX_SESSION:-}" ]] || return 0
+    local scratch="${AGENT_SESSION_SCRATCH:-}" target origin
+    [[ -n "$scratch" && -d "$scratch" && -O "$scratch" ]] || return 0
+    target="$scratch/gcloud"
+    if persists_config_change "$@"; then
+        [[ -e "$target" ]] && { mv -f -- "$target" "$target.replaced.$$" 2> /dev/null || true; }
+        return 0
+    fi
+    if [[ ! -f "$target/$GCLOUD_SESSION_COPIED" ]]; then
+        resolve_user_home 2> /dev/null || return 0
+        origin="${GCLOUD_USER_HOME}/.config/gcloud"
+        "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts/gcloud-session-config" "$origin" "$target" \
+            > /dev/null 2>&1 || return 0
+    fi
+    export CLOUDSDK_CONFIG="$target"
+}
+
 # The account a configuration sets: the `account` line of its file in gcloud's configuration
 # directory, or nothing when the configuration or the line is missing.
 config_account() {
@@ -1153,6 +1217,7 @@ main() {
     real_gcloud="$(find_real_gcloud)"
 
     parse_gcloud_command_path "$@"
+    use_session_config "$@"
     refuse_adc_write_in_agent_session "$@"
     refuse_user_account_in_agent_session "$@"
     refuse_instance_create_without_run_limit "$@"

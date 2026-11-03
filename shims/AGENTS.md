@@ -324,6 +324,20 @@ before handing the call to the real one.
   `OMP_SESSION_ID` (`-` outside omp); the caller is the program that ran gcloud and its script or
   `-m` module, never `-c` code. Count lock hits with `wc -l` or `cut -f2,3 | sort | uniq -c`.
   Calls outside the retry are not seen; a failed log write never changes the call.
+  In an agent session (omp's `scripts/agent-session` exports `AGENT_SESSION_SCRATCH`) gcloud
+  runs with `CLOUDSDK_CONFIG=$AGENT_SESSION_SCRATCH/gcloud`, a copy of `~/.config/gcloud` that
+  `scripts/gcloud-session-config` makes at the session's first call (each sqlite store through
+  sqlite's backup; caches, logs, the access-token cache and sqlite sidecars left out), so the
+  session's sqlite stores are its own and on `/mnt/nvme`; `devbox/session-scratch-reap` removes
+  the copy with the session's scratch. The shared stores on the root disk took 2,148 fsyncs and
+  238 s of fsync time in 300 s on 2026-11-03, and the retry above logged 2,000-4,200 lock lines
+  an hour. Left alone: a `CLOUDSDK_CONFIG` the caller set, an agentbox (its container binds the
+  host's `.config/gcloud`), and a session with no scratch directory or a copy that cannot be
+  made. A change that must outlive the session (`auth login|revoke|activate-service-account|
+  application-default|configure-docker`, `config set|unset|configurations`, `init`, or a path an
+  unknown flag makes ambiguous) runs on `~/.config/gcloud`, and the session's copy is set aside so
+  its next call copies again. A sign-in made outside a running session reaches its copy only after
+  the session runs one of those commands, or in its next session.
   In an agent session with `KUBECONFIG` unset or empty, `container clusters get-credentials
   <cluster>` writes `~/.kube/config.d/<cluster>` (mode 0700 directory) instead of `~/.kube/config`,
   and prints the `export KUBECONFIG=…` to use it; one whose cluster name it cannot read from argv

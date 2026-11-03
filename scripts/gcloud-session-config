@@ -1,0 +1,90 @@
+#!/usr/bin/python3
+"""gcloud-session-config ORIGIN TARGET: make TARGET a private copy of the gcloud configuration directory ORIGIN, once.
+
+shims/gcloud runs every gcloud of an agent session with CLOUDSDK_CONFIG at <session scratch>/gcloud, a copy of
+~/.config/gcloud made by this script at the session's first gcloud call. gcloud keeps credentials and access tokens in
+sqlite files in its configuration directory with a 5 s busy timeout; every gcloud on the box that shared
+~/.config/gcloud contended for them on the root disk (on 2026-11-03 06:27-06:32Z, access_tokens.db and credentials.db
+under ~/.config took 2,148 fsyncs and 238 s of fsync time in 300 s, and the shim logged 2,000-4,200 `database is
+locked` lines an hour). The approach is the Linux eval lane's per-attempt copy (its gcloud_dirs module, commit
+3ba042d3).
+
+Each sqlite store is copied through sqlite's backup, so a store another gcloud is writing is copied whole; caches,
+logs, sqlite sidecars and the access-token cache (a cache: gcloud fetches a new token) are left out. The copy is built
+aside and published by one rename that never replaces a published copy, so of two first calls the second keeps the
+first's copy. Prints TARGET. Exit 1 when no copy could be made; the shim then runs the call on ORIGIN as before.
+"""
+
+from __future__ import annotations
+
+import os
+import pathlib
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+#: Not copied: gcloud's caches and per-call logs, the gcloud shim's retry slots (each directory makes its own), and the
+#: access-token cache, which the copy refills on its first call.
+NOT_COPIED = frozenset({"cache", "cli", "logs", "surface_data", ".gcloud-shim-retry-slots", "access_tokens.db"})
+#: Nor sqlite's sidecars: each store is copied whole through sqlite's backup.
+SQLITE_SIDECARS = ("-journal", "-wal", "-shm")
+#: Written into a finished copy before it is published, so a published directory is always a whole one.
+COMPLETE = ".gcloud-session-copied"
+#: How long the copy of one store waits for another gcloud that holds it. Past it the shim uses ORIGIN for this call
+#: and the next call tries again.
+STORE_WAIT_SECONDS = 30
+
+
+def copy(origin: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    if (target / COMPLETE).is_file():
+        return target
+    if not origin.is_dir():
+        raise FileNotFoundError(origin)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = pathlib.Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
+    try:
+        for entry in sorted(origin.iterdir()):
+            if entry.name in NOT_COPIED or entry.name.endswith(SQLITE_SIDECARS):
+                continue
+            dest = partial / entry.name
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.copytree(entry, dest, symlinks=True)
+            elif entry.suffix == ".db" and not entry.is_symlink():
+                reader = sqlite3.connect(f"file:{entry}?mode=ro", uri=True, timeout=STORE_WAIT_SECONDS)
+                writer = sqlite3.connect(dest)
+                try:
+                    reader.backup(writer)
+                finally:
+                    reader.close()
+                    writer.close()
+                shutil.copymode(entry, dest)
+            else:
+                shutil.copy2(entry, dest, follow_symlinks=False)
+        (partial / COMPLETE).write_text(f"{origin}\n")
+        try:
+            # rename(2) of a directory onto an existing non-empty one fails: a published copy is never replaced.
+            os.rename(partial, target)
+        except OSError:
+            if not (target / COMPLETE).is_file():
+                raise
+    finally:
+        if partial.exists():
+            shutil.rmtree(partial)
+    return target
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print("usage: gcloud-session-config ORIGIN TARGET", file=sys.stderr)
+        return 2
+    try:
+        print(copy(pathlib.Path(argv[1]), pathlib.Path(argv[2])))
+    except (OSError, sqlite3.Error) as error:
+        print(f"gcloud-session-config: no copy of {argv[1]} at {argv[2]}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
