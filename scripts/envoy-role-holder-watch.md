@@ -92,7 +92,7 @@ same holder for 10 minutes after a miss. A transcript on no disk here is looked 
 session sweep's record, below. The descriptor scan behind `openers` is one per run, for every
 holder. The pane check runs before the holder checks, so a long period still checks every pane.
 
-Four things keep a period inside its time, each measured on this box:
+Five things keep a period inside its time, each measured on this box:
 
 - **One pass over `/proc`.** `/proc/<pid>/stat` of every process gives both the `omp` processes
   and the pane check's parent/foreground table, where two passes read 3,400 `comm` files and
@@ -118,6 +118,26 @@ Four things keep a period inside its time, each measured on this box:
   with the roles this one did not reach (`checked_at`, oldest first). A run that starts with its
   budget already spent still does one unit of work, so every period moves at least one role
   forward.
+- **Every disk and `/proc` read runs in a forked child under a hard limit** (`bounded_step`):
+  `STEP_SECONDS` (15 s) or the budget left, whichever is less, and the budget left for the
+  process scan. The budget above is a clock the run checks between two units of work, and a
+  read the box has stalled never comes back to look at it: the three runs started 07:14:50Z,
+  07:19:21Z and 07:20:56Z on 2026-11-03, at io some 87 % with 305 tasks blocked, were killed at
+  90 s having logged nothing, while the runs between them took 2-12 s. A child that has not
+  answered at its limit gets SIGKILL and is not waited for; one the kernel holds in a read goes
+  with the unit's cgroup when the run exits, and it closes its copy of the state file's lock
+  first, so it cannot make the next period skip. The read is then **cut**: the pane or the role
+  it was for is not judged this period — no alert, no clear, its journal state unchanged — with
+  one line (`<role>: holder <id> not judged this run: <step>, cut after N s …`,
+  `pane <id> <where>: not judged this run: …`), and the run goes on to the next one. A cut
+  process scan stops the run as the budget does, since a half table would make live holders
+  look unseen; a cut `tmux list-panes` skips the pane check and not the roles. The summary line
+  names every cut read. A child sends back the memo tables it filled (known transcripts,
+  headers, the session-root index), so the run goes on with what it learnt.
+
+Not bounded this way: Python's own start-up (the budget counts it), the state file and
+`headers.json` (read and written by the run itself, on `/mnt/nvme`, as the decision record),
+`envoy.json`, and the Envoy calls, which have their own 8 s timeout.
 
 Measured interleaved against the unchanged script on 2026-11-03 02:42-03:36Z, 24 runs each,
 alternating, at load 199-379 and at this unit's `Nice` and IO class, reading the live box and
@@ -128,9 +148,12 @@ else), CPU **0.96 s → 0.41 s**, journal lines **42.5 → 1.3 per run**.
 In the six hours to 02:36Z the unchanged script, as the journal records it, had a median run of
 20.7 s and a p95 of 62.6 s, and failed **35 of 545 runs (6.4 %)**: 34 killed at the 90 s
 `TimeoutStartSec`, every one of them in the processes or the roles phase, and one that could not
-read `/v1/sessions`. A run can no longer be killed by a slow step, so what is left is that one
-class — the listener unreachable, which exits 2 and should be visible — plus a whole-box stall
-that holds one unit of work past 90 s: **about 0.2 % of runs**, a fifth of the 1 % asked for.
+read `/v1/sessions`. With the budget alone, the 691 runs from 04:19Z to 10:10Z on 2026-11-03
+still lost **3 to the 90 s kill (0.4 %)**; each logged nothing before it, as a run held in one
+read does, and such a read is now cut at its own limit. What is left is the listener
+unreachable, which exits 2 and should be visible, and a stall outside any step: Python's
+start-up (up to 21 s in those runs), or journald and systemd answering late after the summary
+line (up to 46 s).
 
 Unbounded, the walk was every run on 2026-11-02 from 09:00Z: at load 410-455 the box's root disk
 answered it in 247 s and the header pass in 325 s, and every run was killed at its then 25 s

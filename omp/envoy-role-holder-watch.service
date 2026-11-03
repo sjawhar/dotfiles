@@ -14,7 +14,10 @@ IOSchedulingClass=idle
 # decided and exits 0, so a slow box costs a partial period and not a failed unit. Every slow
 # step inside that is bounded too -- the walk of ~/.omp/agent/sessions shares one 3 s budget per
 # run, the transcript headers a run has not seen before 10 s, each holder's working-directory
-# walk 1 s, each Envoy call 8 s, tmux 10 s -- and the summary line names each phase's seconds.
+# walk 1 s, each Envoy call 8 s, tmux 10 s -- and every disk or /proc read runs in a forked
+# child cut at 15 s or the budget left, so one read the box has stalled skips its pane or role
+# instead of holding the run (three runs killed between 07:14Z and 07:22Z on 2026-11-03 logged
+# nothing). The summary line names each phase's seconds and every cut read.
 # TimeoutStartSec stays at 90 s as the backstop: it is what systemd kills on when a whole-box
 # stall (systemd itself logging nothing for over 25 s at load 350-410) holds a run past its own
 # budget. 25 s killed 100% of runs from 09:00Z to 13:20Z on 2026-11-02 (the unbounded walk) and

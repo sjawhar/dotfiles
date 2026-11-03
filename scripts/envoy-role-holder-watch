@@ -78,7 +78,7 @@ the same to a script, so the person or lead who reads the alert looks at the pan
 
 Scope: role holders, and panes. A session that holds no role and has no pane is not watched.
 
-Three rules about what a run costs and what it says, all of them from measurements on
+Four rules about what a run costs and what it says, all of them from measurements on
 sami-rocqperf in the 48 hours to 2026-11-03 (dispatch://INFRA-672):
 
   A RUN HAS A BUDGET (--budget, 60 s inside the unit's 90 s TimeoutStartSec), counted from the
@@ -89,6 +89,12 @@ sami-rocqperf in the 48 hours to 2026-11-03 (dispatch://INFRA-672):
   steps that took them there are gone: one pass over /proc instead of two, the transcript
   headers kept between runs in headers.json, and no walk, descriptor scan or Postgres read for
   an incident that is finished.
+
+  EVERY DISK AND /proc READ HAS A HARD LIMIT OF ITS OWN. It runs in a forked child (see
+  `bounded_step`), and one that has not answered at its limit is cut: the pane or role it was
+  for is not judged this period -- no alert, no clear -- with one line, and the run goes on.
+  A budget the run checks between two units of work did not stop the three runs killed at 90 s
+  on 2026-11-03 between 07:14Z and 07:22Z, which logged nothing at all.
 
   THE JOURNAL SAYS WHAT CHANGED. One summary line a run, one line when a pane or a role changes
   state, and the alerts and clears, which are events. The state behind each line is in the state
@@ -104,10 +110,14 @@ from __future__ import annotations
 import argparse
 import calendar
 import fcntl
+import functools
 import json
 import os
+import pickle
 import re
+import select
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -357,6 +367,146 @@ def process_started() -> float:
         return min(time.time(), boot + ticks / os.sysconf("SC_CLK_TCK"))
     except (OSError, ValueError, IndexError, StopIteration):
         return time.time()
+
+
+# ---------------------------------------------- the disk and /proc steps, bounded from outside
+#
+# A clock a step checks itself is not enough. The three runs killed at the unit's 90 s on
+# 2026-11-03 (started 07:14:50Z, 07:19:21Z, 07:20:56Z, at io some 87% with 305 tasks blocked)
+# logged nothing at all, while the runs between them finished in 2-12 s. A read the box has
+# stalled does not come back to look at a clock: the kernel stack of this unit's run sampled at
+# 10:54:32Z the same day was waiting on the root disk inside a stat, for the block of a symlink
+# (ext4_get_link, __wait_on_buffer); the transcript headers, /proc/<pid> files and directory
+# listings read here can wait as long. So every step that reads the disk or /proc
+# runs in a forked child (`bounded_step`), and the run stops waiting for it at a hard
+# limit: STEP_SECONDS, or the budget left when that is less. A child that has not answered is
+# sent SIGKILL and not waited for; one stuck in a read the kernel will not interrupt goes with
+# the unit's cgroup once the run exits. The step is then CUT: the pane or role it was for is
+# skipped with one journal line and nothing decided for it -- no alert, no clear -- and the
+# next period reads it again. A cut process scan stops the run as the budget does, since a half
+# table would make live holders look unseen. The run itself goes on and exits 0.
+STEP_SECONDS = 15.0
+# Under this, a step is not started at all: it is cut before it begins.
+STEP_MINIMUM = 0.5
+# What a child fills in for the run, sent back with its answer so the run goes on with it: the
+# memo tables it updates in place, and the module values it builds once per run.
+_MEMO_TABLES = (
+    "_HEADER_IDS", "_HEADER_USED", "_KNOWN_TRANSCRIPTS", "_TRANSCRIPT_WALK", "_SWEPT",
+    "_BOX_LAUNCHERS", "_OMP_PIDS", "_SCAN",
+)
+_MEMO_VALUES = ("_TRANSCRIPT_INDEX", "_SWEEP_INDEX", "_PROC_TABLE", "_OPEN_JSONL")
+# `bounded`: set by run_once, so a direct call (a test, a hand session) runs a step in this
+# process. `child`: set in a step's own child, where a nested bounded step runs in place.
+# `lock_fd`: the state file's locked descriptor, which a child closes, because a child the
+# kernel holds past this run would otherwise keep the lock and the next run would skip its
+# period. `cut`: the steps this run cut, for its summary line.
+_STEPS: dict = {"bounded": False, "child": False, "lock_fd": None, "cut": []}
+
+
+class StepCut(OutOfTime):
+    """A bounded step did not answer inside its limit. The unit of work it was for is skipped
+    with nothing decided; anything that catches OutOfTime stops on it as on the budget."""
+
+
+def bounded_step(name: str, whole_budget: bool = False):
+    """Run the decorated step in a forked child under a hard limit: STEP_SECONDS, or the run's
+    budget left when that is less (`whole_budget`: the budget left only)."""
+
+    def wrap(function):
+        @functools.wraps(function)
+        def call(*args, **kwargs):
+            if not _STEPS["bounded"] or _STEPS["child"]:
+                return function(*args, **kwargs)
+            return run_bounded(name, whole_budget, function, args, kwargs)
+
+        return call
+
+    return wrap
+
+
+def run_bounded(name: str, whole_budget: bool, function, args: tuple, kwargs: dict):
+    left = _RUN["deadline"] - time.time()
+    limit = left if whole_budget else min(STEP_SECONDS, left)
+    if limit <= STEP_MINIMUM:
+        _STEPS["cut"].append(name)
+        raise StepCut(f"{name}, not started: the run has {max(left, 0):.0f} s of its budget left")
+    sys.stdout.flush()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        answer_from_child(write_fd, function, args, kwargs)
+    os.close(write_fd)
+    chunks: list[bytes] = []
+    answered = False
+    until = time.monotonic() + limit
+    with os.fdopen(read_fd, "rb", buffering=0) as source:
+        while True:
+            remaining = until - time.monotonic()
+            if remaining <= 0 or not select.select([source], [], [], remaining)[0]:
+                break
+            chunk = source.read(1 << 16)
+            if not chunk:
+                answered = True
+                break
+            chunks.append(chunk)
+    if not answered:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        _STEPS["cut"].append(name)
+        raise StepCut(
+            f"{name}, cut after {limit:.0f} s still reading (a disk or /proc read the box has stalled)"
+        )
+    os.waitpid(pid, 0)  # it closed its end, so it is already leaving
+    try:
+        kind, value, memo, lines = pickle.loads(b"".join(chunks))
+    except (pickle.UnpicklingError, EOFError, ValueError, TypeError) as error:
+        raise RuntimeError(f"{name}: no answer it could read from its child ({error})") from None
+    module = globals()
+    for table, contents in memo.items():
+        if table in _MEMO_TABLES:
+            module[table].clear()
+            module[table].update(contents)
+        else:
+            module[table] = contents
+    for line in lines:
+        log(line)
+    if kind == "raise":
+        raise value
+    return value
+
+
+def answer_from_child(write_fd: int, function, args: tuple, kwargs: dict) -> None:
+    """In the child: run the step, send back (kind, value, memo tables it changed, the lines it
+    logged), and leave without running any exit handler. Never returns."""
+    module = globals()
+    _STEPS["child"] = True
+    if _STEPS["lock_fd"] is not None:
+        try:
+            os.close(_STEPS["lock_fd"])
+        except OSError:
+            pass
+    lines: list[str] = []
+    module["log"] = lines.append
+    tables = {table: dict(module[table]) for table in _MEMO_TABLES}
+    values = {name: module[name] for name in _MEMO_VALUES}
+    try:
+        outcome = ("return", function(*args, **kwargs))
+    except BaseException as error:  # noqa: BLE001 -- raised again in the run, never here
+        outcome = ("raise", error)
+    memo = {table: module[table] for table in _MEMO_TABLES if module[table] != tables[table]}
+    memo.update({name: module[name] for name in _MEMO_VALUES if module[name] is not values[name]})
+    try:
+        payload = pickle.dumps((*outcome, memo, lines))
+    except Exception as error:  # noqa: BLE001
+        payload = pickle.dumps(("raise", RuntimeError(f"its answer could not be sent back: {error}"), {}, lines))
+    try:
+        with os.fdopen(write_fd, "wb") as answer:
+            answer.write(payload)
+    finally:
+        os._exit(0)
 
 
 def iso(epoch: float | None) -> str:
@@ -859,6 +1009,7 @@ def top_level_session(path: str) -> str | None:
     return match.group(1) if match else None
 
 
+@bounded_step("the process scan", whole_budget=True)
 def omp_sessions_by_pid() -> dict[str, int]:
     """Every session id an `omp` process on this machine holds, mapped to that pid.
 
@@ -987,6 +1138,7 @@ def omp_sessions_by_pid() -> dict[str, int]:
 _OPEN_JSONL: dict[tuple[int, int], list[int]] | None = None
 
 
+@bounded_step("the open-file scan")
 def transcript_holders(path: str | Path) -> list[int]:
     """Every pid on this machine with `path` open FOR WRITING, whatever the process is called.
 
@@ -1134,6 +1286,7 @@ def transcript_in_dir(directory: Path, session_id: str) -> Path | None:
     return best[1] if best else None
 
 
+@bounded_step("the transcript lookup")
 def transcript_of(session_id: str, walk: bool = True, directory: str = "") -> Path | None:
     """The session's own transcript file, the newest one when a session was resumed.
 
@@ -1180,6 +1333,7 @@ def transcript_of(session_id: str, walk: bool = True, directory: str = "") -> Pa
     return found
 
 
+@bounded_step("the transcript tail read")
 def normal_exit_at(path: str | Path | None) -> str | None:
     """When the transcript ends in a normal session exit, the time it records; else None.
 
@@ -1206,6 +1360,33 @@ def normal_exit_at(path: str | Path | None) -> str | None:
     except OSError:
         return None
     return exit_in_lines(lines)
+
+
+@bounded_step("a transcript's stat")
+def file_state(path: str | Path) -> tuple[bool, float | None]:
+    """(whether `path` exists, its mtime or None when that cannot be read), through a symlink."""
+    if not os.path.exists(path):
+        return False, None
+    try:
+        return True, os.path.getmtime(path)
+    except OSError:
+        return True, None
+
+
+@bounded_step("a transcript's session record")
+def session_cwd(path: str | Path) -> str:
+    """The working directory a transcript's `session` record names, or "" when none of its first
+    three lines is one or the file cannot be read."""
+    try:
+        with open(path, "rb") as handle:
+            for _ in range(3):
+                entry = json.loads(handle.readline(65536) or b"{}")
+                if entry.get("type") == "session":
+                    return entry.get("cwd") or ""
+    except (OSError, ValueError):
+        pass
+    return ""
+
 
 
 def exit_in_lines(lines: list[bytes]) -> str | None:
@@ -1266,6 +1447,7 @@ def swept_index() -> dict[str, tuple[str, str]]:
     return _SWEEP_INDEX
 
 
+@bounded_step("the session sweep's record")
 def swept_transcript(session_id: str) -> dict | None:
     """What the session sweep did with this session's transcript, or None when it did not take it.
 
@@ -1328,6 +1510,7 @@ def _entry_time(stamp: str) -> float | None:
 # --------------------------------------------------- what this run could establish about a holder
 
 
+@bounded_step("the working-directory walk")
 def newest_write(directory: str, holder: str = "", now: float | None = None) -> dict:
     """The newest regular file under a holder's working directory, named and dated.
 
@@ -1524,12 +1707,7 @@ def holder_evidence(
     # into every run of 2026-11-02 (see TRANSCRIPT_WALK_SECONDS).
     seen_already = any(seen for _, seen, _ in sources)
     transcript = None if seen_already else transcript_of(holder, walk and deep, directory)
-    last_write = None
-    if transcript:
-        try:
-            last_write = transcript.stat().st_mtime
-        except OSError:
-            last_write = None
+    last_write = file_state(transcript)[1] if transcript else None
 
     # The working-directory walk, on the same gate as `openers`: the first two sources are
     # silent and the session root holds nothing fresh for this holder. A healthy role never
@@ -1691,6 +1869,7 @@ def guard_verdict(text: str) -> str:
     return text
 
 
+@bounded_step("the handover-file search")
 def handover_files(session_id: str, directory: str) -> list[str]:
     """The files a restarted session is briefed from, newest first.
 
@@ -2112,6 +2291,7 @@ PANE_FIELDS = (
 )
 
 
+@bounded_step("tmux list-panes")
 def tmux_panes() -> list[dict] | None:
     """Every pane of the default tmux server, once each (grouped sessions list a pane per group
     member). None when tmux could not be read; [] when no server runs."""
@@ -2153,6 +2333,12 @@ def process_table() -> tuple[dict[int, list[int]], dict[int, tuple[str, int]]]:
     """
     if _PROC_TABLE is not None:
         return _PROC_TABLE
+    return read_process_table()
+
+
+@bounded_step("the process table", whole_budget=True)
+def read_process_table() -> tuple[dict[int, list[int]], dict[int, tuple[str, int]]]:
+    """`process_table` when no scan has built it: one pass over /proc/<pid>/stat."""
     children: dict[int, list[int]] = {}
     info: dict[int, tuple[str, int]] = {}
     for entry in os.listdir(PROC_ROOT):
@@ -2182,6 +2368,7 @@ def session_dir_of(cwd: str) -> Path:
     return SESSION_ROOT / ("--" + cwd.strip("/").replace("/", "-") + "--")
 
 
+@bounded_step("the pane directory's transcript titles")
 def transcript_by_title(cwd: str, text: str, live: dict[str, int]) -> tuple[str, Path] | None:
     """The newest top-level transcript in the pane's directory whose title (its first line) the
     pane title carries, and whose session no live process holds."""
@@ -2206,6 +2393,7 @@ def transcript_by_title(cwd: str, text: str, live: dict[str, int]) -> tuple[str,
     return (best[1], best[2]) if best else None
 
 
+@bounded_step("the pane directory's inventory")
 def directory_inventory(cwd: str, live: dict[str, int], limit: int = 3) -> str:
     """One line saying what the pane's session directory DOES hold, for an unresolved pane.
 
@@ -2255,6 +2443,7 @@ def directory_inventory(cwd: str, live: dict[str, int], limit: int = 3) -> str:
     )
 
 
+@bounded_step("the tmux-resurrect saves")
 def resurrect_command(pane: dict, text: str, limit: int = 60) -> tuple[str, str] | None:
     """The newest tmux-resurrect save in which this pane's place (session, window, pane index),
     under the same title, ran `omp --resume`: (its command, the save file)."""
@@ -2281,6 +2470,7 @@ def resurrect_command(pane: dict, text: str, limit: int = 60) -> tuple[str, str]
     return None
 
 
+@bounded_step("the resumed transcript's header")
 def resume_target(command: str) -> tuple[str | None, str | None]:
     """The session and transcript an `omp … --resume <value>` command actually resumes.
 
@@ -2384,7 +2574,7 @@ def pane_alert_text(incident: dict, now: float) -> str:
     files = incident.get("handover") or []
     brief = "brief it from " + ", ".join(files) if files else "no handover file found: brief it from the tail of its transcript"
     lines.append(
-        f"ESTABLISHED: this pane is at a shell. NOT established: that its session has stopped --"
+        "ESTABLISHED: this pane is at a shell. NOT established: that its session has stopped --"
         " the session may be running in another pane, in a box, or under another process."
     )
     lines.append(
@@ -2530,6 +2720,7 @@ def moved_to(worker: str) -> str:
     return ""
 
 
+@bounded_step("the move records")
 def move_in_progress(pane: dict) -> dict | None:
     """What a pane says about a move of its own worker, or None when it is not a mover pane."""
     found = MOVER_SESSION_RE.match(pane.get("session_name") or "")
@@ -2586,6 +2777,7 @@ def move_claim(session: str, transcript: str = "") -> str:
     return ""
 
 
+@bounded_step("the pane's release check")
 def pane_release(record: dict, session: str | None, transcript: str) -> str:
     """Why a pane whose omp is gone is NOT at a shell in the sense this check alerts on, or "".
 
@@ -2610,6 +2802,7 @@ def pane_release(record: dict, session: str | None, transcript: str) -> str:
     return ""
 
 
+@bounded_step("the lane's owner records")
 def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
     targets = [(INFRA_LEAD, "INFRA lead")]
     live = {s.get("session_id") for s in sessions}
@@ -2659,7 +2852,11 @@ def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -
 
 def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, sessions: list[dict], held: dict[str, int], now: float) -> tuple[int, int, int, int]:
     """(agent panes, agent panes at a shell, alerts, clears) for the default tmux server."""
-    panes = tmux_panes()
+    try:
+        panes = tmux_panes()
+    except StepCut as cut:
+        log(f"panes: not checked this run: {cut}")
+        return 0, 0, 0, 0
     if panes is None:
         return 0, 0, 0, 0
     memory: dict = state.data.setdefault("panes", {})
@@ -2677,7 +2874,11 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             f" (TMUX_TMPDIR={os.environ.get('TMUX_TMPDIR', '(unset)')})"
         )
         return 0, 0, 0, 0
-    children, info = process_table()
+    try:
+        children, info = process_table()
+    except StepCut as cut:
+        log(f"panes: not checked this run: {cut}")
+        return 0, 0, 0, 0
     pid_session = {pid: session for session, pid in held.items()}
     seen_keys = set()
     agents = at_shell = alerts = clears = 0
@@ -2711,6 +2912,181 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             if options.print_alert:
                 print(text)
         incidents.pop(key, None)
+
+    def at_shell_pane(
+        pane: dict, key: str, logged: str, where: str, pane_pid: int, comm: str,
+        remembered: dict | None, incident: dict | None,
+    ) -> None:
+        """The rest of the check for an agent pane at a bare shell: resolve its session, then
+        hold, release or alert. Every read in it is a bounded step, and one that is cut raises
+        StepCut before anything is decided for the pane."""
+        nonlocal at_shell, alerts
+        text = title_text(pane["pane_title"])
+        # Resolve the session this pane last ran: what this watch saw running here, else the
+        # transcript in its directory titled as the pane is, else the newest resurrect save.
+        if incident is None or "session_source" not in incident:
+            session = restart = transcript = None
+            source = ""
+            if remembered and remembered.get("session"):
+                session = remembered["session"]
+                source = f"seen running in this pane by this watch at {iso(remembered.get('seen_at'))}"
+            else:
+                found = transcript_by_title(pane["pane_current_path"], text, held)
+                if found:
+                    session, transcript = found[0], str(found[1])
+                    source = f"the transcript in the pane's directory whose title is in the pane title, {found[1].name}"
+                else:
+                    saved = resurrect_command(pane, text)
+                    if saved:
+                        restart = saved[0]
+                        session, transcript = resume_target(saved[0])
+                        source = (
+                            f"the resume command tmux-resurrect saved for {where} in {saved[1]}"
+                            + ("" if session else
+                               " -- which names a path whose header this watch could not read,"
+                               " so the session is NOT resolved")
+                        )
+            incident = incidents.setdefault(key, {"opened_at": now})
+            transcript = transcript or (str(transcript_of(session) or "") if session and UUID_RE.fullmatch(session) else "")
+            exists, last_write = file_state(transcript) if transcript else (False, None)
+            if transcript and not exists:
+                # A path a resume command named that is not there is not a transcript; keeping
+                # it would put a `grep -F <path>` in the alert that can never match and reads
+                # to a person as "nothing holds it".
+                transcript = ""
+            # `omp --resume <id>` resolves an id against the session store of the directory it
+            # is run in, and a pane's cwd is not always the directory the session was started
+            # in: measured 2026-11-01 17:51Z on pane %58, where `omp --resume
+            # 01a19827-…` run from /home/sami/Code/legion answered `Error: Session
+            # "01a19827-…" not found.` while the session's transcript sat under
+            # -src-oh-my-pi. `--resume <path>` takes the transcript itself and needs no
+            # directory, so it is what the alert hands a reader whenever the transcript lives
+            # outside the pane's own session directory.
+            by_id = f"omp --resume {session}" if session else ""
+            own_dir = str(session_dir_of(pane["pane_current_path"]))
+            if transcript and not str(Path(transcript).parent).startswith(own_dir):
+                by_id = f"omp --resume {shlex.quote(transcript)}"
+            incident.update({
+                "pane_id": pane["pane_id"], "where": where, "window_name": pane["window_name"],
+                "title": pane["pane_title"], "cwd": pane["pane_current_path"], "shell": comm,
+                "shell_pid": pane_pid, "session": session, "session_source": source,
+                "transcript": transcript,
+                "restart": restart or by_id,
+            })
+            incident["last_write"] = last_write if transcript else None
+        # EVERY period, not only the one that opened the incident. The pane being at a shell is
+        # a fact about the pane; whether its session is running somewhere else is a fact about
+        # the session, and that one can change between the open and the 180 s alert. Checking it
+        # once meant an alert could name a session that was live at the moment it was sent, and
+        # hand a reader the send-keys that starts a second omp on its transcript -- the
+        # INFRA-681 double loop the same alert warns about.
+        session = incident.get("session")
+        if session and session in held:
+            log_change(
+                state, logged, f"elsewhere:{session}:{held[session]}",
+                f"pane {pane['pane_id']} {where}: at a shell, but its session {session} runs in"
+                f" pid {held[session]} elsewhere; not an incident",
+            )
+            clear(key, incident, f"its session {session} runs in pid {held[session]} elsewhere")
+            memory.setdefault(key, {})["left"] = {"session": session, "pid": held[session], "at": now}
+            incidents.pop(key, None)
+            state.commit(options)
+            return
+        released = pane_release(memory.get(key) or {}, session, incident.get("transcript") or "")
+        if released:
+            log_change(
+                state, logged, f"released:{released}",
+                f"pane {pane['pane_id']} {where}: at a shell, but {released}; not an incident",
+            )
+            clear(key, incident, released)
+            state.commit(options)
+            return
+        at_shell += 1
+        open_for = now - incident["opened_at"]
+        if open_for < options.pane_grace:
+            log_change(
+                state, logged, f"grace:{incident['opened_at']}",
+                f"pane {pane['pane_id']} {where}: at a shell since {iso(incident['opened_at'])}"
+                f" (< {int(options.pane_grace)} s grace), holding",
+            )
+            state.commit(options)
+            return
+        # A pane in a tmux session named mv-<worker> is `ossv-agent move` relocating that worker
+        # to another box. Its pane shows the worker's `[Stopped by SIGTERM]` and the mover's own
+        # recovery lines, which is exactly the shape this check fires on -- and telling anyone to
+        # resume it would start a second omp on a session the mover is about to resume elsewhere.
+        # Measured 2026-10-30: three such alerts between 20:14Z and 20:35Z on ossv-agent-open.
+        # It is held, not dropped: a move that never finishes is a real failure, so after
+        # --move-grace the alert goes out saying a move is in progress and where the worker is,
+        # and never how to restart it.
+        move = move_in_progress(pane)
+        if move:
+            incident["move"] = move
+            if open_for < options.move_grace:
+                log_change(
+                    state, logged, f"move:{move['worker']}:{incident['opened_at']}",
+                    f"pane {pane['pane_id']} {where}: move in progress (mover session"
+                    f" {move['mover']}, worker {move['worker']}), at a shell since"
+                    f" {iso(incident['opened_at'])} (< {int(options.move_grace)} s move grace);"
+                    " not an incident",
+                )
+                state.commit(options)
+                return
+        if incident.get("alerted_at"):
+            log_change(
+                state, logged, f"alerted:{incident['alerted_at']}",
+                f"pane {pane['pane_id']} {where}: at a shell, alerted at"
+                f" {iso(incident['alerted_at'])}; nothing further goes out for this incident",
+            )
+            return
+        # One alert per pane per session until omp runs in the pane again, however often the
+        # incident closes and reopens in between (a shell child that comes and goes, a session
+        # seen elsewhere and gone again): the lane's state has not changed, so neither has the
+        # alert a reader already has.
+        record = memory.setdefault(key, {})
+        if record.get("alerted_for") == (session or "-"):
+            log_change(
+                state, logged, f"realerted:{record.get('alerted_for')}:{record.get('alerted_at')}",
+                f"pane {pane['pane_id']} {where}: at a shell again; this watch alerted on it at"
+                f" {iso(record.get('alerted_at'))} for session {session or '(not resolved)'}, and"
+                " says nothing more until omp runs in this pane again",
+            )
+            return
+        session = incident.get("session")
+        directory = pane["pane_current_path"]
+        if incident.get("transcript"):
+            directory = session_cwd(incident["transcript"]) or directory
+        incident["handover"] = handover_files(session if session and UUID_RE.fullmatch(session) else "-", directory)
+        targets, notes = pane_recipients(directory, session, sessions)
+        incident["notes"] = notes
+        # Read now, not when the incident opened: whether a transcript's session is running is
+        # a fact about this moment, and the alert says which of them are.
+        if not session:
+            incident["directory_inventory"] = directory_inventory(pane["pane_current_path"], held)
+        # Named in the alert, so a reader knows who else saw it and under which role.
+        incident["told_why"] = [f"{why} {target}" for target, why in targets]
+        full = move_alert_text(incident, now) if incident.get("move") else pane_alert_text(incident, now)
+        # Where a reader already looks: a suppression of another class is named in this one, so
+        # nobody has to read the source of the watch to learn that a class has been silenced.
+        full = "\n".join([full] + suppression_lines(now, state.data.get("suppressed") or {}))
+        text, report = compose(
+            options, f"pane-{pane['pane_id'].strip('%')}-{'move' if incident.get('move') else 'at-shell'}",
+            full, now, *pane_head(incident, now),
+        )
+        incident["alerted_at"] = now
+        incident["told"] = [target for target, _ in targets]
+        record.update({"alerted_for": session or "-", "alerted_at": now})
+        log_change(state, logged, f"alerted:{now}")
+        state.commit(options)
+        told = []
+        for target, why in targets:
+            if options.dry_run or envoy.send(target, text):
+                told.append(f"{target} ({why})")
+        alerts += 1
+        log(f"pane {pane['pane_id']} {where}: ALERT sent to {len(targets)} sessions"
+            f" [{', '.join(told)}]; full report {report}")
+        if options.print_alert:
+            print(text)
 
     for pane in panes:
         check_time("the pane check")
@@ -2808,182 +3184,13 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             if incident:
                 clear(key, incident, f"its session {left.get('session')} runs outside this pane")
             continue
-        text = title_text(pane["pane_title"])
-        # Resolve the session this pane last ran: what this watch saw running here, else the
-        # transcript in its directory titled as the pane is, else the newest resurrect save.
-        if incident is None or "session_source" not in incident:
-            session = restart = transcript = None
-            source = ""
-            if remembered and remembered.get("session"):
-                session = remembered["session"]
-                source = f"seen running in this pane by this watch at {iso(remembered.get('seen_at'))}"
-            else:
-                found = transcript_by_title(pane["pane_current_path"], text, held)
-                if found:
-                    session, transcript = found[0], str(found[1])
-                    source = f"the transcript in the pane's directory whose title is in the pane title, {found[1].name}"
-                else:
-                    saved = resurrect_command(pane, text)
-                    if saved:
-                        restart = saved[0]
-                        session, transcript = resume_target(saved[0])
-                        source = (
-                            f"the resume command tmux-resurrect saved for {where} in {saved[1]}"
-                            + ("" if session else
-                               " -- which names a path whose header this watch could not read,"
-                               " so the session is NOT resolved")
-                        )
-            incident = incidents.setdefault(key, {"opened_at": now})
-            transcript = transcript or (str(transcript_of(session) or "") if session and UUID_RE.fullmatch(session) else "")
-            if transcript and not os.path.exists(transcript):
-                # A path a resume command named that is not there is not a transcript; keeping
-                # it would put a `grep -F <path>` in the alert that can never match and reads
-                # to a person as "nothing holds it".
-                transcript = ""
-            # `omp --resume <id>` resolves an id against the session store of the directory it
-            # is run in, and a pane's cwd is not always the directory the session was started
-            # in: measured 2026-11-01 17:51Z on pane %58, where `omp --resume
-            # 01a19827-…` run from /home/sami/Code/legion answered `Error: Session
-            # "01a19827-…" not found.` while the session's transcript sat under
-            # -src-oh-my-pi. `--resume <path>` takes the transcript itself and needs no
-            # directory, so it is what the alert hands a reader whenever the transcript lives
-            # outside the pane's own session directory.
-            by_id = f"omp --resume {session}" if session else ""
-            own_dir = str(session_dir_of(pane["pane_current_path"]))
-            if transcript and not str(Path(transcript).parent).startswith(own_dir):
-                by_id = f"omp --resume {shlex.quote(transcript)}"
-            incident.update({
-                "pane_id": pane["pane_id"], "where": where, "window_name": pane["window_name"],
-                "title": pane["pane_title"], "cwd": pane["pane_current_path"], "shell": comm,
-                "shell_pid": pane_pid, "session": session, "session_source": source,
-                "transcript": transcript,
-                "restart": restart or by_id,
-            })
-            try:
-                incident["last_write"] = os.path.getmtime(transcript) if transcript else None
-            except OSError:
-                incident["last_write"] = None
-        # EVERY period, not only the one that opened the incident. The pane being at a shell is
-        # a fact about the pane; whether its session is running somewhere else is a fact about
-        # the session, and that one can change between the open and the 180 s alert. Checking it
-        # once meant an alert could name a session that was live at the moment it was sent, and
-        # hand a reader the send-keys that starts a second omp on its transcript -- the
-        # INFRA-681 double loop the same alert warns about.
-        session = incident.get("session")
-        if session and session in held:
-            log_change(
-                state, logged, f"elsewhere:{session}:{held[session]}",
-                f"pane {pane['pane_id']} {where}: at a shell, but its session {session} runs in"
-                f" pid {held[session]} elsewhere; not an incident",
-            )
-            clear(key, incident, f"its session {session} runs in pid {held[session]} elsewhere")
-            memory.setdefault(key, {})["left"] = {"session": session, "pid": held[session], "at": now}
-            incidents.pop(key, None)
-            state.commit(options)
-            continue
-        released = pane_release(memory.get(key) or {}, session, incident.get("transcript") or "")
-        if released:
-            log_change(
-                state, logged, f"released:{released}",
-                f"pane {pane['pane_id']} {where}: at a shell, but {released}; not an incident",
-            )
-            clear(key, incident, released)
-            state.commit(options)
-            continue
-        at_shell += 1
-        open_for = now - incident["opened_at"]
-        if open_for < options.pane_grace:
-            log_change(
-                state, logged, f"grace:{incident['opened_at']}",
-                f"pane {pane['pane_id']} {where}: at a shell since {iso(incident['opened_at'])}"
-                f" (< {int(options.pane_grace)} s grace), holding",
-            )
-            state.commit(options)
-            continue
-        # A pane in a tmux session named mv-<worker> is `ossv-agent move` relocating that worker
-        # to another box. Its pane shows the worker's `[Stopped by SIGTERM]` and the mover's own
-        # recovery lines, which is exactly the shape this check fires on -- and telling anyone to
-        # resume it would start a second omp on a session the mover is about to resume elsewhere.
-        # Measured 2026-10-30: three such alerts between 20:14Z and 20:35Z on ossv-agent-open.
-        # It is held, not dropped: a move that never finishes is a real failure, so after
-        # --move-grace the alert goes out saying a move is in progress and where the worker is,
-        # and never how to restart it.
-        move = move_in_progress(pane)
-        if move:
-            incident["move"] = move
-            if open_for < options.move_grace:
-                log_change(
-                    state, logged, f"move:{move['worker']}:{incident['opened_at']}",
-                    f"pane {pane['pane_id']} {where}: move in progress (mover session"
-                    f" {move['mover']}, worker {move['worker']}), at a shell since"
-                    f" {iso(incident['opened_at'])} (< {int(options.move_grace)} s move grace);"
-                    " not an incident",
-                )
-                state.commit(options)
-                continue
-        if incident.get("alerted_at"):
-            log_change(
-                state, logged, f"alerted:{incident['alerted_at']}",
-                f"pane {pane['pane_id']} {where}: at a shell, alerted at"
-                f" {iso(incident['alerted_at'])}; nothing further goes out for this incident",
-            )
-            continue
-        # One alert per pane per session until omp runs in the pane again, however often the
-        # incident closes and reopens in between (a shell child that comes and goes, a session
-        # seen elsewhere and gone again): the lane's state has not changed, so neither has the
-        # alert a reader already has.
-        record = memory.setdefault(key, {})
-        if record.get("alerted_for") == (session or "-"):
-            log_change(
-                state, logged, f"realerted:{record.get('alerted_for')}:{record.get('alerted_at')}",
-                f"pane {pane['pane_id']} {where}: at a shell again; this watch alerted on it at"
-                f" {iso(record.get('alerted_at'))} for session {session or '(not resolved)'}, and"
-                " says nothing more until omp runs in this pane again",
-            )
-            continue
-        session = incident.get("session")
-        directory = pane["pane_current_path"]
-        if incident.get("transcript"):
-            try:
-                with open(incident["transcript"], "rb") as handle:
-                    for _ in range(3):
-                        entry = json.loads(handle.readline(65536) or b"{}")
-                        if entry.get("type") == "session":
-                            directory = entry.get("cwd") or directory
-                            break
-            except (OSError, ValueError):
-                pass
-        incident["handover"] = handover_files(session if session and UUID_RE.fullmatch(session) else "-", directory)
-        targets, notes = pane_recipients(directory, session, sessions)
-        incident["notes"] = notes
-        # Read now, not when the incident opened: whether a transcript's session is running is
-        # a fact about this moment, and the alert says which of them are.
-        if not session:
-            incident["directory_inventory"] = directory_inventory(pane["pane_current_path"], held)
-        # Named in the alert, so a reader knows who else saw it and under which role.
-        incident["told_why"] = [f"{why} {target}" for target, why in targets]
-        full = move_alert_text(incident, now) if incident.get("move") else pane_alert_text(incident, now)
-        # Where a reader already looks: a suppression of another class is named in this one, so
-        # nobody has to read the source of the watch to learn that a class has been silenced.
-        full = "\n".join([full] + suppression_lines(now, state.data.get("suppressed") or {}))
-        text, report = compose(
-            options, f"pane-{pane['pane_id'].strip('%')}-{'move' if incident.get('move') else 'at-shell'}",
-            full, now, *pane_head(incident, now),
-        )
-        incident["alerted_at"] = now
-        incident["told"] = [target for target, _ in targets]
-        record.update({"alerted_for": session or "-", "alerted_at": now})
-        log_change(state, logged, f"alerted:{now}")
-        state.commit(options)
-        told = []
-        for target, why in targets:
-            if options.dry_run or envoy.send(target, text):
-                told.append(f"{target} ({why})")
-        alerts += 1
-        log(f"pane {pane['pane_id']} {where}: ALERT sent to {len(targets)} sessions"
-            f" [{', '.join(told)}]; full report {report}")
-        if options.print_alert:
-            print(text)
+        try:
+            at_shell_pane(pane, key, logged, where, pane_pid, comm, remembered, incident)
+        except StepCut as cut:
+            # Nothing was decided for this pane -- no alert, no clear -- and its journal state
+            # stays as it was. The next period reads it again.
+            _LOG_KEYS.add(logged)
+            log(f"pane {pane['pane_id']} {where}: not judged this run: {cut}")
 
     for key in list(incidents):
         if key not in seen_keys:
@@ -3083,10 +3290,18 @@ def check_roles(
         finished = bool(incident) and bool(
             incident.get("quieted_at") or (incident.get("exited_at") and incident.get("exited_reported_at"))
         )
-        evidence = holder_evidence(
-            envoy, holder, held, live, options.write_grace, started,
-            record.get("dir") or "", options.dir_grace, rewalk, not finished,
-        )
+        try:
+            evidence = holder_evidence(
+                envoy, holder, held, live, options.write_grace, started,
+                record.get("dir") or "", options.dir_grace, rewalk, not finished,
+            )
+        except StepCut as cut:
+            # A source this role needed was not read: nothing is decided for it -- no alert, no
+            # clear -- and its journal state stays as it was. The next period reads it again,
+            # after the roles this one has now been checked behind (`checked_at`).
+            _LOG_KEYS.update({logged, f"{logged}:registry"})
+            log(f"{role}: holder {holder} not judged this run: {cut}")
+            continue
         if evidence["walk_missed"]:
             record["transcript_missed_at"] = started
         pid = evidence["pid"]
@@ -3285,7 +3500,13 @@ def check_roles(
         if not incident.get("alerted_at"):
             incident["transcript"] = evidence["transcript"]
             incident["swept"] = evidence["swept"]
-            incident["handover"] = handover_files(holder, record.get("dir") or "")
+            try:
+                incident["handover"] = handover_files(holder, record.get("dir") or "")
+            except StepCut as cut:
+                # The alert goes out whole or not at all: the next period sends it.
+                _LOG_KEYS.add(logged)
+                log(f"{role}: alert on {holder} held to the next run: {cut}")
+                continue
             incident["listener"] = envoy.url
             incident["pane"] = pane_of.get(holder, "")
             targets, topics, notes = recipients(role, record, sessions, holder)
@@ -3393,6 +3614,14 @@ MIN_RUN_SECONDS = 1.0
 
 
 def run_once(options: argparse.Namespace) -> int:
+    """One period. Its disk and /proc steps run bounded only inside it (see bounded_step)."""
+    try:
+        return run_period(options)
+    finally:
+        _STEPS.update(bounded=False, lock_fd=None)
+
+
+def run_period(options: argparse.Namespace) -> int:
     global _TRANSCRIPT_INDEX, _OPEN_JSONL, _SWEEP_INDEX, _PROC_TABLE
     started = time.time()
     budget = getattr(options, "budget", None) or DEFAULT_BUDGET
@@ -3412,6 +3641,8 @@ def run_once(options: argparse.Namespace) -> int:
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
         return 0
+    # From here every disk and /proc step runs in a child under a hard limit (bounded_step).
+    _STEPS.update(bounded=True, child=False, lock_fd=state.handle.fileno(), cut=[])
     _TRANSCRIPT_INDEX = _OPEN_JSONL = _SWEEP_INDEX = _PROC_TABLE = None
     _TRANSCRIPT_WALK.update(deadline=0.0, truncated=False)
     _LOG_KEYS.clear()
@@ -3513,8 +3744,10 @@ def run_once(options: argparse.Namespace) -> int:
     if "panes" not in " ".join(phases):
         phase("panes")
     phase("roles")
-    # Only a run that reached every role may forget a role's recorded journal state.
-    forget_logged(state, "role:")
+    # Only a run that reached every role may forget a role's recorded journal state: a run that
+    # stopped, at its budget or on a cut process scan, would make the next one log every role again.
+    if not stopped:
+        forget_logged(state, "role:")
     keep_known_transcripts(state)
     state.commit(options)
     state.close()
@@ -3530,6 +3763,8 @@ def run_once(options: argparse.Namespace) -> int:
         + (f"; {_SCAN['unread_headers']} transcript header(s) left for the next run"
            if _SCAN["unread_headers"] else "")
         + f"); {alerts + pane_alerts} alert(s), {clears + pane_clears} clear(s)"
+        + (f"; {len(_STEPS['cut'])} read(s) cut at their limit, nothing decided on them:"
+           f" {', '.join(_STEPS['cut'])}" if _STEPS["cut"] else "")
         + (f"; STOPPED at its {budget:g} s budget in {stopped}, with what it had done saved: the"
            " next run starts with the roles this one did not reach" if stopped else "")
         + "".join("; " + line for line in suppression_lines(started, suppressed, short=True))

@@ -74,6 +74,10 @@ class Lane(unittest.TestCase):
             lambda: setattr(WATCH, "_TRANSCRIPT_INDEX", original_index)
         )
         self.addCleanup(lambda: setattr(WATCH, "SESSION_ROOT", original_root))
+        # A period's budget counts from its process's start, which in a test is pytest's.
+        original_started = WATCH.process_started
+        WATCH.process_started = time.time
+        self.addCleanup(setattr, WATCH, "process_started", original_started)
         self.now = time.time()
 
     def write(self, name: str, age: float, text: str = "x\n") -> Path:
@@ -372,17 +376,25 @@ class TranscriptLookupCostTest(Lane):
 
     def setUp(self) -> None:
         super().setUp()
-        self.walks = 0
+        # A file, not an attribute: inside a run the lookup runs in a bounded step's forked
+        # child (bounded_step), and only a write outside the process comes back from there.
+        self.walk_record = self.root / "walks"
+        self.walk_record.touch()
         original = WATCH.transcript_index
 
         def counted():
-            self.walks += 1
+            with open(self.walk_record, "a") as record:
+                record.write("walk\n")
             return original()
 
         WATCH.transcript_index = counted
         self.addCleanup(setattr, WATCH, "transcript_index", original)
         WATCH._KNOWN_TRANSCRIPTS.clear()
         self.addCleanup(WATCH._KNOWN_TRANSCRIPTS.clear)
+
+    @property
+    def walks(self) -> int:
+        return len(self.walk_record.read_text().splitlines())
 
     def test_a_holder_a_process_shows_never_walks_the_session_root(self) -> None:
         evidence = WATCH.holder_evidence(

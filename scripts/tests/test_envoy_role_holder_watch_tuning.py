@@ -106,6 +106,8 @@ class Box(unittest.TestCase):
             ("process_table", lambda: self.table),
             ("transcript_by_title", lambda cwd, text, held: None),
             ("resurrect_command", lambda pane, text, limit=60: None),
+            # A period's budget counts from its process's start, which in a test is pytest's.
+            ("process_started", time.time),
         ):
             original = getattr(WATCH, name, None)
             setattr(WATCH, name, value)
@@ -516,21 +518,36 @@ class ExitedHolderCostTest(Box):
 
     def setUp(self) -> None:
         super().setUp()
-        self.walks = 0
-        self.dir_walks = 0
+        # Files, not attributes: inside a run a lookup runs in a bounded step's forked child
+        # (bounded_step), and only a write outside the process comes back from there.
+        self.record = {"walk": self.root / "walks", "dir": self.root / "dir-walks"}
+        for path in self.record.values():
+            path.touch()
         index, newest = WATCH.transcript_index, WATCH.newest_write
 
+        def counted(kind: str) -> None:
+            with open(self.record[kind], "a") as record:
+                record.write(kind + "\n")
+
         def counted_index():
-            self.walks += 1
+            counted("walk")
             return index()
 
         def counted_newest(*args, **kwargs):
-            self.dir_walks += 1
+            counted("dir")
             return newest(*args, **kwargs)
 
         WATCH.transcript_index, WATCH.newest_write = counted_index, counted_newest
         self.addCleanup(setattr, WATCH, "transcript_index", index)
         self.addCleanup(setattr, WATCH, "newest_write", newest)
+
+    @property
+    def walks(self) -> int:
+        return len(self.record["walk"].read_text().splitlines())
+
+    @property
+    def dir_walks(self) -> int:
+        return len(self.record["dir"].read_text().splitlines())
 
     def test_a_recorded_exit_is_not_searched_for_again(self) -> None:
         path = str(WATCH.session_dir_of(str(self.dir)) / f"2026-10-31T19-18-56-140Z_{HOLDER}.jsonl")

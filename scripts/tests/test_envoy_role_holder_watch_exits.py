@@ -103,14 +103,15 @@ class Incident(unittest.TestCase):
         self.logs: list[str] = []
         RunEnvoy.sent = []
         # getattr with a default, so the same tests run against the script before this change
-        # and fail on what it decides rather than on a name it did not have.
+        # and fail on what it decides rather than on a name it did not have. A period's budget
+        # counts from its process's start, which in a test is pytest's: it starts now instead.
         for name, value in (
             ("SESSION_ROOT", self.root / "agent/sessions"), ("SWEEP_STATE", self.sweep),
             ("_TRANSCRIPT_INDEX", None), ("_SWEEP_INDEX", None),
             ("PSQL", None), ("Envoy", RunEnvoy), ("log", self.logs.append),
             ("omp_sessions_by_pid", lambda: {}), ("transcript_holders", lambda path: []),
             ("handover_files", lambda session, directory: []),
-            ("check_panes", lambda *args: (0, 0, 0, 0)),
+            ("check_panes", lambda *args: (0, 0, 0, 0)), ("process_started", time.time),
         ):
             original = getattr(WATCH, name, None)
             setattr(WATCH, name, value)
