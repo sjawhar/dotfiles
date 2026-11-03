@@ -466,7 +466,10 @@ host_disks() {
 
 # sudo_find ARRAY ARGS...: `sudo -n find ARGS`, appending each path to the array named ARRAY, and
 # a FAIL when find (or sudo) exits non-zero, so a walk that failed never reads as one that found
-# nothing.
+# nothing. A path that sessions remove while find walks it is not a failure: find then exits 1
+# and says "No such file or directory" for it (A2 of 08:22Z on 2026-11-03 failed on a file a lane
+# deleted under /mnt/nvme/sami/wt/SkipRecheck). Only when every error line is that one is the run
+# a pass, with a note; any other error, or a non-zero exit with no error line, stays a FAIL.
 sudo_find() {
     local -n into="$1"
     shift
@@ -475,6 +478,10 @@ sudo_find() {
     # shellcheck disable=SC2024  # the output files are sami's own temp files, on purpose
     sudo -n find "$@" >"$out" 2>"$err" || rc=$?
     mapfile -t -O "${#into[@]}" into <"$out"
+    if (( rc == 1 )) && [[ -s "$err" ]] && ! grep -qv ': No such file or directory$' "$err"; then
+        note "logins: sudo -n find $1: $(grep -c '' "$err") path(s) went away during the walk, e.g. $(tail -1 "$err")"
+        rc=0
+    fi
     (( rc == 0 )) || fail "logins: sudo -n find $1 exited $rc: $(tail -1 "$err")"
     rm -f "$out" "$err"
     return "$rc"
