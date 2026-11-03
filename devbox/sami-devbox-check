@@ -762,6 +762,30 @@ leak_check_host_check() {
         || fail "public-leak-check: $d is not $LEAK_CHECK_TAG (sha256sum -c exit $rc): $(grep -v ': OK$' <<<"$out" | tr '\n' ' ')install it: sami-devbox-provision --only leakcheck"
 }
 
+# The leak check's pre-push hook: every checkout under ~/src that pushes to a public repository has
+# it. Which checkouts are public is decided by the sweep's own code (sweep-hooks.sh up to its loop,
+# as sami-devbox-provision's step prepush runs it), with an installer that installs nothing and
+# fails, so each checkout without the hook is one FAILED line and nothing on disk changes.
+prepush_hook_host_check() {
+    local d="$HOME/.local/share/public-leak-check-hooks" t out rc=0 summary missing
+    # shellcheck source=leak-check-tag.env
+    . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/leak-check-tag.env"
+    out="$(cd "$d" && sha256sum -c <<<"$LEAK_CHECK_HOOK_SHA256" 2>&1)" || rc=$?
+    (( rc == 0 )) || { fail "pre-push hook: $d is not $LEAK_CHECK_TAG's hook files (sha256sum -c exit $rc): $(tr '\n' ' ' <<<"$out")install them: sami-devbox-provision --only prepush"; return; }
+    t="$(mktemp -d)"
+    printf '#!/bin/sh\nexit 1\n' > "$t/install-prepush-hook.sh" && chmod +x "$t/install-prepush-hook.sh"
+    bash -c "$(sed '/^i=0$/,$d' "$d/sweep-hooks.sh")
+        here=$t; log=$t/log; sweep \"\$HOME/src\"" </dev/null >/dev/null 2>&1
+    summary="$(grep ' sweep \[' "$t/log" 2>/dev/null | tail -n 1)"
+    missing="$(sed -n 's/^[^ ]* FAILED //p' "$t/log" 2>/dev/null | tr '\n' ' ')"
+    rm -rf "$t"
+    if [[ -n "$summary" && -z "$missing" ]]; then
+        ok "pre-push hook: every public checkout under ~/src has it (${summary#* sweep })"
+    else
+        fail "pre-push hook: missing in ${missing:-(the sweep pass wrote no summary)}; install: sami-devbox-provision --only prepush"
+    fi
+}
+
 # kubectl as a non-interactive ssh command gets it, through the kubeconfig the ossv-job-farm uses.
 # Its smoke failed on 2026-11-03 11:35Z with "Install gke-gcloud-auth-plugin": that PATH has
 # ~/.mise/shims but not ~/.local/bin, so installers/gcloud-sdk.sh links the plugin into
@@ -806,6 +830,7 @@ host() {
     tq_check "on the host"
     rocqperf_check
     leak_check_host_check
+    prepush_hook_host_check
     ossv_tree_host_check
     n6_check "on the host"
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"

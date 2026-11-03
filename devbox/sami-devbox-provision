@@ -22,6 +22,10 @@
 #   leakcheck  the public-text leak check shims/gh requires, in ~/.local/share/public-leak-check
 #              (agentbox/mounts gives boxes that directory) with its pointer: the agent-infra tag
 #              devbox/leak-check-tag.env names, installed as the tag's leak-check/INSTALL.md says.
+#   prepush    the leak check's pre-push hook in every checkout that pushes to a public repository:
+#              the same tag's install-prepush-hook.sh and sweep-hooks.sh in
+#              ~/.local/share/public-leak-check-hooks, then one pass of the sweep over its own roots
+#              (it decides which checkouts are public), and ~/.dotfiles, which no root covers.
 #   tools      a first install.sh pass for mise's tools, then the secrets broker's host helper
 #              (installers/agent-secrets.sh). The pass is expected to stop at installers/omp.sh:
 #              its private marketplaces clone with a GitHub App token, which on this machine comes
@@ -126,7 +130,7 @@ LEAK_CHECK_RECORD="$LEAK_CHECK_SHARED/.editor-slot/holder"
 # shellcheck source=leak-check-tag.env
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/leak-check-tag.env"
 
-STEPS=(vm host dotfiles secrets leakcheck tools broker install image responder speed check)
+STEPS=(vm host dotfiles secrets leakcheck prepush tools broker install image responder speed check)
 
 stamp() { date -u +%FT%TZ; }
 say() { echo "$(stamp) == $*"; }
@@ -260,6 +264,39 @@ step_leakcheck() {
     echo "INSTALLED $(stamp) by $who: $LEAK_CHECK_TAG in $VM:~/.local/share/public-leak-check: $(tr '\n' ' ' <<<"$out")" >> "$LEAK_CHECK_RECORD"
     echo "RELEASED $(stamp) by $who: checks run: $LEAK_CHECK_TAG is $LEAK_CHECK_COMMIT, its files have the sha256 of devbox/leak-check-tag.env, the shared path holds them, $VM sha256sum -c and test -x passed; slot FREE" >> "$LEAK_CHECK_RECORD"
     say "$VM holds $LEAK_CHECK_TAG; record lines appended to $LEAK_CHECK_RECORD"
+}
+
+# The pre-push hook (step prepush). sweep-hooks.sh loops for ever; its code up to that loop
+# (`i=0`) is one pass, `sweep ROOTS...`, run here once with the script's own roots. A box clone
+# (agentbox new) copies its template's hooks, and the templates are under the slow root.
+step_prepush() {
+    local files=(install-prepush-hook.sh sweep-hooks.sh) f stage out
+    stage="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$stage'" RETURN
+    for f in "${files[@]}"; do git -C "$AGENT_INFRA" show "$LEAK_CHECK_TAG:leak-check/$f" > "$stage/$f"; done
+    printf '%s\n' "$LEAK_CHECK_HOOK_SHA256" > "$stage/hook.sha256"
+    (cd "$stage" && sha256sum -c hook.sha256) \
+        || die "$LEAK_CHECK_TAG's hook files are not the sha256 in devbox/leak-check-tag.env"
+    remote 'rm -rf /tmp/pph-stage'
+    rsync -t -e "ssh -o BatchMode=yes" "${files[@]/#/$stage/}" "$stage/hook.sha256" "sami@$VM:/tmp/pph-stage/" \
+        || die "could not copy the hook files to $VM"
+    out="$(remote 'set -e; s=/tmp/pph-stage; d=$HOME/.local/share/public-leak-check-hooks
+        mkdir -p "$d"
+        for f in install-prepush-hook.sh sweep-hooks.sh; do install -m 0755 "$s/$f" "$d/.$f.new"; done
+        for f in install-prepush-hook.sh sweep-hooks.sh; do mv -f "$d/.$f.new" "$d/$f"; done
+        (cd "$d" && sha256sum -c "$s/hook.sha256")
+        rm -rf "$s"
+        "$d/install-prepush-hook.sh" "$HOME/.dotfiles"
+        : > "$d/provision-sweep.log"
+        bash -c "$(sed "/^i=0\$/,\$d" "$d/sweep-hooks.sh")
+            here=$d; log=$d/provision-sweep.log
+            sweep \"\${fast_roots[@]}\" \"\${slow_roots[@]}\""
+        cat "$d/provision-sweep.log"
+        tail -n 1 "$d/provision-sweep.log" | grep -q ", 0 failed$"' 2>&1)" \
+        || { echo "$out"; die "the pre-push hook install on $VM failed"; }
+    echo "$out"
+    say "$VM: every checkout of a public repository has the pre-push hook"
 }
 
 step_tools() {
