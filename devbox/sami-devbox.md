@@ -65,6 +65,11 @@ never into a repository. No person's login is among them: the Google, Azure and 
 of the spec's exclusion list stay on sami-rocqperf, and so does `~/.config/gcloud` as a whole
 (its `credentials.db` holds Sami's refresh token).
 
+omp's `~/.omp/agent/agent.db` here holds one person's login on purpose: Sami's own login, added by
+him 22:40Z while fixing the stall (2026-11-03, provider `anthropic`, sami@theorem.dev). A2's login
+check (`host_omp_logins` in `sami-devbox-check`) accepts exactly that row as a note; any other
+person's row is a FAIL.
+
 `.dotfiles/secrets.env` is the one of them git tracks, and its copy differs from its commit on
 purpose. `scripts/dotfiles-follow`, which fast-forwards `~/.dotfiles` here every 10 minutes,
 keeps every `SECRET_FILES` path that git tracks (read from this list, not a second one) and

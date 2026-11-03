@@ -713,6 +713,37 @@ PY
     done
     if (( ${#found[@]} )); then fail "logins: Azure user login in ${found[*]}"
     elif (( walked )); then ok "logins: no azureProfile.json names a user"; fi
+    host_omp_logins
+}
+
+# omp's own credential store on the host. Every live row is a person's login, with two exceptions:
+# the Slack MCP login, which the box half's "slack MCP" line judges, and Sami's own Anthropic login,
+# which he added himself at 2026-11-03 22:40Z (interactive /login in session 01a13dca's omp) while
+# he fixed the stalled sessions; that one row, matched by provider, account and creation time, is a
+# note. Any other row, or another Anthropic login, is a FAIL.
+SAMI_ANTHROPIC_LOGIN="anthropic|email:sami@theorem.dev|1793745601"
+host_omp_logins() {
+    local out rc=0 row
+    local -a other=()
+    out="$(python3 - "$HOME/.omp/agent/agent.db" <<'PY' 2>&1
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+for provider, identity, created in db.execute(
+        "select provider, coalesce(identity_key, ''), created_at from auth_credentials where disabled_cause is null"):
+    print(f"{provider}|{identity.split('|')[0]}|{created}")
+PY
+)" || rc=$?
+    (( rc == 0 )) || { fail "logins: omp agent.db unreadable: $(tail -1 <<<"$out")"; return; }
+    while IFS= read -r row; do
+        [[ -z "$row" ]] && continue
+        case "$row" in
+            "mcp_oauth:profile:default:https://mcp.slack.com/mcp|"*) ;;
+            "$SAMI_ANTHROPIC_LOGIN") note "logins: omp agent.db holds Sami's own login, added by him 22:40Z while fixing the stall (anthropic, sami@theorem.dev, created 2026-11-03T22:40Z)" ;;
+            *) other+=("$row") ;;
+        esac
+    done <<<"$out"
+    (( ${#other[@]} )) && fail "logins: omp agent.db holds a person's login: ${other[*]}" \
+        || ok "logins: omp agent.db holds no other person's login"
 }
 
 # Owners of the copied trees: to depth 3, every entry under /mnt/nvme/sami and /mnt/durable/sami is
