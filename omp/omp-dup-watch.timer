@@ -1,0 +1,14 @@
+[Unit]
+Description=Check every 5 min that no omp session id runs in more than one omp on this box
+
+[Timer]
+OnActiveSec=45s
+# Five minutes. On 2026-11-03 the duplicates were made in one burst, 00:29:44-00:32:13Z, and a
+# person found them at 00:47Z; five minutes puts the message about 15 minutes earlier, while
+# the copies are still near their start and before each has written much of the one transcript
+# they share.
+OnUnitActiveSec=5min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

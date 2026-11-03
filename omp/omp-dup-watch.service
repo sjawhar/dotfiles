@@ -1,0 +1,18 @@
+[Unit]
+Description=Alert over Envoy when one omp session id runs in more than one live omp on this box
+Documentation=file:%h/.dotfiles/scripts/omp-dup-watch.md
+
+[Service]
+Type=oneshot
+# Below the lanes, like disk-fill-watch: a duplicate lasts until a person ends one copy, so a
+# run that waits a minute for CPU costs nothing, while the pass itself reads every process's
+# /proc entry and must not take cores from the agents.
+Nice=15
+IOSchedulingClass=idle
+# A run that cannot finish is killed, so runs never pile up on the 5-minute period. A pass is
+# one /proc walk, the open files of each omp, one `docker ps` and one Envoy GET: 1.2 s measured
+# on sami-rocqperf at load 277 with 3,639 processes and 87 omp processes. The script's own
+# --budget (45 s) ends the census first and opens what it found, so this limit is only reached
+# when `docker ps` or Envoy hangs.
+TimeoutStartSec=120
+ExecStart=%h/.dotfiles/scripts/omp-dup-watch

@@ -1,0 +1,956 @@
+#!/usr/bin/env python3
+"""Alert when one omp session id runs in more than one live omp process on this box.
+
+Why this exists: on sami-rocqperf, 2026-11-03 00:29:44-01:08:51Z, a session ran
+`tmux new-session -d` without TMUX_TMPDIR, which started a second tmux server at
+/tmp/tmux-1000/default. tmux-resurrect restored the saved layout on it and tmux-resurrect-omp
+resumed every saved session, so 36 sessions got a second omp in that server's panes and 14 got
+one in a new agent box each. Two omps on one session append to one transcript, and Envoy
+delivers the session's messages to only one of them. Nothing watched for it; people found it.
+
+What one run does:
+
+  1. One pass over /proc: every process's stat (name, parent, start time). For each omp that is
+     not one of omp's own helpers (`__omp_worker_*`, the same binary), its command line and
+     cgroup and, where this user may read them, its working directory, open files and TMUX. An
+     agent box's omp is visible here, but under the box's uid, so only its command line and
+     cgroup can be read.
+  2. Its session id, by the rules tmux-resurrect-omp applies (and omp-session-live and agentbox's
+     move census with it): the transcript it holds open (`~/.omp/agent/sessions/<dir>/<stamp>Z_
+     <id>.jsonl`), else the id this watch saw the same process (pid and start time) holding at an
+     earlier run, else the `--resume` on its own command line. A process none of these names
+     (`omp -p --no-session`, a fresh box session that has not been resumed) is counted as
+     unidentified.
+  3. GET /v1/sessions from Envoy, and the rows registered from this host or one of its boxes.
+  4. An id with more than one process, or more than one Envoy row, is duplicated. Every id that
+     is new since the last run goes in ONE message; an id back to one process gets a one-line
+     clear. Nothing is said again for an id that stays duplicated.
+
+Alerts go over Envoy to the box-health owner, as every box watch here sends them:
+BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else the SRE session. Each
+message is at most 600 characters and ends with the report file that holds every process: pid,
+tmux server and socket or box, working directory, start time and how its id was read. This watch
+only reports. It ends no process.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Box health on this machine belongs to the SRE session (dispatch://INFRA-6), as for
+# unit-health-watch, load-swap-watch and disk-fill-watch: it hears an alert when nobody holds
+# the role.
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+OWNER_RE = re.compile(
+    r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+
+# Where the state file and the reports go, as the sibling watches place theirs: the big disk on
+# an agent box, ~/.local/state on a machine without one.
+_NVME_STATE = Path("/mnt/nvme/sami/tmp/omp-dup-watch/state.json")
+DEFAULT_STATE = (
+    _NVME_STATE
+    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "omp-dup-watch/state.json"
+)
+
+MESSAGE_LIMIT = 600
+REPORT_KEEP_SECONDS = 7 * 86400
+# A box's omp sits in docker-<64 hex>.scope; the first 12 are the id `docker ps` names it by.
+CONTAINER_RE = re.compile(r"docker-([0-9a-f]{12})[0-9a-f]*\.scope")
+TMUX_SERVER = "tmux: server"
+ANCESTOR_LIMIT = 64
+HOME = str(Path.home())
+
+
+def _sibling(name: str):
+    """A script beside this one, as a module: the session-id rules are tmux-resurrect-omp's,
+    never a second copy (omp-memory-watch loads it the same way)."""
+    path = Path(os.path.realpath(__file__)).parent / name
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+_RESURRECT = _sibling("tmux-resurrect-omp")
+# A session's transcript, at ANY depth under the agent's sessions directory. The id must come
+# from the FILE NAME and nowhere else in the path, the rule `agentbox`'s move census uses: three
+# live omps here on 2026-11-03 resume `…/<bucket>/<stamp>_<other id>/<stamp>_<id>.jsonl`, which
+# tmux-resurrect-omp's one-directory SESSION_FILE does not match, while a SUBAGENT transcript
+# (`…/<stamp>_<id>/ArityLane.jsonl`) must name no session at all, or two subagents of one
+# session would read as two copies of it.
+SESSION_PATH = re.compile(r"/sessions/.*/[0-9T:-]*Z_(?P<sid>[0-9a-f-]{36})\.jsonl\Z")
+
+
+def named_session(command: str) -> str | None:
+    """The session a command line resumes: `--resume`/`--restore`/`-r` with a transcript path,
+    a full id or the id prefix omp also takes. The flags are tmux-resurrect-omp's."""
+    for match in _RESURRECT.RESUME_ARG.finditer(command):
+        value = match.group("value")
+        in_path = SESSION_PATH.search(value)
+        if in_path:
+            return in_path.group("sid")
+        if _RESURRECT.SESSION_ID.fullmatch(value):
+            return value
+    return None
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    if not epoch:
+        return "never"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def human_time(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}min"
+    return f"{seconds / 3600:.1f}h"
+
+
+def tilde(path: str) -> str:
+    return "~" + path[len(HOME) :] if path == HOME or path.startswith(HOME + "/") else path
+
+
+# ------------------------------------------------------------------------------- Envoy
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+            / "legion/envoy.json"
+        )
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (
+            os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL
+        ).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(
+        self, method: str, path: str, body: dict | None = None
+    ) -> tuple[int, dict | list]:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.url + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                raw = answer.read().decode() or "{}"
+                return answer.status, json.loads(raw)
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (TimeoutError, urllib.error.URLError, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "POST",
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
+        return status == 200
+
+
+def box_health_owner() -> str:
+    """The session id BOX_HEALTH_OWNER names, or "" for the role-then-SRE default."""
+    owner = (os.environ.get("BOX_HEALTH_OWNER") or "").strip()
+    if owner and not OWNER_RE.fullmatch(owner):
+        raise SystemExit(
+            f"BOX_HEALTH_OWNER={owner!r} is not an omp session id"
+            " (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); unset it for the box-health role"
+        )
+    return owner
+
+
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell this box's health owner, and say who heard it ("" when every route refused)."""
+    owner = box_health_owner()
+    if owner:
+        return owner if envoy.send(owner, text) else ""
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    if envoy.send(SRE, text):
+        return SRE
+    return ""
+
+
+def envoy_rows(envoy: Envoy, host: str, boxes: set[str]) -> list[dict] | None:
+    """The sessions Envoy lists as registered from this host or one of its boxes; None when
+    Envoy does not answer. A box registers under its container name."""
+    status, body = envoy.request("GET", "/v1/sessions")
+    if status != 200 or not isinstance(body, list):
+        log(f"  Envoy registrations unavailable: GET /v1/sessions answered {status}")
+        return None
+    mine = []
+    for row in body:
+        if not isinstance(row, dict) or not row.get("session_id"):
+            continue
+        where = str(row.get("host") or "")
+        if where.split(".")[0] == host or where in boxes:
+            mine.append(row)
+    return mine
+
+
+# ------------------------------------------------------------------------------- /proc
+
+
+def read_text(path: Path) -> str | None:
+    try:
+        return path.read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def boot_time(proc: Path) -> float:
+    for line in (read_text(proc / "stat") or "").splitlines():
+        if line.startswith("btime "):
+            return float(line.split()[1])
+    return 0.0
+
+
+def process_table(
+    proc: Path, deadline: float
+) -> tuple[dict[int, tuple[str, str, int, int]], bool]:
+    """{pid: (name, state, parent, start ticks)} from one read of each /proc/<pid>/stat, and
+    whether the pass finished inside the budget."""
+    table: dict[int, tuple[str, str, int, int]] = {}
+    for entry in os.listdir(proc):
+        if not entry.isdigit():
+            continue
+        if time.monotonic() >= deadline:
+            return table, False
+        data = read_text(proc / entry / "stat")
+        if not data:
+            continue
+        close = data.rfind(")")
+        fields = data[close + 2 :].split()
+        try:
+            table[int(entry)] = (data[data.find("(") + 1 : close], fields[0], int(fields[1]), int(fields[19]))
+        except (ValueError, IndexError):
+            continue
+    return table, True
+
+
+def held_session(base: Path) -> tuple[str, str, bool]:
+    """(session id, transcript, readable): the newest session transcript the process holds open,
+    as tmux-resurrect-omp's open_session picks it, at any depth (SESSION_PATH). A transcript
+    deleted under a live omp (the sweep's move to Cloud SQL) still names the session it runs."""
+    best: tuple[float, str, str] | None = None
+    try:
+        with os.scandir(base / "fd") as entries:
+            for entry in entries:
+                try:
+                    target = os.readlink(entry.path)
+                except OSError:
+                    continue
+                if target.endswith(" (deleted)"):
+                    target = target[: -len(" (deleted)")]
+                found = SESSION_PATH.search(target)
+                if not found:
+                    continue
+                try:
+                    mtime = os.stat(target).st_mtime
+                except OSError:
+                    mtime = 0.0
+                if best is None or mtime > best[0]:
+                    best = (mtime, found.group("sid"), target)
+    except OSError:
+        return "", "", False
+    return (best[1], best[2], True) if best else ("", "", True)
+
+
+def environment(base: Path, names: tuple[str, ...]) -> dict[str, str]:
+    raw = read_text(base / "environ") or ""
+    wanted = {}
+    for item in raw.split("\0"):
+        key, _, value = item.partition("=")
+        if key in names:
+            wanted[key] = value
+    return wanted
+
+
+def deepest_unit(cgroup: str) -> str:
+    """The innermost .service or .scope of the cgroup path: every process of a user manager sits
+    under user@1000.service, which says nothing about what runs it."""
+    for line in cgroup.splitlines():
+        for part in reversed(line.rpartition(":")[2].split("/")):
+            if part.endswith((".service", ".scope")):
+                return part
+    return ""
+
+
+def tmux_server_of(pid: int, table: dict) -> int:
+    parent = table.get(pid, ("", "", 0, 0))[2]
+    for _ in range(ANCESTOR_LIMIT):
+        if parent <= 1 or parent not in table:
+            return 0
+        if table[parent][0] == TMUX_SERVER:
+            return parent
+        parent = table[parent][2]
+    return 0
+
+
+def unix_sockets(proc: Path) -> dict[str, str]:
+    """{inode: path} of every bound unix socket, from one read of /proc/net/unix."""
+    paths = {}
+    for line in (read_text(proc / "net" / "unix") or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 8 and fields[-1].startswith("/"):
+            paths[fields[-2]] = fields[-1]
+    return paths
+
+
+def server_socket(proc: Path, server: int, tmux: str, sockets: dict[str, str]) -> str:
+    """The socket a tmux server listens on: the pane's own TMUX when it names this server, the
+    server's `-S` argument, else the bound socket of its own file descriptors. An omp a tool
+    call started carries no TMUX, and a server started as `tmux new-session -d` has no -S, so
+    without the kernel's own answer the reader is not told which server to look in."""
+    socket_path, _, rest = tmux.partition(",")
+    if socket_path and rest.split(",")[0] == str(server):
+        return socket_path
+    argv = (read_text(proc / str(server) / "cmdline") or "").split("\0")
+    for flag, value in zip(argv, argv[1:]):
+        if flag == "-S":
+            return value
+    try:
+        with os.scandir(proc / str(server) / "fd") as entries:
+            for entry in entries:
+                try:
+                    target = os.readlink(entry.path)
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in sockets:
+                    return sockets[target[8:-1]]
+    except OSError:
+        pass
+    return ""
+
+
+def omp_processes(
+    proc: Path, table: dict, deadline: float
+) -> tuple[list[dict], int, bool]:
+    """(every live omp that can run a session, the helper processes skipped, complete)."""
+    boot = boot_time(proc)
+    tick = float(os.sysconf("SC_CLK_TCK"))
+    sockets = unix_sockets(proc)
+    rows: list[dict] = []
+    helpers = 0
+    for pid, (name, state, parent, start) in sorted(table.items()):
+        if name != "omp" or state == "Z":
+            continue
+        if time.monotonic() >= deadline:
+            return rows, helpers, False
+        base = proc / str(pid)
+        argv = [a for a in (read_text(base / "cmdline") or "").split("\0") if a]
+        if not argv:  # gone, or exited and not yet reaped
+            continue
+        if any("__omp_worker" in a for a in argv):
+            helpers += 1
+            continue
+        cgroup = read_text(base / "cgroup") or ""
+        container = CONTAINER_RE.search(cgroup)
+        sid, transcript, readable = held_session(base)
+        try:
+            cwd = os.readlink(base / "cwd")
+        except OSError:
+            cwd = ""
+        env = environment(base, ("TMUX", "TMUX_PANE"))
+        server = 0 if container else tmux_server_of(pid, table)
+        # The pid again, now that every file of it has been read: a pid the kernel gave to
+        # another program since the pass above (pid 1728661 was `omp` in the pass and a python
+        # runner a second later, 2026-11-03 02:59Z) would otherwise contribute that program's
+        # command line, and a session id read from it belongs to nobody.
+        again = read_text(base / "stat") or ""
+        close = again.rfind(")")
+        if again[again.find("(") + 1 : close] != "omp" or again[close + 2 :].split()[19:20] != [str(start)]:
+            continue
+        rows.append(
+            {
+                "pid": pid,
+                "start": start,
+                "started": boot + start / tick,
+                "command": " ".join(argv),
+                "container": container.group(1) if container else "",
+                "box": "",
+                "held": sid,
+                "transcript": transcript,
+                "readable": readable,
+                "cwd": cwd,
+                "server": server,
+                "socket": server_socket(proc, server, env.get("TMUX", ""), sockets) if server else "",
+                "pane": env.get("TMUX_PANE", "") if server else "",
+                "parent": parent,
+                "parent_name": table.get(parent, ("?",))[0],
+                "unit": deepest_unit(cgroup),
+                "sid": "",
+                "how": "",
+            }
+        )
+    return rows, helpers, True
+
+
+def container_names(timeout: float = 15.0) -> dict[str, str]:
+    """{12-character container id: name} of the running containers, from one `docker ps`."""
+    try:
+        done = subprocess.run(
+            ["docker", "ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"  docker ps failed ({error}); boxes are named by container id")
+        return {}
+    names = {}
+    for line in done.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            names[parts[0][:12]] = parts[1]
+    return names
+
+
+def identify(rows: list[dict], remembered: dict[str, str]) -> None:
+    """Each process's session id and how it was read; "" when nothing names one."""
+    for row in rows:
+        key = f"{row['pid']}:{row['start']}"
+        if row["held"]:
+            row["sid"], row["how"] = row["held"], f"holds {row['transcript']} open"
+        elif remembered.get(key):
+            row["sid"] = remembered[key]
+            row["how"] = "held its transcript at an earlier run of this watch (same pid and start)"
+        else:
+            named = named_session(row["command"])
+            if named:
+                row["sid"], row["how"] = named, "its own command line resumes it"
+    full = {row["sid"] for row in rows if len(row["sid"]) == 36}
+    for row in rows:
+        if row["sid"] and len(row["sid"]) < 36:
+            matches = [sid for sid in full if sid.startswith(row["sid"])]
+            if len(matches) == 1:
+                row["how"] += f" by the prefix {row['sid']}"
+                row["sid"] = matches[0]
+
+
+# ------------------------------------------------------------------------------- words
+
+
+def where(row: dict) -> str:
+    if row["container"]:
+        return f"in agent box {row['box'] or 'container ' + row['container']}"
+    if row["server"]:
+        return (
+            f"tmux server {row['server']} socket {row['socket'] or '(unknown)'}"
+            f" pane {row['pane'] or '(unknown)'}"
+        )
+    unit = f", unit {row['unit']}" if row["unit"] else ""
+    return f"in no tmux pane: parent {row['parent']} ({row['parent_name']}){unit}"
+
+
+def place(row: dict) -> str:
+    """Where a process runs, coarsely, for the message's count of copies by place."""
+    if row["container"]:
+        return "agent boxes"
+    if row["server"]:
+        return f"tmux {tilde(row['socket'])}" if row["socket"] else f"tmux server {row['server']}"
+    return "no tmux pane"
+
+
+def delivered_to(entry: dict, procs: list[dict], host: str) -> str:
+    """Where Envoy's row for a session points, and the process of this census it is: a session
+    registers from the machine or the box its omp runs in, so the row names the copy that gets
+    the session's messages. The other copy is reached by nothing."""
+    at = str(entry.get("host") or "")
+    matching = [
+        row["pid"]
+        for row in procs
+        if (row["box"] or row["container"]) == at or (not row["container"] and at.split(".")[0] == host)
+    ]
+    place = f"agent box {at}" if at.startswith("agentbox-") else at or "a machine it did not name"
+    if len(matching) == 1:
+        return f"{place} (pid {matching[0]})"
+    if matching:
+        return f"{place} ({plural(len(matching), 'process', 'processes')} of this census there: {', '.join(str(p) for p in matching)})"
+    return f"{place}, where this census found no omp running it"
+
+
+def report_text(
+    host: str,
+    now: float,
+    ids: list[str],
+    new: set[str],
+    by_id: dict[str, list[dict]],
+    envoy_by_id: dict[str, list[dict]] | None,
+    incidents: dict,
+    summary: str,
+) -> str:
+    lines = [
+        f"omp-dup-watch on {host} at {iso(now)}: {len(ids)} session id(s) run by more than one"
+        f" live omp process or registered more than once with Envoy; {len(new)} new this run.",
+        "",
+        summary,
+        "",
+    ]
+    for sid in ids:
+        procs = by_id.get(sid, [])
+        rows = (envoy_by_id or {}).get(sid, [])
+        opened = incidents.get(sid, {}).get("opened_at")
+        status = "new" if sid in new else f"open since {iso(opened)} ({human_time(now - opened)})" if opened else "now"
+        lines.append(
+            f"== session {sid}  [{status}]  {len(procs)} omp process(es),"
+            f" {len(rows) if envoy_by_id is not None else '?'} Envoy registration(s)"
+        )
+        for row in sorted(procs, key=lambda r: r["started"]):
+            lines += [
+                f"  pid {row['pid']}  started {iso(row['started'])}  {where(row)}",
+                f"      cwd {row['cwd'] or '(not readable from the host: the box owns it)'}",
+                f"      session: {row['how']}",
+                f"      command: {row['command'][:300]}",
+            ]
+        for entry in rows:
+            seen = entry.get("last_seen") or entry.get("updated_at") or 0
+            lines.append(
+                f"  Envoy delivers this session to {delivered_to(entry, procs, host)}; its row:"
+                f" dir {entry.get('dir') or '?'}, last seen"
+                f" {iso(float(seen) / 1000) if seen else 'never'}"
+            )
+        lines.append("")
+    lines += [
+        "What to do:",
+        "  One session id must run in exactly one omp: two copies append to one transcript, and",
+        "  Envoy delivers the session's messages to only one of them. Keep the copy the session's",
+        "  owner works in, usually the older one in its usual tmux server or box, and end the other.",
+        "  `omp-session-live <id>` lists the omp processes that run an id now. A host copy ends with",
+        "  `kill -HUP <pid>`, as `agentbox move` ends one; a box copy runs under the box's uid.",
+        "  This watch ends nothing itself.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def clear_report_text(
+    host: str, now: float, cleared: list[str], by_id: dict[str, list[dict]], incidents: dict
+) -> str:
+    lines = [f"omp-dup-watch on {host} at {iso(now)}: {len(cleared)} session id(s) no longer duplicated.", ""]
+    for sid in cleared:
+        opened = incidents.get(sid, {}).get("opened_at") or now
+        procs = by_id.get(sid, [])
+        lines.append(
+            f"== session {sid}  duplicated from {iso(opened)} for {human_time(now - opened)};"
+            f" {len(procs)} omp process(es) now"
+        )
+        for row in procs:
+            lines.append(f"  pid {row['pid']}  started {iso(row['started'])}  {where(row)}  cwd {row['cwd'] or '(the box owns it)'}")
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def fit(
+    head: str, optional: list[str], label: str, items: list[str], tail: str, limit: int = MESSAGE_LIMIT
+) -> str:
+    """head, then each optional part that fits, then `label` and as many items as fit with
+    "+N more", then the tail; never more than `limit` characters."""
+    text = head
+    for part in optional:
+        if len(text) + len(part) + len(tail) <= limit:
+            text += part
+
+    def listed(chosen: list[str]) -> str:
+        rest = len(items) - len(chosen)
+        return f"{label} {', '.join(chosen)}{f' +{rest} more' if rest else ''}."
+
+    chosen: list[str] = []
+    for item in items:
+        if len(text) + len(listed(chosen + [item])) + len(tail) > limit:
+            break
+        chosen.append(item)
+    if chosen:
+        text += listed(chosen)
+    text += tail
+    if len(text) > limit:
+        text = head[: max(0, limit - len(tail) - 1)] + "…" + tail
+    return text[:limit]
+
+
+def plural(n: int, word: str, many: str = "") -> str:
+    return f"{n} {word if n == 1 else many or word + 's'}"
+
+
+def alert_message(
+    host: str,
+    new: list[str],
+    total: int,
+    by_id: dict[str, list[dict]],
+    envoy_by_id: dict[str, list[dict]] | None,
+    path: str,
+) -> str:
+    procs = [row for sid in new for row in by_id.get(sid, [])]
+    head = (
+        f"DUPLICATE OMP SESSIONS on {host}: {plural(len(new), 'new session id')}"
+        f" {'is' if len(new) == 1 else 'are'} run by more than one live omp"
+        f" ({plural(len(procs), 'omp process', 'omp processes')}; {total} duplicated in all)."
+        " Box-health lead: keep the copy its owner works in. Stop the other one."
+        " Two copies write one transcript, and Envoy speaks to only one of them."
+    )
+    places = collections.Counter(place(row) for row in procs)
+    optional = []
+    if places:
+        optional.append(" Copies by place: " + ", ".join(f"{name} {n}" for name, n in places.most_common()) + ".")
+    twice = [sid for sid in new if len((envoy_by_id or {}).get(sid, [])) > 1]
+    if twice:
+        optional.append(f" Envoy registers {len(twice)} of them more than once.")
+    return fit(head, optional, " New:", list(new), f" Full report: {path}")
+
+
+def clear_message(
+    host: str, cleared: list[str], by_id: dict[str, list[dict]], incidents: dict, now: float, path: str
+) -> str:
+    one = sum(1 for sid in cleared if len(by_id.get(sid, [])) == 1)
+    durations = [now - (incidents.get(sid, {}).get("opened_at") or now) for sid in cleared]
+    head = (
+        f"DUPLICATE OMP SESSIONS CLEARED on {host}: {plural(len(cleared), 'session id')} no longer"
+        f" duplicated ({one} back to one omp, {len(cleared) - one} with none left), after"
+        f" {human_time(min(durations))}"
+        + (f"-{human_time(max(durations))}" if max(durations) - min(durations) >= 60 else "")
+        + "."
+    )
+    return fit(head, [], "", list(cleared), f" Full report: {path}")
+
+
+# ------------------------------------------------------------------------------- state, reports
+
+
+class State:
+    """The one file this watch owns: its open ids and the ids it saw processes holding.
+
+    Opened under an exclusive, non-blocking flock for the whole run, so a hand run and the timer
+    can never both decide that an id is new; the loser skips its period.
+    """
+
+    def __init__(self, path: Path, lock: bool = True) -> None:
+        self.path = path
+        self.locked = True
+        self.handle = None
+        if not lock:
+            try:
+                self.data = json.loads(path.read_text() or "{}")
+            except (OSError, ValueError):
+                self.data = {}
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self) -> None:
+        if self.handle is None:
+            return
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def close(self) -> None:
+        if self.handle is not None:
+            try:
+                self.handle.close()
+            except OSError:
+                pass
+
+
+def report_path(directory: Path, now: float, kind: str) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    path = directory / f"{stamp}-{kind}.txt"
+    n = 2
+    while path.exists():
+        path = directory / f"{stamp}-{kind}-{n}.txt"
+        n += 1
+    return path
+
+
+def prune_reports(directory: Path, now: float) -> None:
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_file() and now - entry.stat().st_mtime > REPORT_KEEP_SECONDS:
+                entry.unlink()
+        except OSError:
+            continue
+
+
+# ------------------------------------------------------------------------------- one run
+
+
+def census(
+    options: argparse.Namespace, remembered: dict[str, str], deadline: float
+) -> tuple[list[dict], int, bool]:
+    table, complete = process_table(options.proc, deadline)
+    rows, helpers, finished = omp_processes(options.proc, table, deadline)
+    identify(rows, remembered)
+    return rows, helpers, complete and finished
+
+
+def run_once(options: argparse.Namespace) -> int:
+    began = time.monotonic()
+    deadline = began + options.budget
+    now = time.time()
+    host = socket.gethostname().split(".")[0]
+    reports = options.state.parent / "reports"
+
+    # A run that writes nothing (--report, --dry-run) takes no lock and creates no file.
+    state = State(options.state, lock=not (options.report or options.dry_run))
+    if not state.locked:
+        log(f"another run holds {options.state}; skipping this period")
+        return 0
+    remembered = dict(state.data.get("seen") or {})
+    incidents: dict = state.data.setdefault("incidents", {})
+
+    rows, helpers, complete = census(options, remembered, deadline)
+    # `docker ps` every run, even with no omp in a container: its box names are also what tells
+    # an Envoy row registered from one of THIS machine's boxes from a box of another machine.
+    names = container_names()
+    for row in rows:
+        if row["container"]:
+            row["box"] = names.get(row["container"], "")
+    envoy = Envoy(timeout=options.http_timeout)
+    registered = envoy_rows(envoy, host, set(names.values()))
+
+    by_id: dict[str, list[dict]] = collections.defaultdict(list)
+    for row in rows:
+        if row["sid"]:
+            by_id[row["sid"]].append(row)
+    envoy_by_id: dict[str, list[dict]] | None = None
+    if registered is not None:
+        envoy_by_id = collections.defaultdict(list)
+        for entry in registered:
+            envoy_by_id[str(entry["session_id"])].append(entry)
+    duplicated = sorted(
+        sid
+        for sid in set(by_id) | set(envoy_by_id or {})
+        if len(by_id.get(sid, [])) > 1 or len((envoy_by_id or {}).get(sid, [])) > 1
+    )
+    unidentified = [row for row in rows if not row["sid"]]
+    summary = (
+        f"Census: {len(rows)} omp processes ({helpers} omp helper processes skipped),"
+        f" {len(rows) - len(unidentified)} with a session id, {len(unidentified)} without one"
+        f" ({sum(1 for r in unidentified if r['container'])} of those in agent boxes, whose"
+        " descriptors this user cannot read)"
+        + ("" if complete else f"; CUT SHORT at the {options.budget:.0f} s budget, so counts are low")
+        + ". Envoy: "
+        + (
+            f"{len(registered)} sessions registered from this host and its boxes."
+            if registered is not None
+            else "did not answer, so only processes were counted."
+        )
+        + f" The census took {time.monotonic() - began:.1f} s."
+    )
+
+    if options.report:
+        print(report_text(host, now, duplicated, set(), by_id, envoy_by_id, incidents, summary), end="")
+        return 0
+
+    new = [sid for sid in duplicated if sid not in incidents]
+    cleared: list[str] = []
+    if complete:
+        for sid in sorted(incidents):
+            if sid in duplicated:
+                continue
+            if envoy_by_id is None and incidents[sid].get("envoy", 0) > 1:
+                continue  # its Envoy count is unknown this run
+            cleared.append(sid)
+
+    outgoing: list[tuple[str, list[str], str, str]] = []
+    if new:
+        path = report_path(reports, now, "duplicate")
+        body = report_text(host, now, duplicated, set(new), by_id, envoy_by_id, incidents, summary)
+        outgoing.append(("alert", new, str(path), body))
+    if cleared:
+        path = report_path(reports, now, "cleared")
+        body = clear_report_text(host, now, cleared, by_id, incidents)
+        outgoing.append(("clear", cleared, str(path), body))
+
+    heard: list[tuple[str, list[str]]] = []
+    for kind, ids, path, body in outgoing:
+        text = (
+            alert_message(host, ids, len(duplicated), by_id, envoy_by_id, path)
+            if kind == "alert"
+            else clear_message(host, ids, by_id, incidents, now, path)
+        )
+        if options.dry_run:
+            print(f"would send to the box-health owner:\n{text}\n\nwould write {path}:\n{body}")
+            continue
+        reports.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(body)
+        if options.print_alert:
+            print(text + "\n")
+        target = tell_box_health(envoy, text)
+        if target:
+            log(f"told {target}: {kind} for {len(ids)} id(s)")
+            heard.append((kind, ids))
+        else:
+            # Left open (or unopened), so the next run says it again.
+            log(f"NOBODY HEARD IT: the {kind} for {len(ids)} id(s) was refused by every Envoy route")
+
+    for kind, ids in heard:
+        for sid in ids:
+            if kind == "alert":
+                incidents[sid] = {"opened_at": now}
+            else:
+                incidents.pop(sid, None)
+    for sid in duplicated:
+        if sid in incidents:
+            incident = incidents[sid]
+            incident["procs"] = len(by_id.get(sid, []))
+            incident["envoy"] = max(
+                int(incident.get("envoy", 0)),
+                len((envoy_by_id or {}).get(sid, [])),
+            )
+    seen = {} if complete else dict(remembered)
+    for row in rows:
+        if row["sid"] and (row["held"] or f"{row['pid']}:{row['start']}" in remembered):
+            seen[f"{row['pid']}:{row['start']}"] = row["sid"]
+    state.data["seen"] = seen
+    state.data["last_run"] = now
+    if not options.dry_run:
+        state.commit()
+        prune_reports(reports, now)
+    state.close()
+
+    log(
+        f"{len(rows)} omp processes ({len(rows) - len(unidentified)} identified,"
+        f" {len(unidentified)} not, {helpers} helpers), "
+        + (f"{len(registered)} Envoy registrations" if registered is not None else "Envoy unread")
+        + f"; duplicated ids: {len(duplicated)} (new {len(new)}, cleared {len(cleared)}, open {len(incidents)})"
+        + ("" if complete else "; census CUT SHORT by the budget, nothing cleared")
+        + f"; {time.monotonic() - began:.2f} s"
+    )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=DEFAULT_STATE,
+        help=f"state file; reports go in reports/ beside it (default {DEFAULT_STATE})",
+    )
+    parser.add_argument(
+        "--proc", type=Path, default=Path("/proc"), help="the /proc to read (default /proc)"
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=45.0,
+        help="seconds the /proc census may take; a census cut short opens what it found and"
+        " clears nothing (default 45)",
+    )
+    parser.add_argument(
+        "--http-timeout",
+        type=float,
+        default=8.0,
+        help="Envoy request timeout (default 8 s)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="decide and print the messages and reports; send nothing, write nothing",
+    )
+    parser.add_argument(
+        "--print-alert",
+        action="store_true",
+        help="print a message to stdout as well as sending it",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print every duplicated id now with its processes; send nothing, write nothing",
+    )
+    options = parser.parse_args()
+    box_health_owner()  # refuse an unusable BOX_HEALTH_OWNER before any work
+    return run_once(options)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
