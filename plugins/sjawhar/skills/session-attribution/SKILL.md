@@ -40,6 +40,8 @@ gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body 
 
 Search the message with `--grep`, never `%(trailers)`: a GitHub merge-queue squash puts the `Omp-Session` lines in the body and then appends its own `Co-authored-by` paragraph, so git's trailer parser reads only that last paragraph and misses them (grading-tools main, 2026-11-01).
 
+A merge commit that a `MERGE` queue made (machcsl-riscv-experimental's `main`) is GitHub's own commit: it holds an `Omp-Session` line only when the pull request's body did. The branch's commits keep their trailers and are in `main`'s history, so read those: `git log --format='%h %(trailers:key=Omp-Session,valueonly)' <merge>^1..<merge>^2`.
+
 ## Read the evidence
 
 - Legion phase workers commit under the root architect's id, so the trailer names the architect, not the worker. Find the worker in comment footers and `.legion/` handoffs.
