@@ -90,12 +90,13 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | N6 clones on the state disk | `stat -c %d` of `~/src/oss-verify-proofs-internal`, `~/src/oss-verifier` and `/mnt/nvme` | one device |
 | N6 farm, host | the box half's N6 lines below, run on the host | as below |
 
-Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-box`):
+Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid -- sami-devbox-check --in-box`):
 
 | Check | Command | Passes when |
 | --- | --- | --- |
 | Google Cloud | `gcloud auth list --filter=status:ACTIVE`; tokeninfo of `gcloud auth print-access-token` | both name dev-sjawhar@ |
 | build pool | `kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs` | `yes` |
+| boxid paths | `CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box gcloud auth print-access-token` to tokeninfo; `kubectl --kubeconfig /mnt/nvme/sami/boxid/infra-kubeconfig get namespaces` (`installers/gcloud-boxid.sh`; the paths sami-rocqperf's scripts name) | dev-sjawhar@; `namespace/builds` listed |
 | secrets broker | `$AGENT_SECRETS_KEY_DIR/enrollment`; `https://secrets.tail12ec1c.ts.net/healthz` | an enrollment id; 200 |
 | secrets, agent tier | `secrets CERAMIC_API_KEY -- …` | a non-empty value |
 | Envoy | `envoy ps --json`; tcp `envoy-hub.tail12ec1c.ts.net:4222` | answers; connects |
@@ -181,7 +182,7 @@ systemd mount units ordered after `gce-disks.service` and before `user@1000.serv
 ### What the copy leaves out
 
 - Logins: `~/.config/gcloud/{application_default_credentials.json,legacy_credentials,credentialed_accounts.db,credentials.db,access_tokens.db}`, `~/.azure`, `~/.config/gh/hosts.yml`.
-- `/mnt/nvme/sami/boxid` (an Azure federation credential; it breaks gcloud on Google) and `/mnt/nvme/sami/session-tmp`.
+- `/mnt/nvme/sami/boxid` (an Azure federation credential; it breaks gcloud on Google; `installers/gcloud-boxid.sh` makes its `gcloud-box` and `infra-kubeconfig` here as the VM's account) and `/mnt/nvme/sami/session-tmp`.
 - Caches that installers rebuild: `/mnt/nvme/sami/{gocache,cache,gomodcache,uvcache,git-objects,agentbox,elan}`, `~/.cache`, `~/.mise`.
 - rocqperf `/mnt/durable/lost+found` and `/mnt/durable/swapfile-overflow`.
 

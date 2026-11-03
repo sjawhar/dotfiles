@@ -33,6 +33,9 @@ DEV_BOX="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
 # S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
 GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
+# The box-identity paths scripts from sami-rocqperf name (installers/gcloud-boxid.sh); the box half
+# gets the directory as a session moved with `--dir` to it does.
+BOXID_DIR="/mnt/nvme/$(id -un)/boxid"
 # Where the box identity writes a scratch object: the prefix LINUX-1248's red-team runs write.
 GCS_PROBE_PREFIX=gs://theorem-build-io/out/linux/redteam
 # The file names A2 lists. A2's list names credentialed_accounts.db, which gcloud does not
@@ -72,6 +75,7 @@ in_box() {
     [[ "$got" == yes ]] && ok "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes" || fail "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: $got"
 
     moved_gcloud_config_check
+    boxid_check
 
     # The secrets broker: the box's own enrolment, which the broker made through the host's
     # machine login, and its front door. A read through the broker needs a person's grant, so the
@@ -110,6 +114,26 @@ in_box() {
 
     echo "== box done, $fails failed, $(stamp)"
     return "$fails"
+}
+
+# Scripts written on sami-rocqperf (the cost lead's spend loaders, sre-reading, bqq) name
+# CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box and KUBECONFIG=/mnt/nvme/sami/boxid/infra-kubeconfig.
+# installers/gcloud-boxid.sh makes both here as the attached account; through each, from the box,
+# a token Google says is dev-sjawhar@'s and a read of the dispatch cluster's namespaces.
+boxid_check() {
+    local tok got
+    if tok="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" gcloud auth print-access-token 2>&1)"; then
+        got="$(curl -fsS -m 20 --data-urlencode "access_token=$tok" https://oauth2.googleapis.com/tokeninfo 2>&1 | jq -r '.email // empty')"
+        [[ "$got" == "$ACCOUNT" ]] && ok "boxid: CLOUDSDK_CONFIG=$BOXID_DIR/gcloud-box prints a token of $got" || fail "boxid: CLOUDSDK_CONFIG=$BOXID_DIR/gcloud-box: want a token of $ACCOUNT, got: ${got:-no email}"
+    else
+        fail "boxid: CLOUDSDK_CONFIG=$BOXID_DIR/gcloud-box gcloud auth print-access-token: $(tail -1 <<<"$tok")"
+    fi
+    got="$(CLOUDSDK_CONFIG="$BOXID_DIR/gcloud-box" kubectl --kubeconfig "$BOXID_DIR/infra-kubeconfig" get namespaces -o name 2>&1)"
+    if grep -qx 'namespace/builds' <<<"$got"; then
+        ok "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig get namespaces lists $(wc -l <<<"$got"), builds among them"
+    else
+        fail "boxid: kubectl --kubeconfig $BOXID_DIR/infra-kubeconfig get namespaces: $(tail -1 <<<"$got")"
+    fi
 }
 
 # A session moved here from sami-rocqperf can bring a gcloud config dir of its own (CLOUDSDK_CONFIG)
@@ -681,7 +705,7 @@ host() {
     rm -f "$doctor_out"
     echo "-- a new agent box runs the box half"
     local rc=0
-    "$DOTFILES_DIR/scripts/agentbox" new --dir "$CUTOVER_DIR" -- bash "$DOTFILES_DIR/devbox/sami-devbox-check" --in-box </dev/null || rc=$?
+    "$DOTFILES_DIR/scripts/agentbox" new --dir "$CUTOVER_DIR" --dir "$BOXID_DIR" -- bash "$DOTFILES_DIR/devbox/sami-devbox-check" --in-box </dev/null || rc=$?
     (( rc == 0 )) || fail "box half: exit $rc (its own FAIL lines are above)"
     host_kernel
     echo "== $fails failed, $(stamp)"

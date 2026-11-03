@@ -37,6 +37,10 @@ bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
 # sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
+# On a Google VM, the box-identity paths scripts from sami-rocqperf name (/mnt/nvme/<user>/boxid/
+# gcloud-box and infra-kubeconfig), as the VM's account (see installers/gcloud-boxid.sh).
+bash "${DOTFILES_DIR}/installers/gcloud-boxid.sh"
+
 # On a machine with no person's GitHub login (the Google VM, sami-devbox), git outside an agent
 # session gets the GitHub App's token too, and ssh remotes of github.com go over https (see
 # installers/gh-app-host.sh).
