@@ -182,8 +182,23 @@ logs and skip shards already done.
 
 | What | Where |
 | --- | --- |
-| shard lists, upload log, monitor log | rocqperf `/mnt/nvme/sami/scratch/devbox-copy/`; leanperf `~/devbox-copy/` |
+| shard lists, upload log, monitor log, EXCLUDE | rocqperf `/mnt/durable/sami/devbox-copy/` (nothing on its `/mnt/nvme` or `/`); leanperf `~/devbox-copy/` |
 | extract log (shard, bytes, times, result) | sami-devbox `/mnt/nvme/sami/cutover/bulk-copy.log` |
+
+### The puller on sami-devbox: never stop it without the reclaim
+
+One persistent unit, `devbox-copy-pull`, runs both pull loops; start it with
+`pull-unit.sh start` (it sets `MemoryHigh=16G`, so reclaim keeps its page cache and the inodes
+charged to it bounded while it runs). **Never stop this unit except with `pull-unit.sh stop`**,
+which writes the cgroup's own size to its `memory.reclaim` until it holds under 256 MiB, and only
+then stops it. To pause the copy, stop the uploads on the old boxes, not the puller (see "Known
+issues": a plain stop after about 7 TiB of extracts hung `sync` and `umount` until a reboot).
+Test of 2026-11-03 (198,279 files, 11 GiB): with the reclaim first, one `inode_switch_wbs` event
+in the 60 s after the stop and no hung umount.
+
+Data a lane owns may be marked `.no-offbox` or listed in `EXCLUDE`; `upload.sh` refuses to start
+without `EXCLUDE`, `exclude-filter.py` and `no-offbox`, and checks each shard with
+`no-offbox --root ROOT --from LIST`.
 
 ## Known issues
 
