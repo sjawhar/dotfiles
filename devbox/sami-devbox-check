@@ -21,7 +21,8 @@
 # Azure box), the build pool, the grade pool, the secrets broker, Envoy, Dispatch, MLflow,
 # the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
 # mounted disk. Both halves also clone-check private theorem-labs repositories over https
-# (github_check) and read the transcript store with `tq` (tq_check). The box half is run through
+# (github_check) and read the transcript store with `tq` (tq_check). The host half also runs
+# agent-infra's guard.sh check (host_guard). The box half is run through
 # `agentbox new`, the same launcher a session goes through, so a check passes only with what a
 # real box gets: its mounts, its relays, its env.
 #
@@ -764,6 +765,31 @@ host_identity() {
         || fail "host: a credential file is configured: ${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/box_credential_config.json}"
 }
 
+# The host profile: agent-infra monitoring/host/guard.sh, the revision OS Config applies (the object
+# its policy reads), run as OS Config's validate runs it, with cloud=gcp and the full profile. Left
+# without cloud=, guard.sh checks the Azure profile and fails datadog_config and fail2ban_ignoreip on
+# this VM (2026-11-03 23:18Z, dispatch://INFRA-993). Any failed check is a FAIL. On a timed box
+# check waits for the timing gate, so it is bounded.
+GUARD_OBJECT=gs://theorem-agent-infra-monitoring-profile/host/guard.sh
+host_guard() {
+    local script out rc=0
+    script="$(mktemp)"
+    if ! out="$(gcloud storage cp "$GUARD_OBJECT" "$script" 2>&1)"; then
+        fail "guard: gcloud storage cp $GUARD_OBJECT: $(tail -1 <<<"$out")"
+        rm -f "$script"
+        return
+    fi
+    out="$(timeout 900 sudo -n bash "$script" check cloud=gcp profile=full 2>&1)" || rc=$?
+    rm -f "$script"
+    if (( rc == 0 )) && grep -qx 'guard: 0 failed' <<<"$out"; then
+        ok "guard: guard.sh check cloud=gcp profile=full: $(grep -c '^check .*=ok$' <<<"$out") checks ok, 0 failed"
+    else
+        local failed
+        failed="$(grep -E '^check .*=FAIL|^guard: ' <<<"$out" | tr '\n' ';')"
+        fail "guard: guard.sh check cloud=gcp profile=full exited $rc: ${failed:-$(tail -1 <<<"$out")}"
+    fi
+}
+
 # No unit failing on the machine: the user manager's and the system's failed lists are empty, and
 # unit-health-watch (scripts/unit-health-watch) holds no open condition in its state file.
 host_units() {
@@ -972,6 +998,7 @@ host() {
     [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
     host_logins
     host_owners
+    host_guard
     github_check "on the host"
     tq_check "on the host"
     rocqperf_check
