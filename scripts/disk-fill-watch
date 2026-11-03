@@ -96,7 +96,10 @@ import ctypes
 import fcntl
 import json
 import os
+import pickle
 import re
+import select
+import signal
 import socket
 import stat
 import subprocess
@@ -1051,6 +1054,93 @@ def left(deadline: float) -> float:
     return deadline - time.time()
 
 
+# The hard limits of the steps that read the disk or /proc, each enforced from OUTSIDE the step.
+# A deadline the step checks itself is not enough: on 2026-11-03 between 08:01Z and 08:36Z, at
+# load ~500 with IO pressure at 85%, four runs were killed at the unit's 120 s limit and the
+# completed ones took 84-102 s against a 90 s budget, because a directory listing, a stat or a
+# /proc read that the box has stalled does not return to look at a clock. So each such step
+# runs in a forked child, and the run stops waiting for it at its limit; a child stuck in a
+# disk read that cannot be killed until the read returns is left to systemd, which removes it
+# with the rest of the unit's cgroup once this process has exited.
+STATVFS_TIMEOUT = 10.0
+WRITER_STEP_TIMEOUT = 60.0
+SCAN_STEP_TIMEOUT = 15.0
+# What every expensive step leaves for the end of the run: the Envoy sends that follow it (8 s
+# each at most), the state commits, and the exit, inside the unit's 120 s.
+FINISH_RESERVE = 20.0
+# Under this, a step is not started at all.
+STEP_MINIMUM = 0.5
+# The state file's locked descriptor, which a child must not keep holding if it outlives this
+# run: the next run would find the lock taken and skip its period.
+LOCK_FD: int | None = None
+
+
+def room(deadline: float) -> float:
+    """What an expensive step may still spend: the budget left, less the end of the run."""
+    return left(deadline) - FINISH_RESERVE
+
+
+def bounded(name: str, seconds: float, function, *args):
+    """(finished, result) of `function(*args)`, given at most `seconds` of wall clock.
+
+    The step runs in a forked child and sends back its result; a child that has not answered
+    in time is sent SIGKILL and not waited for. Every skip is one log line saying why.
+    """
+    if seconds <= STEP_MINIMUM:
+        log(f"  {name}: skipped, this run has {max(seconds, 0):.0f} s of its budget left for it")
+        return False, None
+    sys.stdout.flush()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child: do the step, answer, and leave without running any exit handler
+        os.close(read_fd)
+        if LOCK_FD is not None:
+            try:
+                os.close(LOCK_FD)
+            except OSError:
+                pass
+        try:
+            payload = pickle.dumps((True, function(*args)))
+        except BaseException as error:  # noqa: BLE001 -- reported by the parent, never raised there
+            payload = pickle.dumps((False, f"{type(error).__name__}: {error}"))
+        with os.fdopen(write_fd, "wb") as answer:
+            answer.write(payload)
+        os._exit(0)
+    os.close(write_fd)
+    chunks: list[bytes] = []
+    answered = False
+    until = time.monotonic() + seconds
+    with os.fdopen(read_fd, "rb", buffering=0) as source:
+        while True:
+            remaining = until - time.monotonic()
+            if remaining <= 0 or not select.select([source], [], [], remaining)[0]:
+                break
+            chunk = source.read(1 << 16)
+            if not chunk:
+                answered = True
+                break
+            chunks.append(chunk)
+    if not answered:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        log(
+            f"  {name}: skipped after {seconds:.0f} s, still running (a disk or /proc read the box"
+            " has stalled); this run goes on without it"
+        )
+        return False, None
+    os.waitpid(pid, 0)  # it closed its end, so it is already leaving
+    try:
+        ok, value = pickle.loads(b"".join(chunks))
+    except (pickle.UnpicklingError, EOFError, ValueError) as error:
+        ok, value = False, f"no answer it could read ({error})"
+    if not ok:
+        log(f"  {name}: failed: {value}")
+        return False, None
+    return True, value
+
+
 def growth_text(mount: str, deadline: float) -> str:
     """The guard's recent kept-growth rows for this mount, newest last, or "".
 
@@ -1362,6 +1452,39 @@ def owner_of_path(path: str) -> str:
     return ""
 
 
+def scan_root(
+    root: str, age: float, big: int, budget: float, after: str, seen: set, top: int
+) -> tuple[list[tuple[int, str, float, str]], str]:
+    """(the young big entries of `root` not yet named, each with its owner answer; where the
+    scan stopped). The whole of the scratch rule's disk and /proc reading, in one call, so it
+    can run in a bounded child: the listing, the sizing walk and the owner lookups."""
+    cursor = {"after": after}
+    found = [row for row in young_entries(root, age, big, True, budget, cursor=cursor) if row[1] not in seen]
+    return (
+        [(size_there, path, mtime, owner_of_path(path)) for size_there, path, mtime in found[:top]],
+        str(cursor.get("after") or after),
+    )
+
+
+def bounded_writers(
+    options: argparse.Namespace, device: int, mount: str, deadline: float
+) -> tuple[str, list[dict]]:
+    """writers_now() under a hard limit of its own; an alert that cannot wait for it goes without."""
+    limit = min(WRITER_STEP_TIMEOUT, room(deadline))
+    finished, sampled = bounded(
+        "writer attribution", limit, writers_now, options, device, mount, deadline - FINISH_RESERVE
+    )
+    if finished:
+        return sampled
+    return (
+        f"Top writers now: not sampled. The writer attribution step did not finish inside its"
+        f" {max(limit, 0):.0f} s limit on this run (a stalled disk or /proc read, or no budget"
+        " left), so the alert went out without it. `disk-fill-watch --dry-run --print-alert`"
+        " samples them now.",
+        [],
+    )
+
+
 def tmp_owner_text(owner: str, newest_mtime: float, sampled_at: float) -> str:
     """Describe the narrow ownership test and the cheap activity signal without overclaiming."""
     if owner:
@@ -1507,6 +1630,8 @@ class State:
         try:
             fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.locked = True
+            global LOCK_FD
+            LOCK_FD = self.handle.fileno()
         except OSError:
             self.locked = False
             self.data = {}
@@ -2456,6 +2581,10 @@ def forward_guard_faults(
         # No unit here, nothing to forward, and nothing to say about it: sami-leanperf,
         # sami-devbox and the lane VMs run this same script without the growth watch.
         return 0
+    if left(deadline) <= STEP_MINIMUM:
+        # Not started, and not counted as a failed read: this run spent its budget elsewhere.
+        log(f"  guard journal: skipped, this run has {max(left(deadline), 0):.0f} s of its budget left for it")
+        return 0
     record: dict = state.data.setdefault("guard_watch", {})
     first = not record.get("cursor")
     held_cursor = str(record.get("cursor") or "")
@@ -2599,7 +2728,7 @@ def check_iops(
             text = iops_clear_message(mount, name, rate, cap, record, at, report)
             reset_iops_crossing(record)
         else:
-            paragraph, rows = writers_now(options, device_of(mount) or -1, mount, deadline)
+            paragraph, rows = bounded_writers(options, device_of(mount) or -1, mount, deadline)
             report = write_report(
                 options.state,
                 f"iops-{mount}",
@@ -2650,7 +2779,11 @@ def run_once(options: argparse.Namespace) -> int:
     verdicts = []
     notes: dict = state.data.setdefault("notes", {})
     for mount in distinct_devices(options.mount, notes):
-        measured = free_bytes(mount)
+        # The short path: one statvfs per mount, with a limit of its own, before anything
+        # expensive, so the decision and its alert never wait on a slow step.
+        finished, measured = bounded(f"{mount}: statvfs", STATVFS_TIMEOUT, free_bytes, mount)
+        if not finished:
+            continue
         if measured is None:
             log(f"{mount}: not readable on this machine; skipped")
             continue
@@ -2753,16 +2886,16 @@ def run_once(options: argparse.Namespace) -> int:
         # The expensive reads happen only here, on the run that actually sends: a 15 s writer
         # sample and a bounded /tmp walk on every period would be the load this watch exists to
         # see. A dry run still does them, so a hand run shows exactly what would be sent.
-        writers, writer_rows = writers_now(options, device_of(mount) or -1, mount, deadline)
+        writers, writer_rows = bounded_writers(options, device_of(mount) or -1, mount, deadline)
         tmp_lines: list[str] = []
-        walk = min(options.tmp_walk_budget, max(0.0, left(deadline)))
-        if tmp_device is not None and tmp_device == device_of(mount) and walk > 0:
-            for bytes_there, path, newest_mtime in young_entries(
-                options.tmp, options.tmp_age, options.tmp_big, True, walk
-            )[: options.top_writers]:
-                if left(deadline) <= 0:
-                    break  # each owner lookup reads every pid's fds; the message comes first
-                owner = tmp_owner_text(owner_of_path(path), newest_mtime, started)
+        if tmp_device is not None and tmp_device == device_of(mount):
+            limit = min(SCAN_STEP_TIMEOUT, room(deadline))
+            finished, scanned = bounded(
+                "alert /tmp scan", limit, scan_root, options.tmp, options.tmp_age, options.tmp_big,
+                min(options.tmp_walk_budget, max(0.0, limit - 1.0)), "", set(), options.top_writers,
+            )
+            for bytes_there, path, newest_mtime, found in scanned[0] if finished else []:
+                owner = tmp_owner_text(found, newest_mtime, started)
                 tmp_lines.append(f"{size(bytes_there)}  {path}  (owner: {owner})")
 
         if first:
@@ -2813,10 +2946,6 @@ def run_once(options: argparse.Namespace) -> int:
     alerts += iops_alerts
     cleared += iops_clears
 
-    # The growth watch's own self-test faults, which reach Envoy through this watch and
-    # nowhere else.
-    alerts += forward_guard_faults(options, state, envoy, deadline)
-
     # The scratch rule: name each young, big top-level entry of /tmp and of the checkout root
     # (~/src) ONCE, whether or not a mount is crossing. It is the measurement step before any
     # gate -- a 17 GB tree in /tmp, or a checkout cut on / instead of /mnt/nvme, belongs to a
@@ -2846,23 +2975,21 @@ def run_once(options: argparse.Namespace) -> int:
                 " disk is not short: its entries are not named"
             )
             continue
-        scan = min(options.tmp_idle_walk_budget, max(0.0, left(deadline)))
-        if scan <= 0:
-            log(f"{label}: this run's budget is spent; its entries are scanned next run")
-            continue
         # On the root disk the bar is higher. A full root stops every session at once, so a
         # tree there is worth a message only when it is worth the reader's minute: of 62 NEW
         # BIG notices in 48 h, the ones between 0.5 and 2 GB named trees nobody acted on.
         big = options.root_big if on_root_disk else options.tmp_big
         advice = root["advice"] if on_root_disk else SHORT_ADVICE
-        seen = set(named_tmp)
-        fresh = [
-            (bytes_there, path, newest_mtime)
-            for bytes_there, path, newest_mtime in young_entries(
-                root["path"], options.tmp_age, big, True, scan, cursor=cursors.setdefault(label, {})
-            )
-            if path not in seen
-        ]
+        cursor = cursors.setdefault(label, {})
+        limit = min(SCAN_STEP_TIMEOUT, room(deadline))
+        finished, scanned = bounded(
+            f"{label} scan", limit, scan_root, root["path"], options.tmp_age, big,
+            min(options.tmp_idle_walk_budget, max(0.0, limit - 1.0)), str(cursor.get("after") or ""),
+            set(named_tmp), options.top_writers,
+        )
+        if not finished:
+            continue
+        fresh, cursor["after"] = scanned
         if fresh and not LIVE_READ:
             # Only now, and only once: a notice is about to name a session, and an address is
             # not a claim read off a process but an id Envoy lists as live on this box.
@@ -2870,11 +2997,7 @@ def run_once(options: argparse.Namespace) -> int:
                 refresh_live_sessions(Envoy())
             except SystemExit as error:
                 log(f"  live sessions unavailable: {error}; {label} entries wait for the digest")
-        for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
-            if left(deadline) <= 0:
-                log(f"{label}: this run's budget is spent; the rest are named next run")
-                break
-            found = owner_of_path(path)
+        for bytes_there, path, newest_mtime, found in fresh:
             owner = tmp_owner_text(found, newest_mtime, started)
             lane = live_owner_id(found)
             named_tmp.append(path)
@@ -2938,6 +3061,12 @@ def run_once(options: argparse.Namespace) -> int:
         log(f"scratch digest: {count} unowned entry(ies) -> {heard or 'nobody: every route refused it'}")
         if options.print_alert:
             print(text)
+
+    # The growth watch's own self-test faults, which reach Envoy through this watch and
+    # nowhere else. Read LAST and inside what the budget has left: the read is a journalctl
+    # under sudo that took its whole 15 s on every run between 07:59Z and 08:36Z on 2026-11-03,
+    # plus up to 45 s for its retry, for a forward expected about 0 times a day.
+    alerts += forward_guard_faults(options, state, envoy, deadline - FINISH_RESERVE)
 
     # A mount this run no longer watches takes its incident with it -- but whoever heard its
     # alert is told why it ends, or the last thing they have on that disk is an alarm that never

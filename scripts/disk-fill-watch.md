@@ -149,6 +149,27 @@ Because this is the only path an agent hears, a fault in it is silence, so:
   by what is left, and a run with too little left sends its alert **without** the writer
   sample, saying so, rather than being killed with its decision unsent.
 
+  A deadline a step checks itself was still not enough: between 08:01Z and 08:36Z on
+  2026-11-03, at load ~500 with IO pressure at 85%, four more runs were killed at 120 s and the
+  completed ones took 84-102 s. Every run there spent its first 15 s on the guard journal read
+  (`timed out after 15 s; retrying once with 45 s`), up to 45 s more on its retry, and then
+  the scratch scan, whose directory listing and stats do not come back to look at a clock
+  while the box stalls them. So now:
+
+  | Step | Runs | Hard limit |
+  |---|---|---|
+  | statvfs of each mount | first, in a forked child | 10 s (`STATVFS_TIMEOUT`); the mount is skipped and logged |
+  | the decision and the crossing send | in the run itself, before anything expensive | — |
+  | writer attribution | forked child, before the send | 60 s, or the budget left less 20 s (`FINISH_RESERVE`) |
+  | young-entry sizing and owner lookups | forked child, one per root | 15 s, or the budget left less 20 s |
+  | guard journal read | LAST, a `sudo journalctl` subprocess | 15 s, a 45 s retry, both inside the budget left less 20 s |
+
+  A step that does not answer in time is sent SIGKILL and not waited for: a child stuck in a
+  read the kernel will not interrupt is removed with the unit's cgroup once the run exits.
+  Each skip is one log line naming the step and why, and a crossing alert goes out even when
+  every expensive step is skipped. The 20 s reserve covers the Envoy sends (8 s each), the
+  state commits and the exit, inside the unit's 120 s.
+
 ### The floors
 
 | Mount | Floor | Why |

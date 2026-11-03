@@ -205,9 +205,11 @@ class Harness(unittest.TestCase):
         return argparse.Namespace(**values)
 
     def run_watch(self, **overrides) -> None:
+        logged = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()):
-            with unittest.mock.patch.object(WATCH, "LOG_STREAM", io.StringIO()):
+            with unittest.mock.patch.object(WATCH, "LOG_STREAM", logged):
                 self.assertEqual(0, WATCH.run_once(self.options(**overrides)))
+        self.log_text = logged.getvalue()
 
     def series(self, points: list[tuple[float, float]]) -> list[list[float]]:
         """[[stamp, free bytes]] from (seconds before now, GiB free) pairs."""
@@ -568,9 +570,11 @@ class ScratchEntryTest(unittest.TestCase):
     mount = MOUNT
 
     def run_watch(self, **overrides) -> None:
+        logged = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()):
-            with unittest.mock.patch.object(WATCH, "LOG_STREAM", io.StringIO()):
+            with unittest.mock.patch.object(WATCH, "LOG_STREAM", logged):
                 self.assertEqual(0, WATCH.run_once(self.options(**overrides)))
+        self.log_text = logged.getvalue()
 
     assert_short = Harness.assert_short
 
@@ -1027,6 +1031,92 @@ class GuardWatchFaultTest(Harness):
         self.assertEqual(1, len(self.messages()))
         self.assertIn("journalctl exited 1", self.messages()[0])
         self.assertEqual(3, len(self.reads))  # two in run 1, one in run 2: no retry for this
+
+
+def slow(*_args, **_kwargs):
+    """A disk or /proc read that does not come back: 2026-11-03 08:01-08:36Z, load ~500."""
+    time.sleep(60)
+
+
+class SlowStepTest(Harness):
+    """A slow expensive step is cut off at its own limit; the crossing alert still goes out.
+
+    Four runs between 08:01Z and 08:36Z on 2026-11-03 were killed at the unit's 120 s limit
+    under IO load, and the completed ones took 84-102 s. Each expensive step now runs in a
+    child process with a hard limit of its own, and the run goes on without it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        for name in ("STATVFS_TIMEOUT", "WRITER_STEP_TIMEOUT", "SCAN_STEP_TIMEOUT"):
+            original = getattr(WATCH, name, None)
+            setattr(WATCH, name, 1.0)
+            self.addCleanup(setattr, WATCH, name, original)
+
+    def urgent_crossing(self) -> None:
+        self.seed(self.series([(3900 - 300 * i, 160.0 - 6 * i) for i in range(13)]))
+        self.free = int(60 * GIB)
+
+    def timed_run(self, **overrides) -> float:
+        began = time.monotonic()
+        self.run_watch(**overrides)
+        return time.monotonic() - began
+
+    def test_a_writer_sample_that_hangs_is_cut_off_and_the_alert_goes_out(self) -> None:
+        self.urgent_crossing()
+        WATCH.sample_writers = slow
+
+        spent = self.timed_run()
+
+        self.assertLess(spent, 15.0)
+        self.assertEqual(1, len(self.messages()))
+        self.assertIn("first alert", self.messages()[0])
+        self.assertIn("writer attribution: skipped", self.log_text)
+
+    def test_a_statvfs_that_hangs_skips_that_mount_and_says_so(self) -> None:
+        WATCH.free_bytes = slow
+
+        spent = self.timed_run()
+
+        self.assertLess(spent, 15.0)
+        self.assertIn(f"{NVME}: statvfs: skipped", self.log_text)
+
+    def test_a_scratch_scan_that_hangs_is_cut_off_and_the_alert_goes_out(self) -> None:
+        self.urgent_crossing()
+        original = WATCH.young_entries
+        WATCH.young_entries = slow
+        self.addCleanup(setattr, WATCH, "young_entries", original)
+        devices = {"/nonexistent-tmp": 1, NVME: 1, "/": 1}
+        WATCH.device_of = lambda path: devices.get(path, 99)
+
+        spent = self.timed_run(tmp="/nonexistent-tmp")
+
+        self.assertLess(spent, 15.0)
+        self.assertEqual(1, len(self.messages()))
+        self.assertIn("first alert", self.messages()[0])
+        self.assertIn("scan: skipped", self.log_text)
+
+    def test_a_guard_read_with_no_room_left_is_not_started(self) -> None:
+        """The growth watch's journal is read last, inside what the budget has left."""
+        reads: list[float] = []
+        original = WATCH.guard_journal
+
+        def guard(cursor, deadline, timeout=15.0):
+            reads.append(min(timeout, deadline - WATCH.time.time()))
+            return [], cursor, ""
+
+        WATCH.guard_journal = guard
+        self.addCleanup(setattr, WATCH, "guard_journal", original)
+        original_installed = WATCH.guard_installed
+        WATCH.guard_installed = lambda: True
+        self.addCleanup(setattr, WATCH, "guard_installed", original_installed)
+        self.seed(self.series([(300, 500.0)]))
+        self.free = int(500 * GIB)
+
+        self.run_watch(sudo="auto", run_budget=10.0)
+
+        self.assertTrue(all(room <= 0 for room in reads) or not reads)
+        self.assertIn("guard journal: skipped", self.log_text)
 
 
 if __name__ == "__main__":
