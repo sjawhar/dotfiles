@@ -2365,28 +2365,42 @@ GUARD_UNIT_DIRS = (
     "/lib/systemd/system",
 )
 
+# A read that runs out of time is not a journal this watch cannot read. At
+# 2026-11-03T04:59:08Z, load ~320, one read hit its 15 s limit and the box-health lead was told
+# the growth watch was unreadable. So a timeout is retried once with GUARD_RETRY_TIMEOUT, and
+# is said only when GUARD_TIMEOUT_RUNS runs in a row could not read it; any other failure
+# (sudo refused, no such unit, a non-zero exit) is said at once, as before.
+GUARD_TIMEOUT_ERROR = "journalctl timed out"
+GUARD_RETRY_TIMEOUT = 45.0
+GUARD_TIMEOUT_RUNS = 2
+
 
 def guard_installed() -> bool:
     """Whether this machine has the growth watch at all."""
     return any(os.path.exists(f"{directory}/{GUARD_UNIT}") for directory in GUARD_UNIT_DIRS)
 
 
-def guard_journal(cursor: str, deadline: float) -> tuple[list[str], str, str]:
+def guard_journal(
+    cursor: str, deadline: float, timeout: float = GROWTH_TIMEOUT
+) -> tuple[list[str], str, str]:
     """(the guard's new journal lines, the cursor after them, the reason none were read).
 
     `--after-cursor` with `--show-cursor` is what makes a line reach the box-health lead once
     and only once: the cursor is the reader's place in the journal and it lives in this
-    watch's state file.
+    watch's state file. A read that ran out of time, or had no time left to start, answers
+    exactly GUARD_TIMEOUT_ERROR, so the caller can tell a slow box from a broken read.
     """
-    timeout = min(GROWTH_TIMEOUT, left(deadline))
+    timeout = min(timeout, left(deadline))
     if timeout <= 0:
-        return [], cursor, "this run's budget was spent before the read"
+        return [], cursor, GUARD_TIMEOUT_ERROR
     command = ["sudo", "-n", "journalctl", "-u", GUARD_UNIT, "-o", "cat", "--show-cursor"]
     command += ["--after-cursor", cursor] if cursor else ["--since", GUARD_FIRST_WINDOW]
     try:
         done = subprocess.run(
             command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
         )
+    except subprocess.TimeoutExpired:
+        return [], cursor, GUARD_TIMEOUT_ERROR
     except (OSError, subprocess.SubprocessError) as error:
         return [], cursor, f"{type(error).__name__}: {error}"
     if done.returncode != 0:
@@ -2444,9 +2458,30 @@ def forward_guard_faults(
         return 0
     record: dict = state.data.setdefault("guard_watch", {})
     first = not record.get("cursor")
-    lines, cursor, error = guard_journal(str(record.get("cursor") or ""), deadline)
+    held_cursor = str(record.get("cursor") or "")
+    lines, cursor, error = guard_journal(held_cursor, deadline)
+    if error == GUARD_TIMEOUT_ERROR:
+        log(
+            f"  guard journal read timed out after {int(GROWTH_TIMEOUT)} s; retrying once with"
+            f" {int(GUARD_RETRY_TIMEOUT)} s"
+        )
+        lines, cursor, error = guard_journal(held_cursor, deadline, GUARD_RETRY_TIMEOUT)
     record["cursor"] = cursor
     sent = 0
+    if error == GUARD_TIMEOUT_ERROR:
+        # A slow box, not a broken read: said only when it holds for GUARD_TIMEOUT_RUNS runs in
+        # a row, and then once, under one reason that does not change while it lasts.
+        record["timeouts"] = int(record.get("timeouts") or 0) + 1
+        if record["timeouts"] < GUARD_TIMEOUT_RUNS:
+            log(f"  guard journal read timed out twice this run ({record['timeouts']} run(s) in a row)")
+            state.commit(options)
+            return 0
+        error = (
+            f"{GUARD_TIMEOUT_ERROR} after {int(GROWTH_TIMEOUT)} s and again after"
+            f" {int(GUARD_RETRY_TIMEOUT)} s, on {GUARD_TIMEOUT_RUNS} consecutive runs"
+        )
+    else:
+        record.pop("timeouts", None)
     if error:
         # Said once per reason: a journal this watch cannot read means growth attribution is
         # unverified, and a reason that repeats every five minutes is noise.

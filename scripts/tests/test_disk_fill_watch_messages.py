@@ -838,10 +838,12 @@ class GuardWatchFaultTest(Harness):
         super().setUp()
         self.journal: list[tuple[list[str], str, str]] = []
         self.reads: list[str] = []
+        self.timeouts: list[float | None] = []
         self.free = int(500 * GIB)  # nothing is crossing: these runs say only this
 
-        def read(cursor: str, deadline: float) -> tuple[list[str], str, str]:
+        def read(cursor: str, deadline: float, timeout: float | None = None) -> tuple[list[str], str, str]:
             self.reads.append(cursor)
+            self.timeouts.append(timeout)
             return self.journal.pop(0) if self.journal else ([], cursor, "")
 
         original = WATCH.guard_journal
@@ -965,6 +967,66 @@ class GuardWatchFaultTest(Harness):
         self.assertEqual([], self.reads)
         self.assertEqual([], self.messages())
         self.assertEqual({}, self.state_record())
+
+    # 2026-11-03T04:59:08Z, load ~320: one read hit its 15 s limit and the box-health lead was
+    # told the growth watch was unreadable. A timeout on a loaded box is not a broken journal.
+    TIMED_OUT = "journalctl timed out"
+
+    def test_a_timeout_the_retry_reads_past_says_nothing_about_it(self) -> None:
+        self.journal.append(([], "", self.TIMED_OUT))
+        self.journal.append(([self.UNPROVEN], "c1", ""))
+
+        self.run_guard()
+
+        self.assertEqual(2, len(self.reads))
+        self.assertEqual(45.0, self.timeouts[1])
+        said = self.messages()
+        self.assertEqual(1, len(said))
+        self.assertIn("WATCH UNPROVEN on /mnt/nvme", said[0])
+        self.assertNotIn("UNREADABLE", said[0])
+        self.assertEqual("c1", self.state_record()["cursor"])
+
+    def test_timeouts_are_said_once_after_two_consecutive_runs(self) -> None:
+        for _ in range(2):  # run 1: both attempts time out, nothing said
+            self.journal.append(([], "", self.TIMED_OUT))
+        self.run_guard()
+        self.assertEqual([], self.messages())
+        self.assertEqual(1, self.state_record()["timeouts"])
+
+        self.now += 300
+        for _ in range(2):  # run 2: the second run in a row, said
+            self.journal.append(([], "", self.TIMED_OUT))
+        self.run_guard()
+        self.assertEqual(1, len(self.messages()))
+        text = self.messages()[0]
+        self.assertIn("DISK GROWTH WATCH UNREADABLE", text)
+        self.assertIn("2 consecutive runs", text)
+        self.assert_short(text)
+
+        self.now += 300
+        for _ in range(2):  # run 3: still timing out, already said
+            self.journal.append(([], "", self.TIMED_OUT))
+        self.run_guard()
+        self.assertEqual(1, len(self.messages()))
+
+        self.now += 300
+        self.journal.append(([], "c1", ""))  # run 4: it reads again
+        self.run_guard()
+        self.assertNotIn("timeouts", self.state_record())
+        self.assertNotIn("read_error", self.state_record())
+
+    def test_any_other_failure_is_said_at_once_even_after_a_timeout(self) -> None:
+        for _ in range(2):
+            self.journal.append(([], "", self.TIMED_OUT))
+        self.run_guard()
+
+        self.now += 300
+        self.journal.append(([], "", "journalctl exited 1: sudo: a password is required"))
+        self.run_guard()
+
+        self.assertEqual(1, len(self.messages()))
+        self.assertIn("journalctl exited 1", self.messages()[0])
+        self.assertEqual(3, len(self.reads))  # two in run 1, one in run 2: no retry for this
 
 
 if __name__ == "__main__":

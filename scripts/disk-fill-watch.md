@@ -417,8 +417,13 @@ is forwarded **once**. The first run records the cursor from the last 30 minutes
 round of the self-test. After the reporter restarts it writes no per-mount BACK, only
 `disk-writers: the self-test passed: …`; while a mount is open from an UNPROVEN, that line is
 its BACK, for every open mount. A journal read this watch cannot do is itself said once per
-reason, not swallowed: if it were, a fault in the growth watch would reach nobody. Expected
-volume: about 0 a day. `--sudo never` turns the forwarding off with the privileged sample.
+reason, not swallowed: if it were, a fault in the growth watch would reach nobody. A **timeout**
+is the exception, because it is a slow box rather than a broken read: at 2026-11-03T04:59:08Z,
+load ~320, one 15 s read ran out and the box-health lead was told the journal was unreadable.
+A timed-out read is retried once with 45 s inside the run budget, and is said only after two
+runs in a row could not read it; sudo refused, a missing unit or a non-zero exit is said at
+once. Expected volume: about 0 a day. `--sudo never` turns the forwarding off with the
+privileged sample.
 
 ## Who hears about it
 
