@@ -288,26 +288,84 @@ links between shards arrive as copies; the last rsync pass (`-H`) restores them.
 
 ### Load guards
 
-Every process on an old box runs under `nice -n 19 ionice -c3`. rocqperf's `/mnt/durable`
-(`nvme0n2`, an Azure P50 capped near 7,500 IOPS and 250 MB/s) has the `none` scheduler, so
-ionice does nothing there: the uploader runs in a system scope with cgroup `io.max` on
-`nvme0n2`, about a quarter of the disk's read IOPS, raised only while IO pressure stays flat.
-`monitor.sh` samples the source disk and `/proc/pressure/io` every minute. A disk floor
-(rocqperf `/` 18 GiB, `/mnt/nvme` 84 GB; sami-devbox `/` 50 GiB, `/mnt/nvme` 400 GiB,
-`/mnt/scratch` 500 GiB, `/mnt/durable` 200 GiB) or a disk-fill-watch incident freezes the
-upload units at once; they thaw when it clears. IO pressure above the limit for three minutes
-stops new shards.
+Every process on an old box runs under `nice -n 19 ionice -c3`, but both disks of sami-rocqperf
+that the copy reads (`nvme0n2` = `/mnt/durable`, an Azure P50 capped near 7,500 IOPS and
+250 MB/s, and the root disk `nvme0n1`) have the `none` scheduler, which ignores the idle class.
+So the copy runs only inside two units with cgroup `io.max`: `devbox-copy-up-rocqperf`
+(`/mnt/durable`: 500 read IOPS, 25 MB/s) and `devbox-copy-up-rocqperf-nvme` (`/mnt/nvme/sami`
+and `/home/sami`: md127 10,000 IOPS; nvme0n1 1,000 IOPS, 50 MB/s). A later job reuses those units
+(start it with the same name and caps); no new unit. `monitor.sh` samples every minute:
+
+- a disk floor (rocqperf `/` 18 GiB, `/mnt/nvme` 84 GB; sami-devbox `/` 50 GiB, `/mnt/nvme`
+  400 GiB, `/mnt/scratch` 500 GiB, `/mnt/durable` 200 GiB) freezes the `/mnt/nvme` and home
+  unit; a sami-devbox floor also freezes the `/mnt/durable` unit;
+- `nvme0n2` await over 20 ms or `%util` over 80 for 2 samples freezes the `/mnt/durable` unit
+  (thaw after 2 samples under): on 2026-11-03 03:40Z a lane's cache there held the disk at 100%;
+- the read wait of the disks in `nv_devs` (md127's members for `/mnt/nvme/sami`, `nvme0n1` for
+  home) over 20 ms for 2 samples freezes the other unit (thaw after 2 samples under);
+- io some avg60 over 95 for 5 minutes stops the `/mnt/durable` unit, over 50 the other;
+- `HOLD` in the copy directory (any text, a reason) pauses every new shard.
+
+### The /mnt/durable route: the Azure snapshot
+
+Reading `/mnt/durable` through its live disk held lanes' I/O for hours. The first pass came from
+an incremental snapshot instead (the INFRA lead's, with a 72-hour read SAS in a 0600 file; never
+on a command line, in the environment or a log). On sami-devbox:
+
+1. `snapshot-ranges.py` lists the page blob's valid ranges (8 GiB windows, `NextMarker` followed,
+   a 5xx window split smaller); `snapshot-download.sh` fetches only those, 64 ranged GETs at
+   once, each to a temporary file checked for its exact length **before** it is written into the
+   sparse image on `/mnt/scratch`. The first run piped curl into dd and read only dd's status: a
+   short GET left zeros (40 MiB inside a checksummed file), and the whole image was fetched again.
+2. Check before the SAS is revoked: mount, then `sha256sum -c` a manifest that lives on the disk.
+3. `snapshot-copy.sh mount` puts a dm-snapshot copy-on-write overlay (a file on `/mnt/scratch`)
+   over the read-only loop and mounts that, so ext4 replays its journal without writing the
+   image (`noload` left entries unreadable, "Bad message").
+4. `snapshot-copy.sh copy` lists, filters (EXCLUDE), checks no-offbox, and copies. One rsync
+   over 33.8 M `--files-from` entries spent hours on its file list: after a first pass,
+   `snapshot-missing.py` (lstat of every entry against the target) lists what is left and
+   `snapshot-finish.sh` copies it in 16 streams under one guard.
+5. `snapshot-copy.sh verify`: per-group counts and bytes, and an rsync dry run.
+
+Then the INFRA lead deletes the snapshot; shred the SAS file on both machines.
+
+### Owners on the target
+
+`tar -x` makes a parent directory that a shard does not carry as root. `pull.sh` runs
+`fix-parents.py` after each extract: every root-owned parent of an extracted name gets the owner
+of its nearest non-root ancestor. It must not look at ctime (12 shards extract at once, so a
+parent often comes from another shard). For a tree already copied, list the root-owned entries,
+take each one's owner from the source (leave those root owns there too), and run the list with
+`apply-owners.py` inside the puller (`owner-fix.z` plus `owner-fix.go`; never from an ssh session).
+
+### Delta passes
+
+After the first pass, sessions move to sami-devbox and write there. A pass from an old box is
+`rsync -aHAX --numeric-ids --update --mkpath`, never `--delete` and never `--inplace`, the
+receiver as root under the guard (`--rsync-path="sudo .../cgroup-guard.sh run -- rsync"`), with
+EXCLUDE and the scope files as filters. `--update` keeps a file that is newer on sami-devbox, but
+brings back one that a session deleted there. So, per top-level tree, read fresh before each pass:
+
+- `delta-busy.py` (on sami-devbox): trees a running process uses (cwd or open file) or that hold
+  a file written after the end of the copy's own writes;
+- `delta-plan.py`: skip those, and trees whose owner session (from the move table) has moved;
+  copy the rest;
+- `delta-run.sh PLAN SRC=DST`, in the capped unit, tree by tree, waiting while the monitor holds
+  the disk. A tree whose owner's lanes now write on sami-devbox (leanperf's `/theorem*`) gets no
+  pass until that owner says the old box still writes.
+
+Repeat until a pass copies under 50 GiB.
 
 ### Scripts and logs
 
 The scripts are in `devbox/bulk-copy/`: `mkshards.py` (shard lists from a `find` listing),
-`upload.sh` (old box), `pull.sh` (sami-devbox), `monitor.sh` (old box). All restart from their
-logs and skip shards already done.
+`upload.sh` (old box), `pull.sh` (sami-devbox), `monitor.sh` (old box), and the snapshot and
+delta scripts above. All restart from their logs and skip work already done.
 
 | What | Where |
 | --- | --- |
-| shard lists, upload log, monitor log, EXCLUDE | rocqperf `/mnt/durable/sami/devbox-copy/` (nothing on its `/mnt/nvme` or `/`); leanperf `~/devbox-copy/` |
-| extract log (shard, bytes, times, result) | sami-devbox `/mnt/nvme/sami/cutover/bulk-copy.log` |
+| shard lists, upload log, monitor log, EXCLUDE, delta plans and logs | rocqperf `/mnt/durable/sami/devbox-copy/` (nothing on its `/mnt/nvme` or `/`); leanperf `~/devbox-copy/` |
+| extract log (shard, bytes, times, result), snapshot-copy, owner-fix | sami-devbox `/mnt/nvme/sami/cutover/` (`bulk-copy.log`) |
 
 ### Every mass write runs under cgroup-guard; never stop the puller without the drain
 
