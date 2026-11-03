@@ -25,7 +25,7 @@
       },
       "modify": {
         "command": ["secret-run", "--reason", "gws theorem modify", "--wait", "4m", "GWS_THEOREM_MODIFY_OAUTH", "--"],
-        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "description": "gmail.modify and gmail.settings.basic: labels, archive, trash, drafts, +reply, +forward, and Gmail filters; one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "send": {
         "command": ["secret-run", "--reason", "gws theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--"],
