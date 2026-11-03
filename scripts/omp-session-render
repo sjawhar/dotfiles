@@ -32,12 +32,19 @@ def shake_regions(path, art):
         # into the TOP-LEVEL session's artifact directory, at any depth of nesting. So look in the transcript's
         # own artifact directory, then in each directory above it, up to the sessions root (a second-level
         # subagent's logs are two levels up; one level was all an older lookup tried, 8ede7b94).
-        here = Path(path).resolve()
-        tries = [artifact_dir(path) / f"{art}.shake.log"]
-        for d in list(here.parents)[:6]:
-            if d.name == "sessions":
-                break
-            tries.append(d / f"{art}.shake.log")
+        # Search the parents of the path AS GIVEN before the resolved ones: the disk mover replaces a moved
+        # session's transcript with a symlink into /mnt/durable/sami/omp-sessions-moved/, while the N.shake.log
+        # files stay in the artifact directory beside the symlink. Resolving first looked only under the move
+        # target, so every moved session's subagents rendered placeholders instead of their tool output (L1094).
+        given = Path(path)
+        tries, seen = [artifact_dir(path) / f"{art}.shake.log"], set()
+        for base in (given, given.resolve()):
+            for d in list(base.parents)[:6]:
+                if d.name == "sessions":
+                    break
+                if d not in seen:
+                    seen.add(d)
+                    tries.append(d / f"{art}.shake.log")
         f = next((p for p in tries if p.exists()), None)
         if f is not None:
             for line in f.read_text(errors="replace").splitlines():
