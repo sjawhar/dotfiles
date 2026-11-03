@@ -69,12 +69,18 @@ run() {
   # Without job control, bash gives a background job /dev/null as stdin; the explicit redirect
   # keeps ours, so a command that reads stdin (rsync --server under --rsync-path) still works.
   "$@" <&0 &
-  local child=$! rc
-  trap 'kill -TERM "$child" 2>/dev/null' INT TERM
-  while kill -0 "$child" 2>/dev/null; do
+  local child=$! nap rc stopping=""
+  trap 'stopping=1; kill -TERM "$child" 2>/dev/null' INT TERM
+  # Wait for whichever ends first, the command or the nap, so the guard exits as soon as the
+  # command does, not at the end of the current nap (2026-11-03: one rsync per small tree cost
+  # ~30 s each). A signalled command is a zombie until bash reaps it, and `kill -0` still finds
+  # it, so the trap's flag ends the loop; `wait "$child"` below returns its status either way.
+  while [[ -z $stopping ]] && kill -0 "$child" 2>/dev/null; do
     check
     sleep "$GUARD_INTERVAL" &
-    wait $! 2>/dev/null
+    nap=$!
+    wait -n "$child" "$nap" 2>/dev/null
+    kill "$nap" 2>/dev/null
   done
   wait "$child"; rc=$?
   trap - INT TERM

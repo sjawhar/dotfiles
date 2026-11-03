@@ -104,6 +104,14 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "protocol bytes\n")
 
+    def test_exits_when_the_command_does_not_at_the_end_of_its_nap(self):
+        # One rsync per small tree under a 30 s nap cost ~30 s per tree (910 trees = 7.5 h, 11-03).
+        self.env["GUARD_INTERVAL"] = "120"
+        t0 = time.monotonic()
+        r = self.guard("run", "--", "true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.monotonic() - t0, 60)
+
     def test_reclaims_while_running_when_the_slab_passes_the_bound(self):
         # 2 GiB of slab is over the 1 GiB bound (~800k inodes): reclaimed before the command ends.
         # The command waits up to 30 s for a reclaim, so a loaded box cannot fail it on timing.
