@@ -267,19 +267,26 @@ before handing the call to the real one.
   session nothing changes (`shims/tests/test_gcloud_shim_routing.py`). A call that another
   gcloud's hold on `credentials.db`, past the SDK's 5 s busy timeout, failed with exactly `ERROR:
   gcloud crashed (OperationalError): database is locked`, or with a `gcloud storage` worker's
-  `ERROR: database is locked` line, runs again at most 5 more times, 0.2-3 s apart with jitter,
+  `ERROR: database is locked` line, runs again until 300 s after the call began
+  (`GCLOUD_LOCK_RETRY_SECONDS`), 0.2-6 s apart with jitter, and a repeat attempt first takes one
+  of 8 host-wide slots per configuration directory (`GCLOUD_LOCK_RETRY_SLOTS`; flock(1) on
+  `<config dir>/.gcloud-shim-retry-slots/<n>`, waiting in the kernel), so a stalled store queues
+  its repeats instead of starting hundreds of SDK processes (2026-11-03 00:38Z: 67 calls gave up
+  after 6 attempts in 40 s while the root disk was saturated). This applies
   when running it again repeats nothing: the reads (`config config-helper`, which kubectl runs,
   `auth print-access-token` and the others), whose attempts are held back so only the last one
   shows, and `storage ls|cat|du|cp|rsync` and `storage objects|buckets list|describe`, whose
   stdout streams, so an attempt that wrote a byte of it is not run again. Never with
   `--delete-unmatched-destination-objects`, stdin (`-`, `-I`), or a pipe or device as a path;
   `storage mv` and `rm` never (the shim's `is_lock_retry_safe` gives each verb's reason).
-  Each attempt of such a call appends one line per kind of lock text it printed to `~/.local/state/gcloud-shim/locks.tsv`
-  (`GCLOUD_LOCK_LOG` overrides the path): `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>`,
-  kind `store` (the error above; outcome `retried` or `gave-up`) or `token-cache` (any other
-  `database is locked` line, the SDK's access-token cache warning; outcome `warning`). Count lock
-  hits with `wc -l` or `cut -f2,3 | sort | uniq -c`. Calls outside the retry are not seen; a
-  failed log write never changes the call.
+  Each attempt of such a call appends one line per kind of lock text it printed to
+  `~/.local/state/gcloud-shim/locks.tsv` (`GCLOUD_LOCK_LOG` overrides the path):
+  `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<omp session>\t<caller>`, kind `store`
+  (the error above; outcome `retried` or `gave-up`) or `token-cache` (any other `database is
+  locked` line, the SDK's access-token cache warning; outcome `warning`). The session is
+  `OMP_SESSION_ID` (`-` outside omp); the caller is the program that ran gcloud and its script or
+  `-m` module, never `-c` code. Count lock hits with `wc -l` or `cut -f2,3 | sort | uniq -c`.
+  Calls outside the retry are not seen; a failed log write never changes the call.
   In an agent session with `KUBECONFIG` unset or empty, `container clusters get-credentials
   <cluster>` writes `~/.kube/config.d/<cluster>` (mode 0700 directory) instead of `~/.kube/config`,
   and prints the `export KUBECONFIG=…` to use it; one whose cluster name it cannot read from argv

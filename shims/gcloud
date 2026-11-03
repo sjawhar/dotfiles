@@ -743,7 +743,18 @@ storage_process_count_is_set() {
 # lost 1 to 13 files that way (2026-11-02). A line that is only that text or the crash's,
 # after any dots, is a locked store; any other result passes through as it came.
 GCLOUD_LOCK_ERROR='^\.*ERROR: (gcloud crashed \(OperationalError\): )?database is locked$'
-GCLOUD_LOCK_RETRIES=5
+# How long a call keeps running again on that text, from the shim's start, and how many of the
+# calls sharing a configuration directory may run a repeat attempt at once. At 00:38Z on
+# 2026-11-03 sami-rocqperf's root disk, which holds credentials.db, was saturated (io some avg60
+# 93%, earlyoom killing): for about two minutes no writer committed, and 67 calls that each had
+# had 6 attempts over about 40 s gave up, while 649 repeat attempts, each a new SDK process of
+# its own, added to the load on that same disk. So a call waits for the store, up to
+# GCLOUD_LOCK_RETRY_SECONDS, and a repeat attempt first takes one of GCLOUD_LOCK_RETRY_SLOTS
+# flock(1) slots in <config dir>/.gcloud-shim-retry-slots, waiting in the kernel and not in a
+# new process; without flock(1) (macOS) or that directory it repeats without a slot. A first
+# attempt never waits. Both values can be set in the environment; 0 slots is no limit.
+GCLOUD_LOCK_RETRY_SECONDS="${GCLOUD_LOCK_RETRY_SECONDS:-300}"
+GCLOUD_LOCK_RETRY_SLOTS="${GCLOUD_LOCK_RETRY_SLOTS:-8}"
 
 # True for a command that running again repeats nothing, and that reads no stdin. The command
 # words are read as read_command_words reads them, to the third word; a `-` anywhere, as an
@@ -840,15 +851,48 @@ run_streamed_attempt() {
 }
 
 # Every lock text an attempt printed adds one line to GCLOUD_LOCK_LOG, so counting lock hits is
-# `wc -l`, not a scan of transcripts: `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>`.
+# `wc -l`, not a scan of transcripts:
+# `<UTC time>\t<kind>\t<outcome>\t<subcommand>\t<pid>\t<session>\t<caller>`.
 # Kind `store` is GCLOUD_LOCK_ERROR, the locked store this retry handles; its outcome is
 # `retried` when the shim runs the call again, else `gave-up`. Kind `token-cache` is any other
 # line with `database is locked`, the SDK's warning that access_tokens.db was locked (`Could not
 # initialize access token cache schema: database is locked`, `Could not store access token in
-# cache: database is locked`); its outcome is `warning`, since the call goes on. Only calls that
-# run through this retry are seen; every other call is exec'd with its stderr untouched. Each line
-# is one O_APPEND write, and a log that cannot be written never changes the call.
+# cache: database is locked`); its outcome is `warning`, since the call goes on. The pid is the
+# shim's; the session is OMP_SESSION_ID (`-` outside omp), and the caller is the program that ran
+# the shim, from /proc/<parent>/cmdline: its name and its first argument that is no option (a
+# script, or the module after -m; nothing after -c), since the pid is gone once the call ends.
+# Only calls that run through this retry are seen; every other call is exec'd with its stderr
+# untouched. Each line is one O_APPEND write, and a log that cannot be written never changes the
+# call.
 GCLOUD_LOCK_SUBCOMMAND=""
+GCLOUD_LOCK_CALLER=""
+lock_caller() {
+    [[ -n "$GCLOUD_LOCK_CALLER" ]] && return 0
+    local -a argv=()
+    local arg i caller="-"
+    if [[ -r "/proc/${PPID}/cmdline" ]]; then
+        while IFS= read -r -d '' arg && ((${#argv[@]} < 8)); do
+            argv+=("$arg")
+        done 2>/dev/null <"/proc/${PPID}/cmdline" || :
+    fi
+    if ((${#argv[@]})); then
+        caller="${argv[0]##*/}"
+        for ((i = 1; i < ${#argv[@]}; i++)); do
+            arg="${argv[i]}"
+            [[ "$arg" == -c ]] && break
+            if [[ "$arg" == -m ]]; then
+                caller+=" -m ${argv[i + 1]:-}"
+                break
+            fi
+            [[ "$arg" == -* ]] && continue
+            caller+=" ${arg}"
+            break
+        done
+    fi
+    caller="${caller//[$'\t\n\r']/ }"
+    GCLOUD_LOCK_CALLER="${caller:0:200}"
+}
+
 log_lock_hits() {
     local outcome="$1" err="${GCLOUD_RETRY_DIR}/err" line kinds=""
     grep -qF -- "database is locked" "$err" 2>/dev/null || return 0
@@ -870,22 +914,55 @@ log_lock_hits() {
     dir="$(dirname -- "$log")"
     [[ -d "$dir" ]] || mkdir -p -- "$dir" 2>/dev/null || return 0
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 0
+    lock_caller
     for kind in $kinds; do
         if [[ "$kind" == store ]]; then
             line="$outcome"
         else
             line=warning
         fi
-        { printf '%s\t%s\t%s\t%s\t%s\n' "$now" "$kind" "$line" "$GCLOUD_LOCK_SUBCOMMAND" "$$" >>"$log"; } 2>/dev/null || :
+        { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$kind" "$line" "$GCLOUD_LOCK_SUBCOMMAND" "$$" \
+            "${OMP_SESSION_ID:--}" "$GCLOUD_LOCK_CALLER" >>"$log"; } 2>/dev/null || :
     done
     return 0
 }
 
+# Takes a repeat-attempt slot on fd 9 (see GCLOUD_LOCK_RETRY_SLOTS), waiting on one random slot
+# at a time, at most 5 s, so a slot whose holder runs a long transfer does not hold the waiter.
+# Returns 1 only when the deadline passes first; with no slot to take it returns 0 at once.
+GCLOUD_LOCK_SLOT_DIR=""
+take_retry_slot() {
+    local deadline="$1" wait slot
+    exec 9>&-
+    ((GCLOUD_LOCK_RETRY_SLOTS > 0)) && command -v flock >/dev/null 2>&1 || return 0
+    if [[ -z "$GCLOUD_LOCK_SLOT_DIR" ]]; then
+        if [[ -n "${CLOUDSDK_CONFIG:-}" ]] || resolve_user_home 2>/dev/null; then
+            resolve_config_root
+            GCLOUD_LOCK_SLOT_DIR="${GCLOUD_CONFIG_ROOT}/.gcloud-shim-retry-slots"
+        fi
+        [[ -n "$GCLOUD_LOCK_SLOT_DIR" ]] || GCLOUD_LOCK_RETRY_SLOTS=0
+        mkdir -p -m 700 -- "$GCLOUD_LOCK_SLOT_DIR" 2>/dev/null || GCLOUD_LOCK_RETRY_SLOTS=0
+        ((GCLOUD_LOCK_RETRY_SLOTS > 0)) || return 0
+    fi
+    while :; do
+        wait=$((deadline - SECONDS))
+        ((wait > 0)) || return 1
+        ((wait > 5)) && wait=5
+        slot="${GCLOUD_LOCK_SLOT_DIR}/$((RANDOM % GCLOUD_LOCK_RETRY_SLOTS))"
+        # The group keeps 2>/dev/null to this open: a bare `exec ... 2>/dev/null` would silence
+        # the shim's own stderr, and gcloud's, for the rest of the call.
+        { exec 9>>"$slot"; } 2>/dev/null || return 0
+        flock -w "$wait" 9 2>/dev/null && return 0
+        exec 9>&-
+    done
+}
+
 # Runs argv (gcloud, or its launcher) and exits with its status; never returns. Without a
-# private directory for the output it execs argv once, as before.
+# private directory for the output it execs argv once, as before. gcloud runs without fd 9, so
+# only the shim holds a slot.
 GCLOUD_RETRY_DIR=""
 run_with_lock_retry() {
-    local status attempt=1 delay_ms
+    local status attempt=1 delay_ms retry deadline=$((SECONDS + GCLOUD_LOCK_RETRY_SECONDS))
     GCLOUD_RETRY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gcloud-shim.XXXXXX")" || exec "$@"
     # A printed token sits in that directory until gcloud's attempt ends; remove it on every exit.
     trap 'rm -rf "$GCLOUD_RETRY_DIR"' EXIT
@@ -896,29 +973,41 @@ run_with_lock_retry() {
         status=0
         if ((GCLOUD_LOCK_RETRY_STREAM)); then
             rm -f -- "${GCLOUD_RETRY_DIR}/status"
-            run_streamed_attempt "$@"
+            run_streamed_attempt "$@" 9>&-
             status="$(cat -- "${GCLOUD_RETRY_DIR}/status" 2>/dev/null || echo 1)"
-            if ((status == 0 || attempt > GCLOUD_LOCK_RETRIES)) ||
-                [[ -s "${GCLOUD_RETRY_DIR}/first" ]] ||
+            if ((status == 0)) || [[ -s "${GCLOUD_RETRY_DIR}/first" ]] ||
                 ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
                 log_lock_hits gave-up
                 exit "$status"
             fi
         else
-            "$@" >"${GCLOUD_RETRY_DIR}/out" 2>"${GCLOUD_RETRY_DIR}/err" || status=$?
-            if ((status == 0 || attempt > GCLOUD_LOCK_RETRIES)) ||
-                ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
+            "$@" >"${GCLOUD_RETRY_DIR}/out" 2>"${GCLOUD_RETRY_DIR}/err" 9>&- || status=$?
+            if ((status == 0)) || ! grep -qxE -- "$GCLOUD_LOCK_ERROR" "${GCLOUD_RETRY_DIR}/err"; then
                 log_lock_hits gave-up
                 cat -- "${GCLOUD_RETRY_DIR}/out"
                 cat -- "${GCLOUD_RETRY_DIR}/err" >&2
                 exit "$status"
             fi
         fi
-        log_lock_hits retried
+        # No attempt runs without its backoff: one whose wait would pass the deadline is not run.
         delay_ms=$((200 * attempt + RANDOM % (400 * attempt)))
-        printf 'gcloud shim: another gcloud held a sqlite store in the configuration directory past the SDK busy timeout (attempt %d of %d); running it again in %d.%03d s.\n' \
-            "$attempt" "$((GCLOUD_LOCK_RETRIES + 1))" "$((delay_ms / 1000))" "$((delay_ms % 1000))" >&2
-        sleep "$((delay_ms / 1000)).$(printf '%03d' "$((delay_ms % 1000))")"
+        ((delay_ms > 6000)) && delay_ms=$((2000 + RANDOM % 4000))
+        retry=0
+        if ((SECONDS + (delay_ms + 999) / 1000 < deadline)); then
+            printf 'gcloud shim: another gcloud held a sqlite store in the configuration directory past the SDK busy timeout (attempt %d; running it again for up to %d s in all); next attempt in %d.%03d s.\n' \
+                "$attempt" "$GCLOUD_LOCK_RETRY_SECONDS" "$((delay_ms / 1000))" "$((delay_ms % 1000))" >&2
+            sleep "$((delay_ms / 1000)).$(printf '%03d' "$((delay_ms % 1000))")"
+            take_retry_slot "$deadline" && retry=1
+        fi
+        if ((!retry)); then
+            log_lock_hits gave-up
+            if ((!GCLOUD_LOCK_RETRY_STREAM)); then
+                cat -- "${GCLOUD_RETRY_DIR}/out"
+                cat -- "${GCLOUD_RETRY_DIR}/err" >&2
+            fi
+            exit "$status"
+        fi
+        log_lock_hits retried
         attempt=$((attempt + 1))
     done
 }

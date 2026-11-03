@@ -10,6 +10,7 @@ override) supplies the configurations GCLOUD_ACCOUNT is validated against, so
 the tests never read or write Sami's real ~/.config/gcloud.
 """
 
+import fcntl
 import json
 import os
 import stat
@@ -1343,7 +1344,7 @@ class GcloudLockedStoreRetry(unittest.TestCase):
                 self.assertEqual(result.stdout, "OK-2\n")
                 self.assertNotIn(LOCK_CRASH, result.stderr)
                 self.assertIn("NOTE-2", result.stderr)
-                self.assertIn("attempt 1 of 6", result.stderr)
+                self.assertIn("attempt 1;", result.stderr)
                 self.assertEqual(self.call_count(), 2)
 
     def test_the_storage_task_error_is_a_locked_store_too(self):
@@ -1380,17 +1381,79 @@ class GcloudLockedStoreRetry(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, "OK-3\n")
                     self.assertEqual(result.stderr.count(crash), 2)
-                    self.assertIn("attempt 2 of 6", result.stderr)
+                    self.assertIn("attempt 2;", result.stderr)
                     self.assertIn("NOTE-3", result.stderr)
                     self.assertEqual(self.call_count(), 3)
 
+    def bound_retries(self, seconds: int = 10) -> None:
+        """A short deadline, and a sleep that takes 0.2 s whatever the delay asked, so the loop
+        runs many attempts and its count is bounded. The shim runs no attempt whose delay would
+        pass the deadline, and its clock counts whole seconds."""
+        self.env["GCLOUD_LOCK_RETRY_SECONDS"] = str(seconds)
+        write_stub(self.stub_dir, "sleep", f'echo "$1" >> "{self.stub_dir}/sleeps"; /bin/sleep 0.2')
+
     def test_storage_retry_is_bounded(self):
-        self.stub_gcloud_crashing(times=100, crash=LOCK_TASK_ERROR, partial=False)
+        self.bound_retries()
+        self.stub_gcloud_crashing(times=1000, crash=LOCK_TASK_ERROR, partial=False)
+        started = time.monotonic()
         result = self.run_shim(["storage", "rsync", "gs://b/d", str(self.stub_dir)])
+        self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(self.call_count(), 6)
+        self.assertGreater(self.call_count(), 6)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr.count(LOCK_TASK_ERROR), 6)
+        self.assertEqual(result.stderr.count(LOCK_TASK_ERROR), self.call_count())
+
+    def test_a_store_held_past_the_old_six_attempts_is_waited_for(self):
+        """At 00:38Z on 2026-11-03 the store stayed locked for about two minutes and 67 calls gave
+        up after 6 attempts in about 40 s. A call keeps trying until GCLOUD_LOCK_RETRY_SECONDS."""
+        for args in (["config", "config-helper"], ["storage", "cat", "gs://b/o"]):
+            with self.subTest(args=args):
+                self.calls.unlink(missing_ok=True)
+                self.stub_gcloud_crashing(times=9, crash=LOCK_TASK_ERROR, partial=False)
+                result = self.run_shim(args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "OK-10\n")
+                self.assertEqual(self.call_count(), 10)
+
+    def test_a_repeat_attempt_waits_for_a_slot_and_gcloud_does_not_hold_it(self):
+        """With every slot held, a repeat attempt waits; it runs once a slot is free, and the
+        gcloud it runs has no descriptor on the slot."""
+        self.env["GCLOUD_LOCK_RETRY_SLOTS"] = "1"
+        slots = Path(self.env["HOME"]) / ".config" / "gcloud" / ".gcloud-shim-retry-slots"
+        slots.mkdir()
+        fds = self.stub_dir / "fds"
+        write_stub(
+            self.stub_dir,
+            "gcloud",
+            f'n=$(( $(cat "{self.calls}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{self.calls}"\n'
+            f'ls /proc/$$/fd > "{fds}"\n'
+            f'if (( n == 1 )); then echo "{LOCK_CRASH}" >&2; exit 1; fi\necho OK',
+        )
+        with open(slots / "0", "a") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            proc = subprocess.Popen([str(SHIMS / "gcloud"), "auth", "print-access-token"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, env=self.env)
+            time.sleep(2)
+            self.assertIsNone(proc.poll())
+            self.assertEqual(self.call_count(), 1)
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual((proc.returncode, out), (0, "OK\n"), err)
+        self.assertEqual(self.call_count(), 2)
+        self.assertNotIn("9", fds.read_text(encoding="utf-8").split())
+
+    def test_a_slot_held_past_the_deadline_gives_up_with_the_last_attempt(self):
+        self.env["GCLOUD_LOCK_RETRY_SLOTS"] = "1"
+        self.env["GCLOUD_LOCK_RETRY_SECONDS"] = "2"
+        slots = Path(self.env["HOME"]) / ".config" / "gcloud" / ".gcloud-shim-retry-slots"
+        slots.mkdir()
+        self.stub_gcloud_crashing(times=1)
+        with open(slots / "0", "a") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            result = self.run_shim(["auth", "print-access-token"])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.call_count(), 1)
+        self.assertEqual(result.stdout, "PARTIAL-1\n")
+        self.assertIn(LOCK_CRASH, result.stderr)
 
     def test_a_storage_attempt_that_wrote_stdout_is_not_run_again(self):
         """Its bytes are already downstream; a second attempt would write them twice."""
@@ -1473,17 +1536,20 @@ class GcloudLockedStoreRetry(unittest.TestCase):
                 self.assertIn(crash, result.stderr)
 
     def test_retry_is_bounded_and_the_last_crash_passes_through(self):
-        self.stub_gcloud_crashing(times=100)
+        self.bound_retries()
+        self.stub_gcloud_crashing(times=1000)
         result = self.run_shim(["config", "config-helper", "--format=json"])
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(self.call_count(), 6)
-        self.assertEqual(result.stdout, "PARTIAL-6\n")
+        calls = self.call_count()
+        self.assertGreater(calls, 6)
+        self.assertEqual(result.stdout, f"PARTIAL-{calls}\n")
         self.assertEqual(result.stderr.count(LOCK_CRASH), 1)
         delays = [float(d) for d in (self.stub_dir / "sleeps").read_text(encoding="utf-8").split()]
-        self.assertEqual(len(delays), 5)
-        for attempt, delay in enumerate(delays, start=1):
+        self.assertGreaterEqual(len(delays), 5)
+        for attempt, delay in enumerate(delays[:5], start=1):
             self.assertGreaterEqual(delay, 0.2 * attempt)
             self.assertLess(delay, 0.6 * attempt)
+        self.assertLessEqual(max(delays), 6)
 
     def test_other_failures_and_other_commands_run_once(self):
         cases = (
@@ -1516,12 +1582,14 @@ class GcloudLockedStoreRetry(unittest.TestCase):
 
 class GcloudLockLog(unittest.TestCase):
     """Each lock text a retried call prints adds one tab-separated line to
-    ~/.local/state/gcloud-shim/locks.tsv: time, kind, outcome, subcommand, shim pid."""
+    ~/.local/state/gcloud-shim/locks.tsv: time, kind, outcome, subcommand, shim pid, omp session,
+    and the program that ran the shim."""
 
     setUp = GcloudLockedStoreRetry.setUp
     tearDown = GcloudLockedStoreRetry.tearDown
     stub_gcloud_crashing = GcloudLockedStoreRetry.stub_gcloud_crashing
     run_shim = GcloudLockedStoreRetry.run_shim
+    bound_retries = GcloudLockedStoreRetry.bound_retries
 
     def log_rows(self) -> list[list[str]]:
         log = Path(self.env["HOME"]) / ".local" / "state" / "gcloud-shim" / "locks.tsv"
@@ -1529,22 +1597,37 @@ class GcloudLockLog(unittest.TestCase):
 
     def test_a_retried_store_lock_and_the_cache_warning_each_add_a_line(self):
         self.stub_gcloud_crashing(times=1)
-        result = self.run_shim(["config", "config-helper", "--format=json"])
+        self.env["OMP_SESSION_ID"] = "01a1-test-session"
+        caller = self.stub_dir / "poller.sh"
+        caller.write_text('#!/bin/bash\n"$@"\nexit $?\n', encoding="utf-8")
+        result = subprocess.run(["bash", str(caller), str(SHIMS / "gcloud"), "config", "config-helper",
+                                 "--format=json"], capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = self.log_rows()
         self.assertEqual(sorted(r[1:4] for r in rows), [["store", "retried", "config config-helper"],
                                                         ["token-cache", "warning", "config config-helper"]])
         for row in rows:
-            self.assertEqual(len(row), 5)
+            self.assertEqual(len(row), 7)
             self.assertRegex(row[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
             self.assertRegex(row[4], r"^\d+$")
+            self.assertEqual(row[5:], ["01a1-test-session", f"bash {caller}"])
 
-    def test_a_store_lock_past_the_last_attempt_is_logged_as_gave_up(self):
-        self.stub_gcloud_crashing(times=100, crash=LOCK_TASK_ERROR, partial=False)
+    def test_the_caller_column_never_holds_inline_code(self):
+        self.stub_gcloud_crashing(times=1)
+        env = {k: v for k, v in self.env.items() if k != "OMP_SESSION_ID"}
+        result = subprocess.run(["bash", "-c", f'"{SHIMS / "gcloud"}" auth list; exit $?  # SECRET'],
+                                capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({tuple(r[5:]) for r in self.log_rows()}, {("-", "bash")})
+
+    def test_a_store_lock_past_the_deadline_is_logged_as_gave_up(self):
+        self.bound_retries()
+        self.stub_gcloud_crashing(times=1000, crash=LOCK_TASK_ERROR, partial=False)
         result = self.run_shim(["storage", "rsync", "gs://b/d", str(self.stub_dir)])
         self.assertEqual(result.returncode, 1)
         outcomes = [r[2] for r in self.log_rows() if r[1] == "store"]
-        self.assertEqual(outcomes, ["retried"] * 5 + ["gave-up"])
+        self.assertEqual(outcomes, ["retried"] * (len(outcomes) - 1) + ["gave-up"])
+        self.assertEqual(len(outcomes), int(self.calls.read_text(encoding="utf-8")))
         self.assertEqual({r[3] for r in self.log_rows()}, {"storage rsync gs://b/d"})
 
     def test_the_schema_warning_alone_is_logged_and_the_call_succeeds(self):
