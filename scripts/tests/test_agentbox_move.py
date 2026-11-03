@@ -1765,10 +1765,13 @@ class AgentboxMove(unittest.TestCase):
         self.target()
         ready = self.cutover / "target-ready"
         ready.unlink()
-        # It comes back while the move waits: a shell that writes it after a moment.
-        # Long enough that the move reaches its check before the marker is back (the fixture's
-        # census takes a few seconds), short enough to keep the test quick.
-        writer = subprocess.Popen(["bash", "-c", f'sleep 12; date -u +%FT%TZ >"{ready}"'])
+        # It comes back while the move waits. The writer waits for the move's first check of the
+        # marker to reach the target (the ssh stub logs every remote command), not for a fixed
+        # time: under load the session scan alone can outlast any fixed sleep.
+        ssh_log = self.remote / "SSH"
+        writer = subprocess.Popen(["bash", "-c", (
+            f'for i in $(seq 1 1200); do grep -q "test.*target-ready" "{ssh_log}" 2>/dev/null && break; sleep 0.1; done; '
+            f'sleep 0.5; date -u +%FT%TZ >"{ready}"')])
         self.addCleanup(writer.wait)
         self.env["AGENTBOX_MOVE_READY_WAIT"] = "30"
         self.env["AGENTBOX_MOVE_POLL"] = "1"
