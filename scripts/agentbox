@@ -755,21 +755,18 @@ ensure_unix_forwarder() {
 # DEFAULT tmux server, never at the server a launch happens to come from: on 2026-11-02 one
 # `agentbox new` from a drill's `tmux -L devbox-drill` pane re-pointed the unit, and from
 # 17:18:45Z to 17:58Z every box's `tmux` reached that drill server instead of `agents`. The
-# default server is the one named `default` beside the caller's own socket (a `-L <name>` server
-# shares its directory, the caller's TMUX_TMPDIR), else under TMUX_TMPDIR, else /tmp;
-# AGENTBOX_TMUX_SOCK overrides, and a host with no default server gets no relay and no mount.
+# default server is the workspace server, $HOME/.tmux/sockets/tmux-<uid>/default (.bashrc's
+# TMUX_TMPDIR; .tmux.conf restores the snapshot on that server only), whatever the caller's TMUX
+# or TMUX_TMPDIR: on 2026-11-03 a server at /tmp/tmux-1000/default, also named `default`, was
+# started by a `tmux new-session` run without TMUX_TMPDIR, and a launch from it would have
+# relayed every box there. AGENTBOX_TMUX_SOCK overrides, and a host with no workspace server
+# gets no relay and no mount.
 # Inside, it is TMUX_TMPDIR/tmux-<box uid>/default, which is where a bare `tmux` looks: the box
 # user is uid 1000 by the image (agentbox/Dockerfile), whatever the host's uid.
 BOX_UID=1000
 HOST_TMUX_SOCK=""
 host_tmux_sock() {
-    HOST_TMUX_SOCK="${AGENTBOX_TMUX_SOCK:-}"
-    # TMUX is unset outside tmux, where a bare ${TMUX%%,*} ends the launch under `set -u`.
-    if [[ -z "$HOST_TMUX_SOCK" && -n "${TMUX:-}" ]]; then
-        HOST_TMUX_SOCK="$(dirname "${TMUX%%,*}")/default"
-        [[ -S "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK=""
-    fi
-    [[ -n "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK="${TMUX_TMPDIR:-/tmp}/tmux-$UID_/default"
+    HOST_TMUX_SOCK="${AGENTBOX_TMUX_SOCK:-$HOME/.tmux/sockets/tmux-$UID_/default}"
     [[ -S "$HOST_TMUX_SOCK" ]] || HOST_TMUX_SOCK=""
 }
 
@@ -1412,6 +1409,23 @@ cmd_new() {
         || die "$usage  (a box needs a repo or a --dir; repos: $(repos | tr '\n' ' '))"
     shift
     (( $# )) || die "$usage"
+    # A box that resumes a session must not start while an omp on this HOST runs it: the box's
+    # own agent-session sees only the box's processes. On 2026-11-03 tmux-resurrect-omp started
+    # 15 live boxed sessions a second time, each in a new box (scripts/omp-session-live; it waits
+    # up to 60 s for an omp a hang-up is ending, as after a move's respawn).
+    if [[ "$1" == omp ]]; then
+        local a prev="" resume_target="" live
+        for a in "$@"; do
+            [[ "$a" == -- ]] && break
+            case "$prev" in --resume|-r|--session) resume_target="$a" ;; esac
+            case "$a" in --resume=*|--session=*) resume_target="${a#*=}" ;; esac
+            prev="$a"
+        done
+        if [[ -n "$resume_target" ]] \
+            && live="$("$DOTFILES_DIR/scripts/omp-session-live" --wait "${AGENT_SESSION_LIVE_WAIT:-60}" "$resume_target")"; then
+            die "session $resume_target is running already on this machine ($(sed 's/\t/: /' <<<"$live" | paste -sd ';')); one session must not run twice, so no box is started for it. If that omp is stuck, end it by its pid first."
+        fi
+    fi
     for repo in "${box_repos[@]}"; do
         [[ -d "$SRC/$repo" ]] || die "no checkout $SRC/$repo (repos: $(repos | tr '\n' ' '))"
         git -C "$SRC/$repo" remote get-url origin >/dev/null 2>&1 || die "$SRC/$repo has no origin remote to clone from"

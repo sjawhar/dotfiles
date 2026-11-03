@@ -29,16 +29,21 @@ class TmuxRelay(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        # A TMUX_TMPDIR like this host's (~/.tmux/sockets): the default server and a `-L` one.
-        self.dir = self.root / "sockets" / f"tmux-{os.getuid()}"
+        # The workspace directory (~/.tmux/sockets, .bashrc's TMUX_TMPDIR): the default server
+        # and a `-L` one; and a stray server named `default` elsewhere, as /tmp/tmux-<uid>/default
+        # was on 2026-11-03.
+        self.dir = self.root / ".tmux" / "sockets" / f"tmux-{os.getuid()}"
         self.dir.mkdir(parents=True)
         self.sockets = []
-        for name in ("default", "devbox-drill"):
+        self.stray_dir = self.root / "tmp" / f"tmux-{os.getuid()}"
+        self.stray_dir.mkdir(parents=True)
+        for path in (self.dir / "default", self.dir / "devbox-drill", self.stray_dir / "default"):
             s = socket.socket(socket.AF_UNIX)
-            s.bind(str(self.dir / name))
+            s.bind(str(path))
             self.sockets.append(s)
         self.default = self.dir / "default"
         self.other = self.dir / "devbox-drill"
+        self.stray = self.stray_dir / "default"
 
     def tearDown(self) -> None:
         for s in self.sockets:
@@ -66,8 +71,15 @@ class TmuxRelay(unittest.TestCase):
         self.assertEqual(self.relay_target({"TMUX": f"{self.default},4241,3", "TMUX_PANE": "%47"}),
                          f"RELAY {self.default}")
 
-    def test_a_launch_outside_tmux_finds_the_default_server_under_tmux_tmpdir(self) -> None:
-        self.assertEqual(self.relay_target({"TMUX_TMPDIR": str(self.root / "sockets")}), f"RELAY {self.default}")
+    def test_a_launch_outside_tmux_or_with_another_tmux_tmpdir_relays_to_the_workspace_server(self) -> None:
+        self.assertEqual(self.relay_target({}), f"RELAY {self.default}")
+        self.assertEqual(self.relay_target({"TMUX_TMPDIR": str(self.root / "tmp")}), f"RELAY {self.default}")
+
+    def test_a_launch_from_a_stray_server_named_default_never_relays_to_it(self) -> None:
+        self.assertEqual(self.relay_target({"TMUX": f"{self.stray},3783974,2", "TMUX_PANE": "%50",
+                                            "TMUX_TMPDIR": str(self.root / "tmp")}), f"RELAY {self.default}")
+        other = self.run_bash("box_tmux_env", {"TMUX": f"{self.stray},3783974,2", "TMUX_PANE": "%50"})
+        self.assertNotIn("TMUX_PANE=%50", other.stdout)
 
     def test_a_host_with_no_default_server_gets_no_relay(self) -> None:
         self.default.unlink()
@@ -84,6 +96,21 @@ class TmuxRelay(unittest.TestCase):
         self.assertEqual(other.stdout.splitlines(), ["-e", f"TMUX={self.other},4242,0"])
         self.assertIn("this box gets no TMUX_PANE", other.stderr)
 
+
+    def test_the_tmux_shim_reaches_the_workspace_server_from_a_shell_without_tmux_tmpdir(self) -> None:
+        """A tool shell that dropped TMUX_TMPDIR started a second server at /tmp/tmux-<uid>/default
+        on 2026-11-03; the shim now sends such a call to ~/.tmux/sockets, and keeps a caller's own."""
+        real = self.root / "realbin"
+        real.mkdir()
+        (real / "tmux").write_text('#!/bin/bash\necho "TMUX_TMPDIR=${TMUX_TMPDIR-<unset>}"\n', encoding="utf-8")
+        (real / "tmux").chmod(0o755)
+        path = f"{DOTFILES / 'shims'}:{real}:/usr/bin:/bin"
+        bare = subprocess.run([str(DOTFILES / "shims" / "tmux"), "new-session", "-d"], capture_output=True, text=True,
+                              env={"HOME": str(self.root), "PATH": path}, timeout=30, check=False)
+        self.assertEqual(bare.stdout.strip(), f"TMUX_TMPDIR={self.root}/.tmux/sockets", bare.stderr)
+        own = subprocess.run([str(DOTFILES / "shims" / "tmux"), "ls"], capture_output=True, text=True,
+                             env={"HOME": str(self.root), "PATH": path, "TMUX_TMPDIR": "/x"}, timeout=30, check=False)
+        self.assertEqual(own.stdout.strip(), "TMUX_TMPDIR=/x")
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,15 @@ if (( kills_server )) && [[ -z "${TMUX_ALLOW_KILL_SERVER:-}" ]] && (( ! explicit
     [[ -z "$socket" || "${socket##*/}" == default ]] && refuse
 fi
 
+# A shell whose environment dropped TMUX_TMPDIR (.bashrc sets it to ~/.tmux/sockets) reaches
+# /tmp/tmux-<uid>/default, where the workspace server is not, and a `new-session` there STARTS a
+# second server: at 00:29:44Z on 2026-11-03 a review job's `tmux new-session -d` did, and its
+# config restored the snapshot and resumed 51 live sessions a second time. So the workspace
+# directory is the default here, on the host; a box sets its own TMUX_TMPDIR (scripts/agentbox).
+if [[ -z "${TMUX_TMPDIR:-}" && ! -e /etc/agentbox-identity ]]; then
+    export TMUX_TMPDIR="$HOME/.tmux/sockets"
+fi
+
 # Real tmux: first executable `tmux` on PATH that is not this shim. Content
 # decides, not the directory string (PATH may spell this directory differently
 # from DOTFILES_DIR); an ELF tmux yields a short marker-free header.

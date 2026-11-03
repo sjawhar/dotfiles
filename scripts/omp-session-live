@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# omp-session-live <session id, id prefix, or transcript path>: print "<pid>\t<how>" for each live
+# omp process on this machine that runs that session, and exit 0 when there is one, 1 when there
+# is none. scripts/agent-session and `agentbox new` ask it before any `omp --resume`, so no
+# resume path (tmux-resurrect-omp, a pane restarter, a move's relauncher, a person) starts a
+# session a second time: on 2026-11-03 a second tmux server's restore resumed 50 live sessions
+# again (00:30Z), and a pane restarter resumed one whose omp was alive because a CHILD of it had
+# been killed (00:37Z).
+#
+# An omp runs a session when its own command line names it (`--resume <id>` or a path ending in
+# `_<id>.jsonl`), or when it holds that transcript open (a new session or one resumed by a
+# prefix). omp's helper processes (`__omp_worker_*`) are not sessions. A process inside an agent
+# box is seen by its command line; its descriptors are the box's. OMP_SESSION_LIVE_PROC replaces
+# /proc for the tests.
+#
+# --wait SECONDS: ask again every 2 s until no omp runs the session or SECONDS pass. A relaunch
+# that follows a hang-up (a move, a restart, `respawn-pane -k`) starts while the old omp is still
+# tearing down, and must not be refused for it.
+set -uo pipefail
+P="${OMP_SESSION_LIVE_PROC:-/proc}"
+wait_for=0
+if [[ "${1:-}" == --wait ]]; then wait_for="${2:-0}"; shift 2; fi
+target="${1:-}"
+[[ -n "$target" ]] || { echo "usage: omp-session-live [--wait SECONDS] <session id | id prefix | transcript path>" >&2; exit 2; }
+if (( wait_for > 0 )); then
+    deadline=$((SECONDS + wait_for))
+    while out="$("$0" "$target")"; do
+        (( SECONDS < deadline )) || { printf '%s\n' "$out"; exit 0; }
+        sleep 2
+    done
+    exit 1
+fi
+uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+if [[ "$target" =~ _(${uuid})\.jsonl$ ]]; then
+    want="${BASH_REMATCH[1]}"
+elif [[ "$target" =~ ^[0-9a-f][0-9a-f-]{7,35}$ ]]; then
+    want="$target"
+else
+    exit 1
+fi
+found=1
+pids=()
+for d in "$P"/[0-9]*; do
+    c=""; read -r c 2>/dev/null <"$d/comm" || continue
+    [[ "$c" == omp ]] && pids+=("${d##*/}")
+done
+# Who holds the transcript open, for every omp at once: one `find`, not one per process.
+declare -A holds=()
+if (( ${#pids[@]} )); then
+    fds=(); for pid in "${pids[@]}"; do fds+=("$P/$pid/fd"); done
+    while IFS=$'\t' read -r l t; do
+        [[ "$t" =~ _(${uuid})\.jsonl$ && "${BASH_REMATCH[1]}" == "$want"* ]] || continue
+        l="${l#"$P"/}"; holds[${l%%/*}]="$t"
+    done < <(find "${fds[@]}" -maxdepth 1 -type l -lname "*/sessions/*_${want}*.jsonl" -printf '%p\t%l\n' 2>/dev/null || true)
+fi
+for pid in ${pids[@]+"${pids[@]}"}; do
+    [[ "$pid" == "$$" ]] && continue
+    mapfile -d '' -t args 2>/dev/null <"$P/$pid/cmdline" || continue
+    case " ${args[*]} " in *__omp_worker*) continue ;; esac
+    how=""
+    for ((i = 1; i < ${#args[@]}; i++)); do
+        a="${args[i]}"
+        if [[ "$a" =~ _(${uuid})\.jsonl$ ]]; then id="${BASH_REMATCH[1]}"
+        elif [[ "$a" =~ ^${uuid}$ ]]; then id="$a"
+        else continue; fi
+        [[ "$id" == "$want"* ]] && { how="its command line names $id"; break; }
+    done
+    [[ -z "$how" && -n "${holds[$pid]:-}" ]] && how="it holds ${holds[$pid]} open"
+    if [[ -n "$how" ]]; then printf '%s\t%s\n' "$pid" "$how"; found=0; fi
+done
+exit "$found"

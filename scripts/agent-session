@@ -70,6 +70,15 @@ if [[ "${agent##*/}" == omp ]]; then
         fi
     fi
     unset -f moved_refuse
+    # Nor is a session resumed while an omp on this machine runs it (scripts/omp-session-live):
+    # every resume path comes through here - tmux-resurrect-omp, a pane restarter, a move's
+    # relauncher, a person - and on 2026-11-03 two of them started 51 live sessions a second time.
+    # It waits up to 60 s, since a relaunch that follows a hang-up starts while the old omp is
+    # still tearing down.
+    if [[ -n "$target" ]] && live="$("$DOTFILES_DIR/scripts/omp-session-live" --wait "${AGENT_SESSION_LIVE_WAIT:-60}" "$target")"; then
+        echo "agent-session: session $target is running already on this machine ($(sed 's/\t/: /' <<<"$live" | paste -sd ';')); one session must not run twice, so it is not resumed. If that omp is stuck, end it by its pid first." >&2
+        exit 3
+    fi
 fi
 
 routed=""
