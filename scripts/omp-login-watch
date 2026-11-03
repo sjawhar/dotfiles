@@ -34,17 +34,23 @@ What one run does, with a read-only sqlite read, /proc reads and transcript tail
      "No API key for provider: X", "OAuth token refresh failed for provider X", invalid_grant,
      and 401 authentication_error. --sessions (default 3) distinct live sessions inside the
      window is a crossing on its own, which catches a provider whose credential still looks
-     enabled while every call it makes is refused.
-  5. A crossing opens once. The ask and the Envoy message name the provider, the disabled
-     credential ids with their causes (the cause text with any token-looking run removed), how
-     many sessions are affected, and the one action: a person runs `omp login <provider>` in a
-     terminal on this box. While the crossing is open it is repeated every --repeat (default
-     30 min), and every ask it opens is kept. It clears when the provider has an enabled
-     credential again and the transcripts are quiet; the clear resolves every one of them.
+     enabled while every call it makes is refused. The transcript is the one the session's omp
+     holds open, else the one found before (transcripts.json beside the state file); only a
+     session known neither way is looked for in the session tree, inside the pass's 30 s
+     evidence budget.
+  5. A crossing opens once. The ask names the provider, the disabled credential ids with their
+     causes (the cause text with any token-looking run removed), how many sessions are
+     affected, and the one action: a person runs `omp login <provider>` in a terminal on this
+     box. The Envoy message says the same in at most 600 characters and names the report file
+     that holds the whole text. It is said again only on a new fact (another credential
+     disabled, the sessions' errors joining, their count doubling), and every ask it opens is
+     kept. It clears when the provider has an enabled credential again and the transcripts are
+     quiet; the clear resolves every one of them.
   6. When the human path itself fails -- the ask refused and the message after it refused too,
-     or no identity to act as -- the box-health role is told that nobody was told. A pass that
-     cannot open its state file sends that over the same path and exits non-zero, and the
-     unit's OnFailure handler runs `--report-failure`, which says the watch did not run.
+     or no identity to act as -- the box-health role is told that nobody was told, once, and
+     the ask is tried again every --repeat. A pass that cannot open its state file sends that
+     over the same path and exits non-zero, and the unit's OnFailure handler runs
+     `--report-failure`, which says the watch did not run, once per failure episode.
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -358,14 +365,85 @@ def omp_sessions(store: Path) -> tuple[dict[str, int], int, int]:
 # ------------------------------------------------------------------------ what sessions report
 
 
-def recent_transcripts(window: float, now: float) -> dict[str, Path]:
-    """Session id -> transcript file, for the files written inside the window. One scandir pass."""
-    found: dict[str, Path] = {}
+# Where each live session's transcript is, kept beside the state file between passes. The walk
+# of ~/.omp/agent/sessions that found them was the step that killed passes: on sami-rocqperf
+# 13 of 1,819 passes in the 40 h to 2026-11-03 01:50Z hit TimeoutStartSec=120, all in IO storms
+# (10:23-10:37Z on 11-02 at io some 87-96 % with 776 tasks blocked; 00:29-00:35Z on 11-03).
+# In 00:27-00:38Z the three watches that walk that tree (this one, envoy-role-holder-watch,
+# omp-root-hang-watch) had 12 runs killed, while omp-memory-watch, which reads the same omp
+# processes' /proc entries and no session directory, finished all 21 of its runs in 4-14 s.
+# envoy-role-holder-watch measured the same walk at 247 s under load (2ec571e6). The tree held
+# 1,655 directories on 2026-11-03.
+TRANSCRIPT_CACHE = "transcripts.json"
+# A session the whole walk did not find (its transcript is elsewhere, or not written yet) is
+# walked for again only this long after, so one such session does not bring the walk back on
+# every pass.
+TRANSCRIPT_REWALK = 600.0
+# The evidence after the credential store (processes, Envoy, transcripts) shares one budget per
+# pass, so a pass always reaches its decision, its state and its heartbeat well inside the
+# unit's 120 s, with the dispatch CLI's 60 s still to spare.
+EVIDENCE_SECONDS = 30.0
+
+
+def load_cache(path: Path) -> dict:
+    """{"paths": {session: transcript}, "missed": {session: when the walk did not find it}} from
+    the cache file; empty when it is absent or unreadable, which costs one walk."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    paths = data.get("paths") if isinstance(data.get("paths"), dict) else {}
+    missed = data.get("missed") if isinstance(data.get("missed"), dict) else {}
+    return {
+        "paths": {key: value for key, value in paths.items() if isinstance(value, str)},
+        "missed": {key: value for key, value in missed.items() if isinstance(value, (int, float))},
+    }
+
+
+def save_cache(path: Path, cache: dict, live: set[str]) -> None:
+    """Write the cache back with only the sessions that are live now."""
+    kept = {name: {key: value for key, value in cache[name].items() if key in live} for name in ("paths", "missed")}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch = path.with_name(path.name + ".tmp")
+        scratch.write_text(json.dumps(kept, indent=1, sort_keys=True) + "\n")
+        os.replace(scratch, path)
+    except OSError as error:
+        log(f"  cannot write {path}: {error}")
+
+
+def held_transcript(pid: int, session: str) -> str:
+    """The transcript the omp process holds open for its session, from /proc/<pid>/fd: in-kernel
+    readlinks, no disk read and no read of the process's memory. "" when it holds none."""
+    try:
+        descriptors = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return ""
+    for descriptor in descriptors:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+        except OSError:
+            continue
+        if target.endswith(".jsonl") and session in os.path.basename(target):
+            return target
+    return ""
+
+
+def walk_for(wanted: set[str], deadline: float) -> tuple[dict[str, str], bool]:
+    """The newest `<dir>/<time>_<session>.jsonl` under SESSION_ROOT of each wanted session, and
+    whether the walk finished before `deadline` (time.monotonic)."""
+    found: dict[str, tuple[float, str]] = {}
     try:
         projects = list(os.scandir(SESSION_ROOT))
     except OSError:
-        return found
+        return {}, True
+    finished = True
     for project in projects:
+        if time.monotonic() > deadline:
+            finished = False
+            break
         if not project.is_dir(follow_symlinks=False):
             continue
         try:
@@ -375,15 +453,61 @@ def recent_transcripts(window: float, now: float) -> dict[str, Path]:
         for entry in entries:
             if not entry.name.endswith(".jsonl"):
                 continue
+            match = UUID_RE.search(entry.name)
+            if not match or match.group(0) not in wanted:
+                continue
             try:
-                if now - entry.stat().st_mtime > window:
-                    continue
+                written = entry.stat().st_mtime
             except OSError:
                 continue
-            match = UUID_RE.search(entry.name)
-            if match:
-                found[match.group(0)] = Path(entry.path)
-    return found
+            if written >= found.get(match.group(0), (-1.0, ""))[0]:
+                found[match.group(0)] = (written, entry.path)
+        if len(found) == len(wanted):
+            break
+    return {session: path for session, (_, path) in found.items()}, finished
+
+
+def transcripts_of(
+    sessions: dict[str, int], cache: dict, now: float, deadline: float
+) -> tuple[dict[str, Path], dict]:
+    """Each live session's transcript: the one its omp holds open, else the one this watch found
+    before (the cache), else a walk of the session tree for only the sessions still unknown and
+    not missed in the last TRANSCRIPT_REWALK, stopped at `deadline`. Updates `cache`; returns the
+    paths and how many were found which way."""
+    paths: dict[str, Path] = {}
+    how = {"held": 0, "known": 0, "walked": 0, "unfound": 0, "walk_cut": False}
+    wanted: set[str] = set()
+    for session, pid in sessions.items():
+        held = held_transcript(pid, session)
+        cached = cache["paths"].get(session, "")
+        if held:
+            paths[session] = Path(held)
+            how["held"] += 1
+        elif cached and os.path.exists(cached):
+            paths[session] = Path(cached)
+            how["known"] += 1
+        elif now - cache["missed"].get(session, 0.0) < TRANSCRIPT_REWALK:
+            how["unfound"] += 1
+            continue
+        else:
+            wanted.add(session)
+            continue
+        cache["paths"][session] = str(paths[session])
+        cache["missed"].pop(session, None)
+    if wanted:
+        walked, finished = walk_for(wanted, deadline)
+        for session in wanted:
+            if session in walked:
+                paths[session] = Path(walked[session])
+                cache["paths"][session] = walked[session]
+                cache["missed"].pop(session, None)
+                how["walked"] += 1
+            else:
+                how["unfound"] += 1
+                if finished:
+                    cache["missed"][session] = now
+        how["walk_cut"] = not finished
+    return paths, how
 
 
 def auth_errors(path: Path, since: float, tail_bytes: int) -> dict[str, int]:
@@ -425,20 +549,26 @@ def auth_errors(path: Path, since: float, tail_bytes: int) -> dict[str, int]:
 
 
 def failing_sessions(
-    sessions: dict[str, int], window: float, now: float, tail_bytes: int
-) -> tuple[dict[str, set[str]], dict[str, int]]:
-    """Which live sessions report an auth error inside the window, by provider, and the counts."""
+    paths: dict[str, Path], window: float, now: float, tail_bytes: int, deadline: float
+) -> tuple[dict[str, set[str]], dict[str, int], int]:
+    """Which sessions report an auth error inside the window, by provider, the counts, and how
+    many transcripts were written inside the window. Stops at `deadline`."""
     by_provider: dict[str, set[str]] = {}
     totals: dict[str, int] = {}
-    transcripts = recent_transcripts(window, now)
-    for session in sessions:
-        path = transcripts.get(session)
-        if path is None:
+    recent = 0
+    for session, path in paths.items():
+        if time.monotonic() > deadline:
+            break
+        try:
+            if now - path.stat().st_mtime > window:
+                continue
+        except OSError:
             continue
+        recent += 1
         for provider, count in auth_errors(path, now - window, tail_bytes).items():
             by_provider.setdefault(provider, set()).add(session)
             totals[provider] = totals.get(provider, 0) + count
-    return by_provider, totals
+    return by_provider, totals, recent
 
 
 # ------------------------------------------------------------------------------------- state
@@ -485,7 +615,7 @@ def credential_lines(rows: list[dict]) -> list[str]:
     return lines
 
 
-def alert_text(incident: dict, now: float, repeat: bool = False) -> str:
+def alert_text(incident: dict, now: float, repeat: bool = False, news: str = "") -> str:
     """What a person reads. The provider, the evidence, the count, and the one action."""
     provider = incident["provider"]
     host = socket.gethostname().split(".")[0]
@@ -497,6 +627,8 @@ def alert_text(incident: dict, now: float, repeat: bool = False) -> str:
         else f"omp sessions on {host} still have no {provider} login, {age} on"
     )
     lines = [head, ""]
+    if news:
+        lines += [f"New since the last ask: {news}.", ""]
     if incident.get("credentials"):
         lines.append(
             f"All {len(incident['credentials'])} {provider} credential(s) in {incident['db']} are disabled:"
@@ -525,6 +657,32 @@ def alert_text(incident: dict, now: float, repeat: bool = False) -> str:
     return "\n".join(lines)
 
 
+def envoy_alert_text(incident: dict, now: float, news: str, asked: bool, report: str) -> str:
+    """The box-health role's copy of the alert: the decision first, the detail in the report."""
+    provider = incident["provider"]
+    host = socket.gethostname().split(".")[0]
+    if news:
+        head = (
+            f"LOGIN STILL LOST on {host}: no {provider} login for "
+            f"{human(now - incident.get('opened', now))}; new: {news}."
+        )
+    else:
+        head = f"LOGIN LOST on {host}: omp sessions have no {provider} login."
+    evidence = []
+    if incident.get("credentials"):
+        evidence.append(f"all {len(incident['credentials'])} {provider} credential(s) are disabled")
+    if incident.get("sessions_failing"):
+        evidence.append(f"{incident['sessions_failing']} live session(s) report auth errors")
+    evidence.append(f"{incident['sessions_affected']} live omp process(es) use that store")
+    return short(
+        f"{head} Evidence: {'; '.join(evidence)}. Only a person can fix it, with `omp login {provider}` "
+        f"in a terminal on {host}; "
+        + (f"the person was asked on dispatch://{DISPATCH_ISSUE}." if asked else "the Dispatch ask FAILED.")
+        + f" Sessions on {provider} wait until then.",
+        report,
+    )
+
+
 def clear_text(incident: dict, now: float, cause: str) -> str:
     provider = incident["provider"]
     host = socket.gethostname().split(".")[0]
@@ -535,16 +693,16 @@ def clear_text(incident: dict, now: float, cause: str) -> str:
     )
 
 
-def delivery_failure_text(incident: dict, output: str) -> str:
+def delivery_failure_text(incident: dict, output: str, report: str, repeat: float) -> str:
     """What goes to the box-health role when the one human path did not carry the alert."""
     provider = incident["provider"]
     host = socket.gethostname().split(".")[0]
-    return (
-        f"NOBODY WAS TOLD that {host} has no {provider} login: the Dispatch ask and the message "
-        f"that falls back for it both failed ({output}). Only a person can fix this, by running "
-        f"`omp login {provider}` in a terminal on {host}, and this watch has no other way to "
-        f"reach one, so somebody must be told by hand (dispatch://{DISPATCH_ISSUE}). The alert "
-        "itself follows this message, and the ask is tried again at the next repeat."
+    return short(
+        f"NOBODY WAS TOLD that {host} has no {provider} login: the Dispatch ask and its fallback "
+        f"message both failed ({output[:160]}). Only a person can fix it, with `omp login {provider}` "
+        f"in a terminal on {host}: tell one by hand (dispatch://{DISPATCH_ISSUE}). The ask is tried "
+        f"again every {human(repeat)}.",
+        report,
     )
 
 
@@ -557,6 +715,51 @@ def state_failure_text(path: str, error: BaseException, trouble: int) -> str:
         "tell a standing outage from a new one and would repeat every 60 s. Nothing watches this "
         f"box's provider logins until the path is writable again (dispatch://{DISPATCH_ISSUE})."
     )
+
+
+# Every Envoy message fits one notice; the whole text goes to a report file kept a week, in the
+# state directory's reports/, or here when that directory is the thing that cannot be written.
+MESSAGE_LIMIT = 600
+REPORT_KEEP = 7 * 86400.0
+REPORT_FALLBACK = Path(tempfile.gettempdir()) / "omp-login-watch" / "reports"
+
+
+def short(text: str, report: str) -> str:
+    """`text`, cut to fit, then `Full report: <path>`: at most MESSAGE_LIMIT characters."""
+    tail = f" Full report: {report}" if report else " (no report file could be written)"
+    room = MESSAGE_LIMIT - len(tail)
+    if len(text) > room:
+        text = text[: room - 1].rstrip() + "…"
+    return text + tail
+
+
+def write_report(options: argparse.Namespace, kind: str, body: str) -> str:
+    """Write a message's whole text; return its path ("" when no directory took it). A dry run
+    writes nothing and returns where it would have."""
+    name = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(time.time()))}-{kind}.txt"
+    directories = [Path(options.state).parent / "reports", REPORT_FALLBACK]
+    if getattr(options, "dry_run", False):
+        return str(directories[0] / name)
+    for directory in directories:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_text(body.rstrip("\n") + "\n")
+        except OSError as error:
+            log(f"  cannot write a report in {directory}: {error}")
+            continue
+        prune_reports(directory)
+        return str(directory / name)
+    return ""
+
+
+def prune_reports(directory: Path) -> None:
+    cutoff = time.time() - REPORT_KEEP
+    for entry in directory.glob("*.txt"):
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 # --------------------------------------------------------------------------------- delivery
@@ -679,24 +882,122 @@ def tell_box_health(envoy: Envoy, text: str, options: argparse.Namespace) -> Non
 # ------------------------------------------------------------------------------------- a run
 
 
+def facts_of(record: dict) -> dict:
+    """What a person was told about a crossing, to tell a new fact from a standing one."""
+    return {
+        "credential_ids": list(record.get("credential_ids") or []),
+        "reasons": list(record.get("reasons") or []),
+        "sessions_failing": int(record.get("sessions_failing") or 0),
+    }
+
+
+def news_of(told: dict, now: dict, options: argparse.Namespace) -> str:
+    """What is new since the person was last told, or "" when nothing is: a credential disabled
+    that was not, the sessions' own errors joining a crossing, or twice as many of them."""
+    news = []
+    added = [row for row in now["credential_ids"] if row not in told.get("credential_ids", [])]
+    if added:
+        news.append(f"{len(added)} more credential(s) disabled")
+    before = int(told.get("sessions_failing") or 0)
+    if "transcripts" in now["reasons"] and "transcripts" not in told.get("reasons", []):
+        news.append(f"{now['sessions_failing']} live session(s) now report auth errors")
+    elif before and now["sessions_failing"] >= max(2 * before, options.sessions):
+        news.append(f"sessions reporting auth errors rose from {before} to {now['sessions_failing']}")
+    return "; ".join(news)
+
+
+def tell(
+    record: dict,
+    now: float,
+    options: argparse.Namespace,
+    envoy: Envoy | None,
+    news: str = "",
+    retry: bool = False,
+) -> None:
+    """Ask the person, then tell the box-health role: the alert at the crossing and at each new
+    fact, NOBODY WAS TOLD once for each run of failed asks, and one line when a retried ask
+    finally goes through."""
+    provider = record["provider"]
+    host = socket.gethostname().split(".")[0]
+    text = alert_text(record, now, repeat=bool(news) or retry, news=news)
+    ok, output = tell_person(record, text, options)
+    remember_ask(record, output if ok else "")
+    delivered_before = record.get("delivered", True)
+    record["told"] = now
+    record["delivered"] = ok
+    record["facts"] = facts_of(record)
+    kind = "retry" if retry else ("new-fact" if news else "open")
+    report = write_report(
+        options,
+        f"{kind}-{provider}",
+        f"{text}\n\nDispatch ({'reached' if ok else 'FAILED'}): {output}",
+    )
+    if options.print_alert:
+        print(text)
+    if envoy is None:
+        if options.dry_run:
+            log("  [dry-run] no Envoy message (--no-envoy)")
+        return
+    if not ok and delivered_before:
+        tell_box_health(envoy, delivery_failure_text(record, output, report, options.repeat), options)
+    if retry:
+        if ok:
+            tell_box_health(
+                envoy,
+                short(
+                    f"PERSON ASKED: the Dispatch ask that {host} has no {provider} login went "
+                    f"through on a retry, at {iso(now)} (dispatch://{DISPATCH_ISSUE}).",
+                    report,
+                ),
+                options,
+            )
+        return
+    tell_box_health(envoy, envoy_alert_text(record, now, news, ok, report), options)
+
+
 def run_once(options: argparse.Namespace) -> int:
     now = time.time()
+    started = mark = time.monotonic()
+    deadline = started + EVIDENCE_SECONDS
+    phases: list[str] = []
+
+    def lap(name: str) -> None:
+        nonlocal mark
+        here = time.monotonic()
+        phases.append(f"{name} {here - mark:.1f}s")
+        mark = here
+
     db = Path(options.db)
     rows = credentials(db)
     providers = model_providers(rows)
     down = down_providers(providers)
+    lap("store")
     sessions, unnamed_processes, elsewhere = omp_sessions(Path(options.sessions_store))
+    lap("processes")
     envoy = None if options.dry_run and options.no_envoy else Envoy()
     live = envoy.live_sessions() if envoy is not None else None
     if live is not None:
         known = {session: pid for session, pid in sessions.items() if session in live}
         if known:
             sessions = known
-    failing, errors = failing_sessions(sessions, options.window, now, options.tail_bytes)
+    lap("envoy")
+    cache_path = Path(options.state).parent / TRANSCRIPT_CACHE
+    cache = load_cache(cache_path)
+    paths, how = transcripts_of(sessions, cache, now, deadline)
+    lap("transcripts")
+    failing, errors, recent = failing_sessions(paths, options.window, now, options.tail_bytes, deadline)
+    lap("tails")
+    save_cache(cache_path, cache, set(sessions))
+    lap("cache")
     log(
         f"{len(providers)} model provider(s) in {db}, {len(down)} with no enabled credential; "
         f"{len(sessions) + unnamed_processes} live omp process(es) on this store "
-        f"({unnamed_processes} with no session id), {elsewhere} on another"
+        f"({unnamed_processes} with no session id), {elsewhere} on another; transcripts: "
+        f"{how['held']} held open, {how['known']} known, {how['walked']} walked for, "
+        f"{how['unfound']} not found, {recent} written in the window"
+        + ("; the walk stopped at the budget" if how["walk_cut"] else "")
+        + ("; the evidence stopped at its budget" if time.monotonic() > deadline else "")
+        + f"; {time.monotonic() - started:.1f}s ({', '.join(phases)})"
     )
 
     # A provider is in trouble when its credentials are all disabled, or when enough live
@@ -708,22 +1009,27 @@ def run_once(options: argparse.Namespace) -> int:
         if provider in down:
             reporting |= unnamed
         reason = []
+        reasons = []
         if provider in down:
             reason.append("every credential disabled")
+            reasons.append("credentials")
         if len(reporting) >= options.sessions:
             reason.append(f"{len(reporting)} session(s) reporting auth errors")
+            reasons.append("transcripts")
         if not reason:
             continue
         trouble[provider] = {
             "provider": provider,
             "db": str(db),
             "credentials": credential_lines(down.get(provider, [])),
+            "credential_ids": sorted(row.get("id") or 0 for row in down.get(provider, [])),
             "sessions_failing": len(reporting),
             "errors": errors.get(provider, 0) + (errors.get("", 0) if provider in down else 0),
             "sessions_affected": len(sessions) + unnamed_processes,
             "sessions_elsewhere": elsewhere,
             "window": options.window,
             "reason": ", ".join(reason),
+            "reasons": reasons,
         }
 
     # The state file comes before any alert: without it a standing outage cannot be told from a
@@ -735,8 +1041,14 @@ def run_once(options: argparse.Namespace) -> int:
     except OSError as error:
         message = state_failure_text(str(options.state), error, len(trouble))
         log(message)
-        if envoy is not None:
-            tell_box_health(envoy, message, options)
+        if said_this_episode(options, "state-failure-reported"):
+            log("  already said in this failure episode; no pass has completed since")
+        else:
+            report = write_report(options, "state-failed", message)
+            if envoy is not None:
+                tell_box_health(envoy, short(message, report), options)
+            if not options.dry_run:
+                set_stamp(options, "state-failure-reported", now)
         raise SystemExit(1)
     opened = state.data["open"]
     alerts = 0
@@ -745,41 +1057,41 @@ def run_once(options: argparse.Namespace) -> int:
             record = opened.get(provider)
             if record is None:
                 incident["opened"] = now
-                text = alert_text(incident, now)
                 log(f"CROSSING {provider}: {incident['reason']}")
-                ok, output = tell_person(incident, text, options)
-                remember_ask(incident, output if ok else "")
-                incident["told"] = now
-                if envoy is not None and not ok:
-                    tell_box_health(envoy, delivery_failure_text(incident, output), options)
-                if envoy is not None:
-                    tell_box_health(envoy, text, options)
-                elif options.dry_run:
-                    log("  [dry-run] no Envoy message (--no-envoy)")
+                tell(incident, now, options, envoy)
                 opened[provider] = incident
                 alerts += 1
-                if options.print_alert:
-                    print(text)
                 continue
             record.update(
                 {
                     key: incident[key]
-                    for key in ("credentials", "sessions_failing", "errors", "sessions_affected", "sessions_elsewhere", "reason")
+                    for key in (
+                        "credentials",
+                        "credential_ids",
+                        "sessions_failing",
+                        "errors",
+                        "sessions_affected",
+                        "sessions_elsewhere",
+                        "reason",
+                        "reasons",
+                    )
                 }
             )
-            if now - record.get("told", 0) >= options.repeat:
-                text = alert_text(record, now, repeat=True)
-                log(f"STILL OPEN {provider}: {record['reason']}, {human(now - record.get('opened', now))} on")
-                ok, output = tell_person(record, text, options)
-                remember_ask(record, output if ok else "")
-                record["told"] = now
-                if envoy is not None and not ok:
-                    tell_box_health(envoy, delivery_failure_text(record, output), options)
-                if envoy is not None:
-                    tell_box_health(envoy, text, options)
+            told = record.get("facts")
+            if told is None:
+                # Opened by the previous version, which told the person on a timer: what it last
+                # said is taken as told, so the format change itself is no new fact.
+                record["facts"] = facts_of(record)
+                continue
+            news = news_of(told, facts_of(record), options)
+            if news:
+                log(f"NEW FACT {provider}: {news}, {human(now - record.get('opened', now))} on")
+                tell(record, now, options, envoy, news=news)
                 alerts += 1
-                if options.print_alert:
-                    print(text)
+            elif not record.get("delivered", True) and now - record.get("told", 0) >= options.repeat:
+                log(f"RETRY {provider}: the last ask did not reach Dispatch")
+                tell(record, now, options, envoy, retry=True)
+                alerts += 1
         for provider in [name for name in opened if name not in trouble]:
             record = opened.pop(provider)
             enabled = [row for row in providers.get(provider, []) if not row.get("disabled_cause")]
@@ -790,9 +1102,20 @@ def run_once(options: argparse.Namespace) -> int:
             )
             text = clear_text(record, now, cause)
             log(f"CLEAR {provider}: {cause}")
-            resolve_person(record, text, options)
+            resolved = resolve_person(record, text, options)
+            asks = record.get("asks") or ([record["ask"]] if record.get("ask") else [])
+            report = write_report(
+                options,
+                f"clear-{provider}",
+                f"{text}\n\n"
+                + (
+                    f"Asks resolved ({'all' if resolved else 'NOT all; see the journal'}): {', '.join(asks)}"
+                    if asks
+                    else "No ask was recorded for this crossing."
+                ),
+            )
             if envoy is not None:
-                tell_box_health(envoy, text, options)
+                tell_box_health(envoy, short(text, report), options)
             if options.print_alert:
                 print(text)
         state.save()
@@ -806,14 +1129,71 @@ def run_once(options: argparse.Namespace) -> int:
 
 # A failed pass is news only when no pass has completed for this long: the watch's own budget to
 # reach a person. One pass killed at TimeoutStartSec under IO pressure, with the next one fine,
-# is not (3 of 331 passes on sami-rocqperf on 2026-11-01).
+# is not (3 of 331 passes on sami-rocqperf on 2026-11-01). Past it, one failure episode -- until
+# the next completed pass -- is one message: on 2026-11-02 10:24-10:37Z seven killed passes in a
+# row sent eight identical messages in 13 minutes.
 FAILURE_GRACE = 300.0
-# While passes keep failing past the grace, the report repeats at most this often.
-FAILURE_REPEAT = 1800.0
 
 
 def heartbeat_path(options: argparse.Namespace) -> Path:
     return Path(options.state).parent / "heartbeat"
+
+
+def stamp_paths(options: argparse.Namespace, name: str) -> list[Path]:
+    """Where a "said it" stamp lives: beside the state file, or beside the fallback reports when
+    the state directory is the thing that cannot be written."""
+    return [Path(options.state).parent / name, REPORT_FALLBACK.parent / name]
+
+
+def last_stamp(options: argparse.Namespace, name: str) -> float | None:
+    stamps = []
+    for path in stamp_paths(options, name):
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if stamps else None
+
+
+def set_stamp(options: argparse.Namespace, name: str, now: float) -> None:
+    for path in stamp_paths(options, name):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+            os.utime(path, (now, now))
+            return
+        except OSError as error:
+            log(f"cannot write {path}: {error}")
+
+
+def last_pass_at(options: argparse.Namespace) -> float | None:
+    try:
+        return heartbeat_path(options).stat().st_mtime
+    except OSError:
+        return None
+
+
+def said_this_episode(options: argparse.Namespace, name: str) -> bool:
+    """Whether stamp `name` was set after the last completed pass: one failure episode, from the
+    first failure to the next completed pass, is one message."""
+    said = last_stamp(options, name)
+    last_pass = last_pass_at(options)
+    return said is not None and (last_pass is None or last_pass <= said)
+
+
+def journal_tail(unit: str) -> str:
+    """The unit's last 30 journal lines, for the report; why not, when they cannot be read."""
+    try:
+        done = subprocess.run(
+            ["journalctl", "--user", "-u", unit, "-n", "30", "--no-pager", "-o", "short-iso"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"(journalctl failed: {error})"
+    return done.stdout.strip() or f"(journalctl printed nothing: {done.stderr.strip()[:200]})"
 
 
 def report_failure(options: argparse.Namespace) -> int:
@@ -822,8 +1202,8 @@ def report_failure(options: argparse.Namespace) -> int:
     A pass that dies -- an unwritable state file, a killed run, a python error -- is otherwise
     only a red unit in a journal nobody reads, and the box then has no watch on its logins at
     all. systemd gives the handler the failed unit's result in MONITOR_*. It sends only when
-    the last completed pass is older than FAILURE_GRACE (or there is none), and then at most
-    once per FAILURE_REPEAT.
+    the last completed pass is older than FAILURE_GRACE (or there is none), and then once per
+    failure episode: a later failure with no completed pass since the report is the same fact.
     """
     now = time.time()
     host = socket.gethostname().split(".")[0]
@@ -833,20 +1213,15 @@ def report_failure(options: argparse.Namespace) -> int:
         f"exit code {os.environ.get('MONITOR_EXIT_CODE', '?')}/{os.environ.get('MONITOR_EXIT_STATUS', '?')}"
     )
     heartbeat = heartbeat_path(options)
-    reported = heartbeat.with_name("failure-reported")
-    try:
-        last_pass: float | None = heartbeat.stat().st_mtime
-    except OSError:
-        last_pass = None
+    last_pass = last_pass_at(options)
     if last_pass is not None and now - last_pass < FAILURE_GRACE:
         log(f"{unit} failed ({result}); last pass completed {human(now - last_pass)} ago, not reported")
         return 0
-    try:
-        last_report = reported.stat().st_mtime
-    except OSError:
-        last_report = 0.0
-    if now - last_report < FAILURE_REPEAT:
-        log(f"{unit} failed ({result}); already reported {human(now - last_report)} ago")
+    if said_this_episode(options, "failure-reported"):
+        log(
+            f"{unit} failed ({result}); this failure episode was reported at"
+            f" {iso(last_stamp(options, 'failure-reported'))} and no pass has completed since"
+        )
         return 0
     gap = (
         f"no pass completed for {human(now - last_pass)} (last at {iso(last_pass)})"
@@ -854,22 +1229,32 @@ def report_failure(options: argparse.Namespace) -> int:
         else f"no completed pass on record ({heartbeat} absent)"
     )
     text = (
-        f"{unit} FAILED on {host} ({result}); {gap}. While it does not run, nothing tells a "
-        f"person when this box's omp sessions lose a provider login: on 2026-11-01 that silence "
-        f"was 3 h 45 min and 67 stopped sessions (dispatch://{DISPATCH_ISSUE}). Read it with "
-        f"`systemctl --user status {unit}` and `journalctl --user -u {unit} -n 50`; the watch is "
-        f"{Path(os.path.realpath(__file__))}."
+        f"{unit} FAILED on {host} ({result}); {gap}. Until a pass completes, no person is told "
+        f"when this box's omp sessions lose a provider login (dispatch://{DISPATCH_ISSUE}). "
+        "Said once per failure episode."
     )
-    log(text)
+    report = write_report(
+        options,
+        "failed",
+        "\n".join(
+            [
+                text,
+                "",
+                "On 2026-11-01 that silence was 3 h 45 min and 67 stopped sessions.",
+                f"Read: systemctl --user status {unit}; journalctl --user -u {unit} -n 50",
+                f"The watch: {Path(os.path.realpath(__file__))} (and its .md beside it)",
+                "",
+                f"Last 30 journal lines of {unit}:",
+                journal_tail(unit),
+            ]
+        ),
+    )
+    message = short(text, report)
+    log(message)
     envoy = Envoy()
-    if not envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
-        envoy.send(options.box_health_owner, text)
-    try:
-        reported.parent.mkdir(parents=True, exist_ok=True)
-        reported.touch()
-        os.utime(reported, (now, now))
-    except OSError as error:
-        log(f"cannot write {reported}: {error}")
+    if not envoy.publish(BOX_HEALTH_ROLE_TOPIC, message):
+        envoy.send(options.box_health_owner, message)
+    set_stamp(options, "failure-reported", now)
     return 0
 
 
@@ -891,7 +1276,9 @@ def main() -> int:
     )
     parser.add_argument("--window", type=float, default=300.0, help="how far back a transcript error counts (s)")
     parser.add_argument("--tail-bytes", type=int, default=262144, help="bytes read from the end of a transcript")
-    parser.add_argument("--repeat", type=float, default=1800.0, help="how often an open crossing is said again (s)")
+    parser.add_argument(
+        "--repeat", type=float, default=1800.0, help="how often an ask that did not reach Dispatch is tried again (s)"
+    )
     parser.add_argument("--dispatch-session", default="", help="DISPATCH_SESSION_ID the ask is opened as")
     parser.add_argument("--dispatch-timeout", type=float, default=60.0, help="seconds a dispatch call may take")
     parser.add_argument("--box-health-owner", default=os.environ.get("BOX_HEALTH_OWNER") or SRE)

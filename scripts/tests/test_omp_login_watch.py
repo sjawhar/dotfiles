@@ -141,11 +141,16 @@ class WatchCase(unittest.TestCase):
             "omp_sessions": WATCH.omp_sessions,
             "log": WATCH.log,
         }
+        for name in ("journal_tail", "REPORT_FALLBACK"):
+            if hasattr(WATCH, name):
+                self.restore[name] = getattr(WATCH, name)
         WATCH.Envoy = FakeEnvoy
         WATCH.SESSION_ROOT = self.sessions_root
         WATCH.dispatch_call = self.dispatch_call
         WATCH.omp_sessions = lambda store: (dict(self.live), self.unnamed, self.elsewhere)
         WATCH.log = lambda message: None
+        WATCH.journal_tail = lambda unit: "(the unit's journal, not read in a test)"
+        WATCH.REPORT_FALLBACK = self.tmp / "fallback-reports"
 
     def tearDown(self) -> None:
         for name, value in self.restore.items():
@@ -170,6 +175,12 @@ class WatchCase(unittest.TestCase):
     def every_alert(self) -> list[str]:
         """What left over Envoy across every run of the case, not just the last one."""
         return [message for instance in FakeEnvoy.instances for _, message in instance.published]
+
+    def report_of(self, text: str) -> str:
+        """The report file an Envoy message names in its `Full report: <path>` ending."""
+        self.assertLessEqual(len(text), 600, text)
+        self.assertIn(" Full report: ", text)
+        return Path(text.rsplit(" Full report: ", 1)[1]).read_text()
 
     def store(self, name: str, rows) -> Path:
         path = self.tmp / name
@@ -282,6 +293,7 @@ class NeverReadsTheCredential(WatchCase):
         self.live = {SESSIONS[0]: 101}
         WATCH.run_once(options(self.tmp, db))
         everything = json.dumps(self.calls) + json.dumps(self.alerts())
+        everything += "".join(path.read_text() for path in (self.tmp / "reports").glob("*.txt"))
         self.assertNotIn(SECRET, everything)
         self.assertNotIn("sk-ant", everything)
 
@@ -314,15 +326,28 @@ class OncePerCrossing(WatchCase):
         WATCH.run_once(options(self.tmp, self.db))
         self.assertEqual(len(self.asks()), 1, "three runs, one ask")
 
-    def test_it_is_said_again_after_the_repeat_window(self) -> None:
+    def test_a_standing_outage_is_not_said_again_on_a_timer(self) -> None:
+        """It used to be asked and said again every 30 min with nothing new."""
         WATCH.run_once(options(self.tmp, self.db))
         state = json.loads((self.tmp / "state.json").read_text())
-        state["open"]["anthropic"]["told"] = time.time() - 1801
+        state["open"]["anthropic"]["told"] = time.time() - 3 * 3600
         (self.tmp / "state.json").write_text(json.dumps(state))
         WATCH.run_once(options(self.tmp, self.db))
+        self.assertEqual(len(self.asks()), 1)
+        self.assertEqual(self.alerts(), [], "no Envoy message either")
+
+    def test_a_new_fact_is_said_again(self) -> None:
+        WATCH.run_once(options(self.tmp, self.db))
+        worse = self.store("worse.db", [("anthropic", CAUSE), ("anthropic", CAUSE)])
+        WATCH.run_once(options(self.tmp, worse, sessions_store=str(self.db)))
         self.assertEqual(len(self.asks()), 2)
         question = self.asks()[1][self.asks()[1].index("--question") + 1]
         self.assertIn("still have no anthropic login", question)
+        self.assertIn("New since the last ask: 1 more credential(s) disabled.", question)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertTrue(self.alerts()[0].startswith("LOGIN STILL LOST on "))
+        WATCH.run_once(options(self.tmp, worse, sessions_store=str(self.db)))
+        self.assertEqual(len(self.asks()), 2, "the same fact again is not news")
 
     def test_a_login_clears_it_and_resolves_the_ask(self) -> None:
         WATCH.run_once(options(self.tmp, self.db))
@@ -356,23 +381,20 @@ class EveryAskOfACrossingIsClosed(WatchCase):
         self.db = self.store("down.db", [("anthropic", CAUSE)])
         self.live = {SESSIONS[0]: 101}
 
-    def age_the_crossing(self) -> None:
-        state = json.loads((self.tmp / "state.json").read_text())
-        state["open"]["anthropic"]["told"] = time.time() - 1801
-        (self.tmp / "state.json").write_text(json.dumps(state))
+    def a_new_fact(self) -> Path:
+        """A second credential of the provider disabled: the fact a repeat ask now needs."""
+        return self.store("worse.db", [("anthropic", CAUSE), ("anthropic", CAUSE)])
 
     def test_a_repeat_ask_is_recorded_beside_the_first(self) -> None:
         WATCH.run_once(options(self.tmp, self.db))
-        self.age_the_crossing()
-        WATCH.run_once(options(self.tmp, self.db))
+        WATCH.run_once(options(self.tmp, self.a_new_fact(), sessions_store=str(self.db)))
         record = json.loads((self.tmp / "state.json").read_text())["open"]["anthropic"]
         self.assertEqual(record["asks"], ASK_IDS[:2])
         self.assertEqual(record["ask"], ASK_IDS[0], "the previous format still names the first ask")
 
     def test_the_clear_resolves_every_ask_the_crossing_opened(self) -> None:
         WATCH.run_once(options(self.tmp, self.db))
-        self.age_the_crossing()
-        WATCH.run_once(options(self.tmp, self.db))
+        WATCH.run_once(options(self.tmp, self.a_new_fact(), sessions_store=str(self.db)))
         healthy = self.store("up.db", [("anthropic", CAUSE), ("anthropic", None)])
         WATCH.run_once(options(self.tmp, healthy, sessions_store=str(self.db)))
         resolved = [call[2] for call in self.calls if call and call[0] == "resolve-ask"]
@@ -406,11 +428,12 @@ class EveryAskOfACrossingIsClosed(WatchCase):
         )
         WATCH.run_once(options(self.tmp, self.db))
         record = json.loads((self.tmp / "state.json").read_text())["open"]["anthropic"]
-        self.assertEqual(record["asks"], [ASK_IDS[4], ASK_IDS[0]])
+        self.assertEqual(record["ask"], ASK_IDS[4], "what it last said is taken as told")
+        self.assertEqual(self.asks(), [])
         healthy = self.store("up.db", [("anthropic", None)])
         WATCH.run_once(options(self.tmp, healthy, sessions_store=str(self.db)))
         resolved = [call[2] for call in self.calls if call and call[0] == "resolve-ask"]
-        self.assertEqual(resolved, [ASK_IDS[4], ASK_IDS[0]])
+        self.assertEqual(resolved, [ASK_IDS[4]])
 
 
 class WhenNobodyCanBeTold(WatchCase):
@@ -438,15 +461,41 @@ class WhenNobodyCanBeTold(WatchCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("no DISPATCH_SESSION_ID", failures[0])
 
-    def test_a_repeat_that_cannot_be_delivered_is_said_too(self) -> None:
+    def test_a_new_fact_that_cannot_be_delivered_is_said_too(self) -> None:
+        WATCH.run_once(options(self.tmp, self.db))
+        worse = self.store("worse.db", [("anthropic", CAUSE), ("anthropic", CAUSE)])
+        self.answer = (False, "500 DOC_SERVICE_UNAVAILABLE")
+        WATCH.run_once(options(self.tmp, worse, sessions_store=str(self.db)))
+        failures = [text for text in self.every_alert() if "NOBODY WAS TOLD" in text]
+        self.assertEqual(len(failures), 1)
+
+    def test_a_failed_ask_is_tried_again_without_saying_it_again(self) -> None:
+        self.answer = (False, "500 DOC_SERVICE_UNAVAILABLE")
+        WATCH.run_once(options(self.tmp, self.db))
+        self.assertEqual(len(self.every_alert()), 2, "NOBODY WAS TOLD and the alert")
+        WATCH.run_once(options(self.tmp, self.db))
+        self.assertEqual(len(self.asks()), 1, "inside --repeat nothing is tried")
+        state = json.loads((self.tmp / "state.json").read_text())
+        state["open"]["anthropic"]["told"] = time.time() - 1801
+        (self.tmp / "state.json").write_text(json.dumps(state))
+        WATCH.run_once(options(self.tmp, self.db))
+        self.assertEqual(len(self.asks()), 2, "the ask is tried again")
+        self.assertEqual(len(self.every_alert()), 2, "a second failure of the same ask is no news")
+        state = json.loads((self.tmp / "state.json").read_text())
+        state["open"]["anthropic"]["told"] = time.time() - 1801
+        (self.tmp / "state.json").write_text(json.dumps(state))
+        self.answer = None
+        WATCH.run_once(options(self.tmp, self.db))
+        self.assertEqual(len(self.asks()), 3)
+        news = self.every_alert()[2:]
+        self.assertEqual(len(news), 1)
+        self.assertTrue(news[0].startswith("PERSON ASKED: "))
         WATCH.run_once(options(self.tmp, self.db))
         state = json.loads((self.tmp / "state.json").read_text())
         state["open"]["anthropic"]["told"] = time.time() - 1801
         (self.tmp / "state.json").write_text(json.dumps(state))
-        self.answer = (False, "500 DOC_SERVICE_UNAVAILABLE")
         WATCH.run_once(options(self.tmp, self.db))
-        failures = [text for text in self.every_alert() if "NOBODY WAS TOLD" in text]
-        self.assertEqual(len(failures), 1)
+        self.assertEqual(len(self.asks()), 3, "a delivered ask is not repeated")
 
     def test_a_state_file_that_cannot_be_opened_is_said_and_exits_non_zero(self) -> None:
         blocked = self.tmp / "blocked"
@@ -457,6 +506,16 @@ class WhenNobodyCanBeTold(WatchCase):
         failures = [text for text in self.alerts() if "cannot open its state file" in text]
         self.assertEqual(len(failures), 1)
         self.assertEqual(self.calls, [], "nothing was sent to a person, which is what it says")
+
+    def test_a_state_file_that_stays_unopenable_is_said_once(self) -> None:
+        blocked = self.tmp / "blocked"
+        blocked.write_text("a file where the state directory would be")
+        for _ in range(3):
+            with self.assertRaises(SystemExit):
+                WATCH.run_once(options(self.tmp, self.db, state=str(blocked / "state.json")))
+        failures = [text for text in self.every_alert() if "cannot open its state file" in text]
+        self.assertEqual(len(failures), 1, "every 60 s the same fact: said once")
+        self.report_of(failures[0])
 
 
 class WhenTheWatchItselfDoesNotRun(WatchCase):
@@ -514,20 +573,138 @@ class AFailedPassIsReportedOnlyWhenTheWatchIsLate(WatchCase):
         self.good_pass(60)
         self.assertEqual(self.failed_pass(), [])
 
-    def test_a_failure_400_s_after_sends_once_with_the_gap_then_repeats_at_30_min(self) -> None:
+    def test_one_failure_episode_is_one_message(self) -> None:
+        """2026-11-02 10:24-10:37Z: seven killed passes in a row sent eight identical messages."""
         self.good_pass(400)
         sent = self.failed_pass()
         self.assertEqual(len(sent), 1)
         self.assertIn("no pass completed for 6 min 40 s", sent[0])
-        self.now += 120
-        self.assertEqual(self.failed_pass(), [], "a second failure 2 min later repeats nothing")
-        self.now += 29 * 60
-        self.assertEqual(len(self.failed_pass()), 1, "31 min after the first report it says it again")
+        for _ in range(8):
+            self.now += 120
+            self.assertEqual(self.failed_pass(), [], "a killed pass every 2 min is the same episode")
+        self.now += 3 * 3600
+        self.assertEqual(self.failed_pass(), [], "hours on, with no pass completed, still the same")
+
+    def test_a_completed_pass_ends_the_episode(self) -> None:
+        self.good_pass(400)
+        self.assertEqual(len(self.failed_pass()), 1)
+        self.now += 600
+        self.good_pass(0)
+        self.now += 400
+        self.assertEqual(len(self.failed_pass()), 1, "a failure after a completed pass is new")
 
     def test_no_heartbeat_at_all_sends(self) -> None:
         sent = self.failed_pass()
         self.assertEqual(len(sent), 1)
         self.assertIn("no completed pass on record", sent[0])
+
+
+class EveryEnvoyMessage(WatchCase):
+    """At most 600 characters, ending with the report file that holds the whole text."""
+
+    def test_every_message_is_at_most_600_chars_and_names_its_report(self) -> None:
+        cause = CAUSE + " " + "x" * 900
+        db = self.store("many.db", [("anthropic", cause)] * 6)
+        self.live = {session: 100 + index for index, session in enumerate(SESSIONS)}
+        self.answer = (False, "500 " + "E" * 500)
+        WATCH.run_once(options(self.tmp, db))
+        state = json.loads((self.tmp / "state.json").read_text())
+        state["open"]["anthropic"]["told"] = time.time() - 1801
+        (self.tmp / "state.json").write_text(json.dumps(state))
+        self.answer = None
+        WATCH.run_once(options(self.tmp, db))
+        worse = self.store("more.db", [("anthropic", cause)] * 7)
+        WATCH.run_once(options(self.tmp, worse, sessions_store=str(db)))
+        healthy = self.store("ok.db", [("anthropic", None)])
+        WATCH.run_once(options(self.tmp, healthy, sessions_store=str(db)))
+        blocked = self.tmp / "blocked"
+        blocked.write_text("a file where the state directory would be")
+        with self.assertRaises(SystemExit):
+            WATCH.run_once(options(self.tmp, db, state=str(blocked / "state.json")))
+        stale = time.time() - 400
+        os.utime(self.tmp / "heartbeat", (stale, stale))
+        WATCH.report_failure(options(self.tmp, db))
+        sent = self.every_alert()
+        for start in (
+            "NOBODY WAS TOLD",
+            "LOGIN LOST",
+            "PERSON ASKED",
+            "LOGIN STILL LOST",
+            "The anthropic login on",
+            "omp-login-watch cannot open its state file",
+            "omp-login-watch.service FAILED",
+        ):
+            self.assertEqual(sum(1 for text in sent if text.startswith(start)), 1, start)
+        self.assertEqual(len(sent), 7)
+        for text in sent:
+            self.report_of(text)
+        self.assertIn("x" * 900, self.report_of(sent[1]), "the whole cause is in the report")
+
+
+class FindingTheTranscripts(WatchCase):
+    """The walk of ~/.omp/agent/sessions (1,655 directories) was the step that killed passes in
+    the IO storms of 2026-11-02/03; a session's transcript is looked for there once."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.walks: list[set] = []
+        real = WATCH.walk_for
+        self.restore["walk_for"] = real
+
+        def counted(wanted, deadline):
+            self.walks.append(set(wanted))
+            return real(wanted, deadline)
+
+        WATCH.walk_for = counted
+
+    def test_a_transcript_found_once_is_not_walked_for_again(self) -> None:
+        db = self.store("live.db", [("anthropic", None)])
+        self.live = {session: 100 + index for index, session in enumerate(SESSIONS)}
+        for index, session in enumerate(SESSIONS):
+            transcript(
+                self.sessions_root / "-src-project",
+                session,
+                2 if index < 3 else 0,
+                "No API key for provider: anthropic",
+            )
+        WATCH.run_once(options(self.tmp, db))
+        self.assertEqual(len(self.asks()), 1, "three sessions report errors: a crossing")
+        self.assertEqual(self.walks, [set(SESSIONS)])
+        WATCH.run_once(options(self.tmp, db))
+        self.assertEqual(len(self.walks), 1, "the second pass reads the cache, not the tree")
+        self.assertIn("anthropic", json.loads((self.tmp / "state.json").read_text())["open"])
+        cache = json.loads((self.tmp / "transcripts.json").read_text())
+        self.assertEqual(sorted(cache["paths"]), sorted(SESSIONS))
+
+    def test_a_session_the_walk_did_not_find_waits_10_min(self) -> None:
+        db = self.store("live.db", [("anthropic", None)])
+        self.live = {SESSIONS[0]: 100}
+        WATCH.run_once(options(self.tmp, db))
+        WATCH.run_once(options(self.tmp, db))
+        self.assertEqual(len(self.walks), 1)
+        cache = json.loads((self.tmp / "transcripts.json").read_text())
+        cache["missed"][SESSIONS[0]] = time.time() - 601
+        (self.tmp / "transcripts.json").write_text(json.dumps(cache))
+        WATCH.run_once(options(self.tmp, db))
+        self.assertEqual(len(self.walks), 2)
+
+    def test_the_walk_stops_at_its_deadline(self) -> None:
+        transcript(self.sessions_root / "-src-project", SESSIONS[0], 0, "x")
+        self.assertEqual(WATCH.walk_for({SESSIONS[0]}, time.monotonic() - 1), ({}, False))
+
+    def test_the_transcript_an_omp_holds_open_needs_no_walk(self) -> None:
+        path = transcript(self.sessions_root / "-src-held", SESSIONS[0], 0, "x")
+        with path.open():
+            self.assertEqual(WATCH.held_transcript(os.getpid(), SESSIONS[0]), str(path.resolve()))
+            db = self.store("live.db", [("anthropic", None)])
+            self.live = {SESSIONS[0]: os.getpid()}
+            logged: list[str] = []
+            WATCH.log = logged.append
+            WATCH.run_once(options(self.tmp, db))
+        self.assertEqual(self.walks, [])
+        summary = [line for line in logged if "transcripts:" in line][0]
+        self.assertIn("1 held open", summary)
+        self.assertRegex(summary, r"\(store [0-9.]+s, processes [0-9.]+s, envoy [0-9.]+s, transcripts")
 
 
 class TheUnitSaysWhenItDidNotRun(unittest.TestCase):

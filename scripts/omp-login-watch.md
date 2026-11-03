@@ -42,9 +42,38 @@ died the same way on 2026-10-25 at 22:15:38Z, so the condition recurs
    `OAuth token refresh failed for provider X`, `invalid_grant` and `authentication_error`.
    `--sessions` distinct live sessions (default 3) inside the window is a crossing on its own,
    which catches a provider whose credential still looks enabled while every call is refused.
-5. Alerts once per crossing, repeats every `--repeat` (default 30 min) while it is open, and
-   clears when the provider has an enabled credential again and the transcripts are quiet. The
-   crossing keeps **every** ask it opened, and the clear resolves each of them.
+5. Alerts once per crossing and again only on a **new fact**: another credential of the
+   provider disabled, the sessions' own errors joining a crossing the store opened, or twice as
+   many sessions reporting them. It clears when the provider has an enabled credential again
+   and the transcripts are quiet. The crossing keeps **every** ask it opened, and the clear
+   resolves each of them.
+
+### Finding the transcripts without walking the session tree
+
+A pass used to list all of `~/.omp/agent/sessions` (1,655 directories on 2026-11-03) to find
+the transcripts written in the window. That walk is the step that killed passes: 13 of 1,819
+passes in the 40 h to 2026-11-03 01:50Z hit `TimeoutStartSec=120`, all in IO storms (10:23-10:37Z
+on 11-02 at io some 87-96 % with 776 tasks blocked; 00:29-00:35Z on 11-03). In 00:27-00:38Z the
+three watches that walk that tree (this one, envoy-role-holder-watch, omp-root-hang-watch) had
+12 runs killed, while omp-memory-watch, which reads the same processes' `/proc` entries and no
+session directory, finished all 21 of its runs in 4-14 s. Killed passes printed nothing; the
+passes that finished took 6 s at p50, 41 s at p95 and 79 s at p99 with 1.2 s of CPU, so they
+were waiting, not working.
+
+Now each live session's transcript is, in order: the `.jsonl` its omp holds open
+(`/proc/<pid>/fd`, in-kernel readlinks, 31 of 35 sessions on 2026-11-03), the path found on an
+earlier pass (`transcripts.json` beside the state file), or, for a session known neither way, a
+walk that stops once it has found them all. A session the whole walk did not find is not walked
+for again for 10 minutes. The processes, Envoy, the transcripts and their tails share a 30 s
+budget per pass, so a pass always reaches its decision, its state and its heartbeat. Measured at
+load 250 on 2026-11-03 at the unit's `Nice=15`: 3.7 s for a pass that walked for 4 new sessions,
+then 0.6-2.6 s; the old walk alone took 0.1-2.2 s at that load. Each pass logs its seconds per
+phase (`store, processes, envoy, transcripts, tails, cache`) and how each transcript was found,
+so the next slow pass names its slow step.
+
+What it gives up: a session whose omp does not hold its transcript open and that moved to a new
+transcript file keeps being read at its old path, so its errors count only once its new file is
+found by the walk (when the old path is gone) or held open.
 
 Only `errorMessage` counts, never the same words elsewhere in a transcript. Measured on
 2026-11-01 at 16:38Z, with the login working: matching any line gave 18 "failing" sessions,
@@ -57,16 +86,28 @@ the turn omp could not send (`"stopReason":"error","errorMessage":"No API key fo
 | --- | --- | --- |
 | **A person** | `dispatch ask` on dispatch://INFRA-387, urgency `blocking` | Only Sami can log in again. The ask opens inside a minute of the crossing and is resolved when the login comes back. A refused ask falls back to `dispatch message` on the same issue. |
 | Agents | Envoy publish to `notifications.role.lead-box-health`, else a direct send to the box-health owner | The sessions that must stop working and wait |
-| Agents, when the human path is down | the same publish, with `NOBODY WAS TOLD …` and the CLI's own error | The ask was refused and the message after it was refused too, or the unit has no `DISPATCH_SESSION_ID` to act as. The alert still follows it, and the ask is tried again at the next repeat. |
+| Agents, when the human path is down | the same publish, `NOBODY WAS TOLD …` and the CLI's own error | The ask was refused and the message after it was refused too, or the unit has no `DISPATCH_SESSION_ID` to act as. Said once until an ask goes through; the ask is tried again every `--repeat` (30 min), and the one that goes through is one `PERSON ASKED:` line. |
 | Agents, when the watch cannot run | `omp-login-watch-failed.service`, the unit's `OnFailure=`, running `omp-login-watch --report-failure` | A pass that dies -- an unwritable state file, a killed run, a python error -- sends nothing, and the box then has no watch at all. The report names the unit, systemd's result and how long since the last completed pass. |
 
+Every Envoy message is at most 600 characters and ends with `Full report: <path>`, a file in
+`reports/` beside the state file (kept 7 days) with the whole text: the full alert as the
+person reads it, the Dispatch result, the asks a clear resolved, or the unit's last 30 journal
+lines. When the state directory is what cannot be written, the report goes to
+`$TMPDIR/omp-login-watch/reports/`. The Dispatch ask itself keeps the whole text.
+
 Each completed pass touches `heartbeat` beside the state file. `--report-failure` sends only when
-that heartbeat is older than 300 s or absent, and then at most once per 1800 s while passes keep
-failing (stamp: `failure-reported` in the same directory); a failure inside 300 s is only logged.
-Why: 300 s is the watch's own budget to reach a person, so one late pass loses nothing. Under IO
-pressure of 80-90 % on sami-rocqperf, 3 of 331 passes in 6 h hit `TimeoutStartSec=120` and the
-next pass succeeded each time; each had sent a FAILED message. A unit with no completed run over
-a longer window is unit-health-watch's report.
+that heartbeat is older than 300 s or absent, and then **once per failure episode**: a failure
+after the report, with no completed pass since, is the same fact and is only logged (stamp:
+`failure-reported` in the same directory). The next completed pass ends the episode; it sends
+nothing, so a reader sees the recovery in `systemctl --user status omp-login-watch`. Why: 300 s
+is the watch's own budget to reach a person, so one late pass loses nothing. On 2026-11-02
+10:24-10:37Z, before the 300 s grace, seven killed passes in a row sent eight identical messages
+in 13 minutes. Replayed over the journal's 13 failed passes of 2026-11-02 09:50Z to 11-03 02:00Z,
+the grace alone sends 2 (10:29Z and 00:36Z; the kills at 18:18Z, 22:15Z and 22:55Z came 122-224 s
+after a completed pass); this rule sends the same 2. It differs in an episode longer than
+30 min, which the grace's 30-min repeat said again and again with nothing new, and in a second
+episode inside 30 min of the first, which that repeat did not say at all. Expected: about 1 a
+day (from 7), and fewer once passes stop dying.
 
 Both run from a systemd user unit with **no model call**: the dispatch CLI is a bun program
 that needs `DISPATCH_HOST`, a `DISPATCH_SESSION_ID` (the unit's drop-in, written once per
@@ -91,15 +132,18 @@ A watch that fails quietly is the outage it exists to end. Each way this one can
 reaches the box-health role, and nothing here is only a journal line:
 
 - **The ask and its fallback message both fail**, or the CLI has no identity to act as: the
-  crossing is still recorded, so the next repeat tries the ask again, and `NOBODY WAS TOLD …`
-  goes to the box-health role with the CLI's error in it, because a person then has to be
+  crossing is still recorded, so the ask is tried again every `--repeat`, and `NOBODY WAS TOLD …`
+  goes to the box-health role once with the CLI's error in it, because a person then has to be
   reached by hand.
 - **The state file cannot be opened**: the pass sends no alert at all, since without that file
   it cannot tell a standing outage from a new one and would repeat every 60 s. It says that
-  over Envoy and exits 1, which fires the `OnFailure` handler.
+  over Envoy once per failure episode (stamp `state-failure-reported`, beside the state file or,
+  when that directory cannot be written, in `$TMPDIR/omp-login-watch/`) and exits 1, which fires
+  the `OnFailure` handler.
 - **The pass dies any other way**: systemd runs `omp-login-watch-failed.service`, which posts
-  one Envoy message naming the unit, `MONITOR_SERVICE_RESULT` and the exit status. It uses no
-  dispatch CLI, because a watch failing on Dispatch must still be able to say so.
+  one Envoy message per failure episode naming the unit, `MONITOR_SERVICE_RESULT` and the exit
+  status. It uses no dispatch CLI, because a watch failing on Dispatch must still be able to say
+  so.
 
 Measured on 2026-11-01 at 22:35:44Z against a local listener: the handler posts
 `POST /v1/messages/publish` to `notifications.role.lead-box-health` and stops there; a listener

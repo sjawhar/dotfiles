@@ -6,7 +6,8 @@ Documentation=file:%h/.dotfiles/scripts/omp-login-watch.md
 Type=oneshot
 Nice=15
 IOSchedulingClass=idle
-# One Envoy POST. It must not wait behind the box's load the way a pass may.
+# At most one Envoy POST per failure episode, and the unit's last 30 journal lines (20 s at most)
+# for its report file. It must not wait behind the box's load the way a pass may.
 TimeoutStartSec=60
 # No dispatch CLI here: the failing watch may be failing because it cannot reach Dispatch, and
 # the box-health role is the path that needs nothing of that. systemd hands this unit the

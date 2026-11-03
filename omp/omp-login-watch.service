@@ -12,9 +12,11 @@ Type=oneshot
 # watch that competes with the sessions it watches is worse than one that answers later.
 Nice=15
 IOSchedulingClass=idle
-# One pass is a read-only sqlite read, a /proc walk and the tails of the transcripts written in
-# the last five minutes: 4-15 s at load 140 with 90 omp processes. A run that cannot finish is
-# killed, so runs never pile up on the 60 s period. The dispatch CLI gets 60 s of that budget.
+# One pass is a read-only sqlite read, a /proc read of the omp processes, one Envoy GET and the
+# tails of the transcripts written in the last five minutes, found from the files the sessions
+# hold open and a cache, not a walk of the session tree: 0.6-3.7 s at load 250 with 51 omp
+# processes (2026-11-03). The evidence stops at 30 s whatever the box does. A run that cannot
+# finish is killed, so runs never pile up on the 60 s period. The dispatch CLI gets 60 s of it.
 TimeoutStartSec=120
 # The dispatch CLI is how this watch reaches a person, and it is the only alert path here that
 # needs an environment: bun on PATH, the host it belongs to, and a session id to act as. The id
