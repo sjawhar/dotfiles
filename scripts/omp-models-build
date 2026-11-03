@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# omp-models-build -- write the models.yml omp reads: omp/models.yml with the machine's gitignored
+# omp/models.local.yml merged over it (omp/AGENTS.md, "models.yml"). installers/omp.sh runs it, and so does
+# every writer of a key file named below. Usage: omp-models-build [OUT], OUT ~/.omp/agent/models.yml by default.
+#
+# A provider in models.local.yml may give `apiKeyFile: <path>` in place of `apiKey`. The output then holds that
+# file's contents as a literal `apiKey`, so omp gets the key without starting a process. omp starts a Bun
+# child-subreaper process and `/bin/sh` for every `!command` apiKey, with a fixed 10 s limit
+# (resolve-config-value.ts). On sami-rocqperf at load 350-450 that start failed in 46 omp processes on 2026-11-02
+# and 2026-11-03 ("The apiKey command for provider ... produced no key"). It failed also when the command was only a
+# shell builtin `read`. Each failure sent the turn to its fallback model.
+# Use `apiKeyFile` only for a key that changes rarely, because a running omp keeps the value it read at start. The
+# file's writer must run this script after each change (scripts/ossv-box-gateway-key does). When the file is missing
+# or empty, the provider gets a `!` command that reads the file, so omp can still get the key after the writer runs.
+# The output holds keys, so it is written mode 0600.
+set -euo pipefail
+dot="${DOTFILES_DIR:-$HOME/.dotfiles}"
+out="${1:-${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml}"
+umask 077
+tmp="$out.new.$$"
+trap 'rm -f "$tmp"' EXIT
+if [ -f "$dot/omp/models.local.yml" ]; then
+    yq eval-all '. as $item ireduce ({}; . * $item)' "$dot/omp/models.yml" "$dot/omp/models.local.yml" > "$tmp"
+else
+    cp "$dot/omp/models.yml" "$tmp"
+fi
+# The key reaches yq through load_str, so it is never on a command line or in this shell.
+yq '(.providers // {}) | to_entries | .[] | select(.value.apiKeyFile != null) | .key + "\t" + .value.apiKeyFile' "$tmp" |
+    while IFS=$'\t' read -r provider file; do
+        if [ -s "$file" ]; then
+            P="$provider" F="$file" yq -i \
+                '.providers[strenv(P)].apiKey = (load_str(strenv(F)) | trim) | del(.providers[strenv(P)].apiKeyFile)' "$tmp"
+        else
+            # shellcheck disable=SC2016 # the command is for omp's /bin/sh, not this one
+            P="$provider" C="!IFS= read -r k < '$file' || [ -n \"\$k\" ]; printf %s \"\$k\"" yq -i \
+                '.providers[strenv(P)].apiKey = strenv(C) | del(.providers[strenv(P)].apiKeyFile)' "$tmp"
+            echo "omp-models-build: $file is missing or empty; provider $provider reads it with a command" >&2
+        fi
+    done
+chmod 600 "$tmp"
+if cmp -s "$tmp" "$out"; then
+    chmod 600 "$out"
+else
+    mv "$tmp" "$out"
+fi

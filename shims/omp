@@ -188,9 +188,10 @@ if [[ -n "$profile" ]]; then
             ln -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" "$root/profiles/$profile/agent/envoy.json"
         exec 9>&-
         models_out="$root/profiles/$profile/agent/models.yml"
-        yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" \
-            > "$models_out.new.$$"
-        if cmp -s "$models_out.new.$$" "$models_out"; then rm -f "$models_out.new.$$"; else mv "$models_out.new.$$" "$models_out"; fi
+        # 0600: the default's models.yml can hold literal keys (scripts/omp-models-build, `apiKeyFile`).
+        (umask 077 && yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" \
+            > "$models_out.new.$$")
+        if cmp -s "$models_out.new.$$" "$models_out"; then rm -f "$models_out.new.$$"; chmod 600 "$models_out"; else mv "$models_out.new.$$" "$models_out"; fi
     else
         mirror_links "$root" "$root/profiles/$profile"
         mirror_links "$root/agent" "$root/profiles/$profile/agent"

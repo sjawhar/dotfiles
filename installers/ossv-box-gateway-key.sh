@@ -10,9 +10,10 @@
 # (installers/ossv-box-gateway-token.sh, dispatch://INFRA-993). On any other
 # machine the unit would fail every run.
 #
-# Why this exists: omp/models.local.yml routes this box's Claude traffic through
-# the gateway and reads the key with `!cat`, so a session that starts without
-# the file reaches no model. The file is in tmpfs and does not survive a reboot.
+# Why this exists: omp/models.local.yml routes this box's Claude and Sol traffic
+# through the gateway and names the key file as `apiKeyFile`; each run writes the
+# file, which is in tmpfs and does not survive a reboot, and then writes the key
+# into ~/.omp/agent/models.yml (scripts/omp-models-build).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

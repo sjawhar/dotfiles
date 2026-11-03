@@ -25,26 +25,17 @@ if [ -L "${OMP_AGENT_DIR}/config.yml" ]; then
 fi
 [ -e "${OMP_AGENT_DIR}/config.yml" ] || echo '{}' > "${OMP_AGENT_DIR}/config.yml"
 # models.yml is universal catalog patches; a machine's own provider routing
-# (gateway baseUrl, `!command` apiKey) goes in the gitignored
-# omp/models.local.yml and is merged over it here, straight into the file omp
-# reads. A real file, not a link: no committed file holds the merged content,
-# and shims/omp never mirrors models.yml into a named profile (a client profile
-# must not inherit the default's gateway routing).
+# (gateway baseUrl, apiKey) goes in the gitignored omp/models.local.yml, and
+# scripts/omp-models-build merges it over the patches straight into the file omp
+# reads, writing an `apiKeyFile` provider's key as a literal. A real file, not
+# a link: no committed file holds the merged content, and shims/omp never
+# mirrors models.yml into a named profile (a client profile must not inherit
+# the default's gateway routing).
 MODELS_OUT="${OMP_AGENT_DIR}/models.yml"
 # Converge the earlier layout: a link to a built copy inside the repo.
 [ -L "$MODELS_OUT" ] && rm "$MODELS_OUT"
 rm -f "${DOTFILES_DIR}/omp/models.generated.yml"
-if [ -f "${DOTFILES_DIR}/omp/models.local.yml" ]; then
-    yq eval-all '. as $item ireduce ({}; . * $item)' \
-        "${DOTFILES_DIR}/omp/models.yml" "${DOTFILES_DIR}/omp/models.local.yml" > "${MODELS_OUT}.new"
-else
-    cp "${DOTFILES_DIR}/omp/models.yml" "${MODELS_OUT}.new"
-fi
-if cmp -s "${MODELS_OUT}.new" "$MODELS_OUT" 2>/dev/null; then
-    rm -f "${MODELS_OUT}.new"
-else
-    mv "${MODELS_OUT}.new" "$MODELS_OUT"
-fi
+DOTFILES_DIR="$DOTFILES_DIR" "${DOTFILES_DIR}/scripts/omp-models-build" "$MODELS_OUT"
 ensure_link "${DOTFILES_DIR}/omp/mcp.json"    "${OMP_AGENT_DIR}/mcp.json"
 ensure_link "${DOTFILES_DIR}/omp/lsp.json"    "${OMP_AGENT_DIR}/lsp.json"
 ensure_link "${DOTFILES_DIR}/omp/WATCHDOG.md" "${OMP_AGENT_DIR}/WATCHDOG.md"

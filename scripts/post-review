@@ -24,6 +24,10 @@ in the omp session running this command, read from its transcript (PI_SESSION_FI
 in each session's and subagent's shell). A session posting a verdict another session wrote passes
 that session's model with `--model`, since its own transcript names its own model.
 
+Write the reviewer's prompt as a check for correctness and data loss, not as an attack: OpenAI
+refused a GPT-6.1 Sol review whose prompt said "try to break it" ("flagged for possible
+cybersecurity risk", 2026-11-03 12:58Z, ~/.omp/logs/omp.2026-11-03.34578.log).
+
 Usage:
   post-review [--model <id>] [--dry-run] <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT
               <body-file> <owner/repo>
