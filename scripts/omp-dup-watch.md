@@ -51,7 +51,7 @@ for the next way it happens.
    | --- | --- |
    | the transcript it holds open **for writing** | `…/sessions/…/<stamp>Z_<id>.jsonl` in its `fd` table whose `fdinfo` flags carry `O_WRONLY` or `O_RDWR`, newest first; a transcript the sweep deleted still names the session |
    | this watch's own last run | the same pid and start time, seen holding that transcript: omp opens the file only to write, so an idle session closes nothing but keeps running |
-   | its own command line | `--resume`/`--restore`/`-r` with a transcript path, a full id, or the id prefix omp accepts |
+   | its own command line | the argument of a `--resume`/`--restore`/`-r` WORD of its argv, read from its last path component: a transcript's file name (`…/<stamp>Z_<parent>/<stamp>Z_<id>.jsonl` is `<id>`), a full id, or the id prefix omp accepts. A flag inside another argument does not count: at 2026-11-03 23:15Z two `omp -p` reviewers whose one prompt argument held `git ls-tree -r f1006fe8` read as one session "f1006fe8" run twice |
 
    Only a writer runs a transcript. omp's session writer holds its own file `O_WRONLY|O_APPEND`
    (flags `02102001` on every writer here on 2026-11-03), and an omp opens ANOTHER session's
@@ -63,7 +63,9 @@ for the next way it happens.
    The id must come from the file **name**, at any depth: three live omps here resume
    `…/<bucket>/<stamp>_<other id>/<stamp>_<id>.jsonl`, while a subagent's transcript
    (`…/<stamp>_<id>/ArityLane.jsonl`) names no session — two subagents of one session must never
-   read as two copies of it. A prefix is matched to a full id only when exactly one id fits.
+   read as two copies of it. Ids are compared in full. A prefix is matched to a full id only when
+   exactly one id fits; otherwise it names no session (UUIDv7 ids of sessions started in the same
+   second share their first 8 hex).
 5. **Envoy**: `GET /v1/sessions`, kept to the rows whose `host` is this machine or one of its
    boxes.
 

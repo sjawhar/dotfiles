@@ -87,13 +87,17 @@ after the chief moved, reached the chief.
 | 2 | environment | `OMP_SESSION_ID` (live here), else the omp pid of `AGENT_SESSION_SCRATCH` (`session-tmp/<omp pid>-XXXXXXXX`), from `/proc/<pid>/environ` at the first sample or while earlyoom's pid still lives. omp's shared broker runs tools for many sessions, and each tool's environment names its own session. In an `omp-broker-<16 hex>[-N].scope` an environment equal to the broker's own is not used: a process the broker runs for nobody (a headless browser) carries the broker's environment, which names the session that started the broker, not an owner. With no broker left in the scope to compare, no environment there is used. |
 | 2 | the other processes of its cgroup | when the process's own environment is unreadable: the one live-here session every other readable process of the same cgroup names. Not in a broker scope. |
 | 2 | session-tmp path | `session-tmp/<pid>-XXXXXXXX` in the command line: `scripts/agent-session` makes that directory as `$$-XXXXXXXX` and then execs omp, so `<pid>` is the omp. |
-| 2 | a session's directory | in the command line, then the working directory: a full live-here session id, or a directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`) when exactly one live-here session id starts with those 8 hex. |
+| 2 | a session's directory | in the command line, then the working directory: a full live-here session id (not one in a transcript's `<time>Z_<id>` name: a transcript directory holds its subagents' transcripts and names their parent), or a directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`) when exactly one live-here session id starts with those 8 hex. |
 | 3 | `-svc` scope Description | `run-c<16 hex>-svc[-N].scope`, where omp-memory-watch moves a session's broker services, described `omp session <uuid>`: that session, if live here. systemd 255 adds no process to a running scope without `Delegate=yes`, so omp-memory-watch puts later processes in `<name>-2.scope`, `-3`, ...; both scope names match with or without the `-N`. |
 | 4 | the scope's original session | a `run-*.scope` no omp runs in now: the id in its Description (`omp session <uuid> ...`, or shims/omp's `agent-session omp --resume <uuid>`), else the 16 hex of `run-c<16 hex>.scope`; only if live here. |
 | - | owner unknown | the process sat in a session's scope (`run-*.scope`, an agent box, or an `omp-broker-*.scope` that several sessions share) and no step above found a live-here session. One notice a minute goes to the box-health owner (the `lead-box-health` role, else the SRE session), marked `OWNER UNKNOWN`, with each command line; its report says why (for example, which session moved or ended). |
 
 The session id of an omp is the transcript it holds open (`.../<time>Z_<id>.jsonl`, the rule
-`scripts/agentbox` uses), else its own `--resume`/`--restore` argument, else, for a box omp the
+`scripts/agentbox` uses), else the id in the last path component of its `--resume`/`--restore`
+argument, the transcript file's own name: a lane resumed from a subagent's transcript runs
+`--resume .../<time>Z_<parent>/<time>Z_<own>.jsonl` and is `<own>`, never `<parent>` (2026-11-03
+23:07Z, omp-memory-watch named the parent for such a lane). A scope's Description is read the same
+way. Else, for a box omp the
 host cannot read, `docker exec <box>` reading the box omp's open files (only when a notice needs it).
 `envoy ps --json` and `docker ps` are read only at a kill, and reused for a minute.
 

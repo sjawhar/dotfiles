@@ -51,7 +51,8 @@ old run-c01a13dcae9797264.scope, reached the chief).
      first sampled or while earlyoom's pid still lives, live here; else the one live-here
      session that every other process of its cgroup names in its environment; else a path in
      its command line or working directory: `session-tmp/<omp pid>-XXXXXXXX` (the scratch
-     directory scripts/agent-session makes before it execs omp), a full session id, or a
+     directory scripts/agent-session makes before it execs omp), a full session id (not one in a
+     transcript's `Z_<id>` name: a transcript directory names its subagents' parent), or a
      directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`)
      when exactly one live-here session starts so.
   3. a `run-c<16 hex>-svc[-N].scope` whose Description starts `omp session <uuid>` (omp-memory-watch
@@ -70,7 +71,9 @@ old run-c01a13dcae9797264.scope, reached the chief).
     no session path): counted and logged, and nobody is told. The box-level rate covers them.
 
 The session id of an omp: the transcript it holds open (`.../<time>Z_<id>.jsonl`, the same rule
-scripts/agentbox uses), else its own `--resume`/`--restore` argument, else, for a box whose omp
+scripts/agentbox uses), else the id in the last path component of its `--resume`/`--restore`
+argument (a lane resumed from a subagent's transcript, `.../<time>Z_<parent>/<time>Z_<own>.jsonl`,
+is <own>, never <parent>; the same for a scope's Description), else, for a box whose omp
 the host cannot read, `docker exec <box>` reading the box omp's open files (only at notice time).
 
 It kills nothing, and changes no limit. earlyoom's own `-N` hook runs after the kill, when the
@@ -141,9 +144,15 @@ KILL_RE = re.compile(
 AVAIL_RE = re.compile(r"^mem avail: +(\d+) of +(\d+) MiB \( *([0-9.]+)%\)")
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 TRANSCRIPT_RE = re.compile(r"/sessions/.*/[0-9T:-]*Z_(" + UUID + r")\.jsonl$")
-ARG_RE = re.compile(r"(?:^|/[0-9T:-]*Z_)(" + UUID + r")(?:\.jsonl)?$")
+# The session id of an omp is the id in the LAST path component of its --resume (or --restore)
+# argument: the transcript file's own name. A lane resumed from a subagent's transcript runs
+# `--resume .../<time>Z_<parent id>/<time>Z_<own id>.jsonl`; the parent id earlier in the path is
+# not its session (2026-11-03 23:07Z: omp-memory-watch named 01a15237 for such a lane).
+RESUME_ID_RE = re.compile(r"^(?:[0-9T:-]*Z_)?(" + UUID + r")(?:\.jsonl)?$")
 SESSION_TMP_RE = re.compile(r"/session-tmp/(\d+)-[A-Za-z0-9]{8}(?:/|\s|$)")
-SESSION_UUID_RE = re.compile(r"(?<![0-9a-f])(" + UUID + r")(?![0-9a-f])")
+# A session id in a path, not one in a transcript's name (`Z_<id>`): a transcript directory
+# holds its subagents' transcripts, so it names their parent, not their owner.
+SESSION_UUID_RE = re.compile(r"(?<![0-9a-f])(?<!Z_)(" + UUID + r")(?![0-9a-f])")
 # A directory a session names after itself: `<Name>-<first 8 hex of its id>`, e.g.
 # /mnt/nvme/sami/tmp/TwoPartStage1-01a14126/. Session ids are UUIDv7 of 2026, so `01`.
 SESSION_DIR_RE = re.compile(r"/[A-Za-z][\w.]*-(01[0-9a-f]{6})(?=[/\s\"']|$)")
@@ -168,6 +177,18 @@ def utc(epoch: float) -> str:
 
 def hour_key(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%HZ", time.gmtime(epoch))
+
+
+def resume_session(words: list[str]) -> str:
+    """The session id an omp command line resumes: the id in the last path component of its
+    `--resume`/`--restore` argument (`<id>`, `<time>Z_<id>.jsonl` or a path ending so), else ""."""
+    for i, word in enumerate(words):
+        flag, eq, value = word.partition("=")
+        if flag in ("--resume", "--restore"):
+            value = value if eq else (words[i + 1] if i + 1 < len(words) else "")
+            match = RESUME_ID_RE.match(value.rstrip("/").rsplit("/", 1)[-1])
+            return match[1] if match else ""
+    return ""
 
 
 def parse_kill(message: str) -> dict | None:
@@ -434,11 +455,9 @@ class Watch:
         except OSError:
             pass
         if not found:
-            for word in self.cmdline(pid)[1:]:
-                match = ARG_RE.search(word)
-                if match:
-                    found.add(match[1])
-                    break
+            session = resume_session(self.cmdline(pid))
+            if session:
+                found.add(session)
         session = sorted(found)[0] if len(found) == 1 else ""
         if not session and docker and container:
             session = self.docker_session(container)
@@ -626,7 +645,7 @@ class Watch:
             return (named[1], f"its systemd scope {unit}, whose Description names the session") if named else ("", "")
         if named:
             return named[1], f"its systemd scope {unit}, made for this session (no omp runs in it now)"
-        found = {m[1] for m in map(ARG_RE.search, description.split()) if m}
+        found = {resume_session(description.split())} - {""}
         if len(found) == 1:
             return found.pop(), f"its systemd scope {unit}, which shims/omp started for this session (no omp runs in it now)"
         if run_c:

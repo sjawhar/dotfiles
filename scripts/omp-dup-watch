@@ -18,9 +18,11 @@ What one run does:
   2. Its session id, by the rules tmux-resurrect-omp applies (and omp-session-live and agentbox's
      move census with it): the transcript it holds open (`~/.omp/agent/sessions/<dir>/<stamp>Z_
      <id>.jsonl`), else the id this watch saw the same process (pid and start time) holding at an
-     earlier run, else the `--resume` on its own command line. A process none of these names
-     (`omp -p --no-session`, a fresh box session that has not been resumed) is counted as
-     unidentified.
+     earlier run, else the argument of a `--resume`/`--restore`/`-r` word of its own argv, read
+     from its last path component (a lane resumed from `…/<stamp>Z_<parent>/<stamp>Z_<id>.jsonl`
+     is <id>, never <parent>). Ids are compared in full; a prefix counts only when exactly one
+     full id read here starts with it. A process none of these names (`omp -p --no-session`, a
+     fresh box session that has not been resumed) is counted as unidentified.
   3. GET /v1/sessions from Envoy, and the rows registered from this host or one of its boxes.
   4. An id with more than one process, or more than one Envoy row, is duplicated. Every id that
      is new since the last run goes in ONE message; an id back to one process gets a one-line
@@ -38,8 +40,6 @@ from __future__ import annotations
 import argparse
 import collections
 import fcntl
-import importlib.machinery
-import importlib.util
 import json
 import os
 import re
@@ -79,18 +79,6 @@ ANCESTOR_LIMIT = 64
 HOME = str(Path.home())
 
 
-def _sibling(name: str):
-    """A script beside this one, as a module: the session-id rules are tmux-resurrect-omp's,
-    never a second copy (omp-memory-watch loads it the same way)."""
-    path = Path(os.path.realpath(__file__)).parent / name
-    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-_RESURRECT = _sibling("tmux-resurrect-omp")
 # A session's transcript, at ANY depth under the agent's sessions directory. The id must come
 # from the FILE NAME and nowhere else in the path, the rule `agentbox`'s move census uses: three
 # live omps here on 2026-11-03 resume `…/<bucket>/<stamp>_<other id>/<stamp>_<id>.jsonl`, which
@@ -100,16 +88,24 @@ _RESURRECT = _sibling("tmux-resurrect-omp")
 SESSION_PATH = re.compile(r"/sessions/.*/[0-9T:-]*Z_(?P<sid>[0-9a-f-]{36})\.jsonl\Z")
 
 
-def named_session(command: str) -> str | None:
-    """The session a command line resumes: `--resume`/`--restore`/`-r` with a transcript path,
-    a full id or the id prefix omp also takes. The flags are tmux-resurrect-omp's."""
-    for match in _RESURRECT.RESUME_ARG.finditer(command):
-        value = match.group("value")
-        in_path = SESSION_PATH.search(value)
-        if in_path:
-            return in_path.group("sid")
-        if _RESURRECT.SESSION_ID.fullmatch(value):
-            return value
+# The id in a transcript's own file name, `<stamp>Z_<id>.jsonl`, or a bare full id or id prefix.
+RESUME_VALUE = re.compile(r"(?:[0-9T:-]*Z_(?P<sid>[0-9a-f-]{36})\.jsonl|(?P<bare>[0-9a-f]{8}(?:[0-9a-f-]*[0-9a-f])?))\Z")
+
+
+def named_session(argv: list[str]) -> str | None:
+    """The session an omp's own argv resumes: the argument of a `--resume`/`--restore`/`-r` WORD
+    (tmux-resurrect-omp's flags), read from its last path component: a transcript's file name, a
+    full id, or the id prefix omp also takes. Never a flag inside another argument: on
+    2026-11-03 at 23:15Z two `omp -p` reviewers whose one prompt argument held `git ls-tree -r
+    f1006fe8` read as one session, "f1006fe8", run twice."""
+    for i, word in enumerate(argv[1:], 1):
+        flag, eq, value = word.partition("=")
+        if flag not in ("--resume", "--restore", "-r"):
+            continue
+        if not eq:
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+        found = RESUME_VALUE.match(value.rstrip("/").rsplit("/", 1)[-1])
+        return (found.group("sid") or found.group("bare")) if found else None
     return None
 
 
@@ -468,6 +464,7 @@ def omp_processes(
                 "parent": parent,
                 "parent_name": table.get(parent, ("?",))[0],
                 "unit": deepest_unit(cgroup),
+                "argv": argv,
                 "sid": "",
                 "how": "",
             }
@@ -507,9 +504,12 @@ def identify(rows: list[dict], remembered: dict[str, str]) -> None:
             row["sid"] = remembered[key]
             row["how"] = "held its transcript at an earlier run of this watch (same pid and start)"
         else:
-            named = named_session(row["command"])
+            named = named_session(row["argv"])
             if named:
                 row["sid"], row["how"] = named, "its own command line resumes it"
+    # Ids are compared whole. A prefix stands for a full id only when exactly one full id read
+    # here starts with it; UUIDv7 ids of sessions started in the same second share their first
+    # 8 hex, so any other prefix names no session.
     full = {row["sid"] for row in rows if len(row["sid"]) == 36}
     for row in rows:
         if row["sid"] and len(row["sid"]) < 36:
@@ -517,6 +517,8 @@ def identify(rows: list[dict], remembered: dict[str, str]) -> None:
             if len(matches) == 1:
                 row["how"] += f" by the prefix {row['sid']}"
                 row["sid"] = matches[0]
+            else:
+                row["sid"], row["how"] = "", f"its command line resumes the prefix {row['sid']}, which no one full id here matches"
 
 
 # ------------------------------------------------------------------------------- words

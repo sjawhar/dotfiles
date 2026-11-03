@@ -468,10 +468,21 @@ loop's cached wake-up time (`sd_event_now`), not from the fork. Nothing in this 
 that. In the last 6 h of that window, the 00:36-00:52Z memory-pressure episode included, 410
 runs took at most 4.41 s and none failed.
 
-The session id is read **from the process** — a session id on its command line, else the
+The session id is read **from the process** — the id in the last path component of its
+`--resume`/`--restore` argument (the transcript file's own name), else the name of the
 `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl` it holds open — and is resolved only when an alert
-is about to be sent, which is what keeps a run to a handful of file reads. When it cannot be
-established the alert says "session unknown" and goes to the box-health owner alone; it never guesses.
+is about to be sent, which is what keeps a run to a handful of file reads. No other id on the
+command line counts: a lane resumed from a subagent's transcript runs `--resume
+…/<stamp>Z_<parent>/<stamp>Z_<own>.jsonl`, and at 2026-11-03 23:07Z its near-limit notice named
+the parent 01a15237 (on another machine) because every id on the line was read. When the id
+cannot be established the alert says "session unknown" and goes to the box-health owner alone; it
+never guesses.
+
+Every near-limit and wall notice names the scope's own omp: its pid, tmux window (when it has
+one), working directory and host, with the session id from its own transcript. When Envoy lists
+no live registration for that session on this box and its transcript sits in the directory of a
+session that is live here, the notice goes to that parent session, starts `A LANE OF YOURS, NOT
+YOU`, and asks it to have the lane shed or to stop it, not to restart itself. Its clear goes there too.
 
 ## Who hears about it
 
@@ -568,7 +579,7 @@ owner the moment it is seen, as one message naming the touch's own report.
 | The ceiling | `memory.max` from the scope up to `/sys/fs/cgroup`, else `MemTotal` |
 | The pressure | `memory.stat` (`anon`, `shmem`, `kernel`, `sock`), `memory.current`, `/proc/<pid>/statm` |
 | The wall | `memory.events` (`max`, `oom`, `oom_kill`), `memory.peak`, `memory.swap.max` |
-| Session id (alert only) | `/proc/<pid>/cmdline`, else `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl` |
+| Session id (alert only) | the last path component of `--resume` in `/proc/<pid>/cmdline`, else the name of a `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`; the omp's cwd, its `TMUX`/`TMUX_PANE` (`tmux display-message` for the window), and Envoy's live sessions for the lane rule |
 | Worker name and session (wall report only) | `.ossv-workers/<name>/` on a scope process's command line, and `<that dir>/session` unless `session_unconfirmed` is beside it |
 | Top processes (wall report only) | `cgroup.procs`, `/proc/<pid>/statm`, `/proc/<pid>/cmdline` |
 | Self-watch (alert only) | the command lines of the other processes in the scope, or of a process naming this pid |

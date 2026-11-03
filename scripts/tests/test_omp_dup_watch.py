@@ -390,6 +390,42 @@ class OmpDupWatchTest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIn(X, sent[0])
 
+    def test_two_reviewers_started_in_the_same_second_are_two_sessions(self) -> None:
+        """2026-11-03 23:15:16Z: two `omp -p` reviewers of one PR, started in the same second in one
+        directory, were reported as session "f1006fe8" run twice: `-r f1006fe8` inside their one
+        prompt argument read as a resume. Their UUIDv7 ids share the first 8 hex; each holds its own
+        transcript, and they are compared in full."""
+        a = "01a1a5d0-1111-7000-8000-000000000001"
+        b = "01a1a5d0-2222-7000-8000-000000000002"
+        prompt = "You are reviewing #103. Check the evidence (`git ls-tree -r f1006fe8 theories/`)."
+        for pid, sid, model in ((1101, a, "sol"), (1201, b, "opus")):
+            self.proc.host_omp(pid, 500, argv=(OMP, "-p", "--mode", "json", "--model", model, prompt),
+                               holds=(transcript(sid),), cwd="/mnt/nvme/sami/gate-runs")
+        self.assertEqual(self.run_once(), [])
+        for pid in (1101, 1201):
+            self.proc.drop_fds(pid)
+        self.assertEqual(self.run_once(), [], "a flag inside the prompt names no session")
+
+    def test_a_prefix_two_full_ids_share_names_no_session(self) -> None:
+        a = "01a1a5d0-1111-7000-8000-000000000001"
+        b = "01a1a5d0-2222-7000-8000-000000000002"
+        self.proc.host_omp(1001, 500, holds=(transcript(a),))
+        self.proc.host_omp(1101, 500, holds=(transcript(b),))
+        self.proc.host_omp(1201, 900, argv=(OMP, "--resume", a[:8]))
+        self.assertEqual(self.run_once(), [])
+
+    def test_resume_argument_is_read_from_its_last_path_component(self) -> None:
+        parent, child = X, "01a17dd1-0000-7000-8000-000000000001"
+        nested = f"/home/sami/.omp/agent/sessions/-src/2026-10-19T03-32-08-771Z_{parent}/2026-10-25T02-25-48-934Z_{child}.jsonl"
+        self.assertEqual(WATCH.named_session([OMP, "--resume", nested]), child)
+        self.assertEqual(WATCH.named_session([OMP, f"--resume={nested}"]), child)
+        self.assertEqual(WATCH.named_session([OMP, "-r", parent[:8]]), parent[:8])
+        self.assertIsNone(WATCH.named_session([OMP, "-p", f"run git log -r {parent[:8]}"]))
+        self.assertIsNone(WATCH.named_session([OMP, "--resume", f"/x/2026Z_{parent}/ArityLane.jsonl"]))
+        self.proc.host_omp(1001, 500, holds=(transcript(parent),))
+        self.proc.host_omp(1101, 900, argv=(OMP, "--resume", nested))
+        self.assertEqual(self.run_once(), [], "the lane is its own session, not its parent's copy")
+
     def test_a_process_that_closed_its_transcript_keeps_the_id_it_was_seen_holding(self) -> None:
         """A fresh session has no id on its command line; once seen holding its file, the same
         process (pid and start time) stays that session, so a closed descriptor is no clear."""

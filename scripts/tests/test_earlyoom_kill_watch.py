@@ -382,6 +382,54 @@ class KillWatchTest(unittest.TestCase):
         self.assertEqual([t for t, _ in self.sent], [HOST_SESSION])
         self.assertIn("process tree (omp pid 4000000)", report_of(self, self.sent[0][1]))
 
+    # -- a lane resumed from a subagent's transcript (2026-11-03 23:07Z) -----------------------
+
+    def test_resume_id_is_the_transcript_files_own_name_not_its_parent(self) -> None:
+        parent = "01a15237-75c3-7321-befb-e6e1cc57a948"
+        child = "01a17dd1-0000-7000-8000-000000000001"
+        nested = (f"/home/sami/.omp/agent/sessions/-src/2026-10-19T03-32-08-771Z_{parent}/"
+                  f"2026-10-25T02-25-48-934Z_{child}.jsonl")
+        self.assertEqual(WATCH.resume_session(["omp", "--resume", nested]), child)
+        self.assertEqual(WATCH.resume_session(["omp", f"--resume={nested}"]), child)
+        self.assertEqual(WATCH.resume_session(["omp", "--resume", child, "."]), child)
+        self.assertEqual(WATCH.resume_session(["omp", "-p", f"see dispatch://X/ask/{parent}"]), "")
+        self.assertEqual(WATCH.resume_session(["omp", "--resume", f"/x/2026Z_{parent}/notes.jsonl"]), "")
+
+    def test_lane_resumed_from_a_subagent_transcript_is_its_own_session(self) -> None:
+        """The lane's omp holds no transcript the host can read; its --resume path names the
+        parent's directory first. The kill goes to the lane, not the parent, both live here."""
+        parent = "01a15237-75c3-7321-befb-e6e1cc57a948"
+        child = "01a17dd1-0000-7000-8000-000000000001"
+        nested = (f"/home/sami/.omp/agent/sessions/-src/2026-10-19T03-32-08-771Z_{parent}/"
+                  f"2026-10-25T02-25-48-934Z_{child}.jsonl")
+        self.live.update({parent: "sami-rocqperf", child: "sami-rocqperf"})
+        scope = f"{APP}/run-r107194aa0000000000000000000000.scope"
+        self.proc.add(4100000, "omp", 1, ["/x/bin/omp", "--resume", nested], scope)
+        self.proc.add(50020, "python3", 4100000, ["python3", "lane.py"], scope, rss_mib=1900)
+        w = self.watch()
+        self.kill_one(w, 50020, "python3 lane.py")
+        self.assertEqual([t for t, _ in self.sent], [child])
+
+    def test_left_scope_description_with_a_nested_resume_path_names_the_lane(self) -> None:
+        parent = "01a15237-75c3-7321-befb-e6e1cc57a948"
+        child = "01a17dd1-0000-7000-8000-000000000001"
+        unit = "run-r107194aa0000000000000000000000.scope"
+        self.descriptions[unit] = (f"/home/sami/.dotfiles/scripts/agent-session omp --resume /home/sami/.omp/agent/"
+                                   f"sessions/-src/2026-10-19T03-32-08-771Z_{parent}/2026-10-25T02-25-48-934Z_{child}.jsonl")
+        self.live.update({parent: "sami-rocqperf", child: "sami-rocqperf"})
+        self.left_behind(50021, "python3 lane.py", scope=f"{APP}/{unit}")
+        w = self.watch()
+        self.kill_one(w, 50021, "python3 lane.py")
+        self.assertEqual([t for t, _ in self.sent], [child])
+
+    def test_a_transcript_directory_in_a_tool_path_names_no_owner(self) -> None:
+        parent = "01a15237-75c3-7321-befb-e6e1cc57a948"
+        self.live[parent] = "sami-rocqperf"
+        cmd = f"python3 scan.py /home/sami/.omp/agent/sessions/-src/2026-10-19T03-32-08-771Z_{parent}/x.jsonl"
+        w = self.watch()
+        self.kill_one(w, 50022, cmd, comm="python3")
+        self.assertEqual(self.sent, [], "a transcript's directory names a parent, not an owner")
+
     def test_path_prefix_shared_by_two_live_sessions_names_neither(self) -> None:
         twin = "01a14126-0000-7000-8000-000000000000"
         self.live.update({EFF: "sami-rocqperf", twin: "sami-rocqperf"})
