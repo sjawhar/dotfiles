@@ -86,6 +86,12 @@ before handing the call to the real one.
   `GH_READ_CACHE_LOG=0` the log,
   `GH_READ_CACHE_DEBUG=1` prints one stderr line per hit, and
   `scripts/tests/test_gh_read_cache.py` is the contract.
+  The cache ends with the process that started the shim: the shim passes its parent's pid as
+  `GH_READ_CACHE_PARENT`, the cache asks the kernel for a TERM when that parent dies
+  (`PR_SET_PDEATHSIG`) and refuses to start under any other parent, and it runs each gh child in
+  a process group of its own, which a TERM, HUP or INT to the cache ends whole (the shim, knives,
+  gh and the leak check under it). Before 2026-11-03 a `timeout` that killed the shim left the
+  cache running as a child of pid 1, a GraphQL read still going 2.5 min later.
   The real gh is the first gh past this dir on PATH. When that is mise's own shim, the gh pinned
   exactly in mise's global config runs straight from its install dir, as `shims/knives` runs
   knives: mise's shim is one more process per call, and under load mise hung for minutes

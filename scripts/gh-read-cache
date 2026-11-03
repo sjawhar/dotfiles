@@ -49,6 +49,8 @@ Environment:
     GH_READ_CACHE_WINDOW=<secs> reuse window, default 60
     GH_READ_CACHE_GH=<path>     the gh to run on a miss (the shim passes its own)
     GH_READ_CACHE_BYPASS=1      set on the child, so a miss cannot re-enter
+    GH_READ_CACHE_PARENT=<pid>  the pid the shim saw as its parent when it exec'd
+                                this; another parent now means it already died
 """
 
 from __future__ import annotations
@@ -570,16 +572,20 @@ def run_write(argv: list[str], root: str, context: str, record: dict) -> None:
     costs one real read."""
     env = dict(os.environ)
     env["GH_READ_CACHE_BYPASS"] = "1"
+    group = child_group()
     try:
-        proc = subprocess.Popen(child_command(argv), env=env)
+        proc = subprocess.Popen(child_command(argv), env=env, **group)
     except OSError:
         exec_passthrough(argv)
         return
-    # The terminal sends ^C to the child too; this process must outlive it to
-    # set the marks. A TERM or HUP aimed at this process is passed on.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    CHILDREN.append(proc)
+    # This process must outlive the child to set the marks, so a TERM or HUP
+    # aimed at it (its parent's death sends a TERM) is passed on to the child's
+    # group instead of ending it. A terminal's ^C reaches a child that shares the
+    # terminal's group by itself; a child in a group of its own gets it from here.
+    signal.signal(signal.SIGINT, (lambda s, _f: signal_children(s)) if group else signal.SIG_IGN)
     for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda s, _f: proc.send_signal(s))
+        signal.signal(sig, lambda s, _f: signal_children(s))
     while True:
         try:
             code = proc.wait()
@@ -745,13 +751,72 @@ def child_command(args: list[str]) -> list[str]:
     return [gh] + args
 
 
+# The shim execs this process, so its parent is the outer shim or the shim's own
+# caller. When `timeout` or a session killed that parent, nothing told this
+# process: it went on with its gh child under it, a GraphQL read 2.5 min after
+# its shim had died, as a child of pid 1 (2026-11-03). So it ends when its parent
+# does (die_with_parent), and each gh child runs in a process group of its own,
+# which a TERM, HUP or INT to this process ends as a whole: the shim, knives, gh
+# and the leak check under it.
+CHILDREN: list[subprocess.Popen] = []
+
+
+def child_group() -> dict:
+    """Popen arguments that put a child in a group of its own. Not when stdin is a
+    terminal: a background group's read from it stops the child (SIGTTIN)."""
+    try:
+        if os.isatty(0):
+            return {}
+    except OSError:
+        pass
+    return {"process_group": 0}
+
+
+def signal_children(signum: int) -> None:
+    for proc in CHILDREN:
+        if proc.poll() is not None:
+            continue
+        try:
+            if os.getpgid(proc.pid) == proc.pid:
+                os.killpg(proc.pid, signum)
+            else:
+                proc.send_signal(signum)
+        except OSError:
+            pass
+
+
+def end_on_signal(signum: int, _frame) -> None:
+    signal_children(signum)
+    os._exit(128 + signum)
+
+
+def die_with_parent() -> None:
+    """A TERM, HUP or INT ends this process and its children's groups, and the
+    kernel sends the TERM when the parent dies (PR_SET_PDEATHSIG, which an exec
+    into the shim keeps). A parent that died before the request was armed shows
+    as a parent other than the one the shim named."""
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, end_on_signal)
+    try:
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+    parent = os.environ.get("GH_READ_CACHE_PARENT", "")
+    if parent.isdigit() and os.getppid() != int(parent):
+        os._exit(128 + signal.SIGTERM)
+
+
 def run_child(args: list[str]) -> tuple[int, bytes, bytes]:
     env = dict(os.environ)
     env["GH_READ_CACHE_BYPASS"] = "1"
-    proc = subprocess.run(
-        child_command(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
-    )
-    return proc.returncode, proc.stdout or b"", proc.stderr or b""
+    with subprocess.Popen(
+        child_command(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **child_group()
+    ) as proc:
+        CHILDREN.append(proc)
+        out, err = proc.communicate()
+    return proc.returncode, out or b"", err or b""
 
 
 def exec_passthrough(args: list[str]) -> None:
@@ -816,6 +881,7 @@ def main() -> None:
         argv = argv[1:]
     if not argv:
         sys.exit(2)
+    die_with_parent()
 
     root = cache_root()
     base_record = {

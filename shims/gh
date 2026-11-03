@@ -403,7 +403,9 @@ if agent_context; then
             _self="$(readlink -f "$0" 2> /dev/null || true)"
             [[ -n "$_self" ]] || _self="$0"
         fi
-        GH_READ_CACHE_GH="$_self" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
+        # GH_READ_CACHE_PARENT: the cache ends with this process's parent, and a
+        # parent that died before it could ask the kernel shows as another pid.
+        GH_READ_CACHE_GH="$_self" GH_READ_CACHE_PARENT="$PPID" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
     fi
     # A standalone docs-only pull request is refused where docs are batched.
     if [[ "${1:-}" == pr && "${2:-}" == create ]]; then

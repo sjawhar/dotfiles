@@ -561,6 +561,49 @@ class GhReadCacheTest(unittest.TestCase):
         self.assertEqual(r.stdout, "BODY-1")
         self.assertEqual(len(self.calls()) - before, 1, self.calls())
 
+    # -- a cache whose parent dies -------------------------------------------
+
+    @staticmethod
+    def alive(pid):
+        """A pid that is running (a zombie, already dead, is not)."""
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return False
+        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+    def test_a_killed_parent_ends_the_cache_and_its_gh_group(self):
+        # 2026-11-03: `timeout` killed a shim; its cache, a child of pid 1, read on for minutes.
+        stub = self.dir / "slow-gh"
+        stub.write_text('#!/bin/bash\necho $$ >> "$STUB_PIDS"\nsleep 120 &\necho $! >> "$STUB_PIDS"\nwait\n')
+        stub.chmod(0o755)
+        pids, cache_pid = self.dir / "pids", self.dir / "cache.pid"
+        parent = subprocess.Popen(
+            ["bash", "-c", 'GH_READ_CACHE_PARENT=$$ "$0" -- pr view 5 -R o/r --json state &\n'
+             'echo $! > "$CACHE_PID"; wait', str(CACHE)],
+            cwd=str(self.work), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            env=self.env(GH_READ_CACHE_GH=str(stub), STUB_PIDS=str(pids), CACHE_PID=str(cache_pid)),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline and not (pids.exists() and len(pids.read_text().split()) == 2):
+            time.sleep(0.1)
+        running = [int(cache_pid.read_text())] + [int(p) for p in pids.read_text().split()]
+        self.assertTrue(all(self.alive(p) for p in running), running)
+        parent.kill()  # SIGKILL: the parent runs nothing on its way out
+        parent.wait()
+        deadline = time.time() + 15
+        while time.time() < deadline and any(self.alive(p) for p in running):
+            time.sleep(0.1)
+        left = [p for p in running if self.alive(p)]
+        for p in left:
+            os.kill(p, 9)
+        self.assertEqual(left, [], "the cache, the gh child and its own child all end with the parent")
+
+    def test_a_parent_gone_before_the_cache_starts_runs_nothing(self):
+        r = self.run_cache("pr", "view", "5", "-R", "o/r", GH_READ_CACHE_PARENT=1)
+        self.assertEqual(r.returncode, 143)
+        self.assertEqual(self.calls(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
