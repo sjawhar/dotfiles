@@ -2095,7 +2095,12 @@ move_proc_dirs() {
         local line
         while IFS= read -r line; do
             [[ -n "$line" ]] || continue
-            $MOVE_PROC_KEEP_SRC || ! move_within "${line%%$'\t'*}" "$SRC" || continue
+            # What only the keep mode keeps: a tree under $SRC, or a git tree of the session's own
+            # in a path every box has.
+            if ! $MOVE_PROC_KEEP_SRC; then
+                move_within "${line%%$'\t'*}" "$SRC" && continue
+                move_dir_in_box "${line%%$'\t'*}" && continue
+            fi
             printf '%s\n' "$line"
         done <<<"$MOVE_PROC_MEMO"
         return 0
@@ -2113,7 +2118,9 @@ move_proc_dirs() {
         [[ -n "$dir" && "$dir" != / ]] || continue
         [[ -n "${said[$dir]:-}" ]] && continue
         case "$target" in /proc/*|/sys/*|/dev/*|/run/*) continue ;; esac
-        if move_dir_in_box "$dir"; then $MOVE_PROC_KEEP_SRC && move_within "$dir" "$SRC" || continue; fi
+        if move_dir_in_box "$dir"; then
+            $MOVE_PROC_KEEP_SRC && { move_within "$dir" "$SRC" || move_to_own_git_tree "$dir" >/dev/null; } || continue
+        fi
         pid="${src#"$PROC"/}"
         pid="${pid%%/*}"
         read -r comm 2>/dev/null <"$PROC/$pid/comm" || comm="?"
@@ -3833,7 +3840,14 @@ move_to_src_trees() {
     while IFS=$'\t' read -r path _why; do
         [[ -n "$path" ]] || continue
         [[ -d "$path" ]] || path="${path%/*}"
-        move_within "$path" "$SRC" && [[ "$path" != "$SRC" ]] || continue
+        if ! { move_within "$path" "$SRC" && [[ "$path" != "$SRC" ]]; }; then
+            # A git tree of the session's own elsewhere that every box has (…/wt/<name>).
+            tree="$(move_to_own_git_tree "$path")" || continue
+            [[ -z "${seen[$tree]:-}" ]] || continue
+            seen[$tree]=1
+            printf 'mirror\t%s\n' "$tree"
+            continue
+        fi
         kind=mirror
         if move_git_root_var "$path" && move_within "$MOVE_GIT_ROOT" "$SRC" && [[ "$MOVE_GIT_ROOT" != "$SRC" ]]; then
             tree="$MOVE_GIT_ROOT"
@@ -3909,10 +3923,26 @@ move_to_transcript_paths() {
 MOVE_TO_LEAVE=() MOVE_TO_LEAVE_SID=""
 move_to_left() {
     local p
+    # Only a path: a descriptor's `pipe:[…]` or `socket:[…]` resolved against the working
+    # directory used to land inside the left tree (LINUX-1248's dry run, 2026-11-03).
+    [[ "$1" == /* ]] || return 1
     for p in ${MOVE_TO_LEAVE[@]+"${MOVE_TO_LEAVE[@]}"}; do
         if move_within "$1" "$p" || move_within "$(readlink -f "$1" 2>/dev/null || echo "$1")" "$p"; then return 0; fi
     done
     return 1
+}
+
+# move_to_own_git_tree DIR: the root of the git working tree DIR is in, when that tree is one a
+# move copies although its parent is a path every box has or a root of many sessions' trees: a
+# worktree the box preamble puts under /mnt/nvme/<user>/wt, say. Not the dotfiles, and not a
+# tree that is itself such a root.
+move_to_own_git_tree() {
+    local dots
+    move_git_root_var "$1" || return 1
+    move_dir_too_broad "$MOVE_GIT_ROOT" && return 1
+    dots="$(readlink -f "$DOTFILES_DIR" 2>/dev/null || echo "$DOTFILES_DIR")"
+    if move_within "$MOVE_GIT_ROOT" "$dots" || move_within "$MOVE_GIT_ROOT" "$HOME/.dotfiles"; then return 1; fi
+    printf '%s\n' "$MOVE_GIT_ROOT"
 }
 MOVE_TO_DIRS=() MOVE_TO_SHARE=() MOVE_TO_COPY=()
 move_to_session_paths() {
@@ -3936,6 +3966,15 @@ move_to_session_paths() {
         [[ -n "$path" ]] || continue
         MOVE_TO_DIRS+=("$path")
         if [[ "$path" == "$cwd" ]] && { move_dir_in_box "$path" || move_dir_too_broad "$path"; }; then
+            # A git worktree of the session's own there is re-created on the target: mirrored,
+            # or moved through git into the target's clone (LINUX-1248's worktree under
+            # /mnt/nvme/sami/wt was refused as "not copied" on 2026-11-03).
+            local own_tree
+            if own_tree="$(move_to_own_git_tree "$path")"; then
+                MOVE_TO_COPY+=("mirror	$own_tree")
+                MOVE_TO_SHARE+=("$own_tree")
+                continue
+            fi
             echo "agentbox: $path (session $sid's working directory) is not copied: it holds many sessions' trees or every box has it; the target must have it already" >&2
             continue
         fi
@@ -4472,12 +4511,23 @@ cmd_move_to() {
     if [[ -n "$new_cwd" || ${#MOVE_TO_LEAVE[@]} -gt 0 ]]; then
         MOVE_TO_LEAVE_SID="$sid"
         [[ -z "$new_cwd" ]] || ! move_to_left "$new_cwd" || die "--cwd $new_cwd is inside a tree it --leave's"
-        local busy
+        # Not the move command itself: its own processes (the tool shell running it, its pipes)
+        # are the caller's chain from the omp down, and what they start.
+        local busy p own_chain=" "
+        p=$$
+        while [[ -n "$p" && "$p" != "$MOVE_SELF_PID" && "$p" -gt 1 ]]; do
+            own_chain+="$p "
+            move_stat "$p" || break
+            p="$MOVE_PPID"
+        done
+        while IFS= read -r p; do own_chain+="$p "; done < <(move_descendants $$)
         busy="$(awk -F'\t' -v s="$sid" -v omp="$PROC/$MOVE_SELF_PID/" '$1 == s && index($2, omp) != 1 { print $2 "\t" $3 }' <<<"$MT_TOUCHES" \
             | while IFS=$'\t' read -r link tgt; do
-                [[ "$link" == */cwd ]] && continue
+                [[ "$link" == */cwd || "$tgt" != /* ]] && continue
+                l="${link#"$PROC"/}"
+                [[ "$own_chain" != *" ${l%%/*} "* ]] || continue
                 tgt="${tgt%/*}"
-                if move_to_left "$tgt" && move_to_writes "$link"; then l="${link#"$PROC"/}"; echo "pid ${l%%/*} ($tgt)"; fi
+                if move_to_left "$tgt" && move_to_writes "$link"; then echo "pid ${l%%/*} ($tgt)"; fi
             done | sort -u | head -5 || true)"
         [[ -z "$busy" ]] || die "this session still works in a tree it would --leave: $(paste -sd ';' <<<"$busy"); nothing was hung up"
         if [[ -n "$new_cwd" ]]; then

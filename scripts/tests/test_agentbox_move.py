@@ -1887,6 +1887,52 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(broken.returncode, 1)
         self.assertIn("move --to stopped with exit 1 and no message of its own", broken.stderr)
 
+    def test_a_pipe_of_the_session_is_not_work_in_a_left_tree(self) -> None:
+        """LINUX-1248, 2026-11-03: run from inside the checkout it leaves, its dry run was refused
+        for its own pipe: `pipe:[…]` resolved against the working directory landed in the tree."""
+        shared = self.checkout("shared3")
+        own = self.root / "wt" / "mine3"
+        self.git("worktree", "add", "-q", "-b", "mine3", str(own), cwd=shared)
+        transcript = self.home / ".omp/agent/sessions/-src-shared3" / f"2026-11-03T00-00-00-000Z_{self.TO}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        self.make_proc(999999984, comm="bash", ppid=1, cwd=shared)
+        self.make_proc(999999985, ppid=999999984, cwd=shared, writes=(transcript,))
+        self.make_proc(999999986, comm="bash", ppid=999999985, cwd=shared, writes=(Path("pipe:[1910247]"),))
+        self.set_pids(999999985)
+        self.set_panes({999999984: ("%94", "agents:9.4")})
+        self.target()
+        dry = self.run_bash(f'cd "{shared}"\nmove_own_omp() {{ echo 999999985; }}\n'
+                            f'cmd_move_to --to devbox --cwd "{own}" --leave "{shared}" --dry-run --accept-orphans')
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn("group g-01a19700, 1 session(s)", dry.stdout)
+
+    def test_a_worktree_of_the_session_s_own_under_a_root_every_box_has_is_copied(self) -> None:
+        """LINUX-1248, 2026-11-03: its worktree is /mnt/nvme/sami/wt/linux-1248-eval, reached as
+        ~/src/linux-1248-eval, so every box here has it, and the move refused it as "not copied;
+        the target must have it already". The target has no such tree; the move re-creates it."""
+        repo = self.checkout("big")
+        own = self.root / "wt" / "eval"
+        self.git("worktree", "add", "-q", "-b", "eval", str(own), cwd=repo)
+        (own / "file").write_text("uncommitted\n", encoding="utf-8")
+        os.symlink(own, self.src / "eval")
+        transcript = self.home / ".omp/agent/sessions/-src-eval" / f"2026-11-03T00-00-00-000Z_{self.TO}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        self.make_proc(999999990, comm="bash", ppid=1, cwd=own)
+        self.make_proc(999999991, ppid=999999990, cwd=own, writes=(transcript,))
+        self.set_pids(999999991)
+        self.set_panes({999999990: ("%95", "agents:9.5")})
+        self.target()
+        moved = self.move_to(own=999999991)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertNotIn("is not copied", moved.stderr)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        self.assertIn(str(own), doc["mirror"])
+        self.assertEqual(doc["members"][0]["spec"][:2], ["--dir", str(own)])
+        self.assertTrue(any(p.startswith(str(repo / ".git")) for p in doc["merge"]), doc["merge"])
+
     def test_the_plan_of_a_move_is_the_caller_s_own_group_unless_told_otherwise(self) -> None:
         """By default the plan answers the question a session asks before it moves - its own
         group, found as `move --to` finds it - and reads no other session's paths; --group names
