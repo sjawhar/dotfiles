@@ -12,6 +12,9 @@
 #   sami-devbox-check --pins        only the pin lines (knives is mise.toml's pin, mise has every
 #                                   pin installed), on the host; scripts/dotfiles-follow runs it
 #                                   after each fast-forward. No log file, no marker.
+#   sami-devbox-check --root        only the root-disk lines (/ under 40 GiB, no directory over
+#                                   1 GiB outside the OS's own, /var/log under 2 GiB), on the
+#                                   host. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
 # box, Google Cloud as dev-sjawhar@ (also through a gcloud config dir a session brought from an
@@ -478,12 +481,15 @@ host_disks() {
             fail "disk: $mnt: want /dev/disk/by-id/$dev xfs, got ${src:-nothing} ${fstype:-}"
         fi
     done
-    # /home is the state disk's /mnt/nvme/home, bound: same device, same inode.
-    if [[ "$(stat -c %d:%i /home 2>/dev/null)" == "$(stat -c %d:%i /mnt/nvme/home 2>/dev/null)" ]]; then
-        ok "disk: /home is /mnt/nvme/home (bind)"
-    else
-        fail "disk: /home is not /mnt/nvme/home: $(findmnt -n -o SOURCE,FSTYPE /home 2>&1)"
-    fi
+    # /home and the lane trees are the state disk's, bound: same device, same inode.
+    local d
+    for d in home theorem theorem-ext4 theorem-xfs; do
+        if [[ "$(stat -c %d:%i "/$d" 2>/dev/null)" == "$(stat -c %d:%i "/mnt/nvme/$d" 2>/dev/null)" ]]; then
+            ok "disk: /$d is /mnt/nvme/$d (bind)"
+        else
+            fail "disk: /$d is not /mnt/nvme/$d: $(findmnt -n -o SOURCE,FSTYPE "/$d" 2>&1)"
+        fi
+    done
     src="$(findmnt -n -o SOURCE /mnt/scratch 2>/dev/null)"
     if [[ "$src" == /dev/md* ]]; then
         local md members
@@ -499,6 +505,99 @@ host_disks() {
         fail "swap: /mnt/scratch/swapfile not active: $(swapon --show 2>&1 | tr '\n' ' ')"
     fi
     [[ -d "/mnt/scratch/$(id -un)" && -O "/mnt/scratch/$(id -un)" ]] && ok "scratch: /mnt/scratch/$(id -un) is $(id -un)'s" || fail "scratch: /mnt/scratch/$(id -un) missing or not $(id -un)'s"
+    # /tmp and /var/tmp are bound from the scratch only at a boot (devbox/gce-disks, bind_tmp), so
+    # until the first planned reset after the change they are still the boot disk's: a WAIT.
+    for d in "tmp /tmp" "var-tmp /var/tmp"; do
+        read -r src mnt <<<"$d"
+        if [[ "$(stat -c %d:%i "$mnt" 2>/dev/null)" == "$(stat -c %d:%i "/mnt/scratch/$src" 2>/dev/null)" ]]; then
+            ok "scratch: $mnt is /mnt/scratch/$src (bind)"
+        elif ! mountpoint -q "$mnt"; then
+            echo "WAIT scratch: $mnt is still the boot disk's; devbox/gce-disks binds it from /mnt/scratch/$src at the next planned reset (devbox/sami-devbox.md, \"/tmp and /var/tmp\")"
+        else
+            fail "scratch: $mnt is a mount of something other than /mnt/scratch/$src: $(findmnt -n -o SOURCE,FSTYPE "$mnt" 2>&1)"
+        fi
+    done
+}
+
+# The boot disk holds the OS only (dispatch://INFRA-993, "Shape and disks"): sami-rocqperf's root
+# filled up, and on 2026-11-03 10 GiB of lane logs landed on sami-devbox's in /theorem. Two tests:
+# / uses at most ROOT_MAX_GIB; and no directory on the root filesystem outside the OS's own
+# (ROOT_OS_DIRS) holds more than 1 GiB, counted without those directories and without any mount
+# below it (`du -x`: /home, /var/lib/docker, /theorem and the other binds are other filesystems,
+# and a bind hides what the boot disk holds under it, which only the df test sees). /var/log is
+# the OS's while it holds at most 2 GiB (journald's cap is 2 GiB, devbox/journald-cap.conf). The
+# directory named is the deepest one over the limit, so the line says where the bytes are. du runs
+# with sudo and a time bound: it took 0.4 s on 2026-11-03.
+ROOT_MAX_GIB=40
+ROOT_OS_DIRS=(/usr /var/lib/apt /var/cache/apt /boot /snap /var/lib/snapd /opt /var/log)
+ROOT_DU_SECONDS=120
+# stdin: `du -x -B1 -0 /`; argv: the OS's directories. Prints `TOTAL <bytes> <dirs>`, `VARLOG
+# <bytes>` and one `BIG <bytes> <path>` per deepest directory over 1 GiB of its own.
+ROOT_DU_PY='
+import sys
+GIB = 1024 ** 3
+os_dirs = sys.argv[1:]
+sizes = {}
+for rec in sys.stdin.buffer.read().split(b"\0"):
+    size, tab, path = rec.partition(b"\t")
+    if tab:
+        sizes[path.decode("utf-8", "surrogateescape")] = int(size)
+def under(p, a):
+    return p == a or p.startswith(a.rstrip("/") + "/")
+present = [a for a in os_dirs if a in sizes]
+own = {}
+for p, s in sizes.items():
+    if any(under(p, a) for a in os_dirs):
+        continue
+    own[p] = s - sum(sizes[a] for a in present if under(a, p))
+big = [p for p, s in own.items() if s > GIB]
+deepest = [p for p in big if not any(q != p and under(q, p) for q in big)]
+print("TOTAL", sizes.get("/", 0), len(sizes))
+print("VARLOG", sizes.get("/var/log", 0))
+for p in sorted(deepest, key=lambda p: -own[p]):
+    print("BIG", own[p], p)
+'
+host_rootfs() {
+    local used res err rc kind size path total=0 dirs=0 varlog=0 big=() t0=$SECONDS
+    used="$(df -B1 --output=used / 2>/dev/null | tail -1 | tr -d ' ')"
+    if [[ "$used" =~ ^[0-9]+$ ]] && (( used <= ROOT_MAX_GIB * 1024 ** 3 )); then
+        ok "root disk: / uses $(numfmt --to=iec "$used"), at most ${ROOT_MAX_GIB}G"
+    else
+        fail "root disk: / uses ${used:-?} bytes, over ${ROOT_MAX_GIB}G (df -B1 --output=used /)"
+    fi
+    err="$(mktemp)"
+    # shellcheck disable=SC2024  # the error file is sami's own temp file, on purpose
+    res="$(sudo -n timeout "$ROOT_DU_SECONDS" du -x -B1 -0 / 2>"$err" | python3 -c "$ROOT_DU_PY" "${ROOT_OS_DIRS[@]}"; echo "RC ${PIPESTATUS[0]} ${PIPESTATUS[1]}")"
+    rc="$(sed -n 's/^RC //p' <<<"$res")"
+    if [[ "$rc" == "124 "* ]]; then
+        fail "root disk: sudo du -x / did not finish in $ROOT_DU_SECONDS s"
+    elif [[ "$rc" == "1 0" ]] && [[ -s "$err" ]] && ! grep -qv ': No such file or directory$' "$err"; then
+        note "root disk: du -x /: $(grep -c '' "$err") path(s) went away during the walk, e.g. $(tail -1 "$err")"
+        rc="0 0"
+    fi
+    if [[ "$rc" != "0 0" ]]; then
+        fail "root disk: sudo du -x / | python3 exited $rc: $(tail -1 "$err")"
+        rm -f "$err"
+        return
+    fi
+    rm -f "$err"
+    while read -r kind size path; do
+        case "$kind" in
+            TOTAL) total="$size" dirs="$path" ;;
+            VARLOG) varlog="$size" ;;
+            BIG) big+=("$path $(numfmt --to=iec "$size")") ;;
+        esac
+    done <<<"$res"
+    if (( ${#big[@]} )); then
+        fail "root disk: outside the OS's directories, over 1G of its own: $(printf '%s; ' "${big[@]}")move it to the state disk (/mnt/nvme) or the scratch (/mnt/scratch)"
+    else
+        ok "root disk: no directory outside ${ROOT_OS_DIRS[*]} holds over 1G of its own (du -x /: $(numfmt --to=iec "$total") in $dirs directories, $((SECONDS - t0)) s)"
+    fi
+    if (( varlog <= 2 * 1024 ** 3 )); then
+        ok "root disk: /var/log holds $(numfmt --to=iec "$varlog"), at most 2G"
+    else
+        fail "root disk: /var/log holds $(numfmt --to=iec "$varlog"), over 2G (journald's cap: devbox/journald-cap.conf)"
+    fi
 }
 
 # sudo_find ARRAY ARGS...: `sudo -n find ARGS`, appending each path to the array named ARRAY, and
@@ -804,6 +903,7 @@ host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
     host_disks
+    host_rootfs
     host_units
     host_follow
     host_packages
@@ -890,6 +990,7 @@ host_kernel() {
 case "${1:-}" in
     --in-box) in_box; exit $? ;;
     --pins) knives_check; mise_check; (( fails == 0 )); exit $? ;;
+    --root) host_rootfs; (( fails == 0 )); exit $? ;;
     ""|--mark-ready) ;;
     *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac

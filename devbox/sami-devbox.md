@@ -8,8 +8,8 @@ moves a session (step 5).
 
 | File | Runs where | What |
 | --- | --- | --- |
-| `devbox/gce-disks`, `gce-disks.service`, `gce-disks-ready.conf` | sami-devbox, root, every boot | local-SSD RAID 0 at `/mnt/scratch` with a 256 GiB swap file; state disk at `/mnt/nvme`; cold disk at `/mnt/durable`; `/home` bound from `/mnt/nvme/home`; Docker, containerd and Sysbox data on the state disk. Ordered before `user@1000`, ssh, Docker. |
-| `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, Docker, Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
+| `devbox/gce-disks`, `gce-disks.service`, `gce-disks-ready.conf` | sami-devbox, root, every boot | local-SSD RAID 0 at `/mnt/scratch` with a 256 GiB swap file; state disk at `/mnt/nvme`; cold disk at `/mnt/durable`; `/home`, `/theorem`, `/theorem-ext4` and `/theorem-xfs` bound from `/mnt/nvme/<name>`; Docker, containerd and Sysbox data on the state disk; `/tmp` and `/var/tmp` bound from the scratch at boot only ("The boot disk holds the OS only"). Ordered before `user@1000`, ssh, Docker. |
+| `devbox/gce-host.sh` | sami-devbox, sudo, once | packages, the disk units, journald's cap (`devbox/journald-cap.conf`), Docker, Sysbox (`installers/sysbox.sh`), Tailscale (`installers/tailscale.sh`), linger, sysstat |
 | `devbox/sami-devbox-provision` | sami-rocqperf | the whole provisioning run, step by step (its header lists the steps) |
 | `devbox/sami-devbox-model-routes` | sami-devbox, by `sami-devbox-provision` step install | omp's OpenAI agents and roles (openai-codex/ and openai/) go to the gateway's openai/ group as `ossv-gateway/openai/<id>`, since this machine holds no ChatGPT login; edits only its own `omp/models.local.yml` and `omp/config.local.yml` |
 | `devbox/sami-devbox-check` | sami-devbox | A2, and the disks half of A5; `--mark-ready` writes `/mnt/nvme/sami/cutover/target-ready`, which `agentbox move --to sami-devbox` requires |
@@ -88,7 +88,8 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | tailnet | `tailscale status --self --json` | HostName `sami-devbox`, Tags `tag:sami-devbox` |
 | attached account | metadata `service-accounts/default/email` | `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com` |
 | no credential file | `~/.config/gcloud/box_credential_config.json`, `$GOOGLE_APPLICATION_CREDENTIALS` | neither exists |
-| disks | `findmnt` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home` = `/mnt/nvme/home`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile` |
+| disks | `findmnt`, `stat` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home`, `/theorem`, `/theorem-ext4`, `/theorem-xfs` = `/mnt/nvme/<name>`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile`; `/tmp`, `/var/tmp` = `/mnt/scratch/tmp`, `/mnt/scratch/var-tmp` (a WAIT until the next planned reset) |
+| root disk (`--root` runs only this) | `df /`; `sudo timeout 120 du -x /` | `/` uses at most 40 GiB; no directory on it outside `/usr`, `/var/lib/apt`, `/var/cache/apt`, `/boot`, `/snap`, `/var/lib/snapd`, `/opt`, `/var/log` holds over 1 GiB of its own; `/var/log` at most 2 GiB |
 | no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `credentialed_accounts.db`, `.config/gh/hosts.yml`; no `legacy_credentials` unless every file in it is a keyless `external_account` `adc.json` (no `private_key`, no `refresh_token`) or a `.boto` that only names one (a note: moves carry sessions' own gcloud directories holding dev-sjawhar@'s keyless external_account). A `service_account` key fails, as a user login does. The spec's A2 names the directory by name alone; dispatch://INFRA-993 records the change |
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
@@ -134,6 +135,61 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | A5 | a marker on `/home`, `/mnt/nvme`, `/mnt/durable` and `/mnt/scratch`; `gcloud compute instances stop`; the responder starts the VM | the three markers are unchanged, the scratch one is gone, `/mnt/scratch` is on the RAID, the swap file is on, `gce-disks.service` is active and `user@1000` started after it |
 | A6, start | seconds from TERMINATED to the next status | at most 600 |
 | A6, silence | the CronJob suspended 35 minutes | the monitor `Box-monitor silent for sami-devbox` goes to Alert, and back to OK after the resume |
+
+## The boot disk holds the OS only
+
+The 500 GiB boot disk holds the OS and nothing that grows with work (spec "Shape and disks";
+sami-rocqperf's root filled up). `devbox/gce-disks` makes each bind below at every boot, before
+`user@1000`, ssh and Docker start. A2's "root disk" line (`sami-devbox-check --root`) FAILs when
+something grows on `/` again.
+
+| Path | Bound from | In effect |
+| --- | --- | --- |
+| `/home` | `/mnt/nvme/home` | since provisioning |
+| `/var/lib/docker`, `/var/lib/containerd`, `/var/lib/sysbox` | `/mnt/nvme/<name>` | since provisioning |
+| `/theorem`, `/theorem-ext4`, `/theorem-xfs` | `/mnt/nvme/<name>` | since 2026-11-03 17:21Z |
+| `/tmp`, `/var/tmp` | `/mnt/scratch/tmp`, `/mnt/scratch/var-tmp` (mode 1777) | from the next planned reset |
+
+journald stays in `/var/log/journal`, at most 2 GiB, and keeps 50 GiB of `/` free
+(`devbox/journald-cap.conf`, installed by `devbox/gce-host.sh`).
+
+### The lane paths
+
+On 2026-11-03 12:16-12:23Z a lane's move from sami-leanperf wrote 10 GiB of build logs into
+`/theorem` and `/theorem-xfs` on the boot disk. At 17:18-17:21Z they moved to the state disk under
+`cgroup-guard.sh`: a file only on the boot disk was copied; a file on both disks with other bytes
+kept the lane's newer copy at its path and the bulk copy's beside it as `<file>.leanperf-copy`.
+Then the binds were made on the live system. The lane had agreed, and had stopped its writer.
+
+An agent box binds its `--dir` paths when it starts, so a bind made later on the host does not
+reach a running box: its writes still go to the boot-disk directory under the bind. A session
+that writes there stops its writers, waits for the host bind, and starts a new box with
+`agentbox move --self`. The boot-disk directory under a bind must then be emptied before the next
+boot: at boot `gce-disks` refuses to bind over a target that holds data when the state disk's
+copy holds data too, and the machine is then not ready.
+
+### /tmp and /var/tmp
+
+`gce-disks` binds `/tmp` and `/var/tmp` only while the machine boots, before
+`multi-user.target`, and never over a live `/tmp`: that would hide every file, socket and lock
+the running sessions hold there. So the bind takes effect at the next planned reset, one where
+every resident session is at a safe point and synced, as on the morning of 2026-11-03. Until then
+disk-fill-watch's 50 GiB floor on `/` covers them, A2 shows a WAIT line for each, and a
+`systemctl restart gce-disks` (gce-host.sh runs one) leaves them as they are and says so.
+
+At that boot:
+
+- `systemd-tmpfiles-setup` empties the boot disk's `/tmp`, as at every boot now. What a session
+  keeps in `/tmp` is lost at a reset with or without the bind: before the reset, copy what must
+  stay to `/mnt/nvme/<user>/`.
+- `gce-disks` empties `/mnt/scratch/tmp`, the same cleanup for the new `/tmp`, and removes earlier
+  boots' `systemd-private-*` directories from `/mnt/scratch/var-tmp`. It moves each entry of the
+  boot disk's `/var/tmp` that the scratch one does not have (except `systemd-private-*`), so
+  `/var/tmp` keeps its files across the reset as before. Then it binds both and runs
+  `systemd-tmpfiles --create --boot` for them (the X11 directories).
+- The units that started before `gce-disks` (systemd-resolved, chrony) keep their PrivateTmp
+  directories on the boot disk until the next boot.
+- A stop of the VM empties both, with the rest of `/mnt/scratch`.
 
 ## Starting a session
 
@@ -186,10 +242,8 @@ stopped and disabled.
 
 ### The old leanperf paths
 
-Lanes have `/theorem`, `/theorem-ext4` and `/theorem-xfs` in their scripts. When leanperf's
-lanes move (step 4), three bind mounts give those paths: `/mnt/nvme/theorem` on `/theorem`,
-`/mnt/nvme/theorem-ext4` on `/theorem-ext4`, `/mnt/nvme/theorem-xfs` on `/theorem-xfs`, as
-systemd mount units ordered after `gce-disks.service` and before `user@1000.service`.
+Lanes have `/theorem`, `/theorem-ext4` and `/theorem-xfs` in their scripts. `devbox/gce-disks`
+binds `/mnt/nvme/<name>` on each at every boot; see "The lane paths" below.
 
 ### What the copy leaves out
 

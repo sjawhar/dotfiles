@@ -13,7 +13,9 @@
 #              the startup script has installed its packages and formatted the state and cold
 #              disks; sami is uid 1000.
 #   host       the root layer, devbox/gce-host.sh, from a throwaway clone: the disk units (RAID,
-#              /mnt/scratch, swap, /mnt/nvme, /mnt/durable, /home), Docker's data on the state disk,
+#              /mnt/scratch, swap, /mnt/nvme, /mnt/durable, /home and /theorem, /theorem-ext4,
+#              /theorem-xfs from the state disk, /tmp and /var/tmp from the scratch at the next
+#              boot), Docker's data on the state disk, journald's 2 GiB cap on the boot disk,
 #              Sysbox, Tailscale joined as sami-devbox with tag:sami-devbox by the VM's own Google
 #              identity (TAILSCALE_CLIENT_ID: bootstrap/'s output samiDevboxTailnetClientId),
 #              linger. From here every step goes over Tailscale SSH.

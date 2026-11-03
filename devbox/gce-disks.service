@@ -1,5 +1,5 @@
 [Unit]
-Description=sami-devbox disks: state and cold disks, /home and Docker data from the state disk, local-SSD RAID and swap at /mnt/scratch
+Description=sami-devbox disks: state and cold disks; /home, Docker data and /theorem* from the state disk; local-SSD RAID, swap, /tmp and /var/tmp at /mnt/scratch
 # devbox/gce-disks says what it does and why. A system unit, copied (not linked) by
 # devbox/gce-host.sh to /etc/systemd/system with the script at /usr/local/sbin/gce-disks: the
 # dotfiles live under /home, which is exactly what this unit mounts, so systemd could not read a
@@ -14,13 +14,18 @@ Description=sami-devbox disks: state and cold disks, /home and Docker data from 
 #   ssh.service, cron      a login or a crontab job before the bind would see an empty home;
 #   google-guest-agent     it writes the instance's ssh keys into /home/<user>/.ssh at its start;
 #   tailscaled             its SSH server starts login shells in /home;
-#   docker, containerd,    their data directories are bound from the state disk.
+#   docker, containerd,    their data directories are bound from the state disk;
 #   sysbox
+#   datadog-agent          its SBOM scans write /tmp/trivy-*, which the /tmp bind would hide.
+#
+# The /tmp bind runs after systemd-tmpfiles-setup (sysinit.target) has cleaned the boot disk's
+# /tmp; units that start before this one keep their PrivateTmp directories on the boot disk
+# (devbox/gce-disks, bind_tmp).
 #
 # Default dependencies stay: they order this after local-fs.target and udev's coldplug
 # (sysinit.target), which the by-id links need, and nothing above starts before basic.target.
 After=local-fs.target systemd-udev-trigger.service
-Before=user@1000.service ssh.service cron.service google-guest-agent.service tailscaled.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service
+Before=user@1000.service ssh.service cron.service google-guest-agent.service tailscaled.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service datadog-agent.service
 
 [Service]
 Type=oneshot

@@ -11,13 +11,18 @@
 #     config or package conffile has to name another path and the 500 GiB boot disk holds none of
 #     their data (every agent box runs its own dockerd, whose images Sysbox keeps under
 #     /var/lib/sysbox);
+#   - /theorem, /theorem-ext4 and /theorem-xfs, the paths sami-leanperf's lanes write, bound from
+#     /mnt/nvme/<name>;
 #   - every local NVMe SSD as one RAID 0 (md name `scratch`, XFS label `scratch`) at /mnt/scratch,
 #     with a 256 GiB swap file and /mnt/scratch/<user> for uid 1000. A stop of the VM erases every
-#     local SSD, so after a start the array is created fresh; after a reboot it is assembled again.
+#     local SSD, so after a start the array is created fresh; after a reboot it is assembled again;
+#   - /tmp and /var/tmp bound from /mnt/scratch/tmp and /mnt/scratch/var-tmp, during boot only.
 #
 # Every step looks first and changes only what is missing, so it runs at every boot and by hand
 # (`systemctl start gce-disks` after a failure). It never unmounts, stops an array, formats a
-# state or cold disk, or removes a file other than a swap file of the wrong size. A failed step
+# state or cold disk, or removes a file other than a swap file of the wrong size, an entry of the
+# boot disk's /var/tmp that it moves to the scratch one, and at a boot, before the bind, what the
+# boot's cleanup removes from the scratch /tmp and /var/tmp (bind_tmp). A failed step
 # does not stop the steps that do not depend on it (a broken scratch array still leaves /home
 # mounted for whoever logs in to repair it), but the script then exits non-zero and does not write
 # /run/gce-disks/ready, so the unit is red and the units whose drop-in asserts that file
@@ -137,6 +142,25 @@ bind_docker() { bind_data docker /var/lib/docker; }
 bind_containerd() { bind_data containerd /var/lib/containerd; }
 bind_sysbox() { bind_data sysbox /var/lib/sysbox; }
 
+# bind_lane NAME: /NAME bound from /mnt/nvme/NAME. sami-leanperf's lanes name their trees by
+# /theorem, /theorem-ext4 and /theorem-xfs (devbox/sami-devbox.md, "The old leanperf paths"), and
+# on 2026-11-03 10 GiB of lane logs landed on the boot disk there in the 5 hours before the bind.
+# A tree the state disk lacks is made uid 1000's, as it is on sami-leanperf, since the lanes write
+# it as that user; an existing one is never chowned, since it holds data.
+bind_lane() {
+    local src="/mnt/nvme/$1" entry
+    mountpoint -q /mnt/nvme || die "/$1: /mnt/nvme is not mounted"
+    if [[ ! -d "$src" ]]; then
+        entry="$(getent passwd "$DEVBOX_UID")" || die "/$1: no user with uid $DEVBOX_UID"
+        install -d -o "$DEVBOX_UID" -g "$(cut -d: -f4 <<<"$entry")" -m 755 "$src"
+    fi
+    bind_data "$1" "/$1"
+}
+
+bind_theorem() { bind_lane theorem; }
+bind_theorem_ext4() { bind_lane theorem-ext4; }
+bind_theorem_xfs() { bind_lane theorem-xfs; }
+
 # The local SSDs by kernel name. C4 names them google-local-nvme-ssd-N, older shapes
 # google-local-ssd-N; a partition link is not a member.
 local_ssds() {
@@ -242,6 +266,67 @@ mount_scratch() {
     ensure_mount "$md" /mnt/scratch noatime
 }
 
+# /tmp and /var/tmp bound from /mnt/scratch/tmp and /mnt/scratch/var-tmp (mode 1777): the spec's
+# "Shape and disks" puts /tmp-class data on the disk a stop may erase, and agents write gigabytes
+# there. Only while the machine boots, before multi-user.target (which is ordered after this
+# unit): a bind over a live /tmp would hide every file, socket and lock that running sessions hold
+# in it, so a run on a running machine (gce-host.sh's restart, a run by hand) leaves both for the
+# next boot.
+#
+# By the time this unit runs, systemd-tmpfiles-setup has cleaned the boot disk's /tmp (tmp.conf's
+# `D /tmp`), and only the units that started before this one hold anything there: their PrivateTmp
+# directories (systemd-resolved, chrony), which stay theirs on the boot disk until the next boot's
+# cleanup. That cleanup ran on the boot disk, not on the scratch, so this step does the scratch's
+# part of it, before the bind, while no unit can see these directories: /tmp starts each boot
+# empty, and /var/tmp loses only earlier boots' PrivateTmp directories (`R!
+# /var/tmp/systemd-private-*`). After the bind, systemd-tmpfiles makes the boot entries (the X11
+# directories), with --create only: with --remove it also deleted a PrivateTmp directory of the
+# running boot in a test (2026-11-03), which a unit that started after the bind would hold. The
+# boot disk's /var/tmp entries move to the scratch one, so a reboot keeps them as it did.
+# tmp.mount is not installed on this image; if someone enables it, /tmp is a tmpfs mount before
+# this unit runs, and this step fails rather than stack on it.
+bind_tmp() {
+    local pair name target src entry bound=()
+    mountpoint -q /mnt/scratch || die "tmp: /mnt/scratch is not mounted"
+    for pair in "tmp /tmp" "var-tmp /var/tmp"; do
+        read -r name target <<<"$pair"
+        src="/mnt/scratch/$name"
+        install -d -o root -g root -m 1777 "$src"
+        if mountpoint -q "$target"; then
+            same_dir "$target" "$src" || die "$target is a mount of something other than $src"
+            log "$target: already bound from $src"
+            continue
+        fi
+        if systemctl is-active --quiet multi-user.target; then
+            log "$target: still the boot disk's; it is bound from $src at the next boot, never over a live $target"
+            continue
+        fi
+        if [[ "$target" == /tmp ]]; then
+            find "$src" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+        else
+            find "$src" -mindepth 1 -maxdepth 1 -name 'systemd-private-*' -exec rm -rf -- {} +
+            shopt -s nullglob dotglob
+            for entry in /var/tmp/*; do
+                [[ "${entry##*/}" == systemd-private-* ]] && continue
+                if [[ -e "$src/${entry##*/}" || -L "$src/${entry##*/}" ]]; then
+                    log "/var/tmp: ${entry##*/} is on both disks; the boot disk's copy stays under the bind"
+                    continue
+                fi
+                mv -- "$entry" "$src/"
+                log "/var/tmp: moved the boot disk's ${entry##*/} to $src"
+            done
+            shopt -u nullglob dotglob
+        fi
+        mount --bind "$src" "$target"
+        log "$target: bound from $src"
+        bound+=(--prefix="$target")
+    done
+    if ((${#bound[@]})); then
+        # Not a failure of the step: tmpfiles exits non-zero for a single entry it could not make.
+        systemd-tmpfiles --create --boot "${bound[@]}" || log "tmp: systemd-tmpfiles --create --boot ${bound[*]} exited $?"
+    fi
+}
+
 swap() {
     local want have
     mountpoint -q /mnt/scratch || die "swap: /mnt/scratch is not mounted"
@@ -319,10 +404,15 @@ if [[ -n "${done_ok[mount_state]:-}" ]]; then
     run bind_docker
     run bind_containerd
     run bind_sysbox
+    run bind_theorem
+    run bind_theorem_ext4
+    run bind_theorem_xfs
 fi
 run mount_cold
 run mount_scratch
 if [[ -n "${done_ok[mount_scratch]:-}" ]]; then
+    # First, so that as few units as possible start before it and use the boot disk's /tmp.
+    run bind_tmp
     run swap
     run user_scratch
 fi

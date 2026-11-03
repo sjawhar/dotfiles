@@ -6,9 +6,11 @@
 #   1. the apt packages the dotfiles' installers and scripts expect and a bare Ubuntu 24.04
 #      image lacks, and the AppArmor profile that lets bwrap make its user namespace;
 #   2. devbox/gce-disks and its unit, enabled and run now: state disk at /mnt/nvme, cold disk at
-#      /mnt/durable, /home and Docker's, containerd's and Sysbox's data bound from the state disk,
-#      the local-SSD RAID with its swap at /mnt/scratch; and the drop-in that keeps the user
-#      manager and Docker from starting before it (devbox/gce-disks-ready.conf);
+#      /mnt/durable, /home, Docker's, containerd's and Sysbox's data and /theorem, /theorem-ext4
+#      and /theorem-xfs bound from the state disk, the local-SSD RAID with its swap at
+#      /mnt/scratch, and /tmp and /var/tmp bound from it at the next boot; the drop-in that keeps
+#      the user manager and Docker from starting before it (devbox/gce-disks-ready.conf); and
+#      journald's cap on the boot disk (devbox/journald-cap.conf);
 #   3. Docker (installers/docker.sh, for the user), then Sysbox (installers/sysbox.sh), which
 #      registers itself with Docker;
 #   4. Tailscale, joined by workload identity (installers/tailscale.sh; needs TAILSCALE_CLIENT_ID);
@@ -137,8 +139,20 @@ systemctl restart gce-disks.service || {
     die "gce-disks.service failed (above)"
 }
 # findmnt takes one mount point per call: two or more positional arguments are a usage error.
-for m in /mnt/nvme /mnt/durable /mnt/scratch /home; do findmnt -no TARGET,SOURCE,FSTYPE --mountpoint "$m"; done
+for m in /mnt/nvme /mnt/durable /mnt/scratch /home /theorem /theorem-ext4 /theorem-xfs; do findmnt -no TARGET,SOURCE,FSTYPE --mountpoint "$m"; done
+# Bound only at a boot (devbox/gce-disks, bind_tmp), so after a first run these are not mounts yet.
+for m in /tmp /var/tmp; do findmnt -no TARGET,SOURCE,FSTYPE --mountpoint "$m" || echo "$m: the boot disk's until the next boot"; done
 swapon --show
+
+# journald on the boot disk: at most 2 GiB, and never inside the 50 GiB floor of / (the file says
+# why). Copied, as the disk unit is; a restart of journald keeps its clients' streams and applies
+# the file now, and only when it changed.
+journald_conf=/etc/systemd/journald.conf.d/50-sami-devbox.conf
+if ! cmp -s "$DEVBOX_DIR/journald-cap.conf" "$journald_conf"; then
+    install -D -m 644 "$DEVBOX_DIR/journald-cap.conf" "$journald_conf"
+    systemctl restart systemd-journald.service
+fi
+journalctl --disk-usage
 
 # --- 3. Docker, then Sysbox -----------------------------------------------------------------------
 # installers/docker.sh is a user installer: USER names whom it adds to the docker group.
