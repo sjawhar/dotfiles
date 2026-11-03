@@ -421,9 +421,8 @@ PY
     got="$(timeout 200 omp -p "say ok" --model anthropic/claude-opus-4-8 2>&1 | tail -1)"
     [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through ossv-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
     # openai/ goes through the gateway's openai group too (devbox/sami-devbox-model-routes): the
-    # slow and review roles, both GPT-6.1 Sol, each answer a real turn. A fail prints "Use /login"
-    # or an HTTP 4xx.
-    for model in @slow @review; do
+    # slow role and astra's model each answer a real turn. A fail prints "Use /login" or an HTTP 4xx.
+    for model in @slow ossv-gateway/openai/gpt-6-astra:xhigh; do
         got="$(timeout 200 omp -p "say ok" --model "$model" 2>&1 | tail -1)"
         [[ "${got,,}" == *ok* ]] && ok "$model through ossv-gateway's openai group answers: $got" || fail "$model: $got"
     done
@@ -480,8 +479,8 @@ azure_check() {
 
 # The transcript store, as a session reads it: `tq` through the front door
 # (https://transcript-store.$TAILNET, agent-infra transcript-store/), which names this machine by
-# its tailnet tag, tag:sami-devbox, with no password (dispatch://INFRA-913). A read-only count of
-# the sessions table must give a positive number.
+# its owner's login, sami@theorem.dev, as Sami's own node, with no password (dispatch://INFRA-913,
+# dispatch://INFRA-1099). A read-only count of the sessions table must give a positive number.
 tq_check() {
     local where="$1" out
     # uv tool install puts tq in ~/.local/bin, which a non-login shell's PATH lacks.
@@ -756,8 +755,15 @@ host_identity() {
     local got
     [[ "$(hostname -s)" == sami-devbox ]] && ok "host: hostname sami-devbox" || fail "host: hostname $(hostname -s)"
     [[ "$(id -u)" == 1000 && "$(id -un)" == sami ]] && ok "host: user sami uid 1000" || fail "host: user $(id -un) uid $(id -u), want sami 1000"
-    got="$(tailscale status --self --json 2>/dev/null | jq -r '[.Self.HostName, (.Self.Tags // [] | join(","))] | join(" ")')"
-    [[ "$got" == "sami-devbox tag:sami-devbox" ]] && ok "tailnet: node sami-devbox, tag:sami-devbox" || fail "tailnet: want 'sami-devbox tag:sami-devbox', got '$got'"
+    # Sami's own node (dispatch://INFRA-1099): no tag, and his login owns it. Until agent-infra
+    # #1849 applies, the node may still be the tagged one it was provisioned as; both pass, so the
+    # sign-in that removes the tag does not fail this check and block `agentbox move --to`.
+    got="$(tailscale status --self --json 2>/dev/null | jq -r '"\(.Self.HostName) tags [\((.Self.Tags // []) | join(","))] owner \(.User[(.Self.UserID | tostring)].LoginName // "unknown")"')"
+    case "$got" in
+        "sami-devbox tags [] owner sami@theorem.dev") ok "tailnet: node sami-devbox, no tag, owner sami@theorem.dev" ;;
+        "sami-devbox tags [tag:sami-devbox] owner "*) ok "tailnet: node sami-devbox, still tag:sami-devbox until Sami signs it in (INFRA-1099)" ;;
+        *) fail "tailnet: want 'sami-devbox tags [] owner sami@theorem.dev', got '$got'" ;;
+    esac
     got="$(curl -fsS -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email 2>&1)"
     [[ "$got" == "$ACCOUNT" ]] && ok "host: the VM's attached account is $got" || fail "host: metadata account: $got"
     [[ ! -e "$HOME/.config/gcloud/box_credential_config.json" && -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]] \
@@ -880,15 +886,13 @@ host_bwrap() {
 }
 
 # Movers (S3 and others) run scripts on sami-rocqperf over ssh after the move, so this machine
-# must reach it. While the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending
-# (dispatch://INFRA-734) the connection times out, which is a WAIT; any other error is a FAIL.
+# must reach it. Both are Sami's own nodes, so Tailscale SSH on sami-rocqperf takes the
+# connection as sami by the policy's accept rule for his own devices (dispatch://INFRA-1099).
 rocqperf_check() {
     local out rc=0
     out="$(ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true </dev/null 2>&1)" || rc=$?
     if (( rc == 0 )); then
         ok "ssh sami-devbox -> sami-rocqperf: ssh -o BatchMode=yes sami@sami-rocqperf true exits 0"
-    elif [[ "$out" == *"timed out"* ]]; then
-        echo "WAIT ssh sami-devbox -> sami-rocqperf: tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 pending (dispatch://INFRA-734)"
     else
         fail "ssh sami-devbox -> sami-rocqperf: exit $rc: $(tail -1 <<<"$out")"
     fi
@@ -962,17 +966,17 @@ host() {
     mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
-    # The openai/ agents and roles go to GPT-6.1 Sol through the gateway (devbox/sami-devbox-model-routes):
-    # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/gpt-6.1-sol,
-    # and omp's merged models.yml declares Sol, and no other openai/ model, on the gateway.
+    # The openai/ agents and roles go to the gateway's openai group (devbox/sami-devbox-model-routes):
+    # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/ models,
+    # and omp's merged models.yml declares at least 4 of them.
     missing="$(yq -r '.modelRoles.slow, .modelRoles.deep, .task.agentModelOverrides.astra, .task.agentModelOverrides["sami-proxy"]' "$DOTFILES_DIR/omp/config.local.yml" 2>&1)"
-    if [[ "$(grep -c '^ossv-gateway/openai/gpt-6\.1-sol:' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
-        ok "omp config.local.yml: slow, deep, astra and sami-proxy use gateway GPT-6.1 Sol ($(tr '\n' ' ' <<<"$missing"))"
+    if [[ "$(grep -c '^ossv-gateway/openai/' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
+        ok "omp config.local.yml: slow, deep, astra and sami-proxy use ossv-gateway/openai/ ($(tr '\n' ' ' <<<"$missing"))"
     else
-        fail "omp config.local.yml: slow, deep, astra, sami-proxy want ossv-gateway/openai/gpt-6.1-sol each, got: $(tr '\n' ';' <<<"$missing")"
+        fail "omp config.local.yml: slow, deep, astra, sami-proxy want ossv-gateway/openai/<id> each, got: $(tr '\n' ';' <<<"$missing")"
     fi
-    missing="$(yq -r '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] + [.providers["ossv-gateway-openai"].models[].id | "ossv-gateway-openai/" + .] | join(" ")' "$HOME/.omp/agent/models.yml" 2>&1)"
-    [[ "$missing" == "openai/gpt-6.1-sol ossv-gateway-openai/openai/gpt-6.1-sol" ]] && ok "omp models.yml: the gateway's openai/ models are GPT-6.1 Sol only ($missing)" || fail "omp models.yml: the gateway's openai/ models: want openai/gpt-6.1-sol on ossv-gateway and ossv-gateway-openai, got: $missing"
+    missing="$(yq '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
     host_logins
     host_owners
     github_check "on the host"

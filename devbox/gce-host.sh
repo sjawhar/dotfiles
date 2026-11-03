@@ -14,11 +14,12 @@
 #      tailscaled's and sshd's sessions (devbox/nofile.conf);
 #   3. Docker (installers/docker.sh, for the user), then Sysbox (installers/sysbox.sh), which
 #      registers itself with Docker;
-#   4. Tailscale, joined by workload identity (installers/tailscale.sh; needs TAILSCALE_CLIENT_ID);
+#   4. Tailscale, joined as Sami's own node by his interactive login (installers/tailscale.sh
+#      prints the login URL and waits until he signs in);
 #   5. systemd lingering for the user, so user services outlive the last login;
 #   6. sysstat, whose `sar` history is how the spec's acceptance A4 is measured.
 #
-# Usage: sudo TAILSCALE_CLIENT_ID=<id> devbox/gce-host.sh
+# Usage: sudo devbox/gce-host.sh
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"

@@ -16,9 +16,9 @@
 #              /mnt/scratch, swap, /mnt/nvme, /mnt/durable, /home and /theorem, /theorem-ext4,
 #              /theorem-xfs from the state disk, /tmp and /var/tmp from the scratch at the next
 #              boot), Docker's data on the state disk, journald's 2 GiB cap on the boot disk,
-#              Sysbox, Tailscale joined as sami-devbox with tag:sami-devbox by the VM's own Google
-#              identity (TAILSCALE_CLIENT_ID: bootstrap/'s output samiDevboxTailnetClientId),
-#              linger. From here every step goes over Tailscale SSH.
+#              Sysbox, Tailscale joined as sami-devbox, Sami's own untagged node: the step prints
+#              the login URL `tailscale up` gives and waits until Sami signs in there
+#              (dispatch://INFRA-1099), linger. From here every step goes over Tailscale SSH.
 #   dotfiles   ~/.dotfiles cloned from GitHub (public, no login) onto the state disk, colocated jj.
 #   secrets    the secret files that are in no repository (SECRET_FILES below), over Tailscale SSH.
 #   leakcheck  the public-text leak check shims/gh requires, in ~/.local/share/public-leak-check
@@ -45,8 +45,9 @@
 #              marker `agentbox move --to sami-devbox` requires.
 #
 # Envoy needs nothing deployed on the machine: the hub's listener (agent-infra envoy/) serves
-# every device the tailnet lets reach it, and bootstrap/ grants tag:sami-devbox tcp 9020 and
-# 4222 on the hub. A session reaches it with the envoy.json the secrets step copies.
+# every device the tailnet lets reach it, and bootstrap/ grants every member's device, Sami's
+# sami-devbox among them, tcp 9020 and 4222 on the hub. A session reaches it with the envoy.json
+# the secrets step copies.
 set -euo pipefail
 
 VM=sami-devbox
@@ -162,11 +163,11 @@ step_vm() {
 }
 
 step_host() {
-    [[ -n "${TAILSCALE_CLIENT_ID:-}" ]] || die "TAILSCALE_CLIENT_ID is unset: it is agent-infra bootstrap/'s output samiDevboxTailnetClientId"
+    say "Sign in as sami@theorem.dev at the login URL tailscale up prints below; the step waits for it"
     "${GSSH[@]}" --command "set -e
         rm -rf /tmp/dotfiles-bootstrap
         git clone -q --depth 1 $REPO /tmp/dotfiles-bootstrap
-        sudo TAILSCALE_CLIENT_ID=$(printf '%q' "$TAILSCALE_CLIENT_ID") SUDO_USER=sami bash /tmp/dotfiles-bootstrap/devbox/gce-host.sh
+        sudo SUDO_USER=sami bash /tmp/dotfiles-bootstrap/devbox/gce-host.sh
         rm -rf /tmp/dotfiles-bootstrap"
     local i
     for i in $(seq 60); do
@@ -174,7 +175,9 @@ step_host() {
         (( i == 60 )) && die "$VM is not reachable over Tailscale SSH 10 minutes after the join"
         sleep 10
     done
-    say "Tailscale SSH sami@$VM answers; $(tailscale status --json | jq -r --arg h "$VM" '.Peer[] | select(.HostName == $h) | "\(.DNSName) \(.TailscaleIPs[0]) \((.Tags // []) | join(","))"')"
+    # The addresses are the ones agent-infra bootstrap/'s hosts entries sami-devbox and
+    # sami-devbox-v6 must hold (bootstrap/README.md, "sami-devbox", "The tailnet").
+    say "Tailscale SSH sami@$VM answers; $(tailscale status --json | jq -r --arg h "$VM" '. as $s | .Peer[] | select(.HostName == $h) | "\(.DNSName) \(.TailscaleIPs | join(" ")) owner \($s.User[(.UserID | tostring)].LoginName // "unknown") tags [\((.Tags // []) | join(","))]"')"
 }
 
 step_dotfiles() {

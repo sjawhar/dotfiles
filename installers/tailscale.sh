@@ -1,25 +1,21 @@
 #!/bin/bash
-# Tailscale on a Google VM devbox (sami-devbox), joined with Tailscale's workload identity
-# federation: tailscaled presents the VM's own Google identity token, requested for the
-# federated identity's audience, and gets a node key for the one tag that identity may mint. No
-# auth key is stored anywhere (dispatch://INFRA-993, "Network and Tailscale"; agent-infra
-# bootstrap/samidevbox.go declares the identity, and bootstrap/README.md the `tailscale up` shape
-# other Google VMs use).
+# Tailscale on a Google VM devbox (sami-devbox), joined as Sami's own node: `tailscale up` prints
+# a login URL, and Sami signs in there with his own account, as on his other devices. The node
+# carries no tag, so it reaches what his login reaches through the tailnet policy's members'
+# grants (dispatch://INFRA-1099; agent-infra bootstrap/README.md, "sami-devbox", "The tailnet").
+# No auth key and no client id is stored anywhere.
 #
-# Root-level role installer: devbox/gce-host.sh sources it with sudo. Needs TAILSCALE_CLIENT_ID,
-# the identity's client id, agent-infra bootstrap's stack output `samiDevboxTailnetClientId` (not
-# a secret); Tailscale generates the audience from it. TAILSCALE_HOSTNAME and TAILSCALE_TAG
-# default to this machine's short host name and tag:<that name>, the names the identity and the
-# tailnet policy give sami-devbox.
+# Root-level role installer: devbox/gce-host.sh sources it with sudo. TAILSCALE_HOSTNAME defaults
+# to this machine's short host name, the name the tailnet policy's hosts entries give sami-devbox.
 #
 # Idempotent: the package is installed only when the pinned version is not, and `tailscale up`
-# runs only when the node is not already up under that name and tag.
+# runs only when the node is not already up, untagged, under that name. A node still tagged from
+# an earlier join signs in again (--force-reauth) and drops its tags (--advertise-tags=).
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# The .deb from Tailscale's own Ubuntu pool, pinned. 1.94.0 is the first release whose
-# `tailscale up --audience` fetches the cloud identity token itself (bootstrap/README.md).
+# The .deb from Tailscale's own Ubuntu pool, pinned.
 # The sha256 is the one Tailscale's signed apt index (dists/noble/main/binary-amd64/Packages)
 # lists for this file, read on 2026-11-02.
 TAILSCALE_VERSION=1.104.4
@@ -46,24 +42,19 @@ if [[ -d /run/systemd/system ]]; then
 fi
 
 ts_host="${TAILSCALE_HOSTNAME:-$(hostname -s)}"
-ts_tag="${TAILSCALE_TAG:-tag:$ts_host}"
 ts_state="$(tailscale status --self --json 2>/dev/null \
     | jq -r '[.BackendState, .Self.HostName, ((.Self.Tags // []) | join(","))] | join(" ")' 2>/dev/null || true)"
-if [[ "$ts_state" == "Running $ts_host $ts_tag" ]]; then
-    echo "tailscale.sh: already on the tailnet as $ts_host with $ts_tag"
+read -r ts_backend ts_name ts_tags <<<"$ts_state"
+if [[ "$ts_backend" == Running && "$ts_name" == "$ts_host" && -z "$ts_tags" ]]; then
+    echo "tailscale.sh: already on the tailnet as $ts_host, untagged"
 else
-    if [[ -z "${TAILSCALE_CLIENT_ID:-}" ]]; then
-        echo "tailscale.sh: TAILSCALE_CLIENT_ID is not set. It is agent-infra bootstrap's stack output samiDevboxTailnetClientId (not a secret); rerun with it set." >&2
-        exit 1
+    # --ssh: Tailscale SSH is how the laptop and Sami's other devices log in (the policy's SSH
+    # rule for his own devices). --advertise-tags= with no value: the node carries no tag.
+    ts_up=(tailscale up --hostname="$ts_host" --ssh --advertise-tags=)
+    if [[ -n "$ts_tags" ]]; then
+        ts_up+=(--force-reauth)
     fi
-    # ephemeral=false: the node stays when tailscaled stops, as a devbox must across a reboot.
-    # --ssh: Tailscale SSH is how the laptop logs in (the policy's SSH rule for the tag).
-    tailscale up \
-        --hostname="$ts_host" \
-        --advertise-tags="$ts_tag" \
-        --ssh \
-        --accept-dns=true \
-        --client-id="${TAILSCALE_CLIENT_ID}?ephemeral=false&preauthorized=true" \
-        --audience="api.tailscale.com/${TAILSCALE_CLIENT_ID}"
-    echo "tailscale.sh: joined the tailnet as $ts_host with $ts_tag"
+    echo "tailscale.sh: sign in as sami@theorem.dev at the login URL tailscale up prints below"
+    "${ts_up[@]}"
+    echo "tailscale.sh: joined the tailnet as $ts_host, untagged"
 fi
