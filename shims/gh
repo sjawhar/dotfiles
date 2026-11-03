@@ -12,24 +12,29 @@ set -euo pipefail
 # shim for its own forge queries, and the read cache re-enters it on a miss:
 # both carry a marker, and a marked call is the same call again, not a new
 # one. Every step is best-effort; nothing here may fail a gh call.
+# _gh_cache_root: sets _gh_root, the cache's root directory. A variable, not
+# output: `$(...)` forks a subshell, and on 2026-11-03 at load ~290 every
+# process this shim started cost tens to hundreds of milliseconds.
 _gh_cache_root() {
     if [[ -n "${GH_READ_CACHE_DIR:-}" ]]; then
-        printf '%s' "$GH_READ_CACHE_DIR"
+        _gh_root="$GH_READ_CACHE_DIR"
         return
     fi
     local u="${USER:-$(id -un 2> /dev/null || true)}"
     if [[ -n "$u" && -d "/mnt/nvme/$u" ]]; then
-        printf '%s' "/mnt/nvme/$u/gh-read-cache"
+        _gh_root="/mnt/nvme/$u/gh-read-cache"
     else
-        printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/gh-read-cache"
+        _gh_root="${XDG_CACHE_HOME:-$HOME/.cache}/gh-read-cache"
     fi
 }
 _gh_call_log() {
-    local root dir a s out=''
-    root="$(_gh_cache_root)" || return 0
-    dir="$root/log"
-    mkdir -p "$dir" 2> /dev/null || return 0
-    chmod 700 "$root" "$dir" 2> /dev/null || true
+    local dir a s out='' hour
+    _gh_cache_root
+    dir="$_gh_root/log"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" 2> /dev/null || return 0
+        chmod 700 "$_gh_root" "$dir" 2> /dev/null || true
+    fi
     for a in "$@"; do
         s=${a//\\/\\\\}
         s=${s//\"/\\\"}
@@ -41,9 +46,10 @@ _gh_call_log() {
     local now="${EPOCHREALTIME:-}"
     now="${now/,/.}"
     [[ -n "$now" ]] || now="$(date -u +%s)"
+    TZ=UTC0 printf -v hour '%(%Y%m%d%H)T' -1
     printf '{"t":%s,"pid":%s,"sid":"%s","cwd":"%s","ev":"call","argv":[%s]}\n' \
         "$now" "$$" "${OMP_SESSION_ID:-}" "${PWD//\"/}" "${out:1}" \
-        >> "$dir/$(date -u +%Y%m%d%H).jsonl" 2> /dev/null || true
+        >> "$dir/$hour.jsonl" 2> /dev/null || true
 }
 if [[ -z "${KNIVES_GH_SHIM_DEPTH:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${GH_SHIM_INNER:-}" && "${GH_READ_CACHE_LOG:-}" != 0 ]]; then
     _gh_call_log "$@" || true
@@ -306,7 +312,8 @@ if agent_context; then
     # and the issue still did not go out.
     _approved_log=""
     if [[ -n "${GH_SHIM_APPROVAL:-}" && -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${KNIVES_GH_SHIM_DEPTH:-}" ]]; then
-        _approved_root="$(_gh_cache_root)"
+        _gh_cache_root
+        _approved_root="$_gh_root"
         mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
         _approved_log="$_approved_root/log/approved-posts.jsonl"
         "$_dotfiles/scripts/gh-approved-post" --log "$_approved_log" -- "$@" || exit 1
@@ -364,6 +371,31 @@ if agent_context; then
         esac
         echo "gh shim: GH_TOKEN inherited from the environment (${GH_TOKEN:0:4}…, $_kind); not routing" >&2
     fi
+    # A call goes through the host-wide read cache (dispatch://BET-303):
+    # an identical read from any session inside 60 s (120 s for
+    # `gh pr view/checks/list --json`) is answered without a
+    # request at all, and a plain `gh api` GET revalidates its stored ETag
+    # with a conditional request, which GitHub does not count against the
+    # primary rate limit when it answers 304. A write runs as written, and
+    # when it ends the cache stops serving every read of that pull request or
+    # issue and every repository-wide read of its repository.
+    # The cache comes BEFORE the gates below. Every call it makes (a miss, a
+    # revalidation, a write, a pass-through, and any failure of that layer)
+    # re-enters this shim marked GH_READ_CACHE_BYPASS, and that pass runs the
+    # gates, routing and knives on exactly the arguments gh then runs with. A
+    # hit sends nothing, and it can only serve an answer that such a pass
+    # fetched for the same arguments. With the gates also run before the
+    # cache, every call ran the leak check twice: on 2026-11-03 at load ~290,
+    # 20 calls spent 4.6 s (p50) in each run, 9 s of the 11 s a call took.
+    if [[ -z "${GH_READ_CACHE_BYPASS:-}" && "${GH_READ_CACHE:-}" != 0 && -x "$_dotfiles/scripts/gh-read-cache" ]]; then
+        if [[ "$0" == /* && ! -L "$0" ]]; then
+            _self="$0"
+        else
+            _self="$(readlink -f "$0" 2> /dev/null || true)"
+            [[ -n "$_self" ]] || _self="$0"
+        fi
+        GH_READ_CACHE_GH="$_self" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
+    fi
     # A standalone docs-only pull request is refused where docs are batched.
     if [[ "${1:-}" == pr && "${2:-}" == create ]]; then
         "$_dotfiles/scripts/docs-pr-gate" "${@:3}"
@@ -413,22 +445,6 @@ if agent_context; then
     elif ((_gate_rc != 0)); then
         exit 1
     fi
-    # A call goes through the host-wide read cache (dispatch://BET-303):
-    # an identical read from any session inside 60 s (120 s for
-    # `gh pr view/checks/list --json`) is answered without a
-    # request at all, and a plain `gh api` GET revalidates its stored ETag
-    # with a conditional request, which GitHub does not count against the
-    # primary rate limit when it answers 304. The cache re-enters this shim
-    # for the call it does make, marked, so routing, the gates above and
-    # knives all run on it unchanged. A write runs as written, and when it
-    # ends the cache stops serving every read of that pull request or issue
-    # and every repository-wide read of its repository. Anything else, and
-    # any failure of that layer, continues below as before.
-    if [[ -z "${GH_READ_CACHE_BYPASS:-}" && "${GH_READ_CACHE:-}" != 0 && -x "$_dotfiles/scripts/gh-read-cache" ]]; then
-        _self="$(readlink -f "$0" 2> /dev/null || true)"
-        [[ -n "$_self" ]] || _self="$0"
-        GH_READ_CACHE_GH="$_self" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
-    fi
 fi
 
 # Outside an agent session, git's `gh auth git-credential` (the user's helper in ~/.gitconfig)
@@ -446,15 +462,17 @@ if [[ "${1:-}" == auth && "${2:-}" == git-credential ]] &&
     exit 0
 fi
 
+# real_gh: sets _real to the gh this shim hands the call to.
 # Content decides what is "real", never the path: any candidate carrying the
 # knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string
 # skip broke whenever HOME or DOTFILES_DIR spelled this shim's directory
 # differently from PATH, and knives gh re-entered this shim in an unbounded
 # fork chain (2026-08-27, ~300k processes). Mirrors real_gh() in knives
-# src/commands/gh.rs.
+# src/commands/gh.rs. A variable, not output, so no subshell is forked.
 real_gh() {
     local IFS=':'
     local dir candidate header
+    _real=""
     for dir in $PATH; do
         candidate="$dir/gh"
         [[ -f "$candidate" && -x "$candidate" ]] || continue
@@ -464,8 +482,46 @@ real_gh() {
         header=""
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *knives-gh-shim* ]] && continue
-        echo "$candidate"
-        return
+        _real="$candidate"
+        mise_pinned_gh "$dir" || true
+        return 0
+    done
+    return 1
+}
+# mise_pinned_gh DIR: when DIR is mise's shims directory, sets _real to the gh
+# pinned exactly in mise's global config, straight from its install dir, as
+# shims/knives runs knives. mise's shim is mise itself: it reads its config,
+# then execs that gh, one more process on every call (0.15 s p50, 0.51 s p90
+# over 20 calls at load ~290 on 2026-11-03), and under load mise hung for
+# minutes (2026-11-03 ~00:3x-01:00Z, shims/knives). With no exact pin, or no
+# install of it, _real stays mise's shim.
+mise_pinned_gh() {
+    local IFS=$' \t\n'
+    local root data="" config line section="" pin="" candidate
+    local section_re='^[[:space:]]*\[([^]]*)\]' pin_re='^[[:space:]]*"?gh"?[[:space:]]*=[[:space:]]*"([0-9][0-9A-Za-z.+-]*)"'
+    for root in "${MISE_DATA_DIR:-$HOME/.mise}" "${XDG_DATA_HOME:-$HOME/.local/share}/mise"; do
+        if [[ "$1" -ef "$root/shims" ]]; then
+            data="$root"
+            break
+        fi
+    done
+    [[ -n "$data" ]] || return 1
+    config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+    [[ -r "$config" ]] || return 1
+    while IFS= read -r line; do
+        if [[ "$line" =~ $section_re ]]; then
+            section="${BASH_REMATCH[1]}"
+        elif [[ "$section" == tools && "$line" =~ $pin_re ]]; then
+            pin="${BASH_REMATCH[1]}"
+            break
+        fi
+    done < "$config"
+    [[ -n "$pin" ]] || return 1
+    for candidate in "$data/installs/gh/$pin/bin/gh" "$data/installs/gh/$pin"/*/bin/gh; do
+        if [[ -f "$candidate" && -x "$candidate" ]]; then
+            _real="$candidate"
+            return 0
+        fi
     done
     return 1
 }
@@ -473,7 +529,7 @@ real_gh() {
 # Resolve the real gh FIRST and refuse to proceed without it (a bare `gh`
 # fallback would re-enter this shim and recurse), and honor the bypass before
 # involving knives at all.
-if ! _real="$(real_gh)"; then
+if ! real_gh; then
     echo "gh shim: no real gh found on PATH" >&2
     exit 127
 fi

@@ -33,8 +33,12 @@ before handing the call to the real one.
   `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
-  (`scripts/docs-pr-gate`). In an agent session every call first goes to the shared public leak
-  check through `scripts/public-text-gate`, which refuses it before gh runs. When the check asks for the
+  (`scripts/docs-pr-gate`). In an agent session every call that reaches gh first goes to the shared
+  public leak check through `scripts/public-text-gate`, which refuses it before gh runs. The check
+  runs once per call, on the pass that runs gh: with the read cache on (below), the cache's
+  re-entry, on exactly the arguments gh then gets. A read the cache answers sends nothing and runs
+  no check. Until 2026-11-03 the check also ran ahead of the cache, so twice per call (4.6 s p50
+  per run over 20 calls at load ~290). When the check asks for the
   text gh would read from stdin (its exit 4: `--input -`, `--body-file -`, `-F name=@-`), the
   shim reads all of stdin (at most 64 MiB) into a private file it unlinks before writing a
   byte, hands that open file to the check as `PUBLIC_LEAK_CHECK_STDIN=/dev/fd/N` (a value its
@@ -72,6 +76,11 @@ before handing the call to the real one.
   `GH_READ_CACHE_LOG=0` the log,
   `GH_READ_CACHE_DEBUG=1` prints one stderr line per hit, and
   `scripts/tests/test_gh_read_cache.py` is the contract.
+  The real gh is the first gh past this dir on PATH. When that is mise's own shim, the gh pinned
+  exactly in mise's global config runs straight from its install dir, as `shims/knives` runs
+  knives: mise's shim is one more process per call, and under load mise hung for minutes
+  (2026-11-03). mise's shim runs only when that install is missing
+  (`shims/tests/test_gh_mise_pin.py`).
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and in a
   checkout that sets `git config omp.sessionTrailer false` (the backing git repository's config)
   runs every command that can write a description with `templates.commit_trailers` empty and

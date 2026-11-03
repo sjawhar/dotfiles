@@ -55,7 +55,8 @@ class Base(unittest.TestCase):
         self.gh_log = self.tmp / "gh.log"
         self.gh_log.touch()
         self.env = {
-            **{k: v for k, v in os.environ.items() if not k.startswith(("GIT_CONFIG_", "PUBLIC_LEAK_CHECK"))},
+            **{k: v for k, v in os.environ.items()
+               if not k.startswith(("GIT_CONFIG_", "PUBLIC_LEAK_CHECK", "GH_READ_CACHE", "GH_SHIM_"))},
             "PATH": os.pathsep.join([str(self.bin), os.environ["PATH"]]),
             "HOME": str(self.tmp / "home"),
             "XDG_CONFIG_HOME": str(self.tmp / "config"),
@@ -65,6 +66,9 @@ class Base(unittest.TestCase):
             "GH_LOG": str(self.gh_log),
             "KNIVES_GH_BYPASS": "1",
             "OMP_SESSION_ID": SESSION,
+            # The shim hands every call to scripts/gh-read-cache; without this its
+            # entries and call log go to the machine's real cache.
+            "GH_READ_CACHE_DIR": str(self.tmp / "gh-read-cache"),
         }
         (self.tmp / "home").mkdir()
         (self.tmp / "config").mkdir()
@@ -142,6 +146,65 @@ class Shim(Base):
         result = self.run_shim("pr", "view", "9", "-R", "o/r", check_path=str(self.stub))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("pr view 9 -R o/r", self.gh_log.read_text())
+
+
+class Once(Base):
+    """The check runs once for each call that reaches gh, on the arguments gh runs with, and not at all for a read
+    the host read cache answers, which sends nothing: the shim hands the call to the cache before the gates, and
+    every call the cache makes re-enters the shim, which runs them. Until 2026-11-03 the gates also ran ahead of the
+    cache, so every call ran the check twice (4.6 s p50 per run over 20 calls at load ~290)."""
+
+    def checks(self):
+        return self.stub_log.read_text().splitlines()
+
+    def gh_calls(self):
+        return self.gh_log.read_text().splitlines()
+
+    def test_a_read_that_reaches_gh_is_checked_once(self):
+        result = self.run_shim("pr", "view", "9", "-R", "o/r", check_path=str(self.stub))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.checks(), ["gh-guard pr view 9 -R o/r"])
+        self.assertEqual(self.gh_calls(), ["pr view 9 -R o/r"])
+
+    def test_a_write_is_checked_once(self):
+        result = self.run_shim("pr", "comment", "9", "-R", "o/r", "--body", "x", check_path=str(self.stub))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.checks(), ["gh-guard pr comment 9 -R o/r --body x"])
+        self.assertEqual(self.gh_calls(), ["pr comment 9 -R o/r --body x"])
+
+    def test_the_check_reads_the_arguments_gh_runs_with(self):
+        # A plain `gh api` read goes out with the cache's --include added; the check reads that call, not the one typed.
+        result = self.run_shim("api", "repos/o/r", check_path=str(self.stub))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), ["api repos/o/r --include"])
+        self.assertEqual(self.checks(), ["gh-guard api repos/o/r --include"])
+
+    def test_a_cache_hit_runs_no_check_and_sends_nothing(self):
+        for _ in range(2):
+            result = self.run_shim("pr", "view", "9", "-R", "o/r", "--json", "state", check_path=str(self.stub))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.checks()), 1, self.checks())
+        self.assertEqual(len(self.gh_calls()), 1, self.gh_calls())
+
+    def test_a_refused_read_is_never_answered_from_the_cache(self):
+        for _ in range(2):
+            result = self.run_shim("pr", "view", "9", "-R", "o/r", "--json", "state", rc="3",
+                                   check_path=str(self.stub))
+            self.assertEqual(result.returncode, 1, "a read the check refused was answered")
+        self.assertEqual(len(self.checks()), 2, self.checks())
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_with_the_cache_off_the_check_still_runs_once_before_gh(self):
+        env = {**self.env, "STUB_RC": "3", "PUBLIC_LEAK_CHECK": str(self.stub), "GH_READ_CACHE": "0"}
+        argv = [str(GH), "pr", "comment", "9", "-R", "o/r", "--body", "x"]
+        refused = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(self.gh_calls(), [])
+        env["STUB_RC"] = "0"
+        passed = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual(len(self.checks()), 2, self.checks())
+        self.assertEqual(self.gh_calls(), ["pr comment 9 -R o/r --body x"])
 
 
 class Stdin(Base):
