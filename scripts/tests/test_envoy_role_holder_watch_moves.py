@@ -209,7 +209,12 @@ class CheckPanesTest(FakeTree):
     def options(self, **overrides):
         import argparse
 
-        values = {"pane_grace": 180.0, "move_grace": 1800.0, "dry_run": False, "print_alert": False}
+        # `state` only so the alert's report file (`Full report: …`) is written under this
+        # test's own temporary tree and never beside the real watcher's state.
+        values = {
+            "pane_grace": 180.0, "move_grace": 1800.0, "dry_run": False, "print_alert": False,
+            "state": self.root / "state.json", "write_state": True,
+        }
         values.update(overrides)
         return argparse.Namespace(**values)
 

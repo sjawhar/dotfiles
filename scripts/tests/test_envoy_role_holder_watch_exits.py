@@ -340,10 +340,16 @@ class RepeatTest(Incident):
 
         self.assertEqual([target for target, _ in RunEnvoy.sent], [CHIEF])
         text = RunEnvoy.sent[0][1]
-        self.assertIn(f"REPEAT of the incident first seen at {WATCH.iso(opened)}", text)
-        self.assertIn(f"first alerted at {WATCH.iso(alerted)}", text)
-        self.assertIn("49 min 0 s after its first alert", text)
-        self.assertNotIn("after 10 minutes", text)
+        # The message itself is now the decision only (at most 600 characters) and names the
+        # report file that holds the whole alert; both carry the two times and the one repeat.
+        report = Path(text.rsplit("Full report: ", 1)[1].strip())
+        self.assertLessEqual(len(text), 600, text)
+        for carries in (text, report.read_text()):
+            self.assertIn(f"REPEAT of the incident first seen at {WATCH.iso(opened)}", carries)
+            self.assertIn(f"alerted at {WATCH.iso(alerted)}", carries)
+            self.assertIn("49 min 0 s after its first alert", carries)
+            self.assertNotIn("after 10 minutes", carries)
+        self.assertIn("THIS IS A REPEAT, AND THE ONLY ONE", report.read_text())
         self.assertTrue(any("a repeat of the incident first seen at" in line for line in first), first)
         self.assertFalse(any("ESCALATED" in line for line in later), later)
 

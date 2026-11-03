@@ -79,27 +79,100 @@ One run, with no model call:
 
 Timing: last sighting + 60 s grace + at most one 30 s period, so about a minute.
 
-Cost of a run. A holder a process or a fresh heartbeat shows is never looked up further: its
-transcript is read only when those two are silent. Then the transcript is the one the watch
-already knows the session by — the file an omp held open for it, this run or an earlier one,
-kept in the state file — at the cost of one stat. Next is the session directory of the working
-directory Envoy lists for the holder (`~/.omp/agent/sessions/<encoded dir>/*_<id>.jsonl`), one
-listing, every time: that is where omp writes a session's transcript. Only a session found in
-neither needs the walk of the session root, and that walk and the header pass behind it share
+Cost of a run, and its budget. A holder a process or a fresh heartbeat shows is never looked up
+further: its transcript is read only when those two are silent. Then the transcript is the one
+the watch already knows the session by — the file an omp held open for it, this run or an
+earlier one, kept in the state file — at the cost of one stat. Next is the session directory of
+the working directory Envoy lists for the holder (`~/.omp/agent/sessions/<encoded dir>/*_<id>.jsonl`),
+one listing, every time: that is where omp writes a session's transcript. Only a session found
+in neither needs the walk of the session root, and that walk and the header pass behind it share
 one **3 s** budget per run (`TRANSCRIPT_WALK_SECONDS`), go through the working directories
 newest first, say so in the transcript row when they run out, and are not repeated for the
 same holder for 10 minutes after a miss. A transcript on no disk here is looked up in the
 session sweep's record, below. The descriptor scan behind `openers` is one per run, for every
-holder.
-The pane check runs before the holder checks, so a long period still checks every pane.
+holder. The pane check runs before the holder checks, so a long period still checks every pane.
+
+Four things keep a period inside its time, each measured on this box:
+
+- **One pass over `/proc`.** `/proc/<pid>/stat` of every process gives both the `omp` processes
+  and the pane check's parent/foreground table, where two passes read 3,400 `comm` files and
+  3,400 `stat` files (0.2-0.5 s of CPU, up to 9 s of wall clock each at load 268).
+- **The transcript headers are cached between runs**, in `headers.json` beside the state file,
+  keyed by path and inode. A header is written when the transcript is created and never
+  rewritten, so only a transcript opened since the last run is read at all. Re-reading all ~500
+  that the omp processes hold open was **38 s of a 39 s process scan** at load 268, one read
+  5 s, and the slowest step of 49 of the 71 runs over 45 s in the six hours before this change.
+  A run reads new headers for at most `HEADER_READ_SECONDS` (10 s); the rest are counted, the
+  summary line says so, and **no holder is judged unseen in a period that left any unread** —
+  one of them could be the sighting.
+- **A finished incident costs the two free sources only.** A recorded normal exit or an alert
+  quieted on the directory rule has one question left, "did the session come back", which a
+  process or a heartbeat answers; the session-root walk, the directory walk, the descriptor
+  scan and the Postgres read are not repeated. One such holder — `bet-owner-nickmine`, which
+  exited on 2026-11-02 and whose transcript the sweep then deleted — cost the run of
+  2026-11-03T00:18:07Z **80 s of its 90 s**, and that run was killed.
+- **The run has a wall-clock budget** (`--budget`, 60 s) counted from the moment the process
+  started, under the unit's 90 s `TimeoutStartSec`. Past it the run stops between two units of
+  work — never inside one — writes the state file with everything it has decided, logs one line
+  saying where it stopped, and exits 0, so systemd records no failure and the next period starts
+  with the roles this one did not reach (`checked_at`, oldest first). A run that starts with its
+  budget already spent still does one unit of work, so every period moves at least one role
+  forward.
+
+Measured interleaved against the unchanged script on 2026-11-03 02:42-03:36Z, 24 runs each,
+alternating, at load 199-379 and at this unit's `Nice` and IO class, reading the live box and
+sending nothing: **median 7.71 s → 1.49 s, p90 18.0 s → 2.53 s, p95 19.1 s → 3.46 s, worst
+19.3 s → 8.12 s** (that worst new run was one `GET /v1/sessions` taking 8.1 s, and nothing
+else), CPU **0.96 s → 0.41 s**, journal lines **42.5 → 1.3 per run**.
+
+In the six hours to 02:36Z the unchanged script, as the journal records it, had a median run of
+20.7 s and a p95 of 62.6 s, and failed **35 of 545 runs (6.4 %)**: 34 killed at the 90 s
+`TimeoutStartSec`, every one of them in the processes or the roles phase, and one that could not
+read `/v1/sessions`. A run can no longer be killed by a slow step, so what is left is that one
+class — the listener unreachable, which exits 2 and should be visible — plus a whole-box stall
+that holds one unit of work past 90 s: **about 0.2 % of runs**, a fifth of the 1 % asked for.
 
 Unbounded, the walk was every run on 2026-11-02 from 09:00Z: at load 410-455 the box's root disk
 answered it in 247 s and the header pass in 325 s, and every run was killed at its then 25 s
-`TimeoutStartSec` before any holder after the first, any pane, alert or clear. Measured after,
-at load 350-410: **6-13 s**, 22 s at the worst; the summary line gives each phase's seconds
-(`envoy`, `processes`, `panes`, `roles`). `TimeoutStartSec` is 90 s, since whole-box stalls in
-which systemd itself logs nothing for 25 s happen at this load; a oneshot still starting absorbs
-the next timer tick, so runs cannot pile up.
+`TimeoutStartSec` before any holder after the first, any pane, alert or clear. The summary line
+gives each phase's seconds (`envoy`, `processes`, `panes`, `roles`). A oneshot still starting
+absorbs the next timer tick, so runs cannot pile up.
+
+## What a run writes to the journal
+
+**One line per run**, plus a line each time a pane or a role CHANGES state, plus the alerts and
+clears, which are events. The summary line carries the counts, each phase's seconds, whatever
+ran out, and the suppressions in their short form.
+
+The journal held **150,188 lines in 40 h** (23,597 in the six hours to 2026-11-03T02:36Z, of
+which 10,723 were `<role>: ok (holder …)` and 8,318 `pane %N …: agent pane runs bash, not omp
+…; holding` — the same sentences every 30 s). The state behind each line is now kept in the
+state file under `logged`, keyed by pane and by role, and a line goes out only when that state
+differs from the one recorded: a new pid, a new command in the pane, a grace that has started, an
+alert, a clear. A pane or role the run never reached keeps its recorded state, so a budgeted run
+does not make the next one repeat everything.
+
+Expected volume after, at this box's ~120 runs an hour: **about 160 lines an hour** from the
+watch (1.3 a run measured over 24 runs) against about 3,700, plus systemd's own three lines a
+run, which this file does not control. Messages are unchanged in number — the review of
+2026-11-03 classed all of this watcher's alerts in 48 h as true positives, and nothing here
+changes when one is sent — and each is at most 600 characters instead of up to 2,404.
+
+## What these bounds give up
+
+- **A message alone no longer carries the evidence.** The per-source lines, the warning about
+  the claim, the handover files and the list of who else was told are in the report file, which
+  lives on the box that sent the message. A reader on another machine sees the decision and a
+  path.
+- **The journal no longer shows the current state of every pane and role.** `journalctl -n 50`
+  shows what changed; the state of each pane and role right now is
+  `jq .logged /mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json`.
+- **A finished incident is watched by the two free sources only.** A holder that comes back
+  invisible to both an `omp` process and Envoy's registry — resumed inside an agent box, say —
+  is not noticed until the role is dropped from the state file 24 h after it was last seen.
+- **A run that reaches its budget checks some roles a period later.** Detection then takes the
+  60 s grace plus up to two 30 s periods instead of one. No run in the 24 measured came near the
+  budget; the roles left over are the next run's first.
 
 ## What not reading the claim costs
 
@@ -259,14 +332,16 @@ check then covers it however its pane ends. The repo lane is being re-dispatched
 | Live sessions, their roles, host, dir, topics | `GET $ENVOY/v1/sessions` |
 | Role claim | **not read** by the watch, and named in no remedy: `GET /v1/roles/<role>` releases a lapsed holder's claim as it answers; see "What not reading the claim costs" |
 | Envoy registry entry and heartbeat | `GET $ENVOY/v1/sessions`, and `GET $ENVOY/v1/registry/<id>` for a holder absent from that list (`sessionEntryHandler` reads the session bucket and answers it; it makes no release) |
-| Holder process | `/proc/*/comm`, `/proc/*/cmdline`, `/proc/*/fd` |
+| Holder process | `/proc/*/stat` (one pass, shared with the pane check), then `/proc/*/cmdline` and `/proc/*/fd` of the `omp` and launcher processes only |
 | Last seen alive | `st_mtime` of the holder's `~/.omp/agent/sessions/**/<stamp>_<id>.jsonl`, else `mtime_ms` of its row in Postgres when the sweep took it, read once when the incident opens and carried unchanged through every message about it |
 | Swept transcript | the session sweep's record `~/.local/share/omp-session-sql/deleted.tsv` (which files it deleted, and when), then the last two 1 MiB parts of the row in `omp_session_files` on agents-postgres, through `psql` and the sweep's DSN file beside that record; read once per holder (5 s limit) and kept in the state file under `swept` |
 | Handover files (alert text only) | absolute `.md` paths the holder's transcript names whose basename reads like a handover, plus `WAKE.md`/`HANDOVER.md`/`HANDOFF.md`/`STATE.md` in its working directory, `/mnt/nvme/sami/<lane>` and `/mnt/nvme/sami/tmp/<lane>` |
 | Listener and bearer | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Roster and open incidents | `/mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json` |
+| Roster, open incidents and the journal state of each pane and role | `/mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json` |
+| Transcript headers of the last run | `/mnt/nvme/sami/tmp/envoy-role-holder-watch/headers.json`, keyed by path and inode |
+| The full text of each message sent | `/mnt/nvme/sami/tmp/envoy-role-holder-watch/reports/<stamp>-<kind>.txt`, pruned at 7 days |
 | Panes | `tmux list-panes -a -F` on the default server: session, window index and name, pane id and index, current command, pane pid, path, title |
-| Pane foreground | `/proc/*/stat`: `comm`, `ppid` and `tpgid` of every process, once per run |
+| Pane foreground | the same `/proc/*/stat` pass: `comm`, `ppid` and `tpgid` of every process, once per run |
 | Pane's last session | this watch's own memory, else the title of the first line of each `*.jsonl` in the pane's `~/.omp/agent/sessions/<encoded cwd>/`, else `~/.local/share/tmux/resurrect/tmux_resurrect_*.txt` |
 
 Reaching the default tmux server takes two things a shell has and a systemd service does not, so
@@ -351,12 +426,25 @@ Agent sessions only, never a person:
   recently messaged a role, so this is the closest cheap substitute; when the dead session had no
   team topic, the alert says that the peers could not be named.
 
-Each alert names the role, the holder, how long nothing has seen it, and one line per source
-saying what that source answered. Then a line that reads, in these words:
+Every message is at most **600 characters** and ends with `Full report: <path>`. The message is
+the decision — which role, which holder, how long, what is and is not established, and the two
+steps that cost nothing and cannot hurt a live lane — and the report file holds the whole alert:
+one line per source, the warning about the claim, the handover files, who else was told, the
+suppressions and their reasons. A pane alert of **2,404 characters** went out on
+2026-11-01T10:01Z and its first 200 characters were what its reader acted on.
+
+Reports go to `<state dir>/reports/<UTC YYYYmmddTHHMMSSZ>-<kind>.txt`
+(`/mnt/nvme/sami/tmp/envoy-role-holder-watch/reports/` here), and each run deletes the ones
+older than seven days. The report is written and the message names it even when no `Full report`
+file could be written, so a reader always sees the path the text should be at.
+
+Each alert names the role, the holder, how long nothing has seen it, and — in the report — one
+line per source saying what that source answered. Both carry the line that reads, in these words:
 
 > ESTABLISHED: I cannot see this session. NOT established: that the holder has stopped.
 
-and then the remedy, in order, stopping as soon as one answers:
+and then the remedy, in order, stopping as soon as one answers (the report carries all four;
+the message carries the first two):
 
 1. **Look at the pane** this watch last saw the session running in, or the `tmux list-panes`
    command that finds it by title or directory.
@@ -380,7 +468,7 @@ and then the remedy, in order, stopping as soon as one answers:
 
 ```sh
 scripts/envoy-role-holder-watch --dry-run --print-alert   # decide and print, send nothing
-scripts/envoy-role-holder-watch --grace 60 --write-grace 120 --escalate 600 --pane-grace 180  # the unit's defaults
+scripts/envoy-role-holder-watch --grace 60 --write-grace 120 --escalate 600 --pane-grace 180 --budget 60  # the unit's defaults
 ```
 
 ## Turning it off
@@ -393,6 +481,9 @@ journalctl --user -u envoy-role-holder-watch.service -n 50     # what the last r
 ```
 
 `installers/envoy-role-holder-watch.sh` arms it (links `omp/envoy-role-holder-watch.{service,timer}`
-into `~/.config/systemd/user`). Deleting `/mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json`
-forgets every open incident: the next run re-learns the roles and re-alerts on one that is still
-dead.
+into `~/.config/systemd/user`). Beside the state file the watch keeps two things it can lose
+without harm: `headers.json`, the transcript headers of the last run, and `reports/`, the full
+text of each message it has sent in the last seven days. Deleting
+`/mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json` forgets every open incident and every
+journal state: the next run re-learns the roles, logs each one's state once and re-alerts on a
+holder that is still unseen.

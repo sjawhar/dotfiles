@@ -68,6 +68,26 @@ The watcher never executes that command. A pane a person paused and a pane whose
 the same to a script, so the person or lead who reads the alert looks at the pane and decides.
 
 Scope: role holders, and panes. A session that holds no role and has no pane is not watched.
+
+Three rules about what a run costs and what it says, all of them from measurements on
+sami-rocqperf in the 48 hours to 2026-11-03 (dispatch://INFRA-672):
+
+  A RUN HAS A BUDGET (--budget, 60 s inside the unit's 90 s TimeoutStartSec), counted from the
+  moment the process started. Past it the run stops between two units of work, saves what it has
+  decided, logs one line saying where it stopped and exits 0, so systemd records no failure and
+  the next period starts with the roles this one did not reach. 35 of 545 runs in six hours were
+  killed at the timeout, each one a period in which nothing after the slow step ran at all. The
+  steps that took them there are gone: one pass over /proc instead of two, the transcript
+  headers kept between runs in headers.json, and no walk, descriptor scan or Postgres read for
+  an incident that is finished.
+
+  THE JOURNAL SAYS WHAT CHANGED. One summary line a run, one line when a pane or a role changes
+  state, and the alerts and clears, which are events. The state behind each line is in the state
+  file under `logged`. It was 150,188 lines in 40 hours, the same sentences every 30 seconds.
+
+  A MESSAGE IS AT MOST 600 CHARACTERS and ends with `Full report: <path>`. The message is the
+  decision; the report file beside the state file holds the whole text, and reports older than
+  seven days are deleted in the same run. A pane alert was 2,404 characters.
 """
 
 from __future__ import annotations
@@ -179,6 +199,27 @@ DIR_SCAN_SECONDS = 1.0
 # file this watch rewrites and fsyncs every 30 s.
 SUPPRESSED_FORGET = 600.0
 
+# ------------------------------------------------------------------- what one run may cost
+#
+# The whole run has a wall-clock budget, counted from the moment its process started, under the
+# unit's 90 s TimeoutStartSec. Measured on sami-rocqperf in the six hours to 2026-11-03T02:36Z at
+# load 240-290: 1.0-2.5 s of CPU per run, 6-86 s of wall clock (median 20.7 s, p95 62.6 s), and
+# 35 of 545 runs killed at 90 s -- each a period in which nothing after the slow step ran at all.
+# A run that reaches the budget stops between two units of work, writes the state file with
+# everything it has done, says so in ONE journal line and exits 0, so systemd records no failure;
+# the next period starts with the roles this one did not reach (`checked_at`).
+DEFAULT_BUDGET = 60.0
+# The header reads of transcripts this watch has not read before share this much of a run. One
+# read took up to 5 s at load 268, and ~500 of them were 38 s of a 39 s process scan
+# (2026-11-03 02:41Z); with the header cache (`load_header_cache`) only a transcript opened since
+# the last run is read at all.
+HEADER_READ_SECONDS = 10.0
+# Every Envoy message is at most this long. The whole text goes to a report file the message
+# names last (`write_report`), kept REPORT_KEEP: a pane alert was 2,404 characters, and its
+# first 200 carried the decision anyway (dispatch://INFRA-672, review of 2026-11-03).
+MESSAGE_LIMIT = 600
+REPORT_KEEP = 7 * 86400.0
+
 # ------------------------------------------------------------------ named class suppressions
 #
 # A suppression here is an exception with a name, a scope, a date and a reason, and the watch
@@ -248,6 +289,63 @@ RELEASE_CALL = (
 def log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"{stamp} {message}", flush=True)
+
+
+# The journal keys (`role:<role>`, `pane:<tmux pane key>`) whose state this run decided.
+_LOG_KEYS: set[str] = set()
+
+
+def log_change(state, key: str, signature: str, message: str = "") -> None:
+    """Log `message` only when `key`'s state differs from the one the last run recorded.
+
+    The state file keeps one signature per pane and per role under `logged`. A signature names
+    the state and nothing that moves on its own -- never an age, never a heartbeat -- so a role
+    whose holder runs on writes one `ok` line when it becomes ok and none after, where it wrote
+    one every 30 s: 10,723 role lines and 8,318 pane lines in six hours on 2026-11-02/03, of
+    23,597. An empty `message` records the state without a line, for the states whose line is
+    an event already logged (an ALERT, a CLEARED) or a healthy pane, which never had one.
+    """
+    logged = state.data.setdefault("logged", {})
+    _LOG_KEYS.add(key)
+    if logged.get(key) == signature:
+        return
+    logged[key] = signature
+    if message:
+        log(message)
+
+
+def forget_logged(state, prefix: str) -> None:
+    """Drop the recorded journal states under `prefix` that this run did not decide: the pane or
+    role is gone, and if it comes back its first state is news again."""
+    logged = state.data.get("logged") or {}
+    for key in [key for key in logged if key.startswith(prefix) and key not in _LOG_KEYS]:
+        logged.pop(key)
+
+
+# The run's deadline, wall clock: `_RUN["deadline"]`, set by run_once from --budget.
+_RUN: dict = {"deadline": float("inf")}
+
+
+class OutOfTime(Exception):
+    """The run reached its budget. Raised only between two units of work -- a process, a pane,
+    a role, a source -- never inside one, so what a run stops on is left as the last run did."""
+
+
+def check_time(where: str) -> None:
+    if time.time() > _RUN["deadline"]:
+        raise OutOfTime(where)
+
+
+def process_started() -> float:
+    """When this process started, from /proc. The budget counts Python's own start-up because
+    systemd's TimeoutStartSec counts it too, and under load it is not small."""
+    try:
+        ticks = int(Path("/proc/self/stat").read_text().rpartition(")")[2].split()[19])
+        with open("/proc/stat") as handle:
+            boot = next(int(line.split()[1]) for line in handle if line.startswith("btime "))
+        return min(time.time(), boot + ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError, StopIteration):
+        return time.time()
 
 
 def iso(epoch: float | None) -> str:
@@ -324,6 +422,81 @@ def suppression_lines(now: float, counts: dict | None = None, short: bool = Fals
                 " ~/.dotfiles/scripts/envoy-role-holder-watch."
             )
     return lines
+
+
+def suppression_note(now: float) -> list[str]:
+    """The suppressions in one short sentence each, for a message whose report has the long form."""
+    notes = []
+    for rule in SUPPRESSIONS:
+        if now < epoch_of(rule["until"]):
+            notes.append(f"Suppressed until {rule['until']}: roles matching {rule['shown']} (see the report).")
+        else:
+            notes.append(f"EXPIRED suppression {rule['shown']}: delete the entry (see the report).")
+    return notes
+
+
+# ------------------------------------------------------------------- messages and reports
+
+
+def write_report(options: argparse.Namespace, kind: str, text: str, now: float) -> Path:
+    """Write the whole text of one message to <state dir>/reports/<UTC stamp>-<kind>.txt.
+
+    The message itself carries the decision and names this file last; the file carries every
+    line the message used to: sources, steps, recipients, the suppression's reason. Reports
+    older than REPORT_KEEP are pruned in the same call. A dry run that writes no state writes no
+    report either, and the message names the path it would have had.
+    """
+    directory = Path(options.state).parent / "reports"
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", kind).strip("_")[:80] or "report"
+    path = directory / f"{stamp}-{name}.txt"
+    if options.dry_run and not getattr(options, "write_state", False):
+        return path
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        number = 1
+        while path.exists():
+            number += 1
+            path = directory / f"{stamp}-{name}-{number}.txt"
+        path.write_text(text + "\n")
+    except OSError as error:
+        log(f"report {path} not written: {error}")
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.name.endswith(".txt") and entry.stat().st_mtime < now - REPORT_KEEP:
+                        os.unlink(entry.path)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return path
+
+
+def short_message(report: Path, *parts: str) -> str:
+    """At most MESSAGE_LIMIT characters: `parts` in order while they fit, then the report path.
+
+    The first part is the decision -- what, where, how long, who acts -- and is always there,
+    cut if it must be; every later part is kept whole or left out, so a long working directory
+    drops a closing sentence rather than leave half of one.
+    """
+    tail = f" Full report: {report}"
+    room = MESSAGE_LIMIT - len(tail)
+    head = ""
+    for index, part in enumerate(" ".join(part.split()) for part in parts if part):
+        joined = f"{head} {part}" if head else part
+        if len(joined) <= room:
+            head = joined
+        elif index == 0:
+            head = part[: max(0, room - 3)].rstrip() + "..."
+    return guard_verdict(head + tail)
+
+
+def compose(options: argparse.Namespace, kind: str, full: str, now: float, *parts: str) -> tuple[str, Path]:
+    """Write `full` to its report and return (the short message that names it, the report)."""
+    report = write_report(options, kind, guard_verdict(full), now)
+    return short_message(report, *parts), report
 
 
 # --------------------------------------------------------------------------- Envoy transport
@@ -472,7 +645,56 @@ _SWEEP_INDEX: dict[str, tuple[str, str]] | None = None
 _SWEPT: dict[str, dict] = {}
 
 
-def session_id_in_header(path: str | Path) -> str | None:
+# path -> [inode, session id]: the header of every transcript this watch looked up in its last
+# run, kept in <state dir>/headers.json between runs. A header is written when the transcript is
+# created and never rewritten, so (path, inode) names it for as long as the file lives. Without
+# it every run re-read the headers of all ~500 transcripts the omp processes hold open: 38 s of a
+# 39 s process scan at load 268, one read 5 s (2026-11-03 02:41Z, at this unit's Nice and IO
+# class), and the slowest step of 49 of the 71 runs over 45 s in the six hours before.
+_HEADER_CACHE: dict[str, list] = {}
+# What the next run's cache will hold: only the transcripts looked up in this one, so the file
+# never outgrows what omp holds open.
+_HEADER_USED: dict[str, list] = {}
+
+
+def load_header_cache(path: Path) -> None:
+    _HEADER_CACHE.clear()
+    _HEADER_USED.clear()
+    try:
+        loaded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if isinstance(loaded, dict):
+        _HEADER_CACHE.update(
+            {name: entry for name, entry in loaded.items() if isinstance(entry, list) and len(entry) == 2}
+        )
+
+
+def save_header_cache(path: Path) -> None:
+    """Replaced whole, never fsynced: a lost cache costs one run its header reads and nothing else."""
+    scratch = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch.write_text(json.dumps(_HEADER_USED, sort_keys=True))
+        os.replace(scratch, path)
+    except OSError as error:
+        log(f"header cache {path} not written: {error}")
+
+
+def header_known(path: str | Path, info: os.stat_result) -> tuple[bool, str | None]:
+    """(True, id) when this run or the cache already holds the header of this file; else (False, None)."""
+    key = (info.st_dev, info.st_ino)
+    if key in _HEADER_IDS:
+        return True, _HEADER_IDS[key]
+    cached = _HEADER_CACHE.get(str(path))
+    if cached and cached[0] == info.st_ino:
+        _HEADER_IDS[key] = cached[1]
+        _HEADER_USED[str(path)] = cached
+        return True, cached[1]
+    return False, None
+
+
+def session_id_in_header(path: str | Path, info: os.stat_result | None = None, via: str = "") -> str | None:
     """The session id a transcript names in its own header, or None.
 
     A transcript's file name is not its identity, and neither is the command line that opened
@@ -485,18 +707,22 @@ def session_id_in_header(path: str | Path) -> str | None:
 
     omp writes the id in a `{"type": "session", "id": ...}` record, which is not the first line:
     the first is the `title` record. So the first few records are read, not just one. Memoised on
-    (device, inode), because a run reads the same transcript once per holding process.
+    (device, inode), because a run reads the same transcript once per holding process, and kept
+    across runs on (path, inode) in the header cache -- but only an answer that is final: a file
+    whose session record is not written yet is read again by the next run. `via` is the
+    /proc/<pid>/fd link the process scan found it by, so the file read is the file held open.
     """
+    if info is None:
+        try:
+            info = os.stat(via or path)
+        except OSError:
+            return None
+    known, found = header_known(path, info)
+    if known:
+        return found
+    final = False
     try:
-        info = os.stat(path)
-    except OSError:
-        return None
-    key = (info.st_dev, info.st_ino)
-    if key in _HEADER_IDS:
-        return _HEADER_IDS[key]
-    found = None
-    try:
-        with open(path, "rb") as handle:
+        with open(via or path, "rb") as handle:
             for _ in range(8):
                 line = handle.readline(65536)
                 if not line:
@@ -510,12 +736,18 @@ def session_id_in_header(path: str | Path) -> str | None:
                 match = UUID_RE.search(str(record.get("id") or ""))
                 if match:
                     found = match.group(0)
+                final = True
                 break
+            else:
+                # Eight records and none of them the session's: that is this file's answer.
+                final = True
     except OSError:
         # A read that failed is not a file with no id in it. Caching it would make one transient
         # EMFILE or EACCES the answer for every later caller in this run.
         return None
-    _HEADER_IDS[key] = found
+    _HEADER_IDS[(info.st_dev, info.st_ino)] = found
+    if final:
+        _HEADER_USED[str(path)] = [info.st_ino, found]
     return found
 
 
@@ -550,6 +782,27 @@ def box_launcher_session(argv: list[str]) -> tuple[str | None, str | None]:
     return resume_target(" ".join(argv))
 
 
+# The pane check's process table, from the same pass over /proc as the omp sessions: see
+# `process_table`. None until this run's scan has filled it.
+_PROC_TABLE: tuple[dict[int, list[int]], dict[int, tuple[str, int]]] | None = None
+# What this run's process scan left undone: the transcript headers it had no time to read. A
+# holder known only by one of them would look unseen, so `run_once` judges no unseen holder in a
+# period that left any (see HEADER_READ_SECONDS).
+_SCAN: dict = {"unread_headers": 0}
+
+
+def read_stat(entry: str) -> tuple[str, int, int] | None:
+    """(comm, ppid, tpgid) from /proc/<pid>/stat, or None when the process is gone."""
+    try:
+        with open(f"/proc/{entry}/stat", "rb") as handle:
+            raw = handle.read().decode("utf8", "replace")
+        head, _, tail = raw.rpartition(")")
+        fields = tail.split()
+        return head.partition("(")[2], int(fields[1]), int(fields[5])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def omp_sessions_by_pid() -> dict[str, int]:
     """Every session id an `omp` process on this machine holds, mapped to that pid.
 
@@ -567,19 +820,37 @@ def omp_sessions_by_pid() -> dict[str, int]:
     death: this reads only processes whose comm is `omp` or a launcher's, so a lane under a
     differently named parent is invisible to it, which is why `transcript_holders` reads the
     transcript's own openers before anything alerts.
+
+    ONE pass over /proc per run: /proc/<pid>/stat of every process gives the comm this filters
+    on and the parent and terminal group the pane check needs (`_PROC_TABLE`), where two passes
+    read 3,400 comm files and 3,400 stat files. Headers come from the header cache first; the
+    ones not in it are read inside HEADER_READ_SECONDS, and the rest are counted in
+    `_SCAN["unread_headers"]` for the next run to read.
     """
+    global _PROC_TABLE
     held: dict[str, int] = {}
     launchers: dict[str, tuple[int, str]] = {}
+    children: dict[int, list[int]] = {}
+    info: dict[int, tuple[str, int]] = {}
     _BOX_LAUNCHERS.clear()
+    _SCAN["unread_headers"] = 0
+    header_deadline = min(time.time() + HEADER_READ_SECONDS, _RUN["deadline"])
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
+        check_time("the process scan")
+        stat = read_stat(entry)
+        if stat is None:
+            continue
         pid = int(entry)
+        comm, ppid, tpgid = stat
+        children.setdefault(ppid, []).append(pid)
+        info[pid] = (comm, tpgid)
+        if comm != "omp" and comm not in BOX_LAUNCHER_COMMS:
+            continue
         try:
-            comm = Path(f"/proc/{pid}/comm").read_text().strip()
-            if comm != "omp" and comm not in BOX_LAUNCHER_COMMS:
-                continue
-            argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf8", "replace").split("\0")
+            with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                argv = handle.read().decode("utf8", "replace").split("\0")
         except OSError:
             continue
         argv = [word for word in argv if word]
@@ -601,13 +872,23 @@ def omp_sessions_by_pid() -> dict[str, int]:
         except OSError:
             descriptors = []
         for descriptor in descriptors:
+            link = f"/proc/{pid}/fd/{descriptor}"
             try:
-                target = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+                target = os.readlink(link)
             except OSError:
                 continue
             if "/.omp/agent/sessions/" in target and target.endswith(".jsonl"):
                 named = UUID_RE.findall(os.path.basename(target))
-                from_header = session_id_in_header(target)
+                try:
+                    opened = os.stat(link)
+                except OSError:
+                    continue
+                known, from_header = header_known(target, opened)
+                if not known:
+                    if time.time() <= header_deadline:
+                        from_header = session_id_in_header(target, opened, via=link)
+                    else:
+                        _SCAN["unread_headers"] += 1
                 # The file a running omp holds is the transcript of these ids, for certain: kept,
                 # so the lookup after this holder stops needs no walk of the session root.
                 for session_id in named + ([from_header] if from_header else []):
@@ -621,6 +902,7 @@ def omp_sessions_by_pid() -> dict[str, int]:
         if session not in held:
             held[session] = pid
             _BOX_LAUNCHERS[pid] = command
+    _PROC_TABLE = (children, info)
     return held
 
 
@@ -635,7 +917,8 @@ def transcript_holders(path: str | Path) -> list[int]:
     openers instead, by device and inode, so a lane running under a wrapper, a renamed binary or
     a box's init still counts as a holder. It reads every descriptor of every process this user
     can read, so it does that ONCE per run, for every holder asked about: once per holder was
-    0.66 s each at load 410 on 2026-11-02, with six open incidents in every period.
+    0.66 s each at load 410 on 2026-11-02, with six open incidents in every period. A scan the
+    run's budget stops leaves no table behind: half a table would say "nobody holds it".
     """
     global _OPEN_JSONL
     try:
@@ -643,10 +926,11 @@ def transcript_holders(path: str | Path) -> list[int]:
     except OSError:
         return []
     if _OPEN_JSONL is None:
-        _OPEN_JSONL = {}
+        table: dict[tuple[int, int], list[int]] = {}
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
                 continue
+            check_time("the open-file scan")
             directory = f"/proc/{entry}/fd"
             try:
                 descriptors = os.listdir(directory)
@@ -659,9 +943,10 @@ def transcript_holders(path: str | Path) -> list[int]:
                     seen = os.stat(f"{directory}/{descriptor}")
                 except OSError:
                     continue
-                pids = _OPEN_JSONL.setdefault((seen.st_dev, seen.st_ino), [])
+                pids = table.setdefault((seen.st_dev, seen.st_ino), [])
                 if int(entry) not in pids:
                     pids.append(int(entry))
+        _OPEN_JSONL = table
     return list(_OPEN_JSONL.get((info.st_dev, info.st_ino), []))
 
 
@@ -684,7 +969,7 @@ def transcript_index() -> tuple[dict[str, Path], list[Path]]:
     global _TRANSCRIPT_INDEX
     if _TRANSCRIPT_INDEX is not None:
         return _TRANSCRIPT_INDEX
-    deadline = time.time() + TRANSCRIPT_WALK_SECONDS
+    deadline = min(time.time() + TRANSCRIPT_WALK_SECONDS, _RUN["deadline"])
     _TRANSCRIPT_WALK.update(deadline=deadline, truncated=False)
     cutoff = time.time() - 7 * 86400
     by_id: dict[str, tuple[float, Path]] = {}
@@ -994,7 +1279,7 @@ def newest_write(directory: str, holder: str = "", now: float | None = None) -> 
     # run that has already spent six seconds on Envoy and /proc would otherwise hand this walk
     # a deadline in the past. It did, on the first live run of this step at 2026-10-30 23:06Z:
     # the walk stopped after ONE entry and reported the lane's directory as unreadable.
-    deadline = time.time() + DIR_SCAN_SECONDS
+    deadline = min(time.time() + DIR_SCAN_SECONDS, _RUN["deadline"])
     stack = [(directory, 0)]
     while stack and not found["truncated"]:
         path, depth = stack.pop()
@@ -1043,6 +1328,7 @@ def holder_evidence(
     directory: str = "",
     dir_grace: float = DEFAULT_DIR_GRACE,
     walk: bool = True,
+    deep: bool = True,
 ) -> dict:
     """Every source this watch has on one holder, and what each one answered.
 
@@ -1069,6 +1355,14 @@ def holder_evidence(
 
     `alive` is true when ANY source found it. The verdict when none did is CANNOT_SEE_HOLDER,
     and there is no path to HOLDER_DEAD: see that constant.
+
+    `deep=False` reads only the two free sources and the transcript this watch already knows:
+    no openers scan, no working-directory walk, no read of the session sweep's table. It is for
+    a holder whose incident is finished -- a recorded normal exit, a quieted alert -- where the
+    only question left is whether the session came back, which a process or a heartbeat answers.
+    On 2026-11-03 00:18:13Z-00:19:33Z one such holder cost a run 80 s of its 90 s and the run
+    was killed.
+
     """
     sources: list[tuple[str, bool, str]] = []
 
@@ -1148,7 +1442,7 @@ def holder_evidence(
     # said about it; looking it up for every role every period is what put the session-root walk
     # into every run of 2026-11-02 (see TRANSCRIPT_WALK_SECONDS).
     seen_already = any(seen for _, seen, _ in sources)
-    transcript = None if seen_already else transcript_of(holder, walk, directory)
+    transcript = None if seen_already else transcript_of(holder, walk and deep, directory)
     last_write = None
     if transcript:
         try:
@@ -1162,7 +1456,7 @@ def holder_evidence(
     scan = {"dir": directory, "file": "", "mtime": None, "age": None, "scanned": 0,
             "truncated": False, "error": "not read: a source above already found the holder",
             "transcript": "", "transcript_mtime": None}
-    if not any(seen for _, seen, _ in sources) and not (
+    if deep and not any(seen for _, seen, _ in sources) and not (
         last_write and now - last_write <= write_grace
     ):
         scan = newest_write(directory, holder, now)
@@ -1173,7 +1467,7 @@ def holder_evidence(
             last_write = scan["transcript_mtime"]
 
     # On no disk here at all: the session sweep may have moved it into Postgres (see SWEEP_STATE).
-    swept = None if seen_already or transcript else swept_transcript(holder)
+    swept = None if seen_already or transcript or not deep else swept_transcript(holder)
     if swept and swept["mtime"]:
         last_write = swept["mtime"]
 
@@ -1225,7 +1519,7 @@ def holder_evidence(
         )
 
     openers: list[int] = []
-    if not any(seen for _, seen, _ in sources):
+    if deep and not any(seen for _, seen, _ in sources):
         if transcript:
             openers = transcript_holders(transcript)
             sources.append(
@@ -1272,6 +1566,7 @@ def holder_evidence(
     sources.append(("directory", False, dir_sentence))
 
     found = next((sentence for _, seen, sentence in sources if seen), "")
+    found_source = next((name for name, seen, _ in sources if seen), "")
     return {
         "alive": bool(found),
         "found": found,
@@ -1287,13 +1582,17 @@ def holder_evidence(
         "dir_write": scan["mtime"],
         "dir_sentence": dir_sentence,
         "dir_truncated": scan["truncated"],
+        "found_source": found_source,
+        # Read whenever a transcript was found at all: with deep=False that is only one this
+        # watch already knew the path of, which costs a stat and a 64 KiB tail read, and it is
+        # what tells a planned stop from a lane that was resumed after it.
         "exited_at": None if found else (
             normal_exit_at(transcript) if transcript else (swept or {}).get("exited_at")
         ),
         # What the session sweep did with the transcript, when it is not on this disk.
         "swept": swept,
         # True when this call walked the session root for the holder and found nothing.
-        "walk_missed": walk and not seen_already and not transcript and not swept,
+        "walk_missed": walk and deep and not seen_already and not transcript and not swept,
     }
 
 
@@ -1447,6 +1746,25 @@ def recipients(role: str, record: dict, sessions: list[dict], holder: str) -> tu
     return targets + peers[:6], sorted(team_bases), notes
 
 
+def alert_head(role: str, incident: dict, holder: str, now: float, kind: str) -> list[str]:
+    """The decision of a role alert, in order: the full text is in the report `compose` writes.
+
+    What a reader must have without opening anything: which role, which holder, how long, what
+    is and is not established, and the two steps that cost nothing and cannot hurt a live lane.
+    Everything else -- the five sources, the release warning, the handover files, who else was
+    told -- is in the report, because a reader who has looked at the pane needs none of it.
+    """
+    unseen_for = human(now - (incident.get("opened_at") or now))
+    return [
+        f"ENVOY ROLE HOLDER UNSEEN ({kind}): no source has seen {holder}, the holder of role"
+        f" {role}, for {unseen_for}, since {iso(incident.get('opened_at'))}. ESTABLISHED: I"
+        " cannot see that session. NOT established: that it stopped.",
+        f"Do: look at its pane, then ask it (`envoy send {holder} \"are you alive?\"`). Do NOT"
+        " read the role claim or delete the session.",
+        f"Lane {incident.get('dir') or '-'} on {incident.get('host') or '-'}.",
+    ]
+
+
 def alert_text(
     role: str, incident: dict, holder: str, now: float, kind: str, banner: list[str] | None = None
 ) -> str:
@@ -1595,8 +1913,11 @@ def clear_text(
             " an omp session, or a lane whose transcript lives outside the session root -- not"
             " of a lane that died with nobody noticing.",
             f"{role} is left in the watch's state file as quieted, so no further alert and no"
-            " escalation goes out for this holder. If the holder shows up on any source again,"
-            " the role goes back to being watched normally from that moment."
+            " escalation goes out for this holder. From here this watch reads only the two free"
+            " sources for it -- an omp process, and Envoy's own entry -- so if either sees the"
+            " holder again the role goes back to being watched normally from that moment. The"
+            " walk of its directory and of the session root is not repeated, because nothing"
+            " they could find would change what this message says."
             + tail,
         ]
     elif kind == "suppressed":
@@ -1625,6 +1946,41 @@ def clear_text(
     return guard_verdict("\n".join(lines))
 
 
+def clear_head(role: str, incident: dict, holder: str, cause: str, now: float, kind: str) -> list[str]:
+    """The decision of a clear, in order of what a reader needs: the full text is in the report."""
+    opened = incident.get("opened_at") or now
+    lasted = f"The incident opened {iso(opened)} and lasted {human(now - opened)}."
+    if kind == "quiet":
+        return [
+            f"ENVOY ROLE HOLDER UNSEEN, NOT ALERTING AGAIN: role {role}'s holder {holder} is still"
+            " unseen and no source here will ever see it, so this watch stops rather than repeat"
+            " an alert nobody can answer.",
+            f"The only thing that moved: {cause[:200]}.",
+            "That does not say the lane is working and does not say the holder is alive.",
+            lasted,
+        ]
+    if kind == "suppressed":
+        return [
+            f"ENVOY ROLE HOLDER UNSEEN, CLOSED BY A SUPPRESSION: the open alert on role {role} is"
+            f" closed because its class is suppressed, not because anything was learnt about"
+            f" holder {holder}. It is still unseen.",
+            lasted,
+        ]
+    if kind == "exited":
+        return [
+            f"ENVOY ROLE HOLDER EXITED NORMALLY: role {role}'s {cause}",
+            "The session ended on purpose, so this watch will not alert on this holder again."
+            " Whoever needs the role must claim it.",
+            lasted,
+        ]
+    return [
+        f"ENVOY ROLE HOLDER UNSEEN, CLEARED: role {role} has a holder this watch can see again."
+        " No action is needed.",
+        f"What cleared it: {cause[:200]}.",
+        lasted,
+    ]
+
+
 def send_clear(
     envoy: Envoy, options: argparse.Namespace, role: str, incident: dict, holder: str, cause: str,
     now: float, kind: str = "seen", banner: list[str] | None = None,
@@ -1634,7 +1990,10 @@ def send_clear(
         return False
     incident["cleared_at"] = now
     targets = incident.get("told") or [CHIEF_OF_STAFF, INFRA_LEAD]
-    text = clear_text(role, incident, holder, cause, now, kind, banner)
+    text, report = compose(
+        options, f"role-{role}-{kind}", clear_text(role, incident, holder, cause, now, kind, banner),
+        now, *clear_head(role, incident, holder, cause, now, kind),
+    )
     for target in targets:
         if not options.dry_run:
             envoy.send(target, text)
@@ -1642,7 +2001,8 @@ def send_clear(
         "quiet": "QUIETED ON THE DIRECTORY RULE", "suppressed": "CLOSED BY A SUPPRESSION",
         "exited": "CLOSED, HOLDER EXITED NORMALLY",
     }
-    log(f"{role}: {named.get(kind, 'CLEARED')} ({cause}); told {len(targets)} sessions")
+    log(f"{role}: {named.get(kind, 'CLEARED')} ({cause}); told {len(targets)} sessions;"
+        f" full report {report}")
     if options.print_alert:
         print(text)
     return True
@@ -1702,20 +2062,27 @@ def tmux_panes() -> list[dict] | None:
 
 
 def process_table() -> tuple[dict[int, list[int]], dict[int, tuple[str, int]]]:
-    """children by parent pid, and (comm, foreground process group of its tty) by pid."""
+    """children by parent pid, and (comm, foreground process group of its tty) by pid.
+
+    The run's own process scan (`omp_sessions_by_pid`) already read /proc/<pid>/stat of every
+    process this user can see, so this returns what that pass built. It walks /proc itself only
+    when no scan has run in this process -- a test that stubs the scan, or a caller that asks
+    for the table first. One pass of 3,400 processes was 0.2-0.5 s of CPU and up to 9 s of wall
+    clock at load 268 (2026-11-03 02:41Z), so two of them were a tenth of a slow run.
+    """
+    if _PROC_TABLE is not None:
+        return _PROC_TABLE
     children: dict[int, list[int]] = {}
     info: dict[int, tuple[str, int]] = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
-        try:
-            raw = Path(f"/proc/{entry}/stat").read_text()
-        except OSError:
+        check_time("the process table")
+        stat = read_stat(entry)
+        if stat is None:
             continue
-        comm = raw[raw.index("(") + 1 : raw.rindex(")")]
-        fields = raw[raw.rindex(")") + 2 :].split()
-        pid, ppid, tpgid = int(entry), int(fields[1]), int(fields[5])
-        children.setdefault(ppid, []).append(pid)
+        comm, ppid, tpgid = stat
+        children.setdefault(ppid, []).append(pid := int(entry))
         info[pid] = (comm, tpgid)
     return children, info
 
@@ -1978,6 +2345,38 @@ def pane_alert_text(incident: dict, now: float) -> str:
     return guard_verdict("\n".join(lines))
 
 
+def pane_head(incident: dict, now: float) -> list[str]:
+    """The decision of a pane alert, in order: the full text is in the report.
+
+    The first 200 characters carry what, where and how long, because that is all a reader saw
+    of the 2,404-character alert of 2026-11-01T10:01Z before deciding whether to read on.
+    """
+    if incident.get("move"):
+        move = incident["move"]
+        where_now = (move.get("where") or "")[:160]
+        return [
+            f"WORKER MOVE NOT FINISHED: tmux pane {incident['pane_id']} ({incident['where']}) is"
+            f" mover session {move['mover']}, moving worker {move['worker']} off"
+            f" {socket.gethostname()}. It has sat at a {incident['shell']} prompt for"
+            f" {human(now - incident['opened_at'])}.",
+            "This is NOT a dead lane: resume nothing here, and start no omp in that pane.",
+            f"Where the worker is: {where_now}" if where_now
+            else "Where the worker runs now is not recorded yet (see the report).",
+            "Do: look at the mover pane and at `ossv-agent move` on the box that runs it.",
+        ]
+    session = incident.get("session")
+    return [
+        f"AGENT PANE AT SHELL: tmux pane {incident['pane_id']} ({incident['where']}, window"
+        f" \"{incident['window_name']}\") has had no omp in it for"
+        f" {human(now - incident['opened_at'])}, since {iso(incident['opened_at'])}.",
+        f"Do: re-read the pane (`tmux capture-pane -p -t {incident['pane_id']} | tail -n 15`);"
+        " only if it is still a shell, restart the lane IN THAT PANE, never a new one. This"
+        " watch restarted nothing.",
+        f"Last session: {session}." if session else "Last session: NOT RESOLVED.",
+        f"cwd {incident['cwd']}.",
+    ]
+
+
 # The lane boxes' operator. A worker pane under /home/sami/work/workers/** on an ossv-agent-* box
 # has no lead-* holder in its own directory, so every one of its alerts fell through to the INFRA
 # lead, who holds neither that pane's tmux socket nor the lane. The operator holds both. Measured
@@ -2136,23 +2535,35 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         if incident.get("alerted_at") and not incident.get("cleared_at"):
             incident["cleared_at"] = now
             state.commit(options)
-            text = guard_verdict(
-                f"AGENT PANE AT SHELL CLEARED: tmux pane {incident['pane_id']} ({incident['where']})."
-                f" What cleared it: {cause}. The incident opened at {iso(incident['opened_at'])} and"
-                f" lasted {human(now - incident['opened_at'])}. No action is needed. From"
-                f" envoy-role-holder-watch on {socket.gethostname()}."
+            head = (
+                f"AGENT PANE AT SHELL CLEARED: tmux pane {incident['pane_id']}"
+                f" ({incident['where']}). What cleared it: {cause}."
+            )
+            text, report = compose(
+                options, f"pane-{incident['pane_id'].strip('%')}-cleared",
+                guard_verdict(
+                    f"{head} The incident opened at {iso(incident['opened_at'])} and lasted"
+                    f" {human(now - incident['opened_at'])}. No action is needed. From"
+                    f" envoy-role-holder-watch on {socket.gethostname()}."
+                ),
+                now, head,
+                f"It opened {iso(incident['opened_at'])} and lasted"
+                f" {human(now - incident['opened_at'])}. No action is needed.",
             )
             for target in incident.get("told") or [INFRA_LEAD]:
                 if not options.dry_run:
                     envoy.send(target, text)
             clears += 1
-            log(f"pane {incident['pane_id']} {incident['where']}: CLEARED ({cause})")
+            log(f"pane {incident['pane_id']} {incident['where']}: CLEARED ({cause});"
+                f" full report {report}")
             if options.print_alert:
                 print(text)
         incidents.pop(key, None)
 
     for pane in panes:
+        check_time("the pane check")
         key = f"{pane['pid']}.{pane['start_time']}:{pane['pane_id']}"
+        logged = f"pane:{key}"
         seen_keys.add(key)
         where = f"{pane['session_name']}:{pane['window_index']}.{pane['pane_index']}"
         pane_pid = int(pane["pane_pid"] or 0)
@@ -2176,10 +2587,16 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             if incident:
                 clear(key, incident, f"omp (pid {omp_pids[0]}) runs in the pane again"
                       + (f", session {session}" if session else ""))
+            # A healthy pane has never had a line of its own, and the summary counts it.
+            log_change(state, logged, f"omp:{session or omp_pids[0]}")
             continue
         comm, tpgid = info.get(pane_pid, ("", 0))
         if not (comm in SHELLS and tpgid == pane_pid):
-            log(f"pane {pane['pane_id']} {where}: agent pane runs {pane['pane_current_command']}, not omp and not a bare shell; holding")
+            log_change(
+                state, logged, f"busy:{pane['pane_current_command']}",
+                f"pane {pane['pane_id']} {where}: agent pane runs {pane['pane_current_command']},"
+                " not omp and not a bare shell; holding",
+            )
             continue
         # A pane whose shell has a live child is working, whatever its foreground process group
         # says. A script started with `&` or left running by a wrapper sits outside the pane's
@@ -2191,7 +2608,11 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         kids = [p for p in children.get(pane_pid, []) if p in info]
         if kids:
             names = ", ".join(f"{info[p][0]} (pid {p})" for p in sorted(kids)[:3])
-            log(f"pane {pane['pane_id']} {where}: at a shell, but its shell has live children: {names}; holding")
+            log_change(
+                state, logged, f"children:{names}",
+                f"pane {pane['pane_id']} {where}: at a shell, but its shell has live children:"
+                f" {names}; holding",
+            )
             if incident:
                 clear(key, incident, f"its shell has live children: {names}")
             continue
@@ -2199,7 +2620,11 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             # Its owner says this pane runs a one-shot omp and outlives it, so a shell here is the
             # end of the work, not the death of a lane. An incident already open is cleared rather
             # than left to sit: the option may have been set after the first alert.
-            log(f"pane {pane['pane_id']} {where}: at a shell, @agent_oneshot set by its owner; not an incident")
+            log_change(
+                state, logged, "oneshot",
+                f"pane {pane['pane_id']} {where}: at a shell, @agent_oneshot set by its owner;"
+                " not an incident",
+            )
             if incident:
                 clear(key, incident, "its owner marks this pane @agent_oneshot: a one-shot omp that exits by design")
             continue
@@ -2267,9 +2692,10 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         # INFRA-681 double loop the same alert warns about.
         session = incident.get("session")
         if session and session in held:
-            log(
+            log_change(
+                state, logged, f"elsewhere:{session}:{held[session]}",
                 f"pane {pane['pane_id']} {where}: at a shell, but its session {session} runs in"
-                f" pid {held[session]} elsewhere; not an incident"
+                f" pid {held[session]} elsewhere; not an incident",
             )
             clear(key, incident, f"its session {session} runs in pid {held[session]} elsewhere")
             incidents.pop(key, None)
@@ -2277,7 +2703,11 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             continue
         open_for = now - incident["opened_at"]
         if open_for < options.pane_grace:
-            log(f"pane {pane['pane_id']} {where}: at a shell for {int(open_for)} s (< {int(options.pane_grace)} s grace), holding")
+            log_change(
+                state, logged, f"grace:{incident['opened_at']}",
+                f"pane {pane['pane_id']} {where}: at a shell since {iso(incident['opened_at'])}"
+                f" (< {int(options.pane_grace)} s grace), holding",
+            )
             state.commit(options)
             continue
         # A pane in a tmux session named mv-<worker> is `ossv-agent move` relocating that worker
@@ -2292,15 +2722,21 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
         if move:
             incident["move"] = move
             if open_for < options.move_grace:
-                log(
+                log_change(
+                    state, logged, f"move:{move['worker']}:{incident['opened_at']}",
                     f"pane {pane['pane_id']} {where}: move in progress (mover session"
-                    f" {move['mover']}, worker {move['worker']}), at a shell for {int(open_for)} s"
-                    f" (< {int(options.move_grace)} s move grace); not an incident"
+                    f" {move['mover']}, worker {move['worker']}), at a shell since"
+                    f" {iso(incident['opened_at'])} (< {int(options.move_grace)} s move grace);"
+                    " not an incident",
                 )
                 state.commit(options)
                 continue
         if incident.get("alerted_at"):
-            log(f"pane {pane['pane_id']} {where}: at a shell for {human(open_for)}, already alerted at {iso(incident['alerted_at'])}")
+            log_change(
+                state, logged, f"alerted:{incident['alerted_at']}",
+                f"pane {pane['pane_id']} {where}: at a shell, alerted at"
+                f" {iso(incident['alerted_at'])}; nothing further goes out for this incident",
+            )
             continue
         session = incident.get("session")
         directory = pane["pane_current_path"]
@@ -2323,18 +2759,25 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             incident["directory_inventory"] = directory_inventory(pane["pane_current_path"], held)
         # Named in the alert, so a reader knows who else saw it and under which role.
         incident["told_why"] = [f"{why} {target}" for target, why in targets]
-        text = move_alert_text(incident, now) if incident.get("move") else pane_alert_text(incident, now)
+        full = move_alert_text(incident, now) if incident.get("move") else pane_alert_text(incident, now)
         # Where a reader already looks: a suppression of another class is named in this one, so
         # nobody has to read the source of the watch to learn that a class has been silenced.
-        text = "\n".join([text] + suppression_lines(now, state.data.get("suppressed") or {}))
+        full = "\n".join([full] + suppression_lines(now, state.data.get("suppressed") or {}))
+        text, report = compose(
+            options, f"pane-{pane['pane_id'].strip('%')}-{'move' if incident.get('move') else 'at-shell'}",
+            full, now, *pane_head(incident, now),
+        )
         incident["alerted_at"] = now
         incident["told"] = [target for target, _ in targets]
+        log_change(state, logged, f"alerted:{now}")
         state.commit(options)
+        told = []
         for target, why in targets:
             if options.dry_run or envoy.send(target, text):
-                log(f"  -> {target} ({why})")
+                told.append(f"{target} ({why})")
         alerts += 1
-        log(f"pane {pane['pane_id']} {where}: ALERT sent to {len(targets)} sessions")
+        log(f"pane {pane['pane_id']} {where}: ALERT sent to {len(targets)} sessions"
+            f" [{', '.join(told)}]; full report {report}")
         if options.print_alert:
             print(text)
 
@@ -2344,6 +2787,9 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
     for key in list(memory):
         if key not in seen_keys:
             memory.pop(key)
+    # Only here, where every pane of this server has been read: a pane the run never reached
+    # keeps its recorded journal state, so the next run does not log it again as news.
+    forget_logged(state, "pane:")
     state.commit(options)
     return agents, at_shell, alerts, clears
 
@@ -2367,110 +2813,28 @@ def keep_known_transcripts(state: State) -> None:
     }
 
 
-def run_once(options: argparse.Namespace) -> int:
-    global _TRANSCRIPT_INDEX, _OPEN_JSONL, _SWEEP_INDEX
-    started = time.time()
-    # Where each run spends its time, in the summary line, so a run that nears its
-    # TimeoutStartSec names the step that took it there.
-    phases: list[str] = []
-    mark = started
+def check_roles(
+    options: argparse.Namespace, state: State, envoy: Envoy, sessions: list[dict],
+    live: dict[str, dict], held: dict[str, int], roles_state: dict, incidents: dict,
+    suppressed: dict, pane_of: dict[str, str], host: str, started: float,
+) -> tuple[int, int]:
+    """(alerts, clears) for every Envoy role whose holder session is on this machine.
 
-    def phase(name: str) -> None:
-        nonlocal mark
-        phases.append(f"{name} {time.time() - mark:.1f}s")
-        mark = time.time()
-
-    envoy = Envoy(timeout=options.http_timeout)
-    state = State(options.state)
-    if not state.locked:
-        log(f"another run holds {options.state}; skipping this period")
-        return 0
-    _TRANSCRIPT_INDEX = _OPEN_JSONL = _SWEEP_INDEX = None
-    _TRANSCRIPT_WALK.update(deadline=0.0, truncated=False)
-    _KNOWN_TRANSCRIPTS.clear()
-    _KNOWN_TRANSCRIPTS.update(
-        {session: path for session, path in (state.data.get("transcripts") or {}).items()
-         if isinstance(path, str)}
-    )
-    _SWEPT.clear()
-    _SWEPT.update(
-        {session: record for session, record in (state.data.get("swept") or {}).items()
-         if isinstance(record, dict)}
-    )
-    roles_state: dict = state.data.setdefault("roles", {})
-    # Incident memory, keyed by role AND holder so a role that is re-claimed by a new session
-    # starts a new incident. It lives in this one file, which the service owns, and is written
-    # and flushed to disk BEFORE any message goes out, so a crash between the two can never
-    # resend a first alert.
-    incidents: dict = state.data.setdefault("incidents", {})
-    host = socket.gethostname()
-
-    try:
-        sessions = envoy.sessions()
-    except RuntimeError as error:
-        log(f"envoy unreachable: {error}")
-        return 2
-    phase("envoy")
-    live = {
-        session["session_id"]: session for session in sessions if session.get("session_id")
-    }
-    local = [
-        session
-        for session in sessions
-        if (session.get("host") or session.get("machine_id")) == host and session.get("roles")
-    ]
-    held = omp_sessions_by_pid()
-    phase("processes")
-    # Where this watch last saw each session running, for the alert's "look at the pane" step.
-    pane_of: dict[str, str] = {}
-    for pane_key, remembered in (state.data.get("panes") or {}).items():
-        if isinstance(remembered, dict) and remembered.get("session"):
-            pane_of[remembered["session"]] = (
-                f"{pane_key.rsplit(':', 1)[-1]} ({remembered.get('where') or '?'},"
-                f" {remembered.get('cwd') or '?'})"
-            )
-
-    # Learn the roles this machine holds, and keep what an earlier run learnt: a holder whose
-    # session registration has already aged out is exactly the case this watch must still see.
-    for session in local:
-        for role in session.get("roles") or []:
-            record = roles_state.setdefault(role, {})
-            previous = record.get("holder")
-            if previous != session["session_id"]:
-                record.clear()
-                record["holder"] = session["session_id"]
-                # The old holder's incident, if any, is over: the role has moved.
-                incidents.pop(f"{role}|{previous}", None)
-            record.update(
-                {
-                    "dir": session.get("dir") or "",
-                    "title": session.get("title") or "",
-                    "host": host,
-                    "topics": session.get("topics") or [],
-                }
-            )
-    # On disk before any per-holder work: the roster and where each holder's transcript is, so a
-    # run that is killed later still leaves the next one what this one learnt.
-    keep_known_transcripts(state)
-    state.commit(options)
-
-    # The pane check first: it is cheap (0.2-1.3 s at load 400) and reads no holder, so a period
-    # whose holder checks run long still checks every pane and sends its alerts and clears.
-    agents, at_shell, pane_alerts, pane_clears = check_panes(
-        options, state, envoy, sessions, held, started
-    )
-    phase("panes")
-
+    It raises OutOfTime when the run's budget runs out between two roles: what it has decided
+    so far is in the state file, and the roles it did not reach are the ones the next run
+    starts with.
+    """
     alerts = clears = 0
-    # The tally every alert of every other class carries: how much this suppression has
-    # actually swallowed, so a reader can see the size of what they are not being told.
-    suppressed: dict = state.data.setdefault("suppressed", {})
-    for role in sorted(roles_state):
+
+    for role in sorted(roles_state, key=lambda name: ((roles_state[name] or {}).get("checked_at") or 0, name)):
+        check_time("the role checks")
         record = roles_state[role]
         holder = record.get("holder")
         if not holder or record.get("host") != host:
             continue
+        record["checked_at"] = started
         key = f"{role}|{holder}"
+        logged = f"role:{role}"
         incident = incidents.get(key)
 
         # A named class suppression, checked before any work is done for the role: see
@@ -2508,13 +2872,29 @@ def run_once(options: argparse.Namespace) -> int:
 
         # A holder the last walk missed is walked for again only after TRANSCRIPT_REWALK.
         rewalk = started - (record.get("transcript_missed_at") or 0) >= TRANSCRIPT_REWALK
+        # An incident that is finished -- a recorded normal exit, or an alert quieted on the
+        # directory rule -- has one question left, "did the session come back", and the two free
+        # sources answer it. The deep sources are what cost the run of 2026-11-03T00:18:07Z 80 s
+        # on a holder that had exited the day before and whose transcript the sweep had taken.
+        finished = bool(incident) and bool(
+            incident.get("quieted_at") or (incident.get("exited_at") and incident.get("exited_reported_at"))
+        )
         evidence = holder_evidence(
             envoy, holder, held, live, options.write_grace, started,
-            record.get("dir") or "", options.dir_grace, rewalk,
+            record.get("dir") or "", options.dir_grace, rewalk, not finished,
         )
         if evidence["walk_missed"]:
             record["transcript_missed_at"] = started
         pid = evidence["pid"]
+        # A holder whose only sighting would have been a transcript header this run had no time
+        # to read is not unseen, it is unread. Judging it would alert on a lane that is running.
+        if not evidence["alive"] and _SCAN["unread_headers"]:
+            log_change(
+                state, logged, f"unread:{_SCAN['unread_headers']}",
+                f"{role}: holding {holder}: {_SCAN['unread_headers']} transcript header(s) were"
+                " left unread at this run's header budget, and one of them could name it",
+            )
+            continue
 
         # A role whose holder another live session has taken is not this holder's incident.
         taken_by = next(
@@ -2531,10 +2911,13 @@ def run_once(options: argparse.Namespace) -> int:
         # envoy_send answers "no live session"), which the Rocq speed lane recorded on
         # 2026-10-25 15:10-15:16Z and agent infra measured again at load 233 on 2026-10-29.
         if pid and evidence["registry"] != "live":
-            log(
+            log_change(
+                state, f"{logged}:registry", f"fault:{holder}:{evidence['registry']}",
                 f"{role}: {CANNOT_SEE_HOLDER} {holder} in Envoy's registry, but pid {pid} holds"
-                " it -- registry fault, not an incident; no role lookup and no alert"
+                " it -- registry fault, not an incident; no role lookup and no alert",
             )
+        else:
+            log_change(state, f"{logged}:registry", f"ok:{holder}:{evidence['registry']}")
 
         cause = ""
         if evidence["alive"]:
@@ -2551,7 +2934,12 @@ def run_once(options: argparse.Namespace) -> int:
                 state.commit(options)
             incidents.pop(key, None)
             if evidence["alive"]:
-                log(f"{role}: ok (holder {holder}, {evidence['found']})")
+                # One line when a role becomes ok, none while it stays ok: 10,723 of the 23,597
+                # journal lines of the six hours to 2026-11-03T02:36Z were this line repeating.
+                log_change(
+                    state, logged, f"ok:{holder}:{evidence['found_source']}:{pid}",
+                    f"{role}: ok (holder {holder}, {evidence['found']})",
+                )
             else:
                 log(f"{role}: forgetting {holder} ({cause})")
                 roles_state.pop(role, None)
@@ -2631,13 +3019,16 @@ def run_once(options: argparse.Namespace) -> int:
             elif unseen_for > FORGET_AFTER:
                 incidents.pop(key, None)
                 roles_state.pop(role, None)
+            else:
+                log_change(state, logged, f"exited:{exited}")
             state.commit(options)
             continue
 
         if unseen_for < options.grace:
-            log(
-                f"{role}: {CANNOT_SEE_HOLDER} {holder} for {int(unseen_for)} s"
-                f" (< {options.grace} s grace), holding"
+            log_change(
+                state, logged, f"holding:{holder}:{incident['opened_at']}",
+                f"{role}: {CANNOT_SEE_HOLDER} {holder} since {iso(incident['opened_at'])}"
+                f" (< {options.grace} s grace), holding",
             )
             state.commit(options)
             continue
@@ -2657,9 +3048,11 @@ def run_once(options: argparse.Namespace) -> int:
         # its first alert and then one quieting message instead of an escalation. That trade is
         # deliberate and it is the only part of this rule that could hide a real failure.
         if incident.get("quieted_at"):
-            log(
+            log_change(
+                state, logged, f"quieted:{incident['quieted_at']}",
                 f"{role}: {CANNOT_SEE_HOLDER} {holder}, quieted at"
-                f" {iso(incident['quieted_at'])} on the directory rule; {evidence['dir_sentence']}"
+                f" {iso(incident['quieted_at'])} on the directory rule; nothing further goes out"
+                " for this holder",
             )
             if unseen_for > FORGET_AFTER:
                 incidents.pop(key, None)
@@ -2695,29 +3088,39 @@ def run_once(options: argparse.Namespace) -> int:
             incident["notes"] = notes
             for field in ("dir", "title", "host"):
                 incident[field] = record.get(field)
-            text = alert_text(
-                role, incident, holder, started, "first alert",
-                suppression_lines(started, suppressed),
+            kind = "first alert"
+            full = alert_text(
+                role, incident, holder, started, kind, suppression_lines(started, suppressed),
+            )
+            text, report = compose(
+                options, f"role-{role}-alert", full, started,
+                *alert_head(role, incident, holder, started, kind),
+                *suppression_note(started),
             )
             # On disk before a single message leaves: a resent first alert is worse than a late one.
             incident["alerted_at"] = started
             incident["told"] = [target for target, _ in targets]
+            log_change(state, logged, f"alerted:{started}")
             state.commit(options)
             told = []
             for target, why in targets:
                 if options.dry_run or envoy.send(target, text):
                     told.append(target)
-                    log(f"  -> {target} ({why})")
             for topic in topics:
-                headline = text.splitlines()[0] + (
-                    f" Peers on {topic}: a message to this role may reach nobody."
+                headline = short_message(
+                    report,
+                    f"ENVOY ROLE HOLDER UNSEEN: no source has seen the holder of role {role}"
+                    f" ({holder}) since {iso(incident['opened_at'])}, so a message to"
+                    f" notifications.role.{role} may reach nobody. This watch cannot see that"
+                    " session; it does NOT establish that it stopped.",
                 )
                 if not options.dry_run:
-                    envoy.publish(topic, guard_verdict(headline))
-                log(f"  -> topic {topic}")
+                    envoy.publish(topic, headline)
             incident["told"] = told or incident["told"]
             alerts += 1
-            log(f"{role}: ALERT sent to {len(told)} sessions and {len(topics)} topics")
+            log(f"{role}: ALERT sent to {len(told)} session(s)"
+                f" [{', '.join(f'{t} ({w})' for t, w in targets)}] and {len(topics)} topic(s);"
+                f" full report {report}")
             if options.print_alert:
                 print(text)
         elif (
@@ -2728,25 +3131,36 @@ def run_once(options: argparse.Namespace) -> int:
             # alert carried, so the message names when the incident was first seen and first
             # alerted, how long ago that really was, and that nothing further will follow.
             first_seen, first_alert = iso(incident["opened_at"]), iso(incident["alerted_at"])
-            text = alert_text(
-                role, incident, holder, started,
+            kind = (
                 f"REPEAT of the incident first seen at {first_seen},"
-                f" {human(started - incident['alerted_at'])} after its first alert",
-                suppression_lines(started, suppressed),
+                f" {human(started - incident['alerted_at'])} after its first alert"
             )
-            text += (
+            full = alert_text(
+                role, incident, holder, started, kind, suppression_lines(started, suppressed),
+            )
+            full += (
                 f"\nTHIS IS A REPEAT, AND THE ONLY ONE: the incident was first seen at {first_seen}"
                 f" and first alerted at {first_alert}, and no source has seen the holder since."
                 " No further alert goes out for this holder unless a source sees it again or its"
                 " transcript is found to end in a normal exit. You own looking at the pane."
             )
+            head = alert_head(role, incident, holder, started, kind)
+            text, report = compose(
+                options, f"role-{role}-repeat", full, started,
+                head[0],
+                f"First alerted at {first_alert}; this is the only repeat, and you own looking"
+                " at the pane.",
+                *head[1:],
+            )
             incident["escalated_at"] = started
+            log_change(state, logged, f"escalated:{started}")
             state.commit(options)
             if not options.dry_run:
-                envoy.send(CHIEF_OF_STAFF, guard_verdict(text))
+                envoy.send(CHIEF_OF_STAFF, text)
             log(
                 f"{role}: ESCALATED to the chief of staff, a repeat of the incident first seen at"
-                f" {first_seen} and first alerted at {first_alert}; no further repeat"
+                f" {first_seen} and first alerted at {first_alert}; no further repeat;"
+                f" full report {report}"
             )
         elif unseen_for > FORGET_AFTER:
             log(
@@ -2756,25 +3170,166 @@ def run_once(options: argparse.Namespace) -> int:
             incidents.pop(key, None)
             roles_state.pop(role, None)
         else:
-            log(
-                f"{role}: {CANNOT_SEE_HOLDER} {holder} for {human(unseen_for)}, already alerted"
-                f" at {iso(incident.get('alerted_at'))}"
+            log_change(
+                state, logged, f"alerted:{incident.get('alerted_at')}",
+                f"{role}: {CANNOT_SEE_HOLDER} {holder}, alerted at"
+                f" {iso(incident.get('alerted_at'))}; nothing further goes out until a source"
+                " sees it or 10 minutes pass",
             )
         state.commit(options)
 
+    return alerts, clears
+
+
+# A run that starts with its budget already spent still does one unit of work per phase, so
+# every period moves at least one role forward. A run that did nothing at all would be a watch
+# that has stopped watching while systemd and the timer both look healthy, which is the failure
+# this file exists for.
+MIN_RUN_SECONDS = 1.0
+
+
+def run_once(options: argparse.Namespace) -> int:
+    global _TRANSCRIPT_INDEX, _OPEN_JSONL, _SWEEP_INDEX, _PROC_TABLE
+    started = time.time()
+    budget = getattr(options, "budget", None) or DEFAULT_BUDGET
+    _RUN["deadline"] = max(process_started() + budget, started + MIN_RUN_SECONDS)
+    # Where each run spends its time, in the summary line, so a run that nears its
+    # TimeoutStartSec names the step that took it there.
+    phases: list[str] = []
+    mark = started
+
+    def phase(name: str) -> None:
+        nonlocal mark
+        phases.append(f"{name} {time.time() - mark:.1f}s")
+        mark = time.time()
+
+    envoy = Envoy(timeout=options.http_timeout)
+    state = State(options.state)
+    if not state.locked:
+        log(f"another run holds {options.state}; skipping this period")
+        return 0
+    _TRANSCRIPT_INDEX = _OPEN_JSONL = _SWEEP_INDEX = _PROC_TABLE = None
+    _TRANSCRIPT_WALK.update(deadline=0.0, truncated=False)
+    _LOG_KEYS.clear()
+    _SCAN["unread_headers"] = 0
+    load_header_cache(Path(options.state).parent / "headers.json")
+    _KNOWN_TRANSCRIPTS.clear()
+    _KNOWN_TRANSCRIPTS.update(
+        {session: path for session, path in (state.data.get("transcripts") or {}).items()
+         if isinstance(path, str)}
+    )
+    _SWEPT.clear()
+    _SWEPT.update(
+        {session: record for session, record in (state.data.get("swept") or {}).items()
+         if isinstance(record, dict)}
+    )
+    roles_state: dict = state.data.setdefault("roles", {})
+    # Incident memory, keyed by role AND holder so a role that is re-claimed by a new session
+    # starts a new incident. It lives in this one file, which the service owns, and is written
+    # and flushed to disk BEFORE any message goes out, so a crash between the two can never
+    # resend a first alert.
+    incidents: dict = state.data.setdefault("incidents", {})
+    host = socket.gethostname()
+
+    try:
+        sessions = envoy.sessions()
+    except RuntimeError as error:
+        log(f"envoy unreachable: {error}")
+        return 2
+    phase("envoy")
+    live = {
+        session["session_id"]: session for session in sessions if session.get("session_id")
+    }
+    local = [
+        session
+        for session in sessions
+        if (session.get("host") or session.get("machine_id")) == host and session.get("roles")
+    ]
+    # Every step from here can run out of the run's budget, and each raises OutOfTime between
+    # two units of work rather than inside one. A half-read process table would make live
+    # holders look unseen, so a step that stops leaves nothing behind: the state file keeps what
+    # whole steps decided, the summary line says where the run stopped, and the next period
+    # starts with the roles this one did not reach.
+    agents = at_shell = pane_alerts = pane_clears = alerts = clears = 0
+    held: dict[str, int] = {}
+    suppressed: dict = state.data.setdefault("suppressed", {})
+    stopped = ""
+    try:
+        held = omp_sessions_by_pid()
+    except OutOfTime as where:
+        stopped = str(where)
+    phase("processes")
+    # Where this watch last saw each session running, for the alert's "look at the pane" step.
+    pane_of: dict[str, str] = {}
+    for pane_key, remembered in (state.data.get("panes") or {}).items():
+        if isinstance(remembered, dict) and remembered.get("session"):
+            pane_of[remembered["session"]] = (
+                f"{pane_key.rsplit(':', 1)[-1]} ({remembered.get('where') or '?'},"
+                f" {remembered.get('cwd') or '?'})"
+            )
+
+    # Learn the roles this machine holds, and keep what an earlier run learnt: a holder whose
+    # session registration has already aged out is exactly the case this watch must still see.
+    for session in local:
+        for role in session.get("roles") or []:
+            record = roles_state.setdefault(role, {})
+            previous = record.get("holder")
+            if previous != session["session_id"]:
+                record.clear()
+                record["holder"] = session["session_id"]
+                # The old holder's incident, if any, is over: the role has moved.
+                incidents.pop(f"{role}|{previous}", None)
+            record.update(
+                {
+                    "dir": session.get("dir") or "",
+                    "title": session.get("title") or "",
+                    "host": host,
+                    "topics": session.get("topics") or [],
+                }
+            )
+    # On disk before any per-holder work: the roster and where each holder's transcript is, so a
+    # run that is killed later still leaves the next one what this one learnt.
+    keep_known_transcripts(state)
+    state.commit(options)
+
+    if not stopped:
+        try:
+            # The pane check first: it is cheap (0.2-1.3 s at load 400) and reads no holder, so
+            # a period whose holder checks run long still checks every pane and its alerts.
+            agents, at_shell, pane_alerts, pane_clears = check_panes(
+                options, state, envoy, sessions, held, started
+            )
+            phase("panes")
+            alerts, clears = check_roles(
+                options, state, envoy, sessions, live, held, roles_state, incidents, suppressed,
+                pane_of, host, started,
+            )
+        except OutOfTime as where:
+            stopped = str(where)
+    if "panes" not in " ".join(phases):
+        phase("panes")
     phase("roles")
+    # Only a run that reached every role may forget a role's recorded journal state.
+    forget_logged(state, "role:")
     keep_known_transcripts(state)
     state.commit(options)
     state.close()
+    if not options.dry_run or getattr(options, "write_state", False):
+        save_header_cache(Path(options.state).parent / "headers.json")
+    # ONE line a run, whatever happened: the counts, each phase's seconds, what ran out, and the
+    # suppressions in their short form. Everything else this run logs is a state that changed.
     log(
         f"checked {len(roles_state)} local role(s) and {agents} agent pane(s), {at_shell} at a shell,"
         f" in {time.time() - started:.2f}s ({', '.join(phases)}"
         + (f"; session-root walk stopped at its {TRANSCRIPT_WALK_SECONDS:g} s budget"
            if _TRANSCRIPT_WALK["truncated"] else "")
+        + (f"; {_SCAN['unread_headers']} transcript header(s) left for the next run"
+           if _SCAN["unread_headers"] else "")
         + f"); {alerts + pane_alerts} alert(s), {clears + pane_clears} clear(s)"
+        + (f"; STOPPED at its {budget:g} s budget in {stopped}, with what it had done saved: the"
+           " next run starts with the roles this one did not reach" if stopped else "")
+        + "".join("; " + line for line in suppression_lines(started, suppressed, short=True))
     )
-    for line in suppression_lines(started, suppressed, short=True):
-        log(line)
     return 0
 
 
@@ -2813,6 +3368,16 @@ def main() -> int:
         help=(
             "seconds within which a write under the holder's working directory quiets an"
             " alert no source can clear; it never says the holder is alive"
+        ),
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=DEFAULT_BUDGET,
+        help=(
+            "seconds of wall clock one run may take, counted from the moment the process"
+            " started; past it the run stops between two units of work, saves what it has done"
+            " and exits 0, so systemd records no failure"
         ),
     )
     parser.add_argument("--http-timeout", type=float, default=8.0)

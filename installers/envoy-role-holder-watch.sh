@@ -1,7 +1,7 @@
 #!/bin/bash
 # Arm the 30-second Envoy role-holder watch (scripts/envoy-role-holder-watch).
 #
-# Standalone installer (like omp-billing-watch.sh) — not sourced by install.sh.
+# Standalone installer (like omp-root-hang-watch.sh) — not sourced by install.sh.
 # Run it on a machine that runs omp sessions holding Envoy roles: the watch reads THIS
 # machine's /proc to decide whether a role's holder still has a process, so there is nothing
 # to arm on a laptop that only SSHes in.

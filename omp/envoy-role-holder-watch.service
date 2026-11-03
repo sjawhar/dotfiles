@@ -9,13 +9,17 @@ Type=oneshot
 Nice=15
 IOSchedulingClass=idle
 # A run that cannot finish is killed. Runs cannot pile up whatever this is: a oneshot that is
-# still starting absorbs the next timer tick. Every slow step of a run is bounded -- the walk of
-# ~/.omp/agent/sessions shares one 3 s budget per run, each holder's working-directory walk 1 s,
-# each Envoy call 8 s, tmux 10 s -- and the summary line names each phase's seconds. Measured on
-# 2026-11-02 at load 350-410: 6-13 s, 22 s at the worst, and stalls of the whole box in which
-# systemd itself logged nothing for over 25 s. 25 s killed 100% of runs from 09:00Z to 13:20Z
-# (the unbounded walk) and still some after it; 90 s holds the worst run measured at twice
-# this load, with margin.
+# still starting absorbs the next timer tick. The run bounds itself first: --budget (60 s,
+# counted from the moment the process started) stops it between two units of work, saves what it
+# decided and exits 0, so a slow box costs a partial period and not a failed unit. Every slow
+# step inside that is bounded too -- the walk of ~/.omp/agent/sessions shares one 3 s budget per
+# run, the transcript headers a run has not seen before 10 s, each holder's working-directory
+# walk 1 s, each Envoy call 8 s, tmux 10 s -- and the summary line names each phase's seconds.
+# TimeoutStartSec stays at 90 s as the backstop: it is what systemd kills on when a whole-box
+# stall (systemd itself logging nothing for over 25 s at load 350-410) holds a run past its own
+# budget. 25 s killed 100% of runs from 09:00Z to 13:20Z on 2026-11-02 (the unbounded walk) and
+# 35 of 545 runs in the six hours to 2026-11-03T02:36Z; with the budget, a run that reaches it
+# records no failure at all.
 TimeoutStartSec=90
 # The pane check talks to the default tmux server. Two things a shell gives it and a systemd
 # service does not: the socket directory .bashrc sets, and the mise-managed tmux the server was
