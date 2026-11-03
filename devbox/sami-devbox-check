@@ -141,7 +141,7 @@ mise_check() {
 # The pinned tools, the inner docker's ghcr.io login, and omp's Slack MCP credential, as a
 # session in a box sees them.
 tools_check() {
-    local pin got live
+    local got live model
     # The public-text leak check shims/gh requires before gh pr create/edit/comment: the pointer
     # and the script it names, both in the box.
     got="$(cat "$HOME/.config/public-leak-check/path" 2>&1)"
@@ -174,7 +174,6 @@ PY
     if [[ "$got" == 1 ]]; then
         ok "slack MCP: omp holds one live Slack credential"
     elif [[ "$got" == 0 && "$live" == 0 ]]; then
-        echo "WAIT openai-codex/ waits on the gateway openai group (INFRA-481)"
         echo "WAIT slack MCP: needs a person's Slack OAuth (Sami's), which the spec bars on this machine; agent.db is not copied (decided 18:24Z)"
     else
         fail "slack MCP: live Slack credentials: $got (all live credentials: $live)"
@@ -183,6 +182,12 @@ PY
     # by sami-devbox-provision's secrets step): a real turn from inside the box.
     got="$(timeout 200 omp -p "say ok" --model anthropic/claude-opus-4-8 2>&1 | tail -1)"
     [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through ossv-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
+    # openai/ goes through the gateway's openai group too (devbox/sami-devbox-model-routes): the
+    # slow role and astra's model each answer a real turn. A fail prints "Use /login" or an HTTP 4xx.
+    for model in @slow ossv-gateway/openai/gpt-6-astra:xhigh; do
+        got="$(timeout 200 omp -p "say ok" --model "$model" 2>&1 | tail -1)"
+        [[ "${got,,}" == *ok* ]] && ok "$model through ossv-gateway's openai group answers: $got" || fail "$model: $got"
+    done
 }
 
 # jwt_claim prints one claim of a JWT's payload.
@@ -417,6 +422,17 @@ host() {
     mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
+    # The openai/ agents and roles go to the gateway's openai group (devbox/sami-devbox-model-routes):
+    # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/ models,
+    # and omp's merged models.yml declares at least 4 of them.
+    missing="$(yq -r '.modelRoles.slow, .modelRoles.deep, .task.agentModelOverrides.astra, .task.agentModelOverrides["sami-proxy"]' "$DOTFILES_DIR/omp/config.local.yml" 2>&1)"
+    if [[ "$(grep -c '^ossv-gateway/openai/' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
+        ok "omp config.local.yml: slow, deep, astra and sami-proxy use ossv-gateway/openai/ ($(tr '\n' ' ' <<<"$missing"))"
+    else
+        fail "omp config.local.yml: slow, deep, astra, sami-proxy want ossv-gateway/openai/<id> each, got: $(tr '\n' ';' <<<"$missing")"
+    fi
+    missing="$(yq '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
     host_logins
     github_check "on the host"
     rocqperf_check

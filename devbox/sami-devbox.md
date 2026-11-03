@@ -82,6 +82,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
 | dotfiles follow main | `systemctl --user is-active dotfiles-follow.timer`, `systemctl --user show dotfiles-follow.service`, its state file | timer active; last run exited 0; that run, at most 30 min ago, left HEAD on origin/main with nothing open and the tools installed |
 | mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it on the host after each fast-forward) | nothing missing |
+| openai routes | `yq` of `~/.dotfiles/omp/config.local.yml` (`modelRoles.slow`, `.deep`, `task.agentModelOverrides.astra`, `["sami-proxy"]`) and of `~/.omp/agent/models.yml` | each names `ossv-gateway/openai/<id>`; ossv-gateway declares 4 or more `openai/` models |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 | ssh to sami-rocqperf | `ssh -o BatchMode=yes -o ConnectTimeout=15 sami@sami-rocqperf true` (movers run scripts there after the move) | exit 0; a time-out is a WAIT while the tailnet rule tag:sami-devbox -> sami-rocqperf tcp:22 is pending (dispatch://INFRA-734) |
 
@@ -97,6 +98,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-b
 | Dispatch | `dispatch read --issue INFRA-993` | `Title: sami-devbox…` |
 | MLflow | `http://mlflow.tail12ec1c.ts.net/health` | `OK` |
 | model gateway | the `email` of `$XDG_RUNTIME_DIR/ossv-box/gateway-token`; `/v1/models` with it | dev-box@; 200 |
+| openai through the gateway | `omp -p "say ok" --model @slow`, and `--model ossv-gateway/openai/gpt-6-astra:xhigh` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
 | Azure | `az account show` | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
 
