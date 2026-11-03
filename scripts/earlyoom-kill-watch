@@ -303,7 +303,9 @@ class Watch:
         self.cursor: str | None = state.get("cursor")
         self.last_ts: int = int(state.get("last_ts") or 0)
         self.recent: list[str] = list(state.get("recent") or [])
-        self.table: dict[str, dict] = state.get("table") or {}
+        # A record from before 2026-11-03 holds one owner, not the evidence owner_of weighs at the
+        # kill; dropped, its process is sampled again in 2 s.
+        self.table: dict[str, dict] = {k: e for k, e in (state.get("table") or {}).items() if "tree" in e}
         self.sessions: dict[str, dict] = state.get("sessions") or {}
         self.hours: dict[str, dict] = state.get("hours") or {}
         self.pending: list[dict] = state.get("pending") or []

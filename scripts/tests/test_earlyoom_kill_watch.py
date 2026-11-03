@@ -327,6 +327,20 @@ class KillWatchTest(unittest.TestCase):
         self.kill_one(w, 50001, LOKY, comm="python")
         self.assertEqual(self.sent, [], "never sampled, no scope: unmatched, nobody told")
 
+    def test_a_record_saved_before_this_rule_is_sampled_again(self) -> None:
+        """A state file of the old format held one owner per record: the chief's scope description."""
+        self.descriptions["run-c01a13dcae9797264.scope"] = f"omp session {CHIEF}"
+        self.live[EFF] = "sami-rocqperf"
+        self.left_behind(50001, LOKY)
+        self.state.write_text(json.dumps({"table": {"50001:1000": {
+            "pid": 50001, "start": 1000, "comm": "python", "first_seen": 0, "last_seen": at("20:28:00"),
+            "rss_max": 1900, "omp": 0, "omp_start": 0, "container": "", "how": "", "session": "",
+            "scope": "run-c01a13dcae9797264.scope"}}}))
+        w = self.watch()
+        self.assertEqual(w.table, {})
+        self.kill_one(w, 50001, LOKY)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+
     # -- the tree each kill came from ----------------------------------------------------------
 
     def ruling_box(self) -> None:
