@@ -23,10 +23,13 @@ What one run does:
      operation here: this script applies nothing and can refuse nothing.
   3. Append one sample per stack per run to the log, whether or not anything is pending. A
      silent log cannot be told from a dead watch.
-  4. Alert over Envoy only when a stack has a pending plan, or when a preview fails. A clean
-     stack says nothing, because a daily "nothing to report" trains its reader to ignore it.
-  5. Name every resource in the plan, with its URN, so the reader can tell whose change it is
-     without running the preview again.
+  4. Alert over Envoy only when a stack's pending set changes, or a preview starts failing, or a
+     run cannot start. A clean stack says nothing, because a daily "nothing to report" trains
+     its reader to ignore it; and bootstrap/prod had pending steps in every one of its 7
+     samples (2026-10-30..11-02), so the same pending set again is not news either.
+  5. Name every pending resource in the message (at most 600 characters, short names), and
+     every URN in the report file it names, so the reader can tell whose change it is without
+     running the preview again.
 
 What it does not do: it does not apply, does not refresh (a refresh takes a lock and rewrites
 state), does not read or print any secret, and does not judge whether a pending plan is good.
@@ -50,6 +53,7 @@ import os
 import pathlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -65,12 +69,14 @@ LOG = STATE_ROOT / "samples.jsonl"
 # reaches no provider that needs a credential this box does not hold.
 STACKS = [("bootstrap", "prod")]
 
-# Who hears a pending plan. The INFRA lead and the Legion controller asked for it
-# (2026-10-30T02:28Z); both are session ids, so delivery is direct and not a topic fan-out.
-TARGETS = [
-    "01a13c57-d826-7242-80fe-5f0670188b11",  # INFRA stream lead
-    "01a17552-e0de-7007-aa66-3a2088e7dbc6",  # Legion controller, INFRA
-]
+# Who hears it: the INFRA project's Legion controller, which owns the pending applies
+# (dispatch://INFRA-430 comment c78927c8), by its Envoy role, so the address survives a new
+# controller session. The INFRA lead asked for it too (2026-10-30T02:28Z) but holds no Envoy role
+# (`envoy ps`, 2026-11-03), so its session id is the fallback only, for when nobody holds the role.
+TARGET = "notifications.role.legion-infra-controller"
+FALLBACK = "01a13c57-d826-7242-80fe-5f0670188b11"  # INFRA lead
+MESSAGE_LIMIT = 600
+REPORT_DAYS = 7
 
 ENVOY = pathlib.Path(__file__).with_name("envoy")
 # agent-infra's applier: bootstrap/README.md's "Who applies" has a session export it, and the
@@ -156,16 +162,17 @@ def preview(directory: str, stack: str, env: dict) -> dict:
     }
 
 
-def alert_text(commit: str, plan: dict) -> str:
+def report_text(commit: str, plan: dict) -> str:
+    """Everything a reader needs to act: the full report file a message names."""
     where = f"{plan['dir']}/ stack {plan['stack']}"
     if plan["rc"] != 0:
         return (
             f"PULUMI PREVIEW FAILED: {where} on theorem-labs/agent-infra main at {commit[:9]}, "
             f"exit {plan['rc']}. This watch previews only; it applied nothing and refused "
-            f"nothing. The preview's last lines:\n\n{plan['tail'][-1500:]}\n\n"
+            f"nothing. The preview's last lines:\n\n{plan['tail']}\n\n"
             "A failed preview hides whatever is pending behind it, so treat this as unknown "
             "drift, not as a clean stack. From pulumi-drift-watch "
-            "(~/.dotfiles/scripts/pulumi-drift-watch) on sami-rocqperf, a systemd --user timer."
+            f"(~/.dotfiles/scripts/pulumi-drift-watch) on {socket.gethostname()}, a systemd --user timer.\n"
         )
     parts = ", ".join(f"{n} to {k}" for k, n in sorted(plan["counts"].items()))
     body = [
@@ -175,9 +182,7 @@ def alert_text(commit: str, plan: dict) -> str:
         "",
         "What is pending, by URN:",
     ]
-    body += [f"  {u}" for u in plan["steps"][:40]]
-    if len(plan["steps"]) > 40:
-        body.append(f"  … and {len(plan['steps']) - 40} more")
+    body += [f"  {u}" for u in plan["steps"]]
     body += [
         "",
         "Why this matters beyond the missing resources: the next person's preview of this stack "
@@ -192,10 +197,88 @@ def alert_text(commit: str, plan: dict) -> str:
         "",
         "This watch previews only. It applies nothing, refreshes nothing (a refresh takes the "
         "state lock), reads no secret, and judges nothing. A preview takes no lock, so this run "
-        "blocked no apply. From pulumi-drift-watch (~/.dotfiles/scripts/pulumi-drift-watch) on "
-        "sami-rocqperf, a systemd --user timer.",
+        "blocked no apply. It says a pending set once, and again only when the set changes. From "
+        f"pulumi-drift-watch (~/.dotfiles/scripts/pulumi-drift-watch) on {socket.gethostname()}, "
+        "a systemd --user timer.",
+        "",
+        "The preview's last lines:",
+        plan["tail"],
     ]
-    return "\n".join(body)
+    return "\n".join(body) + "\n"
+
+
+def resource_name(urn: str) -> str:
+    """`urn:pulumi:prod::proj::gcp:iam/x:WorkloadIdentityPool::github-preview` -> `github-preview`,
+    the name `git log -S` finds in the program; the report has the whole URN."""
+    return urn.rpartition("::")[2]
+
+
+def fit(items: list[str], room: int) -> str:
+    """As many of `items` as fit in `room` characters, then how many more the report lists."""
+    shown: list[str] = []
+    for i, item in enumerate(items):
+        more = len(items) - i - 1
+        if len(", ".join(shown + [item]) + (f", and {more} more" if more else "")) > room:
+            break
+        shown.append(item)
+    more = len(items) - len(shown)
+    if not more:
+        return ", ".join(shown)
+    return ", ".join(shown) + f", and {more} more" if shown else f"{more} resources, listed in the report"
+
+
+def bounded(text: str, tail: str) -> str:
+    """`text` cut at its end so that `text + tail` is at most MESSAGE_LIMIT characters."""
+    room = MESSAGE_LIMIT - len(tail)
+    if len(text) > room:
+        text = text[: max(0, room - 2)].rstrip() + "… "
+    return text + tail
+
+
+def message_text(commit: str, plan: dict, previous: str | None, report: str) -> str:
+    """The Envoy message: the decision first, every pending resource by name, the report last.
+
+    The controller runs in GKE (Envoy lists it on machine `gke`) and cannot open a file on this
+    box, so the names are in the message itself; the 6 pending on 2026-11-02 take 193 characters."""
+    where = f"{plan['dir']}/{plan['stack']} at agent-infra {commit[:9]}"
+    tail = f"Full report: {report}"
+    if plan["rc"] != 0:
+        last = next((line.strip() for line in reversed(plan["tail"].splitlines()) if line.strip()), "")
+        return bounded(
+            f"PULUMI PREVIEW FAILED: {where}, exit {plan['rc']}: what is pending is unknown until a preview"
+            f" works. Last line: {last[:200]}. Applied and refused nothing. Said once, until a preview"
+            " works again. ", tail)
+    parts = ", ".join(f"{n} to {k}" for k, n in sorted(plan["counts"].items()))
+    before = set(previous.splitlines()) if previous and previous != "failed" else None
+    now = set(plan["steps"])
+    change = (f"Changed since the last report: {len(now - before)} added, {len(before - now)} gone. "
+              if before is not None else "")
+    head = f"PULUMI PLAN PENDING: {where}: {parts}, merged, not live. {change}Pending: "
+    advice = (f". Authors apply theirs or say on the issue that it waits (git log -S<name> -- {plan['dir']}/)."
+              " Sent again only on a change. ")
+    names = fit([resource_name(u) for u in sorted(plan["steps"])],
+                MESSAGE_LIMIT - len(head) - len(advice) - len(tail))
+    return bounded(head + names + advice, tail)
+
+
+def write_report(kind: str, text: str) -> str:
+    """One report file under STATE_ROOT/reports, those older than REPORT_DAYS removed; its path."""
+    directory = STATE_ROOT / "reports"
+    now = time.time()
+    path = directory / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))}-{kind}.txt"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    except OSError as exc:
+        print(f"report {path} not written: {exc}", file=sys.stderr)
+        return f"none ({path} not written: {exc.strerror or exc})"
+    for old in directory.glob("*.txt"):
+        try:
+            if old.stat().st_mtime < now - REPORT_DAYS * 86400:
+                old.unlink()
+        except OSError:
+            continue
+    return str(path)
 
 
 def plan_fingerprint(plan: dict) -> str:
@@ -209,7 +292,7 @@ def plan_fingerprint(plan: dict) -> str:
     return "\n".join(sorted(plan["steps"]))
 
 
-def sent_path(directory: str, stack: str) -> Path:
+def sent_path(directory: str, stack: str) -> pathlib.Path:
     return STATE_ROOT / f"sent.{directory.replace('/', '_')}.{stack}"
 
 
@@ -233,14 +316,29 @@ def forget_sent(directory: str, stack: str) -> None:
 
 
 def send(target: str, text: str) -> bool:
-    r = run([str(ENVOY), "send", target, text], timeout=120)
-    ok = r.returncode == 0
-    if not ok:
+    """One Envoy message: a session id is a direct send, a topic (a role) a publish."""
+    try:
+        r = subprocess.run([str(ENVOY), "send", "--source", "envoy", "--message-file", "-", target],
+                           input=text, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"envoy send to {target} failed: {exc}", file=sys.stderr)
+        return False
+    if r.returncode != 0:
         print(f"envoy send to {target} failed: {r.stdout.strip()[:400]}", file=sys.stderr)
-    return ok
+    return r.returncode == 0
 
 
-def main() -> int:
+def deliver(text: str) -> str:
+    """Send to the controller's role, else to the INFRA lead; who took it, or "" for nobody."""
+    return next((t for t in (TARGET, FALLBACK) if send(t, text)), "")
+
+
+# A run that cannot start says so once per cause (the text before the first ':' of its error),
+# and again only after a run that started: a daily repeat of the same failure is not news.
+COULD_NOT_RUN = "sent.could-not-run"
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true",
                     help="run the previews and print what would be sent; send nothing")
@@ -248,22 +346,26 @@ def main() -> int:
                     help="print each alert to stdout as well as sending it")
     ap.add_argument("--always", action="store_true",
                     help="report even a stack with nothing pending (for proving the path)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         commit = ensure_checkout()
         env = preview_env()
     except Exception as exc:  # the run itself could not start
-        text = (
-            f"PULUMI DRIFT WATCH COULD NOT RUN: {exc}. No preview was taken, so nothing is known "
-            "about pending plans this cycle. From pulumi-drift-watch on sami-rocqperf."
-        )
-        print(text, file=sys.stderr)
-        if not args.dry_run:
-            for t in TARGETS:
-                send(t, text)
+        cause = str(exc).split(":", 1)[0]
+        print(f"PULUMI DRIFT WATCH COULD NOT RUN: {exc}", file=sys.stderr)
+        repeat = (STATE_ROOT / COULD_NOT_RUN).is_file() and (STATE_ROOT / COULD_NOT_RUN).read_text() == cause
+        if args.dry_run or repeat:
+            return 1
+        report = write_report("could-not-run", f"PULUMI DRIFT WATCH COULD NOT RUN on {socket.gethostname()}: {exc}\n")
+        text = bounded(
+            f"PULUMI DRIFT WATCH COULD NOT RUN on {socket.gethostname()}: {str(exc)[:250]}. No preview ran, so"
+            " pending plans are unknown until a run works. Said once per cause. ", f"Full report: {report}")
+        if deliver(text):
+            (STATE_ROOT / COULD_NOT_RUN).write_text(cause)
         return 1
+    (STATE_ROOT / COULD_NOT_RUN).unlink(missing_ok=True)
 
     rc = 0
     for directory, stack in STACKS:
@@ -283,24 +385,30 @@ def main() -> int:
         # c78927c8 records that set as deliberately waiting on dispatch://INFRA-773). So a pending
         # set is sent once and then only when the set itself changes -- a URN added or removed, or
         # a preview that failed where it used to succeed. A clean run forgets the set, so the next
-        # time it comes back it is news again. The daily --always run still reports everything.
+        # time it comes back it is news again. Only a hand run with --always repeats a set.
         fingerprint = plan_fingerprint(plan)
-        if not args.always and fingerprint == last_sent(directory, stack):
-            print(f"{directory}/{stack}: unchanged pending set, not resent ({plan['pending']} pending)")
-            continue
-        text = alert_text(commit, plan)
+        previous = last_sent(directory, stack)
         if plan["rc"] != 0:
             rc = 1
-        if args.print_alert or args.dry_run:
+        if not args.always and fingerprint == previous:
+            print(f"{directory}/{stack}: unchanged pending set, not resent ({plan['pending']} pending)")
+            continue
+        full = report_text(commit, plan)
+        if args.dry_run:
+            print(message_text(commit, plan, previous, "(not written in a dry run)"))
+            print(full)
+            continue
+        text = message_text(commit, plan, previous, write_report("failed" if plan["rc"] else "pending", full))
+        if args.print_alert:
             print(text)
-        if not args.dry_run:
-            delivered = [t for t in TARGETS if send(t, text)]
-            # Claiming delivery without checking it is how a watch becomes decorative.
-            if not delivered:
-                print("no recipient took the alert", file=sys.stderr)
-                rc = 1
-            else:
-                remember_sent(directory, stack, fingerprint)
+        # Claiming delivery without checking it is how a watch becomes decorative.
+        told = deliver(text)
+        if not told:
+            print("no recipient took the alert", file=sys.stderr)
+            rc = 1
+        else:
+            print(f"{directory}/{stack}: sent to {told}")
+            remember_sent(directory, stack, fingerprint)
     return rc
 
 

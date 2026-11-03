@@ -32,11 +32,15 @@ service account with state-bucket and state-key access.
 2. Runs `pulumi preview --stack <stack> --non-interactive --diff` for each configured stack.
 3. Appends one sample per stack per run to `samples.jsonl` beside the checkout, whether or not
    anything is pending — a silent log cannot be told from a dead watch.
-4. Sends an Envoy message **only** when a stack has a pending plan or its preview failed. A
-   clean stack says nothing: a daily "nothing to report" trains its reader to skip the day it
-   matters.
-5. Names every pending step by URN, so the reader can tell whose change it is without running
-   the preview again.
+4. Sends an Envoy message **only** when a stack's pending set changes (a URN added or removed),
+   when its preview starts failing, or when a run cannot start (once per cause). A clean stack
+   says nothing: a daily "nothing to report" trains its reader to skip the day it matters. The
+   same pending set again says nothing either: bootstrap/prod had pending steps in all 7 samples
+   from 2026-10-30 to 2026-11-02 (6, 6, 6, 6, 1, 9, 6), so pending alone is a standing fact.
+5. The message is at most 600 characters and names every pending resource by its name (the 6 of
+   2026-11-02 take 193 characters), what changed since the last report, and `Full report:
+   <path>` last. The report (`/mnt/nvme/sami/pulumi-drift-watch/reports/<UTC>-pending.txt`,
+   pruned after 7 days) has every URN and the preview's last lines.
 
 ## What it deliberately does not do
 
@@ -62,10 +66,19 @@ admin key, which is a human-tier broker secret and must not sit behind a timer.
 ## Configuration
 
 `STACKS` at the top of the script: `[(directory, stack)]`, today `[("bootstrap", "prod")]`.
-`TARGETS` is the list of Envoy session ids that hear a report — the INFRA stream lead and the
-Legion controller, who asked for it at 2026-10-30T02:28Z. A session id changes when a lead's
-session is replaced; a stale id makes the watch deliver to nobody, and the run reports
-`no recipient took the alert` and exits non-zero rather than claiming delivery.
+`TARGET` is the Envoy role that hears a report: `notifications.role.legion-infra-controller`,
+the INFRA project's Legion controller, which owns the pending applies (dispatch://INFRA-430,
+comment c78927c8) and asked for the report at 2026-10-30T02:28Z with the INFRA lead. A role
+survives a new controller session; the session ids written here before 2026-11-03 did not.
+The INFRA lead holds no Envoy role, so its session (`FALLBACK`,
+`01a13c57-d826-7242-80fe-5f0670188b11`) hears the report only when nobody holds the
+controller's role. When neither takes it, the run reports `no recipient took the alert`, exits
+non-zero, and the next run sends it again.
+
+Expected volume: at most one message a day, and only on the days the set changes. Of the 7
+samples to 2026-11-02, 4 were a first report or a changed count (6, 6, 6, 6, 1, 9, 6), so about
+4 messages in 4 days, fewer on weeks the set stands still. What it gives up: the INFRA lead no
+longer gets a copy of every report while the controller's role has a holder.
 
 ## Running it by hand
 
@@ -86,7 +99,8 @@ Nothing re-arms it: `installers/pulumi-drift-watch.sh` is standalone and not sou
 
 ## Proof it fires
 
-Run at 02:35Z on 2026-10-30, after the two Legion resources had been applied:
+Run at 02:35Z on 2026-10-30, after the two Legion resources had been applied (this text is now
+the report file; the message is the short form of step 5):
 
 ```
 PULUMI PLAN PENDING ON MAIN: bootstrap/ stack prod at theorem-labs/agent-infra a0d64d9e1
