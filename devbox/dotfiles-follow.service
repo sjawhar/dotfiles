@@ -1,0 +1,19 @@
+[Unit]
+Description=Fast-forward ~/.dotfiles to origin's main, install mise's pins, and alert over Envoy when it cannot
+Documentation=file:%h/.dotfiles/scripts/dotfiles-follow.md
+
+[Service]
+Type=oneshot
+Nice=5
+IOSchedulingClass=idle
+# A user unit's PATH holds neither the dotfiles nor mise's shims: `mise install` and the pin lines
+# of devbox/sami-devbox-check need mise (bin/), knives (shims/) and the tools mise installs.
+# MISE_TRUSTED_CONFIG_PATHS as .bashrc sets it, so mise loads the checkout's mise.toml.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
+# Its steps' own limits add up to under 15 min (fetch 120 s, merge 120 s, mise install 600 s,
+# the pin check 180 s), so a run is killed here only when one of them hangs past its own.
+# Under two periods, so unit-health-watch never reads a run as one that never ends.
+TimeoutStartSec=1080
+ExecStart=%h/.dotfiles/scripts/dotfiles-follow

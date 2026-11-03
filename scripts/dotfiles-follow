@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+"""Keep this machine's ~/.dotfiles on origin's main by fast-forward only, and say when it cannot.
+
+Why this exists: the dotfiles change only by commit and push, and each machine pulls
+(dispatch://INFRA-993, the cutover rule). On sami-devbox nothing pulled, and when someone did,
+nothing ran `mise install`, so a new pin (knives 3.2.2) failed A2 until a person installed it by
+hand.
+
+What one run does:
+
+  1. `git fetch origin main`.
+  2. Refuse, and change nothing, while the checkout holds any change git sees: a tracked file
+     modified, staged, deleted or in conflict, an untracked file that no .gitignore covers, or a
+     merge, rebase or cherry-pick in progress. One exception: a path that SECRET_FILES in
+     devbox/sami-devbox-provision names and git tracks (today secrets.env). Step 2 of the cutover
+     copies the working copy there, which differs from its commit on purpose, so it may be
+     modified. It may not be deleted, renamed or in conflict.
+  3. Refuse when origin/main is not a fast-forward of HEAD: HEAD has commits origin/main lacks.
+  4. Refuse when the commits to take change an exception file that is modified here. (`git merge
+     --ff-only` keeps a modified file that the merge does not touch, and refuses one it does.)
+  5. `git merge --ff-only origin/main`.
+  6. After a fast-forward, and on each later run until it passes once at the current HEAD:
+     `mise install`, then `devbox/sami-devbox-check --pins` (the check's knives and mise-pin lines).
+  7. Say each new condition once, all of one run's in one message; say it again once after
+     --escalate if it still holds; say when it clears.
+
+It never stashes, resets, rebases, abandons, restores or deletes. A refusal leaves HEAD, the
+index and every file as they were. Alerts go over Envoy to the box-health owner the same way the
+box watches here send them: BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else
+the SRE session.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import getpass
+import json
+import os
+import re
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Box health belongs to the SRE session (dispatch://INFRA-6) when nobody holds the role, as for
+# unit-health-watch, load-swap-watch and disk-fill-watch.
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+OWNER_RE = re.compile(
+    r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+
+# Where the state file goes, as the sibling watches place theirs: the big disk where there is one,
+# ~/.local/state elsewhere. devbox/sami-devbox-check reads it for A2.
+_NVME_TMP = Path(f"/mnt/nvme/{getpass.getuser()}/tmp")
+DEFAULT_STATE = (
+    _NVME_TMP / "dotfiles-follow/state.json"
+    if os.access(_NVME_TMP, os.W_OK)
+    else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "dotfiles-follow/state.json"
+)
+
+HEADLINE = {
+    "fetch": "CANNOT FETCH origin/main",
+    "dirty": "UNCOMMITTED CHANGES",
+    "not-ff": "NOT A FAST-FORWARD",
+    "kept-file": "MAIN CHANGES A KEPT FILE",
+    "merge": "FAST-FORWARD FAILED",
+    "tools": "TOOLS NOT INSTALLED",
+}
+KINDS = tuple(HEADLINE)
+# A tracked exception file may differ from its commit in the work tree or the index; any other
+# status of it (deleted, renamed, in conflict) is a change like any other.
+KEPT_STATUSES = {" M", "M ", "MM"}
+# git's markers of an operation left half done in the checkout.
+IN_PROGRESS = {
+    "MERGE_HEAD": "a merge",
+    "rebase-merge": "a rebase",
+    "rebase-apply": "a rebase or am",
+    "CHERRY_PICK_HEAD": "a cherry-pick",
+    "REVERT_HEAD": "a revert",
+}
+LIST_LIMIT = 20
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    if not epoch:
+        return "never"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def human_time(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}min"
+    return f"{seconds / 3600:.1f}h"
+
+
+def tail(text: str, lines: int = 15) -> str:
+    kept = [line for line in (text or "").strip().splitlines() if line.strip()]
+    if len(kept) > lines:
+        kept = [f"(... {len(kept) - lines} earlier lines)"] + kept[-lines:]
+    return "\n".join(f"    {line}" for line in kept) or "    (no output)"
+
+
+# ------------------------------------------------------------------------------- Envoy
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+            / "legion/envoy.json"
+        )
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (
+            os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL
+        ).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(self, path: str, body: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            self.url + path, data=json.dumps(body).encode(), method="POST"
+        )
+        request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                return answer.status, json.loads(answer.read().decode() or "{}")
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (TimeoutError, urllib.error.URLError, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
+        return status == 200
+
+
+def box_health_owner() -> str:
+    """The session id BOX_HEALTH_OWNER names, or "" for the role-then-SRE default."""
+    owner = (os.environ.get("BOX_HEALTH_OWNER") or "").strip()
+    if owner and not OWNER_RE.fullmatch(owner):
+        raise SystemExit(
+            f"BOX_HEALTH_OWNER={owner!r} is not an omp session id"
+            " (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); unset it for the box-health role"
+        )
+    return owner
+
+
+def tell_box_health(envoy: Envoy, text: str) -> str:
+    """Tell this box's health owner, and say who heard it ("" when every route refused)."""
+    owner = box_health_owner()
+    if owner:
+        return owner if envoy.send(owner, text) else ""
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    if envoy.send(SRE, text):
+        return SRE
+    return ""
+
+
+# ------------------------------------------------------------------------------- git
+
+
+def git(repo: Path, *args: str, timeout: float = 120) -> subprocess.CompletedProcess:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as error:
+        return subprocess.CompletedProcess(
+            error.cmd, 124, "", f"timed out after {timeout:.0f}s"
+        )
+
+
+def rev(repo: Path, name: str) -> str:
+    done = git(repo, "rev-parse", "--verify", "--quiet", name + "^{commit}")
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def secret_files(provision: Path) -> list[str]:
+    """SECRET_FILES of devbox/sami-devbox-provision, as bash reads the array.
+
+    Read from that script, never copied here, so the list the cutover copies and the list this
+    tool lets differ from their commits are one list.
+    """
+    text = provision.read_text()
+    match = re.search(r"^SECRET_FILES=\($.*?^\)$", text, re.MULTILINE | re.DOTALL)
+    if not match:
+        raise ValueError(f"{provision} has no SECRET_FILES=( ... ) array")
+    done = subprocess.run(
+        ["bash", "-c", 'eval "$1" && printf "%s\\0" "${SECRET_FILES[@]}"', "_", match.group(0)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+        stdin=subprocess.DEVNULL,
+    )
+    if done.returncode != 0:
+        raise ValueError(f"bash could not read SECRET_FILES of {provision}: {done.stderr.strip()}")
+    return [entry for entry in done.stdout.split("\0") if entry]
+
+
+def kept_paths(repo: Path, provision: Path) -> tuple[set[str], str]:
+    """(repo-relative paths that may differ from their commit, a note when the list is unread).
+
+    SECRET_FILES' paths are relative to $HOME; those inside this checkout that git tracks are kept.
+    Untracked ones need no exception: git ignores them (.gitignore) or this tool refuses them.
+    """
+    try:
+        entries = secret_files(provision)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return set(), f"SECRET_FILES could not be read, so no file is kept: {error}"
+    prefix = os.path.relpath(repo.resolve(), Path.home().resolve()) + "/"
+    inside = [entry[len(prefix):] for entry in entries if entry.startswith(prefix)]
+    inside = [entry for entry in inside if entry]
+    if not inside:
+        return set(), ""
+    done = git(repo, "ls-files", "-z", "--", *inside)
+    if done.returncode != 0:
+        return set(), f"git ls-files failed, so no file is kept: {done.stderr.strip()}"
+    return {path for path in done.stdout.split("\0") if path}, ""
+
+
+def worktree_status(repo: Path) -> tuple[list[tuple[str, str]], str]:
+    """([(XY, path)] of every change git sees, error text)."""
+    done = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if done.returncode != 0:
+        return [], done.stderr.strip() or f"git status exited {done.returncode}"
+    entries: list[tuple[str, str]] = []
+    fields = done.stdout.split("\0")
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if len(field) < 4:
+            continue
+        code, path = field[:2], field[3:]
+        if code[0] in "RC":
+            # A rename or copy names its source next.
+            path = f"{fields[i]} -> {path}" if i < len(fields) else path
+            i += 1
+        entries.append((code, path))
+    return entries, ""
+
+
+def operations_in_progress(repo: Path) -> list[str]:
+    found = []
+    for marker, what in IN_PROGRESS.items():
+        done = git(repo, "rev-parse", "--git-path", marker)
+        if done.returncode == 0:
+            path = Path(done.stdout.strip())
+            if not path.is_absolute():
+                path = repo / path
+            if path.exists():
+                found.append(f"{what} is in progress ({marker})")
+    return found
+
+
+def short(sha: str) -> str:
+    return sha[:12] if sha else "none"
+
+
+def display_path(path: Path) -> str:
+    """The path as a person types it: ~/.dotfiles rather than /home/<user>/.dotfiles."""
+    home = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
+
+
+# ------------------------------------------------------------------------------- tools
+
+
+def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
+    try:
+        done = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            # The check reads mise.toml from DOTFILES_DIR: this checkout's, whichever it is.
+            env={**os.environ, "DOTFILES_DIR": str(cwd)},
+        )
+        return done.returncode, (done.stdout or "") + (done.stderr or "")
+    except subprocess.TimeoutExpired as error:
+        out = error.stdout or ""
+        if isinstance(out, bytes):
+            out = out.decode(errors="replace")
+        return 124, f"{out}\n{' '.join(argv)}: timed out after {timeout:.0f}s"
+    except OSError as error:
+        return 127, f"{' '.join(argv)}: {error}"
+
+
+def install_tools(repo: Path, options: argparse.Namespace) -> str:
+    """"" when `mise install` and the check's pin lines pass, else why."""
+    code, out = run_step(["mise", "install"], repo, options.mise_timeout)
+    if code != 0:
+        return f"`mise install` in {display_path(repo)} exited {code}:\n{tail(out)}"
+    check = repo / "devbox/sami-devbox-check"
+    code, out = run_step([str(check), "--pins"], repo, options.check_timeout)
+    if code != 0:
+        return f"`mise install` passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
+    log(f"tools: mise install and {check.name} --pins passed")
+    for line in out.strip().splitlines():
+        log(f"  {line}")
+    return ""
+
+
+# ------------------------------------------------------------------------------- state
+
+
+class State:
+    """The one file this tool owns: its open conditions and its last run.
+
+    Opened under an exclusive, non-blocking flock for the whole run, so a hand run and the timer
+    never both act on the checkout; the loser skips its period.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")  # noqa: SIM115 -- held open for the run's flock
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.locked = True
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self) -> None:
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def close(self) -> None:
+        try:
+            self.handle.close()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------------------- one run
+
+
+def assess_and_follow(
+    repo: Path, options: argparse.Namespace, state: dict
+) -> tuple[dict[str, str], set[str], dict]:
+    """Do the run's work. Returns ({kind: why} found now, kinds judged this run, facts)."""
+    found: dict[str, str] = {}
+    judged: set[str] = {"fetch", "dirty", "not-ff"}
+    facts: dict = {"fast_forwarded": False}
+    display = display_path(repo)
+
+    fetched = git(repo, "fetch", "--quiet", options.remote, options.branch, timeout=options.fetch_timeout)
+    target_ref = f"refs/remotes/{options.remote}/{options.branch}"
+    if fetched.returncode != 0:
+        failures = int(state.get("fetch_failures", 0)) + 1
+        state["fetch_failures"] = failures
+        log(f"fetch failed ({failures} run(s) in a row): {fetched.stderr.strip()}")
+        if failures >= options.fetch_grace:
+            found["fetch"] = (
+                f"`git fetch {options.remote} {options.branch}` in {display} failed on the last"
+                f" {failures} runs; the latest said:\n{tail(fetched.stderr)}\n"
+                f"  The checks below used the {target_ref} of the last fetch that worked."
+            )
+    else:
+        state["fetch_failures"] = 0
+
+    head = rev(repo, "HEAD")
+    target = rev(repo, target_ref)
+    facts.update(head=head, target=target)
+    if not head or not target:
+        found["not-ff"] = f"{display}: HEAD is {short(head)} and {target_ref} is {short(target)}; one of them does not resolve."
+        return found, judged, facts
+
+    kept, note = kept_paths(repo, options.provision)
+    entries, error = worktree_status(repo)
+    blocking = [f"{code} {path}" for code, path in entries if not (path in kept and code in KEPT_STATUSES)]
+    modified_kept = sorted(path for code, path in entries if path in kept and code in KEPT_STATUSES)
+    if error:
+        blocking.append(f"git status failed: {error}")
+    blocking += operations_in_progress(repo)
+    facts["kept_modified"] = modified_kept
+    if blocking:
+        listed = blocking[:LIST_LIMIT]
+        more = len(blocking) - len(listed)
+        why = (
+            f"{display} has {len(blocking)} change(s) git sees that are not committed, so it stays at"
+            f" {short(head)}:\n"
+            + "\n".join(f"    {line}" for line in listed)
+            + (f"\n    ... and {more} more (git -C {display} status)" if more else "")
+        )
+        if modified_kept:
+            why += f"\n  Kept on purpose and not judged: {', '.join(modified_kept)} (SECRET_FILES in devbox/sami-devbox-provision)."
+        if note:
+            why += f"\n  {note}"
+        why += "\n  Commit, move or delete them by hand; the next run fast-forwards."
+        found["dirty"] = why
+
+    if head == target:
+        relation = "current"
+    elif git(repo, "merge-base", "--is-ancestor", head, target).returncode == 0:
+        relation = "behind"
+    else:
+        relation = "ahead" if git(repo, "merge-base", "--is-ancestor", target, head).returncode == 0 else "diverged"
+    facts["relation"] = relation
+    if relation in {"ahead", "diverged"}:
+        local = git(repo, "log", "--format=%h %s", "-n", "10", f"{target}..{head}").stdout.strip()
+        found["not-ff"] = (
+            f"{options.remote}/{options.branch} ({short(target)}) is not a fast-forward of HEAD ({short(head)}) in {display}:"
+            f" HEAD has commits it lacks{' and lacks some of its commits' if relation == 'diverged' else ''}:\n"
+            + tail(local, 10)
+            + "\n  Publish them (scripts/dotfiles-publish) or drop them by hand; this tool never rebases."
+        )
+        return found, judged, facts
+
+    judged.add("kept-file")
+    if relation == "current":
+        judged.add("merge")
+    if relation == "behind":
+        behind = git(repo, "rev-list", "--count", f"{head}..{target}").stdout.strip()
+        facts["behind"] = behind
+        touched = git(repo, "diff", "--name-only", "-z", head, target, "--", *modified_kept) if modified_kept else None
+        touched_paths = sorted(p for p in (touched.stdout.split("\0") if touched else []) if p)
+        if touched_paths:
+            found["kept-file"] = (
+                f"{options.remote}/{options.branch} ({short(target)}, {behind} commit(s) ahead of {short(head)}) changes"
+                f" {', '.join(touched_paths)}, which differs here on purpose (SECRET_FILES in"
+                f" devbox/sami-devbox-provision), so {display} stays at {short(head)}.\n"
+                f"  Merge the committed change into this machine's copy by hand (git -C {display} diff {short(head)} {short(target)} -- {' '.join(touched_paths)}),"
+                " then commit it or make the copy equal the new commit; the next run fast-forwards."
+            )
+        elif not blocking:
+            judged.add("merge")
+            merged = git(repo, "merge", "--ff-only", "--quiet", target, timeout=options.fetch_timeout)
+            if merged.returncode != 0:
+                found["merge"] = (
+                    f"`git merge --ff-only {short(target)}` in {display} exited {merged.returncode}; HEAD stays at"
+                    f" {short(rev(repo, 'HEAD'))}:\n{tail(merged.stdout + merged.stderr)}"
+                )
+            else:
+                facts["fast_forwarded"] = True
+                facts["head"] = rev(repo, "HEAD")
+                log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
+                head = facts["head"]
+
+    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
+    if head == target and "dirty" not in found and (
+        facts["fast_forwarded"] or state.get("tools_ok_head") != head
+    ):
+        judged.add("tools")
+        why = install_tools(repo, options)
+        if why:
+            found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
+        else:
+            state["tools_ok_head"] = head
+    return found, judged, facts
+
+
+def run_once(options: argparse.Namespace) -> int:
+    now = time.time()
+    repo = options.repo
+    envoy = Envoy(timeout=options.http_timeout)
+    state = State(options.state)
+    if not state.locked:
+        log(f"another run holds {options.state}; skipping this period")
+        return 0
+    data = state.data
+    incidents: dict = data.setdefault("incidents", {})
+    found, judged, facts = assess_and_follow(repo, options, data)
+
+    opened: dict[str, str] = {}
+    escalated: dict[str, str] = {}
+    cleared: list[str] = []
+    for kind in KINDS:
+        why = found.get(kind)
+        incident = incidents.get(kind)
+        if why:
+            if not incident:
+                incidents[kind] = {"opened_at": now, "alerted_at": now, "escalated_at": None, "why": why}
+                opened[kind] = why
+            else:
+                incident["why"] = why
+                if incident.get("escalated_at") is None and now - incident["alerted_at"] >= options.escalate:
+                    incident["escalated_at"] = now
+                    escalated[kind] = why
+        elif incident and kind in judged:
+            cleared.append(
+                f"{HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
+                f" (opened {iso(incident['opened_at'])})."
+            )
+            incidents.pop(kind)
+
+    host = socket.gethostname().split(".")[0]
+    display = display_path(repo)
+    where = f"{display} at {short(facts.get('head', ''))}, {options.remote}/{options.branch} at {short(facts.get('target', ''))}"
+
+    def blocks(chosen: dict[str, str]) -> str:
+        return "\n\n".join(f"{HEADLINE[kind]}: {why}" for kind, why in chosen.items())
+
+    messages: list[str] = []
+    changed = (
+        f"It fast-forwarded the checkout to {short(facts.get('head', ''))} and changed nothing else"
+        if facts["fast_forwarded"]
+        else "It changed nothing in the checkout"
+    )
+    footer = (
+        f"From dotfiles-follow on {host} (scripts/dotfiles-follow.md). {changed}:"
+        " it never stashes, resets, rebases, abandons or restores."
+    )
+    if opened:
+        messages.append(f"DOTFILES NOT FOLLOWING MAIN on {host} ({where}).\n\n{blocks(opened)}\n\n{footer}")
+    if escalated:
+        messages.append(
+            f"STILL NOT FOLLOWING MAIN on {host}, {human_time(options.escalate)} after the first alert"
+            f" ({where}).\n\n{blocks(escalated)}\n\n{footer}"
+        )
+    if cleared:
+        messages.append(
+            f"DOTFILES FOLLOWING MAIN AGAIN on {host} ({where}):\n"
+            + "\n".join(f"  {line}" for line in cleared)
+            + f"\nNo action is needed for these. From dotfiles-follow on {host}."
+        )
+
+    data["last_run"] = now
+    data["head"] = facts.get("head", "")
+    data["target"] = facts.get("target", "")
+    data["last_outcome"] = "ok" if not incidents and not found else ",".join(sorted(set(incidents) | set(found)))
+    state.commit()
+    state.close()
+
+    log(
+        f"{where}; relation {facts.get('relation', '?')}; fast-forwarded: {facts['fast_forwarded']};"
+        f" kept: {', '.join(facts.get('kept_modified', [])) or 'none'}; open: {', '.join(sorted(incidents)) or 'none'};"
+        f" new: {len(opened)}; cleared: {len(cleared)}"
+    )
+    unheard = 0
+    for text in messages:
+        if options.print_alert:
+            print(text + "\n", flush=True)
+        target = tell_box_health(envoy, text)
+        if target:
+            log(f"told {target}")
+        else:
+            unheard += 1
+    if unheard:
+        # The state already records the alert as made, so this line is the only trace that it
+        # reached nobody.
+        log(f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    dotfiles = Path(os.environ.get("DOTFILES_DIR") or Path.home() / ".dotfiles")
+    parser.add_argument("--repo", type=Path, default=dotfiles, help="the checkout (default $DOTFILES_DIR or ~/.dotfiles)")
+    parser.add_argument("--remote", default="origin")
+    parser.add_argument("--branch", default="main")
+    parser.add_argument(
+        "--provision",
+        type=Path,
+        default=None,
+        help="the script whose SECRET_FILES names the kept files (default <repo>/devbox/sami-devbox-provision)",
+    )
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help=f"state file (default {DEFAULT_STATE})")
+    parser.add_argument("--escalate", type=float, default=7200.0, help="say a condition again once after this many seconds (default 7200)")
+    parser.add_argument("--fetch-grace", type=int, default=3, help="runs in a row a fetch may fail before it is said (default 3)")
+    parser.add_argument("--fetch-timeout", type=float, default=120.0)
+    parser.add_argument("--mise-timeout", type=float, default=600.0)
+    parser.add_argument("--check-timeout", type=float, default=180.0)
+    parser.add_argument("--http-timeout", type=float, default=8.0)
+    parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
+    options = parser.parse_args()
+    options.repo = options.repo.absolute()
+    if options.provision is None:
+        options.provision = options.repo / "devbox/sami-devbox-provision"
+    box_health_owner()
+    return run_once(options)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -86,6 +86,16 @@ arm_user_timer devbox docker-cap
 ensure_box_health_owner unit-health-watch
 arm_user_timer devbox unit-health-watch
 
+# On a Google VM (sami-devbox, dispatch://INFRA-993), every 10 min: fast-forward ~/.dotfiles to
+# origin's main, then `mise install` and the readiness check's pin lines; tell the box-health owner
+# over Envoy, once per condition, when it refuses (a change git sees, other than the SECRET_FILES
+# copies of devbox/sami-devbox-provision; a main that is not a fast-forward) or a step fails
+# (scripts/dotfiles-follow.md). Other machines are moved by scripts/dotfiles-sync.
+if "${DOTFILES_DIR}/scripts/on-google-vm"; then
+    ensure_box_health_owner dotfiles-follow
+    arm_user_timer devbox dotfiles-follow
+fi
+
 # Scratch on the big disk for the box's systemd --user services, which read environment.d and
 # not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
 # writable, and only once both directories are there, since environment.d has no conditionals.

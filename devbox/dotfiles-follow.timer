@@ -1,0 +1,10 @@
+[Unit]
+Description=Fast-forward ~/.dotfiles to origin's main every 10 min
+
+[Timer]
+OnActiveSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

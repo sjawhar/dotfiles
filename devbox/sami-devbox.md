@@ -59,6 +59,12 @@ never into a repository. No person's login is among them: the Google, Azure and 
 of the spec's exclusion list stay on sami-rocqperf, and so does `~/.config/gcloud` as a whole
 (its `credentials.db` holds Sami's refresh token).
 
+`.dotfiles/secrets.env` is the one of them git tracks, and its copy differs from its commit on
+purpose. `scripts/dotfiles-follow`, which fast-forwards `~/.dotfiles` here every 10 minutes,
+keeps every `SECRET_FILES` path that git tracks (read from this list, not a second one) and
+refuses on any other change; it also refuses when main changes such a file
+(`scripts/dotfiles-follow.md`).
+
 ## A2: each check, its command, what passes
 
 Host half (`sami-devbox-check`, on sami-devbox as sami):
@@ -73,6 +79,8 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `legacy_credentials`, `credentialed_accounts.db`, `.config/gh/hosts.yml` |
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
+| dotfiles follow main | `systemctl --user is-active dotfiles-follow.timer`, `systemctl --user show dotfiles-follow.service`, its state file | timer active; last run exited 0; that run, at most 30 min ago, left HEAD on origin/main with nothing open and the tools installed |
+| mise pins | `mise ls --missing` (`sami-devbox-check --pins` adds the box half's `knives --version` line; `dotfiles-follow` runs it on the host after each fast-forward) | nothing missing |
 | GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 
 Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-box`):

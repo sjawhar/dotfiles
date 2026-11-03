@@ -53,6 +53,8 @@ LOGS="${SAMI_DEVBOX_PROVISION_LOGS:-/mnt/nvme/$(id -un)/scratch/devbox-provision
 # The files a session on the machine needs that no repository holds (spec "Shared state during
 # the cutover": they copy at step 2). Paths are relative to $HOME and copied to the same path.
 # Never a person's login: no gcloud, Azure or GitHub sign-in is here, and none may be added.
+# scripts/dotfiles-follow reads this array too: the paths here that git tracks (.dotfiles/secrets.env)
+# are the ones it lets differ from their commit when it fast-forwards ~/.dotfiles on the machine.
 #   .config/sops/age/keys.txt       sami-rocqperf's machine age key, a recipient of every
 #                                   agent-tier secrets.env (.sops.yaml), so secretsd decrypts there
 #                                   with no `sops updatekeys`; sami-rocqperf retires.

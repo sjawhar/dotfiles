@@ -9,6 +9,9 @@
 #                                   `agentbox move --to sami-devbox` requires before it moves
 #                                   any session (CUTOVER_DIR/target-ready).
 #   sami-devbox-check --in-box      the box half; agentbox runs it, a person does not.
+#   sami-devbox-check --pins        only the pin lines (knives is mise.toml's pin, mise has every
+#                                   pin installed), on the host; scripts/dotfiles-follow runs it
+#                                   after each fast-forward. No log file, no marker.
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
 # box, Google Cloud as dev-sjawhar@, the build pool, the secrets broker, Envoy, Dispatch, MLflow,
@@ -119,6 +122,22 @@ github_check() {
     done
 }
 
+# The pins: knives is mise.toml's pin, and mise has every pin of mise.toml installed. The box half
+# runs the first, the host half the second, and `--pins` runs both on the host:
+# scripts/dotfiles-follow runs it after each fast-forward and its `mise install`.
+knives_check() {
+    local pin got
+    pin="$(sed -n 's/^"github:sjawhar\/knives" = "\([^"]*\)".*/\1/p' "$DOTFILES_DIR/mise.toml")"
+    got="$(knives --version 2>&1 | tail -1)"
+    [[ -n "$pin" && "$got" == "knives $pin" ]] && ok "knives: $got (the mise.toml pin)" || fail "knives: want 'knives $pin', got: $got"
+}
+
+mise_check() {
+    local missing
+    missing="$(cd "$DOTFILES_DIR" && mise ls --missing 2>&1)"
+    [[ -z "$missing" ]] && ok "mise: every pin in mise.toml is installed" || fail "mise ls --missing: $(tr '\n' ';' <<<"$missing")"
+}
+
 # The pinned tools, the inner docker's ghcr.io login, and omp's Slack MCP credential, as a
 # session in a box sees them.
 tools_check() {
@@ -128,9 +147,7 @@ tools_check() {
     got="$(cat "$HOME/.config/public-leak-check/path" 2>&1)"
     [[ -x "$got" ]] && ok "public-leak-check: $got is in the box" || fail "public-leak-check: the pointer names '$got', which this box does not have; shims/gh refuses gh pr create/edit/comment"
 
-    pin="$(sed -n 's/^"github:sjawhar\/knives" = "\([^"]*\)".*/\1/p' "$DOTFILES_DIR/mise.toml")"
-    got="$(knives --version 2>&1 | tail -1)"
-    [[ -n "$pin" && "$got" == "knives $pin" ]] && ok "knives: $got (the mise.toml pin)" || fail "knives: want 'knives $pin', got: $got"
+    knives_check
 
     got="$(jq -r '(.auths // {}) | keys | join(",")' "$HOME/.docker/config.json" 2>&1)"
     if [[ ",$got," == *,ghcr.io,* ]]; then
@@ -350,14 +367,39 @@ host_units() {
     fi
 }
 
+# The dotfiles follow origin's main by themselves (scripts/dotfiles-follow): its timer is active,
+# its last run exited 0, and that run, at most 30 minutes ago, left ~/.dotfiles on origin/main
+# with no condition open and its tools installed.
+host_follow() {
+    local got state outcome age head target tools
+    got="$(systemctl --user is-active dotfiles-follow.timer 2>&1)"
+    [[ "$got" == active ]] || { fail "dotfiles-follow: timer is '$got', want active (devbox/install.sh arms it)"; return; }
+    # One line per property, sorted, so the order systemctl prints them in does not matter.
+    got="$(systemctl --user show -p Result -p ExecMainStatus -p ExecMainExitTimestamp dotfiles-follow.service 2>&1 | sort | tr '\n' ' ')"
+    if [[ " $got" == *" ExecMainExitTimestamp= "* || " $got" != *" ExecMainStatus=0 "* || " $got" != *" Result=success "* ]]; then
+        fail "dotfiles-follow: its last run did not exit 0, or none ran: $got"
+        return
+    fi
+    for state in "/mnt/nvme/$(id -un)/tmp/dotfiles-follow/state.json" "${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles-follow/state.json"; do
+        [[ -s "$state" ]] && break
+    done
+    outcome="$(jq -r '"\(.last_outcome) \(now - (.last_run // 0) | floor) \(.head[0:12]) \(.target[0:12]) \(.tools_ok_head == .head)"' "$state" 2>&1)"
+    read -r got age head target tools <<<"$outcome"
+    if [[ "$got" == ok && "$age" =~ ^[0-9]+$ && "$age" -le 1800 && "$head" == "$target" && "$tools" == true ]]; then
+        ok "dotfiles-follow: timer active; its last run, ${age}s ago, exited 0 and left ~/.dotfiles on origin/main $head with its tools installed (state $state)"
+    else
+        fail "dotfiles-follow: last run: '$outcome' (want: outcome ok, at most 1800 s ago, HEAD = origin/main, tools installed at HEAD; state $state)"
+    fi
+}
+
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
     host_disks
     host_units
+    host_follow
     local missing
-    missing="$(cd "$DOTFILES_DIR" && mise ls --missing 2>&1)"
-    [[ -z "$missing" ]] && ok "mise: every pin in mise.toml is installed" || fail "mise ls --missing: $(tr '\n' ';' <<<"$missing")"
+    mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
     host_logins
@@ -418,6 +460,7 @@ host_kernel() {
 
 case "${1:-}" in
     --in-box) in_box; exit $? ;;
+    --pins) knives_check; mise_check; (( fails == 0 )); exit $? ;;
     ""|--mark-ready) ;;
     *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac
