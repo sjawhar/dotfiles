@@ -215,6 +215,9 @@ step_install() {
         cd ~/.dotfiles
         bash install.sh
         bash devbox/install.sh
+        # After install.sh's models.yml merge: omp's OpenAI agents and roles go through the
+        # gateway's openai/ group, since this machine holds no ChatGPT login (the script says why).
+        bash devbox/sami-devbox-model-routes
         failed=''
         for i in ${EXTRA_INSTALLERS[*]}; do
             echo \"--- installers/\$i.sh\"
