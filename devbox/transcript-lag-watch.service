@@ -1,0 +1,17 @@
+[Unit]
+Description=Alert over Envoy when the transcript store stops receiving this host's agent sessions
+Documentation=file:%h/.dotfiles/scripts/transcript-lag-watch.md
+
+[Service]
+Type=oneshot
+# Above the lanes, like unit-health-watch: a lag this watch looks for comes from a loaded box
+# too, and a watch scheduled behind that load would go quiet with the importer. Measured on
+# sami-rocqperf at load ~350 on 2026-11-03: a quiet pass 1.9-3.8 s (the tq query 0.3-0.5 s of
+# it), and 5-10 s on a pass that writes a report, which also reads the importer's journal.
+Nice=5
+IOSchedulingClass=idle
+# Each step has its own limit (systemctl 15 s, the tq query 45 s, the importer's journal 15 s,
+# each Envoy request 8 s), so a pass ends well inside this; a run that cannot finish is killed,
+# so runs never pile up on the 10-minute period.
+TimeoutStartSec=180
+ExecStart=%h/.dotfiles/scripts/transcript-lag-watch

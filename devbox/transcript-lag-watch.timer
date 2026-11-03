@@ -1,0 +1,12 @@
+[Unit]
+Description=Check every 10 min that the transcript store still receives this host's sessions
+
+[Timer]
+OnActiveSec=2min
+# Ten minutes, the importer's own period. An alert needs two checks in a row over the bar, so
+# it comes 10-20 min after the lag crosses it.
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

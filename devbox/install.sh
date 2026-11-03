@@ -96,6 +96,13 @@ if "${DOTFILES_DIR}/scripts/on-google-vm"; then
     arm_user_timer devbox dotfiles-follow
 fi
 
+# Every 10 min, tell the box-health owner over Envoy when the transcript store's newest entry from
+# this host is over 45 min old on two checks in a row (scripts/transcript-lag-watch.md). Quiet on a
+# machine with no transcript-import unit and no transcript-store config. BOX_HEALTH_OWNER, when
+# set, goes in its drop-in.
+ensure_box_health_owner transcript-lag-watch
+arm_user_timer devbox transcript-lag-watch
+
 # Scratch on the big disk for the box's systemd --user services, which read environment.d and
 # not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
 # writable, and only once both directories are there, since environment.d has no conditionals.

@@ -1,0 +1,1007 @@
+#!/usr/bin/env python3
+"""Alert when the transcript store stops receiving this host's agent sessions.
+
+Why this exists (notify review G5, 2026-11-03): nothing said so when the store fell behind. The
+unit health watch sees the importer's unit, not the age of the data. At 02:10Z the store's newest
+entry from sami-rocqperf was 132 min old (its importer was stopped at 00:16Z), and the
+ossv-agent-* hosts were ~31 h behind. A session that is not in the store is invisible to `tq`.
+
+What one run does (every 10 min, transcript-lag-watch.timer):
+
+  1. Ask the store, through `tq sql` under a time limit, for the newest `messages.ts` that carries
+     this host's name (the `host` key of ~/.config/transcript-store/config.toml), and the host's
+     last load (`loads.loaded_at`). The lag is now minus that newest entry.
+  2. Read the importer's two units (`systemctl --user show transcript-import.service
+     transcript-import.timer`).
+  3. Alert once when the lag is over --lag-min on --checks checks in a row. Say it again only on
+     a new fact: the lag doubled since the last message, or the importer is in a state (timer
+     state, last run result) not said yet in this episode. One line when the lag is back under
+     the bar. A store that does not answer on --checks checks in a row is its own message, once
+     per episode, and one line when it answers again.
+  4. A pause file (<state dir>/paused: an optional UTC until-time, then a reason) holds every
+     alert for a deliberate stop; a clear of an alert already sent still goes.
+
+Every message is at most 600 characters and ends with `Full report: <path>`, a file under
+<state dir>/reports that holds the readings, the importer's units and journal, and the commands
+to run. Reports older than 7 days are removed.
+
+Alerts go over Envoy to the box-health owner, as every box watch here sends them:
+BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else the SRE session. This
+watch only reports. It starts, stops and changes nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import calendar
+import fcntl
+import json
+import math
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import time
+import tomllib
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# Box health on this machine belongs to the SRE session (dispatch://INFRA-6), as for
+# unit-health-watch, load-swap-watch and disk-fill-watch: it hears an alert when nobody holds the
+# role.
+SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
+DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
+OWNER_RE = re.compile(
+    r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+
+IMPORT_SERVICE = "transcript-import.service"
+IMPORT_TIMER = "transcript-import.timer"
+SHOW_PROPERTIES = (
+    "Id,LoadState,ActiveState,SubState,UnitFileState,Result,ExecMainStatus,"
+    "ExecMainStartTimestamp,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime"
+)
+RUNNING_STATES = {"activating", "active", "deactivating", "reloading", "refreshing"}
+
+# A host name as the store's rows carry it. The name goes into the SQL text (`tq sql` takes no
+# bound parameters), so anything else is refused.
+HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
+
+# Where the state file, the pause file and the reports go, as the sibling watches place theirs:
+# the big disk on an agent box, ~/.local/state on a machine without one. Every message names the
+# directory it used, so a reader never has to guess which one this machine has.
+_NVME_TMP = Path("/mnt/nvme/sami/tmp")
+
+
+def default_state_dir(big_disk: Path = _NVME_TMP) -> Path:
+    if os.access(big_disk, os.W_OK):
+        return big_disk / "transcript-lag-watch"
+    return (
+        Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+        / "transcript-lag-watch"
+    )
+
+
+MAX_MESSAGE = 600
+REPORT_KEEP_S = 7 * 86400
+HISTORY = 12
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} {message}", flush=True)
+
+
+def iso(epoch: float | None) -> str:
+    """A UTC time to the minute, for a message."""
+    if not epoch:
+        return "never"
+    return time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(epoch))
+
+
+def iso_s(epoch: float | None) -> str:
+    """A UTC time to the second, for a report."""
+    if not epoch:
+        return "never"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def age(seconds: float | None) -> str:
+    if seconds is None or math.isinf(seconds):
+        return "unknown"
+    seconds = max(0.0, float(seconds))
+    if seconds < 120 * 60:
+        return f"{seconds / 60:.0f} min"
+    if seconds < 48 * 3600:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 86400:.1f} days"
+
+
+def parse_utc(text: str) -> float | None:
+    """2026-11-03T06:00Z, 2026-11-03T06:00:00Z or '2026-11-03 06:00' as an epoch; else None."""
+    match = re.fullmatch(
+        r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d)(?::(\d\d))?Z?", text.strip()
+    )
+    if not match:
+        return None
+    stamp = f"{match.group(1)} {match.group(2)}:{match.group(3) or '00'}"
+    try:
+        return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
+    except ValueError:
+        return None
+
+
+# ------------------------------------------------------------------------------- Envoy
+
+
+class Envoy:
+    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+
+    def __init__(self, timeout: float = 8.0) -> None:
+        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
+            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+            / "legion/envoy.json"
+        )
+        try:
+            config = json.loads(Path(path).read_text()).get("envoy") or {}
+        except (OSError, ValueError):
+            config = {}
+        if config.get("enabled") is False:
+            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
+        self.url = (
+            os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL
+        ).rstrip("/")
+        self.timeout = timeout
+        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
+        if token.startswith("!"):
+            try:
+                done = subprocess.run(
+                    ["/bin/sh", "-c", token[1:]],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+                token = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                token = ""
+        self.token = token
+
+    def request(self, path: str, body: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            self.url + path, data=json.dumps(body).encode(), method="POST"
+        )
+        request.add_header("Content-Type", "application/json")
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
+                return answer.status, json.loads(answer.read().decode() or "{}")
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode() or "{}"
+            try:
+                return error.code, json.loads(raw)
+            except ValueError:
+                return error.code, {"error": raw.strip()}
+        except (TimeoutError, urllib.error.URLError, ValueError, OSError) as error:
+            return 0, {"error": str(error)}
+
+    def send(self, session_id: str, message: str) -> bool:
+        status, body = self.request(
+            "/v1/messages/send",
+            {"target_session": session_id, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  send to {session_id} failed: {status} {body}")
+        return status == 200
+
+    def publish(self, topic: str, message: str) -> bool:
+        status, body = self.request(
+            "/v1/messages/publish",
+            {"topic": topic, "message": message, "source": "envoy"},
+        )
+        if status != 200:
+            log(f"  publish to {topic} failed: {status} {body}")
+        return status == 200
+
+
+def box_health_owner() -> str:
+    """The session id BOX_HEALTH_OWNER names, or "" for the role-then-SRE default."""
+    owner = (os.environ.get("BOX_HEALTH_OWNER") or "").strip()
+    if owner and not OWNER_RE.fullmatch(owner):
+        raise SystemExit(
+            f"BOX_HEALTH_OWNER={owner!r} is not an omp session id"
+            " (01xxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx); unset it for the box-health role"
+        )
+    return owner
+
+
+def tell_box_health(envoy, text: str) -> str:
+    """Tell this box's health owner, and say who heard it ("" when every route refused)."""
+    owner = box_health_owner()
+    if owner:
+        return owner if envoy.send(owner, text) else ""
+    if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
+        return BOX_HEALTH_ROLE_TOPIC
+    if envoy.send(SRE, text):
+        return SRE
+    return ""
+
+
+# ------------------------------------------------------------------------------- the store
+
+
+class StoreError(Exception):
+    """The store did not answer the question: tq failed, timed out, or printed no row."""
+
+
+def store_host() -> str | None:
+    """The name this host's rows carry: the importer's `host` in the store's config.toml."""
+    directory = Path(
+        os.environ.get(
+            "TRANSCRIPT_STORE_CONFIG", str(Path.home() / ".config/transcript-store")
+        )
+    ).expanduser()
+    try:
+        host = tomllib.loads((directory / "config.toml").read_text()).get("host")
+    except (OSError, ValueError):
+        return None
+    return host if isinstance(host, str) and host else None
+
+
+def resolve_tq() -> str:
+    # The user manager's PATH has no ~/.local/bin, where the transcript-store tool installs tq.
+    return shutil.which("tq") or str(Path.home() / ".local/bin/tq")
+
+
+def store_sql(host: str, timeout: float) -> str:
+    # The newest entry ignores rows stamped more than 5 min ahead of the store's clock, so one
+    # session file with a wrong clock cannot hide the lag. loads.loaded_at is not Nullable: its
+    # max over no rows is the epoch, read as "never".
+    limit = max(1, int(timeout * 0.75))
+    return (
+        "SELECT"
+        " (SELECT toUnixTimestamp64Milli(max(ts)) / 1000 FROM messages"
+        f"  WHERE host = '{host}' AND ts <= now64(3) + INTERVAL 5 MINUTE) AS newest,"
+        " (SELECT toUnixTimestamp64Milli(max(loaded_at)) / 1000 FROM loads"
+        f"  WHERE host = '{host}') AS last_load"
+        f" SETTINGS max_execution_time = {limit}"
+    )
+
+
+def _epoch(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def query_store(host: str, timeout: float, tq: str | None = None) -> dict:
+    """{"newest": epoch|None, "last_load": epoch|None} for host, or StoreError within timeout."""
+    if not HOST_RE.fullmatch(host or ""):
+        raise StoreError(f"{host!r} is not a host name")
+    command = [
+        tq or resolve_tq(),
+        "sql",
+        "--format",
+        "JSONEachRow",
+        store_sql(host, timeout),
+    ]
+    try:
+        child = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise StoreError(f"cannot run {command[0]}: {error}") from None
+    try:
+        out, err = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        child.communicate()
+        raise StoreError(f"tq sql timed out after {timeout:.0f} s") from None
+    if child.returncode != 0:
+        lines = [line.strip() for line in err.splitlines() if line.strip()]
+        raise StoreError(
+            f"tq sql exited {child.returncode}: {lines[-1] if lines else 'no error text'}"
+        )
+    rows = [line for line in out.splitlines() if line.strip()]
+    if not rows:
+        raise StoreError("tq sql printed no row")
+    try:
+        row = json.loads(rows[0])
+    except ValueError:
+        raise StoreError(f"tq sql printed no JSON row: {rows[0][:200]}") from None
+    return {
+        "newest": _epoch(row.get("newest")),
+        "last_load": _epoch(row.get("last_load")),
+    }
+
+
+# ------------------------------------------------------------------------------- the importer
+
+
+def parse_show(text: str) -> dict[str, dict[str, str]]:
+    """`systemctl show` of several units: one block of Key=Value lines per unit, by Id."""
+    units: dict[str, dict[str, str]] = {}
+    for block in re.split(r"\n\s*\n", text):
+        props = {}
+        for line in block.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                props[key] = value
+        if props.get("Id"):
+            units[props["Id"]] = props
+    return units
+
+
+def parse_when(value: str) -> float | None:
+    """A systemctl timestamp: @<epoch> (--timestamp=unix) or 'Tue 2026-11-03 02:38:43 UTC'."""
+    value = (value or "").strip()
+    if not value or value in {"0", "n/a"}:
+        return None
+    if value.startswith("@"):
+        return _epoch(value[1:])
+    try:
+        return float(calendar.timegm(time.strptime(value, "%a %Y-%m-%d %H:%M:%S %Z")))
+    except ValueError:
+        return None
+
+
+def importer_units(timeout: float = 15.0) -> dict[str, dict[str, str]]:
+    """The importer's two units as systemd sees them; {} when systemctl does not answer."""
+    try:
+        done = subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                "--timestamp=unix",
+                IMPORT_SERVICE,
+                IMPORT_TIMER,
+                "-p",
+                SHOW_PROPERTIES,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"systemctl show failed: {error}")
+        return {}
+    if done.returncode != 0:
+        log(f"systemctl show exited {done.returncode}: {done.stderr.strip()[:200]}")
+    return parse_show(done.stdout)
+
+
+def importer_journal(timeout: float = 15.0) -> str:
+    try:
+        done = subprocess.run(
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                IMPORT_SERVICE,
+                "-n",
+                "15",
+                "--no-pager",
+                "-o",
+                "short-iso",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"(journalctl failed: {error})"
+    return done.stdout.strip() or done.stderr.strip() or "(nothing in the journal)"
+
+
+def importer_loaded(units: dict) -> bool:
+    return any(
+        units.get(name, {}).get("LoadState") == "loaded"
+        for name in (IMPORT_SERVICE, IMPORT_TIMER)
+    )
+
+
+def importer_summary(units: dict, now: float) -> tuple[str, str]:
+    """(one line for a message, the fact a re-send keys on).
+
+    The key is the timer's state and the last run's result. A run starting and ending is the
+    importer working, so whether a run is going now is in the line and not in the key.
+    """
+    if not units:
+        return "state unknown (systemctl gave nothing)", "unknown"
+    timer = units.get(IMPORT_TIMER, {})
+    service = units.get(IMPORT_SERVICE, {})
+    if not importer_loaded(units):
+        return f"no {IMPORT_SERVICE} on this host", "not-found"
+    timer_text = (
+        f"{IMPORT_TIMER} {timer.get('ActiveState', '?')} ({timer.get('SubState', '?')})"
+    )
+    if timer.get("UnitFileState") not in (None, "", "enabled"):
+        timer_text += f", {timer.get('UnitFileState')}"
+    result = service.get("Result", "?")
+    status = service.get("ExecMainStatus", "?")
+    if service.get("ActiveState") in RUNNING_STATES:
+        started = parse_when(service.get("ExecMainStartTimestamp", ""))
+        run_text = f"a run going since {iso(started)} ({age(now - started) if started else '?'})"
+    else:
+        ended = parse_when(service.get("ExecMainExitTimestamp", ""))
+        # 75 is the importer's SuccessExitStatus: a lock stayed busy (a timed benchmark run, or
+        # the previous import), so the run imported nothing.
+        busy = (
+            " (lock busy: a timed benchmark or the previous import)"
+            if status == "75"
+            else ""
+        )
+        run_text = f"last run {result}, exit {status}{busy}, ended {iso(ended)}"
+    key = f"timer={timer.get('ActiveState', '?')}|result={result}|load={timer.get('LoadState', '?')}"
+    return f"{timer_text}; {run_text}", key
+
+
+# ------------------------------------------------------------------------------- the pause file
+
+
+def parse_pause(text: str) -> tuple[float | None, str]:
+    """(until, reason) from a pause file: an optional UTC time first, then the reason."""
+    words = text.split()
+    if words:
+        until = parse_utc(words[0])
+        if until is not None:
+            return until, " ".join(words[1:])
+    return None, " ".join(words)
+
+
+def pause_status(path: Path, now: float) -> dict:
+    try:
+        text = path.read_text(errors="replace")
+    except FileNotFoundError:
+        return {"exists": False, "active": False, "until": None, "reason": ""}
+    except OSError as error:
+        # A pause file that cannot be read still says someone meant to pause.
+        text = f"(unreadable: {error})"
+    until, reason = parse_pause(text)
+    return {
+        "exists": True,
+        "active": until is None or until > now,
+        "until": until,
+        "reason": reason,
+    }
+
+
+def pause_text(pause: dict) -> str:
+    until = f"until {iso(pause['until'])}" if pause["until"] else "with no end time"
+    reason = f": {pause['reason']}" if pause["reason"] else ""
+    return f"{until}{reason}"
+
+
+# ------------------------------------------------------------------------------- state
+
+
+class State:
+    """The watch's state file, under an exclusive non-blocking flock for the whole run, so a hand
+    run and the timer never both decide that a condition is new; the loser skips its period. A
+    dry run without --write-state reads it if it exists and creates nothing."""
+
+    def __init__(self, path: Path, writing: bool) -> None:
+        self.path = path
+        self.writing = writing
+        self.handle = None
+        self.locked = True
+        if not writing:
+            try:
+                self.data = json.loads(path.read_text() or "{}")
+            except (OSError, ValueError):
+                self.data = {}
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = open(path, "a+")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.locked = False
+            self.data = {}
+            return
+        self.handle.seek(0)
+        try:
+            self.data = json.loads(self.handle.read() or "{}")
+        except ValueError:
+            self.data = {}
+
+    def commit(self) -> None:
+        if not self.handle:
+            return
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.data, self.handle, indent=1, sort_keys=True)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def close(self) -> None:
+        if self.handle:
+            try:
+                self.handle.close()
+            except OSError:
+                pass
+
+
+# ------------------------------------------------------------------------------- messages
+
+
+def fit(head: str, optional: list[tuple[int, str]], tail: str) -> str:
+    """head + the optional parts that fit + tail, at most MAX_MESSAGE characters. An optional
+    part is (rank, text); the part of the highest rank is dropped first, and the parts kept stay
+    in their order. A head too long for the tail alone is cut."""
+    parts = list(optional)
+    while parts and len(head + "".join(text for _, text in parts) + tail) > MAX_MESSAGE:
+        parts.remove(max(parts, key=lambda part: part[0]))
+    text = head + "".join(text for _, text in parts) + tail
+    if len(text) > MAX_MESSAGE:
+        head = head[: MAX_MESSAGE - len(tail) - 1] + "…"
+        text = head + tail
+    return text
+
+
+class Run:
+    """One check's readings, and the messages it makes."""
+
+    def __init__(
+        self,
+        options: argparse.Namespace,
+        host: str,
+        now: float,
+        units: dict,
+        pause: dict,
+        state: dict,
+    ) -> None:
+        self.options = options
+        self.host = host
+        self.now = now
+        self.units = units
+        self.pause = pause
+        self.state = state
+        self.bar = options.lag_min * 60
+        self.importer, self.importer_key = importer_summary(units, now)
+        self.reading: dict = {}
+        self.error = ""
+        self.lag: float | None = None
+        self.notices: list[dict] = []  # {"kind", "text", "report"}
+
+    def report_path(self, kind: str) -> Path:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.now))
+        return self.options.state_dir / "reports" / f"{stamp}-{kind}.txt"
+
+    def add(self, kind: str, head: str, optional: list[tuple[int, str]]) -> None:
+        report = self.report_path(kind)
+        text = fit(head, optional, f" Full report: {report}")
+        self.notices.append({"kind": kind, "text": text, "report": report})
+
+    def pause_part(self) -> tuple[int, str]:
+        """Where a deliberate stop is paused: in every alert, so the reader can hold the rest.
+        Ranked below the advice, so a squeezed message keeps it."""
+        path = self.options.state_dir / "paused"
+        if self.pause["exists"] and not self.pause["active"]:
+            return (
+                1,
+                f" The pause file {path} expired {iso(self.pause['until'])};"
+                " write '<until UTC> <reason>' there to hold these again.",
+            )
+        return (
+            1,
+            f" Deliberate stop? Write '<until UTC> <reason>' to {path} to hold these.",
+        )
+
+    def newest_text(self) -> str:
+        newest = self.reading.get("newest")
+        if newest is None:
+            return "no entry from this host in the store"
+        return f"newest entry {iso(newest)}, {age(self.lag)} old"
+
+    # -- the store did not answer
+
+    def store_failed(self, error: str) -> None:
+        self.error = error
+        state = self.state
+        state["errors"] = state.get("errors", 0) + 1
+        down = state.get("store_down") or {"since": self.now, "told_at": None}
+        down["error"] = error
+        state["store_down"] = down
+        if (
+            state["errors"] >= self.options.checks
+            and down["told_at"] is None
+            and not self.pause["active"]
+        ):
+            down["told_at"] = self.now
+            self.add(
+                "store-unreachable",
+                f"TRANSCRIPT STORE UNREACHABLE from {self.host} on {state['errors']} checks"
+                f" since {iso(down['since'])}: {error[:200]}. Importer: {self.importer}."
+                " Box-health owner: check the store and this host's path to it.",
+                [
+                    (2, " Lag unknown; said once until the store answers."),
+                    self.pause_part(),
+                ],
+            )
+
+    def store_answered(self) -> None:
+        state = self.state
+        down = state.pop("store_down", None)
+        state["errors"] = 0
+        if down and down.get("told_at"):
+            self.add(
+                "store-back",
+                f"TRANSCRIPT STORE ANSWERS AGAIN from {self.host} after"
+                f" {age(self.now - down['since'])} unreachable; {self.newest_text()}.",
+                [],
+            )
+
+    # -- the store answered
+
+    def judge_lag(self, reading: dict) -> None:
+        self.reading = reading
+        newest = reading.get("newest")
+        self.lag = math.inf if newest is None else max(0.0, self.now - newest)
+        state = self.state
+        episode = state.get("episode")
+        if self.lag <= self.bar:
+            state["over"] = 0
+            state.pop("episode", None)
+            if episode and episode.get("told_at"):
+                self.add(
+                    "caught-up",
+                    f"TRANSCRIPT STORE CAUGHT UP for {self.host}: newest entry {age(self.lag)} old,"
+                    f" after {age(self.now - episode['since'])} over the {self.options.lag_min:g} min bar.",
+                    [],
+                )
+            return
+        state["over"] = state.get("over", 0) + 1
+        if not episode:
+            episode = {"since": self.now, "told_at": None, "told_lag": None, "said": []}
+            state["episode"] = episode
+        if state["over"] < self.options.checks or self.pause["active"]:
+            return
+        told_lag = episode.get("told_lag")
+        if episode.get("told_at") is None:
+            self.add(
+                "lag",
+                f"TRANSCRIPT STORE BEHIND for {self.host}: {self.newest_text()}"
+                f" (bar {self.options.lag_min:g} min on {self.options.checks} checks)."
+                f" Importer: {self.importer}."
+                " Box-health owner: restart or fix the importer.",
+                [
+                    (2, " tq cannot see this host's newer sessions."),
+                    self.pause_part(),
+                ],
+            )
+        else:
+            doubled = (
+                told_lag is not None
+                and not math.isinf(self.lag)
+                and self.lag >= 2 * told_lag
+            )
+            changed = self.importer_key not in episode.get("said", [])
+            if not (doubled or changed):
+                return
+            was = (
+                f" ({age(told_lag)} at the last message, {iso(episode['told_at'])})"
+                if doubled
+                else ""
+            )
+            self.add(
+                "lag-update",
+                f"TRANSCRIPT STORE STILL BEHIND for {self.host}: {self.newest_text()}{was}."
+                + (" Importer changed:" if changed else " Importer:")
+                + f" {self.importer}.",
+                [self.pause_part()],
+            )
+        episode["told_at"] = self.now
+        episode["told_lag"] = None if math.isinf(self.lag) else self.lag
+        if self.importer_key not in episode.setdefault("said", []):
+            episode["said"].append(self.importer_key)
+
+    # -- the report file
+
+    def report_body(self, notice: dict, journal: str) -> str:
+        options = self.options
+        state = self.state
+        pause_path = options.state_dir / "paused"
+        if not self.pause["exists"]:
+            pause_line = "absent"
+        elif self.pause["active"]:
+            pause_line = f"ACTIVE {pause_text(self.pause)}"
+        else:
+            pause_line = f"expired {iso_s(self.pause['until'])} ({self.pause['reason'] or 'no reason'})"
+        lines = [
+            f"transcript-lag-watch on {socket.gethostname()}, {iso_s(self.now)}",
+            "",
+            notice["text"],
+            "",
+            f"Store rows for host '{self.host}' (tq sql; tables messages, loads):",
+        ]
+        if self.error:
+            lines.append(f"  the store did not answer: {self.error}")
+        else:
+            lines += [
+                f"  newest messages.ts:  {iso_s(self.reading.get('newest'))}  (lag {age(self.lag)})",
+                f"  last load:           {iso_s(self.reading.get('last_load'))}"
+                + (
+                    f"  ({age(self.now - self.reading['last_load'])} ago)"
+                    if self.reading.get("last_load")
+                    else ""
+                ),
+            ]
+        lines += [
+            f"  bar: lag over {options.lag_min:g} min on {options.checks} checks in a row;"
+            " a check every 10 min (transcript-lag-watch.timer)",
+            "",
+            "Recent checks (oldest first):",
+        ]
+        for at, lag, error in state.get("checks", []):
+            lines.append(
+                f"  {iso_s(at)}  "
+                + (
+                    f"store error: {error[:160]}"
+                    if error
+                    else f"lag {age(math.inf if lag is None else lag)}"
+                )
+            )
+        episode = state.get("episode")
+        if episode:
+            lines += [
+                "",
+                f"Lag episode: over the bar since {iso_s(episode['since'])};"
+                f" last told {iso_s(episode.get('told_at'))} at lag {age(episode.get('told_lag'))};"
+                f" importer states said: {', '.join(episode.get('said') or []) or 'none'}",
+            ]
+        down = state.get("store_down")
+        if down:
+            lines += [
+                "",
+                f"Store episode: no answer since {iso_s(down['since'])}; told {iso_s(down.get('told_at'))};"
+                f" last error: {down.get('error', '')}",
+            ]
+        lines += [
+            "",
+            f"Importer: {self.importer}",
+            "Importer units (systemctl --user show):",
+        ]
+        for name in (IMPORT_TIMER, IMPORT_SERVICE):
+            props = self.units.get(name)
+            if not props:
+                lines.append(f"  {name}: no answer")
+                continue
+            lines.append(f"  {name}:")
+            for key in sorted(props):
+                value = props[key]
+                when = parse_when(value) if value.startswith("@") else None
+                lines.append(
+                    f"    {key}={value}" + (f"  ({iso_s(when)})" if when else "")
+                )
+        lines += [
+            "",
+            f"Importer journal (journalctl --user -u {IMPORT_SERVICE} -n 15):",
+            *(f"  {line}" for line in journal.splitlines()),
+            "",
+            f"Pause file {pause_path}: {pause_line}",
+            f"  hold alerts for a deliberate stop: echo '2026-11-03T08:00Z importer stopped for <why>' > {pause_path}",
+            "  (with no time first, the pause holds until the file is removed)",
+            f"  end the pause: rm {pause_path}",
+            "",
+            "Read and act:",
+            f"  systemctl --user status {IMPORT_SERVICE} {IMPORT_TIMER}",
+            f"  journalctl --user -u {IMPORT_SERVICE} --since -3h",
+            '  tq sql "SELECT host, max(loaded_at) AS last_load FROM loads GROUP BY host ORDER BY host"',
+            f"  systemctl --user start {IMPORT_TIMER}    # re-arm a stopped importer",
+            "  ~/.dotfiles/scripts/transcript-lag-watch.md says what this watch checks and how to turn it off.",
+        ]
+        return "\n".join(lines) + "\n"
+
+
+def prune_reports(directory: Path, now: float) -> None:
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.stat().st_mtime < now - REPORT_KEEP_S:
+                entry.unlink()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------------------- one run
+
+
+def run_once(
+    options: argparse.Namespace,
+    store=None,
+    importer=None,
+    journal=None,
+    envoy=None,
+    now: float | None = None,
+) -> list[str]:
+    """One check. Returns the texts it sent (or, in a dry run, would send)."""
+    now = time.time() if now is None else now
+    store = store or (lambda host, timeout: query_store(host, timeout, tq=options.tq))
+    importer = importer or importer_units
+    journal = journal or importer_journal
+    units = importer()
+    host = options.host or store_host()
+    if not host:
+        if not importer_loaded(units):
+            log(
+                f"no {IMPORT_SERVICE} and no transcript-store config host on this machine;"
+                " nothing to watch"
+            )
+            return []
+        host = socket.gethostname()
+
+    writing = not options.dry_run or options.write_state
+    state_file = State(options.state_dir / "state.json", writing)
+    if not state_file.locked:
+        log(f"another run holds {state_file.path}; skipping this period")
+        return []
+    state = state_file.data
+    pause = pause_status(options.state_dir / "paused", now)
+    run = Run(options, host, now, units, pause, state)
+
+    started = time.monotonic()
+    try:
+        reading = store(host, options.query_timeout)
+    except StoreError as error:
+        run.store_failed(str(error))
+    else:
+        run.store_answered()
+        run.judge_lag(reading)
+    took = time.monotonic() - started
+
+    checks = state.setdefault("checks", [])
+    checks.append(
+        [now, None if run.lag is None or math.isinf(run.lag) else run.lag, run.error]
+    )
+    del checks[:-HISTORY]
+    state["last_run"] = now
+
+    journal_text = journal() if run.notices else ""
+    if writing:
+        reports = options.state_dir / "reports"
+        if run.notices:
+            reports.mkdir(parents=True, exist_ok=True)
+        for notice in run.notices:
+            notice["report"].write_text(run.report_body(notice, journal_text))
+        prune_reports(reports, now)
+    state_file.commit()
+    state_file.close()
+
+    log(
+        f"{host}: "
+        + (
+            f"store error ({run.error[:120]})"
+            if run.error
+            else f"{run.newest_text()}; last load {iso(run.reading.get('last_load'))}"
+        )
+        + f"; query {took:.1f} s; over the bar {state.get('over', 0)}/{options.checks}"
+        + (f"; PAUSED {pause_text(pause)}" if pause["active"] else "")
+        + f"; messages {len(run.notices)}"
+    )
+
+    texts: list[str] = []
+    unheard = 0
+    if run.notices and not options.dry_run and envoy is None:
+        envoy = Envoy(timeout=options.http_timeout)
+    for notice in run.notices:
+        texts.append(notice["text"])
+        if options.dry_run or options.print_alert:
+            print(notice["text"] + "\n")
+        if options.dry_run:
+            if not writing:
+                print(f"--- report it would write to {notice['report']} ---")
+                print(run.report_body(notice, journal_text))
+            continue
+        target = tell_box_health(envoy, notice["text"])
+        if target:
+            log(f"told {target} ({notice['kind']}, {len(notice['text'])} chars)")
+        else:
+            unheard += 1
+    if unheard:
+        # The state already records the message as made, so this line is the only trace that it
+        # reached nobody.
+        log(
+            f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above"
+        )
+    return texts
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="the store's host name to watch (default: `host` in ~/.config/transcript-store/config.toml,"
+        " else this machine's name)",
+    )
+    parser.add_argument(
+        "--lag-min",
+        type=float,
+        default=45.0,
+        help="alert when the newest entry is older than this many minutes (default 45)",
+    )
+    parser.add_argument(
+        "--checks",
+        type=int,
+        default=2,
+        help="checks in a row over the bar, or without a store answer, before a message (default 2)",
+    )
+    parser.add_argument(
+        "--query-timeout",
+        type=float,
+        default=45.0,
+        help="seconds the tq query may take, start to end (default 45)",
+    )
+    parser.add_argument(
+        "--http-timeout",
+        type=float,
+        default=8.0,
+        help="Envoy request timeout (default 8 s)",
+    )
+    parser.add_argument(
+        "--state-dir",
+        type=Path,
+        default=default_state_dir(),
+        help=f"state, pause file and reports (default {default_state_dir()})",
+    )
+    parser.add_argument(
+        "--tq",
+        default=None,
+        help="the tq to run (default: tq on PATH, else ~/.local/bin/tq)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="decide and print the messages and reports; send nothing, write nothing",
+    )
+    parser.add_argument(
+        "--write-state",
+        action="store_true",
+        help="with --dry-run, still write the state file and reports (to chain dry runs)",
+    )
+    parser.add_argument(
+        "--print-alert",
+        action="store_true",
+        help="print a message as well as sending it",
+    )
+    return parser
+
+
+def main() -> int:
+    options = build_parser().parse_args()
+    box_health_owner()  # refuse an unusable BOX_HEALTH_OWNER before any work
+    run_once(options)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
