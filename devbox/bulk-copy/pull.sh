@@ -12,7 +12,7 @@ LOG=$CUT/bulk-copy.log
 TREES=$2
 ERR=$CUT/pull-err
 mkdir -p "$ERR"
-export BUCKET LOG ERR
+export BUCKET LOG ERR CUT
 
 floors_ok() {
   local m fl free
@@ -31,13 +31,17 @@ process() {  # BOX TREE TARGET SHARD
   local bytes=$(gcloud storage ls -l "$obj" 2>/dev/null | awk 'NR==1{print $1}')
   local t0=$(date +%s)
   sudo mkdir -p "$target"
-  gcloud storage cp "$obj" - 2>"$ERR/$tree.$shard.gcs" | sudo tar -C "$target" -xpf - --numeric-owner 2>"$ERR/$tree.$shard.err"
+  # tar -v names go to fix-parents.py, which gives directories tar made without a shard entry
+  # (root-owned) the owner of their nearest real parent; the zdirs shard sets the rest at the end.
+  gcloud storage cp "$obj" - 2>"$ERR/$tree.$shard.gcs" \
+    | sudo tar -C "$target" -xpvf - --numeric-owner 2>"$ERR/$tree.$shard.err" \
+    | sudo python3 "$CUT/fix-parents.py" "$target" "$t0" >"$ERR/$tree.$shard.parents"
   local st=("${PIPESTATUS[@]}")
-  if [[ ${st[0]} -eq 0 && ${st[1]} -eq 0 ]]; then
+  if [[ ${st[0]} -eq 0 && ${st[1]} -eq 0 && ${st[2]} -eq 0 ]]; then
     gcloud storage rm "$obj" >/dev/null 2>&1
-    echo "$box $tree $shard ok bytes=${bytes:-?} start=$t0 end=$(date +%s)" >>"$LOG"
+    echo "$box $tree $shard ok bytes=${bytes:-?} start=$t0 end=$(date +%s) parents_fixed=$(cat "$ERR/$tree.$shard.parents")" >>"$LOG"
   else
-    echo "$box $tree $shard fail gcs_rc=${st[0]} tar_rc=${st[1]} bytes=${bytes:-?} start=$t0 end=$(date +%s)" >>"$LOG"
+    echo "$box $tree $shard fail gcs_rc=${st[0]} tar_rc=${st[1]} fix_rc=${st[2]} bytes=${bytes:-?} start=$t0 end=$(date +%s)" >>"$LOG"
   fi
 }
 export -f process

@@ -58,19 +58,30 @@ echo "size=$size page_ranges=$(wc -l <"$W/ranges") used_bytes=$used" >>"$LOG"
 CH=$((256 * 1024 * 1024))
 awk -v ch=$CH '{s = $1; e = $2; while (s <= e) { x = s + ch - 1; if (x > e) x = e; print s, x; s = x + 1 } }' \
   "$W/ranges" | sort >"$W/chunks"
+# A chunk is fetched to a temporary file and checked for its exact length BEFORE it is written
+# into the image. The first run piped curl into dd and read only dd's exit status, so a short or
+# failed GET left zeros in the image (seen 2026-11-03: 40 MiB of zeros inside a checksummed file).
 fetch() {
-  local s=$1 e=$2 try
+  local s=$1 e=$2 try want tmp got
+  want=$((e - s + 1)); tmp=$W/part/$s
   for try in 1 2 3 4 5; do
-    if cfg | curl -K - -r "$s-$e" -o - | dd of="$OUT" bs=4M seek="$s" oflag=seek_bytes conv=notrunc status=none; then
-      echo "$s $e" >>"$W/done"; return 0
+    if cfg | curl -K - -r "$s-$e" -o "$tmp"; then
+      got=$(stat -c %s "$tmp" 2>/dev/null || echo 0)
+      if [[ $got == "$want" ]]; then
+        dd if="$tmp" of="$OUT" bs=4M seek="$s" oflag=seek_bytes conv=notrunc status=none \
+          && { rm -f "$tmp"; echo "$s $e" >>"$W/done"; return 0; }
+      fi
     fi
-    sleep $((try * 5))
+    rm -f "$tmp"; sleep $((try * 5))
   done
   echo "FAILED $s $e" >>"$LOG"; return 1
 }
 export -f fetch cfg; export SAS_FILE OUT LOG W
+mkdir -p "$W/part"
 touch "$W/done"
-sort "$W/done" | comm -23 "$W/chunks" - | xargs -P "${PAR:-64}" -L1 bash -c 'fetch $0 $1' || true
+# chunks.v2 (snapshot-ranges.py, which follows NextMarker) wins when it exists.
+[[ -s $W/chunks.v2 ]] && cp "$W/chunks.v2" "$W/chunks"
+sort -n "$W/done" | comm -23 <(sort -n "$W/chunks") - | xargs -P "${PAR:-64}" -L1 bash -c 'fetch $0 $1' || true
 t1=$(date +%s)
 left=$(sort "$W/done" | comm -23 "$W/chunks" - | wc -l)
 echo "end $(date -u +%FT%TZ) seconds=$((t1 - t0)) MiB/s=$((used / 1048576 / (t1 - t0 + 1))) chunks_left=$left" >>"$LOG"

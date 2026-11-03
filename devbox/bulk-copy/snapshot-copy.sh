@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Copy rocqperf's /mnt/durable from the downloaded snapshot image to sami-devbox /mnt/durable
 # (dispatch://INFRA-993 step 3). Run as root on sami-devbox, after snapshot-download.sh ended.
-#   mount  attach the image read-only (no journal replay: crash-consistent, ro,noload)
+#   mount  attach the image read-only, put a copy-on-write overlay (dm-snapshot, COW file on
+#          /mnt/scratch) over it, and mount that, so ext4 replays its journal without touching
+#          the image (crash-consistent snapshot; `noload` left 15 entries unreadable, "Bad message")
 #   copy   list, filter (EXCLUDE + scope rules), no-offbox check, rsync into /mnt/durable
 #   verify per-group file counts and bytes, list vs target, and an rsync dry run
 #   umount detach
@@ -14,18 +16,24 @@ mkdir -p "$L"
 case ${1:-} in
 mount)
   size=$(stat -c %s "$IMG")
-  dev=$(losetup -r --sizelimit $((size - 512)) -f --show "$IMG")   # a fixed VHD ends in a 512-byte footer
-  echo "$dev" >"$L/loopdev"
-  blkid "$dev" | tee "$L/blkid"
+  base=$(losetup -r --sizelimit $((size - 512)) -f --show "$IMG")   # a fixed VHD ends in a 512-byte footer
+  truncate -s 64G "$(dirname "$IMG")/cow.img"
+  cow=$(losetup -f --show "$(dirname "$IMG")/cow.img")
+  dmsetup create durable-snap --table "0 $(blockdev --getsz "$base") snapshot $base $cow N 8"
+  printf '%s\n%s\n' "$base" "$cow" >"$L/loopdev"
+  blkid /dev/mapper/durable-snap | tee "$L/blkid"
   mkdir -p "$MNT"
-  mount -o ro,noload "$dev" "$MNT"
+  mount -o ro /dev/mapper/durable-snap "$MNT"   # a writable device: ext4 replays the journal into the COW
+  dmesg | tail -3 | tee -a "$L/blkid"
   df -h "$MNT" | tee -a "$L/blkid" ;;
 copy)
   cd "$MNT"
+  # Unreadable entries are recorded, not fatal.
   find . -xdev \( -path ./lost+found -o -path ./swapfile-overflow -o -path ./sami/devbox-copy -o -path ./sami/gocache \) -prune \
-    -o -mindepth 1 -printf '%y %s %P\0' >"$L/all.find"
+    -o -mindepth 1 -printf '%y %s %P\0' >"$L/all.find" 2>"$L/find.err" || echo "find rc=$? ($(wc -l <"$L/find.err") errors)" >>"$L/find.err"
   python3 "$C/exclude-filter.py" /mnt/durable "$C/EXCLUDE" --records <"$L/all.find" >"$L/kept.find" 2>"$L/excluded.txt"
-  tr '\0' '\n' <"$L/kept.find" | cut -d' ' -f3- | tr '\n' '\0' >"$L/kept.list"
+  python3 -c 'import sys; d=sys.stdin.buffer.read().split(b"\0"); sys.stdout.buffer.write(b"".join(r.split(b" ",2)[2]+b"\0" for r in d if r))' \
+    <"$L/kept.find" >"$L/kept.list"
   if ! "${NO_OFFBOX:-/home/sami/.dotfiles/scripts/no-offbox}" --root "$MNT" --from "$L/kept.list" -0 >"$L/offbox.txt" 2>&1; then
     echo "no-offbox refused entries; see $L/offbox.txt" >&2
     # Drop the refused paths (and everything under them) from the list, keep the record.
@@ -55,6 +63,8 @@ PY
   rsync -aHAXn --numeric-ids --from0 --files-from="$L/kept.list" --itemize-changes "$MNT/" /mnt/durable/ >"$L/dryrun.txt" 2>&1 || true
   echo "verify: $(grep ^TOTAL "$L/verify.txt"); dry-run changes: $(grep -c '^[<>ch.]' "$L/dryrun.txt")" ;;
 umount)
-  umount "$MNT"; losetup -d "$(cat "$L/loopdev")" ;;
+  umount "$MNT"; dmsetup remove durable-snap
+  while read -r d; do losetup -d "$d"; done <"$L/loopdev"
+  rm -f "$(dirname "$IMG")/cow.img" ;;
 *) echo "usage: $0 mount|copy|verify|umount" >&2; exit 2 ;;
 esac

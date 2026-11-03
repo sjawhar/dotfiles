@@ -601,6 +601,37 @@ PY
     elif (( walked )); then ok "logins: no azureProfile.json names a user"; fi
 }
 
+# Owners of the copied trees: to depth 3, every entry under /mnt/nvme/sami and /mnt/durable/sami is
+# sami's. tar -x made parent directories as root when a shard did not carry them (2026-11-03: an
+# agentbox move was refused on root-owned /mnt/nvme/sami/tmp/restack). The exceptions are paths
+# that root owns on sami-rocqperf too (container and root-run outputs, and the root-run cold moves),
+# found by the bulk copy's comparison on 2026-11-03; anything under them is not judged here.
+OWNER_EXCEPTIONS=(
+    /mnt/durable/sami/nvme-cold          # cold moves of 2026-11-01..03, made as root on rocqperf
+    /mnt/durable/sami/src-cold           # the same
+    /mnt/durable/sami/craft-tmp/r4       # Rocq build outputs of a root container
+    /mnt/nvme/sami/chief                 # root-owned on rocqperf
+    /mnt/nvme/sami/tmp/pr1295-probe      # Rocq build outputs of a root container
+    /mnt/nvme/sami/tmp/task12            # build logs and objects of a root container
+    /mnt/nvme/sami/keyrestore-pr/tasks/.pytest_cache
+    /mnt/nvme/sami/pinship/accept/d-fastgrade
+)
+host_owners() {
+    local -a found=() bad=()
+    local f e skip walked=1
+    sudo_find found /mnt/nvme/sami /mnt/durable/sami -maxdepth 3 ! -user sami -print || walked=0
+    for f in "${found[@]}"; do
+        skip=0
+        for e in "${OWNER_EXCEPTIONS[@]}"; do [[ "$f" == "$e" || "$f" == "$e"/* ]] && { skip=1; break; }; done
+        (( skip )) || bad+=("$f")
+    done
+    if (( ${#bad[@]} )); then
+        fail "owners: ${#bad[@]} entries to depth 3 under /mnt/nvme/sami and /mnt/durable/sami are not sami's, e.g. ${bad[*]:0:5}"
+    elif (( walked )); then
+        ok "owners: 0 entries to depth 3 under /mnt/nvme/sami and /mnt/durable/sami owned by anyone but sami ($(( ${#found[@]} )) under the ${#OWNER_EXCEPTIONS[@]} documented root-owned paths)"
+    fi
+}
+
 host_identity() {
     local got
     [[ "$(hostname -s)" == sami-devbox ]] && ok "host: hostname sami-devbox" || fail "host: hostname $(hostname -s)"
@@ -772,6 +803,7 @@ host() {
     missing="$(yq '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
     host_logins
+    host_owners
     github_check "on the host"
     tq_check "on the host"
     rocqperf_check
