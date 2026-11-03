@@ -1,7 +1,7 @@
 #!/bin/bash
-# The box memory guard: swap, reclaim settings, a bound on the user's slice, and the shed
-# daemon (scripts/omp-box-memory-guard). Role installer, run from devbox/install.sh on a
-# machine that runs agent sessions; there is nothing to arm on a laptop that only SSHes in.
+# The box memory guard: swap, reclaim settings and a bound on the user's slice. Role installer,
+# run from devbox/install.sh on a machine that runs agent sessions; there is nothing to arm on a
+# laptop that only SSHes in.
 #
 # Why it exists: sami-rocqperf wedged on 2026-10-27. Available memory fell from 65,039 MiB at
 # 08:45:45Z to 22,521 MiB at 08:48:36Z with swap 0 of 0, the kernel's machine-wide OOM followed
@@ -10,13 +10,17 @@
 # not protect it: they sum to about four times the machine's RAM, and the sessions that held
 # the memory had no scope at all (156 GiB of 193 GiB in one unlimited login scope).
 #
-# Four parts, in the order the kernel meets them:
+# Three parts, in the order the kernel meets them:
 #   1. swap on the big disk, so reclaim has somewhere to put cold anonymous memory;
 #   2. reclaim sysctls, so kswapd starts before every core is in direct reclaim;
-#   3. MemoryHigh/MemoryMax on user-<uid>.slice, so the user's sessions together can never take
-#      the RAM the system's daemons need;
-#   4. the shed daemon, which kills the largest single session when the first three are not
-#      enough, after telling it and the INFRA lead over Envoy.
+#   3. MemoryMax on user-<uid>.slice, so the user's sessions together can never take the RAM the
+#      system's daemons need.
+# Below them earlyoom (agent-infra's guard, `-s 100,100`) is the last-resort net, and
+# scripts/earlyoom-kill-watch tells each session what it killed. The fourth part, a daemon that
+# shed the largest session (scripts/omp-box-memory-guard), never ran past a halted dry-run bake:
+# four open defects from 2026-10-27, a false shed on a box with 135 GiB free among them (git show
+# 2d52488). It was removed on 2026-11-03, and step 4 below takes its unit off a machine that has
+# it.
 #
 # Everything it does is idempotent and survives a reboot: a hand `echo` into cgroupfs or a
 # `swapon` at a shell is exactly how this box got where it was.
@@ -27,24 +31,14 @@ DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 SWAP_DIR="${OMP_SWAP_DIR:-/mnt/nvme/swap}"
 SWAP_FILE="${SWAP_DIR}/swapfile"
-# The path the guard's own DEFAULT_STATE picks on a machine that has /mnt/nvme.
-STATE_DIR="/mnt/nvme/sami/tmp/omp-box-memory-guard"
 SLICE_DROPIN=/etc/systemd/system/user-.slice.d/60-omp-memory-guard.conf
 SYSCTL_FILE=/etc/sysctl.d/70-omp-memory-guard.conf
 
 mem_total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 
 # --- preconditions -----------------------------------------------------------------------
-command -v python3 >/dev/null || {
-    echo "omp-box-memory-guard: python3 not on PATH; the guard is a python3 script" >&2
-    exit 1
-}
 [ -r /sys/fs/cgroup/cgroup.controllers ] || {
     echo "omp-box-memory-guard: no cgroup v2 at /sys/fs/cgroup" >&2
-    exit 1
-}
-[ -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" ] || {
-    echo "omp-box-memory-guard: no envoy.json; the guard would have nowhere to send its alerts" >&2
     exit 1
 }
 # earlyoom must stay armed once there is swap. earlyoom acts only when memory AND free swap are
@@ -160,53 +154,18 @@ if [ "$slice_max" = infinity ] || [ "$slice_max" = unknown ]; then
     exit 1
 fi
 
-# --- 4. the shed daemon ----------------------------------------------------------------------
-# This step INSTALLS the unit. Whether it ARMS it is a separate decision, and the installer is
-# not allowed to make it: on 2026-10-27 at 16:16:46Z a re-run enabled and started the guard two
-# minutes after a lead had deliberately stopped it, silently undoing a safety decision taken
-# because the guard had SIGKILLed a live session. An idempotent installer that re-arms whatever
-# it finds stopped does that every time it runs.
-#
-# Two things stop it, and either is enough:
-#   * the disarm marker below, which outlives the unit being removed altogether (a removed unit
-#     is indistinguishable from a never-installed one, so unit state alone cannot carry the
-#     decision);
-#   * the unit being inactive and not enabled when its link was already installed -- someone
-#     disarmed it.
-# Neither is overridden here. Arming after a deliberate stop is a human decision: remove the
-# marker, then start the unit by hand. A unit whose link this run creates is a first install (a
-# new machine): nobody can have stopped it, so it is armed unless the marker says otherwise.
-mkdir -p "$STATE_DIR" 2>/dev/null \
-    || echo "NOTE: ${STATE_DIR} could not be created; pass --state to put the guard's state elsewhere."
+# --- 4. the retired shed daemon --------------------------------------------------------------
+# scripts/omp-box-memory-guard and its unit were removed on 2026-11-03 (see the header). A machine
+# that installed the unit keeps a link to a file that no longer exists; take it off. After its
+# false kill of 2026-10-27 16:13:51Z the unit ran only in --dry-run, and on sami-rocqperf it had
+# been inactive since that day's halted bake.
 if [ -n "${container:-}" ] || [ -f /.dockerenv ]; then
-    echo "omp-box-memory-guard: inside a container; the guard belongs on the host" >&2
     exit 0
 fi
-GUARD_UNIT=omp-box-memory-guard.service
-DISARM_MARKER="${XDG_CONFIG_HOME:-$HOME/.config}/omp-box-memory-guard.disarmed"
-mkdir -p "$HOME/.config/systemd/user"
-guard_link="$HOME/.config/systemd/user/$GUARD_UNIT"
-guard_new=""
-if [ ! -e "$guard_link" ] && [ ! -L "$guard_link" ]; then guard_new=1; fi
-ensure_link "$HOME/.dotfiles/omp/$GUARD_UNIT" "$guard_link"
-systemctl --user daemon-reload
-
-guard_state=$(systemctl --user is-active "$GUARD_UNIT" 2>/dev/null || true)
-guard_enabled=$(systemctl --user is-enabled "$GUARD_UNIT" 2>/dev/null || true)
-if [ -e "$DISARM_MARKER" ]; then
-    echo "omp-box-memory-guard: NOT arming: $DISARM_MARKER says it is deliberately disarmed."
-    echo "  Reason recorded there: $(head -n1 "$DISARM_MARKER" 2>/dev/null)"
-    echo "  The unit file is installed and up to date; it is ${guard_state:-absent}."
-    echo "  To arm it: rm '$DISARM_MARKER' && systemctl --user enable --now $GUARD_UNIT"
-elif [ -z "$guard_new" ] && [ "$guard_state" != active ] && [ "$guard_enabled" != enabled ]; then
-    echo "omp-box-memory-guard: NOT arming: the unit is ${guard_state:-inactive} and"
-    echo "  ${guard_enabled:-not enabled}, which is how a deliberate stop looks. The unit file is"
-    echo "  installed and up to date. To arm it: systemctl --user enable --now $GUARD_UNIT"
-else
-    systemctl --user enable "$GUARD_UNIT"
-    # restart, not just start: a re-run after the script changed must load the new code.
-    systemctl --user restart "$GUARD_UNIT"
-    systemctl --user is-active --quiet "$GUARD_UNIT" \
-        || { echo "omp-box-memory-guard: the service did not start" >&2; exit 1; }
-    echo "omp-box-memory-guard: armed ($(swapon --show=NAME,SIZE --noheadings | tr '\n' ' '))"
+retired_link="$HOME/.config/systemd/user/omp-box-memory-guard.service"
+if [ -L "$retired_link" ] || [ -e "$retired_link" ]; then
+    systemctl --user disable --now omp-box-memory-guard.service >/dev/null 2>&1 || true
+    rm -f "$retired_link"
+    systemctl --user daemon-reload
+    echo "omp-box-memory-guard: removed the retired shed daemon's unit link ${retired_link}"
 fi

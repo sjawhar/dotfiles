@@ -161,7 +161,7 @@ is a mount point reads as unowned), and the root itself is never a candidate.
 ### It is report-only
 
 It is delete-capable, the class of thing that was caught twice in dry run about to kill healthy
-sessions (`~/.dotfiles/scripts/omp-box-memory-guard.DEFECTS.md`), so it ships deciding and
+sessions (`omp-box-memory-guard.DEFECTS.md`, `git show 2d52488`), so it ships deciding and
 printing and removing nothing — **whatever `--dry-run` says**, and whatever the timer does. Each
 run ends with one line — this one is the first run on sami-rocqperf, 2026-10-31, where no entry
 carried an `OWNER` file yet, so the whole root read as unowned:

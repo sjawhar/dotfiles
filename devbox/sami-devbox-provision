@@ -97,16 +97,16 @@ EXTRA_INSTALLERS=(
     # own attached account.
     ossv-box-gateway-token
     # Not here:
-    # - omp-root-hang-watch watches one root session (SPEEDCOACH, scripts/omp-root-hang-watch
-    #   DEFAULT_SESSION), whose transcript is on sami-rocqperf. Arm it here when that session moves.
+    # - omp-root-hang-watch watches the root session holding the Envoy role lead-rocq-speed
+    #   (SPEEDCOACH), whose transcript is on sami-rocqperf. Arm it here when that session moves.
     # - ossv-box-gateway-key: it reads the box key over ssh to the gateway VM as sami's OS Login
     #   user with sami-rocqperf's key (bin/ossv-vm), a person's login; dev-sjawhar may not read the
     #   key's secret itself (403, 2026-11-02). Here omp signs in to the gateway with the dev-box@ ID
     #   token of ossv-box-gateway-token instead (step_secrets rewrites the model overlay).
-    # - hawk-token-refresh and omp-billing-watch: sami-rocqperf arms neither (checked
-    #   2026-11-02: `systemctl --user is-enabled` not-found), and no omp model there uses hawk.
-    #   hawk-token-refresh would fail every 3 minutes here: it clones a private repository with
-    #   no GitHub credential and mints with a hawk login, a person's, that this machine never holds.
+    # - hawk-token-refresh: sami-rocqperf does not arm it (checked 2026-11-02: `systemctl --user
+    #   is-enabled` not-found), and no omp model there uses hawk. It would fail every 3 minutes
+    #   here: it clones a private repository with no GitHub credential and mints with a hawk
+    #   login, a person's, that this machine never holds.
 )
 
 # The agent-azure user-assigned identity of theorem-labs/agent-infra#1146 (box-identity output

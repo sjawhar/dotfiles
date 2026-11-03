@@ -69,8 +69,9 @@ modelRoles:
 # Codex window spent or at its reserve (measured 2026-11-02 12:21Z and 12:28Z).
 # No setting enforces the pause, so a stream that must stay off the OpenAI API
 # avoids those agents by name.
-# omp-billing-watch reports the spend. openai-codex (the Codex subscription) is
-# a separate provider and was never paused.
+# The model-spend records of installers/agent-spend.sh (one per model call) carry
+# the spend. openai-codex (the Codex subscription) is a separate provider and
+# was never paused.
 extensionHandlers:
   # pi-envoy's AskGate (@sjawhar/pi-envoy, README "The time limit") holds its
   # 90 s review 5 s under this ceiling: at omp's 30 s default it would get

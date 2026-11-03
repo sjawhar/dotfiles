@@ -2,7 +2,7 @@
 # Arm the 3-minute hawk-token credential refresher (scripts/hawk-token-fast,
 # omp/hawk-token-refresh.{service,timer}).
 #
-# Standalone installer (like omp-billing-watch.sh) — not sourced by install.sh.
+# Standalone installer (like omp-root-hang-watch.sh) — not sourced by install.sh.
 # Run it on a machine that runs omp sessions against the hawk/middleman gateway.
 #
 # Why this exists: `!hawk-token` mints live on every call and omp kills a
