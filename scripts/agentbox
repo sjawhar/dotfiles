@@ -4185,6 +4185,15 @@ move_to_copy_lists() {
     return 0
 }
 
+# One line of a copy's cost: the rsync's time and its --stats bytes.
+move_to_copy_said() {
+    local kind="$1" label="$2" secs="$3" f="$4" total literal files
+    total="$(sed -n 's/^Total transferred file size: //p' "$f" | head -1)"
+    literal="$(sed -n 's/^Literal data: //p' "$f" | head -1)"
+    files="$(sed -n 's/^Number of regular files transferred: //p' "$f" | head -1)"
+    say "rsync $kind $label: ${secs}s, ${files:-?} files transferred, ${total:-?} transferred file size, ${literal:-?} literal data"
+}
+
 # A long child of the relauncher (rsync, git push), run so that a signal reaches the relauncher at
 # once: bash runs a trap only after its foreground child exits, and a TERM to a relauncher in the
 # middle of a long copy otherwise waits for the copy. MOVE_TO_CHILD is what the handler stops.
@@ -4201,8 +4210,11 @@ move_to_fg() {
 
 # move_to_copy TARGET STAMP: the two rsyncs, MOVE_TO_MIRROR then MOVE_TO_MERGE, every path at its
 # own absolute path on the target. No marker is ever copied.
+# move_to_copy TARGET STAMP [LABEL]: as below; each rsync's time and its --stats bytes are
+# logged through `say` when LABEL is given ("before the hang-up", "after the hang-up").
 move_to_copy() {
-    local target="$1" stamp="$2" excludes=() p
+    local target="$1" stamp="$2" label="${3:-}" excludes=() p stats start
+    stats="$(mktemp)"
     if (( ${#MOVE_TO_MKDIR[@]} )); then
         move_remote "$target" "mkdir -p $(printf '%q ' "${MOVE_TO_MKDIR[@]}")" </dev/null || return 1
     fi
@@ -4212,14 +4224,19 @@ move_to_copy() {
     # --no-group: the copy runs as the user, who cannot give a directory root's group (the
     # implied parents /home and /mnt, mirrored into the backup directory, failed a drill with it).
     if (( ${#MOVE_TO_MIRROR[@]} )); then
+        start=$SECONDS
         move_to_fg rsync -aH --no-group --omit-dir-times --relative --delete --backup --backup-dir="$MOVE_TO_CUTOVER/replaced/$stamp" \
-            --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
-            "${MOVE_TO_MIRROR[@]}" "$MOVE_TO_USER@$target:/" || return 1
+            --stats --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+            "${MOVE_TO_MIRROR[@]}" "$MOVE_TO_USER@$target:/" >"$stats" || { rm -f "$stats"; return 1; }
+        [[ -z "$label" ]] || move_to_copy_said "mirror" "$label" "$((SECONDS - start))" "$stats"
     fi
     if (( ${#MOVE_TO_MERGE[@]} )); then
-        move_to_fg rsync -aH --no-group --omit-dir-times --relative --update --exclude="$MOVE_MARKER" -e "${MOVE_TO_SSH[*]}" \
-            "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || return 1
+        start=$SECONDS
+        move_to_fg rsync -aH --no-group --omit-dir-times --relative --update --stats --exclude="$MOVE_MARKER" -e "${MOVE_TO_SSH[*]}" \
+            "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" >"$stats" || { rm -f "$stats"; return 1; }
+        [[ -z "$label" ]] || move_to_copy_said "merge" "$label" "$((SECONDS - start))" "$stats"
     fi
+    rm -f "$stats"
     return 0
 }
 
@@ -4299,12 +4316,22 @@ move_to_git_native_plan() {
         fi
         MOVE_TO_NATIVE+=("$w	$common")
     done
-    (( ${#MOVE_TO_NATIVE[@]} + ${#MOVE_TO_UNBORN[@]} )) || return 0
+    # Git storage the target has already - a merged common dir whose objects are there, at the
+    # same path - is not copied either, whether or not a tree of it is mirrored: INFRA-1018's move
+    # (2026-11-03 05:32Z) --leave'd ~/src/machcsl-riscv, so no tree of it went through git, and
+    # 8.96 GB of /mnt/nvme/sami/git-objects/machcsl-riscv went to a target that had the clone.
+    local -a held=()
+    for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        [[ -e "$p/HEAD" && -e "$p/objects" ]] || continue
+        move_remote "$target" "test -d $(printf '%q' "$p/objects")" </dev/null >/dev/null 2>&1 || continue
+        held+=("$p")
+    done
+    (( ${#MOVE_TO_NATIVE[@]} + ${#MOVE_TO_UNBORN[@]} + ${#held[@]} )) || return 0
     # The target's repository is not overwritten: its storage leaves the merge, and each tree's
     # .git (a directory or a worktree's pointer file) leaves the mirror.
     for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
         keep=1
-        for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"} ${MOVE_TO_UNBORN[@]+"${MOVE_TO_UNBORN[@]}"}; do
+        for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"} ${MOVE_TO_UNBORN[@]+"${MOVE_TO_UNBORN[@]}"} ${held[@]+"${held[@]}"}; do
             common="${n#*$'\t'}"
             if move_within "$p" "$common" || move_within "$p" "$(readlink -f "$common/objects")"; then keep=0; break; fi
         done
@@ -4395,13 +4422,36 @@ move_to_git_native_finish() {
 
 # move_to_mark SID TRANSCRIPT TARGET / move_to_unmark SID TRANSCRIPT: the marker in the session's
 # own directory and its copy in the id index (agent-session's lookup by id), on this machine.
+# move_to_reroot TARGET TRANSCRIPT CWD: on the target, move the copied transcript to CWD's
+# session bucket with omp's own tool (`omp session pack`, then `omp session unpack --cwd`), which
+# rewrites the header's cwd and replaces the copy in the old bucket, so one id has one file. What
+# the session's own directory holds beyond pack's artifacts (its subagents' transcripts) is put
+# back beside the new file: pack carries the session file and its artifacts only. Prints the new
+# transcript path.
+move_to_reroot() {
+    local target="$1" t="$2" cwd="$3"
+    move_remote "$target" "set -e
+t=$(printf '%q' "$t") c=$(printf '%q' "$cwd")
+s=\$(mktemp -d)
+mkdir -p \"\$s/keep\"
+if [ -d \"\${t%.jsonl}\" ]; then cp -a \"\${t%.jsonl}/.\" \"\$s/keep/\"; fi
+omp session pack \"\$t\" \"\$s/session.tar\" >/dev/null
+new=\$(omp session unpack \"\$s/session.tar\" --cwd \"\$c\" | tail -n 1)
+case \"\$new\" in /*.jsonl) ;; *) echo \"omp session unpack printed no transcript path: \$new\" >&2; exit 3 ;; esac
+mkdir -p \"\${new%.jsonl}\"
+cp -an \"\$s/keep/.\" \"\${new%.jsonl}/\"
+if [ \"\$new\" != \"\$t\" ]; then rm -f \"\$t\"; rm -rf \"\${t%.jsonl}\"; fi
+rm -rf \"\$s\"
+printf '%s\\n' \"\$new\"" </dev/null
+}
+
 move_to_mark() {
-    local sid="$1" t="$2" target="$3" body
+    local sid="$1" t="$2" target="$3" there="${4:-$2}" body
     body="from=${AGENTBOX_HOST:-$(hostname -s)}
 to=$target
 time=$(date -u +%FT%TZ)
 session=$sid
-transcript=$t
+transcript=$there
 "
     mkdir -p "${t%.jsonl}" "$MOVE_MARKER_INDEX" || return 1
     printf '%s' "$body" >"${t%.jsonl}/$MOVE_MARKER" && printf '%s' "$body" >"$MOVE_MARKER_INDEX/$sid"
@@ -4637,8 +4687,21 @@ move_to_census_paths() {
 
 # move_to_member SID TARGET: a group member as the relauncher's job needs it, one JSON object on
 # stdout; or the reason it cannot be moved on stderr, status 1. Its paths are MT_DIRS[SID].
+# move_transcript_cwd FILE: the cwd in the transcript's session header, which omp adopts on every
+# resume when it exists (oh-my-pi session-manager.ts); nothing when there is none.
+move_transcript_cwd() {
+    [[ -r "$1" ]] || return 1
+    local c
+    c="$(head -n 5 "$1" 2>/dev/null | jq -r 'select(.type == "session") | .cwd // empty' 2>/dev/null | head -1)"
+    [[ -n "$c" ]] || return 1
+    printf '%s\n' "$c"
+}
+
+# --cwd of `move --to`, for move_to_member: the caller resumes there, and its transcript is
+# re-rooted there on the target (move_to_reroot).
+MOVE_TO_NEW_CWD=""
 move_to_member() {
-    local sid="$1" target="$2" class pid _sid pane at cwd detail dirs=()
+    local sid="$1" target="$2" class pid _sid pane at cwd detail dirs=() reroot=false hc
     IFS="$SEP" read -r class pid _sid pane at cwd detail <<<"${MT_ROW[$sid]}"
     [[ "$class" == host ]] || { echo "session $sid is $class ($detail), which only a person can move" >&2; return 1; }
     [[ -n "$pane" ]] || { echo "session $sid has no tmux pane" >&2; return 1; }
@@ -4650,12 +4713,22 @@ move_to_member() {
         echo "session $sid: tmux cannot reach its pane $pane from here ($MOVE_TMUX_BIN ${MOVE_TMUX[*]})" >&2
         return 1
     fi
+    # The member resumes where omp will put it: its transcript header's cwd, which omp adopts on
+    # every resume, not the shell's (LINUX-1248, 2026-11-03: its box worked in its worktree while
+    # omp went back to the header's ~/src/machcsl-riscv). --cwd re-roots the transcript instead.
+    if [[ -n "$MOVE_TO_NEW_CWD" && "$sid" == "$MOVE_TO_LEAVE_SID" ]]; then
+        cwd="$MOVE_TO_NEW_CWD"
+        hc="$(move_transcript_cwd "$MOVE_RESUME" || true)"
+        [[ "$hc" == "$cwd" ]] || reroot=true
+    elif hc="$(move_transcript_cwd "$MOVE_RESUME")"; then
+        cwd="$hc"
+    fi
     jq -cn --arg sid "$sid" --argjson pid "$pid" --arg pane "$pane" --arg at "$at" --arg cwd "$cwd" \
-        --arg resume "$MOVE_RESUME" --arg tmux_bin "$MOVE_TMUX_BIN" \
+        --arg resume "$MOVE_RESUME" --arg tmux_bin "$MOVE_TMUX_BIN" --argjson reroot "$reroot" \
         --argjson spec "$(move_json_array "${MOVE_SPEC[@]}")" \
         --argjson tmux "$(move_json_array ${MOVE_TMUX[@]+"${MOVE_TMUX[@]}"})" \
         '{sid: $sid, pid: $pid, box: "", pane: $pane, at: $at, cwd: $cwd, resume: $resume, spec: $spec,
-          tmux: $tmux, tmux_bin: $tmux_bin}'
+          tmux: $tmux, tmux_bin: $tmux_bin, reroot: $reroot}'
 }
 
 # move_to_job TARGET GROUP MEMBER-JSON…: the relauncher's job file, with the copy lists of every
@@ -4701,6 +4774,7 @@ cmd_move_to() {
             --cwd)
                 [[ -d "${2:-}" ]] || die "--cwd takes an existing directory, the one the session resumes in. $MOVE_USAGE"
                 new_cwd="$(readlink -f "$2")"
+                MOVE_TO_NEW_CWD="$new_cwd"
                 shift
                 ;;
             --leave)
@@ -4869,6 +4943,9 @@ move_to_in_box() {
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here; nothing was hung up"
+    # Where omp will resume: the transcript header's cwd, not this shell's (move_to_member).
+    local hc
+    hc="$(move_transcript_cwd "$resume")" && cwd="$hc"
     for d in "${dirs[@]}"; do
         spec+=(--dir "$d")
         if move_git_root_var "$d"; then copy+="mirror	$d"$'\n'; else copy+="merge	$d"$'\n'; fi
@@ -4918,12 +4995,15 @@ move_to_run() {
     if [[ "$(jq '.ssh | length' "$job")" -gt 0 ]]; then mapfile -t MOVE_TO_SSH < <(jq -r '.ssh[]' "$job"); fi
     me="${AGENTBOX_HOST:-$(hostname -s)}"
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    local sids=() pids=() boxes=() panes=() ats=() cwds=() resumes=() windows=()
+    local sids=() pids=() boxes=() panes=() ats=() cwds=() resumes=() windows=() reroots=() there=()
     for ((i = 0; i < n; i++)); do
         sids[i]="$(jq -r ".members[$i].sid" "$job")" pids[i]="$(jq -r ".members[$i].pid" "$job")"
         boxes[i]="$(jq -r ".members[$i].box" "$job")" panes[i]="$(jq -r ".members[$i].pane" "$job")"
         cwds[i]="$(jq -r ".members[$i].cwd" "$job")" resumes[i]="$(jq -r ".members[$i].resume" "$job")"
         ats[i]="$(jq -r ".members[$i].at" "$job")"
+        reroots[i]="$(jq -r ".members[$i].reroot // false" "$job")"
+        # The transcript as the target names it: the same path, unless it is re-rooted there.
+        there[i]="${resumes[i]}"
     done
     mapfile -t MOVE_TO_MIRROR < <(jq -r '.mirror[]' "$job")
     mapfile -t MOVE_TO_MERGE < <(jq -r '.merge[]' "$job")
@@ -4971,7 +5051,7 @@ move_to_run() {
         shift
         # One time for every line of the attempt: the halt rule counts an attempt by it.
         now="$(date -u +%FT%TZ)"
-        for j in "$@"; do lines+=("$now	${sids[j]}	$group	$me	$target	$result	${resumes[j]}"); done
+        for j in "$@"; do lines+=("$now	${sids[j]}	$group	$me	$target	$result	${there[j]}"); done
         move_to_log "$target" "${lines[@]}" || true
     }
     local all=()
@@ -4988,7 +5068,8 @@ move_to_run() {
     move_to_run_exit() { move_to_active_clear; move_exit; }
     move_to_run_signal() {
         [[ -z "$MOVE_TO_CHILD" ]] || kill -TERM "$MOVE_TO_CHILD" 2>/dev/null || true
-        say "stopped by signal $1; state: $MOVE_TO_STATE. The relauncher is gone: check each session (${MOVE_TO_ACTIVE_SIDS[*]}) - it may be down here, or on $target with its marker here"
+        # To stderr: a signal can come while stdout is redirected (an rsync's --stats file).
+        say "stopped by signal $1; state: $MOVE_TO_STATE. The relauncher is gone: check each session (${MOVE_TO_ACTIVE_SIDS[*]}) - it may be down here, or on $target with its marker here" >&2
         exit "$2"
     }
     trap move_to_run_exit EXIT
@@ -5020,6 +5101,20 @@ move_to_run() {
     (( ${#MOVE_TO_NATIVE[@]} )) && say "through git: $(printf '%s ' "${MOVE_TO_NATIVE[@]%%$'\t'*}")"
     MOVE_TO_STATE="pushing branches to $target, before the hang-up"
     move_to_git_native_prepush "$target" say
+    # Each native tree's HEAD and its registration, and a first pass of the copy, all BEFORE the
+    # hang-up: after it only what changed goes (LINUX-1248's first copy was 3.69 GB in 178,633
+    # files, 760 s of its downtime at load 279). A failure here refuses the move while the
+    # sessions still run.
+    MOVE_TO_STATE="copying to $target, before the hang-up"
+    MOVE_TO_WHY=""
+    if ! move_to_git_native_push "$target" || ! move_to_copy "$target" "$stamp-before" "before the hang-up"; then
+        [[ -n "$MOVE_TO_WHY" ]] || MOVE_TO_WHY="the first copy to $target failed (above)"
+        say "refused, nothing was hung up: $MOVE_TO_WHY"
+        for ((i = 0; i < n; i++)); do
+            envoy send --source envoy "${sids[i]}" "agentbox: the move to $target did not start and this session was not hung up: $MOVE_TO_WHY. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+        done
+        return 2
+    fi
     MOVE_TO_STATE="hanging up ${sids[*]}"
     # 1. The hang-up, of every member, before anything is copied.
     local down=() alive=() waited
@@ -5049,13 +5144,27 @@ move_to_run() {
     say "copying ${#MOVE_TO_MIRROR[@]} mirrored and ${#MOVE_TO_MERGE[@]} merged path(s)"
     if ! move_to_git_native_push "$target"; then
         reason="failed: $MOVE_TO_WHY"
-    elif ! move_to_copy "$target" "$stamp"; then
+    elif ! move_to_copy "$target" "$stamp" "after the hang-up"; then
         reason="failed: the copy to $target"
     elif ! move_to_git_native_finish "$target"; then
         reason="failed: $MOVE_TO_WHY"
     else
+        # --cwd: the transcript moves to that directory's bucket on the target (move_to_reroot).
+        local moved_to
         for ((i = 0; i < n; i++)); do
-            move_to_mark "${sids[i]}" "${resumes[i]}" "$target" || { reason="failed: the marker of ${sids[i]} could not be written"; break; }
+            [[ "${reroots[i]}" == true ]] || continue
+            if moved_to="$(move_to_reroot "$target" "${resumes[i]}" "${cwds[i]}")" && [[ "$moved_to" == /*.jsonl ]]; then
+                there[i]="$moved_to"
+                say "${sids[i]}: its transcript is re-rooted in ${cwds[i]} on $target: $moved_to"
+            else
+                reason="failed: the transcript of ${sids[i]} could not be re-rooted in ${cwds[i]} on $target: $moved_to"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$reason" ]]; then
+        for ((i = 0; i < n; i++)); do
+            move_to_mark "${sids[i]}" "${resumes[i]}" "$target" "${there[i]}" || { reason="failed: the marker of ${sids[i]} could not be written"; break; }
         done
     fi
     # The working directory must be on the target once the copy is done: a box cannot start
@@ -5073,16 +5182,16 @@ move_to_run() {
         MOVE_TO_STATE="starting the sessions on $target"
         for ((i = 0; i < n; i++)); do
             member_spec "$i"
-            if ! windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${resumes[i]}" "${MOVE_SPEC[@]}")" || [[ -z "${windows[i]}" ]]; then
+            if ! windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${there[i]}" "${MOVE_SPEC[@]}")" || [[ -z "${windows[i]}" ]]; then
                 reason="failed: no tmux window for ${sids[i]} on $target"
                 break
             fi
             say "${sids[i]}: started in window ${windows[i]} of tmux session $MOVE_TO_TMUX_SESSION on $target"
         done
     fi
-    if [[ -z "$reason" ]] && ! move_to_settled "$target" "${resumes[@]}"; then
+    if [[ -z "$reason" ]] && ! move_to_settled "$target" "${there[@]}"; then
         reason="failed: not resumed on $target within ${MOVE_TO_START_WAIT}s:"
-        for ((i = 0; i < n; i++)); do [[ -n "${MOVE_TO_OK[${resumes[i]}]:-}" ]] || reason+=" ${sids[i]}"; done
+        for ((i = 0; i < n; i++)); do [[ -n "${MOVE_TO_OK[${there[i]}]:-}" ]] || reason+=" ${sids[i]}"; done
     fi
     if [[ -z "$reason" ]]; then
         local both

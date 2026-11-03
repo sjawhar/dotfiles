@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import shutil
 import subprocess
 import tempfile
 import time
@@ -1403,7 +1404,10 @@ class AgentboxMove(unittest.TestCase):
         self.set_pids()
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        # Two passes of the same two rsyncs: one before the hang-up, one after (only what changed).
+        first_mirror, first_merge, mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(first_mirror.replace("-before ", " "), mirror)
+        self.assertEqual(first_merge, merge)
         self.assertIn(f"--delete --backup --backup-dir={self.cutover}/replaced/", mirror)
         self.assertIn("--exclude=agentbox-moved", mirror)
         self.assertTrue(mirror.endswith(" sami@devbox:/"), mirror)
@@ -1413,7 +1417,7 @@ class AgentboxMove(unittest.TestCase):
         # mirror.
         self.assertIn(f"--exclude={self.src / 'other/.git'}/ ", mirror)
         self.assertIn(f"--exclude={self.worktree}/.git ", mirror)
-        self.assertIn(f"--update --exclude=agentbox-moved -e ssh -o BatchMode=yes -o ConnectTimeout=20 {self.lane} sami@devbox:/", merge)
+        self.assertIn(f"--update --stats --exclude=agentbox-moved -e ssh -o BatchMode=yes -o ConnectTimeout=20 {self.lane} sami@devbox:/", merge)
         self.assertIn("through git:", run.stdout)
         for marker in (transcript.with_suffix("") / "agentbox-moved", self.home / ".omp/agentbox-moved" / self.TO):
             body = marker.read_text(encoding="utf-8")
@@ -1533,7 +1537,7 @@ class AgentboxMove(unittest.TestCase):
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn("through git:", run.stdout)
-        _mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        _m1, _g1, _mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
         self.assertIn(f"{self.lane} {self.src / 'other/.git'} {self.src / 'repo/.git'} sami@devbox:/", merge)
 
     def test_a_tree_moved_through_git_keeps_its_branch_head_and_uncommitted_change(self) -> None:
@@ -1589,7 +1593,10 @@ class AgentboxMove(unittest.TestCase):
         self.set_panes({999999900: ("%81", "agents:4.1")})
         self.target()
         active = self.root / "cache/omp/agentbox/move-to/active" / self.TO
-        write_stub(self.stubs, "rsync", f'touch "{self.root}/IN_RSYNC"; sleep 60')
+        # The third rsync is the first after the hang-up (mirror and merge went before it).
+        count = self.root / "RSYNC_N"
+        write_stub(self.stubs, "rsync", f'n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n >"{count}"; '
+                                        f'[ $n -ge 3 ] || exit 0; touch "{self.root}/IN_RSYNC"; sleep 60')
         self.assertEqual(self.move_to().returncode, 0)
         [job] = self.jobs()
         self.set_pids()
@@ -1622,6 +1629,89 @@ class AgentboxMove(unittest.TestCase):
         branches = run.stdout.index("pushed the local branches of")
         hangup = run.stdout.index("hung up after")
         self.assertLess(branches, hangup, run.stdout)
+
+    def test_a_first_copy_runs_before_the_hang_up_and_each_pass_logs_its_cost(self) -> None:
+        """LINUX-1248's copy was 3.69 GB in 178,633 files, 760 s of its downtime (2026-11-03). The
+        same two rsyncs now run once before the hang-up and again after it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        write_stub(self.stubs, "rsync", 'printf "%s\\n" "$*" >>"$STUB_RSYNC"; '
+                   'printf "Number of regular files transferred: 7\\nTotal transferred file size: 1,234 bytes\\nLiteral data: 1,000 bytes\\n"')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        before = run.stdout.index("rsync mirror before the hang-up: ")
+        hangup = run.stdout.index("hung up after")
+        after = run.stdout.index("rsync mirror after the hang-up: ")
+        self.assertLess(before, hangup)
+        self.assertLess(hangup, after)
+        self.assertIn("7 files transferred, 1,234 bytes transferred file size, 1,000 bytes literal data", run.stdout)
+
+    def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
+        """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
+        target that had the clone. A merged common dir whose objects the target has is dropped
+        from the copy, with the store its objects link to."""
+        self.target()
+        repo = self.checkout("held")
+        store = self.root / "objects-elsewhere"
+        shutil.move(str(repo / ".git" / "objects"), str(store))
+        os.symlink(store, repo / ".git" / "objects")
+        plan = (f'MOVE_TO_MIRROR=()\nMOVE_TO_MERGE=("{repo}/.git" "{store}" "{self.root}/lane")\n'
+                'move_to_git_native_plan devbox\nprintf "merge %s\\n" "${MOVE_TO_MERGE[@]}"')
+        (self.root / "lane").mkdir()
+        held = self.run_bash(plan)
+        self.assertEqual(held.stdout.splitlines(), [f"merge {self.root}/lane"], held.stderr)
+        (self.remote / "MISSING").write_text(f"{repo}/.git/objects\n", encoding="utf-8")
+        lacked = self.run_bash(plan)
+        self.assertEqual(sorted(lacked.stdout.splitlines()),
+                         sorted([f"merge {repo}/.git", f"merge {store}", f"merge {self.root}/lane"]))
+
+    def test_a_member_resumes_in_its_transcript_header_s_cwd_not_the_shell_s(self) -> None:
+        """omp adopts the transcript header's cwd on every resume. LINUX-1248's box worked in its
+        worktree while omp went back to the header's ~/src/machcsl-riscv (2026-11-03)."""
+        transcript = self.moving_session()
+        header_cwd = self.src / "repo"
+        transcript.write_text(json.dumps({"type": "session", "id": self.TO, "cwd": str(header_cwd)}) + "\n", encoding="utf-8")
+        self.target()
+        env = {"AGENTBOX_BOX": "agentbox-0123456789ab", "AGENTBOX_DIRS": str(self.lane),
+               "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
+        moved = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.lane}"\ncmd_move_to --to devbox --accept-orphans', env)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        [job] = self.jobs()
+        self.assertEqual(json.loads(job.read_text(encoding="utf-8"))["members"][0]["cwd"], str(header_cwd))
+
+    def test_cwd_re_roots_the_transcript_on_the_target_with_one_file_for_the_id(self) -> None:
+        """--cwd: the transcript moves to that directory's bucket with omp's own pack and unpack,
+        which rewrite the header and remove the copy in the old bucket; the subagents' transcripts,
+        which pack does not carry, are put back beside the new file. The stub omp does what omp
+        does to the file."""
+        self.target()
+        old = self.home / ".omp/agent/sessions/-old" / f"2026-11-03T00-00-00-000Z_{self.TO}.jsonl"
+        old.with_suffix("").mkdir(parents=True)
+        old.write_text(json.dumps({"type": "session", "id": self.TO, "cwd": "/old"}) + "\n", encoding="utf-8")
+        (old.with_suffix("") / "Sub.jsonl").write_text("{}\n", encoding="utf-8")
+        new_cwd = self.root / "newcwd"
+        new_cwd.mkdir()
+        sessions = self.home / ".omp/agent/sessions"
+        write_stub(self.remote / "bin", "omp", "\n".join([
+            'case "$2" in',
+            '  pack) printf "%s" "$3" >"$4" ;;',
+            '  unpack) src="$(cat "$3")"; d="$5"; b="' + str(sessions) + '/-$(echo "$d" | tr / -)"; mkdir -p "$b"; '
+            'new="$b/$(basename "$src")"; jq -c --arg c "$d" ".cwd = \\$c" "$src" >"$new"; rm -f "$src"; rm -rf "${src%.jsonl}"; '
+            'echo "Replaced the local copy"; echo "$new" ;;',
+            'esac']))
+        result = self.run_bash(f'move_to_reroot devbox "{old}" "{new_cwd}"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        new = Path(result.stdout.strip().splitlines()[-1])
+        self.assertNotEqual(new, old)
+        self.assertEqual(json.loads(new.read_text(encoding="utf-8"))["cwd"], str(new_cwd))
+        self.assertTrue((new.with_suffix("") / "Sub.jsonl").exists())
+        self.assertFalse(old.exists())
+        self.assertEqual(len(list(sessions.glob(f"*/*_{self.TO}.jsonl"))), 1)
 
     def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
         transcript = self.moving_session()
