@@ -68,7 +68,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         WATCH.Envoy = lambda timeout=8.0: self.envoy
         WATCH.free_bytes = lambda mount: (self.free, 100 * WATCH.GIB)
         WATCH.device_of = lambda path: None
-        WATCH.writers_now = lambda options, device, mount: "writers: (none in this test)"
+        WATCH.writers_now = lambda options, device, mount, deadline: ("writers: (none in this test)", [])
 
         def restore() -> None:
             WATCH.Envoy = original_envoy
@@ -90,7 +90,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "clear_factor": 1.5,
             "grace": 0.0,
             "urgent_horizon": WATCH.URGENT_HORIZON,
-            "escalate": 1800.0,
+            "run_budget": 100.0,
             "history": 10800.0,
             "samples": 400,
             "confirmations": 3,
@@ -103,14 +103,18 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             "src": "/nonexistent-src",
             "tmp_age": 21600.0,
             "tmp_big": 500000000,
+            "root_big": 2000000000,
             "tmp_walk_budget": 20.0,
             "tmp_idle_walk_budget": 5.0,
+            "tmp_digest": 86400.0,
+            "tmp_pending_max": 500,
             "state": self.state,
             "iops_caps": {},
             "http_timeout": 8.0,
             "dry_run": False,
             "write_state": False,
             "print_alert": False,
+            "report": False,
         }
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -290,8 +294,9 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
 
     # The `/` crossing of 2026-10-31 opened at 11:04Z, alerted at 11:09Z, escalated once at
     # 11:39Z and then said nothing while free space fell from 22.6 GiB to 3.9 GiB. A fall of
-    # FLOOR_STEP below the lowest level already reported is a new fact and is said again.
-    def test_a_crossing_that_keeps_falling_escalates_on_each_floor_step(self) -> None:
+    # a quarter below the level already reported is a new fact and is said again
+    # (RESEND_FALL_FRACTION; it was a fixed 5 GiB step until 2026-11-03).
+    def test_a_crossing_that_keeps_falling_is_said_again_on_each_quarter_lost(self) -> None:
         self.big_filesystem(19)
         self.run_once()
         self.envoy.published.clear()
@@ -300,11 +305,18 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         for free_gib in (17, 15, 13, 11, 9, 7):  # a 12 GiB fall, in 2 GiB samples
             self.fall_to(free_gib)
 
-        self.assertEqual(2, len(self.escalations()))
-        self.assertEqual(2, self.incident()["escalations"])
+        # The samples are one instant apart here, so the first of them is already under an
+        # hour from full and says so; after that, each quarter lost below the level last
+        # reported: 17 -> 11 is 35%, 11 -> 7 is 36%, and the levels between are not said.
+        said = self.escalations()
+        self.assertEqual(3, len(said))
+        self.assertIn("under 1 h to full", said[0])
+        self.assertIn("free fell 35% below the 17.0 GiB last reported", said[1])
+        self.assertIn("free fell 36% below the 11.0 GiB last reported", said[2])
+        self.assertEqual(3, self.incident()["escalations"])
         self.assertEqual(7 * WATCH.GIB, self.incident()["reported_free"])
 
-    def test_a_flat_crossing_escalates_no_further(self) -> None:
+    def test_a_flat_crossing_is_never_said_again(self) -> None:
         self.big_filesystem(19)
         self.run_once()
         self.envoy.published.clear()
@@ -317,15 +329,15 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.assertEqual(19 * WATCH.GIB, self.incident()["reported_free"])
 
     def repeats(self) -> list[str]:
-        """Every message that is not the first alert, whichever rule sent it."""
+        """Every message that is not the first alert, whichever fact sent it."""
         return [
             text
             for _, text in self.envoy.published + self.envoy.sent
-            if "Said again on:" in text
+            if "Said again:" in text
         ]
 
     def age_last_message(self, seconds: float) -> None:
-        """Put the crossing's last message -- alert or escalation -- that far in the past."""
+        """Put the crossing's last message -- alert or repeat -- that far in the past."""
         incident = self.incident()
         field = "escalated_at" if incident.get("escalated_at") else "alerted_at"
         shift = time.time() - seconds - incident[field]
@@ -334,38 +346,32 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             fields["alerted_at"] = incident["alerted_at"] + shift
         self.rewrite_incident(**fields)
 
-    # On 2026-10-31 /mnt/nvme spent its one escalation at 20:42:26Z and then said nothing from
-    # 20:57Z until the box went down at 21:58Z, with free space under the floor the whole time.
-    # The clock now runs from the last message and keeps running while the disk is under floor.
-    def test_a_crossing_under_its_floor_repeats_every_escalate_period(self) -> None:
+    # The clock is gone: 52 of the 150 messages in the 48 h to 2026-11-03 were a 30-minute
+    # timer restating one open crossing, and the SRE acted on none of them
+    # (dispatch://INFRA-672). Time alone is not a fact about the disk.
+    def test_a_crossing_under_its_floor_is_not_repeated_by_the_clock(self) -> None:
         self.big_filesystem(19)
         self.run_once()
         self.envoy.published.clear()
         self.envoy.sent.clear()
 
-        self.age_last_message(1800)  # +30 min after the first alert
-        self.run_once()
-        self.assertEqual(1, len(self.repeats()))
+        for _ in range(6):  # three hours of five-minute runs, free space unchanged
+            self.age_last_message(1800)
+            self.run_once()
 
-        self.age_last_message(1800)  # +60 min: 30 min after that escalation
-        self.run_once()
+        self.assertEqual([], self.repeats())
+        self.assertEqual(0, int(self.incident().get("escalations") or 0))
 
-        self.assertEqual(2, len(self.repeats()))
-        self.assertEqual(2, self.incident()["escalations"])
-        for text in self.repeats():
-            self.assertIn("STILL UNDER THE FLOOR", text)
-            self.assertIn("Said again on: 30 min since the last message, still under the floor.", text)
-
-    def test_a_floor_step_says_which_trigger_sent_it(self) -> None:
+    def test_a_quarter_lost_says_which_fact_sent_it(self) -> None:
         self.big_filesystem(19)
         self.run_once()
         self.envoy.published.clear()
         self.envoy.sent.clear()
 
-        self.fall_to(13)  # a 6 GiB fall, with no 30 minutes gone
+        self.fall_to(13)  # a 6 GiB fall, 32% of what was left
 
         self.assertEqual(1, len(self.repeats()))
-        self.assertIn("Said again on: a further 5.0 GiB fall.", self.repeats()[0])
+        self.assertIn("Said again: free fell 32% below the 19.0 GiB last reported.", self.repeats()[0])
 
     def rate_only_crossing(self) -> None:
         """A crossing open on the fill rate alone, with free space well above the floor."""
@@ -390,10 +396,9 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             )
         )
 
-    # Above the floor the crossing rests on the fill rate, and the rate is already in the first
-    # alert, so the clock still fires once: two falls of less than FLOOR_STEP, half an hour
-    # apart, send one escalation and not two.
-    def test_a_rate_only_crossing_above_the_floor_still_escalates_once(self) -> None:
+    # Above the floor the crossing rests on the fill rate, which the first alert already
+    # carries. Two small falls say nothing; the hour running out is a new fact and says so.
+    def test_a_rate_only_crossing_speaks_again_when_the_hour_runs_out(self) -> None:
         self.rate_only_crossing()
         self.run_once()
         self.assertIn("DISK FILLING", self.envoy.published[0][1])
@@ -402,16 +407,17 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
         self.envoy.sent.clear()
 
         self.age_last_message(1800)
-        self.fall_to(29)
-        self.assertEqual(1, len(self.repeats()))
-        self.envoy.published.clear()
-        self.envoy.sent.clear()
-
+        self.fall_to(29)  # 69 min to full: nothing new
         self.age_last_message(1800)
-        self.fall_to(28)
-
+        self.fall_to(28)  # 64 min to full: still nothing new
         self.assertEqual([], self.repeats())
-        self.assertEqual(1, self.incident()["escalations"])
+
+        self.fall_to(23)  # 43 min to full
+        self.assertEqual(1, len(self.repeats()))
+        self.assertIn("Said again: under 1 h to full", self.repeats()[0])
+
+        self.fall_to(22)  # still under the hour, and only 4% further down: said once
+        self.assertEqual(1, len(self.repeats()))
 
     def incident_floor(self) -> float:
         return min(
@@ -504,7 +510,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
         WATCH.Envoy = lambda timeout=8.0: self.envoy
         WATCH.free_bytes = lambda mount: (self.free, 1000 * WATCH.GIB)
         WATCH.device_of = lambda path: None
-        WATCH.writers_now = lambda options, device, mount: "writers: (none in this test)"
+        WATCH.writers_now = lambda options, device, mount, deadline: ("writers: (none in this test)", [])
         WATCH.time.time = lambda: self.now
 
         def restore() -> None:
@@ -528,7 +534,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             clear_factor=1.5,
             grace=0.0,
             urgent_horizon=WATCH.URGENT_HORIZON,
-            escalate=1800.0,
+            run_budget=100.0,
             history=10800.0,
             samples=400,
             confirmations=3,
@@ -541,14 +547,18 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             src="/nonexistent-src",
             tmp_age=21600.0,
             tmp_big=500000000,
+            root_big=2000000000,
             tmp_walk_budget=20.0,
             tmp_idle_walk_budget=5.0,
+            tmp_digest=86400.0,
+            tmp_pending_max=500,
             state=self.state,
             iops_caps={},
             http_timeout=8.0,
             dry_run=False,
             write_state=False,
             print_alert=False,
+            report=False,
         )
 
     def run_once(self, options: argparse.Namespace | None = None) -> None:
@@ -579,8 +589,12 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
         self.run_once(options)
         self.assertEqual(1, len(self.envoy.published))
         self.assertIn(
-            "three scheduled 5 min samples in a row, each under the 2 h horizon",
+            "Three samples in a row reach full inside the 2 h horizon",
             self.envoy.published[0][1],
+        )
+        self.assertIn(
+            "three scheduled 5 min samples in a row, each under the 2 h horizon",
+            self.report(self.envoy.published[0][1]),
         )
 
     def test_today_one_minute_swings_never_reach_three_confirmations(self) -> None:
@@ -647,12 +661,22 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
 
         self.assertEqual(1, len(self.envoy.published))
         text = self.envoy.published[0][1]
-        self.assertIn("Alerted on the first sample of this crossing, with no grace window", text)
+        self.assertIn("Sent on the first sample of this crossing", text)
         self.assertIn("inside the 30 min urgent mark", text)
+        # The sentence a reader acts on is in the message; the whole account is in the report.
+        self.assertIn(
+            "Alerted on the first sample of this crossing, with no grace window", self.report(text)
+        )
         incident = json.loads(self.state.read_text())["incidents"][MOUNT]
         self.assertEqual("urgent", incident["first_rule"])
         self.assertEqual(3900.0, incident["opened_at"])
         self.assertEqual(3900.0, incident["alerted_at"])
+
+    def report(self, message: str) -> str:
+        """The report a message names, which holds what the 600 characters left out."""
+        path = Path(message.rsplit("Full report: ", 1)[1].strip())
+        self.assertTrue(path.is_file(), path)
+        return path.read_text()
 
     def test_the_hour_rate_alone_would_have_held_that_first_sample(self) -> None:
         """The same sample, asked of each rate: the hour says 38 min, the last two say 11."""
@@ -690,8 +714,9 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
         self.run_once(options)
         self.assertEqual(1, len(self.envoy.published))
         text = self.envoy.published[0][1]
-        self.assertIn("Alerted after the crossing held the grace window", text)
+        self.assertIn("is under the 78.2 GiB floor.", text)
         self.assertNotIn("no grace window", text)
+        self.assertIn("Alerted after the crossing held the grace window", self.report(text))
         self.assertEqual("grace", json.loads(self.state.read_text())["incidents"][MOUNT]["first_rule"])
 
     def test_alert_labels_df_growth_and_single_window_write_traffic(self) -> None:
@@ -869,6 +894,10 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
     2026-10-31.
     """
 
+    # A tree with a live owner on this box: since 2026-11-03 a NEW BIG notice goes to that
+    # session and to nobody else, so the tests that read the notice give it one.
+    LANE = "01a19336-7537-7291-98db-3b4c6de1d7de"
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -884,15 +913,27 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
         WATCH.Envoy = lambda timeout=8.0: self.envoy
         WATCH.free_bytes = lambda mount: (500 * WATCH.GIB, 1000 * WATCH.GIB)
         WATCH.device_of = lambda path: 1  # src, /tmp and the watched mount on one filesystem
-        WATCH.writers_now = lambda options, device, mount: "writers: (none in this test)"
+        WATCH.writers_now = lambda options, device, mount, deadline: ("writers: (none in this test)", [])
 
         def restore() -> None:
             WATCH.Envoy = original_envoy
             WATCH.free_bytes = original_free
             WATCH.device_of = original_device
             WATCH.writers_now = original_writers
+            WATCH.LIVE_SESSIONS.clear()
+            WATCH.LIVE_READ = False
 
         self.addCleanup(restore)
+        WATCH.LIVE_SESSIONS.clear()
+        WATCH.LIVE_READ = False
+
+    def owned_by_a_live_session(self) -> None:
+        """Envoy lists one session live here, and the entry is reached through it."""
+        original_owner = WATCH.owner_of_path
+        WATCH.owner_of_path = lambda path: self.LANE
+        self.addCleanup(setattr, WATCH, "owner_of_path", original_owner)
+        WATCH.LIVE_SESSIONS[self.LANE] = {"session_id": self.LANE}
+        WATCH.LIVE_READ = True
 
     def options(self) -> argparse.Namespace:
         values = dict(
@@ -901,9 +942,9 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
             tmp=str(Path(self.tmp.name) / "no-such-tmp"),
             src=str(self.src),
             tmp_big=1,
-            tmp_digest_max=1000,
+            root_big=1,
             tmp_pending_max=200,
-            tmp_digest=3600.0,
+            tmp_digest=86400.0,
         )
         return argparse.Namespace(**values)
 
@@ -913,7 +954,11 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
     def messages(self) -> list[str]:
         return [text for _, text in self.envoy.published + self.envoy.sent if "NEW BIG" in text]
 
+    def report(self, message: str) -> str:
+        return Path(message.rsplit("Full report: ", 1)[1].strip()).read_text()
+
     def test_a_new_big_checkout_under_src_is_named_once(self) -> None:
+        self.owned_by_a_live_session()
         checkout = self.src / "agent-infra-task9"
         checkout.mkdir()
         (checkout / "pack.bin").write_bytes(b"x" * 4096)
@@ -926,13 +971,26 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
         self.assertIn(str(checkout), message)
         self.assertIn("agent-workspace", message)
         self.assertIn("/mnt/nvme", message)
-        self.assertEqual(
-            [WATCH.BOX_HEALTH_ROLE_TOPIC], [topic for topic, _ in self.envoy.published]
-        )
+        # Its owner session, and nobody else: not the role, not the box-health SRE.
+        self.assertEqual([self.LANE], [who for who, _ in self.envoy.sent])
+        self.assertEqual([], self.envoy.published)
 
-        self.envoy.published.clear()
+        self.envoy.sent.clear()
         self.run_once()
         self.assertEqual([], self.messages())
+
+    def test_a_checkout_nobody_on_this_box_owns_waits_for_the_digest(self) -> None:
+        """Since 2026-11-03 an orphan is a line in one digest a day, not a message of its own:
+        the box-health owner acted on none of the 62 it received in 48 h."""
+        checkout = self.src / "machcsl-cut"
+        checkout.mkdir()
+        (checkout / "pack.bin").write_bytes(b"x" * 4096)
+
+        self.run_once()
+
+        self.assertEqual([], self.envoy.published + self.envoy.sent)
+        pending = json.loads(self.state.read_text())["tmp_pending"]
+        self.assertEqual([str(checkout)], [entry["path"] for entry in pending])
 
     def test_a_symlink_left_by_a_moved_tree_never_alerts(self) -> None:
         moved = Path(self.tmp.name) / "moved-to-nvme"
@@ -958,6 +1016,7 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
 
     def test_src_on_the_root_device_gets_the_root_disk_advice(self) -> None:
         """sami-rocqperf: ~/src really is on /, and a checkout there belongs on /mnt/nvme."""
+        self.owned_by_a_live_session()
         self.on_devices(src=1, mount=1, root=1)
         checkout = self.big_checkout()
 
@@ -966,8 +1025,8 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
         self.assertEqual(1, len(self.messages()))
         message = self.messages()[0]
         self.assertIn(str(checkout), message)
-        self.assertIn(f"~/src is on {MOUNT}", message)
         self.assertIn("A checkout belongs on /mnt/nvme", message)
+        self.assertIn(f"~/src is on {MOUNT}", self.report(message))
 
     def test_src_on_another_device_with_room_says_nothing(self) -> None:
         """sami-devbox, 2026-11-02T19:42:14Z: /home is a bind of /mnt/nvme/home, so ~/src is on
@@ -981,6 +1040,7 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
         self.assertEqual([], self.envoy.published + self.envoy.sent)
 
     def test_src_on_another_short_device_is_named_without_root_disk_advice(self) -> None:
+        self.owned_by_a_live_session()
         self.on_devices(src=2, mount=2, root=1, free=10 * WATCH.GIB)
         checkout = self.big_checkout()
 
@@ -988,10 +1048,10 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
 
         found = [text for text in self.messages() if str(checkout) in text]
         self.assertEqual(1, len(found))
-        self.assertIn(f"~/src is on {MOUNT}", found[0])
         self.assertNotIn("A checkout belongs on /mnt/nvme", found[0])
         self.assertNotIn("agent-workspace", found[0])
         self.assertIn("That disk is short", found[0])
+        self.assertIn(f"~/src is on {MOUNT}", self.report(found[0]))
 
 
 class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):
@@ -1464,7 +1524,10 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
         original_time = WATCH.time.time
         WATCH.Envoy = lambda timeout=8.0: self.envoy
         WATCH.device_ops = lambda mount: ("nvme0n2", self.ops)
-        WATCH.writers_now = lambda options, device, mount: "Top writers now: (none in this test)"
+        WATCH.writers_now = lambda options, device, mount, deadline: (
+            "Top writers now: (none in this test)",
+            [],
+        )
         WATCH.time.time = lambda: self.now
 
         def restore() -> None:
@@ -1541,9 +1604,12 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
         self.assertEqual(WATCH.BOX_HEALTH_ROLE_TOPIC, self.envoy.published[0][0])
         text = self.envoy.published[0][1]
         self.assertIn("DISK AT ITS IOPS CAP", text)
-        self.assertIn("7500 IOPS this device is provisioned for", text)
-        self.assertIn("Three consecutive runs", text)
-        self.assertIn("Top writers now", text)
+        self.assertIn("100% of its 7500 cap", text)
+        self.assertIn("for three runs since", text)
+        report = Path(text.rsplit("Full report: ", 1)[1].strip()).read_text()
+        self.assertIn("7500 IOPS this device is provisioned for", report)
+        self.assertIn("Three consecutive runs", report)
+        self.assertIn("Top writers now", report)
 
         self.step(self.CAP)  # and not again while the crossing stays open
         self.assertEqual(1, len(self.envoy.published))

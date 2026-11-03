@@ -57,14 +57,15 @@ What one run does, with `statvfs` and /proc reads only, no model call:
      written, not what is being written now.
 
 It also keeps the /tmp rule of the script it replaces, and applies it to the checkout root
-(~/src) too: a top-level entry of either, born in the last 6 hours and now at or over 500 MB,
-is named once with its owning session. Which disk each is on is read from its device, never
-assumed: on sami-rocqperf both are on /, agents' scratch in /tmp was the
-repeated root cause on 2026-10-26, and a checkout cut under ~/src instead of on /mnt/nvme fills
-the same disk. Unlike that script, a young DIRECTORY is sized too -- but only while a crossing
-is open on the mount that holds the root, and under a bounded walk, because /tmp holds ~20k
-entries and walking it on every run would itself be the load. A symlink is measured as itself
-and never followed, so a tree already moved to /mnt/nvme says nothing.
+(~/src) too: a top-level entry of either, born in the last 6 hours and now at or over 2 GB on
+the root disk (500 MB elsewhere), is named once, to its owning session alone. Which disk each
+is on is read from its device, never assumed: on sami-rocqperf both are on /, agents' scratch
+in /tmp was the repeated root cause on 2026-10-26, and a checkout cut under ~/src instead of
+on /mnt/nvme fills the same disk. Unlike that script, a young DIRECTORY is sized too -- under
+a bounded walk that resumes where the last run stopped, because /tmp holds ~13k entries and
+walking it whole on every run would itself be the load. A symlink is measured as itself and
+never followed, so a tree already moved to /mnt/nvme says nothing. An entry no live session on
+this box owns is a line in one digest a day, not a message.
 
 It also samples, every run, the COMPLETED OPERATIONS of the block device under each mount with
 a provisioned IOPS cap (--iops-cap, default /mnt/durable at 7,500, the Azure P50 data disk's
@@ -75,10 +76,16 @@ normal: on 2026-10-31T21:58Z this box went down with /mnt/durable at its cap for
 be counted afterwards. Three runs in a row at or over 90% of the cap alert once, with the same
 device-placed writer sample an alert carries; under 80% clears.
 
+It is the AGENT path to a disk alert on these boxes (Datadog posts the same floors to
+#fleet-alerts for people), so it also forwards the self-test faults that
+`guard-disk-writers` -- the root unit that attributes growth to a session -- can only write to
+the journal, each once.
+
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
-for the first alert, for every further FLOOR_STEP the disk falls below the lowest level
-already reported, for a repeat every 30 minutes while the crossing stays under its floor,
-and for the clear. An unheld role falls back to the box-health SRE's session. This watch only
+for the first alert, for each NEW FACT while the crossing is open (free a quarter below the
+level last reported, free under the floor, or under an hour to full -- never a clock), and for
+the clear. An unheld role falls back to the box-health SRE's session. Every message is at most
+600 characters and ends with the path of a report file holding the rest. This watch only
 detects. It deletes nothing and kills nothing.
 """
 
@@ -181,14 +188,47 @@ MAX_FLOOR_FRACTION = 0.10
 # 1 GB/h on a disk with any useful headroom is days from full, well outside any horizon.
 FLAT_RATE = GB / 3600
 
-# How much further free space must fall, below the lowest level this watch has already
-# reported, before an open crossing is said again. The `/` crossing of 2026-10-31 opened at
-# 11:04Z, was alerted at 11:09Z and escalated once at 11:39Z, and then said nothing while free
-# space fell from 22.6 GiB to 3.9 GiB: at that time the only test was the clock, and the clock
-# fired once. A fall of this much is a new fact, so it is said. The guard that sheds
-# writers uses the same step for the same purpose (agent-infra monitoring/host guard.sh
-# `FLOOR_STEP`, 5 GB decimal there).
-FLOOR_STEP = 5 * GIB
+# An open crossing is said again only on a NEW FACT, never on a clock. In 48 h to
+# 2026-11-03 this watch sent 52 "STILL" re-sends of about 6 KB each, and the SRE acted on none
+# of them: each restated the first alert with a new free-space number, and 20 of them were one
+# hovering /mnt/nvme crossing (dispatch://INFRA-672). The three facts are below; everything
+# else about an open crossing is already in the message the reader has.
+#
+# FREE FELL THIS MUCH of the level the last message reported. A proportion, not the fixed
+# 5 GiB step this used to use: 5 GiB off a 3.7 TB array is noise, and 5 GiB off a root disk
+# with 9 GiB left is the whole remaining disk.
+RESEND_FALL_FRACTION = 0.25
+# TIME TO FULL FELL UNDER THIS, which is the point at which the reader has one working hour.
+# Said once while it holds. It re-arms only when the disk climbs back out past RESEND_REARM,
+# not merely past the hour: /mnt/nvme swings about 100 GB an hour here, so its time to full
+# crosses an hour-long line several times in an hour, and a fact that re-arms on the line
+# would be the 30-minute clock again under another name. Replayed over the 40 h of journal to
+# 2026-11-03T03:30Z, the line alone fires 7 times and this hysteresis 2.
+RESEND_HORIZON = 3600.0
+RESEND_REARM = 7200.0
+# The third fact is free space falling under the mount's floor while the crossing is open,
+# which happens to a crossing opened on the fill rate alone. It needs no constant: the floor is
+# FLOORS[mount], and the level the last message reported says whether it was already under it.
+
+# What one Envoy message may cost the reader. The body carries the decision -- what, where, how
+# bad, who acts -- and the rest goes in the report file this names. The crossing messages of
+# 2026-11-01/02 were 4,205-7,208 chars, 66% of all the watcher text the SRE received.
+MESSAGE_LIMIT = 600
+# How long a report stays readable. Pruned in the same run that writes one.
+REPORT_KEEP = 7 * 86400
+
+# What one run may spend before it stops starting expensive work. The unit kills a run at
+# TimeoutStartSec=120, and 7 runs in the 6 h to 2026-11-03T02:39Z were killed there
+# (22:11:34Z, 22:16:34Z, 23:01:37Z, 00:36:45Z, 00:41:45Z, 00:46:46Z, 00:51:46Z): each had
+# logged its mounts and its IOPS figure in the first two seconds and then spent the rest of the
+# 120 s in the scratch scan, which at load 250+ costs 5.4 s for /tmp's 13,439 entries and 5.2 s
+# for ~/src on an idle-priority process, and has no bound of its own once a directory walk
+# starts. Under this budget a run skips what it cannot finish and says so, rather than being
+# killed with its decision unsent.
+# Measured on this box on 2026-11-03 at load 250: a run that alerts spends 15 s on the guard
+# journal read, ~20 s on the sudo probe and the privileged sample, and up to 20 s sizing young
+# directories -- 67 s in all. 90 s leaves the two Envoy sends (8 s each) inside the limit.
+RUN_BUDGET = 90.0
 
 # How near to full a crossing must be for its FIRST sample to alert, with no grace window. The
 # grace window exists so that one `rm` and one build do not fire, and it costs a whole sampling
@@ -274,6 +314,82 @@ def size(value: float) -> str:
         if abs(value) >= scale:
             return f"{value / scale:.1f} {unit}"
     return f"{int(value)} B"
+
+
+def under_floor(free: float, floor: float) -> str:
+    """'free 17.6 GiB is under the 18.0 GiB floor', never with the two numbers printed equal.
+
+    gib() rounds to one decimal, so at 19,327,348,736 bytes free on / the sentence read "free
+    18.0 GiB is under the 18.0 GiB floor" (DdRootFloor's proof run, 2026-11-03). Where the two
+    round to the same figure, the sentence gives the shortfall instead, which is the number
+    that is actually true.
+    """
+    if gib(free) == gib(floor):
+        return f"free is {size(floor - free)} under the {gib(floor)} floor"
+    return f"free {gib(free)} is under the {gib(floor)} floor"
+
+
+
+# ------------------------------------------------------------------- the message and its report
+
+
+def reports_dir(state: Path) -> Path:
+    """Where the long bodies go: beside the state file this watch already owns."""
+    return state.parent / "reports"
+
+
+def prune_reports(directory: Path, now: float) -> None:
+    """Drop reports older than REPORT_KEEP, in the run that writes a new one."""
+    try:
+        old = [path for path in directory.glob("*.txt") if now - path.stat().st_mtime > REPORT_KEEP]
+    except OSError:
+        return
+    for path in old:
+        try:
+            path.unlink()
+        except OSError as error:
+            log(f"  report {path} could not be pruned: {error}")
+
+
+def slug(text: str) -> str:
+    """A file-name piece: lower case, digits, and single hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "report"
+
+
+def write_report(state: Path, kind: str, when: float, body: str) -> str:
+    """Write the full detail of one message and return its path, or "" when it cannot be.
+
+    A message carries the decision and this carries everything behind it: the writers, the
+    evidence, the advice, the commands. The reader opens it only when the message says to.
+    """
+    directory = reports_dir(state)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(when))}-{slug(kind)}.txt"
+        path.write_text(body.rstrip("\n") + "\n")
+    except OSError as error:
+        log(f"  report could not be written under {directory}: {error}")
+        return ""
+    return str(path)
+
+
+def newest_report(state: Path) -> str:
+    """The newest report written, for `--report`."""
+    try:
+        reports = sorted(reports_dir(state).glob("*.txt"))
+    except OSError:
+        return ""
+    return str(reports[-1]) if reports else ""
+
+
+def with_report(body: str, report: str, limit: int = MESSAGE_LIMIT) -> str:
+    """One message: the decision, then where the rest of it is, inside `limit` characters."""
+    tail = f"Full report: {report}" if report else "Full report: could not be written (see the journal)"
+    separator = "\n" if "\n" in body else " "
+    room = limit - len(tail) - len(separator)
+    if len(body) > room:
+        body = body[: max(0, room - 1)].rstrip() + "…"
+    return body + separator + tail
 
 
 # --------------------------------------------------------------------------- Envoy transport
@@ -825,6 +941,7 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
     for row in rows[:top]:
         pid = row["pid"]
         evidence = mount_evidence(pid, device)
+        claim, _source = session_claim(pid)
         described.append(
             {
                 "pid": pid,
@@ -832,6 +949,10 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
                 "write_traffic_rate": row["written"] / max(seconds, 1),
                 "command": cmdline_of(pid)[:200] or comm_of(pid),
                 "session": session_phrase(pid, scope_of(pid)),
+                # The id on its own, for the short message, which has room for an address and
+                # not for the sentence that qualifies it. "" where nothing named a session, or
+                # where the id is not live on this box: the report carries that distinction.
+                "session_id": claim if claim and (not LIVE_READ or claim in LIVE_SESSIONS) else "",
                 "scope": scope_of(pid),
                 "pane": pane_of(pid),
                 "cwd": evidence["cwd"],
@@ -916,22 +1037,38 @@ SUDO_PROBE_TIMEOUT = 30.0
 # How many of the guard's growth rows an alert carries, and how far back it looks for them.
 GROWTH_ROWS = 6
 GROWTH_WINDOW = "-60min"
+# What the guard's journal read may cost. One read took the whole 30 s it used to get, on
+# 2026-11-02T02:43:35Z, and these rows are an extra: the alert is correct without them.
+GROWTH_TIMEOUT = 15.0
+# What the writer sample needs beyond its own two /proc passes: the sudo probe, the child's
+# start, and the fd reads for each writer it describes. A run with less than this left skips
+# the sample rather than being killed in the middle of it.
+WRITER_SAMPLE_SLACK = 20.0
 
 
-def growth_text(mount: str) -> str:
+def left(deadline: float) -> float:
+    """Seconds of this run's budget still unspent."""
+    return deadline - time.time()
+
+
+def growth_text(mount: str, deadline: float) -> str:
     """The guard's recent kept-growth rows for this mount, newest last, or "".
 
     `guard-disk-writers` already attributes DISK GROWTH to a session over an hour --
     `disk-writers: growth session:<id> on <mount>: kept X GB of Y GB written` -- which is the
     one thing the 15 s /proc traffic sample below cannot say. It is read best-effort: a journal
-    this run cannot read costs the alert nothing but these lines.
+    this run cannot read, or has no time left to read, costs the alert nothing but these lines.
     """
+    timeout = min(GROWTH_TIMEOUT, left(deadline))
+    if timeout <= 0:
+        log("  guard growth rows unavailable: this run's budget is spent")
+        return ""
     try:
         done = subprocess.run(
             ["sudo", "-n", "journalctl", "-u", "guard-disk-writers.service", "--since", GROWTH_WINDOW, "-o", "cat"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError) as error:
@@ -957,8 +1094,10 @@ def growth_text(mount: str) -> str:
     )
 
 
-def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
-    """The top writers paragraph of an alert, privileged where this machine allows it.
+def writers_now(
+    options: argparse.Namespace, device: int, mount: str, deadline: float
+) -> tuple[str, list[dict]]:
+    """(the writers paragraph of a report, the rows the short message names).
 
     An unprivileged run cannot read /proc/<pid>/io of another user's process, and root owns the
     writers that took the box down on 2026-10-27 (rsyslogd on /var/log/syslog, dockerd's exec
@@ -967,15 +1106,29 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
     child prints the rows as JSON on stdout and every diagnostic on stderr. Where it does not,
     the unprivileged sample is used and the alert says how many processes refused the read,
     rather than implying there were none.
+
+    The sample costs `--writer-sample` of wall clock and the reads around it. A run whose
+    budget cannot pay for that sends its decision without it and says so: the deadline, the
+    mount and the free space are the alert, and the writers are how to act on it.
     """
+    spare = left(deadline)
+    if spare < options.writer_sample + WRITER_SAMPLE_SLACK:
+        log(f"  writers not sampled: {spare:.0f}s of this run's budget left")
+        return (
+            f"Top writers now: not sampled. This run had {spare:.0f} s of its"
+            f" {int(options.run_budget)} s budget left, which does not pay for the"
+            f" {int(options.writer_sample)} s /proc/<pid>/io sample, so the alert went out"
+            " without it. `disk-fill-watch --dry-run --print-alert` samples them now.",
+            [],
+        )
     payload = json.dumps({"seconds": options.writer_sample, "device": device, "top": options.top_writers})
-    growth = growth_text(mount) if options.sudo != "never" else ""
+    growth = growth_text(mount, deadline) if options.sudo != "never" else ""
     if options.sudo != "never":
         try:
             probe = subprocess.run(
                 ["sudo", "-n", "true"],
                 capture_output=True,
-                timeout=SUDO_PROBE_TIMEOUT,
+                timeout=max(1.0, min(SUDO_PROBE_TIMEOUT, left(deadline) - options.writer_sample)),
                 stdin=subprocess.DEVNULL,
             )
             if probe.returncode == 0:
@@ -983,7 +1136,7 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
                     ["sudo", "-n", sys.executable, os.path.abspath(__file__), "--writers-json", payload],
                     capture_output=True,
                     text=True,
-                    timeout=options.writer_sample + 45,
+                    timeout=max(options.writer_sample + 5, min(options.writer_sample + 45, left(deadline))),
                     stdin=subprocess.DEVNULL,
                 )
                 if done.returncode == 0:
@@ -991,8 +1144,12 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
                     for line in done.stderr.splitlines():
                         # The child stamps its own lines; one stamp per journal line is enough.
                         log(f"  [privileged] {STAMP_RE.sub('', line.strip())[:200]}")
-                    return growth + writers_text(
-                        answer["writers"], answer["denied"], options.writer_sample, mount, privileged=True
+                    return (
+                        growth
+                        + writers_text(
+                            answer["writers"], answer["denied"], options.writer_sample, mount, privileged=True
+                        ),
+                        answer["writers"],
                     )
                 log(f"  privileged writer sample failed ({done.returncode}): {done.stderr.strip()[:200]}")
             elif options.sudo == "always":
@@ -1001,7 +1158,10 @@ def writers_now(options: argparse.Namespace, device: int, mount: str) -> str:
             log(f"  privileged writer sample unavailable: {type(error).__name__}: {error}")
     rows, denied = sample_writers(options.writer_sample)
     described = describe_writers(rows, device, options.writer_sample, options.top_writers)
-    return growth + writers_text(described, denied, options.writer_sample, mount, privileged=False)
+    return (
+        growth + writers_text(described, denied, options.writer_sample, mount, privileged=False),
+        described,
+    )
 
 
 # ------------------------------------------------- the scratch rule: /tmp and the src root
@@ -1087,7 +1247,7 @@ def birth_time(path: str, stat_result: os.stat_result | None = None) -> float:
 
 
 def young_entries(
-    root: str, age: float, big: int, walk_dirs: bool, budget: float
+    root: str, age: float, big: int, walk_dirs: bool, budget: float, cursor: dict | None = None
 ) -> list[tuple[int, str, float]]:
     """Top-level entries of `root` born within `age` seconds and now at or over `big` bytes.
 
@@ -1101,16 +1261,31 @@ def young_entries(
     Each result also carries the newest file or directory modification time seen while sizing it.
     That costs no extra walk: directory sizing already stats every file. It distinguishes a
     directory no process holds open at this instant from one whose contents were just modified.
+
+    `budget` bounds the WHOLE scan, not only its directory walks, and `cursor` carries where
+    the last scan stopped so the next one starts there and wraps: /tmp holds 13,439 top-level
+    entries on this box, and a scan that always restarts at the first of them reads the same
+    few hundred every run and never reaches the rest -- while a scan with no bound at all is
+    what spent the 120 s unit limit on seven runs in the 6 h to 2026-11-03T02:39Z. Entries are
+    taken in name order, so one pass over the root costs as many runs as its size needs and
+    reaches every entry once before it reaches any of them twice.
     """
     now = time.time()
-    found = []
+    found: list[tuple[int, str, float]] = []
     deadline = now + budget
     try:
-        entries = list(os.scandir(root))
+        entries = sorted(os.scandir(root), key=lambda entry: entry.name)
         tmp_dev = os.stat(root).st_dev
     except OSError:
         return found
-    for entry in entries:
+    after = (cursor or {}).get("after") or ""
+    start = next((index for index, entry in enumerate(entries) if entry.name > after), 0)
+    order = entries[start:] + entries[:start]
+    for entry in order:
+        if time.time() > deadline:
+            break
+        if cursor is not None:
+            cursor["after"] = entry.name
         try:
             stat = entry.stat(follow_symlinks=False)
         except OSError:
@@ -1127,21 +1302,21 @@ def young_entries(
             continue
         newest_mtime = stat.st_mtime
         if entry.is_dir(follow_symlinks=False):
-            if not walk_dirs or time.time() > deadline:
+            if not walk_dirs:
                 continue
             total = 0
-            for root, dirs, files in os.walk(entry.path, onerror=None):
+            for walked, dirs, files in os.walk(entry.path, onerror=None):
                 kept = []
                 for name in dirs:
                     try:
-                        if os.lstat(os.path.join(root, name)).st_dev == tmp_dev:
+                        if os.lstat(os.path.join(walked, name)).st_dev == tmp_dev:
                             kept.append(name)
                     except OSError:
                         continue
                 dirs[:] = kept
                 for name in files:
                     try:
-                        child = os.lstat(os.path.join(root, name))
+                        child = os.lstat(os.path.join(walked, name))
                     except OSError:
                         continue
                     if child.st_dev != tmp_dev:
@@ -1200,46 +1375,38 @@ def tmp_owner_text(owner: str, newest_mtime: float, sampled_at: float) -> str:
     )
 
 
-# A per-entry notice is about one session's own tree, so it goes to that session and not to the
-# box's health owner, who can do nothing with it. Two things change that.
+# A per-entry notice is about one session's own tree, so it goes to that session and to nobody
+# else. The box-health owner cannot act on it: of 62 NEW BIG notices in the 48 h to
+# 2026-11-03, every one that reached that owner named a tree it did not make, and it acted on
+# none of them (dispatch://INFRA-672). An entry no live session on this box can be matched to
+# is a line in one digest a day, whatever its size: a list of orphans is a pattern worth
+# reading, and no single orphan is worth waking anyone.
 #
-# SHORT: a disk with little left is the box's problem whoever made the entry. "Little" cannot be
-# a flat fraction. At 15% of a 3.9 TB disk, ossv-agent-open2 with 412 GB free counted as short
-# and every entry on it went to the box-health owner (Sami, 2026-10-31), though 412 GB is more
-# headroom than most of these boxes ever have. So it is a fraction with a floor under it: the
-# fraction catches a small disk, the floor stops a big one reading as short while it still holds
-# more free space than a whole lane VM's root.
+# SHORT still decides whether a root OFF the root disk is scanned at all, and which advice the
+# notice carries. "Little" cannot be a flat fraction: at 15% of a 3.9 TB disk, ossv-agent-open2
+# with 412 GB free counted as short (Sami, 2026-10-31), though 412 GB is more headroom than
+# most of these boxes ever have. So it is a fraction with a floor under it.
 ENTRY_SHORT_FRACTION = 0.05
 ENTRY_SHORT_FLOOR = 100 * GB
-# SMALL AND UNOWNED: an entry nobody can be sent to, and small enough to be a line in a list
-# rather than a thing to act on. These wait for the digest instead of sending a message each.
-ENTRY_DIGEST_MAX = 2 * GB
 
 
 def disk_is_short(free: float, total: float) -> bool:
-    """Whether a filesystem has so little left that an entry on it is the box's problem."""
+    """Whether a filesystem has so little left that a big young tree on it is worth saying."""
     if not total:
         return False
     return free < max(ENTRY_SHORT_FRACTION * total, ENTRY_SHORT_FLOOR)
 
 
 def tmp_digest_text(pending: list[dict], window: float) -> str:
-    """Every small unowned scratch entry since the last digest, one line each.
-
-    Nobody can be sent these one at a time: no live session on this box holds them, and each is
-    under the size that makes an entry worth a message of its own. As a list they are still
-    worth reading -- a hundred small unowned trees is a pattern -- so they are batched rather
-    than dropped.
-    """
+    """Every unowned scratch entry since the last digest, one line each: the report body."""
     total = sum(int(entry.get("bytes") or 0) for entry in pending)
     mounts = sorted({str(entry.get("mount") or "?") for entry in pending})
     roots = sorted({str(entry.get("root") or "/tmp") for entry in pending})
     lines = [
-        f"SMALL UNOWNED {' AND '.join(roots)} ENTRIES on {socket.gethostname()}: {len(pending)}"
+        f"UNOWNED {' AND '.join(roots)} ENTRIES on {socket.gethostname()}: {len(pending)}"
         f" born in the last {human_time(window)} on {', '.join(mounts)}, {size(total)} between"
-        " them. No live session on this box could be matched to any of them, and each is under"
-        " the size that earns a message of its own. Nothing here is urgent; a long list is the"
-        " signal."
+        " them. No live session on this box could be matched to any of them, so there is nobody"
+        " to send them to one at a time. Nothing here is urgent; a long list is the signal."
     ]
     for entry in sorted(pending, key=lambda e: -int(e.get("bytes") or 0)):
         lines.append(
@@ -1247,11 +1414,33 @@ def tmp_digest_text(pending: list[dict], window: float) -> str:
             f" {iso(entry.get('at'))}; {entry.get('owner')})"
         )
     lines.append(
-        "An entry with a live owner, one at or over the digest size, or any entry on a disk"
-        " that is short was sent on its own and is not in this list. From disk-fill-watch on "
-        + socket.gethostname() + "."
+        "An entry whose live owner this box could name was sent to that session and is not in"
+        " this list. From disk-fill-watch on " + socket.gethostname() + "."
     )
     return "\n".join(lines)
+
+
+def tmp_digest_message(pending: list[dict], window: float, report: str) -> str:
+    """The digest the box-health owner reads: how many, how much, and the biggest few."""
+    total = sum(int(entry.get("bytes") or 0) for entry in pending)
+    mounts = sorted({str(entry.get("mount") or "?") for entry in pending})
+    roots = sorted({str(entry.get("root") or "/tmp") for entry in pending})
+    biggest = sorted(pending, key=lambda entry: -int(entry.get("bytes") or 0))
+    head = (
+        f"UNOWNED {' AND '.join(roots)} ENTRIES on {socket.gethostname()}: {len(pending)} born"
+        f" in the last {human_time(window)} on {', '.join(mounts)}, {size(total)} between them,"
+        " no live session on this box matched to any. Nothing is urgent; the length is the"
+        " signal. Biggest:"
+    )
+    room = MESSAGE_LIMIT - len(head) - len(f" Full report: {report}") - 1
+    named = []
+    for entry in biggest:
+        line = f" {size(entry.get('bytes') or 0)} {entry.get('path')};"
+        if len(line) > room:
+            break
+        named.append(line)
+        room -= len(line)
+    return with_report(head + "".join(named), report)
 
 
 # What a reader is told to do with a big young entry, per root. /tmp holds a session's scratch;
@@ -1490,7 +1679,7 @@ def verdict(
     fast = rate_candidate and confirmations >= options.confirmations
     reasons = []
     if below_floor:
-        reasons.append(f"free {gib(free)} is under the {gib(floor)} floor")
+        reasons.append(under_floor(free, floor))
     if fast:
         reasons.append(
             f"{number_word(confirmations)} scheduled {short_time(options.confirmation_spacing)} samples"
@@ -1552,6 +1741,153 @@ def is_falling(now: dict) -> bool:
     if rate is None or rate <= 0:
         return False
     return rate > FLAT_RATE or bool(now.get("rate_candidate")) or bool(now.get("fast"))
+
+
+def trend_phrase(now: dict) -> str:
+    """How the disk is moving, in the three words a message has room for."""
+    rate = now.get("df_fill_rate")
+    if rate is None:
+        return "fill rate unknown (too few samples)"
+    if not is_falling(now) and abs(rate) <= FLAT_RATE:
+        return "free space flat"
+    return f"{'falling' if rate > 0 else 'rising'} {gb(abs(rate) * 3600)}/h"
+
+
+def short_command(command: str, limit: int = 44) -> str:
+    """A command a reader recognises: the program and its first argument, cut to `limit`."""
+    parts = (command or "").split()
+    if not parts:
+        return ""
+    text = " ".join([parts[0].rsplit("/", 1)[-1]] + parts[1:2])
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def writers_brief(rows: list[dict], mount: str, room: int) -> str:
+    """The top three writers ON this filesystem, as much of each as `room` pays for.
+
+    The pid, the traffic and the owning session are the whole address of the thing to stop, so
+    they go in first, for as many writers as fit; whatever room is left after that buys the
+    commands, in order. Everything else about them -- the elsewhere group, the device evidence,
+    the panes, the cwds -- is in the report.
+    """
+    chosen = [row for row in rows if row.get("on_mount")][:3]
+    if not chosen:
+        return ""
+    prefix = f"Top writers on {mount}: "
+    heads = [
+        f"pid {row['pid']} {size(row['written'])} {row.get('session_id') or row.get('scope') or 'no session'}"
+        for row in chosen
+    ]
+    while heads and len(prefix) + len("; ".join(heads)) + 1 > room:
+        heads.pop()
+        chosen.pop()
+    if not heads:
+        return ""
+    spare = room - len(prefix) - len("; ".join(heads)) - 1
+    for index, row in enumerate(chosen):
+        command = short_command(row.get("command") or "")
+        if command and spare >= len(command) + 1:
+            heads[index] += " " + command
+            spare -= len(command) + 1
+    return prefix + "; ".join(heads) + "."
+
+
+def crossing_message(
+    now: dict, incident: dict, kind: str, why: str, writers: list[dict], when: float, report: str
+) -> str:
+    """What the box-health owner reads about a crossing: the decision, then the report path."""
+    headline = "DISK FILLING" if now["fast"] else "DISK LOW"
+    deadline = (
+        f", {human_time(now['time_to_full'])} to full"
+        if is_falling(now) and now.get("time_to_full") is not None
+        else ""
+    )
+    head = (
+        f"{headline} ({kind}): {now['mount']} on {socket.gethostname()} {gib(now['free'])} free"
+        f" of {gib(now['total'])} ({100 * (1 - now['free'] / max(now['total'], 1)):.0f}% used),"
+        f" {trend_phrase(now)}{deadline}. {why}"
+    )
+    room = MESSAGE_LIMIT - len(head) - len(f"\nFull report: {report}") - 1
+    brief = writers_brief(writers, now["mount"], room) if room > 0 else ""
+    return with_report(head + (" " + brief if brief else ""), report)
+
+
+def first_alert_why(now: dict, incident: dict, horizon: float) -> str:
+    """Why a first alert was sent, in one clause."""
+    if incident.get("first_rule") == "urgent":
+        return (
+            f"Sent on the first sample of this crossing, inside the"
+            f" {short_time(now['urgent_horizon'])} urgent mark"
+            f" ({human_time(now['urgent_time_to_full'])} at the faster of its two rates)."
+        )
+    if now.get("below_floor"):
+        phrase = under_floor(now["free"], now["floor"])
+        return phrase[0].upper() + phrase[1:] + "."
+    return f"Three samples in a row reach full inside the {short_time(horizon)} horizon."
+
+
+def repeat_kind(now: dict, incident: dict, when: float) -> str:
+    """What a repeat calls itself. DESCENDING only while the disk is measurably falling.
+
+    Eight of the re-sends in the 48 h to 2026-11-03 were headed `STILL DESCENDING` over a body
+    that read `rising 20.2 GB/h` or `free space is flat` (2026-11-01T19:54Z, 19:59Z, 20:09Z,
+    08:51Z, 09:21Z). A headline that contradicts its own body is why a reader stops reading
+    headlines.
+    """
+    age = human_time(when - (incident.get("alerted_at") or when))
+    if is_falling(now):
+        return f"STILL DESCENDING after {age}"
+    if now.get("below_floor"):
+        return f"STILL UNDER THE FLOOR after {age}"
+    return f"STILL OPEN after {age}"
+
+
+def resend_reason(now: dict, incident: dict) -> str:
+    """The new fact that makes an open crossing worth saying again, or "".
+
+    Three facts, in the order a reader would rank them: the disk lost a quarter of what it had
+    when this was last said; it fell under its floor, which a crossing opened on the fill rate
+    alone had not; the hour that is left is now one hour. Nothing else -- not the clock, not a
+    new free-space number, not a new writer -- is a reason to say it again.
+    """
+    reported = incident.get("reported_free")
+    if reported:
+        fallen = (reported - now["free"]) / reported
+        if fallen >= RESEND_FALL_FRACTION:
+            return f"Said again: free fell {fallen * 100:.0f}% below the {gib(reported)} last reported."
+    if now.get("below_floor") and not (reported is not None and reported < now["floor"]):
+        return f"Said again: {under_floor(now['free'], now['floor'])}."
+    if under_the_hour(now) and not incident.get("reported_under_hour"):
+        return f"Said again: under 1 h to full ({human_time(now['time_to_full'])})."
+    return ""
+
+
+def under_the_hour(now: dict) -> bool:
+    """Whether this disk reaches full inside RESEND_HORIZON at a rate worth a deadline.
+
+    Not while the window is VARYING. A varying window is one where a rise inside it is as
+    large as the move between its two ends, and the script already refuses to call that figure
+    a deadline in the message it prints; raising a message on it would be worse. On the evening
+    of 2026-11-01 /mnt/nvme hovered at 22-33 GiB free with its rate swinging between 30 and
+    50 GB/h, so its time to full crossed the hour line five times in five hours with the disk
+    no nearer landing. A real fall says the same thing through the 25% rule, which is what the
+    2026-11-02T03:13:10Z case went out on.
+    """
+    return (
+        is_falling(now)
+        and now.get("time_to_full") is not None
+        and now["time_to_full"] < RESEND_HORIZON
+        and not now.get("df_rate_varying")
+    )
+
+
+def out_of_the_hour(now: dict) -> bool:
+    """Whether the disk has climbed far enough out for the hour-to-full fact to re-arm."""
+    return (
+        not is_falling(now)
+        or now.get("time_to_full") is None
+        or now["time_to_full"] >= RESEND_REARM
+    )
 
 
 def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], kind: str, when: float) -> str:
@@ -1676,8 +2012,8 @@ def alert_text(now: dict, incident: dict, writers: str, tmp_lines: list[str], ki
     hedged = " on a rate that is swinging, so it may land sooner than that, or not at all" if varying else ""
     if deadline and below_floor:
         lines.append(
-            f"This is both, and the clock is the half to act on: free {gib(now['free'])} is under"
-            f" the {gib(now['floor'])} floor AND still falling, {time_left} from full{hedged}."
+            f"This is both, and the clock is the half to act on: {under_floor(now['free'], now['floor'])}"
+            f" AND still falling, {time_left} from full{hedged}."
             " Do not leave it to the morning on the grounds that it is only a standing low."
             + act
             + " If this level is normal for this machine, the floor belongs in FLOORS or"
@@ -1720,6 +2056,18 @@ def clear_text(now: dict, incident: dict, when: float) -> str:
         f" {gib(incident.get('low_free') or now['free'])} - the sampler cannot see a trough"
         f" shorter than its interval, so the disk may have gone lower. No action is needed."
         f" From disk-fill-watch on {socket.gethostname()}."
+    )
+
+
+def clear_message(now: dict, incident: dict, when: float, report: str) -> str:
+    """A clear is one line: nothing is being asked of the reader."""
+    opened = incident.get("opened_at") or when
+    return with_report(
+        f"DISK CROSSING CLEARED: {now['mount']} on {socket.gethostname()} back to"
+        f" {gib(now['free'])} free, over its {gib(now['floor'])} floor. Open"
+        f" {human_time(when - opened)} from {iso(opened)}; lowest SAMPLED free space"
+        f" {gib(incident.get('low_free') or now['free'])}. No action is needed.",
+        report,
     )
 
 
@@ -1956,7 +2304,226 @@ def iops_clear_text(
     )
 
 
-def check_iops(options: argparse.Namespace, state: State, envoy: Envoy) -> tuple[int, int]:
+def iops_alert_message(
+    mount: str, device: str, iops: float, cap: float, record: dict, writers: list[dict],
+    when: float, report: str,
+) -> str:
+    opened = record.get("high_since") or when
+    head = (
+        f"DISK AT ITS IOPS CAP: {mount} on {socket.gethostname()} ({device}) {iops:.0f} IOPS,"
+        f" {100 * iops / cap:.0f}% of its {cap:.0f} cap, for"
+        f" {number_word(int(record.get('high_runs') or 0))} runs since {iso(opened)}"
+        f" ({human_time(when - opened)}); peak {float(record.get('peak') or iops):.0f}."
+        " Every operation over the cap waits in a queue while free space, load and memory read"
+        " normal."
+    )
+    room = MESSAGE_LIMIT - len(head) - len(f"\nFull report: {report}") - 1
+    brief = writers_brief(writers, mount, room) if room > 0 else ""
+    return with_report(head + (" " + brief if brief else ""), report)
+
+
+def iops_clear_message(
+    mount: str, device: str, iops: float, cap: float, record: dict, when: float, report: str
+) -> str:
+    opened = record.get("high_since") or record.get("alerted_at") or when
+    return with_report(
+        f"DISK IOPS CLEARED: {mount} on {socket.gethostname()} ({device}) is back to"
+        f" {iops:.0f} IOPS, under {100 * IOPS_CLEAR_FRACTION:.0f}% of its {cap:.0f} IOPS cap,"
+        f" after {human_time(when - opened)} at it; the highest figure sampled was"
+        f" {float(record.get('peak') or iops):.0f} IOPS. No action is needed.",
+        report,
+    )
+
+
+# ------------------------------------------------- the growth watch's own faults, forwarded
+
+# `guard-disk-writers` runs as root and attributes DISK GROWTH to a session. It cannot send
+# over Envoy, and no agent hears a journal line, so this watch -- the agent path to a disk
+# alert on these boxes -- forwards the three lines its self-test writes to the journal
+# (decided by Sami through sami-proxy, option B, relayed 2026-11-03; agent-infra branch
+# guard-disk-writers-root-selftest). Expected volume: about 0 a day.
+GUARD_UNIT = "guard-disk-writers.service"
+GUARD_WATCH_PREFIX = "disk-writers: WATCH "
+# The reporter writes no per-mount BACK after its own restart; this line is its self-test
+# passing, and it closes every mount left open by an UNPROVEN.
+GUARD_SELFTEST_PASSED = (
+    "disk-writers: the self-test passed: the probe charged this reporter's writes to its"
+    " session on every watched mount"
+)
+# What the first run reads, before there is a cursor. The self-test runs every 30 minutes, so
+# this is one round of it: enough to catch a fault that opened just before this watch started,
+# and bounded, so an install does not replay a week of the journal.
+GUARD_FIRST_WINDOW = "-30min"
+# Where a systemd system unit lives. This script runs on every agent box, and only
+# sami-rocqperf carries the growth watch: a box without it must spend nothing on the read and
+# say nothing about it, so the forwarding asks the filesystem first. Four paths stat'd is
+# cheaper than `systemctl show`, which is a subprocess on a box already at load 250.
+GUARD_UNIT_DIRS = (
+    "/etc/systemd/system",
+    "/run/systemd/system",
+    "/usr/lib/systemd/system",
+    "/lib/systemd/system",
+)
+
+
+def guard_installed() -> bool:
+    """Whether this machine has the growth watch at all."""
+    return any(os.path.exists(f"{directory}/{GUARD_UNIT}") for directory in GUARD_UNIT_DIRS)
+
+
+def guard_journal(cursor: str, deadline: float) -> tuple[list[str], str, str]:
+    """(the guard's new journal lines, the cursor after them, the reason none were read).
+
+    `--after-cursor` with `--show-cursor` is what makes a line reach the box-health lead once
+    and only once: the cursor is the reader's place in the journal and it lives in this
+    watch's state file.
+    """
+    timeout = min(GROWTH_TIMEOUT, left(deadline))
+    if timeout <= 0:
+        return [], cursor, "this run's budget was spent before the read"
+    command = ["sudo", "-n", "journalctl", "-u", GUARD_UNIT, "-o", "cat", "--show-cursor"]
+    command += ["--after-cursor", cursor] if cursor else ["--since", GUARD_FIRST_WINDOW]
+    try:
+        done = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return [], cursor, f"{type(error).__name__}: {error}"
+    if done.returncode != 0:
+        return [], cursor, f"journalctl exited {done.returncode}: {done.stderr.strip()[:200]}"
+    lines = []
+    found = cursor
+    for line in done.stdout.splitlines():
+        text = line.strip()
+        if text.startswith("-- cursor:"):
+            found = text.split(":", 1)[1].strip()
+            continue
+        if text:
+            lines.append(text)
+    return lines, found, ""
+
+
+def guard_message(line: str, report: str) -> str:
+    """One forwarded fault, as the box-health lead reads it."""
+    return with_report(
+        f"DISK GROWTH WATCH on {socket.gethostname()}: {line} Forwarded by disk-fill-watch,"
+        f" the agent path to a disk alert on this box; the growth watch is `{GUARD_UNIT}` and"
+        " writes only to the journal.",
+        report,
+    )
+
+
+def guard_back_message(mount: str, report: str) -> str:
+    """A mount left open by an UNPROVEN, closed by the reporter's own self-test passing."""
+    return with_report(
+        f"DISK GROWTH WATCH BACK on {socket.gethostname()}: {mount} is watched again. The"
+        f" reporter's self-test passed after it restarted, which it writes once for every"
+        " watched mount instead of one line per mount. No action is needed.",
+        report,
+    )
+
+
+def guard_open_mount(line: str) -> str:
+    """The mount an UNPROVEN or BACK line names, or ""."""
+    found = re.search(r"WATCH (?:UNPROVEN|BACK) on (\S+?):", line)
+    return found.group(1) if found else ""
+
+
+def forward_guard_faults(
+    options: argparse.Namespace, state: State, envoy: Envoy, deadline: float
+) -> int:
+    """Send the growth watch's self-test faults to the box-health lead, each once.
+
+    The growth watch reports whether it can still SEE writes on a mount. That is a fact about
+    this box's instruments, nobody else forwards it, and a reader who is told nothing assumes
+    growth attribution works. A read this run cannot do is itself said once, not swallowed.
+    """
+    if options.sudo == "never" or not guard_installed():
+        # No unit here, nothing to forward, and nothing to say about it: sami-leanperf,
+        # sami-devbox and the lane VMs run this same script without the growth watch.
+        return 0
+    record: dict = state.data.setdefault("guard_watch", {})
+    first = not record.get("cursor")
+    lines, cursor, error = guard_journal(str(record.get("cursor") or ""), deadline)
+    record["cursor"] = cursor
+    sent = 0
+    if error:
+        # Said once per reason: a journal this watch cannot read means growth attribution is
+        # unverified, and a reason that repeats every five minutes is noise.
+        if record.get("read_error") != error:
+            record["read_error"] = error
+            text = with_report(
+                f"DISK GROWTH WATCH UNREADABLE on {socket.gethostname()}: this watch could not"
+                f" read {GUARD_UNIT}'s journal ({error}), so a fault in the growth watch would"
+                " not reach anyone. Growth attribution by session is unverified until it reads"
+                " again; the floors and the fill rates are unaffected.",
+                write_report(
+                    options.state,
+                    "guard-unreadable",
+                    time.time(),
+                    f"`sudo -n journalctl -u {GUARD_UNIT} -o cat --show-cursor` failed: {error}."
+                    f"\nCursor held: {record.get('cursor') or '(none yet)'}."
+                    "\nThis is said once per reason; the next run tries again.",
+                ),
+            )
+            state.commit(options)
+            if not options.dry_run:
+                log(f"  -> {tell_box_health(envoy, text)} (guard journal unreadable)")
+            sent += 1
+            if options.print_alert:
+                print(text)
+        state.commit(options)
+        return sent
+    record.pop("read_error", None)
+    if first:
+        log("guard watch: cursor recorded; its faults are forwarded from the next line on")
+    open_mounts: list = record.setdefault("open_mounts", [])
+    for line in lines:
+        if line.startswith(GUARD_SELFTEST_PASSED) and open_mounts:
+            for mount in list(open_mounts):
+                text = guard_back_message(
+                    mount,
+                    write_report(
+                        options.state, f"guard-back-{mount}", time.time(),
+                        f"{line}\n\nThis closes the WATCH UNPROVEN this watch forwarded for"
+                        f" {mount}. The reporter writes one self-test line for every watched"
+                        " mount after it restarts, not one line per mount.",
+                    ),
+                )
+                state.commit(options)
+                if not options.dry_run:
+                    log(f"  -> {tell_box_health(envoy, text)} (growth watch back on {mount})")
+                sent += 1
+                if options.print_alert:
+                    print(text)
+            open_mounts.clear()
+            continue
+        if not line.startswith(GUARD_WATCH_PREFIX):
+            continue
+        mount = guard_open_mount(line)
+        if "WATCH UNPROVEN" in line and mount and mount not in open_mounts:
+            open_mounts.append(mount)
+        elif "WATCH BACK" in line and mount in open_mounts:
+            open_mounts.remove(mount)
+        elif "WATCH STOPPED" in line:
+            # Nothing will report those mounts back: the unit does not start again by itself.
+            open_mounts.clear()
+        text = guard_message(
+            line, write_report(options.state, "guard-watch", time.time(), line)
+        )
+        state.commit(options)
+        if not options.dry_run:
+            log(f"  -> {tell_box_health(envoy, text)} (growth watch fault)")
+        sent += 1
+        if options.print_alert:
+            print(text)
+    state.commit(options)
+    return sent
+
+
+def check_iops(
+    options: argparse.Namespace, state: State, envoy: Envoy, deadline: float
+) -> tuple[int, int]:
     """Sample each capped mount's device, log its IOPS, and say when it stays at the cap.
 
     (alerts sent, crossings cleared). The counters and the instant they were read are the whole
@@ -1991,13 +2558,20 @@ def check_iops(options: argparse.Namespace, state: State, envoy: Envoy) -> tuple
             state.commit(options)
             continue
         if decision == "clear":
-            text = iops_clear_text(mount, name, rate, cap, record, at)
+            report = write_report(
+                options.state, f"iops-clear-{mount}", at, iops_clear_text(mount, name, rate, cap, record, at)
+            )
+            text = iops_clear_message(mount, name, rate, cap, record, at, report)
             reset_iops_crossing(record)
         else:
-            text = iops_alert_text(
-                mount, name, rate, cap, span, record,
-                writers_now(options, device_of(mount) or -1, mount), at,
+            paragraph, rows = writers_now(options, device_of(mount) or -1, mount, deadline)
+            report = write_report(
+                options.state,
+                f"iops-{mount}",
+                at,
+                iops_alert_text(mount, name, rate, cap, span, record, paragraph, at),
             )
+            text = iops_alert_message(mount, name, rate, cap, record, rows, at, report)
         # On disk before the message leaves, as every other alert here is: a resent first alert
         # is worse than a late one.
         state.commit(options)
@@ -2016,17 +2590,27 @@ def check_iops(options: argparse.Namespace, state: State, envoy: Envoy) -> tuple
 
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
+    # What this run may spend. Everything cheap -- statvfs, the rate, the IOPS counters, the
+    # decision -- happens whatever the clock says; the writer sample and the scratch scan are
+    # skipped once it is gone, so a loaded box gets a late message instead of a killed run.
+    deadline = started + options.run_budget
     envoy = Envoy(timeout=options.http_timeout)
     state = State(options.state)
     if not state.locked:
         log(f"another run holds {options.state}; skipping this period")
         return 0
+    # Reports outlive the messages that named them by a week, pruned here rather than in the
+    # run that writes one: a box that is quiet for a month would otherwise keep every report
+    # it ever wrote.
+    prune_reports(reports_dir(options.state), started)
     mounts_state: dict = state.data.setdefault("mounts", {})
     incidents: dict = state.data.setdefault("incidents", {})
     named_tmp: list = state.data.setdefault("named_tmp", [])
-    # Small unowned /tmp entries waiting for the digest. They accumulate across runs, so a
-    # quiet digest window loses none.
+    # Unowned scratch entries waiting for the digest. They accumulate across runs, so a quiet
+    # digest window loses none.
     tmp_pending: list = state.data.setdefault("tmp_pending", [])
+    # Where the last scratch scan of each root stopped, so the next one starts there.
+    cursors: dict = state.data.setdefault("scan_cursor", {})
 
     verdicts = []
     notes: dict = state.data.setdefault("notes", {})
@@ -2067,7 +2651,10 @@ def run_once(options: argparse.Namespace) -> int:
         if not now["crossing"]:
             if incident and clears(now, options):
                 if incident.get("alerted_at"):
-                    text = clear_text(now, incident, started)
+                    report = write_report(
+                        options.state, f"clear-{mount}", started, clear_text(now, incident, started)
+                    )
+                    text = clear_message(now, incident, started, report)
                     state.data["incidents"].pop(mount, None)
                     state.commit(options)
                     for target in incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]:
@@ -2109,48 +2696,37 @@ def run_once(options: argparse.Namespace) -> int:
                 f" ({human_time(now['urgent_time_to_full'])} to full), alerting without the grace window"
             )
 
-        # The lowest free space this crossing has already been reported at: the first alert's
-        # level, then each escalation's. A crossing that keeps falling has to keep saying so --
-        # the `/` crossing of 2026-10-31 said nothing between 11:39Z and 3.9 GiB free -- so each
-        # further FLOOR_STEP below that level escalates again.
-        reported_free = incident.get("reported_free")
-        if reported_free is None:
-            reported_free = incident.get("alert_free")
-        still_falling = now["free"] < (incident.get("alert_free") or now["free"])
-        # The clock runs from the LAST message, not from the first alert, and it keeps running
-        # while the disk stays under its floor. It used to fire once per crossing: on
-        # 2026-10-31 /mnt/nvme spent that single escalation at 20:42:26Z and then said nothing
-        # from 20:57Z until the box went down at 21:58Z, with free space under the floor the
-        # whole time. Under the floor is a standing fact, so it is said again every
-        # --escalate. A crossing open only on the fill rate, with free space above its floor,
-        # keeps the one-escalation rule: there the clock is the rate's, and the rate is already
-        # in the first alert.
-        said_at = incident.get("escalated_at") or incident.get("alerted_at") or started
-        since_said = started - said_at
-        if now["below_floor"]:
-            timed_out = since_said >= options.escalate
-        else:
-            timed_out = (
-                not incident.get("escalated_at")
-                and since_said >= options.escalate
-                and still_falling
+        # An open crossing says nothing again unless this run holds a new fact: a quarter of
+        # what was left at the last message is gone, the disk has fallen under its floor, or
+        # what is left is under an hour. The clock that used to send one every 30 minutes is
+        # gone with the 52 re-sends it sent in 48 h.
+        reason = "" if first else resend_reason(now, incident)
+        if not first and not reason:
+            if out_of_the_hour(now):
+                # The hour-to-full fact re-arms only once the disk is well clear of the line,
+                # not every time a swinging rate carries it across (RESEND_REARM).
+                incident.pop("reported_under_hour", None)
+            log(
+                f"{mount}: crossing for {human_time(open_for)}, no new fact since"
+                f" {iso(incident.get('escalated_at') or incident.get('alerted_at'))}"
+                f" ({gib(incident.get('reported_free') or now['free'])} reported then,"
+                f" {gib(now['free'])} now)"
             )
-        stepped = reported_free is not None and now["free"] <= reported_free - FLOOR_STEP
-        escalating = not first and (timed_out or stepped)
-        if not first and not escalating:
-            log(f"{mount}: crossing for {human_time(open_for)}, already alerted at {iso(incident.get('alerted_at'))}")
             state.commit(options)
             continue
 
         # The expensive reads happen only here, on the run that actually sends: a 15 s writer
         # sample and a bounded /tmp walk on every period would be the load this watch exists to
         # see. A dry run still does them, so a hand run shows exactly what would be sent.
-        writers = writers_now(options, device_of(mount) or -1, mount)
+        writers, writer_rows = writers_now(options, device_of(mount) or -1, mount, deadline)
         tmp_lines: list[str] = []
-        if tmp_device is not None and tmp_device == device_of(mount):
+        walk = min(options.tmp_walk_budget, max(0.0, left(deadline)))
+        if tmp_device is not None and tmp_device == device_of(mount) and walk > 0:
             for bytes_there, path, newest_mtime in young_entries(
-                options.tmp, options.tmp_age, options.tmp_big, True, options.tmp_walk_budget
+                options.tmp, options.tmp_age, options.tmp_big, True, walk
             )[: options.top_writers]:
+                if left(deadline) <= 0:
+                    break  # each owner lookup reads every pid's fds; the message comes first
                 owner = tmp_owner_text(owner_of_path(path), newest_mtime, started)
                 tmp_lines.append(f"{size(bytes_there)}  {path}  (owner: {owner})")
 
@@ -2161,32 +2737,26 @@ def run_once(options: argparse.Namespace) -> int:
             # Which of the two first-alert rules sent it, for the alert to say out loud.
             incident["first_rule"] = "urgent" if urgent_first else "grace"
             kind = "first alert"
+            why = first_alert_why(now, incident, options.horizon)
         else:
             incident["escalated_at"] = started
             incident["escalations"] = int(incident.get("escalations") or 0) + 1
-            kind = (
-                f"STILL DESCENDING after {human_time(started - incident['alerted_at'])}"
-                if still_falling
-                else f"STILL UNDER THE FLOOR after {human_time(started - incident['alerted_at'])}"
-            )
+            kind = repeat_kind(now, incident, started)
+            why = reason
         incident["reported_free"] = now["free"]
-        text = alert_text(now, incident, writers, tmp_lines, kind, started)
+        incident["reported_under_hour"] = under_the_hour(now)
+        body = alert_text(now, incident, writers, tmp_lines, kind, started)
         if not first:
-            # Which of the two escalation rules sent this one, said out loud: a reader who gets
-            # a message every half hour has to be able to tell it from one a new fall sent.
-            trigger = (
-                f"{short_time(options.escalate)} since the last message, still under the floor"
-                if timed_out
-                else f"a further {gib(FLOOR_STEP)} fall"
-            )
-            text += (
-                f"\nSaid again on: {trigger}."
+            body += (
+                f"\n{reason}"
                 f"\nNothing has stopped it since the first alert at {iso(incident['alerted_at'])}:"
                 f" {gib(incident.get('alert_free') or 0)} free then, {gib(now['free'])} now."
             )
+        report = write_report(options.state, f"crossing-{mount}", started, body)
+        text = crossing_message(now, incident, kind, why, writer_rows, started, report)
         # On disk before a single message leaves: a resent first alert is worse than a late one.
         state.commit(options)
-        # The first alert, the escalation and the clear all go to the box-health role: box
+        # The first alert, the repeat and the clear all go to the box-health role: box
         # health is that lane's work, decided 2026-10-31T02:37:50Z, and neither the chief of
         # staff nor the INFRA lead is on any of them. An unheard message wakes the SRE.
         if not options.dry_run:
@@ -2195,18 +2765,22 @@ def run_once(options: argparse.Namespace) -> int:
             told = [] if first else (incident.get("told") or [BOX_HEALTH_ROLE_TOPIC])
             incident["told"] = sorted(set(told + [heard]))
             state.commit(options)
-            log(f"  -> {heard} ({'box-health lead' if first else 'box-health lead: still descending'})")
+            log(f"  -> {heard} (box-health lead{'' if first else ': ' + kind.lower()})")
         alerts += 1
-        log(f"{mount}: {'ALERT' if first else 'ESCALATED'} ({gib(now['free'])} free)")
+        log(f"{mount}: {'ALERT' if first else 'SAID AGAIN'} ({gib(now['free'])} free)")
         if options.print_alert:
             print(text)
 
     # The IOPS cap of each capped mount's device, measured against its previous reading. This
     # is a different failure from a filling disk and is on its own mounts: a device at its
     # provisioned limit has free space, and the disks that fill here have no cap.
-    iops_alerts, iops_clears = check_iops(options, state, envoy)
+    iops_alerts, iops_clears = check_iops(options, state, envoy, deadline)
     alerts += iops_alerts
     cleared += iops_clears
+
+    # The growth watch's own self-test faults, which reach Envoy through this watch and
+    # nowhere else.
+    alerts += forward_guard_faults(options, state, envoy, deadline)
 
     # The scratch rule: name each young, big top-level entry of /tmp and of the checkout root
     # (~/src) ONCE, whether or not a mount is crossing. It is the measurement step before any
@@ -2214,9 +2788,9 @@ def run_once(options: argparse.Namespace) -> int:
     # session, and the session is findable while it still runs. A young DIRECTORY is sized here
     # too, under a few seconds of budget: the script this replaces sized only files, which is
     # why /tmp/rev1 was named at 17 GB and the directories beside it never were. What the budget
-    # does not reach this run, the next run reaches, since a named entry is never looked at
-    # again. A symlink is measured only as itself, so a tree already moved to /mnt/nvme with a
-    # link left behind says nothing.
+    # does not reach this run, the next run reaches from where this one stopped (`scan_cursor`),
+    # and a named entry is never looked at again. A symlink is measured only as itself, so a
+    # tree already moved to /mnt/nvme with a link left behind says nothing.
     root_disk = device_of("/")
     for root in scratch_roots(options):
         label = root["label"]
@@ -2237,12 +2811,20 @@ def run_once(options: argparse.Namespace) -> int:
                 " disk is not short: its entries are not named"
             )
             continue
+        scan = min(options.tmp_idle_walk_budget, max(0.0, left(deadline)))
+        if scan <= 0:
+            log(f"{label}: this run's budget is spent; its entries are scanned next run")
+            continue
+        # On the root disk the bar is higher. A full root stops every session at once, so a
+        # tree there is worth a message only when it is worth the reader's minute: of 62 NEW
+        # BIG notices in 48 h, the ones between 0.5 and 2 GB named trees nobody acted on.
+        big = options.root_big if on_root_disk else options.tmp_big
         advice = root["advice"] if on_root_disk else SHORT_ADVICE
         seen = set(named_tmp)
         fresh = [
             (bytes_there, path, newest_mtime)
             for bytes_there, path, newest_mtime in young_entries(
-                root["path"], options.tmp_age, options.tmp_big, True, options.tmp_idle_walk_budget
+                root["path"], options.tmp_age, big, True, scan, cursor=cursors.setdefault(label, {})
             )
             if path not in seen
         ]
@@ -2252,71 +2834,73 @@ def run_once(options: argparse.Namespace) -> int:
             try:
                 refresh_live_sessions(Envoy())
             except SystemExit as error:
-                log(f"  live sessions unavailable: {error}; {label} notices go to the box-health owner")
+                log(f"  live sessions unavailable: {error}; {label} entries wait for the digest")
         for bytes_there, path, newest_mtime in fresh[: options.top_writers]:
+            if left(deadline) <= 0:
+                log(f"{label}: this run's budget is spent; the rest are named next run")
+                break
             found = owner_of_path(path)
             owner = tmp_owner_text(found, newest_mtime, started)
-            lane = "" if short else live_owner_id(found)
+            lane = live_owner_id(found)
             named_tmp.append(path)
-            # An entry nobody can be sent to, small, on a disk with room: one line in the next
-            # digest. A message each for these was the whole of what the box-health owner got
-            # from open2 (Sami, 2026-10-31).
-            if not lane and not short and bytes_there < options.tmp_digest_max:
-                tmp_pending.append(
-                    {"at": started, "path": path, "bytes": bytes_there, "owner": owner,
-                     "mount": mount, "root": label}
+            held = ""
+            if lane:
+                body = (
+                    f"NEW BIG {label} ENTRY on {socket.gethostname()}: {size(bytes_there)} at"
+                    f" {path}, born in the last {human_time(options.tmp_age)} (owner: {owner})."
+                    f" {label} is on {disk_phrase(mount)}, which every session on this box"
+                    f" shares. {advice} This entry is yours: it was reached through a process"
+                    " of your session. From disk-fill-watch; said once per entry."
                 )
-                del tmp_pending[: max(0, len(tmp_pending) - options.tmp_pending_max)]
-                state.commit(options)
-                log(f"{label}: named {path} ({size(bytes_there)}), unowned and small; held for the digest")
-                continue
+                report = write_report(options.state, f"entry-{label}", started, body)
+                message = with_report(
+                    f"NEW BIG {label} ENTRY on {socket.gethostname()}: {size(bytes_there)} at"
+                    f" {path}, born in the last {human_time(options.tmp_age)}, on"
+                    f" {disk_phrase(mount)}, which every session shares. This entry is yours:"
+                    f" it was reached through a process of your session. {advice}",
+                    report,
+                )
+                heard = lane if options.dry_run else (envoy.send(lane, message) and lane)
+                if options.print_alert:
+                    print(message)
+                if heard:
+                    state.commit(options)
+                    log(f"{label}: named {path} ({size(bytes_there)}) -> {heard}")
+                    continue
+                # Its owner refused the send: the entry waits for the digest rather than
+                # reaching the box-health owner, who can do nothing about one session's tree.
+                held = f"its owner {lane} refused the send"
+            # Nobody to send it to. One line in the next digest, whatever its size: a single
+            # orphan is nobody's work, and a long list of them is the thing worth reading.
+            tmp_pending.append(
+                {"at": started, "path": path, "bytes": bytes_there, "owner": owner,
+                 "mount": mount, "root": label}
+            )
+            del tmp_pending[: max(0, len(tmp_pending) - options.tmp_pending_max)]
             state.commit(options)
-            why = (
-                "This entry is yours: it was reached through a process of your session."
-                if lane
-                else (
-                    f"This goes to the box-health owner because {mount} has"
-                    f" {size(root_verdict['free'])} free, under the"
-                    f" {size(max(ENTRY_SHORT_FRACTION * (root_verdict.get('total') or 0), ENTRY_SHORT_FLOOR))}"
-                    f" that is short for a disk this size"
-                    if short
-                    else "This goes to the box-health owner because no live session on this box"
-                    f" could be matched to it, and at {size(bytes_there)} it is over the"
-                    f" {size(options.tmp_digest_max)} that would have made it a digest line."
-                )
+            log(
+                f"{label}: named {path} ({size(bytes_there)}),"
+                f" {held or 'no live session on this box matched it'}; held for the digest"
             )
-            message = (
-                f"NEW BIG {label} ENTRY on {socket.gethostname()}: {size(bytes_there)} at {path},"
-                f" born in the last {human_time(options.tmp_age)} (owner: {owner}). {label} is on"
-                f" {disk_phrase(mount)}, which every session on this box shares. {advice}"
-                f" {why} From disk-fill-watch; said once per entry."
-            )
-            if not options.dry_run:
-                heard = envoy.send(lane, message) and lane if lane else tell_box_health(envoy, message)
-                if lane and not heard:
-                    # Its owner refused the send, so the notice is not simply dropped.
-                    heard = tell_box_health(envoy, message)
-            else:
-                heard = lane or "(box-health owner)"
-            log(f"{label}: named {path} ({size(bytes_there)}), owner {owner} -> {heard}")
-            if options.print_alert:
-                print(message)
         del named_tmp[: max(0, len(named_tmp) - 500)]
 
-    # The small unowned entries, as one message however many there are. The window opens at the
+    # The unowned entries, as one message a day however many there are. The window opens at the
     # first entry, not at the epoch: an unset mark would make the very first entry its own
     # digest, which is the message-per-entry this replaces.
     if tmp_pending and not state.data.get("tmp_digest_at"):
         state.data["tmp_digest_at"] = started
         state.commit(options)
     if tmp_pending and started - (state.data.get("tmp_digest_at") or started) >= options.tmp_digest:
-        text = tmp_digest_text(tmp_pending, options.tmp_digest)
+        report = write_report(
+            options.state, "entry-digest", started, tmp_digest_text(tmp_pending, options.tmp_digest)
+        )
+        text = tmp_digest_message(tmp_pending, options.tmp_digest, report)
         state.data["tmp_digest_at"] = started
         count = len(tmp_pending)
         del tmp_pending[:]
         state.commit(options)
         heard = "(dry run)" if options.dry_run else tell_box_health(envoy, text)
-        log(f"/tmp digest: {count} small unowned entry(ies) -> {heard or 'nobody: every route refused it'}")
+        log(f"scratch digest: {count} unowned entry(ies) -> {heard or 'nobody: every route refused it'}")
         if options.print_alert:
             print(text)
 
@@ -2335,11 +2919,19 @@ def run_once(options: argparse.Namespace) -> int:
             if instead
             else "it is no longer a watched mount on this machine"
         )
-        text = (
+        body = (
             f"DISK CROSSING CLEARED: {mount} on {socket.gethostname()} is no longer watched"
             f" separately, because {why}. The crossing opened at {iso(incident.get('opened_at'))}"
             f" and is withdrawn, not resolved: read the alert for the filesystem's own mount."
+            f" Its lowest SAMPLED free space was"
+            f" {gib(incident.get('low_free') or incident.get('free') or 0)}."
             f" From disk-fill-watch on {socket.gethostname()}."
+        )
+        text = with_report(
+            f"DISK CROSSING CLEARED: {mount} on {socket.gethostname()} is no longer watched"
+            f" separately, because {why}. It is withdrawn, not resolved: read the alert for the"
+            " filesystem's own mount.",
+            write_report(options.state, f"withdrawn-{mount}", started, body),
         )
         state.commit(options)
         for target in incident.get("told") or [BOX_HEALTH_ROLE_TOPIC]:
@@ -2380,7 +2972,7 @@ def writers_json(raw: str) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--mount",
@@ -2447,10 +3039,12 @@ def main() -> int:
         " which the first sample of a crossing alerts without the grace window (default 30 min)",
     )
     parser.add_argument(
-        "--escalate",
+        "--run-budget",
         type=float,
-        default=1800.0,
-        help="seconds after the alert, still descending, before the box-health owner is told again (default 30 min)",
+        default=RUN_BUDGET,
+        help="seconds a run may spend before it stops starting expensive work: the writer"
+        " sample and the scratch scan. Under the unit's TimeoutStartSec (120 s), so a loaded"
+        f" box gets a late message instead of a killed run (default {int(RUN_BUDGET)} s)",
     )
     parser.add_argument("--history", type=float, default=10800.0, help="seconds of samples kept per mount")
     parser.add_argument("--samples", type=int, default=400, help="samples kept per mount")
@@ -2487,7 +3081,18 @@ def main() -> int:
     )
     parser.add_argument("--tmp", default="/tmp", help="the shared scratch directory watched for big young entries")
     parser.add_argument("--tmp-age", type=float, default=21600.0, help="seconds: a /tmp entry is young for this long")
-    parser.add_argument("--tmp-big", type=float, default=500000000, help="bytes at which a young /tmp entry is named")
+    parser.add_argument(
+        "--tmp-big",
+        type=float,
+        default=500000000,
+        help="bytes at which a young entry is named, off the root disk (default 500 MB)",
+    )
+    parser.add_argument(
+        "--root-big",
+        type=float,
+        default=2000000000,
+        help="bytes at which a young entry ON THE ROOT DISK is named (default 2 GB)",
+    )
     parser.add_argument(
         "--tmp-walk-budget",
         type=float,
@@ -2503,14 +3108,8 @@ def main() -> int:
     parser.add_argument(
         "--tmp-digest",
         type=float,
-        default=3600.0,
-        help="seconds between digests of the small unowned /tmp entries (default 1 h)",
-    )
-    parser.add_argument(
-        "--tmp-digest-max",
-        type=float,
-        default=ENTRY_DIGEST_MAX,
-        help="bytes: an UNOWNED entry under this is a digest line, not a message of its own",
+        default=86400.0,
+        help="seconds between digests of the unowned scratch entries (default 24 h)",
     )
     parser.add_argument(
         "--tmp-pending-max",
@@ -2523,12 +3122,32 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="decide and log, send nothing")
     parser.add_argument("--write-state", action="store_true", help="with --dry-run, still write the state file")
     parser.add_argument("--print-alert", action="store_true", help="print the alert text it would send")
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print the newest report a message named, and exit. Every message ends with the"
+        " path of its own report; this is the one for the message that came last",
+    )
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     options = parser.parse_args()
     box_health_owner()  # refuse an unusable BOX_HEALTH_OWNER before any work
     if options.writers_json:
         return writers_json(options.writers_json)
+    if options.report:
+        newest = newest_report(options.state)
+        if not newest:
+            print(f"no report under {reports_dir(options.state)}", file=sys.stderr)
+            return 1
+        print(f"# {newest}")
+        print(Path(newest).read_text(), end="")
+        return 0
     options.mount = options.mount or ["/", "/mnt/nvme"]
     options.tmp_big = int(options.tmp_big)
+    options.root_big = int(options.root_big)
     for override in options.floor or []:
         mount, _, value = override.partition("=")
         if not value:

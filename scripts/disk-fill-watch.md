@@ -46,23 +46,55 @@ Per mount, per run:
 | Last-two-sample rate | the same two-endpoint fall, over the last two samples only. It is read for one decision and nothing else: whether a crossing may skip the grace window |
 | Urgent | free ÷ the **faster** of those two rates is under `--urgent-horizon` (30 min) |
 | Alert | after `--grace` (240 s, so a second consecutive run confirms it) — **or at once, on the sample that opens the crossing, when it is urgent** |
-| Escalate | **every 30 minutes since its last message, while free is under the floor**, **and** on each further fall of 5 GiB (`FLOOR_STEP`) below the lowest level already reported, while the crossing stays open. A crossing open only on the rate, with free above the floor, escalates once on the clock, as before |
+| Said again | only on a **new fact**: free fell **25%** below the level the last message reported, free fell **under the floor** (a crossing opened on the rate alone), or time to full fell **under 1 h**. Never on a clock |
 | Clear | free ≥ floor × 1.5 **and** no df free-space fall that reaches full inside twice the horizon |
 
-**A crossing that keeps falling keeps saying so.** The `/` crossing of 2026-10-31 opened about
-11:04Z, alerted at 11:09Z and escalated at 11:39Z, then said nothing while free space fell from
-22.6 GiB to 3.9 GiB. Each further fall of `FLOOR_STEP` (5 GiB, the step the guard
-`guard-disk-writers` uses for the same purpose) below the lowest level this watch has already
-reported is a new fact, so it escalates again, with the current writers and the current number.
+### A crossing is said again only on a new fact
 
-**A crossing under its floor keeps saying so even when it is flat.** The clock runs from the
-last message, not from the first alert, and it keeps running. On 2026-10-31 `/mnt/nvme` spent
-its one escalation at 20:42:26Z, said nothing from 20:57Z while free space stayed under the
-78.2 GiB floor, and the box went down at 21:58Z. Under the floor is a standing fact, so the
-watch now repeats it every `--escalate` (30 min). Replayed against that day's samples the new
-rule speaks at 20:36Z, 20:46Z, 21:16Z and 21:36Z. Each escalation says which rule sent it:
-`Said again on: 30 min since the last message, still under the floor.` or
-`Said again on: a further 5.0 GiB fall.`
+In the 48 h to 2026-11-03 this watch sent 150 messages, 454 k characters — 66% of every
+watcher message the SRE received. **52 of them were `DISK LOW (STILL …)` re-sends of 4.2-7.2 KB
+each**, sent by a 30-minute clock while one crossing hovered, and the SRE acted on none of
+them; 20 covered a single `/mnt/nvme` crossing between 16:34Z and 00:06Z. A new free-space
+number is not a new fact (dispatch://INFRA-672).
+
+So the clock is gone and the 5 GiB `FLOOR_STEP` with it. An open crossing is said again when,
+and only when, this run holds one of three facts, and the message says which:
+
+| Fact | Said as | Why this one |
+|---|---|---|
+| free fell ≥ `RESEND_FALL_FRACTION` (25%) below the level the last message reported | `Said again: free fell 42% below the 15.9 GiB last reported.` | a proportion, not a fixed step: 5 GiB off a 3.7 TB array is noise, and 5 GiB off a root disk with 9 GiB left is the disk |
+| free fell under the mount's floor | `Said again: free fell under its 78.2 GiB floor.` | a crossing opened on the fill rate alone reaching its floor is new |
+| time to full under `RESEND_HORIZON` (1 h) | `Said again: under 1 h to full (8 min 36 s).` | said once while it holds, and again if the disk climbs back out and falls in |
+
+Replayed against the night of 2026-11-02, the crossing that opened at 00:51:43Z and ran to
+03:23Z says its first alert and then speaks on the falls that mattered, including **03:13:10Z,
+`/mnt/nvme` at 9.2 GiB free, falling 68.9 GB/h, 8 minutes from full** — a 42% fall below the
+15.9 GiB of its previous message. `scripts/tests/test_disk_fill_watch_messages.py` holds that
+case with the journal's own samples.
+
+**The headline never contradicts the body.** `STILL DESCENDING` is used only while the disk is
+measurably falling; under the floor and flat or rising it is `STILL UNDER THE FLOOR`, and above
+the floor with no fall it is `STILL OPEN`. Eight of the 48 h re-sends said "STILL DESCENDING"
+over a body that read `rising 20.2 GB/h` or `free space is flat` (2026-11-01T19:54Z, 19:59Z,
+20:09Z, 08:51Z, 09:21Z).
+
+### Every message is at most 600 characters, and names its report
+
+A crossing message carries the decision — mount, host, free, rate, time to full, why it is
+said, and the top three writers on that filesystem with their owning sessions — and ends with
+`Full report: <path>`. The report holds what used to be in the message: the writers in both
+groups with their device evidence, the guard's kept-growth rows, the young `/tmp` entries, the
+farm kinds already refused, and the DO paragraph.
+
+| | |
+|---|---|
+| Where | `<state dir>/reports/<UTC YYYYmmddTHHMMSSZ>-<kind>.txt`, i.e. `/mnt/nvme/sami/tmp/disk-fill-watch/reports/` on this box |
+| Kinds | `crossing-<mount>`, `clear-<mount>`, `withdrawn-<mount>`, `iops-<mount>`, `iops-clear-<mount>`, `entry-<root>`, `entry-digest` |
+| Pruned | every run deletes reports older than 7 days |
+| Read it | `scripts/disk-fill-watch --report` prints the newest one; any message's own path is in its last line |
+
+A clear, a withdrawal and an IOPS clear are **one line** each: nothing is being asked of the
+reader.
 
 **A sawtooth is not a leak.** `/mnt/nvme` on this box swings about 100 GB up and down every hour
 as grade jobs land and are cleaned (its 10-minute log on 2026-10-26 reads 295 GB → 479 → 378 →
@@ -83,7 +115,39 @@ already that close to full alerts on the sample that opens it. The projection us
 the two rates because an accelerating fall hides inside an hour-long average: at 00:25:51Z the
 hour read 91 GB/h (42 min to full, outside the mark) while the last two samples read 248 GB/h
 (15 min, inside it). A crossing further out than the mark keeps the grace window unchanged, and
-both alerts say which of the two rules sent them. Escalation and clear are untouched.
+both alerts say which of the two rules sent them. The repeat rule and the clear are untouched.
+
+### The agent path to a floor, and a bounded run
+
+**This watch is the agent path to a disk floor on these boxes; Datadog posts the same floor
+to #fleet-alerts for people** (Disk-writer floor alert, monitor 29275908, whose `/` threshold
+is being raised to 19.33 GB — this watch's 18.0 GiB — in agent-infra). Datadog never wakes an
+agent, and the floors here stay as they are. `guard-disk-writers` keeps its own floor check
+for the writers it sheds and writes only to the journal.
+
+Joined ±10 min against this watch's journal, 54 of Datadog's 86 floor alerts in the 48 h to
+2026-11-03T01:50Z have a send from this watch; of the 32 that do not, 16 are before this
+journal's retention (it starts 2026-11-01T09:50:56Z), 8 are Datadog renotifying a crossing
+this watch had already said at its start, 6 are minutes when this watch's own sample read
+**above** both floors (a trough shorter than its five-minute period, which Datadog's 15-second
+metric sees and this does not), 1 is a run killed at the unit's time limit, and 1 is a dip
+that opened and closed inside the grace window (2026-11-02T04:13:57Z, `/mnt/nvme` at exactly
+78.2 GiB, back to 91.0 GiB by 04:19:05Z). None is a defect in the rules; the killed run is
+what the budget below fixes.
+
+Because this is the only path an agent hears, a fault in it is silence, so:
+
+- **the growth watch's self-test faults are forwarded here** (below), and
+- **a run bounds its own work** (`--run-budget`, 90 s, under the unit's `TimeoutStartSec=120`).
+  Seven runs in the 6 h to 2026-11-03T02:39Z were killed at that limit (22:11:34Z, 22:16:34Z,
+  23:01:37Z, 00:36:45Z, 00:41:45Z, 00:46:46Z, 00:51:46Z). Each had logged its mounts and its
+  IOPS figure in the first two seconds and then spent the rest in the scratch scan, which at
+  load 250 costs 5.4 s for `/tmp`'s 13,439 entries and 5.2 s for `~/src` and had no bound of
+  its own once a directory walk started. Now the scan is bounded, each root keeps a cursor
+  (`scan_cursor`) so the next run resumes where the last stopped and no entry is starved, the
+  guard journal read is capped at 15 s, the `sudo` probe and the privileged sample are capped
+  by what is left, and a run with too little left sends its alert **without** the writer
+  sample, saying so, rather than being killed with its decision unsent.
 
 ### The floors
 
@@ -265,11 +329,15 @@ count and the open crossing live in the state file under `iops`.
 
 Both are shared by every session: agents' scratch in `/tmp` was the repeated root cause on
 2026-10-26, and a checkout cut under `~/src` instead of on `/mnt/nvme` fills the root disk. A
-top-level entry of either root (`--tmp`, `--src`, default `~/src`) born
-in the last 6 hours and now at or over 500 MB is named **once**, with the session of a process
-whose cwd or open descriptor is inside it. If none is observed, the notice says exactly that and
-gives the newest file or directory modification time it saw; it never infers that a session has
-ended.
+top-level entry of either root (`--tmp`, `--src`, default `~/src`) born in the last 6 hours
+and now at or over the size bar is named **once**, with the session of a process whose cwd or
+open descriptor is inside it. If none is observed, the notice says exactly that and gives the
+newest file or directory modification time it saw; it never infers that a session has ended.
+
+**The bar is 2 GB on the root disk** (`--root-big`) and 500 MB elsewhere (`--tmp-big`). A full
+root stops every session on the box at once, so a tree there is worth a message only when it is
+worth a reader's minute: of the 62 NEW BIG notices in the 48 h to 2026-11-03, those between
+0.5 and 2 GB named trees nobody acted on.
 
 **"Born" is the entry's birth, not its ctime.** On 2026-10-31T21:51:59Z this watch named
 `~/src/<task repo>` — the shared canonical checkout, created 2026-10-14T01:48:07Z
@@ -304,62 +372,94 @@ the directories beside it never were. What a run's budget does not reach, the ne
 an entry already named is never looked at again. A mount point under either root (containerd's
 and buildkit's overlays) holds another filesystem's bytes and is not counted.
 
-**A per-entry notice goes to the entry's own live owner**, not to the box-health owner. The
-entry belongs to one session's work and that session is the only reader who can remove it: on
+**A per-entry notice goes to the entry's own live owner, and to nobody else.** The entry
+belongs to one session's work and that session is the only reader who can remove it: on
 2026-10-31 the box-health owner received notices naming other sessions (`01a1809b` on
-ossv-agent-open, `01a18c07` on open5) that it could do nothing with. The session id read off a
+ossv-agent-open, `01a18c07` on open5) that it could do nothing with, and of the 62 notices in
+the 48 h to 2026-11-03 it acted on none (dispatch://INFRA-672). The session id read off a
 process is a claim, so it is used as an address only when Envoy lists it as live on **this**
 box, the same check this watch makes for a writer.
 
-Three cases take a notice away from the lane, and each says which it is:
+**An entry with no live owner here waits for one digest a day** (`--tmp-digest`, 86,400 s):
+one message, one line per entry in its report, whatever each entry's size and however short
+the disk is. Nobody can act on an orphan one at a time, and a list of them is the thing worth
+reading. An owner that refuses the send puts its entry in that digest too. The window opens at
+the first entry, not at the epoch, so the first one is not its own digest, and entries
+accumulate in the state file (`tmp_pending`, capped at `--tmp-pending-max`), so a quiet window
+loses none.
 
-- **the disk is short.** Not a flat fraction: free under `max(5% of the filesystem, 100 GB)`.
-  At a flat 15%, ossv-agent-open2 with 412 GB free of 3.9 TB counted as short and every entry
-  on it went to the box-health owner (Sami, 2026-10-31) — 412 GB is more headroom than most of
-  these boxes ever have. The fraction catches a small disk; the floor stops a big one reading
-  as short while it still holds more free space than a whole lane VM's root. A short disk's
-  entry goes to the box-health owner at once, whatever its size and whoever owns it.
-- **no live session on this box matches the entry** (none observed, a `pid N (comm)` answer, or
-  an id live somewhere else) **and it is at or over `--tmp-digest-max`** (2 GB): a message of
-  its own to the box-health owner.
-- **unowned and under `--tmp-digest-max`**: one line in the **hourly digest**
-  (`--tmp-digest`, 3600 s), never a message of its own. Nobody can act on these one at a time,
-  and a message each was all the box-health owner got from open2; as a list they still say
-  something, so they are batched rather than dropped. The window opens at the first entry, not
-  at the epoch, so the first one is not its own digest. Entries accumulate in the state file
-  (`tmp_pending`, capped at `--tmp-pending-max`), so a quiet window loses none.
+A **short disk** — free under `max(5% of the filesystem, 100 GB)` — no longer moves a notice
+away from its owner; it decides only whether a root OFF the root disk is scanned at all, and
+which advice the notice carries. (At a flat 15%, ossv-agent-open2 with 412 GB free of 3.9 TB
+counted as short and every entry on it went to the box-health owner, Sami, 2026-10-31; the
+fraction with a floor under it is what fixed that.) A short disk is the crossing message's
+business, and that message names the writers.
 
-An owner that refuses the send gets the notice resent to the box-health owner rather than
-dropped. Box-level crossings — the floor, the fill rate, the clear — are about the box and are
+Box-level crossings — the floor, the fill rate, the clear — are about the box and are
 unchanged: they always go to the box-health owner.
+
+## The growth watch's own faults
+
+`guard-disk-writers` is the root unit that attributes disk GROWTH to a session over an hour.
+It writes only to the journal and cannot send over Envoy, and one event must have one source,
+so **this watch forwards the three lines its self-test writes** (Sami through sami-proxy,
+option B, relayed 2026-11-03; agent-infra branch `guard-disk-writers-root-selftest`):
+
+| Line | What it means |
+|---|---|
+| `disk-writers: WATCH UNPROVEN on <mount>: …` | growth on that mount may go unreported; its floor is still checked |
+| `disk-writers: WATCH BACK on <mount>: …` | the probe sees writes there again |
+| `disk-writers: WATCH STOPPED: …` | the watch is not running and systemd will not start it again |
+
+Read with `sudo -n journalctl -u guard-disk-writers.service -o cat --after-cursor <saved>
+--show-cursor`; the cursor lives in this watch's state file under `guard_watch`, so each line
+is forwarded **once**. The first run records the cursor from the last 30 minutes, which is one
+round of the self-test. After the reporter restarts it writes no per-mount BACK, only
+`disk-writers: the self-test passed: …`; while a mount is open from an UNPROVEN, that line is
+its BACK, for every open mount. A journal read this watch cannot do is itself said once per
+reason, not swallowed: if it were, a fault in the growth watch would reach nobody. Expected
+volume: about 0 a day. `--sudo never` turns the forwarding off with the privileged sample.
 
 ## Who hears about it
 
-Agent sessions only, never a person. Every message goes to the Envoy role
-**`notifications.role.lead-box-health`**: the first alert, a repeat every 30 minutes while the
-crossing stays under its floor (a crossing open only on the rate escalates once on that clock,
-and only while free space is **lower than at the alert**), each further
-escalation 5 GiB below the lowest level already reported, and the clear.
-Box health is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief of staff was
-on the escalation until then, the INFRA lead owned this detector and handed the lane over, and
-neither is on anything here now.
+Agent sessions only, never a person. A crossing goes to the Envoy role
+**`notifications.role.lead-box-health`**: the first alert, each repeat a new fact earns, and
+the clear. Box health is the box-health lane's work, decided 2026-10-31T02:37:50Z; the chief
+of staff was on the escalation until then, the INFRA lead owned this detector and handed the
+lane over, and neither is on anything here now.
 
 Nobody holds the role? The publish answers non-200 and the **box-health SRE**
 (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`) hears it instead — every message, first alert,
-escalation and clear alike.
+repeat and clear alike.
 
 A machine whose box health belongs to one session sets `BOX_HEALTH_OWNER` to that session id in
 the service's environment: every message then goes to that session alone, with no role publish —
 this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
 owner instead of to this box's role holder. An invalid value stops the watch at start.
 
-One first alert per crossing, one clear, an escalation for each 5 GiB the disk falls below
-the last level reported, and one every 30 minutes under the floor, while that crossing stays
-open. The clear goes to everyone who heard the crossing.
+A **NEW BIG entry** goes to its own live owner session and to nobody else; one with no live
+owner here is a line in the daily digest, which goes to the role. The clear of a crossing goes
+to everyone who heard the crossing.
 
 An IOPS crossing takes the same route: one alert when the device has been at its cap for three
-consecutive runs, and one clear when it falls under 80% of the cap. It never escalates — the
+consecutive runs, and one clear when it falls under 80% of the cap. It never repeats — the
 cap is a fixed number, so there is no further level to report.
+
+**Expected volume on sami-rocqperf**, against the 48 h measured for dispatch://INFRA-672
+(150 messages, 454 k characters):
+
+| | Before, per day | After, per day |
+|---|---|---|
+| Crossings (first alerts and repeats) | ~35 | ~5-8 |
+| Clears | ~9 | ~9, one line each |
+| NEW BIG entries | ~31 | ~1 digest, plus whatever reaches an owner session |
+| Growth-watch faults (new) | — | ~0 |
+| Characters to the box-health lead | ~227 k | ~5-8 k, with the detail in report files |
+
+What this gives up: a slow steady fall below the floor is said less often — between two
+messages the disk may lose up to a quarter of what was left, unless the hour runs out first —
+and an orphan scratch tree waits up to 24 h unless a crossing fires, where the crossing
+message already names the top writers.
 
 Every alert ends with what to DO: act only on the writers listed as on this filesystem (stopping
 one from the elsewhere group frees nothing here), stop or finish that lane, move its output to
@@ -376,9 +476,11 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
   open the same crossing; the loser logs `another run holds …` and skips its period;
 - `alerted_at` is written and `fsync`ed **before** the first message is sent;
 - it also holds the df free-space samples, each mount's in-progress consecutive rate
-  confirmations, the lowest free space each open crossing has already been reported at
-  (`reported_free`, what the 5 GiB escalation step is measured from), the `/tmp` entries
-  already named, and each capped mount's last `/proc/diskstats` counters under `iops`;
+  confirmations, the free space each open crossing was last reported at (`reported_free`, what
+  the 25% fall is measured from) and whether that message was under the hour
+  (`reported_under_hour`), the `/tmp` and `~/src` entries already named, where the last scratch
+  scan of each root stopped (`scan_cursor`), the growth watch's journal cursor and open mounts
+  (`guard_watch`), and each capped mount's last `/proc/diskstats` counters under `iops`;
 - `--state <other path>` is for tests only: a run on any other file forces `--dry-run`.
 
 ## Inputs
@@ -388,23 +490,31 @@ machine without `/mnt/nvme/sami/tmp` uses `$XDG_STATE_HOME/disk-fill-watch/state
 | Free and total space | `os.statvfs(mount)` — `f_bavail`, `f_blocks`, `f_frsize` |
 | df free-space fill rate and time to full | this watch's own free-space samples in its state file |
 | Writers | `/proc/<pid>/io` `write_bytes`, twice, `--writer-sample` apart, through `sudo -n` where allowed; reported as single-window write traffic |
-| Disk growth kept, by session | `sudo -n journalctl -u guard-disk-writers.service --since -60min -o cat`, the guard's `growth session:` rows for the crossing mount; best-effort |
+| Disk growth kept, by session | `sudo -n journalctl -u guard-disk-writers.service --since -60min -o cat`, the guard's `growth session:` rows for the crossing mount; best-effort, capped at 15 s |
+| The growth watch's own faults | `sudo -n journalctl -u guard-disk-writers.service -o cat --after-cursor <saved> --show-cursor`, its `disk-writers: WATCH …` lines |
 | A writer's session | `/proc/<pid>/environ`, `/proc/<pid>/cmdline`, `/proc/<pid>/fd` → `~/.omp/agent/sessions/**/*.jsonl`, then its ancestors |
 | A writer's mount | `st_dev` of `/proc/<pid>/cwd` and of each regular file or directory open on `/proc/<pid>/fd/N`, stat'd through the fd, with the access mode from `/proc/<pid>/fdinfo/<N>`, compared with the mount's `st_dev` at the sample instant |
 | Young `/tmp` and `~/src` entries | `os.scandir` of each root, a budgeted `os.walk` for directories (symlinks measured as themselves, never followed), and the newest file or directory mtime seen while sizing |
 | IOPS of a capped device | reads completed + writes completed from `/proc/diskstats`, for the major and minor numbers of the mount's `st_dev`, against the previous run's reading |
 | Listener | `$ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` |
-| Samples, confirmations, crossings, named `/tmp` and `~/src` entries | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
+| Samples, confirmations, crossings, named entries, scan cursors, the guard cursor | `/mnt/nvme/sami/tmp/disk-fill-watch/state.json` |
+| Report files | `/mnt/nvme/sami/tmp/disk-fill-watch/reports/`, kept 7 days |
 
 ## Running it by hand
 
 ```sh
+scripts/disk-fill-watch --report                                     # the newest report in full
 scripts/disk-fill-watch --dry-run --print-alert                      # decide and print, send nothing
 scripts/disk-fill-watch --state /tmp/x.json --write-state \
-    --print-alert --grace 0 --floor '/=400' --mount /                # deliberate trigger, sends nothing
+    --print-alert --grace 0 --floor '/=400' --max-floor-fraction 0.9 \
+    --mount /                                                        # deliberate trigger, sends nothing
 scripts/disk-fill-watch --state /tmp/x.json --write-state --sudo never \
     --iops-cap '/mnt/durable=7500'                                   # the IOPS line, twice for a figure
 ```
+
+A message names its own report; `--report` prints the newest one whatever sent it. A run on a
+state file other than the default forces `--dry-run`, and still writes its reports beside that
+file, so a hand run shows exactly what would have been sent and what the reader would open.
 
 ## Turning it off
 

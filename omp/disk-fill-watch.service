@@ -9,9 +9,11 @@ Type=oneshot
 # that answers later.
 Nice=15
 IOSchedulingClass=idle
-# A run that cannot finish is killed, so runs can never pile up on the 5-minute period. An
-# ordinary pass is statvfs plus a bounded /tmp scan, ~0.4 s. A pass that alerts also samples
-# /proc/*/io twice 15 s apart and sizes young /tmp directories for up to 20 s, so the ceiling is
-# well above both.
+# A run that cannot finish is killed, so runs can never pile up on the 5-minute period. The
+# script bounds itself first (--run-budget, 90 s): an ordinary pass is statvfs plus a budgeted
+# scratch scan, ~10 s on this box at load 250, and a pass that alerts also samples /proc/*/io
+# twice 15 s apart, reads the guard's journal and sizes young directories, measured at 67 s.
+# Seven runs in the 6 h to 2026-11-03T02:39Z were killed here because the scan had no bound of
+# its own; now the run skips what it cannot pay for and still sends.
 TimeoutStartSec=120
 ExecStart=%h/.dotfiles/scripts/disk-fill-watch
