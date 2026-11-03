@@ -1557,6 +1557,72 @@ class AgentboxMove(unittest.TestCase):
         refs = subprocess.run(["git", "-C", str(self.src / "repo"), "for-each-ref", "refs/agentbox-move"], capture_output=True, text=True).stdout
         self.assertEqual(refs, "")
 
+    def test_a_move_in_flight_is_marked_active_and_unmarked_on_every_outcome(self) -> None:
+        """omp-memory-watch resumed LINUX-1248 on this host 6 s after the 04:10Z hang-up
+        (2026-11-03), since nothing told it a `move --to` was in flight. The relauncher writes
+        $MOVE_TO_JOBS/active/<sid> before the hang-up and removes it on every exit."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        active = self.root / "cache/omp/agentbox/move-to/active" / self.TO
+        seen = self.root / "ACTIVE_DURING_COPY"
+        # rsync, which runs after the hang-up, records the active file as it finds it.
+        write_stub(self.stubs, "rsync", f'cat "{active}" >>"{seen}" 2>/dev/null || echo MISSING >>"{seen}"; printf "%s\\n" "$*" >>"$STUB_RSYNC"')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        moved = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        during = seen.read_text(encoding="utf-8")
+        self.assertRegex(during, r"^pid=\d+\ntarget=devbox\nstart=\d+\n")
+        self.assertFalse(active.exists())
+        # Refused, before any hang-up: nothing left behind either.
+        (self.cutover / "target-ready").unlink()
+        refused = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(refused.returncode, 2)
+        self.assertFalse(active.exists())
+
+    def test_a_relauncher_stopped_by_a_signal_says_where_and_leaves_no_active_file(self) -> None:
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        active = self.root / "cache/omp/agentbox/move-to/active" / self.TO
+        write_stub(self.stubs, "rsync", f'touch "{self.root}/IN_RSYNC"; sleep 60')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        log = self.root / "relauncher.log"
+        proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nmove_to_run "{job}"'],
+                                env=self.env, stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
+        for _ in range(300):
+            if (self.root / "IN_RSYNC").exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(active.exists())
+        proc.send_signal(15)
+        proc.wait(timeout=30)
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("stopped by signal TERM; state: copying to devbox (the sessions are hung up)", text)
+        self.assertFalse(active.exists())
+
+    def test_the_other_branches_are_pushed_before_the_hang_up(self) -> None:
+        """LINUX-1248, 04:10Z: the push of every branch from a blob:none clone ran 3+ min after
+        the hang-up. It now runs before; after the hang-up only HEAD goes."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        branches = run.stdout.index("pushed the local branches of")
+        hangup = run.stdout.index("hung up after")
+        self.assertLess(branches, hangup, run.stdout)
+
     def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
         transcript = self.moving_session()
         self.set_pids(999999901)

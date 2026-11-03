@@ -4174,6 +4174,20 @@ move_to_copy_lists() {
     return 0
 }
 
+# A long child of the relauncher (rsync, git push), run so that a signal reaches the relauncher at
+# once: bash runs a trap only after its foreground child exits, and a TERM to a relauncher in the
+# middle of a long copy otherwise waits for the copy. MOVE_TO_CHILD is what the handler stops.
+MOVE_TO_CHILD=""
+move_to_fg() {
+    local rc
+    "$@" &
+    MOVE_TO_CHILD=$!
+    wait "$MOVE_TO_CHILD"
+    rc=$?
+    MOVE_TO_CHILD=""
+    return "$rc"
+}
+
 # move_to_copy TARGET STAMP: the two rsyncs, MOVE_TO_MIRROR then MOVE_TO_MERGE, every path at its
 # own absolute path on the target. No marker is ever copied.
 move_to_copy() {
@@ -4187,12 +4201,12 @@ move_to_copy() {
     # --no-group: the copy runs as the user, who cannot give a directory root's group (the
     # implied parents /home and /mnt, mirrored into the backup directory, failed a drill with it).
     if (( ${#MOVE_TO_MIRROR[@]} )); then
-        rsync -aH --no-group --omit-dir-times --relative --delete --backup --backup-dir="$MOVE_TO_CUTOVER/replaced/$stamp" \
+        move_to_fg rsync -aH --no-group --omit-dir-times --relative --delete --backup --backup-dir="$MOVE_TO_CUTOVER/replaced/$stamp" \
             --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
             "${MOVE_TO_MIRROR[@]}" "$MOVE_TO_USER@$target:/" || return 1
     fi
     if (( ${#MOVE_TO_MERGE[@]} )); then
-        rsync -aH --no-group --omit-dir-times --relative --update --exclude="$MOVE_MARKER" -e "${MOVE_TO_SSH[*]}" \
+        move_to_fg rsync -aH --no-group --omit-dir-times --relative --update --exclude="$MOVE_MARKER" -e "${MOVE_TO_SSH[*]}" \
             "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || return 1
     fi
     return 0
@@ -4301,7 +4315,29 @@ move_to_git_native_plan() {
     return 0
 }
 
-# Before the mirror: push and register each tree on the target. Sets MOVE_TO_WHY on failure.
+# BEFORE the hang-up: the other local branches of each native tree, without force (a branch the
+# target has only moves forward). From a blob:none partial clone this packs every branch's
+# objects, which took 3+ minutes for LINUX-1248's machcsl-riscv on 2026-11-03 - all of it in the
+# session's downtime while it ran after the hang-up. A failure here is logged and costs nothing:
+# the branches stay unpushed. $2 is a function that logs one line.
+move_to_git_native_prepush() {
+    local target="$1" log="${2:-echo}" n w common start
+    for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
+        w="${n%%$'\t'*}" common="${n#*$'\t'}"
+        start=$SECONDS
+        if GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
+            "$MOVE_TO_USER@$target:$common" 'refs/heads/*:refs/heads/*' >/dev/null 2>&1; then
+            "$log" "pushed the local branches of $w before the hang-up ($((SECONDS - start))s)"
+        else
+            "$log" "the local branches of $w were not all pushed ($((SECONDS - start))s; one the target has may not move forward); the move goes on"
+        fi
+    done
+    return 0
+}
+
+# After the hang-up, before the mirror: push each tree's HEAD and register the tree on the
+# target. Only HEAD, a small delta once the branches went before the hang-up. Sets MOVE_TO_WHY
+# on failure.
 move_to_git_native_push() {
     local target="$1" n w common tag head branch script
     for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
@@ -4309,14 +4345,11 @@ move_to_git_native_push() {
         tag="refs/agentbox-move/$(printf '%s' "$w" | md5sum | cut -c1-12)"
         head="$(git -C "$w" rev-parse -q --verify HEAD)" || { MOVE_TO_WHY="$w has no commit to push"; return 1; }
         branch="$(git -C "$w" symbolic-ref -q --short HEAD || true)"
-        if ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git -C "$w" push --quiet --no-verify \
+        if ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "+HEAD:$tag" 2>&1; then
             MOVE_TO_WHY="git push of $w to $target:$common failed"
             return 1
         fi
-        # The other local branches, without force: one the target has only moves forward.
-        GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git -C "$w" push --quiet --no-verify \
-            "$MOVE_TO_USER@$target:$common" 'refs/heads/*:refs/heads/*' >/dev/null 2>&1 || true
         script="set -e
 w=$(printf '%q' "$w") c=$(printf '%q' "$common") tag=$(printf '%q' "$tag") head=$(printf '%q' "$head") b=$(printf '%q' "$branch")
 if [ -e \"\$w/.git\" ] && git -C \"\$w\" rev-parse -q --git-dir >/dev/null 2>&1; then :
@@ -4857,8 +4890,16 @@ move_to_in_box() {
 # one of three states at the end, and each is logged: moved (running on the target, its old pane a
 # shell that says where it went), back here (in a box on this machine, its marker removed), or
 # both-machines (found running on both; nothing more is done to it, and moves halt).
+#
+# While it runs, $MOVE_TO_JOBS/active/<sid> says so for each member (pid=, target=, start=):
+# written before the hang-up, removed on every exit, so a pane restarter (omp-memory-watch) never
+# resumes a session whose move is in flight - on 2026-11-03 it resumed LINUX-1248 on this host 6 s
+# after the 04:10Z hang-up, since it read only the `move --self` log. A relauncher stopped by a
+# signal says so, with the step it was in, so its log never ends at "copying".
+MOVE_TO_ACTIVE="$MOVE_TO_JOBS/active"
 move_to_run() {
     local job="$1" target group n i stamp me reason=""
+    MOVE_TO_STATE="reading the job"
     [[ -r "$job" ]] || die "no job file $job"
     target="$(jq -r .to "$job")" group="$(jq -r .group "$job")" n="$(jq '.members | length' "$job")"
     # The caller's ssh command, since the relauncher of a box's move runs under the host's tmux
@@ -4925,9 +4966,27 @@ move_to_run() {
     local all=()
     for ((i = 0; i < n; i++)); do all+=("$i"); done
     say "job $job: ${sids[*]} to $target"
+    # The active files, and the one exit path that removes them (the EXIT trap of cmd_move, which
+    # also clears the transcript index, runs this too). A signal says where it stopped.
+    # Globals, since the EXIT trap runs after this function's locals are gone.
+    MOVE_TO_ACTIVE_SIDS=("${sids[@]}")
+    move_to_active_clear() {
+        local s
+        for s in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do rm -f "$MOVE_TO_ACTIVE/$s"; done
+    }
+    move_to_run_exit() { move_to_active_clear; move_exit; }
+    move_to_run_signal() {
+        [[ -z "$MOVE_TO_CHILD" ]] || kill -TERM "$MOVE_TO_CHILD" 2>/dev/null || true
+        say "stopped by signal $1; state: $MOVE_TO_STATE. The relauncher is gone: check each session (${MOVE_TO_ACTIVE_SIDS[*]}) - it may be down here, or on $target with its marker here"
+        exit "$2"
+    }
+    trap move_to_run_exit EXIT
+    trap 'move_to_run_signal TERM 143' TERM
+    trap 'move_to_run_signal INT 130' INT
+    trap 'move_to_run_signal HUP 129' HUP
     # The ready files are spent: a member that comes back here starts its next move afresh.
     for ((i = 0; i < n; i++)); do rm -f "$MOVE_TO_JOBS/ready/${sids[i]}"; done
-    # 0. The checks again, right before the hang-up: minutes may have passed.
+    MOVE_TO_STATE="checking $target"
     if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
         || ! move_to_dests_writable "$target" || ! move_to_offbox; then
         say "refused, nothing was hung up: $MOVE_TO_WHY"
@@ -4936,9 +4995,21 @@ move_to_run() {
         done
         return 2
     fi
+    # From here the members' moves are in flight: a restarter that reads these leaves them alone.
+    mkdir -p "$MOVE_TO_ACTIVE"
+    for ((i = 0; i < n; i++)); do
+        printf 'pid=%s\ntarget=%s\nstart=%s\njob=%s\n' "$BASHPID" "$target" "$(date +%s)" "$job" >"$MOVE_TO_ACTIVE/${sids[i]}"
+    done
     # Clone a repository the target lacks BEFORE the hang-up: the object store is the big part of
-    # a tree, and once the clone is there git sends only what the target misses.
+    # a tree, and once the clone is there git sends only what the target misses. Then push every
+    # native tree's other branches, also before: after the hang-up only HEAD goes.
+    MOVE_TO_STATE="cloning on $target, before the hang-up"
     move_to_clone_missing "$target" say
+    move_to_git_native_plan "$target"
+    (( ${#MOVE_TO_NATIVE[@]} )) && say "through git: $(printf '%s ' "${MOVE_TO_NATIVE[@]%%$'\t'*}")"
+    MOVE_TO_STATE="pushing branches to $target, before the hang-up"
+    move_to_git_native_prepush "$target" say
+    MOVE_TO_STATE="hanging up ${sids[*]}"
     # 1. The hang-up, of every member, before anything is copied.
     local down=() alive=() waited
     for ((i = 0; i < n; i++)); do
@@ -4961,10 +5032,9 @@ move_to_run() {
         log_all "$reason" "${all[@]}"
         return 1
     fi
-    # 2. The copy (git trees the target has a clone of go through git). 3. The markers. 4. The
-    # windows. Any failure rolls the whole group back.
-    move_to_git_native_plan "$target"
-    (( ${#MOVE_TO_NATIVE[@]} )) && say "through git: $(printf '%s ' "${MOVE_TO_NATIVE[@]%%$'\t'*}")"
+    # 2. The copy (git trees the target has a clone of go through git, HEAD only now). 3. The
+    # markers. 4. The windows. Any failure rolls the whole group back.
+    MOVE_TO_STATE="copying to $target (the sessions are hung up)"
     say "copying ${#MOVE_TO_MIRROR[@]} mirrored and ${#MOVE_TO_MERGE[@]} merged path(s)"
     if ! move_to_git_native_push "$target"; then
         reason="failed: $MOVE_TO_WHY"
@@ -4989,6 +5059,7 @@ move_to_run() {
         done
     fi
     if [[ -z "$reason" ]]; then
+        MOVE_TO_STATE="starting the sessions on $target"
         for ((i = 0; i < n; i++)); do
             member_spec "$i"
             if ! windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${resumes[i]}" "${MOVE_SPEC[@]}")" || [[ -z "${windows[i]}" ]]; then
@@ -5023,6 +5094,7 @@ move_to_run() {
     # The rollback. The target's windows close, and nothing of the group may still run there
     # before a member resumes here.
     say "$reason; rolling the group back"
+    MOVE_TO_STATE="rolling back to this machine ($reason)"
     local w left
     for w in ${windows[@]+"${windows[@]}"}; do
         [[ -n "$w" ]] && move_remote "$target" "tmux kill-window -t $(printf '%q' "$w") 2>/dev/null || true" </dev/null || true
