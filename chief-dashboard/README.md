@@ -145,7 +145,12 @@ reloads.
   `docker run --name <box>` (container from its cgroup). `WINDOW_STREAMS` there maps each window to its stream issue
   (dispatch://INFRA-202/spec, "Windows on sami-rocqperf"): a new window is one line. Any other window, a pane in
   another tmux session, or no pane at all is "outside a stream window". `chief-dashboard sessions` prints what the
-  page counts; `--record FILE` writes the reading as a test fixture, cut to flags and ids.
+  page counts; `--record FILE` writes the reading as a test fixture, cut to flags and ids. In an agent box nothing is
+  measured (its /proc holds only the box's processes).
+- Each stream row's session count is the stream's live sessions on every machine (`sessions.stream_census`, as
+  `pilot census` counts them): this reading's sessions in the stream's windows, sessions moved off this machine from
+  them, and those an earlier read saw, live while `envoy ps` lists them. Its records are the pilot's
+  `DASHBOARD_PILOT_STATE/<issue>/members.txt` and `pilot-sessions.txt` (default `/mnt/nvme/sami/chief/streams`).
 - Explainer videos: every `explainer*.mp4` artifact on a stream issue (latest version), titled by the `title:` front
   matter of `<same name>-script.md` when it exists, else by the file name. Dispatch serves files only with the
   machine token, as downloads, without Range support, so the page cannot link there: each version is downloaded once

@@ -339,15 +339,15 @@ def behind_strip(page: PageV2) -> str:
 
 
 def stream_sessions(v: StreamView) -> str:
-    """The stream's live agent sessions, counted in its tmux window (sessions.py), in its header line."""
+    """The stream's live agent sessions on every machine (sessions.stream_census), in its header line."""
     if not v.windows:
         return '<span class="sess dim">no tmux window of its own</span>'
     where = ", ".join(v.windows)
     if v.sessions is None:
         return f'<span class="sess dim">sessions in {e(where)} not measured</span>'
-    return (f'<a class="sess" href="#sessions" title="Live agent sessions in tmux window {e(where)}, counted from '
-            f'this machine&rsquo;s processes at the last read">{v.sessions} session{"s" if v.sessions != 1 else ""} '
-            f'in {e(where)}</a>')
+    return (f'<a class="sess" href="#sessions" title="Live agent sessions of the stream on every machine: in tmux '
+            f'window {e(where)} here, moved from it, or seen there by an earlier read and still listed by Envoy">'
+            f'{v.sessions} session{"s" if v.sessions != 1 else ""} of {e(where)}</a>')
 
 
 def session_label(s: dict) -> str:

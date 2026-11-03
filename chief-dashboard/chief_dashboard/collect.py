@@ -21,6 +21,9 @@ from .videos import VideoStore
 # attention items, matched to a discovered stream by issue key or slug. Everything else comes from the scoreboard.
 REGISTRY = Path(os.environ.get("STREAMS_REGISTRY", Path.home() / "src/scrum/workstreams/streams.json"))
 SCOREBOARD_SLUG = "scoreboard-json"
+# The pilot's state directory (`chief-dashboard pilot ... --state`): each stream's members.txt and pilot-sessions.txt,
+# which `sessions.stream_census` reads and extends.
+PILOT_STATE = Path(os.environ.get("DASHBOARD_PILOT_STATE", "/mnt/nvme/sami/chief/streams"))
 
 
 class VersionCache:
@@ -91,6 +94,14 @@ def collect(
     # Live agent sessions per tmux window, read from this machine's processes and tmux (sessions.py), first: it
     # needs no outside service, so a Dispatch outage still shows them.
     snap["sessions"] = sessions.read(errors)
+    # Each windowed stream's live sessions on every machine (`sessions.stream_census`): a session moved to another
+    # machine, or a read from an agent box, still counts for its stream.
+    live = sessions.read_envoy(errors)
+    try:
+        snap["stream_sessions"] = {issue: sessions.stream_census(PILOT_STATE, issue, snap["sessions"], live)
+                                   for issue in sorted({i for i in sessions.WINDOW_STREAMS.values() if i})}
+    except OSError as e:
+        errors.append(f"stream sessions: {PILOT_STATE}: {e}")
     try:
         api = api or Dispatch()
     except (OSError, KeyError, ValueError) as e:

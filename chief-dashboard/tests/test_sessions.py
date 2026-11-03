@@ -22,7 +22,7 @@ def recorded():
     return sessions.measure(raw["processes"], raw["panes"], raw["containers"], host="sami-rocqperf"), raw
 
 
-def test_the_recorded_reading_counts_every_session_once_by_window():
+def test_the_recorded_reading_counts_every_session_once_by_window(tmp_path):
     census, raw = recorded()
     counts = {w: len(ss) for w, ss in census["windows"].items()}
     assert counts == {"chief": 6, "ossv": 14, "linux": 7, "tasks": 13, "grader": 5, "infra": 7, "rocq": 5, "cicd": 1}
@@ -33,8 +33,10 @@ def test_the_recorded_reading_counts_every_session_once_by_window():
     counted = {s["pid"] for ss in census["windows"].values() for s in ss}
     counted |= {s["pid"] for pl in census["ungrouped"] for s in pl["sessions"]}
     assert len(counted) == 76 and not counted & {p["pid"] for p in workers}
-    assert sessions.stream_counts(census) == {"OSSV-142": 14, "LINUX-31": 7, "BET-83": 13, "BET-59": 5,
-                                              "INFRA-203": 7, "INFRA-167": 5}
+    # Each stream counts the sessions of its windows, whether or not their ids can be read (no Envoy here).
+    issues = ("OSSV-142", "LINUX-31", "BET-83", "BET-59", "INFRA-203", "INFRA-167")
+    assert {i: len(sessions.stream_census(tmp_path, i, census, None)) for i in issues} == {
+        "OSSV-142": 14, "LINUX-31": 7, "BET-83": 13, "BET-59": 5, "INFRA-203": 7, "INFRA-167": 5}
 
 
 def test_the_recorded_boxes_are_attributed_through_their_host_window():
@@ -137,16 +139,21 @@ def test_the_recording_keeps_no_prompt_path_or_environment(tmp_path):
     assert argv == {10: ["-bash"], 11: ["docker", "run", "--name", "agentbox-1"], 12: [OMP, "-p", "--model"]}
 
 
-def test_each_stream_row_carries_its_count_and_the_strip_names_the_windows_outside():
+def test_each_stream_row_carries_its_count_and_the_strip_names_the_windows_outside(tmp_path):
     census, _ = recorded()
     snap = snapshot()
     snap["sessions"] = census
+    moved = "01a1d00d-0000-0000-0000-000000000000"  # moved from tasks to another machine, after this reading
+    (tmp_path / "BET-83").mkdir()
+    (tmp_path / "BET-83" / "members.txt").write_text(moved + "\n")
+    live = [{"session_id": moved, "host": "agentbox-04921df9ec32", "title": "SHORT"}]
+    snap["stream_sessions"] = {"BET-83": sessions.stream_census(tmp_path, "BET-83", census, live)}
     page = v2_model.build(snap, NOW)
     v = next(x for x in page.streams if x.st.issue == "BET-83")
-    assert (v.sessions, v.windows) == (13, ["tasks"])
+    assert (v.sessions, v.windows) == (14, ["tasks"])
     head = v2_render.stream_section(v, page, [])
     head = head[head.index('<div class="sh-right">'):head.index("</div></div>")]
-    assert '<a class="sess" href="#sessions"' in head and ">13 sessions in tasks</a>" in head
+    assert '<a class="sess" href="#sessions"' in head and ">14 sessions of tasks</a>" in head
     top = v2_render.top_line(page)
     assert '<span class="n">76</span> live <span class="n bad">18</span> outside a stream window' in top
     strip = v2_render.sessions_strip(page)

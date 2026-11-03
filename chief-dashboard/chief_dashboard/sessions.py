@@ -21,6 +21,7 @@ lanes run outside its window is what this count exists to show."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -115,7 +116,12 @@ def read_containers() -> dict[str, str]:
 
 def read(errors: list[str]) -> dict | None:
     """One measurement, as the snapshot keeps it (see `measure`); None when the processes or tmux cannot be read,
-    since counts without panes would put every session outside its window."""
+    since counts without panes would put every session outside its window, and in an agent box, whose /proc holds
+    only the box's own processes (their pids would be matched against the host's panes)."""
+    if os.environ.get("AGENTBOX_BOX"):
+        errors.append(f"agent sessions: not measured in agent box {os.environ['AGENTBOX_BOX']}, which sees no host "
+                      "process; stream counts come from Envoy and members.txt")
+        return None
     try:
         processes = read_processes()
     except OSError as e:
@@ -133,6 +139,21 @@ def read(errors: list[str]) -> dict | None:
                       f"{getattr(e, 'stderr', '') or e}".strip())
         containers = {}
     return measure(processes, panes, containers)
+
+
+def read_envoy(errors: list[str]) -> list[dict] | None:
+    """Live Envoy sessions on every machine (`envoy ps --json`): id, host (a machine, or `agentbox-<id>` for a box),
+    title, held roles. None, with an error, when the hub cannot be read."""
+    try:
+        done = subprocess.run(["envoy", "ps", "--json"], text=True, capture_output=True, check=True)
+        value = json.loads(done.stdout)
+        if not isinstance(value, list):
+            raise ValueError("envoy ps --json did not return a session list")
+        return value
+    except (OSError, ValueError, subprocess.CalledProcessError) as e:
+        detail = getattr(e, "stderr", None) or ""
+        errors.append(f"Envoy unavailable, role holders and sessions off this machine not read: {e} {detail}".rstrip())
+        return None
 
 
 def record(processes: list[dict], panes: list[dict], containers: dict[str, str]) -> dict:
@@ -162,8 +183,8 @@ def record(processes: list[dict], panes: list[dict], containers: dict[str, str])
                 a.startswith("-") or a.startswith("__omp_worker_") or SESSION_ARG.search(a))]
         return {**p, "argv": [a.replace(home, "~") for a in cut]}
 
-    # A pane's start command can hold a prompt; the measurement never reads it.
-    cut = [{k: v for k, v in pn.items() if k != "start"}
+    # A pane's start command can hold a prompt: only a move's notice (MOVED_PANE), which the measurement reads, stays.
+    cut = [{**pn, "start": m.group(0) if (m := MOVED_PANE.search(pn.get("start") or "")) else ""}
            for pn in panes if pn["pid"] in keep or pn["tmux"] == AGENTS_TMUX]
     raw = {"processes": [scrub(p) for p in processes if p["pid"] in keep], "panes": cut, "containers": containers}
     if measure(raw["processes"], cut, containers, "") != measure(processes, panes, containers, ""):
@@ -303,21 +324,51 @@ def measure(processes: list[dict], panes: list[dict], containers: dict[str, str]
         "windows": {w: [asdict(s) for s in ss] for w, ss in windows.items()},
         "ungrouped": [asdict(pl) for pl in ungrouped],
         "idle_windows": idle,
+        # {window: [session id]}: sessions moved off this machine from a window of WINDOW_STREAMS (moved_from).
+        "moved": {w: sorted(sid for sid, mw in moved_from(panes).items() if mw == w) for w in WINDOW_STREAMS},
     }
-
-
-def stream_counts(census: dict | None) -> dict[str, int]:
-    """Live sessions per stream issue, summed over the windows WINDOW_STREAMS gives that issue."""
-    out: dict[str, int] = {}
-    for window, sessions in ((census or {}).get("windows") or {}).items():
-        issue = WINDOW_STREAMS.get(window)
-        if issue:
-            out[issue] = out.get(issue, 0) + len(sessions)
-    return out
 
 
 def stream_windows(issue: str) -> list[str]:
     return [w for w, i in WINDOW_STREAMS.items() if i == issue]
+
+
+def stream_sessions(directory: Path, issue: str, census: dict | None, live: list[dict] | None,
+                    pilot_sessions: set[str]) -> list[dict]:
+    """The stream's live sessions on every machine, each {session, host, title}; `session` is None for one this
+    machine sees in a window without a readable id, `host` is Envoy's (a machine, or `agentbox-<id>` for a box).
+
+    A session is the stream's when this machine's CENSUS (`measure`) has it in one of the stream's windows or as
+    moved off this machine from one; when an earlier read saw either (`members.txt` in DIRECTORY, which this call
+    extends); or when it posted `LEDGER start` on the stream issue (PILOT_SESSIONS). The record is what counts a
+    session on a machine whose windows say nothing: `agentbox move --to` starts a moved session in tmux session
+    `moved` on the target, in a window named for its id, and a reader in an agent box measures nothing (`read`).
+    One in a window here is live by that reading; any other is live while Envoy (LIVE) lists it."""
+    windows = stream_windows(issue)
+    local = [s for w in windows for s in (census or {}).get("windows", {}).get(w, [])]
+    here = {s["session"] for s in local if s["session"]}
+    moved = {sid for w in windows for sid in (census or {}).get("moved", {}).get(w, [])}
+    path = directory / "members.txt"
+    members = set(path.read_text().split()) if path.exists() else set()
+    if (here | moved) - members:
+        members |= here | moved
+        path.write_text("".join(f"{session}\n" for session in sorted(members)))
+    by_id = {item["session_id"]: item for item in live or [] if item.get("session_id")}
+    machine = socket.gethostname()
+    out = [{"session": sid, "host": by_id.get(sid, {}).get("host") or (machine if sid in here else None),
+            "title": by_id.get(sid, {}).get("title")}
+           for sid in sorted(here | ((members | pilot_sessions) & by_id.keys()))]
+    return out + [{"session": None, "host": machine, "title": s["title"] or None} for s in local if not s["session"]]
+
+
+def stream_census(state: Path, issue: str, census: dict | None, live: list[dict] | None) -> list[dict]:
+    """`stream_sessions` with the stream's records under the pilot's state directory STATE (`STATE/<issue>/`, made
+    when absent; STATE itself must exist): its members.txt and the pilot's pilot-sessions.txt."""
+    directory = state / issue
+    directory.mkdir(exist_ok=True)
+    pilot_path = directory / "pilot-sessions.txt"
+    pilot_sessions = set(pilot_path.read_text().split()) if pilot_path.exists() else set()
+    return stream_sessions(directory, issue, census, live, pilot_sessions)
 
 
 def moved_from(panes: list[dict]) -> dict[str, str]:

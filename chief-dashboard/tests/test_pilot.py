@@ -197,8 +197,7 @@ def moved_pane_command(session: str) -> str:
             "there in tmux session moved, window 01a16551 (@4). This pane is a shell.'; exec bash -i\"")
 
 
-def test_machine_census_reads_the_streams_windows_and_the_sessions_moved_from_them_and_nothing_in_a_box(monkeypatch):
-    monkeypatch.delenv("AGENTBOX_BOX", raising=False)
+def test_measure_records_the_sessions_moved_from_each_stream_window_and_read_measures_nothing_in_a_box(monkeypatch):
     panes = [
         {"pane": "%35", "pid": 10, "tmux": "agents", "window": "rocq", "start": moved_pane_command(MOVED), "title": ""},
         {"pane": "%36", "pid": 11, "tmux": "agents", "window": "tasks", "start": moved_pane_command(GONE), "title": ""},
@@ -206,18 +205,22 @@ def test_machine_census_reads_the_streams_windows_and_the_sessions_moved_from_th
     ]
     processes = [{"pid": 12, "ppid": 1, "uid": 1000, "argv": ["bash"], "cgroup": ""},
                  {"pid": 13, "ppid": 12, "uid": 1000, "argv": ["omp", "--resume", SESSION], "cgroup": ""}]
-    monkeypatch.setattr(pilot.sessions, "read_panes", lambda: panes)
-    monkeypatch.setattr(pilot.sessions, "read_processes", lambda: processes)
-    monkeypatch.setattr(pilot.sessions, "read_containers", lambda: {})
-    findings: list[str] = []
 
-    assert pilot._machine_census("INFRA-167", findings) == ({SESSION}, {MOVED})
-    assert findings == []
+    census = pilot.sessions.measure(processes, panes, {}, host="h")
+
+    assert [s["session"] for s in census["windows"]["rocq"]] == [SESSION]
+    assert census["moved"]["rocq"] == [MOVED] and census["moved"]["tasks"] == [GONE]
+    # A recorded fixture keeps a move's notice and drops every other start command (it can hold a prompt).
+    raw = pilot.sessions.record(processes, panes, {})
+    assert [p["start"] for p in raw["panes"]] == [f"agentbox: session {MOVED} moved to sami-devbox at ",
+                                                  f"agentbox: session {GONE} moved to sami-devbox at ", ""]
 
     monkeypatch.setenv("AGENTBOX_BOX", "agentbox-0123")
-    assert pilot._machine_census("INFRA-167", findings) is None
-    assert findings == ["in agent box agentbox-0123: this machine's windows not read, sessions counted from "
-                        "members.txt and Envoy"]
+    monkeypatch.setattr(pilot.sessions, "read_processes", lambda: pytest.fail("a box sees no host process"))
+    errors: list[str] = []
+    assert pilot.sessions.read(errors) is None
+    assert errors == ["agent sessions: not measured in agent box agentbox-0123, which sees no host process; stream "
+                      "counts come from Envoy and members.txt"]
 
 
 def test_stream_sessions_counts_its_sessions_on_every_machine_while_envoy_lists_them(tmp_path):
@@ -228,18 +231,22 @@ def test_stream_sessions_counts_its_sessions_on_every_machine_while_envoy_lists_
         {"session_id": OTHER, "host": "agentbox-161f233fba59", "title": "pilot session"},
         {"session_id": "01a1f00d-0000-0000-0000-000000000000", "host": "sami-devbox", "title": "another stream's"},
     ]
+    window = [{"session": SESSION, "title": "ROCQ"}, {"session": "", "title": "no id on its command line"}]
+    census = {"windows": {"rocq": window}, "moved": {"rocq": [MOVED]}}
 
-    found = pilot.stream_sessions(tmp_path, ({SESSION}, {MOVED}), live, {OTHER})
+    found = pilot.sessions.stream_sessions(tmp_path, "INFRA-167", census, live, {OTHER})
 
+    host = pilot.sessions.socket.gethostname()
     assert [(item["session"], item["host"]) for item in found] == [
-        (SESSION, "sami-rocqperf"), (OTHER, "agentbox-161f233fba59"), (MOVED, "agentbox-04921df9ec32")]
+        (SESSION, "sami-rocqperf"), (OTHER, "agentbox-161f233fba59"), (MOVED, "agentbox-04921df9ec32"), (None, host)]
     # The record keeps what this machine saw, for a reader that cannot see the windows; GONE stays, uncounted.
     assert tmp_path.joinpath("members.txt").read_text() == f"{SESSION}\n{MOVED}\n{GONE}\n"
     # In an agent box on sami-devbox: no window reading, and the record and Envoy still count them.
-    assert [item["session"] for item in pilot.stream_sessions(tmp_path, None, live, set())] == [SESSION, MOVED]
+    found = pilot.sessions.stream_sessions(tmp_path, "INFRA-167", None, live, set())
+    assert [item["session"] for item in found] == [SESSION, MOVED]
     # Envoy down: only what this machine sees in the windows, live by that reading.
-    found = pilot.stream_sessions(tmp_path, ({SESSION}, set()), None, {OTHER})
-    assert [(item["session"], item["host"]) for item in found] == [(SESSION, pilot.socket.gethostname())]
+    found = pilot.sessions.stream_sessions(tmp_path, "INFRA-167", census, None, {OTHER})
+    assert [(item["session"], item["host"]) for item in found] == [(SESSION, host), (None, host)]
 
 
 def test_live_omp_panes_reads_nothing_in_an_agent_box(monkeypatch):
@@ -716,7 +723,7 @@ class FactsDispatch:
 
 
 def fake_commands(monkeypatch, panes: set[str], sessions: list[dict] | None,
-                  machine: tuple[set[str], set[str]] | None = None) -> list[list[str]]:
+                  machine: dict | None = None) -> list[list[str]]:
     """Answer what facts reads from the machine: `envoy ps --json`, and the panes that run omp (PANES). Records each
     read. SESSIONS None makes `envoy ps` fail as it does when its hub is unreachable (exit 1)."""
     import json
@@ -737,7 +744,7 @@ def fake_commands(monkeypatch, panes: set[str], sessions: list[dict] | None,
 
     monkeypatch.setattr(pilot.subprocess, "run", run)
     monkeypatch.setattr(pilot, "_live_omp_panes", live_panes)
-    monkeypatch.setattr(pilot, "_machine_census", lambda stream, findings: machine)
+    monkeypatch.setattr(pilot.sessions, "read", lambda errors: machine)
     return ran
 
 
@@ -940,7 +947,7 @@ def test_summary_dry_run_prints_the_bounded_omp_command_and_runs_nothing(monkeyp
 
 def test_facts_and_the_dry_run_list_the_streams_live_sessions(monkeypatch, tmp_path, capsys):
     fake_commands(monkeypatch, set(), [{"session_id": MOVED, "host": "agentbox-04921df9ec32", "title": "SHORT",
-                                        "roles": []}], machine=(set(), {MOVED}))
+                                        "roles": []}], machine={"windows": {}, "moved": {"rocq": [MOVED]}})
 
     result, _ = pilot.facts(FactsDispatch(STARTED_RECORD), "INFRA-167", tmp_path, datetime(2026, 11, 1, 18, tzinfo=UTC))
 

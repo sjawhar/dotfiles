@@ -69,8 +69,8 @@ class StreamView:
     example: bool  # the plan shown is example items (?example=1)
     week: WeekPlan | None = None
     week_lines: list[PlanLine] = field(default_factory=list)
-    # Live agent sessions in the stream's tmux windows (sessions.py); None when they were not measured or the stream
-    # has no window of its own in sessions.WINDOW_STREAMS.
+    # The stream's live agent sessions on every machine (sessions.stream_census, the snapshot's `stream_sessions`);
+    # None when they were not read or the stream has no window of its own in sessions.WINDOW_STREAMS.
     sessions: int | None = None
     windows: list[str] = field(default_factory=list)
 
@@ -228,10 +228,11 @@ def build(snap: dict, now: datetime, example: bool = False) -> PageV2:
     counts = {ON_PACE: 0, BEHIND: 0, CANT_TELL: 0}
     behind: list[tuple[StreamView, KpiRow]] = []
     census = snap.get("sessions")
-    per_stream = sessions.stream_counts(census)
+    per_stream = snap.get("stream_sessions") or {}
     for v in views:
         v.windows = sessions.stream_windows(v.st.issue or "")
-        v.sessions = per_stream.get(v.st.issue or "", 0) if census and v.windows else None
+        found = per_stream.get(v.st.issue or "")
+        v.sessions = len(found) if found is not None and v.windows else None
         for k in v.kpis:
             counts[k.label.label] += 1
             if k.label.label == BEHIND:
