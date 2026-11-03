@@ -54,8 +54,11 @@ old run-c01a13dcae9797264.scope, reached the chief).
      directory scripts/agent-session makes before it execs omp), a full session id, or a
      directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`)
      when exactly one live-here session starts so.
-  3. a `run-c<16 hex>-svc.scope` whose Description starts `omp session <uuid>` (omp-memory-watch
-     moves a session's broker services there): that session, when it is live here.
+  3. a `run-c<16 hex>-svc[-N].scope` whose Description starts `omp session <uuid>` (omp-memory-watch
+     moves a session's broker services there): that session, when it is live here. In an
+     `omp-broker-<16 hex>[-N].scope` step 2 ignores an environment equal to the broker's own (the
+     session that started the broker, which a headless browser inherits), and every environment
+     when no broker is left there to compare.
   4. the scope's original session: the session id in a `run-*.scope`'s Description (`omp session
      <uuid> ...`, or shims/omp's `agent-session omp --resume <uuid>`), else the 16 hex of
      `run-c<16 hex>.scope`, only when that session is live here.
@@ -146,7 +149,11 @@ SESSION_UUID_RE = re.compile(r"(?<![0-9a-f])(" + UUID + r")(?![0-9a-f])")
 SESSION_DIR_RE = re.compile(r"/[A-Za-z][\w.]*-(01[0-9a-f]{6})(?=[/\s\"']|$)")
 DOCKER_RE = re.compile(r"/docker-([0-9a-f]{64})\.scope")
 SCOPE_RE = re.compile(r"^(.*?/(?:run-[^/]+|session-[^/]+|tmux-spawn-[^/]+|omp-broker-[^/]+)\.scope)")
-RUN_C_RE = re.compile(r"^run-c([0-9a-f]{16})(-svc)?\.scope$")
+# omp-memory-watch's names. systemd 255 adds no process to a running scope without Delegate=yes,
+# so a scope's later processes go to `<name>-2.scope`, `-3`, ...: one scope, by its base name.
+RUN_C_RE = re.compile(r"^run-c([0-9a-f]{16})(-svc)?(?:-\d+)?\.scope$")
+# omp-broker-<16 hex of sha256(runtime dir)>.scope: omp's shared worker broker, for many sessions.
+BROKER_RE = re.compile(r"^omp-broker-([0-9a-f]{16})(?:-\d+)?\.scope$")
 DESCRIPTION_RE = re.compile(r"^omp session (" + UUID + r")")
 LIVE_TTL = 60.0  # seconds a read of `envoy ps --json` is reused
 
@@ -321,6 +328,7 @@ class Watch:
         self.sample_ms = 0
         self.procs: dict[int, tuple[str, int, int, int]] = {}
         self._omp_cgroups: dict[tuple[int, int], str] | None = None
+        self._brokers: dict[str, dict] | None = None
 
     # ---------------------------------------------------------------- /proc
 
@@ -391,6 +399,22 @@ class Watch:
                                  if row[0] == "omp" and self.is_session_omp(pid, "omp")}
         return [key for key, cgroup in self._omp_cgroups.items() if scope in cgroup]
 
+    def broker_env(self, unit: str, procs: dict) -> dict | None:
+        """The environment of the omp broker of broker scope `unit` (any of its -N scopes), or None
+        when no broker runs in it. A process the broker runs for nobody (a headless browser) carries
+        this environment: the session that started the broker, not an owner."""
+        base = BROKER_RE.match(unit)
+        if not base:
+            return None
+        if self._brokers is None:
+            self._brokers = {}
+            for pid, row in procs.items():
+                if row[0] == "omp daemon brok" or (row[0] == "omp" and "__omp_worker_daemon_broker" in self.cmdline(pid)[:3]):
+                    found = BROKER_RE.match(self.cgroup(pid).rsplit("/", 1)[-1])
+                    if found:
+                        self._brokers[found[1]] = self.environ(pid)
+        return self._brokers.get(base[1])
+
     # ---------------------------------------------------------------- sessions
 
     def session_of(self, pid: int, start: int, container: str = "", docker: bool = False) -> str:
@@ -449,8 +473,11 @@ class Watch:
                 scope_omp = {"omp": omp, "omp_start": omp_start, "session": session,
                              "how": "same agent box" if docker else "same systemd scope"}
         unit = scope.rsplit("/", 1)[-1] if not docker and re.search(r"/(?:run|omp-broker)-[^/]+\.scope$", scope) else ""
-        return {"container": container, "cgroup": cgroup, "scope": unit, "scope_omp": scope_omp, "tree": tree,
-                "env": self.environ(pid), "cwd": self.cwd(pid)}
+        entry = {"container": container, "cgroup": cgroup, "scope": unit, "scope_omp": scope_omp, "tree": tree,
+                 "env": self.environ(pid), "cwd": self.cwd(pid)}
+        if BROKER_RE.match(unit):
+            entry["broker_env"] = self.broker_env(unit, procs)
+        return entry
 
     # ---------------------------------------------------------------- sampling
 
@@ -459,7 +486,7 @@ class Watch:
         procs = self.scan()
         with self.lock:
             self.procs = procs
-            self._omp_cgroups = None
+            self._omp_cgroups = self._brokers = None
             for pid, (comm, _ppid, start, rss) in procs.items():
                 # omp and its broker are the sessions themselves, and earlyoom's --ignore spares them.
                 if rss < RSS_FLOOR or comm in ("omp", "omp daemon brok"):
@@ -620,7 +647,7 @@ class Watch:
         if row and row[0] == comm:
             entry = self.table.get(f"{pid}:{row[2]}")
             if entry is None:
-                self._omp_cgroups = None
+                self._omp_cgroups = self._brokers = None
                 entry = self.owner_live(pid, self.scan())
             elif not entry.get("env"):
                 entry["env"] = self.environ(pid)
@@ -641,12 +668,23 @@ class Watch:
             if session:
                 return {"session": session, "how": "process tree", "omp": rec["omp"]}
         env = entry.get("env") or {}
+        unit = entry.get("scope", "")
+        broker = bool(BROKER_RE.match(unit))
+        inherited = ""
+        if broker and (env.get("session") or env.get("scratch")):
+            # A process the broker runs for nobody carries the broker's own environment: the session
+            # that started the broker, not an owner. With no broker to compare, nothing is known.
+            broker_env = entry.get("broker_env")
+            name = "session" if env.get("session") else "scratch"
+            if broker_env is None or broker_env.get(name) == env[name]:
+                inherited, env = env[name], {}
         if env.get("session") and env["session"] in self.live_here():
             return {"session": env["session"], "how": "its environment (OMP_SESSION_ID)", "omp": 0}
         session, omp_pid = self.tmp_session(env.get("scratch", ""))
         if session:
             return {"session": session, "how": "its environment (AGENT_SESSION_SCRATCH)", "omp": omp_pid}
-        if not env.get("session"):
+        # The processes of a broker scope serve many sessions: no one of them speaks for another.
+        if not env.get("session") and not broker and not inherited:
             session = self.cgroup_session(entry.get("cgroup", ""), pid)
             if session:
                 return {"session": session, "how": "the environment of the other processes of its cgroup", "omp": 0}
@@ -658,7 +696,6 @@ class Watch:
             if session:
                 return {"session": session, "how": f"a session's directory in its {where}", "omp": 0}
         # 3. and 4. what its scope names, only when that session is live here
-        unit = entry.get("scope", "")
         session, how = self.scope_session(unit)
         if session and session in self.live_here():
             return {"session": session, "how": how, "omp": 0}
@@ -674,6 +711,11 @@ class Watch:
             return {"session": "", "how": "", "omp": 0}
         if env.get("session"):
             why += f"; its environment names session {env['session']}, not live on this host"
+        if inherited:
+            why += (f"; its environment names {inherited}, which is the broker's own (the session that"
+                    " started the broker, not an owner)" if entry.get("broker_env") is not None else
+                    f"; its environment names {inherited}, and no broker runs in the scope to tell that from"
+                    " the broker's own")
         return {"session": "", "how": "", "omp": 0, "unknown": why}
 
     # ---------------------------------------------------------------- the box-level rate

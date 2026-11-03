@@ -38,7 +38,8 @@ HOST_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u4242.
 CHIEF = "01a13dca-e979-7264-af32-f654ef57a6f5"
 EFF = "01a14126-ae14-7525-98b7-6b1ac6cefd80"
 CHIEF_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-c01a13dcae9797264.scope"
-BROKER_SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/omp-broker-3f2a9c.scope"
+APP = "/user.slice/user-1000.slice/user@1000.service/app.slice"
+BROKER_SCOPE = f"{APP}/omp-broker-3f2a9c0d1e2b4a59.scope"
 LOKY = ("/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/wt/tasks/.venv/bin/python -m loky.backend.popen_loky_posix"
         " --process-name LokyProcess-2 --pipe 20")
 PAGE = os.sysconf("SC_PAGE_SIZE")
@@ -238,7 +239,8 @@ class KillWatchTest(unittest.TestCase):
         self.proc.add(727012, "omp", 1, ["omp"], HOST_SCOPE,
                       session_file=f"/home/sami/.omp/agent/sessions/-x/2026-11-01T00-00-00-000Z_{RUNNER_SESSION}.jsonl")
         cmd = "python3 job.py"
-        self.left_behind(50005, cmd, scope=BROKER_SCOPE, env={"AGENT_SESSION_SCRATCH": "/mnt/nvme/sami/session-tmp/727012-abcdEFGH"})
+        self.left_behind(50005, cmd, scope=f"{APP}/run-u777.scope",
+                         env={"AGENT_SESSION_SCRATCH": "/mnt/nvme/sami/session-tmp/727012-abcdEFGH"})
         w = self.watch()
         self.kill_one(w, 50005, cmd)
         self.assertEqual([t for t, _ in self.sent], [RUNNER_SESSION])
@@ -290,6 +292,66 @@ class KillWatchTest(unittest.TestCase):
         self.kill_one(w, 50009, cmd)
         self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC])
         self.assertIn("omp broker scope", report_of(self, self.sent[0][1]))
+
+    def broker(self, started_by: str = CHIEF) -> None:
+        """omp's shared broker in its own scope; its later processes go to omp-broker-<hex>-2.scope."""
+        self.proc.add(77103, "omp daemon brok", 1, ["/x/bin/omp", "__omp_worker_daemon_broker"], BROKER_SCOPE,
+                      env={"OMP_SESSION_ID": started_by, "AGENT_SESSION_SCRATCH": "/mnt/nvme/sami/session-tmp/47314-K7KkdNKX"})
+
+    def test_broker_scope_process_with_the_brokers_own_environment_is_owner_unknown(self) -> None:
+        """A headless browser the broker runs for nobody carries the broker's OMP_SESSION_ID, the
+        session that started the broker: not an owner, even while that session is live here."""
+        self.broker()
+        self.live[CHIEF] = "sami-rocqperf"
+        cmd = "/home/sami/.omp/puppeteer/chrome/linux-150/chrome --headless"
+        self.left_behind(50011, cmd, scope=f"{APP}/omp-broker-3f2a9c0d1e2b4a59-2.scope",
+                         env={"OMP_SESSION_ID": CHIEF, "AGENT_SESSION_SCRATCH": "/mnt/nvme/sami/session-tmp/47314-K7KkdNKX"})
+        w = self.watch()
+        self.kill_one(w, 50011, cmd, comm="chrome")
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC])
+        report = report_of(self, self.sent[0][1])
+        self.assertIn("omp broker scope", report)
+        self.assertIn(f"its environment names {CHIEF}, which is the broker's own", report)
+
+    def test_broker_scope_tool_run_for_another_session_reaches_that_session(self) -> None:
+        self.broker()
+        self.live.update({CHIEF: "sami-rocqperf", EFF: "sami-rocqperf"})
+        cmd = "python3 qa.py"
+        self.left_behind(50012, cmd, scope=f"{APP}/omp-broker-3f2a9c0d1e2b4a59-3.scope", env={"OMP_SESSION_ID": EFF})
+        w = self.watch()
+        self.kill_one(w, 50012, cmd)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+        self.assertIn("OMP_SESSION_ID", report_of(self, self.sent[0][1]))
+
+    def test_broker_scope_with_no_broker_left_trusts_no_environment(self) -> None:
+        self.live[EFF] = "sami-rocqperf"
+        cmd = "python3 qa.py"
+        self.left_behind(50012, cmd, scope=BROKER_SCOPE, env={"OMP_SESSION_ID": EFF})
+        w = self.watch()
+        self.kill_one(w, 50012, cmd)
+        self.assertEqual([t for t, _ in self.sent], [WATCH.BOX_HEALTH_ROLE_TOPIC])
+        self.assertIn("no broker runs in the scope", report_of(self, self.sent[0][1]))
+
+    def test_broker_scope_path_still_names_the_owner(self) -> None:
+        """Step 2's paths come before owner unknown, in a broker scope too."""
+        self.broker()
+        self.live[EFF] = "sami-rocqperf"
+        self.left_behind(50001, LOKY, scope=f"{APP}/omp-broker-3f2a9c0d1e2b4a59-2.scope", env={"OMP_SESSION_ID": CHIEF})
+        w = self.watch()
+        self.kill_one(w, 50001, LOKY)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+
+    def test_numbered_svc_scope_description_names_the_owner(self) -> None:
+        """omp-memory-watch's later service processes go to run-c<owner>-svc-2.scope."""
+        unit = "run-c01a14126ae147525-svc-2.scope"
+        self.descriptions[unit] = f"omp session {EFF}"
+        self.live[EFF] = "sami-rocqperf"
+        cmd = "node server.js"
+        self.left_behind(50013, cmd, scope=f"{APP}/{unit}")
+        w = self.watch()
+        self.kill_one(w, 50013, cmd)
+        self.assertEqual([t for t, _ in self.sent], [EFF])
+        self.assertIn(f"its systemd scope {unit}, whose Description names the session", report_of(self, self.sent[0][1]))
 
     def test_scope_live_omp_comes_before_paths(self) -> None:
         """Step 1: the one live session omp of the scope wins over a path naming another session."""
