@@ -156,6 +156,10 @@ ledger = "sjawhar/.knives-ledger"
 [repos.litellm]
 upstream = "https://github.com/BerriAI/litellm.git"
 origin = "https://github.com/sjawhar/litellm.git"
+ledger = "sjawhar/.knives-ledger"
+
+[repos.litellm.series."1.106"]
+base = "stable/1.106.x"
 
 [repos.lean4]
 upstream = "https://github.com/leanprover/lean4"
