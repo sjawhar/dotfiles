@@ -26,6 +26,7 @@ Exits 1 when the fork gave no answer.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -163,7 +164,13 @@ def main() -> None:
         print(json.dumps({"text": text, "model": model, "fallback": fallback, "cost": round(cost, 4), "tokens": tokens,
                           "cut": cut, "fork_session": fork_session}))
         if not text:
-            sys.exit(f"omp-fork: the fork gave no answer (omp exit {proc.returncode}): {proc.stderr.strip()[-300:]}")
+            # A Bun crash prints source lines and a stack after its error line, so the tail alone can
+            # hide the cause (an agent.db SQLITE_BUSY showed only stack frames): name that line first.
+            err = proc.stderr.strip()
+            cause = next((l.strip() for l in reversed(err.splitlines()) if re.match(r"\s*\w*Error\b", l)), "")
+            tail = err[-300:]
+            shown = f"{cause} | {tail}" if cause and cause not in tail else tail
+            sys.exit(f"omp-fork: the fork gave no answer (omp exit {proc.returncode}): {shown}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
