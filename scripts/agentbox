@@ -1845,10 +1845,12 @@ move_in_box_paths() {
     if (( ${#MOVE_IN_BOX[@]} )); then return 0; fi
     local p
     MOVE_IN_BOX=("$SRC" "$HOME/.dotfiles" "$DOTFILES_DIR")
-    for p in "$SRC"/*; do
-        [[ -L "$p" ]] || continue
-        MOVE_IN_BOX+=("$(readlink -f "$p")")
-    done
+    # Every symlink under $SRC resolved by ONE realpath, not a readlink fork each: one per link
+    # took 40 s for this host's ~/src at load 300, and the $(…) subshells of a move each paid it
+    # again (2026-11-03). A caller that forks computes this first, so the subshells inherit it.
+    while IFS= read -r p; do
+        [[ -n "$p" ]] && MOVE_IN_BOX+=("$p")
+    done < <(find "$SRC" -mindepth 1 -maxdepth 1 -type l -print0 2>/dev/null | xargs -0 -r realpath -q -- 2>/dev/null || true)
     while read -r p; do [[ -n "$p" ]] && MOVE_IN_BOX+=("$HOME/$p"); done < <(mounts_of rw; mounts_of ro)
     [[ -z "$DURABLE_DIR" ]] || MOVE_IN_BOX+=("$DURABLE_DIR")
 }
@@ -2137,7 +2139,7 @@ move_proc_dirs() {
         return 0
     fi
     local root="$1" pids=() pid args=() src target comm fd flags dir key value
-    local -A said=()
+    local -A said=() dropped=()
     move_read_kids
     mapfile -t pids < <(move_descendants "$root")
     (( ${#pids[@]} )) || return 0
@@ -2147,10 +2149,11 @@ move_proc_dirs() {
         if [[ "$src" == */cwd ]]; then dir="$target"; else dir="${target%/*}"; fi
         # A target directly under / leaves an empty dirname, and no box is given / anyway.
         [[ -n "$dir" && "$dir" != / ]] || continue
-        [[ -n "${said[$dir]:-}" ]] && continue
+        [[ -n "${said[$dir]:-}" || -n "${dropped[$dir]:-}" ]] && continue
         case "$target" in /proc/*|/sys/*|/dev/*|/run/*) continue ;; esac
+        # A directory decided once: a lead's processes hold thousands of files in a few dozen.
         if move_dir_in_box "$dir"; then
-            $MOVE_PROC_KEEP_SRC && { move_within "$dir" "$SRC" || move_to_own_git_tree "$dir" >/dev/null; } || continue
+            $MOVE_PROC_KEEP_SRC && { move_within "$dir" "$SRC" || move_to_own_git_tree "$dir" >/dev/null; } || { dropped[$dir]=1; continue; }
         fi
         pid="${src#"$PROC"/}"
         pid="${pid%%/*}"
@@ -2198,9 +2201,8 @@ move_proc_dirs() {
 # wider net costs noise, not reach: on 01a16220, 137 raw candidates became a handful of mounts.
 #
 # The window is today by default (AGENTBOX_MOVE_SINCE overrides, and the test fixture sets it).
-# The transcript is found by its own name, `<stamp>_<session id>.jsonl`, under the session roots -
-# ~/.omp/agent/sessions and, on this host, /mnt/durable/<user>/omp-sessions-moved, where older
-# session directories were moved (AGENTBOX_SESSION_ROOTS replaces the list).
+# The transcript is found by its own name, `<stamp>_<session id>.jsonl`, under ~/.omp/agent/sessions
+# (AGENTBOX_SESSION_ROOTS replaces it), where an archived one is a symlink.
 MOVE_RECORD_SINCE="${AGENTBOX_MOVE_SINCE:-$(date -u +%FT00:00:00Z)}"
 SESSION_ROOTS=()
 move_session_roots() {
@@ -2209,8 +2211,11 @@ move_session_roots() {
         IFS=: read -r -a SESSION_ROOTS <<<"$AGENTBOX_SESSION_ROOTS"
         return 0
     fi
+    # The local tree only. A transcript archived to /mnt/durable/<user>/omp-sessions-moved stays
+    # behind a symlink here, which the listing takes whatever its mtime. Listing the durable tree
+    # itself, with an mtime test on every file of a network disk, held the INFRA lead's
+    # `move --to` dry run for over 5 minutes at load 300 (2026-11-03).
     SESSION_ROOTS=("$HOME/.omp/agent/sessions")
-    [[ -n "$DURABLE_DIR" && -d "$DURABLE_DIR/omp-sessions-moved" ]] && SESSION_ROOTS+=("$DURABLE_DIR/omp-sessions-moved")
     return 0
 }
 
@@ -2232,7 +2237,7 @@ move_read_transcripts() {
         sid="${sid%.jsonl}"
         [[ "$sid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue
         MOVE_TRANSCRIPT[$sid]="$file"
-    done < <(find "${roots[@]}" -mindepth 2 -maxdepth 2 -name '*_*.jsonl' -newermt "$MOVE_RECORD_SINCE" 2>/dev/null)
+    done < <(find "${roots[@]}" -mindepth 2 -maxdepth 2 -name '*_*.jsonl' \( -type l -o -newermt "$MOVE_RECORD_SINCE" \) 2>/dev/null)
     return 0
 }
 
@@ -2366,8 +2371,19 @@ move_record_dirs() {
         awk -F'\t' -v s="$sid" '$1 == s { print $3 "\t" $2 }' "$MOVE_RECORD_CACHE"
         return 0
     fi
-    move_read_transcripts
+    # A session in this run's census is found through its own process (move_transcript, from its
+    # open files), not through a listing of every bucket: that listing took 14-156 s at load 450,
+    # most of a `move --to`'s time (2026-11-03).
     file="${MOVE_TRANSCRIPT[$sid]:-}"
+    if [[ -z "$file" && -n "${MT_ROW_OF[$sid]:-}" ]]; then
+        local _c pid _r
+        IFS="$SEP" read -r _c pid _r <<<"${MT_ROW_OF[$sid]}"
+        file="$(move_transcript "$pid" "$sid" 2>/dev/null || true)"
+    fi
+    if [[ -z "$file" ]]; then
+        move_read_transcripts
+        file="${MOVE_TRANSCRIPT[$sid]:-}"
+    fi
     [[ -n "$file" ]] || return 0
     python3 -c "$MOVE_RECORD_PY" "$MOVE_RECORD_SINCE" "$sid=$file" 2>/dev/null \
         | awk -F'\t' '{ print $3 "\t" $2 }'
@@ -2737,14 +2753,55 @@ MOVE_SWEEP_RECORD="${AGENTBOX_SWEEP_RECORD:-$HOME/.local/share/omp-session-sql/d
 # one walk of each agent directory, which move_transcript then reads instead of walking again.
 MOVE_DEEP_INDEX_DIR=""
 move_to_index_transcripts() {
-    MOVE_DEEP_INDEX_DIR="$(mktemp -d)"
+    # Under agentbox's own cache, not TMPDIR: a session's TMPDIR can be reaped mid-run, and the
+    # index went with it (SPEEDCOACH's plan, 2026-11-03).
+    mkdir -p "$MOVE_TO_JOBS" 2>/dev/null || true
+    MOVE_DEEP_INDEX_DIR="$(mktemp -d -p "$MOVE_TO_JOBS" index.XXXXXX 2>/dev/null || mktemp -d)"
 }
+# Progress of `move --to` before its hand-off: one line a second on stderr naming the step
+# (move_step) and the seconds since the start, and a bound (AGENTBOX_MOVE_SCAN_LIMIT, 600 s) after
+# which it gives up and says the step it was in. Nothing is hung up before the hand-off, so giving
+# up costs nothing. Two leads' dry runs printed nothing for 600 and 900 s (2026-11-03).
+MOVE_PROGRESS_FILE="" MOVE_PROGRESS_PID="" MOVE_PROGRESS_START=0
+MOVE_SCAN_LIMIT="${AGENTBOX_MOVE_SCAN_LIMIT:-600}"
+move_step() { [[ -z "$MOVE_PROGRESS_FILE" ]] || printf '%s\n' "$*" >"$MOVE_PROGRESS_FILE"; }
+move_progress_start() {
+    local main=$$ limit="$MOVE_SCAN_LIMIT"
+    MOVE_PROGRESS_FILE="$(mktemp)"
+    MOVE_PROGRESS_START=$SECONDS
+    echo "starting" >"$MOVE_PROGRESS_FILE"
+    # A limit of 0 means no bound (the tests, and a session that asks for none).
+    (( limit > 0 )) || limit=0
+    (
+        local start=$SECONDS step e
+        while sleep 1; do
+            kill -0 "$main" 2>/dev/null || exit 0
+            step="$(cat "$MOVE_PROGRESS_FILE" 2>/dev/null)" || exit 0
+            e=$((SECONDS - start))
+            echo "agentbox: ${e}s: $step" >&2
+            if (( limit > 0 && e >= limit )); then
+                echo "agentbox: move --to gave up after ${e}s (AGENTBOX_MOVE_SCAN_LIMIT) in: $step; nothing was hung up" >&2
+                kill -TERM "$main" 2>/dev/null
+                exit 0
+            fi
+        done
+    ) &
+    MOVE_PROGRESS_PID=$!
+    trap 'MOVE_SAID=1; exit 124' TERM
+}
+move_progress_stop() {
+    [[ -z "$MOVE_PROGRESS_PID" ]] || kill "$MOVE_PROGRESS_PID" 2>/dev/null || true
+    [[ -z "$MOVE_PROGRESS_FILE" ]] || rm -f "$MOVE_PROGRESS_FILE"
+    MOVE_PROGRESS_PID="" MOVE_PROGRESS_FILE=""
+}
+
 # The one EXIT trap of `agentbox move` (cmd_move): it removes the index, and for `--to` it says
 # why the command ended when no refusal did. A second `trap … EXIT` replaced the first and
 # silenced that message, so nothing else sets one.
 MOVE_FORM=""
 move_exit() {
     local rc=$?
+    move_progress_stop
     [[ -z "$MOVE_DEEP_INDEX_DIR" ]] || rm -rf "$MOVE_DEEP_INDEX_DIR"
     if [[ "$MOVE_FORM" == --to ]] && (( rc != 0 )) && [[ -z "$MOVE_SAID" ]]; then
         echo "agentbox: move --to stopped with exit $rc and no message of its own; nothing was hung up. This is a bug: report it with the command you ran." >&2
@@ -2755,25 +2812,51 @@ move_transcript() {
     [[ -n "$sid" ]] || return 1
     # One `find` over the descriptors, not a `readlink` fork per descriptor: a lead's omp holds
     # thousands, and at load 500 the forks made a group's plan run for half an hour (2026-11-02).
-    link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*/sessions/*_${sid}.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
+    # Any path, not only one under a `sessions/` directory: an archived transcript is open at its
+    # target under /mnt/durable/<user>/omp-sessions-moved (SPEEDCOACH's 01a16c67, 2026-11-03).
+    link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*_${sid}.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
     if [[ -n "$link" ]]; then printf '%s\n' "$link"; return 0; fi
+    # A subagent's transcript it holds open is `<own transcript without .jsonl>/<name>.jsonl`:
+    # an idle lead holds only those (01a15237, 2026-11-03).
+    link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*_${sid}/*.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
+    if [[ -n "$link" && -e "${link%/*}.jsonl" ]]; then printf '%s\n' "${link%/*}.jsonl"; return 0; fi
     while IFS= read -r -d '' arg; do
         if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
     done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
     dir="$(move_agent_dir "$pid")/sessions"
+    # Then by name, at depth 2 only (<bucket>/<stamp>_<id>.jsonl), without following symlinks:
+    # first in the bucket of the omp's working directory, which omp names after it, then in every
+    # bucket. `find -L … -maxdepth 4` over this host's 1,768 buckets, through every subagent log
+    # offloaded behind a symlink to /mnt/durable, ran past 20 minutes at load 300 for one idle
+    # lead (2026-11-03) and held the whole `move --to` there; a glob at depth 3 took 80 s.
+    local cwd bucket
+    cwd="$(readlink "$PROC/$pid/cwd" 2>/dev/null || true)"
+    if [[ -n "$cwd" ]]; then
+        bucket="${cwd#"$HOME"}"
+        bucket="-${bucket#/}"
+        bucket="${bucket//\//-}"
+        found=()
+        for link in "$dir/$bucket"/*_"$sid".jsonl; do [[ -e "$link" || -L "$link" ]] && found+=("$link"); done
+        if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
+    fi
     if [[ -n "$MOVE_DEEP_INDEX_DIR" ]]; then
-        # One walk of the agent directory for every session a run asks about, kept in a file so
-        # that the $(…) subshells this is called in share it: the walk took 12.5 s here at load
-        # 300, and `move --plan --to` asked it of each idle session in turn for over 40 minutes.
+        # One listing of the buckets for every session a run asks about, kept in a file that the
+        # $(…) subshells this is called in share.
         local idx
         idx="$MOVE_DEEP_INDEX_DIR/$(printf '%s' "$dir" | md5sum | cut -c1-16)"
         if [[ ! -e "$idx" ]]; then
-            find -L "$dir" -maxdepth 4 -type f -name '*_*.jsonl' 2>/dev/null >"$idx.$BASHPID" || true
-            mv -f "$idx.$BASHPID" "$idx"
+            mkdir -p "$MOVE_DEEP_INDEX_DIR" 2>/dev/null || true
+            if find "$dir" -mindepth 2 -maxdepth 2 -name '*_*.jsonl' >"$idx.$BASHPID" 2>/dev/null; then
+                mv -f "$idx.$BASHPID" "$idx" 2>/dev/null || true
+            fi
         fi
-        mapfile -t found < <(grep -- "_${sid}\.jsonl\$" "$idx" || true)
+        if [[ -r "$idx" ]]; then
+            mapfile -t found < <(grep -- "_${sid}\.jsonl\$" "$idx" || true)
+        else
+            mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 2 -name "*_${sid}.jsonl" 2>/dev/null)
+        fi
     else
-        mapfile -t found < <(find -L "$dir" -maxdepth 4 -type f -name "*_${sid}.jsonl" 2>/dev/null)
+        mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 2 -name "*_${sid}.jsonl" 2>/dev/null)
     fi
     if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
     if [[ -r "$MOVE_SWEEP_RECORD" ]]; then
@@ -2824,7 +2907,23 @@ move_session_spec() {
     move_resume_check "$pid" "$sid" "${MOVE_SPEC[@]}"
 }
 
+# One census per run when MOVE_CENSUS_ONCE is on (a `move --to` or `--self` asks it to identify
+# the caller and again to read the host; each read costs ~20 s at load 300).
+MOVE_CENSUS_ONCE=false MOVE_CENSUS_SAVED="" MOVE_CENSUS_HAVE=false
 move_census() {
+    if $MOVE_CENSUS_ONCE && $MOVE_CENSUS_HAVE; then
+        [[ -z "$MOVE_CENSUS_SAVED" ]] || printf '%s\n' "$MOVE_CENSUS_SAVED"
+        return 0
+    fi
+    if $MOVE_CENSUS_ONCE; then
+        MOVE_CENSUS_SAVED="$(move_census_read)"
+        MOVE_CENSUS_HAVE=true
+        [[ -z "$MOVE_CENSUS_SAVED" ]] || printf '%s\n' "$MOVE_CENSUS_SAVED"
+        return 0
+    fi
+    move_census_read
+}
+move_census_read() {
     local -A pane_id=() pane_at=() cname=() comm=() ppid=() ctr=() unit=() cwd=() sid=()
     local pids=() files=() pid parent key name value id class detail chain found guard line leaf child
     local server=() panes="" err rc=0
@@ -3513,6 +3612,11 @@ cmd_move_self() {
         move_self_in_box "$dry" "${raw_dirs[@]+"${raw_dirs[@]}"}"
         return $?
     fi
+    # As `move --to` does: one census and one list of the in-box paths, read in this shell so
+    # the $(…) subshells below inherit them.
+    MOVE_CENSUS_ONCE=true
+    move_census >/dev/null
+    move_in_box_paths
     move_self_identify "agentbox move --self"
     local pid="$MOVE_SELF_PID" sid="$MOVE_SELF_SID" pane="$MOVE_SELF_PANE" at="$MOVE_SELF_AT" cwd="$MOVE_SELF_CWD" detail="$MOVE_SELF_DETAIL"
     local dirs=() whys=() spec=() d path why
@@ -3821,6 +3925,28 @@ move_to_halted() {
 # both machines, which halts every later move too.
 MOVE_TO_WHY=""
 NO_OFFBOX="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/no-offbox"
+# The state of the target's health check (devbox/sami-devbox-check), from its newest log
+# $MOVE_TO_CUTOVER/a2-<UTC stamp>.log there: it deletes target-ready when it starts and writes it
+# again only after a run with no failure, usually 8-13 minutes later.
+move_to_check_state() {
+    local target="$1" out name rest
+    out="$(move_remote "$target" "f=\$(ls -1t $(printf '%q' "$MOVE_TO_CUTOVER")/a2-*.log 2>/dev/null | head -n 1); [ -n \"\$f\" ] || exit 0; printf '%s\\n' \"\$f\"; tail -n 20 \"\$f\" | grep -c '^FAIL' || true" </dev/null 2>/dev/null)" || out=""
+    name="$(sed -n 1p <<<"$out")"
+    rest="$(sed -n 2p <<<"$out")"
+    if [[ -z "$name" ]]; then
+        echo "Its health check (devbox/sami-devbox-check) has written no log there; the box-health lead decides"
+        return 0
+    fi
+    name="${name##*/a2-}"
+    name="${name%.log}"
+    local when="${name:0:4}-${name:4:2}-${name:6:2} ${name:9:2}:${name:11:2}:${name:13:2}Z"
+    if [[ "${rest:-0}" != 0 ]]; then
+        echo "The last health check (devbox/sami-devbox-check, started $when) FAILED, so it is not written again until a check passes; the box-health lead decides"
+    else
+        echo "A health check (devbox/sami-devbox-check) started at $when deletes it while it runs and writes it again when it passes, usually 8-13 min after its start. Run the move again then"
+    fi
+}
+
 move_to_preflight() {
     local target="$1" halted running me
     shift
@@ -3846,7 +3972,7 @@ move_to_preflight() {
             fi
         done
         if (( waited >= 0 )); then
-            MOVE_TO_WHY="$target has no $MOVE_TO_READY. Its health check (devbox/sami-devbox-check) deletes that file when it starts and writes it again only after a run with no failure, and a run takes about 6 minutes, so this usually means a check is in flight$( (( MOVE_TO_READY_WAIT > 0 )) && echo " (waited ${waited}s)"). Run the move again in about 6 minutes; if it is still missing then, the last check FAILED and the box-health lead decides"
+            MOVE_TO_WHY="$target has no $MOVE_TO_READY$( (( MOVE_TO_READY_WAIT > 0 )) && echo " (waited ${waited}s)"). $(move_to_check_state "$target")"
             return 1
         fi
     fi
@@ -4152,6 +4278,109 @@ move_to_session_paths() {
     return 0
 }
 
+# move_to_gate ASKED…: what a move copies is what the session asked for - its --dir paths of
+# this move, its working directory, its transcript - and what it was inferred to use at that
+# path's exact size: a file as that file, a git tree as that tree, its git storage. An inferred
+# directory in no git tree is copied only when it is under MOVE_TO_GATE_BYTES (5 GB); one over
+# that, or that `du` cannot measure in MOVE_TO_GATE_WAIT seconds, leaves the copy and is listed
+# in MOVE_TO_UNASKED with its size, to pass with --dir. PROCS's move (2026-11-03 07:09Z) held
+# all of /mnt/nvme/sami/wt - 323 GB of every session's worktrees - for one file and one worktree
+# of its own there.
+MOVE_TO_GATE_BYTES="${AGENTBOX_MOVE_GATE_BYTES:-5000000000}"
+MOVE_TO_GATE_WAIT="${AGENTBOX_MOVE_GATE_WAIT:-20}"
+MOVE_TO_UNASKED=()
+move_to_gate() {
+    local p a asked c real size
+    local -a check=() keep_mirror=() keep_merge=()
+    local -A sizes=() stores=()
+    MOVE_TO_UNASKED=()
+    for c in "$SRC"/*/.git; do
+        [[ -d "$c/objects" ]] || continue
+        real="$(readlink -f "$c/objects" 2>/dev/null)" && stores[$real]=1
+    done
+    move_to_gated() {
+        local p="$1" a
+        [[ -d "$p" && ! -L "$p" ]] || return 1
+        for a in "${@:2}"; do [[ -n "$a" ]] && move_within "$p" "$a" && return 1; done
+        [[ -e "$p/.git" || ( -e "$p/HEAD" && -e "$p/objects" ) || -n "${stores[$p]:-}" ]] && return 1
+        move_git_root_var "$p" && return 1
+        return 0
+    }
+    for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        move_to_gated "$p" "$@" && check+=("$p")
+    done
+    if (( ${#check[@]} )); then
+        while IFS=$'\t' read -r size p; do
+            [[ -n "$p" ]] && sizes[$p]="$size"
+        done < <(printf '%s\0' "${check[@]}" \
+            | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_GATE_WAIT" du -sxb 2>/dev/null || true)
+    fi
+    for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
+        if move_to_gate_drops "$p"; then continue; fi
+        keep_mirror+=("$p")
+    done
+    for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        if move_to_gate_drops "$p"; then continue; fi
+        keep_merge+=("$p")
+    done
+    MOVE_TO_MIRROR=(${keep_mirror[@]+"${keep_mirror[@]}"})
+    MOVE_TO_MERGE=(${keep_merge[@]+"${keep_merge[@]}"})
+}
+# For move_to_gate, which sets check and sizes: true, and the path listed, when it is dropped.
+move_to_gate_drops() {
+    local p="$1" c
+    for c in ${check[@]+"${check[@]}"}; do
+        [[ "$c" == "$p" ]] || continue
+        if [[ -z "${sizes[$p]:-}" ]]; then
+            MOVE_TO_UNASKED+=("$p (not measured within ${MOVE_TO_GATE_WAIT}s)")
+            return 0
+        fi
+        if (( sizes[$p] > MOVE_TO_GATE_BYTES )); then
+            MOVE_TO_UNASKED+=("$p ($(numfmt --to=iec "${sizes[$p]}"))")
+            return 0
+        fi
+        return 1
+    done
+    return 1
+}
+
+# move_to_not_carried TOUCHES: from "<link>\t<target>" lines (the session's processes' working
+# directories and open files), each directory the session uses that the copy does not carry and
+# the target does not have by itself: the list its owner says yes to before the hang-up.
+move_to_not_carried() {
+    local link t d p carried
+    local -A seen=()
+    while IFS=$'\t' read -r link t; do
+        [[ "$t" == /* && "$t" != *" (deleted)" ]] || continue
+        if [[ "$link" == */cwd ]]; then d="$t"; else d="${t%/*}"; fi
+        [[ -n "$d" && -z "${seen[$d]:-}" ]] || continue
+        seen[$d]=1
+        case "$d" in /|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|/tmp|/tmp/*|/usr|/usr/*|/lib*|/etc|/etc/*|/opt|/opt/*|/bin|/bin/*|/sbin|/sbin/*|/var|/var/*|/snap/*) continue ;; esac
+        move_dir_in_box "$d" && ! move_within "$d" "$SRC" && continue
+        move_dir_dies_with_omp "$d" && continue
+        carried=false
+        for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"} ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"}; do
+            if move_within "$d" "$p" || move_within "$t" "$p"; then carried=true; break; fi
+        done
+        $carried || printf '%s\n' "$d"
+    done | sort -u | awk 'NR == 1 || index($0, prev "/") != 1 { print; prev = $0 }' | head -40
+}
+
+# The two lists the owner says yes to, and what was left out for its size.
+move_to_print_lists() {
+    local target="$1" not_carried="$2" p
+    echo "CARRIED to $target (say yes to this list):"
+    for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do echo "  mirror  $p"; done
+    for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do echo "  merge   $p"; done
+    for p in ${MOVE_TO_MKDIR[@]+"${MOVE_TO_MKDIR[@]}"}; do echo "  empty   $p"; done
+    echo "NOT CARRIED (the session will not see these on $target; pass --dir for any it needs):"
+    if [[ -n "$not_carried" ]]; then sed 's/^/  /' <<<"$not_carried"; else echo "  (nothing its processes use now)"; fi
+    if (( ${#MOVE_TO_UNASKED[@]} )); then
+        echo "WOULD COPY, NOT ASKED FOR (inferred, over $(numfmt --to=si "$MOVE_TO_GATE_BYTES")B or not measurable; pass --dir to carry it):"
+        printf '  %s\n' "${MOVE_TO_UNASKED[@]}"
+    fi
+}
+
 # move_to_copy_lists: from "mirror\t<path>" / "merge\t<path>" lines on stdin, MOVE_TO_MIRROR
 # (copied with deletions) and MOVE_TO_MERGE (no deletion, nothing newer replaced), each the
 # smallest set of paths covering the others, with a symlink's target beside the link. A working
@@ -4332,10 +4561,26 @@ move_to_git_native_plan() {
     # same path - is not copied either, whether or not a tree of it is mirrored: INFRA-1018's move
     # (2026-11-03 05:32Z) --leave'd ~/src/machcsl-riscv, so no tree of it went through git, and
     # 8.96 GB of /mnt/nvme/sami/git-objects/machcsl-riscv went to a target that had the clone.
+    # An object store merged on its own (a tree's objects linked elsewhere, as
+    # /mnt/nvme/<user>/git-objects/machcsl-riscv for ~/src/machcsl-riscv) counts as the checkout
+    # whose .git/objects resolves to it: PROCS's job (06:53Z) carried that store alone.
     local -a held=()
+    local -A store_of=()
+    local c real
+    for c in "$SRC"/*/.git; do
+        [[ -d "$c/objects" ]] || continue
+        real="$(readlink -f "$c/objects" 2>/dev/null)" || continue
+        [[ "$real" == "$c/objects" ]] || store_of[$real]="$c"
+    done
     for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
-        [[ -e "$p/HEAD" && -e "$p/objects" ]] || continue
-        move_remote "$target" "test -d $(printf '%q' "$p/objects")" </dev/null >/dev/null 2>&1 || continue
+        if [[ -e "$p/HEAD" && -e "$p/objects" ]]; then
+            c="$p"
+        elif [[ -n "${store_of[$(readlink -f "$p" 2>/dev/null || echo "$p")]:-}" ]]; then
+            c="${store_of[$(readlink -f "$p" 2>/dev/null || echo "$p")]}"
+        else
+            continue
+        fi
+        move_remote "$target" "test -d $(printf '%q' "$c/objects")" </dev/null >/dev/null 2>&1 || continue
         held+=("$p")
     done
     (( ${#MOVE_TO_NATIVE[@]} + ${#MOVE_TO_UNBORN[@]} + ${#held[@]} )) || return 0
@@ -4365,21 +4610,36 @@ move_to_git_native_plan() {
     return 0
 }
 
-# BEFORE the hang-up: the other local branches of each native tree, without force (a branch the
-# target has only moves forward). From a blob:none partial clone this packs every branch's
-# objects, which took 3+ minutes for LINUX-1248's machcsl-riscv on 2026-11-03 - all of it in the
-# session's downtime while it ran after the hang-up. A failure here is logged and costs nothing:
-# the branches stay unpushed. $2 is a function that logs one line.
+# BEFORE the hang-up: the local branches of each native tree's REPOSITORY, once per repository
+# (S3's 50 worktrees of a few repositories each pushed every branch of the same repository,
+# 1-535 s each, 40 minutes in all, 2026-11-03), and only the branches the target lacks or that
+# moved, without force (a branch the target has only moves forward). From a blob:none partial
+# clone a push packs every branch's objects, which took 3+ minutes for LINUX-1248's machcsl-riscv
+# after its hang-up. A failure here is logged and costs nothing: those branches stay unpushed.
+# $2 is a function that logs one line.
 move_to_git_native_prepush() {
-    local target="$1" log="${2:-echo}" n w common start
+    local target="$1" log="${2:-echo}" n common start there ref sha
+    local -A done_=() theirs=()
+    local -a refs=()
     for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
-        w="${n%%$'\t'*}" common="${n#*$'\t'}"
+        common="${n#*$'\t'}"
+        [[ -z "${done_[$common]:-}" ]] || continue
+        done_[$common]=1
         start=$SECONDS
-        if GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
-            "$MOVE_TO_USER@$target:$common" 'refs/heads/*:refs/heads/*' >/dev/null 2>&1; then
-            "$log" "pushed the local branches of $w before the hang-up ($((SECONDS - start))s)"
+        theirs=()
+        there="$(GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git --git-dir="$common" ls-remote --heads "$MOVE_TO_USER@$target:$common" 2>/dev/null)" || there=""
+        while read -r sha ref; do [[ -n "$ref" ]] && theirs[$ref]="$sha"; done <<<"$there"
+        refs=()
+        while read -r sha ref; do
+            [[ "${theirs[$ref]:-}" == "$sha" ]] || refs+=("$ref:$ref")
+        done < <(git --git-dir="$common" for-each-ref --format='%(objectname) %(refname)' refs/heads 2>/dev/null)
+        if (( ${#refs[@]} == 0 )); then
+            "$log" "the branches of $common are on $target already ($((SECONDS - start))s)"
+        elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git --git-dir="$common" push --quiet --no-verify \
+            "$MOVE_TO_USER@$target:$common" "${refs[@]}" >/dev/null 2>&1; then
+            "$log" "pushed ${#refs[@]} branch(es) of $common before the hang-up ($((SECONDS - start))s)"
         else
-            "$log" "the local branches of $w were not all pushed ($((SECONDS - start))s; one the target has may not move forward); the move goes on"
+            "$log" "${#refs[@]} branch(es) of $common were not all pushed ($((SECONDS - start))s; one the target has may not move forward); the move goes on"
         fi
     done
     return 0
@@ -4596,9 +4856,11 @@ move_to_process_trees() {
 }
 
 # move_to_records_parallel SID…: move_to_session_record for each SID not read yet, in parallel,
-# MOVE_RECORD_JOBS at a time, each in a subshell that leaves its answer in files.
+# MOVE_RECORD_JOBS at a time, each in a subshell that leaves its answer in files. It waits for its
+# own workers by pid: a bare `wait` also waited for the progress line of `move --to`, which runs
+# until the command ends, and so held every dry run to its time limit (2026-11-03).
 move_to_records_parallel() {
-    local s tmp running=0 todo=()
+    local s tmp todo=() workers=() w
     for s in "$@"; do [[ -n "${MT_DONE[$s]:-}" ]] || todo+=("$s"); done
     (( ${#todo[@]} )) || return 0
     tmp="$(mktemp -d)"
@@ -4609,10 +4871,13 @@ move_to_records_parallel() {
             printf '%s' "${MT_SHARE[$s]}" >"$tmp/$s.share"
             printf '%s' "${MT_COPY[$s]}" >"$tmp/$s.copy"
         ) &
-        running=$((running + 1))
-        if (( running >= MOVE_RECORD_JOBS )); then wait -n || true; running=$((running - 1)); fi
+        workers+=("$!")
+        if (( ${#workers[@]} >= MOVE_RECORD_JOBS )); then
+            wait "${workers[0]}" 2>/dev/null || true
+            workers=("${workers[@]:1}")
+        fi
     done
-    wait || true
+    for w in ${workers[@]+"${workers[@]}"}; do wait "$w" 2>/dev/null || true; done
     for s in "${todo[@]}"; do
         MT_DONE[$s]=1
         MT_ROW[$s]="${MT_ROW_OF[$s]}"
@@ -4639,47 +4904,45 @@ move_to_session_record() {
         MT_COPY[$s]="$(printf '%s\n' ${MOVE_TO_COPY[@]+"${MOVE_TO_COPY[@]}"})"
     fi
 }
-# move_to_find_group SID [DIR…]: SID's group in MOVE_TO_GROUP (SID first). A member's trees are
-# the git trees its own LIVE processes work in (move_to_process_trees), plus, for SID, the tree of
-# the working directory it resumes in (--cwd). A session joins when one of its processes has its
-# working directory, or a file open for writing, in a tree of a member, until nothing is added.
-# Then each member's paths are inferred, in parallel. A tree a member only names - by --dir or in
-# its record - is copied but groups nobody: S3's --dir of ~/src/binary-equivalence-taiga, a
-# checkout many sessions work in, grew a group whose listing ran past 900 s (2026-11-03), and a
-# session that does not work in a tree now does not need its users moved. Inferring every session
-# of this host one after the other took 221 s at load 300 (2026-11-02), all of it before the
-# hang-up. Needs move_to_scan_processes. DIR… are SID's own --dir paths.
+# move_to_find_group SID [DIR…]: SID's group in MOVE_TO_GROUP (SID first): SID and every session
+# with a process whose working directory, or a file open for writing, is in one of SID's own git
+# trees - the trees its live processes work in (move_to_process_trees), the tree it resumes in,
+# and the git trees its paths name. Only SID's trees: a member's other trees pull nobody in. The
+# closure over every member's trees pulled most of this host into the INFRA lead's group, and its
+# dry run ran past 400 s at load 500 (2026-11-03). A group of more than MOVE_TO_GROUP_MAX
+# sessions is refused with the trees and sessions that make it, before any member's paths are
+# inferred: such a tree is a shared checkout, which a session leaves with --leave or works in
+# from a worktree of its own. Needs move_to_scan_processes. DIR… are SID's own --dir paths.
+MOVE_TO_GROUP_MAX="${AGENTBOX_MOVE_GROUP_MAX:-6}"
 move_to_find_group() {
-    local self="$1" s i=0 o link trees own_cwd_tree=""
+    local self="$1" o link trees="" own_cwd_tree="" t
     shift
-    local queue=("$self")
-    local -A in=([$self]=1)
+    local -A in=([$self]=1) why=()
     MOVE_USE_PLAN=true
-    MOVE_TO_GROUP=()
+    MOVE_TO_GROUP=("$self")
     move_to_session_record "$self" "$@"
     if [[ -n "$MOVE_SELF_CWD" ]] && move_git_root_var "$MOVE_SELF_CWD" && ! move_dir_too_broad "$MOVE_GIT_ROOT"; then
         own_cwd_tree="$MOVE_GIT_ROOT"
     fi
-    while (( i < ${#queue[@]} )); do
-        s="${queue[i]}"
-        i=$((i + 1))
-        [[ -n "${MT_ROW_OF[$s]:-}" ]] || continue
-        MOVE_TO_GROUP+=("$s")
-        trees="$(move_to_process_trees "$s")"
-        [[ "$s" != "$self" || -z "$own_cwd_tree" ]] || trees+=$'\n'"$own_cwd_tree"
-        while IFS=$'\t' read -r o link; do
-            [[ -z "${in[$o]:-}" ]] || continue
-            move_to_writes "$link" || continue
-            in[$o]=1
-            queue+=("$o")
-        done < <(TREES="$trees" awk -F'\t' '
-            BEGIN { n = split(ENVIRON["TREES"], t, "\n") }
-            {
-                p = $3
-                if ($2 !~ /\/cwd$/) sub(/\/[^\/]*$/, "", p)
-                for (k = 1; k <= n; k++) if (t[k] != "" && (p == t[k] || index(p, t[k] "/") == 1)) { print $1 "\t" $2; next }
-            }' <<<"$MT_TOUCHES")
-    done
+    trees="$(move_to_process_trees "$self")"$'\n'"$own_cwd_tree"$'\n'"${MT_SHARE[$self]:-}"
+    while IFS=$'\t' read -r o link t; do
+        [[ -n "${MT_ROW_OF[$o]:-}" && -z "${in[$o]:-}" ]] || continue
+        move_to_writes "$link" || continue
+        in[$o]=1
+        why[$o]="$t"
+        MOVE_TO_GROUP+=("$o")
+    done < <(TREES="$trees" awk -F'\t' '
+        BEGIN { n = split(ENVIRON["TREES"], t, "\n") }
+        {
+            p = $3
+            if ($2 !~ /\/cwd$/) sub(/\/[^\/]*$/, "", p)
+            for (k = 1; k <= n; k++) if (t[k] != "" && (p == t[k] || index(p, t[k] "/") == 1)) { print $1 "\t" $2 "\t" t[k]; next }
+        }' <<<"$MT_TOUCHES")
+    if (( ${#MOVE_TO_GROUP[@]} > MOVE_TO_GROUP_MAX )); then
+        local o2 list=""
+        for o2 in "${MOVE_TO_GROUP[@]:1}"; do list+="$o2 in ${why[$o2]}; "; done
+        die "this session's group would be ${#MOVE_TO_GROUP[@]} sessions (over $MOVE_TO_GROUP_MAX), through shared trees: ${list% }. Nothing was hung up. Work in a worktree of your own and pass --leave for the shared tree (agentbox move --to <machine> --cwd <your tree> --leave <shared tree>), or name the group's sessions to Main"
+    fi
     move_to_records_parallel "${MOVE_TO_GROUP[@]}"
 }
 
@@ -4817,10 +5080,16 @@ cmd_move_to() {
         move_to_in_box "$target" "$dry" ${raw_dirs[@]+"${raw_dirs[@]}"}
         return $?
     fi
+    move_progress_start
+    # Read once, in this shell, what the $(…) subshells below would each read again.
+    MOVE_CENSUS_ONCE=true
+    move_step "reading this host's omp processes (the census)"
+    move_census >/dev/null
+    move_in_box_paths
     move_self_identify "agentbox move --to $target"
     local sid="$MOVE_SELF_SID" s members=() missing=() m err group
     move_to_index_transcripts
-    echo "agentbox move --to $target: reading this host's sessions' processes to find this session's group" >&2
+    move_step "reading this host's processes (one census, one find over /proc)"
     move_to_scan_processes
     # --cwd / --leave: the session resumes in another tree and leaves one it no longer works in, so
     # it does not group with the sessions there (LINUX-1248, 2026-11-03: its omp's working
@@ -4859,10 +5128,14 @@ cmd_move_to() {
         fi
     fi
     [[ -n "${MT_ROW_OF[$sid]:-}" ]] || die "session $sid is not in this host's census"
+    move_step "finding this session's group and inferring its paths"
     move_to_find_group "$sid" ${BOX_DIRS[@]+"${BOX_DIRS[@]}"}
     [[ -n "${MT_DIRS[$sid]:-}" ]] || die "$(move_dirs_why "$MOVE_SELF_CWD" "$MOVE_SELF_PID" "$sid" 2>&1 >/dev/null || true)"
     group="g-$(printf '%s\n' "${MOVE_TO_GROUP[@]}" | sort | head -1 | cut -c1-8)"
+    local k=0
     for s in "${MOVE_TO_GROUP[@]}"; do
+        k=$((k + 1))
+        move_step "reading member $k of ${#MOVE_TO_GROUP[@]} ($s): its transcript, its spec, its pane"
         err="$(mktemp)"
         if m="$(move_to_member "$s" "$target" 2>"$err")"; then members+=("$m"); else missing+=("$(<"$err")"); fi
         rm -f "$err"
@@ -4876,14 +5149,24 @@ cmd_move_to() {
     # A dry run never waits for the target; it says what the move would wait for.
     $dry && MOVE_TO_READY_WAIT=0
     move_to_or_would() { if $dry; then would+=("$1"); else die "no move to $target; nothing was hung up: $1"; fi; }
+    move_step "asking $target: ready, halts, the same sessions there"
     move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || move_to_or_would "$MOVE_TO_WHY"
-    local copy="" cwds=()
+    local copy="" cwds=() tpaths="" t
     for s in "${MOVE_TO_GROUP[@]}"; do
         copy+="${MT_COPY[$s]}"$'\n'
-        copy+="$(move_to_transcript_paths "$(jq -r --arg s "$s" 'select(.sid == $s) | .resume' <<<"$(printf '%s\n' "${members[@]}")")")"$'\n'
+        t="$(move_to_transcript_paths "$(jq -r --arg s "$s" 'select(.sid == $s) | .resume' <<<"$(printf '%s\n' "${members[@]}")")")"
+        copy+="$t"$'\n'
+        tpaths+="$(cut -f2 <<<"$t")"$'\n'
     done
     move_to_copy_lists <<<"$copy"
     mapfile -t cwds < <(printf '%s\n' "${members[@]}" | jq -r .cwd)
+    # Only what was asked for, or inferred at its own size (move_to_gate).
+    move_step "measuring the inferred directories the session did not name"
+    local -a asked=()
+    mapfile -t asked < <(printf '%s\n' ${BOX_DIRS[@]+"${BOX_DIRS[@]}"} "${cwds[@]}" $tpaths | sed '/^$/d')
+    move_to_gate "${asked[@]}"
+    local not_carried
+    not_carried="$(awk -F'\t' -v ids=" ${MOVE_TO_GROUP[*]} " 'index(ids, " " $1 " ") { print $2 "\t" $3 }' <<<"$MT_TOUCHES" | move_to_not_carried)"
     move_to_cwds_present "$target" "${cwds[@]}" || move_to_or_would "$MOVE_TO_WHY"
     move_to_dests_writable "$target" || move_to_or_would "$MOVE_TO_WHY"
     move_to_offbox || move_to_or_would "$MOVE_TO_WHY"
@@ -4898,14 +5181,7 @@ cmd_move_to() {
         done
     fi
     echo "agentbox: group $group, ${#MOVE_TO_GROUP[@]} session(s): ${MOVE_TO_GROUP[*]}"
-    echo "copied to $target as mirrors (deletions too; what they replace there is kept under $MOVE_TO_CUTOVER/replaced/):"
-    printf '  %s\n' ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}
-    echo "merged into $target (git storage: nothing newer there replaced, nothing deleted):"
-    printf '  %s\n' ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}
-    if (( ${#MOVE_TO_MKDIR[@]} )); then
-        echo "made EMPTY on $target (a working directory that holds other sessions' trees; only what is listed above is copied into it):"
-        printf '  %s\n' "${MOVE_TO_MKDIR[@]}"
-    fi
+    move_to_print_lists "$target" "$not_carried"
     for m in "${members[@]}"; do
         jq -r --arg t "$MOVE_TO_AGENTBOX" '"  \(.sid): tmux window moved:\(.sid[0:8]) on the target runs \($t) new \(.spec | join(" ")) -- omp --resume \(.resume)"' <<<"$m"
     done
@@ -4963,8 +5239,21 @@ move_to_in_box() {
         if move_git_root_var "$d"; then copy+="mirror	$d"$'\n'; else copy+="merge	$d"$'\n'; fi
     done
     copy+="$(move_to_src_trees "$cwd" "${own:-}")"$'\n'
-    copy+="$(move_to_transcript_paths "$resume")"$'\n'
+    local tpaths
+    tpaths="$(move_to_transcript_paths "$resume")"
+    copy+="$tpaths"$'\n'
     move_to_copy_lists <<<"$copy"
+    # Only what was asked for - this move's --dir paths (the box's own are inferred), the working
+    # directory, the transcript - or inferred at its own size (move_to_gate).
+    local -a asked=()
+    mapfile -t asked < <(printf '%s\n' "${@}" "$cwd" $(cut -f2 <<<"$tpaths") | sed '/^$/d')
+    move_to_gate "${asked[@]}"
+    local touches="" p
+    if [[ -n "${own:-}" ]]; then
+        local -a procs=()
+        while IFS= read -r p; do procs+=("$PROC/$p/cwd" "$PROC/$p/fd"); done < <(move_read_kids; move_descendants "$own")
+        (( ${#procs[@]} )) && touches="$(find "${procs[@]}" -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null || true)"
+    fi
     # The box may not see every pattern file or marker; the relauncher on the host asks again.
     move_to_offbox || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
     if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"; fi
@@ -4977,7 +5266,7 @@ move_to_in_box() {
         --argjson spec "$(move_json_array "${spec[@]}")" --argjson tmux "$(move_json_array ${sock:+-S "$sock"})" \
         '{sid: $sid, pid: 0, box: $box, pane: $pane, at: "", cwd: $cwd, resume: $resume, spec: $spec, tmux: $tmux, tmux_bin: ""}')"
     echo "agentbox: session $sid, in box ${AGENTBOX_BOX:-?}, moves to $target as: $MOVE_TO_AGENTBOX new ${spec[*]} -- omp --resume $resume"
-    printf '  to copy: %s\n' ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}
+    move_to_print_lists "$target" "$(move_to_not_carried <<<"$touches")"
     if [[ "$dry" == true ]]; then echo "agentbox: --dry-run: nothing was hung up, copied or sent"; return 0; fi
     job="$(move_to_job "$target" "$group" "$member")" || die "could not write the move's job file under $MOVE_TO_JOBS"
     tmux run-shell -b -t "$pane" "$(printf 'setsid %q move --to-run %q </dev/null >>%q 2>&1' \
@@ -4997,6 +5286,23 @@ move_to_in_box() {
 # after the 04:10Z hang-up, since it read only the `move --self` log. A relauncher stopped by a
 # signal says so, with the step it was in, so its log never ends at "copying".
 MOVE_TO_ACTIVE="$MOVE_TO_JOBS/active"
+MOVE_TO_MAX_FLIGHT="${AGENTBOX_MOVE_MAX_FLIGHT:-2}"
+MOVE_TO_FLIGHT_POLL="${AGENTBOX_MOVE_FLIGHT_POLL:-10}"
+# move_to_in_flight GROUP: the other groups with a live relauncher's active claim, space-separated.
+move_to_in_flight() {
+    local f pid job g
+    local -A groups=()
+    for f in "$MOVE_TO_ACTIVE"/*; do
+        [[ -f "$f" ]] || continue
+        pid="$(sed -n 's/^pid=//p' "$f" 2>/dev/null)"
+        job="$(sed -n 's/^job=//p' "$f" 2>/dev/null)"
+        [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || continue
+        g="${job##*/}"
+        g="${g%%-2[0-9][0-9][0-9][0-9][0-9][0-9][0-9]T*}"
+        [[ -n "$g" && "$g" != "$1" ]] && groups[$g]=1
+    done
+    printf '%s ' "${!groups[@]}"
+}
 move_to_run() {
     local job="$1" target group n i stamp me reason=""
     MOVE_TO_STATE="reading the job"
@@ -5090,6 +5396,18 @@ move_to_run() {
     trap 'move_to_run_signal HUP 129' HUP
     # The ready files are spent: a member that comes back here starts its next move afresh.
     for ((i = 0; i < n; i++)); do rm -f "$MOVE_TO_JOBS/ready/${sids[i]}"; done
+    # At most MOVE_TO_MAX_FLIGHT moves in flight from this host (default 2): ~35 sessions move
+    # themselves at once tonight, and each copy competes for the same disks and link. A move
+    # waits while that many OTHER groups hold active claims with live relaunchers.
+    local flight said_flight=""
+    while flight="$(move_to_in_flight "$group")" && (( $(wc -w <<<"$flight") >= MOVE_TO_MAX_FLIGHT )); do
+        if [[ "$flight" != "$said_flight" ]]; then
+            say "waiting: $(wc -w <<<"$flight") moves in flight: $flight"
+            said_flight="$flight"
+        fi
+        MOVE_TO_STATE="waiting for one of the moves in flight ($flight) to end"
+        sleep "$MOVE_TO_FLIGHT_POLL"
+    done
     MOVE_TO_STATE="checking $target"
     if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
         || ! move_to_dests_writable "$target" || ! move_to_offbox; then

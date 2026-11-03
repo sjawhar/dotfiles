@@ -1626,9 +1626,13 @@ class AgentboxMove(unittest.TestCase):
         self.set_pids()
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        branches = run.stdout.index("pushed the local branches of")
+        # The stub's target is this machine, so its branches are there already: once per
+        # repository, before the hang-up. Two worktrees of repo/.git (wt) and other/.git: two lines.
+        lines = [l for l in run.stdout.splitlines() if "branch" in l and ".git" in l]
+        self.assertEqual(len(lines), 2, run.stdout)
+        self.assertTrue(all("are on devbox already" in l or "before the hang-up" in l for l in lines), lines)
         hangup = run.stdout.index("hung up after")
-        self.assertLess(branches, hangup, run.stdout)
+        self.assertLess(run.stdout.index(lines[-1]), hangup, run.stdout)
 
     def test_a_first_copy_runs_before_the_hang_up_and_each_pass_logs_its_cost(self) -> None:
         """LINUX-1248's copy was 3.69 GB in 178,633 files, 760 s of its downtime (2026-11-03). The
@@ -1665,6 +1669,11 @@ class AgentboxMove(unittest.TestCase):
         (self.root / "lane").mkdir()
         held = self.run_bash(plan)
         self.assertEqual(held.stdout.splitlines(), [f"merge {self.root}/lane"], held.stderr)
+        # The store merged on its own, without its checkout's .git (PROCS, 06:53Z): it counts as
+        # the checkout under $SRC whose .git/objects resolves to it.
+        alone = self.run_bash(f'MOVE_TO_MIRROR=()\nMOVE_TO_MERGE=("{store}" "{self.root}/lane")\n'
+                              'move_to_git_native_plan devbox\nprintf "merge %s\\n" "${MOVE_TO_MERGE[@]}"')
+        self.assertEqual(alone.stdout.splitlines(), [f"merge {self.root}/lane"], alone.stderr)
         (self.remote / "MISSING").write_text(f"{repo}/.git/objects\n", encoding="utf-8")
         lacked = self.run_bash(plan)
         self.assertEqual(sorted(lacked.stdout.splitlines()),
@@ -1712,6 +1721,106 @@ class AgentboxMove(unittest.TestCase):
         self.assertTrue((new.with_suffix("") / "Sub.jsonl").exists())
         self.assertFalse(old.exists())
         self.assertEqual(len(list(sessions.glob(f"*/*_{self.TO}.jsonl"))), 1)
+
+    def test_an_inferred_directory_over_the_limit_is_not_copied_unless_named(self) -> None:
+        """PROCS, 2026-11-03 07:09Z: its copy held all of /mnt/nvme/sami/wt, 323 GB of every
+        session's worktrees, for one file and one worktree of its own there. An inferred directory
+        in no git tree over the limit leaves the copy and is listed; a --dir carries it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        (self.lane / "big.bin").write_bytes(b"x" * 4096)
+        self.env["AGENTBOX_MOVE_GATE_BYTES"] = "1000"
+        self.env["AGENTBOX_MOVE_SCAN_LIMIT"] = "0"
+        dry = self.move_to("--to devbox --dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn("WOULD COPY, NOT ASKED FOR", dry.stdout)
+        self.assertIn(f"  {self.lane} (", dry.stdout)
+        self.assertNotIn(f"  merge   {self.lane}\n", dry.stdout)
+        self.assertIn("CARRIED to devbox (say yes to this list):", dry.stdout)
+        self.assertIn(f"  mirror  {self.worktree}\n", dry.stdout)
+        # The session's processes use the lane, and it is not carried: the owner sees it.
+        self.assertIn("NOT CARRIED (the session will not see these on devbox", dry.stdout)
+        self.assertIn(f"\n  {self.lane}\n", dry.stdout.split("NOT CARRIED")[1])
+        named = self.move_to(f'--to devbox --dry-run --dir "{self.lane}"')
+        self.assertIn(f"  merge   {self.lane}\n", named.stdout)
+        self.assertNotIn("WOULD COPY, NOT ASKED FOR", named.stdout)
+
+    def test_a_relauncher_waits_while_two_other_moves_are_in_flight(self) -> None:
+        """~35 sessions move themselves tonight: at most two moves run at once from a host."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        active = self.root / "cache/omp/agentbox/move-to/active"
+        active.mkdir(parents=True)
+        holders = [subprocess.Popen(["sleep", "8"]) for _ in range(2)]
+        for k, h in enumerate(holders):
+            (active / f"01a1aaaa-0000-7000-8000-00000000000{k}").write_text(
+                f"pid={h.pid}\ntarget=devbox\nstart=0\njob=/x/g-other{k}-20261103T070000Z-1.json\n", encoding="utf-8")
+        self.env["AGENTBOX_MOVE_FLIGHT_POLL"] = "1"
+        start = time.time()
+        run = self.run_bash(f'move_to_run "{job}"')
+        for h in holders:
+            h.wait()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("waiting: 2 moves in flight:", run.stdout)
+        self.assertIn("g-other0", run.stdout)
+        self.assertGreater(time.time() - start, 5)
+        self.assertLess(run.stdout.index("waiting: 2 moves"), run.stdout.index("hung up after"))
+
+    def test_an_archived_transcript_is_found_through_its_open_file(self) -> None:
+        """SPEEDCOACH's 01a16c67 (2026-11-03): its transcript is open at its target under
+        /mnt/durable/<user>/omp-sessions-moved, a path with no `sessions/` part."""
+        archived = self.root / "durable" / "omp-sessions-moved" / "-lane" / f"2026-11-01T09-00-00-000Z_{self.TO}.jsonl"
+        archived.parent.mkdir(parents=True)
+        archived.write_text("{}\n", encoding="utf-8")
+        self.make_proc(999999993, ppid=1, cwd=self.root, writes=(archived,))
+        found = self.run_bash(f"move_transcript 999999993 {self.TO}")
+        self.assertEqual(found.stdout.strip(), str(archived), found.stderr)
+
+    def test_a_dry_run_prints_progress_each_second_and_gives_up_at_its_bound(self) -> None:
+        """Two leads' dry runs printed nothing for 600 and 900 s (2026-11-03). A line a second
+        names the step, and past AGENTBOX_MOVE_SCAN_LIMIT the command gives up and says where."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.env["AGENTBOX_MOVE_SCAN_LIMIT"] = "3"
+        slow = self.run_bash('move_own_omp() { echo 999999901; }\n'
+                             'eval "orig_$(declare -f move_to_find_group)"\n'
+                             'move_to_find_group() { sleep 30; orig_move_to_find_group "$@"; }\n'
+                             'cmd_move --to devbox --dry-run --accept-orphans')
+        self.assertNotEqual(slow.returncode, 0)
+        self.assertRegex(slow.stderr, r"agentbox: \ds: finding this session's group")
+        self.assertIn("move --to gave up after 3s (AGENTBOX_MOVE_SCAN_LIMIT) in: finding this session's group", slow.stderr)
+        self.assertNotIn("no message of its own", slow.stderr)
+
+    def test_branches_are_pushed_once_per_repository(self) -> None:
+        """S3, 2026-11-03: 50 worktrees each pushed every branch of the same repository, 40 min
+        before its hang-up. Two worktrees of one repository make one push of the branches the
+        target lacks."""
+        self.target()
+        repo = self.checkout("onerepo")
+        for name in ("w1", "w2"):
+            self.git("worktree", "add", "-q", "-b", name, str(self.root / name), cwd=repo)
+        (self.remote / "MISSING").write_text("", encoding="utf-8")
+        log = self.root / "GITLOG"
+        write_stub(self.stubs, "git", f'echo "$*" >>"{log}"\n'
+                   'case " $* " in *" ls-remote "*) exit 0 ;; *" push "*) exit 0 ;; esac\nexec /usr/bin/git "$@"')
+        result = self.run_bash(
+            f'MOVE_TO_NATIVE=("{self.root}/w1\t{repo}/.git" "{self.root}/w2\t{repo}/.git")\n'
+            'move_to_git_native_prepush devbox')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pushes = [l for l in log.read_text(encoding="utf-8").splitlines() if " push " in f" {l} "]
+        self.assertEqual(len(pushes), 1, pushes)
+        self.assertIn("refs/heads/w1:refs/heads/w1", pushes[0])
+        self.assertIn("refs/heads/w2:refs/heads/w2", pushes[0])
+        self.assertIn(f"pushed 3 branch(es) of {repo}/.git before the hang-up", result.stdout)
 
     def test_a_resume_that_fails_on_the_target_puts_the_session_back_here(self) -> None:
         transcript = self.moving_session()
@@ -1819,7 +1928,7 @@ class AgentboxMove(unittest.TestCase):
         (self.cutover / "target-ready").unlink()
         dry = self.move_to("--to devbox --dry-run")
         self.assertEqual(dry.returncode, 1, dry.stdout)
-        self.assertIn(f"  {self.worktree}\n", dry.stdout)
+        self.assertIn(f"  mirror  {self.worktree}\n", dry.stdout)
         self.assertIn("the move would REFUSE now, before any hang-up: devbox has no", dry.stderr)
         self.assertNotIn("stopped with exit", dry.stderr)
         self.assertEqual(self.jobs(), [])
@@ -1875,7 +1984,14 @@ class AgentboxMove(unittest.TestCase):
         self.env["AGENTBOX_MOVE_READY_WAIT"] = "2"
         gone = self.move_to()
         self.assertEqual(gone.returncode, 1)
-        self.assertIn("Run the move again in about 6 minutes; if it is still missing then, the last check FAILED", gone.stderr)
+        self.assertIn("has written no log there", gone.stderr)
+        # With the check's log: when it started, and whether its last run failed.
+        (self.cutover / "a2-20261103T082250Z.log").write_text("ok   one\nok   two\n", encoding="utf-8")
+        running = self.move_to()
+        self.assertIn("started at 2026-11-03 08:22:50Z deletes it while it runs and writes it again when it passes, usually 8-13 min", running.stderr)
+        (self.cutover / "a2-20261103T091000Z.log").write_text("ok   one\nFAIL two\n", encoding="utf-8")
+        failed = self.move_to()
+        self.assertIn("started 2026-11-03 09:10:00Z) FAILED", failed.stderr)
         # A dry run never waits.
         self.env["AGENTBOX_MOVE_READY_WAIT"] = "600"
         start = time.time()
