@@ -89,6 +89,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | attached account | metadata `service-accounts/default/email` | `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com` |
 | no credential file | `~/.config/gcloud/box_credential_config.json`, `$GOOGLE_APPLICATION_CREDENTIALS` | neither exists |
 | disks | `findmnt`, `stat` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home`, `/theorem`, `/theorem-ext4`, `/theorem-xfs` = `/mnt/nvme/<name>`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile`; `/tmp`, `/var/tmp` = `/mnt/scratch/tmp`, `/mnt/scratch/var-tmp` (a WAIT until the next planned reset) |
+| nofile | `systemctl show tailscaled ssh -p LimitNOFILESoft`; `grep 'open files' /proc/$(pgrep -o -x tailscaled)/limits` | both units `65536`; the running tailscaled's soft limit 65536 (a WAIT until tailscaled restarts, at the next planned reset) |
 | root disk (`--root` runs only this) | `df /`; `sudo timeout 120 du -x /` | `/` uses at most 40 GiB; no directory on it outside `/usr`, `/var/lib/apt`, `/var/cache/apt`, `/boot`, `/snap`, `/var/lib/snapd`, `/opt`, `/var/log` holds over 1 GiB of its own; `/var/log` at most 2 GiB |
 | no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `credentialed_accounts.db`, `.config/gh/hosts.yml`; no `legacy_credentials` unless every file in it is a keyless `external_account` `adc.json` (no `private_key`, no `refresh_token`) or a `.boto` that only names one (a note: moves carry sessions' own gcloud directories holding dev-sjawhar@'s keyless external_account). A `service_account` key fails, as a user login does. The spec's A2 names the directory by name alone; dispatch://INFRA-993 records the change |
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
@@ -190,6 +191,27 @@ At that boot:
 - The units that started before `gce-disks` (systemd-resolved, chrony) keep their PrivateTmp
   directories on the boot disk until the next boot.
 - A stop of the VM empties both, with the rest of `/mnt/scratch`.
+
+## Next planned reset
+
+What takes effect only at the next planned reset, and what to do after it:
+
+- `/tmp` and `/var/tmp` are bound from `/mnt/scratch` (above); A2's two scratch WAIT lines become
+  ok lines.
+- tailscaled restarts with the nofile drop-in (`devbox/nofile.conf`, installed by gce-host.sh as
+  `/etc/systemd/system/tailscaled.service.d/60-nofile.conf`). Then remove MoveShepherd's
+  `ulimit -n 65536` line at the top of sami-devbox's `~/.bashrc` (keep the backup
+  `~/.bashrc.bak-20261103T1900Z`), and show that a fresh ssh gets `ulimit -Sn` = 65536:
+
+  ```sh
+  # from another machine, after the reset (or after `sudo systemctl restart tailscaled`):
+  ssh sami@sami-devbox 'bash --norc --noprofile -c "ulimit -Sn"'   # must print 65536
+  ssh sami@sami-devbox 'grep "open files" /proc/$(pgrep -o -x tailscaled)/limits'  # soft 65536
+  ssh sami@sami-devbox "sed -i '/^# MoveShepherd 2026-11-03: git receive-pack/d; /^ulimit -n 65536 2>\/dev\/null\$/d' ~/.bashrc"
+  ssh sami@sami-devbox 'bash --norc --noprofile -c "ulimit -Sn"; bash -ic "ulimit -Sn"'  # 65536 twice
+  ```
+
+  A2's tailscaled nofile line then reads ok instead of WAIT.
 
 ## Starting a session
 

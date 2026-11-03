@@ -809,6 +809,25 @@ host_packages() {
     [[ -z "$missing" ]] && ok "lane packages: opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64 resolve" || fail "lane packages: missing command(s):$missing"
 }
 
+# The open-file soft limit of Tailscale SSH and sshd sessions (devbox/nofile.conf). The unit
+# property holds once gce-host.sh installed the drop-in; the running tailscaled takes it only at
+# its next start, which waits for a planned reset (devbox/sami-devbox.md, "Next planned reset").
+host_nofile() {
+    local unit got pid
+    for unit in tailscaled ssh; do
+        got="$(systemctl show "$unit.service" -p LimitNOFILESoft --value 2>&1)"
+        [[ "$got" == 65536 ]] && ok "nofile: $unit.service LimitNOFILESoft=65536" \
+            || fail "nofile: $unit.service LimitNOFILESoft=$got, want 65536; run sudo devbox/gce-host.sh"
+    done
+    pid="$(pgrep -o -x tailscaled)" || { fail "nofile: no tailscaled process"; return; }
+    got="$(awk '/^Max open files/ {print $4}' "/proc/$pid/limits")"
+    if [[ "$got" == 65536 ]]; then
+        ok "nofile: running tailscaled (pid $pid) has soft limit 65536"
+    else
+        echo "WAIT nofile: running tailscaled (pid $pid) has soft limit $got; it takes 65536 at its next start (devbox/sami-devbox.md, \"Next planned reset\")"
+    fi
+}
+
 # bwrap makes its network namespace as sami: the AppArmor profile devbox/gce-host.sh installs
 # (Ubuntu 24.04 denies unprivileged user namespaces without it) is byte for byte the dotfiles'
 # copy, and a bwrap sandbox with its own network namespace and / read-only runs `true`. That
@@ -908,6 +927,7 @@ host() {
     host_follow
     host_packages
     host_bwrap
+    host_nofile
     host_plain_path_kubectl
     local missing
     mise_check

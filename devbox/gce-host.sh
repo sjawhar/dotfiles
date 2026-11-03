@@ -10,7 +10,8 @@
 #      and /theorem-xfs bound from the state disk, the local-SSD RAID with its swap at
 #      /mnt/scratch, and /tmp and /var/tmp bound from it at the next boot; the drop-in that keeps
 #      the user manager and Docker from starting before it (devbox/gce-disks-ready.conf); and
-#      journald's cap on the boot disk (devbox/journald-cap.conf);
+#      journald's cap on the boot disk (devbox/journald-cap.conf); the open-file limit of
+#      tailscaled's and sshd's sessions (devbox/nofile.conf);
 #   3. Docker (installers/docker.sh, for the user), then Sysbox (installers/sysbox.sh), which
 #      registers itself with Docker;
 #   4. Tailscale, joined by workload identity (installers/tailscale.sh; needs TAILSCALE_CLIENT_ID);
@@ -153,6 +154,20 @@ if ! cmp -s "$DEVBOX_DIR/journald-cap.conf" "$journald_conf"; then
     systemctl restart systemd-journald.service
 fi
 journalctl --disk-usage
+
+# The open-file limit of the sessions that Tailscale SSH and sshd start (the file says why).
+# Never restarted here: a tailscaled restart drops every Tailscale SSH connection and blips the
+# tailnet, so its drop-in takes effect at its next start (devbox/sami-devbox.md, "Next planned
+# reset"). sshd restarts when its drop-in changed: KillMode=process keeps its sessions.
+for unit in tailscaled ssh; do
+    nofile_conf="/etc/systemd/system/${unit}.service.d/60-nofile.conf"
+    cmp -s "$DEVBOX_DIR/nofile.conf" "$nofile_conf" && continue
+    install -D -m 644 "$DEVBOX_DIR/nofile.conf" "$nofile_conf"
+    systemctl daemon-reload
+    [[ "$unit" == ssh ]] && systemctl try-restart ssh.service
+    echo "gce-host.sh: installed $nofile_conf"
+done
+systemctl show tailscaled.service ssh.service -p Id -p LimitNOFILESoft
 
 # --- 3. Docker, then Sysbox -----------------------------------------------------------------------
 # installers/docker.sh is a user installer: USER names whom it adds to the docker group.
