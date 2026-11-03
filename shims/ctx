@@ -23,6 +23,9 @@ set -u
 
 mise="$(command -v mise 2>/dev/null || true)"
 [[ -n "$mise" ]] || mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
+# The dotfiles keep mise's tools in their own data dir (.bashrc, mise/mise.conf); a unit or a
+# script that sourced neither must look there too, or mise reports nothing installed.
+export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
 
 if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-}" ]]; then
 	root="${CTX_PERSONAL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ctx-personal}"
@@ -52,7 +55,7 @@ if [[ "${OMP_PROFILE:-${PI_PROFILE:-}}" == personal || -n "${CTX_PERSONAL_ROOT:-
 	exec "$real" "$@"
 fi
 
-real="$(MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}" "$mise" which -C / ctx --tool github:sjawhar/ctx-memory 2>/dev/null)" || real=""
+real="$("$mise" which -C / ctx --tool github:sjawhar/ctx-memory 2>/dev/null)" || real=""
 if [[ -z "$real" || ! -x "$real" ]]; then
 	echo "ctx shim: mise did not resolve the pinned github:sjawhar/ctx-memory; run \`mise install\`" >&2
 	exit 127
