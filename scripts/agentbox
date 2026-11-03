@@ -5710,6 +5710,26 @@ move_to_member() {
     elif hc="$(move_transcript_cwd "$MOVE_RESUME")"; then
         cwd="$hc"
     fi
+    # Every directory this member CARRIES is bound in its new box, not only the one it works in:
+    # SCIENCE landed on sami-devbox with its working directory alone and none of the trees the
+    # move had copied (2026-11-03). A path the box has anyway, one too broad to bind, and a git
+    # directory (the box's own --dir brings the tree's storage) are left out.
+    local line kind path have p2
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        kind="${line%%$'\t'*}" path="${line#*$'\t'}"
+        [[ -d "$path" ]] || continue
+        [[ "$path" == */.git || "$path" == */.git/* ]] && continue
+        move_dir_in_box "$path" && continue
+        move_dir_too_broad "$path" && continue
+        have=0
+        for p2 in "${MOVE_SPEC[@]}"; do
+            [[ "$p2" == /* ]] || continue
+            move_within "$path" "$p2" && { have=1; break; }
+        done
+        (( have )) || MOVE_SPEC+=(--dir "$path")
+    done <<<"${MT_COPY[$sid]:-}"$'\n'"$(printf 'mirror\t%s\n' ${MT_SHARE[$sid]+${MT_SHARE[$sid]}})"
+
     # The window's NAME, not only its index: a stream's windows are named for the stream, and
     # pilot.py counts a stream's sessions by that name. `at` holds session:index.pane, which says
     # nothing about the stream once the session is on another machine.

@@ -2060,6 +2060,33 @@ class AgentboxMove(unittest.TestCase):
         self.assertFalse([line for line in asked.splitlines() if " push " in f" {line} "],
                          f"a commit GitHub has is never pushed: {asked}")
 
+    def test_the_new_box_binds_every_path_the_move_carries(self) -> None:
+        """SCIENCE landed on sami-devbox with its working directory alone and none of the trees
+        the move had copied (2026-11-03), so its session could not read its own work. Every
+        directory a member carries and no --dir of its spec covers becomes one, except a path
+        every box has anyway (a checkout under ~/src, the home paths) and a git directory."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        carried = self.root / "carried-tree"
+        (carried / "work").mkdir(parents=True)
+        inside = self.src / "repo"
+        # The scan fills MT_ROW, MT_DIRS and MT_COPY; this test adds carried paths to the member's
+        # copy list and asks for the member the relauncher's job would hold.
+        result = self.run_bash(
+            "move_to_scan_processes\n"
+            f'MT_ROW[{self.TO}]="${{MT_ROW_OF[{self.TO}]}}"\n'
+            f'MT_DIRS[{self.TO}]="{self.worktree}"\n'
+            f'MT_COPY[{self.TO}]="mirror\t{carried}"$\'\\n\'"merge\t{inside}"$\'\\n\'"merge\t{self.src}/repo/.git"\n'
+            f'move_to_member {self.TO} devbox')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        spec = json.loads(result.stdout)["spec"]
+        dirs = [spec[i + 1] for i, word in enumerate(spec) if word == "--dir"]
+        self.assertIn(str(carried), dirs, f"a carried directory outside the box's own paths is bound: {dirs}")
+        self.assertNotIn(f"{self.src}/repo/.git", dirs, "a git directory is not bound; the tree brings its storage")
+        self.assertNotIn(str(inside), dirs, "a checkout every box clones for itself is not bound")
+
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
         target that had the clone. A merged common dir whose objects the target has is dropped
