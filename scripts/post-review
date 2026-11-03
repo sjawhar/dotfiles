@@ -17,10 +17,20 @@ The review App's key is human-tier (Sami, 2026-10-26: "move the Legion reviewer 
 key back to the human tier; he grants it to dev-box agents that need it"), so it comes from
 the secrets broker through secret-run and is never written to disk.
 
+Every verdict ends with a `Reviewed by model: <id>` line, so a reader can tell a cross-family
+review from a same-family one. The id is `--model` when given; otherwise every model that answered
+in the omp session running this command, read from its transcript (PI_SESSION_FILE, which omp sets
+in each session's and subagent's shell). A session posting a verdict another session wrote passes
+that session's model with `--model`, since its own transcript names its own model.
+
 Usage:
-  post-review <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT <body-file> <owner/repo>
+  post-review [--model <id>] [--dry-run] <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT
+              <body-file> <owner/repo>
+
+--dry-run prints the review it would post, footer included, and mints, reads and posts nothing.
 """
 
+import argparse
 import fcntl
 import json
 import os
@@ -238,13 +248,66 @@ def notify_author(token: str, slug: str, pr: str, head: str, event: str, stamp: 
         print(f"post-review: could not tell the author: {error}")
 
 
+def answering_models(session_file: str) -> list[str]:
+    """Every model that answered in one omp session, in the order each first answered.
+
+    omp writes each assistant turn to the session's JSONL transcript with the provider and model
+    that served it, so a fallback mid-review (Codex spent, the turn answered by Claude) shows up
+    as a second id rather than being hidden behind the model the reviewer was asked to run on.
+    """
+    seen: list[str] = []
+    try:
+        with open(session_file, encoding="utf-8", errors="replace") as lines:
+            for line in lines:
+                if '"assistant"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") if entry.get("type") == "message" else None
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                model = message.get("model")
+                if not model:
+                    continue
+                provider = message.get("provider")
+                name = f"{provider}/{model}" if provider else str(model)
+                if name not in seen:
+                    seen.append(name)
+    except OSError:
+        return []
+    return seen
+
+
+def model_footer(explicit: str | None) -> str:
+    """The line every verdict ends with, naming the model that wrote it."""
+    if explicit:
+        return f"Reviewed by model: `{explicit}` (given with --model)"
+    session_file = os.environ.get("PI_SESSION_FILE", "")
+    models = answering_models(session_file) if session_file else []
+    if models:
+        named = ", then ".join(f"`{m}`" for m in models)
+        return f"Reviewed by model: {named} (read from the posting session's transcript)"
+    print(
+        "post-review: no --model and no omp transcript in PI_SESSION_FILE to read it from;"
+        " the verdict says the model is unknown. Pass --model <id> of the model that wrote it.",
+        file=sys.stderr,
+    )
+    return "Reviewed by model: unknown (no --model given, no omp session transcript to read)"
+
+
 def main() -> None:
-    if len(sys.argv) < 6:
-        die(
-            "usage: post-review <pr> <head-sha> APPROVE|REQUEST_CHANGES|COMMENT"
-            " <body-file> <owner/repo>"
-        )
-    pr, head, event, body_file, slug = sys.argv[1:6]
+    parser = argparse.ArgumentParser(prog="post-review", description=__doc__.splitlines()[0])
+    parser.add_argument("pr")
+    parser.add_argument("head")
+    parser.add_argument("event")
+    parser.add_argument("body_file")
+    parser.add_argument("slug")
+    parser.add_argument("--model", help="the model that wrote the verdict (default: read from the session)")
+    parser.add_argument("--dry-run", action="store_true", help="print the review; post nothing")
+    args = parser.parse_args()
+    pr, head, event, body_file, slug = args.pr, args.head, args.event, args.body_file, args.slug
 
     if event not in EVENTS:
         die(f"event must be one of {', '.join(EVENTS)}, not {event}")
@@ -257,6 +320,12 @@ def main() -> None:
     if not repo:
         die(f"the repository must be owner/repo, not {slug}")
 
+    text = body.read_text().rstrip("\n") + "\n\n---\n" + model_footer(args.model) + "\n"
+    if args.dry_run:
+        print(f"post-review: dry run, would post {event} on {slug}#{pr} at {head}:\n")
+        print(text, end="")
+        return
+
     token = installation_token(owner, repo)
 
     live = gh(token, "api", f"repos/{slug}/pulls/{pr}", "--jq", ".head.sha")
@@ -266,9 +335,7 @@ def main() -> None:
             1,
         )
 
-    payload = json.dumps(
-        {"commit_id": head, "event": event, "body": body.read_text()}
-    )
+    payload = json.dumps({"commit_id": head, "event": event, "body": text})
     gh(token, "api", "--method", "POST", f"repos/{slug}/pulls/{pr}/reviews", "--input", "-", stdin=payload)
 
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

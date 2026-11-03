@@ -21,7 +21,9 @@ before handing the call to the real one.
   with a `gh shim: REFUSED` block naming the call, the identity, why, and the route: where
   the repository needs an approving review (agent-infra's main does), a session that did not
   author the pull request posts the review as the legion-reviewer App with
-  `scripts/post-review <pr> <head sha> APPROVE|REQUEST_CHANGES <body-file> <owner/repo>`,
+  `scripts/post-review <pr> <head sha> APPROVE|REQUEST_CHANGES <body-file> <owner/repo>`
+  (which ends every verdict with `Reviewed by model: <id>`, read from the posting session's
+  transcript, or `--model <id>` for a verdict another session wrote),
   since a comment does not count as an approval; elsewhere a verdict goes out as an App
   comment beginning `VERDICT: <verdict> at <head sha>`; anything
   else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). A call GitHub stops
