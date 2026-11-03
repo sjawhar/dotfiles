@@ -77,7 +77,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | attached account | metadata `service-accounts/default/email` | `dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com` |
 | no credential file | `~/.config/gcloud/box_credential_config.json`, `$GOOGLE_APPLICATION_CREDENTIALS` | neither exists |
 | disks | `findmnt` | `/mnt/nvme` = `google-state` xfs, `/mnt/durable` = `google-cold` xfs, `/home` = `/mnt/nvme/home`, `/mnt/scratch` on `/dev/md*`, swap `/mnt/scratch/swapfile` |
-| no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `legacy_credentials`, `credentialed_accounts.db`, `.config/gh/hosts.yml` |
+| no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `credentialed_accounts.db`, `.config/gh/hosts.yml`; no `legacy_credentials` unless every file in it is an `adc.json` of type `external_account` or `service_account` (a note: gcloud writes one for the machine's own accounts, and moves carry sessions' own gcloud directories; the spec's A2 names the directory by name alone, this check judges what it holds) |
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
 | dotfiles follow main | `systemctl --user is-active dotfiles-follow.timer`, `systemctl --user show dotfiles-follow.service`, its state file | timer active; last run exited 0; that run, at most 30 min ago, left HEAD on origin/main with nothing open and the tools installed |

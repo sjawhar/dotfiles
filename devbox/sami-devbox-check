@@ -431,20 +431,53 @@ sudo_find() {
     return "$rc"
 }
 
+# legacy_is_machine DIR: DIR, a gcloud legacy_credentials directory, holds only the credentials of
+# accounts that are no person: each adc.json in it is of type external_account or service_account,
+# each .boto holds no refresh token (an external account's names its adc.json in
+# gs_external_account_file), and nothing else is there. A user login there is an adc.json of type
+# authorized_user and a .boto with gs_oauth2_refresh_token.
+legacy_is_machine() {
+    local f t out rc=0
+    out="$(sudo -n find "$1" -type f -print 2>&1)" || rc=$?
+    (( rc == 0 )) || return 1
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        case "${f##*/}" in
+            adc.json)
+                t="$(sudo -n cat "$f" 2>/dev/null | jq -r '.type // empty' 2>/dev/null)"
+                [[ "$t" == external_account || "$t" == service_account ]] || return 1 ;;
+            .boto)
+                t="$(sudo -n cat "$f" 2>/dev/null)" || return 1
+                ! grep -qi refresh_token <<<"$t" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done <<<"$out"
+}
+
 # No person's login on any mounted disk: the A2 file names, a gh login, and any gcloud or Azure
 # store that holds a user's login. Every local filesystem is walked once (-xdev per mount).
+# A2 names legacy_credentials as a person's login, and gcloud also writes that directory for the
+# machine's own accounts: a session's own CLOUDSDK_CONFIG that holds dev-sjawhar@'s keyless
+# external_account has one, and `agentbox move --to` carries it with the session (three on
+# 2026-11-03 05:25-05:39Z). So a legacy_credentials directory is judged
+# by what it holds, as credentials.db is below: one that legacy_is_machine passes is a note, not
+# a FAIL; every other file of the list is a FAIL by its name alone.
 host_logins() {
-    local -a names=() found=() dbs=() profiles=()
+    local -a names=() found=() person=() machine=() dbs=() profiles=()
     local n f walked=1
     for n in "${LOGIN_FILES[@]}"; do names+=(-name "$n" -o); done
     names+=(-path '*/.config/gh/hosts.yml')
     for mnt in / /mnt/nvme /mnt/durable /mnt/scratch; do
         sudo_find found "$mnt" -xdev \( "${names[@]}" \) -print || walked=0
     done
-    if (( ${#found[@]} )); then
-        fail "logins: person's login files present: ${found[*]}"
+    for f in "${found[@]}"; do
+        if [[ "${f##*/}" == legacy_credentials ]] && legacy_is_machine "$f"; then machine+=("$f"); else person+=("$f"); fi
+    done
+    (( ${#machine[@]} )) && note "logins: legacy_credentials holding only external_account or service_account credentials (no person's): ${machine[*]}"
+    if (( ${#person[@]} )); then
+        fail "logins: person's login files present: ${person[*]}"
     elif (( walked )); then
-        ok "logins: no ${LOGIN_FILES[*]} or .config/gh/hosts.yml on /, /mnt/nvme, /mnt/durable, /mnt/scratch"
+        ok "logins: no ${LOGIN_FILES[*]} or .config/gh/hosts.yml holding a person's login on /, /mnt/nvme, /mnt/durable, /mnt/scratch"
     fi
     # gcloud's own stores: a row whose credential is authorized_user is a person's login.
     found=()
