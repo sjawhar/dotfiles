@@ -37,6 +37,15 @@ yq '(.providers // {}) | to_entries | .[] | select(.value.apiKeyFile != null) | 
             echo "omp-models-build: $file is missing or empty; provider $provider reads it with a command" >&2
         fi
     done
+# Every Anthropic-format provider a machine points at its own address (the OSS Verify gateway, as `ossv-gateway`
+# or as `anthropic` with a gateway baseUrl) gets the 1-hour prompt-cache marker. omp sends `ttl: 1h` only to
+# Anthropic's own address unless `compat.supportsLongCacheRetention` is set, so `providers.cacheRetention: long`
+# (omp/config.yml) gave these routes 5-minute entries (dispatch://INFRA-1058). The gateway honours the marker:
+# probes on sami-rocqperf and sami-devbox on 2026-11-03 wrote ephemeral_1h tokens. Only providers the merged file
+# already declares with a baseUrl are touched, so no machine gains a provider; an explicit value in
+# models.local.yml wins.
+yq -i '((.providers[] | select(.baseUrl != null and .api == "anthropic-messages") | .compat.supportsLongCacheRetention | select(. == null)) = true)
+  | ((.providers.anthropic | select(.baseUrl != null and .api == null) | .compat.supportsLongCacheRetention | select(. == null)) = true)' "$tmp"
 chmod 600 "$tmp"
 if cmp -s "$tmp" "$out"; then
     chmod 600 "$out"
