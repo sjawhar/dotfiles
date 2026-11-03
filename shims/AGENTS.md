@@ -331,6 +331,14 @@ before handing the call to the real one.
   2 MiB: 16 processes took 21-30 s up and 12-18 s down at 18 processes and 1.8 GiB summed RSS;
   4 took 39-45 s up and 12-20 s down at 6 processes and 0.62 GiB. The thread count stays the
   SDK's: 8 threads instead of 4 gained nothing.
+  In an agent session `compute instances create` and `compute instances bulk create` (also
+  `bulk-create`, behind any release track) are refused unless the command line carries
+  `--max-run-duration` or `--termination-time`, or the caller sets `GCLOUD_NO_RUN_LIMIT=<reason>`
+  for a long-lived VM declared in code with an owner (dispatch://INFRA-672). A limit in a
+  `--flags-file` or an instance template is not seen, so such a create is refused too. The refusal
+  names the flags (with `--instance-termination-action=STOP` and, for local SSD,
+  `--discard-local-ssds-at-termination-timestamp=true`), Google's run-time limit page and the
+  escape; a call that passes keeps its argv. Outside an agent session nothing changes.
 - **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
   harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
   mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data

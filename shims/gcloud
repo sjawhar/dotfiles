@@ -92,6 +92,8 @@ USER_LOGIN_CONFIGURATION=theorem
 # (agent-infra bootstrap/README.md, "Who applies"), and the page of the steps only a person can make.
 GCLOUD_APPLIER="infra-applier@theorem-agent-infra.iam.gserviceaccount.com"
 GCLOUD_BREAK_GLASS_URL="https://github.com/theorem-labs/agent-infra/blob/main/docs/break-glass.md"
+# Google's page on a VM's run-time limit, named in the refusal of a VM create without one.
+GCLOUD_RUN_LIMIT_DOCS_URL="https://cloud.google.com/compute/docs/instances/limit-vm-runtime"
 
 # The global flags of the installed SDK, split by how many values each takes.
 # Generated from the root parser's own declarations by `scripts/gcloud-global-flags`
@@ -587,6 +589,64 @@ refuse_adc_write_in_agent_session() {
         echo "  Identity: $what as $identity."
         echo "  Why: every Google client library and Pulumi on this machine without GOOGLE_APPLICATION_CREDENTIALS acts as whoever that file names, so one write changes the identity of every such process. No agent process writes it."
         print_agent_route
+    } >&2
+    exit 1
+}
+
+# True for `compute instances create` and `compute instances bulk create` (and `bulk-create`): the
+# first words of the command path past global flags, their values and one release track. A
+# command's own flag before its last command word (`compute --zone z instances create`) is not
+# a form the SDK parses, so it is not read here either.
+is_instance_create() {
+    local arg track_stripped=0
+    local -a words=()
+    while (($#)) && ((${#words[@]} < 4)); do
+        arg="$1"
+        shift
+        case "$arg" in
+            --) break ;;
+            -?*)
+                if is_value_flag "$arg" && [[ "$arg" != *=* ]] && (($#)); then
+                    shift
+                fi
+                ;;
+            *)
+                if ((${#words[@]} == 0 && !track_stripped)) &&
+                    contains_word "$arg" "${GCLOUD_RELEASE_TRACKS[@]}"; then
+                    track_stripped=1
+                    continue
+                fi
+                words+=("$arg")
+                ;;
+        esac
+    done
+    [[ "${words[0]:-} ${words[1]:-}" == "compute instances" ]] || return 1
+    [[ "${words[2]:-}" == create || "${words[2]:-}" == bulk-create || "${words[2]:-} ${words[3]:-}" == "bulk create" ]]
+}
+
+# Refuses, in an agent session, a VM create that carries no run-time limit on its command line:
+# neither --max-run-duration nor --termination-time. A VM an agent creates for a while and then
+# forgets runs, and bills, until someone stops it; with a limit Google stops it and keeps its disk
+# (dispatch://INFRA-672/ask/a76ad180-3939-48ed-87bf-a6b716d4def0). A long-lived VM is declared in
+# code with an owner instead, and a one-off create of one passes with GCLOUD_NO_RUN_LIMIT=<reason>.
+# A limit inside a --flags-file or an instance template is not seen here, so it is refused too:
+# put the flag on the command line. The argv of a call that passes is never changed.
+refuse_instance_create_without_run_limit() {
+    agent_context || return 0
+    [[ -z "${GCLOUD_NO_RUN_LIMIT:-}" ]] || return 0
+    is_instance_create "$@" || return 0
+    has_option --max-run-duration "$@" && return 0
+    has_option --termination-time "$@" && return 0
+    {
+        printf 'gcloud shim: REFUSED in an agent session (argv:'
+        printf ' %q' "$@"
+        printf ')\n'
+        echo "  Why: this VM has no run-time limit, so it runs and bills until someone stops it."
+        echo "  Add a limit at creation: --max-run-duration=<duration, e.g. 8h; 30s to 120d> (or --termination-time=<RFC 3339 time>) with --instance-termination-action=STOP, which stops the VM when the time runs out and keeps its disk."
+        echo "  With local SSD also add --discard-local-ssds-at-termination-timestamp=true; the local SSD data is lost at that stop. Spot VMs take a limit; legacy --preemptible VMs cannot."
+        echo "  To extend: start the VM again after it stops (a duration restarts at each start); gcloud compute instances set-scheduling changes the limit only while the VM is stopped."
+        echo "  Docs: ${GCLOUD_RUN_LIMIT_DOCS_URL}"
+        echo "  A long-lived VM (a service, a dev box) is declared in code with an owner= label; to create one by hand, set GCLOUD_NO_RUN_LIMIT=<reason> on this one command."
     } >&2
     exit 1
 }
@@ -1095,6 +1155,7 @@ main() {
     parse_gcloud_command_path "$@"
     refuse_adc_write_in_agent_session "$@"
     refuse_user_account_in_agent_session "$@"
+    refuse_instance_create_without_run_limit "$@"
     route_get_credentials_kubeconfig "$@"
 
     # Read the ADC only for a command this block can refuse: an ambiguous path that

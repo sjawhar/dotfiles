@@ -1036,6 +1036,71 @@ class GcloudRouting(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(stub_argv(result), args)
 
+    # Every VM an agent creates gets a run-time limit at creation, so a forgotten one stops by itself
+    # (dispatch://INFRA-672/ask/a76ad180-3939-48ed-87bf-a6b716d4def0).
+    UNLIMITED_CREATES = (
+        ["compute", "instances", "create", "vm-1", "--zone", "us-east4-a"],
+        ["--project", "p", "compute", "instances", "create", "vm-1", "--spot"],
+        ["beta", "compute", "instances", "create", "vm-1"],
+        ["compute", "instances", "bulk", "create", "--count", "2", "--name-pattern", "vm-#"],
+        ["compute", "instances", "create", "vm-1", "--instance-termination-action=STOP"],
+        ["compute", "instances", "create", "vm-1", "--flags-file", "/tmp/flags.yaml"],
+    )
+
+    def test_agent_session_refuses_a_vm_create_without_a_run_limit(self):
+        self.stub_gcloud_that_must_not_run()
+        for marker in self.AGENT_MARKERS:
+            for args in self.UNLIMITED_CREATES:
+                with self.subTest(marker=marker, args=args):
+                    result = self.run_shim(marker, args=args)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                    self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                    for text in ("--max-run-duration", "--termination-time",
+                                 "--instance-termination-action=STOP",
+                                 "--discard-local-ssds-at-termination-timestamp=true",
+                                 "https://cloud.google.com/compute/docs/instances/limit-vm-runtime",
+                                 "GCLOUD_NO_RUN_LIMIT=<reason>", "set-scheduling"):
+                        self.assertIn(text, result.stderr)
+
+    def test_agent_session_passes_a_vm_create_with_a_run_limit_unchanged(self):
+        cases = (
+            ({}, ["compute", "instances", "create", "vm-1", "--max-run-duration=8h",
+                  "--instance-termination-action=STOP"]),
+            ({}, ["compute", "instances", "create", "vm-1", "--max-run-duration", "28800s",
+                  "--instance-termination-action", "STOP"]),
+            ({}, ["compute", "instances", "create", "vm-1", "--termination-time=2026-11-04T00:00:00Z",
+                  "--instance-termination-action=STOP"]),
+            ({}, ["compute", "instances", "bulk", "create", "--count", "2", "--max-run-duration=1h"]),
+            ({"GCLOUD_NO_RUN_LIMIT": "model gateway, declared in code"},
+             ["compute", "instances", "create", "gateway-1", "--zone", "us-east4-a"]),
+        )
+        for env, args in cases:
+            with self.subTest(env=env, args=args):
+                result = self.run_shim({**self.AGENT_MARKERS[0], **env}, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_run_limit_rule_leaves_other_compute_commands_and_the_users_shell_alone(self):
+        for args in (["compute", "instances", "list"], ["compute", "instances", "start", "vm-1"],
+                     ["compute", "instances", "set-scheduling", "vm-1", "--max-run-duration=8h"],
+                     ["compute", "instance-templates", "create", "t-1"], ["compute", "disks", "create", "d-1"],
+                     ["compute", "ssh", "vm-1", "--", "compute", "instances", "create"]):
+            with self.subTest(args=args):
+                result = self.run_shim(self.AGENT_MARKERS[0], args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+        with self.subTest("outside an agent session"):
+            args = ["compute", "instances", "create", "vm-1"]
+            result = self.run_shim(args=args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(stub_argv(result), args)
+        with self.subTest("an empty escape is no escape"):
+            self.stub_gcloud_that_must_not_run()
+            result = self.run_shim({**self.AGENT_MARKERS[0], "GCLOUD_NO_RUN_LIMIT": ""},
+                                   args=["compute", "instances", "create", "vm-1"])
+            self.assertEqual(result.returncode, 1)
+
     def test_users_own_session_keeps_its_adc_login(self):
         """Outside an agent session the user's explicit login with --update-adc reaches gcloud as he
         typed it, and a bare one under box is still routed with --update-adc dropped."""

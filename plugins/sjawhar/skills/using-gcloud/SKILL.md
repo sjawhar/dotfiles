@@ -48,6 +48,13 @@ People, dev boxes, VMs, CI jobs and managed services reach each other over the V
 - Deploy a service that only your own people and machines call onto the VPN. Never `gcloud run deploy --allow-unauthenticated`, an `allUsers` IAM binding, an internet-facing load balancer, or a firewall rule that opens its port to `0.0.0.0/0`; a shared bearer token is not a substitute, because the port is still reachable by everyone.
 - Open a service to the internet only for a named caller outside the organization that cannot join the VPN, such as a webhook sender. Name that caller and the reason where the service is documented, so the next reader can check it.
 
+## A VM you create gets a run-time limit
+
+A VM left running bills until someone stops it, so give every VM you create for a while a limit at creation: `--max-run-duration=<D> --instance-termination-action=STOP` (add `--discard-local-ssds-at-termination-timestamp=true` with local SSD). Google stops it when the time runs out and keeps its disk; in an agent session `shims/gcloud` refuses an `instances create` without a limit.
+
+- To extend, start it again after it stops: the clock restarts at each start. `gcloud compute instances set-scheduling` changes the limit only while the VM is stopped.
+- A long-lived VM (a service, a dev box) is declared in code with an `owner=` label instead, not created by hand.
+
 ## Host keys: one gcloud ssh call at a time
 
 Each `gcloud compute ssh` or `scp` call rewrites all of `~/.ssh/google_compute_known_hosts` with no lock. Parallel calls remove each other's keys, also for other sessions on the machine.
