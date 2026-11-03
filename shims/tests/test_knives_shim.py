@@ -25,11 +25,31 @@ LOOP_TIMEOUT = 10
 MISE_WHICH = r"""
 cat > /dev/null
 [[ "$*" == "which -C / knives --tool github:sjawhar/knives" ]] || { echo "unexpected mise $*" >&2; exit 99; }
+if [[ -n "${STUB_MISE_LOG:-}" ]]; then
+    echo call >> "$STUB_MISE_LOG"
+fi
+if [[ -n "${STUB_MISE_SLEEP_ONCE:-}" && ! -e "$STUB_MISE_LOG.slept" ]]; then
+    touch "$STUB_MISE_LOG.slept"
+    sleep "$STUB_MISE_SLEEP_ONCE"
+fi
+if [[ -n "${STUB_MISE_SLEEP:-}" ]]; then
+    sleep "$STUB_MISE_SLEEP"
+fi
 if [[ -n "${STUB_PIN_MISSING:-}" ]]; then
     echo "mise ERROR github:sjawhar/knives@2.0.0 is not installed" >&2
     exit 1
 fi
 echo "${STUB_PINNED:-${MISE_DATA_DIR:?mise was given no data dir}/installs/github-sjawhar-knives/2.0.0/bin/knives}"
+"""
+
+PIN_CONFIG = """\
+[settings]
+minimum_release_age_excludes = [
+  "github:sjawhar/knives",
+]
+
+[tools]
+"github:sjawhar/knives" = "{version}"  # keep equal to the plugin tag
 """
 
 # A knives build. `gh` without the depth marker re-enters through the shim in this pid, as a
@@ -57,7 +77,7 @@ def write_stub(directory: Path, name: str, body: str) -> Path:
     return path
 
 
-class KnivesShim(unittest.TestCase):
+class ShimFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -98,8 +118,12 @@ class KnivesShim(unittest.TestCase):
             )
         except subprocess.TimeoutExpired:
             pass
-        self.fail(f"shims/knives was still running after {LOOP_TIMEOUT}s: it re-entered itself")
+        self.fail(
+            f"shims/knives was still running after {LOOP_TIMEOUT}s: it re-entered itself or waited on mise"
+        )
 
+
+class KnivesShim(ShimFixture):
     def test_a_stale_install_dir_on_path_still_reaches_the_pin(self) -> None:
         """An old session's PATH: the shims dir, then the install dir pinned when it started."""
         result = self.run_shim(SHIM.parent, self.stale_dir)
@@ -193,6 +217,89 @@ class KnivesShim(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("is not installed", result.stderr)
         self.assertIn("mise did not resolve the pinned github:sjawhar/knives", result.stderr)
+
+
+class KnivesShimWithoutMise(ShimFixture):
+    """The pin in mise's global config names an installed version: the shim execs it from the
+    install dir, so a mise that hangs or errors at call time (a reinstall's window, a lock, a
+    loaded box: 2026-11-03 ~00:3x-01:00Z) does not take knives and every gh call down with it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.mise_log = self.root / "mise-calls"
+        self.write_pin("2.0.0")
+
+    def write_pin(self, version: str) -> None:
+        config = self.root / ".config" / "mise" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(PIN_CONFIG.format(version=version), encoding="utf-8")
+
+    def mise_calls(self) -> int:
+        if not self.mise_log.exists():
+            return 0
+        return len(self.mise_log.read_text(encoding="utf-8").splitlines())
+
+    def run_pinned(self, **stub_env: str) -> subprocess.CompletedProcess[str]:
+        return self.run_shim(
+            SHIM.parent,
+            self.stale_dir,
+            extra_env={"STUB_MISE_LOG": str(self.mise_log), **stub_env},
+        )
+
+    def test_a_hanging_mise_with_the_pin_installed_still_runs_knives(self) -> None:
+        result = self.run_pinned(STUB_MISE_SLEEP="60")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "PINNED knives --version\nstdin: \n")
+        self.assertEqual(self.mise_calls(), 0)
+
+    def test_a_failing_mise_with_the_pin_installed_still_runs_knives(self) -> None:
+        result = self.run_pinned(STUB_PIN_MISSING="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "PINNED knives --version\nstdin: \n")
+        self.assertEqual(self.mise_calls(), 0)
+
+    def test_the_pin_installed_only_in_mises_default_data_dir_runs(self) -> None:
+        """A `mise install` run without .bashrc's MISE_DATA_DIR puts the pin in
+        ~/.local/share/mise; the shim looks there too."""
+        default_bin = self.root / ".local/share/mise/installs/github-sjawhar-knives/3.0.0/bin"
+        write_stub(default_bin, "knives", KNIVES.format(label="DEFAULT-DIR"))
+        self.write_pin("3.0.0")
+        result = self.run_pinned(STUB_PIN_MISSING="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "DEFAULT-DIR knives --version\nstdin: \n")
+
+    def test_a_path_mise_resolved_once_is_reused_when_mise_later_fails(self) -> None:
+        elsewhere = self.root / "elsewhere"
+        write_stub(elsewhere, "knives", KNIVES.format(label="RESOLVED"))
+        self.write_pin("4.0.0")
+        first = self.run_pinned(STUB_PINNED=str(elsewhere / "knives"))
+        self.assertEqual(first.stdout, "RESOLVED knives --version\nstdin: \n", first.stderr)
+        second = self.run_pinned(STUB_PIN_MISSING="1")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(second.stdout, "RESOLVED knives --version\nstdin: \n")
+        self.assertEqual(self.mise_calls(), 1)
+
+    def test_a_mise_that_times_out_once_is_retried(self) -> None:
+        self.write_pin("4.0.0")
+        result = self.run_pinned(STUB_MISE_SLEEP_ONCE="60", DOTFILES_KNIVES_MISE_TIMEOUT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "PINNED knives --version\nstdin: \n")
+        self.assertEqual(self.mise_calls(), 2)
+
+    def test_a_missing_pin_names_every_path_tried(self) -> None:
+        self.write_pin("4.0.0")
+        result = self.run_pinned(STUB_MISE_SLEEP="60", DOTFILES_KNIVES_MISE_TIMEOUT="1")
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.mise_calls(), 2)
+        self.assertIn("knives 4.0.0", result.stderr)
+        self.assertIn("timed out", result.stderr)
+        for tried in (
+            self.mise_data / "installs/github-sjawhar-knives/4.0.0/bin/knives",
+            self.root / ".local/share/mise/installs/github-sjawhar-knives/4.0.0/bin/knives",
+            self.root / ".cache/dotfiles-knives-shim/4.0.0",
+        ):
+            self.assertIn(str(tried), result.stderr)
 
 
 if __name__ == "__main__":

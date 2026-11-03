@@ -47,16 +47,78 @@ for _d in "${_dirs[@]}"; do
 done
 if [[ -z "$_knives" ]]; then
     # The machine's pin, never a project's (`-C /`): the knives plugin every session loads is
-    # pinned machine-wide beside it (omp/plugins/package.json). Looked up in the data dir whose
-    # copies the scan above skipped. An absolute path, so nothing past here looks knives up on
-    # PATH; stdin stays knives' (a hook's event payload).
+    # pinned machine-wide beside it (omp/plugins/package.json). An absolute path, so nothing
+    # past here looks knives up on PATH; stdin stays knives' (a hook's event payload).
+    # mise is asked last: under load, or while a `mise install` replaces the install dir, it
+    # hung or said "knives <pin> is not installed" for minutes (2026-11-03 ~00:3x-01:00Z), and
+    # every gh call (shims/gh execs `knives gh`) failed with it. So an exact version pinned in
+    # mise's global config is run straight from an install dir: the one the scan above skipped,
+    # then mise's default one; then from the path mise resolved for that version before.
+    _config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
+    _pin=""
+    if [[ -r "$_config" ]]; then
+        _pin_re='^[[:space:]]*"github:sjawhar/knives"[[:space:]]*=[[:space:]]*"([0-9][0-9A-Za-z.+-]*)"'
+        while IFS= read -r _line; do
+            [[ "$_line" =~ $_pin_re ]] && { _pin="${BASH_REMATCH[1]}"; break; }
+        done < "$_config"
+    fi
+    _tried=()
+    _cache=""
+    if [[ -n "$_pin" ]]; then
+        for _root in "$_mise_root" "${XDG_DATA_HOME:-$HOME/.local/share}/mise"; do
+            _candidate="$_root/installs/github-sjawhar-knives/$_pin/bin/knives"
+            _tried+=("$_candidate")
+            if [[ -f "$_candidate" && -x "$_candidate" ]]; then
+                _knives="$_candidate"
+                break
+            fi
+        done
+        _cache="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles-knives-shim/$_pin"
+        if [[ -z "$_knives" ]]; then
+            _tried+=("$_cache")
+            _cached=""
+            [[ -r "$_cache" ]] && IFS= read -r _cached < "$_cache" || true
+            if [[ "$_cached" == /* && -f "$_cached" && -x "$_cached" ]]; then
+                _knives="$_cached"
+            fi
+        fi
+    fi
+fi
+if [[ -z "$_knives" ]]; then
     # mise lives in ~/.dotfiles/bin, which a unit's, harness's or credential helper's PATH can
-    # leave out while it keeps this shim; then the shim runs that mise by its path.
+    # leave out while it keeps this shim; then the shim runs that mise by its path. A call that
+    # fails or outlives the timeout is tried once more (a reinstall's window, a lock).
     _mise="$(command -v mise)" || _mise="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
-    _knives="$(MISE_DATA_DIR="$_mise_root" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || {
-        echo "knives: ${BASH_SOURCE[0]}: mise did not resolve the pinned github:sjawhar/knives (its error is above)" >&2
+    _mise_timeout="${DOTFILES_KNIVES_MISE_TIMEOUT:-20}"
+    _why=""
+    for _attempt in 1 2; do
+        _rc=0
+        _knives="$(MISE_DATA_DIR="$_mise_root" timeout "$_mise_timeout" "$_mise" which -C / knives --tool github:sjawhar/knives </dev/null)" || _rc=$?
+        if (( _rc == 0 )) && [[ -n "$_knives" ]]; then
+            break
+        fi
+        _knives=""
+        if (( _rc == 124 )); then
+            _why+="${_why:+; }attempt $_attempt timed out after ${_mise_timeout}s"
+        else
+            _why+="${_why:+; }attempt $_attempt exited $_rc"
+        fi
+        (( _attempt == 1 )) && sleep 1
+    done
+    if [[ -z "$_knives" ]]; then
+        if [[ -n "$_pin" ]]; then
+            echo "knives: ${BASH_SOURCE[0]}: knives $_pin (pinned in $_config) is not at any of: ${_tried[*]}; and \`mise which\` did not resolve it ($_why; mise's errors are above). Run \`mise install github:sjawhar/knives@$_pin\`." >&2
+        else
+            echo "knives: ${BASH_SOURCE[0]}: no exact github:sjawhar/knives version pinned in $_config, and mise did not resolve the pinned github:sjawhar/knives ($_why; its errors are above)" >&2
+        fi
         exit 127
-    }
+    fi
+    # Remembered per pin, so a later call survives a mise outage too; never a wrapper.
+    if [[ -n "$_cache" && "$_knives" == /* && "$(realpath "$_knives" 2>/dev/null)" != */shims/* ]]; then
+        { mkdir -p "${_cache%/*}" \
+            && printf '%s\n' "$_knives" > "$_cache.$$" \
+            && mv -f "$_cache.$$" "$_cache"; } 2>/dev/null || rm -f "$_cache.$$" 2>/dev/null || true
+    fi
 fi
 export DOTFILES_KNIVES_SHIM="$$ $_now $_entry $_knives"
 exec "$_knives" "$@"
