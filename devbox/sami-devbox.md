@@ -73,6 +73,7 @@ Host half (`sami-devbox-check`, on sami-devbox as sami):
 | no login files | `sudo find / /mnt/nvme /mnt/durable /mnt/scratch -xdev` | no `application_default_credentials.json`, `box_credential_config.json`, `legacy_credentials`, `credentialed_accounts.db`, `.config/gh/hosts.yml` |
 | no gcloud login | every `credentials.db` | no row of type `authorized_user` |
 | no Azure login | every `azureProfile.json` | no subscription whose user type is `user` |
+| GitHub, plain shell | `git ls-remote https://github.com/theorem-labs/{machcsl-riscv,oss-verify-proofs-internal} HEAD` with no agent marker and no routing include, as `agentbox move --to` runs over ssh | a sha for each (the App's token, through `installers/gh-app-host.sh`) |
 
 Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-box`):
 
@@ -87,6 +88,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover -- sami-devbox-check --in-b
 | MLflow | `http://mlflow.tail12ec1c.ts.net/health` | `OK` |
 | model gateway | the `email` of `$XDG_RUNTIME_DIR/ossv-box/gateway-token`; `/v1/models` with it | dev-box@; 200 |
 | Azure | `az account show` | user type `servicePrincipal` |
+| GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
 
 ## A5 and A6 (the drill)
 

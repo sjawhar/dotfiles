@@ -24,7 +24,13 @@ before handing the call to the real one.
   `scripts/post-review <pr> <head sha> APPROVE|REQUEST_CHANGES <body-file> <owner/repo>`,
   since a comment does not count as an approval; elsewhere a verdict goes out as an App
   comment beginning `VERDICT: <verdict> at <head sha>`; anything
-  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). `gh pr create` for an
+  else stops and goes to the lead (`shims/tests/test_gh_user_login.py`). Outside an agent
+  session, `gh auth git-credential` (git's helper in `~/.gitconfig`) goes to the user's login,
+  except where the machine's own git config file, `~/.config/git/config` (not the shared
+  `~/.gitconfig`, not a repository's), names `gh-app.host-profile` (a machine with no person's
+  login, sami-devbox: `installers/gh-app-host.sh`): there it answers through
+  `gh-app-token <profile>` as an agent's does (`shims/tests/test_gh_host_credential.py`).
+  `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet
   (`scripts/docs-pr-gate`). In an agent session every call first goes to the shared public leak

@@ -431,6 +431,21 @@ if agent_context; then
     fi
 fi
 
+# Outside an agent session, git's `gh auth git-credential` (the user's helper in ~/.gitconfig)
+# goes to the user's own login, except on a machine that holds no person's GitHub login
+# (sami-devbox, dispatch://INFRA-993), where nothing would answer it and every private clone
+# from an ssh shell failed with "could not read Username". Such a machine names a gh-app
+# profile in its own git config file, ~/.config/git/config (`gh-app.host-profile`, written by
+# installers/gh-app-host.sh), and the request goes to the App helper exactly as an agent's does
+# above. Only that file counts: not the shared ~/.gitconfig, not a repository's config, and not
+# `git config --global`, which git 2.43 answers from ~/.gitconfig alone when that file exists.
+if [[ "${1:-}" == auth && "${2:-}" == git-credential ]] &&
+    _host_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" &&
+    [[ -n "$_host_profile" ]]; then
+    [[ "${3:-}" == get ]] && exec gh-app-token "$_host_profile" get
+    exit 0
+fi
+
 # Content decides what is "real", never the path: any candidate carrying the
 # knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string
 # skip broke whenever HOME or DOTFILES_DIR spelled this shim's directory

@@ -37,6 +37,11 @@ bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
 # sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
+# On a machine with no person's GitHub login (the Google VM, sami-devbox), git outside an agent
+# session gets the GitHub App's token too, and ssh remotes of github.com go over https (see
+# installers/gh-app-host.sh).
+bash "${DOTFILES_DIR}/installers/gh-app-host.sh"
+
 # Model-spend records from every harness, now that gcloud acts as the box identity, which reads the collector's token,
 # with the host name as theorem.lane (see installers/agent-spend.sh).
 AGENT_SPEND_LANE="$(hostname -s)" bash "${DOTFILES_DIR}/installers/agent-spend.sh"
