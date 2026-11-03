@@ -46,7 +46,7 @@
       "enabled": true
     },
     "dev-infra": {
-      "version": "0.2.46",
+      "version": "0.2.47",
       "enabledFeatures": null,
       "enabled": true
     }
