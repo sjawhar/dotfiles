@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-jwt python3-cryptography build-essential pkg-config libssl-dev \
         tmux less procps xz-utils unzip zstd rsync file acl \
         python3-pip python3-yaml python3-venv postgresql-client sqlite3 socat wget bc bsdextrautils bubblewrap \
+        inotify-tools \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \

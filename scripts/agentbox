@@ -944,6 +944,10 @@ mount_args() {
     # entrypoint's chown walks the bind rather than the overlay (it follows $HOME's own device).
     mkdir -p "$BOXES/$box/home" "$BOXES/$box/tmp"
     chmod 1777 "$BOXES/$box/tmp"
+    # When the box started, so close_box can tell what the session wrote in its home from what the
+    # launch put there, and what the session's last box left in its home (box_home_carry).
+    : >"$BOXES/$box/.started"
+    seed_box_home "$box"
     a+=(-v "$BOXES/$box/home:$HOME")
     a+=(-v "$BOXES/$box/tmp:/tmp")
     [[ "$DOTFILES_DIR" == "$SRC"/* || "$(readlink -f "$DOTFILES_DIR")" == "$(readlink -f "$HOME/.dotfiles")" ]] \
@@ -1217,6 +1221,20 @@ refresh_template() {
             "${APP_GIT[@]}" -C "$tpl.partial" sparse-checkout set --no-cone "${pats[@]}" || return 1
         fi
         mv "$tpl.partial" "$tpl" || return 1
+        # `agentbox new` copies the template's .git/hooks into every box clone, so a NEW template
+        # without the public-text leak-check pre-push hook gives each box a clone that pushes
+        # unchecked. sami-rocqperf's sweep repairs templates within 15 min; sami-devbox has none
+        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589).
+        local src_common installer
+        if src_common="$(git -C "$SRC/$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+            && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then
+            installer="$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh"
+            [[ -x "$installer" ]] || installer="/mnt/nvme/$(id -un)/frac-verify/shared/leak-check/install-prepush-hook.sh"
+            "$installer" "$tpl" || {
+                echo "agentbox: no leak-check pre-push hook in the new template $tpl ($installer failed); a box clone of $repo would push unchecked" >&2
+                return 1
+            }
+        fi
     fi
     detached "${APP_GIT[@]}" -C "$tpl" fetch --quiet --prune origin >&2 || return 1
     upstream="$(git -C "$tpl" symbolic-ref --short refs/remotes/origin/HEAD)" || return 1
@@ -1286,6 +1304,65 @@ unpushed_work() {
     return 0
 }
 
+# $HOME in a box is $BOXES/<box>/home on the host, so every file a session writes in its home and
+# not under a --dir path lives there and dies with the box. `agentbox move --self` on sami-devbox
+# removed box agentbox-74a3ddaacbdc with its home at 17:22Z, and PEER's WAKE-peer-01a13837.md and
+# .leanperf.md, written minutes before, went with it (2026-11-03). So a home with files NEWER than
+# the box's start is never removed unseen: they are copied under BOX_HOMES, keyed by the session,
+# and the next box of that session (a rebox, a resume) starts with them in place. A copy that is
+# too big or that fails keeps the whole box directory instead.
+BOX_HOMES="${AGENTBOX_BOX_HOMES:-${XDG_STATE_HOME:-$HOME/.local/state}/agentbox/box-homes}"
+BOX_HOME_CARRY_BYTES="${AGENTBOX_BOX_HOME_CARRY_BYTES:-2000000000}"
+
+# box_home_carry BOX SID: copy what the session wrote in BOX's home; prints the directory it wrote,
+# or nothing when the home holds no new file. Status 1 when the home must be kept in place.
+box_home_carry() {
+    local box="$1" sid="${2:-}" list dest bytes n
+    local home="$BOXES/$box/home" stamp="$BOXES/$box/.started"
+    [[ -d "$home" ]] || return 0
+    list="$(mktemp)" || return 1
+    if [[ -e "$stamp" ]]; then
+        (cd "$home" && find . -newer "$stamp" \( -type f -o -type l \) -print0 >"$list")
+    else
+        # A box from before the stamp: everything in its home counts as the session's.
+        (cd "$home" && find . \( -type f -o -type l \) -print0 >"$list")
+    fi
+    if [[ ! -s "$list" ]]; then rm -f "$list"; return 0; fi
+    n="$(tr -dc '\0' <"$list" | wc -c)"
+    bytes="$(cd "$home" && xargs -0r du -scb <"$list" 2>/dev/null | awk '$2 == "total" { print $1 }')"
+    if [[ -n "$bytes" ]] && (( bytes > BOX_HOME_CARRY_BYTES )); then
+        rm -f "$list"
+        echo "agentbox: $home holds $(numfmt --to=iec "$bytes") written since the box started, over the $(numfmt --to=iec "$BOX_HOME_CARRY_BYTES") a close copies; $BOXES/$box is left in place for its owner" >&2
+        return 1
+    fi
+    dest="$BOX_HOMES/${sid:-$box}/$box-$(date -u +%Y%m%dT%H%M%SZ)"
+    if ! mkdir -p "$dest" || ! (cd "$home" && xargs -0r cp -a --parents -t "$dest" <"$list"); then
+        rm -f "$list"
+        echo "agentbox: could not copy what $home holds to $dest; $BOXES/$box is left in place for its owner" >&2
+        return 1
+    fi
+    rm -f "$list"
+    echo "agentbox: $n file(s) the session wrote in its box home are kept in $dest" >&2
+    printf '%s\n' "$dest"
+    return 0
+}
+
+# seed_box_home BOX: put what the session's last box left in its home (box_home_carry) into the new
+# box's home, so a rebox keeps it. BOX_SEED_SID names the session; without it nothing is seeded. A
+# file the new home has already is NOT replaced, and the carried copy stays on disk.
+seed_box_home() {
+    local box="$1" last
+    [[ -n "${BOX_SEED_SID:-}" && -d "$BOX_HOMES/$BOX_SEED_SID" ]] || return 0
+    last="$(find "$BOX_HOMES/$BOX_SEED_SID" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
+    [[ -n "$last" ]] || return 0
+    if cp -a -n "$last/." "$BOXES/$box/home/" 2>/dev/null; then
+        echo "agentbox: what this session's last box left in its home is in this box's home ($last)" >&2
+    else
+        echo "agentbox: could not put $last into $BOXES/$box/home; those files are still in $last" >&2
+    fi
+    return 0
+}
+
 # Everything the box made goes: the knives claims its session holds, then the directory. The
 # container must be gone first — it holds the mounts, and docker recreates a removed mountpoint
 # root-owned. The work in a clone is its agent's to push or remove (Sami, AGENTC-1420, 2026-10-02:
@@ -1325,6 +1402,8 @@ close_box() {
             kept=1
         fi
     done
+    # What the session wrote in its box home, before anything is removed.
+    box_home_carry "$box" "$sid" >/dev/null || kept=1
     rm -rf "${RUN_BASE:?}/$box"
     # The box's own filesystem takes everything in it (close_box_disk), leaving the mountpoint
     # for the rm below; a box with no disk limit has no image and the rm does all of it. A
@@ -1446,6 +1525,12 @@ cmd_new() {
             case "$a" in --resume=*|--session=*) resume_target="${a#*=}" ;; esac
             prev="$a"
         done
+        # The session this box resumes: its last box's home comes with it (seed_box_home).
+        if [[ -n "$resume_target" ]]; then
+            BOX_SEED_SID="$(basename "$resume_target")"
+            BOX_SEED_SID="${BOX_SEED_SID%.jsonl}"
+            BOX_SEED_SID="${BOX_SEED_SID##*_}"
+        fi
         if [[ -n "$resume_target" ]] \
             && live="$("$DOTFILES_DIR/scripts/omp-session-live" --wait "${AGENT_SESSION_LIVE_WAIT:-60}" "$resume_target")"; then
             die "session $resume_target is running already on this machine ($(sed 's/\t/: /' <<<"$live" | paste -sd ';')); one session must not run twice, so no box is started for it. If that omp is stuck, end it by its pid first."
@@ -3571,13 +3656,26 @@ move_orphans() {
             continue
         fi
         n="$(move_descendants "$p" | wc -l)"
-        printf '%s\t%s\t%s\n' "$p" "$((n - 1))" "${cmd% }"
+        # Whose it is, when its own environment says so: a subagent's bash tool and an eval
+        # runner carry the session they belong to, so a lead sees which of its sessions to ask.
+        local owner=""
+        if [[ -r "$PROC/$p/environ" ]]; then
+            local kv
+            while IFS= read -r -d "" kv; do
+                case "$kv" in
+                    OMP_SESSION_ID=*) owner="${kv#OMP_SESSION_ID=}" ;;
+                    PI_SESSION_FILE=*) [[ -n "$owner" ]] || { owner="${kv#PI_SESSION_FILE=}"; owner="${owner##*/}"; owner="${owner%.jsonl}"; } ;;
+                esac
+            done <"$PROC/$p/environ"
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$p" "$((n - 1))" "${cmd% }" "$owner"
     done
 }
 
 # The rows of move_orphans as one line a person reads.
 move_orphans_list() {
-    awk -F'\t' '{ printf "%s%s (pid %s%s)", (NR > 1 ? "; " : ""), $3, $1, ($2 > 0 ? ", " $2 " under it" : "") }' <<<"$1"
+    awk -F'\t' '{ printf "%s%s (pid %s%s%s)", (NR > 1 ? "; " : ""), $3, $1,
+        ($2 > 0 ? ", " $2 " under it" : ""), ($4 != "" ? ", of session " $4 : "") }' <<<"$1"
 }
 
 # move_orphans_gate OMP CALLER DRY: say what of the session dies with the hang-up; return 1 with
@@ -4207,7 +4305,13 @@ move_to_cwds_present() {
 move_to_offbox() {
     local out rc=0
     (( ${#MOVE_TO_MIRROR[@]} + ${#MOVE_TO_MERGE[@]} )) || return 0
-    out="$("$NO_OFFBOX" -- ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"} 2>&1)" || rc=$?
+    # Through move_to_fg: a TERM to the relauncher must reach this check too. It ran on after a
+    # stop on 2026-11-03 17:34Z and held the relauncher's trap until a person killed it.
+    local said
+    said="$(mktemp)"
+    move_to_fg "$NO_OFFBOX" -- ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"} >"$said" 2>&1 || rc=$?
+    out="$(cat "$said")"
+    rm -f "$said"
     (( rc == 0 )) && return 0
     MOVE_TO_WHY="no-offbox refuses its copy (status $rc), so it may not leave this machine: $(tr '\n' ' ' <<<"$out")"
     return 1
@@ -4652,35 +4756,207 @@ move_to_fg() {
     return "$rc"
 }
 
+# One rsync of a move. A file that the session writes while the copy walks it is normal - a
+# session at work has temporary files (`...packet.json_.gstmp`, an editor's `.#file`) - and rsync
+# ends with 24 ("some files vanished"). That is NOT a failure: the pass after the hang-up copies
+# whatever the first pass missed, and there a file the session no longer has is gone for good.
+# LANE-C's move (2026-11-03 14:46Z) hit it in the merge pass. Each run says how long it took, so a
+# long copy is not read as a dead move, and the vanished files are said once with their count.
+MOVE_TO_RSYNC_TICK="${AGENTBOX_MOVE_RSYNC_TICK:-300}"
+# What one progress line says: rsync's own `--info=progress2` record - bytes sent, how far, the
+# rate and the time left - and how long the pass has run. It is read from the pass's stdout file,
+# where progress records are separated by carriage returns.
+move_to_rsync_progress() {
+    tr '\r' '\n' <"$1" 2>/dev/null | grep -E '[0-9]+%' | tail -1 | tr -s ' ' | sed 's/^ //'
+}
+move_to_rsync() {
+    local kind="$1" stats="$2" label="${MOVE_TO_RSYNC_LABEL:-}" line sid
+    shift 2
+    local rc=0 err start=$SECONDS tick_pid=""
+    err="$(mktemp)"
+    # A long pass said nothing until it ended, so its owners read it as a dead move (LANE-C's
+    # merge pass, 76 minutes at 4 MB/s, 2026-11-03 14:46Z). Every MOVE_TO_RSYNC_TICK seconds the
+    # pass says where it is, in the move log and to each session that waits for it.
+    if (( MOVE_TO_RSYNC_TICK > 0 )); then
+        (
+            while sleep "$MOVE_TO_RSYNC_TICK"; do
+                line="rsync $kind: ${label:-copying} for $((SECONDS - start))s: $(move_to_rsync_progress "$stats")"
+                say "$line"
+                for sid in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do
+                    envoy send --source envoy "$sid" "agentbox: your move goes on. $line (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+                done
+            done
+        ) &
+        tick_pid=$!
+    fi
+    # rsync's messages are kept AND still reach the log: `2>"$err"` alone would take the
+    # relauncher's own signal line with them, since a trap runs inside the redirection of the
+    # command it interrupts, and that line is the only record of a stopped move.
+    move_to_fg rsync "$@" >"$stats" 2> >(tee "$err" >&2) || rc=$?
+    [[ -z "$tick_pid" ]] || { kill "$tick_pid" 2>/dev/null || true; wait "$tick_pid" 2>/dev/null || true; }
+    say "rsync $kind: $((SECONDS - start))s, exit $rc"
+    if (( rc == 24 )); then
+        say "rsync $kind: $(grep -c "^file has vanished" "$err" || true) file(s) vanished while they were copied; the move goes on (rsync exit 24)"
+        rc=0
+    fi
+    rm -f "$err"
+    return "$rc"
+}
+
+# Every path of the move that is gone now, dropped from the copy lists and from the git-native
+# plan, with a line each. Run right before the hang-up: a move holds for the session's `agentbox
+# move --go`, and a session at work removes a tree (the librarian's ~/src/legion-turnfix, 17:27Z
+# on 2026-11-03, whose native push then failed after the hang-up and rolled the group back). A
+# native tree whose HEAD no longer resolves is copied as files instead.
+move_to_drop_gone() {
+    local p kept=() gone=() tree common
+    for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
+        if [[ -e "$p" ]]; then kept+=("$p"); else gone+=("$p"); fi
+    done
+    MOVE_TO_MIRROR=(${kept[@]+"${kept[@]}"}); kept=()
+    for p in ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        if [[ -e "$p" ]]; then kept+=("$p"); else gone+=("$p"); fi
+    done
+    MOVE_TO_MERGE=(${kept[@]+"${kept[@]}"}); kept=()
+    local -a native=()
+    for p in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
+        tree="${p%%$'\t'*}" common="${p#*$'\t'}"
+        if [[ ! -d "$tree" ]]; then
+            gone+=("$tree")
+            continue
+        fi
+        if ! git -C "$tree" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+            say "$tree has no commit to push any more; it is copied as files"
+            [[ " ${MOVE_TO_MIRROR[*]-} " == *" $tree "* ]] || MOVE_TO_MIRROR+=("$tree")
+            [[ " ${MOVE_TO_MERGE[*]-} " == *" $common "* ]] || MOVE_TO_MERGE+=("$common")
+            continue
+        fi
+        native+=("$p")
+    done
+    MOVE_TO_NATIVE=(${native[@]+"${native[@]}"})
+    (( ${#gone[@]} )) && say "gone since the job: not copied: $(printf '%s ' "${gone[@]}")"
+    return 0
+}
+
 # move_to_copy TARGET STAMP: the two rsyncs, MOVE_TO_MIRROR then MOVE_TO_MERGE, every path at its
 # own absolute path on the target. No marker is ever copied.
+# A read-only source tree (LANE-C freezes its verification sets: 0555 directories, 0444 files,
+# each checked against a sha256 manifest) arrives writable and is then set back to the source's
+# modes. rsync gives a directory its final mode BEFORE it fills it, so a 0555 directory a pass
+# made stops the next pass with "mkdir: Permission denied" (rsync 23; LANE-C 16:19Z and 16:30Z,
+# 2026-11-03). Each pass runs twice: the copy with --chmod=Du+w, then a modes-only pass over the
+# same list (--existing --size-only sends no data) that puts every mode back. The source is
+# never chmod'ed.
 # move_to_copy TARGET STAMP [LABEL]: as below; each rsync's time and its --stats bytes are
 # logged through `say` when LABEL is given ("before the hang-up", "after the hang-up").
+# What the last pass saw: the time it started and the file list of each kind, so the next pass
+# copies only what changed since and deletes what went. The librarian's pass after the hang-up
+# re-walked 14 mirrored and 192 merged paths (~49 GB) and had read 5.8 GB in 14 minutes with the
+# session down (18:19-18:37Z, 2026-11-03).
+MOVE_TO_DELTA_DIR=""
+# move_to_delta_record KIND PATH…: the list of every file of these paths, now, for the next pass.
+move_to_delta_record() {
+    local kind="$1"
+    shift
+    (( $# )) || { : >"$MOVE_TO_DELTA_DIR/$kind.new"; return 0; }
+    find "$@" \( -type f -o -type l \) -print 2>/dev/null | sort >"$MOVE_TO_DELTA_DIR/$kind.new"
+}
+# move_to_delta_files KIND SINCE PATH…: a --files-from list of what changed since SINCE (the
+# stamp FILE the last pass left, so the comparison has the filesystem's own resolution and a file
+# written in the same second as that pass is still caught) and of what the last pass saw and is
+# gone now (rsync --delete-missing-args removes each of those on the target). Prints the list's
+# path, or nothing when there is nothing to send.
+move_to_delta_files() {
+    local kind="$1" since="$2"
+    local out="$MOVE_TO_DELTA_DIR/$kind.files"
+    shift 2
+    : >"$out"
+    if (( $# )); then
+        find "$@" \( -newer "$since" -o -cnewer "$since" \) -print 2>/dev/null >>"$out"
+    fi
+    if [[ -s "$MOVE_TO_DELTA_DIR/$kind.list" ]]; then
+        comm -23 "$MOVE_TO_DELTA_DIR/$kind.list" "$MOVE_TO_DELTA_DIR/$kind.new" >>"$out"
+    fi
+    sort -u "$out" -o "$out"
+    [[ -s "$out" ]] || return 1
+    printf '%s\n' "$out"
+}
+
 move_to_copy() {
     local target="$1" stamp="$2" label="${3:-}" excludes=() p stats start
+    local since="" files
     stats="$(mktemp)"
+    # Each pass records what it saw, and every pass after the first sends only the difference.
+    if [[ -z "$MOVE_TO_DELTA_DIR" ]]; then
+        MOVE_TO_DELTA_DIR="$(mktemp -d)"
+    elif [[ -e "$MOVE_TO_DELTA_DIR/stamp" ]]; then
+        since="$MOVE_TO_DELTA_DIR/stamp"
+    fi
+    # A second back, so a file written while the pass before it ran is in this one.
+    touch -d "1 second ago" "$MOVE_TO_DELTA_DIR/stamp.new"
+    move_to_delta_record mirror ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}
+    move_to_delta_record merge ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}
     if (( ${#MOVE_TO_MKDIR[@]} )); then
         move_remote "$target" "mkdir -p $(printf '%q ' "${MOVE_TO_MKDIR[@]}")" </dev/null || return 1
     fi
     for p in ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"}; do
         if [[ -d "$p" ]]; then excludes+=("--exclude=$p/"); else excludes+=("--exclude=$p"); fi
     done
+    # Files a running session makes and removes in the same second: the target does not want them
+    # and each one is a vanished-file warning.
+    excludes+=(--exclude="*.gstmp" --exclude=".#*" --exclude="*.tmp.*")
     # --no-group: the copy runs as the user, who cannot give a directory root's group (the
     # implied parents /home and /mnt, mirrored into the backup directory, failed a drill with it).
     if (( ${#MOVE_TO_MIRROR[@]} )); then
         start=$SECONDS
-        move_to_fg rsync -aH --no-group --omit-dir-times --relative --delete --backup --backup-dir="$MOVE_TO_CUTOVER/replaced/$stamp" \
-            --stats --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
-            "${MOVE_TO_MIRROR[@]}" "$MOVE_TO_USER@$target:/" >"$stats" || { rm -f "$stats"; return 1; }
+        MOVE_TO_RSYNC_LABEL="$label"
+        if [[ -n "$since" ]]; then
+            if files="$(move_to_delta_files mirror "$since" ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"})"; then
+                move_to_rsync mirror "$stats" --info=progress2 -aH --no-group --omit-dir-times --relative \
+                    --files-from="$files" --delete-missing-args --backup --backup-dir="$MOVE_TO_CUTOVER/replaced/$stamp" \
+                    --chmod=Du+w --stats --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+                    / "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
+            else
+                say "rsync mirror ${label:-pass}: nothing changed since the last pass"
+            fi
+        else
+        move_to_rsync mirror "$stats" --info=progress2 -aH --no-group --omit-dir-times --relative --delete --backup --backup-dir="$MOVE_TO_CUTOVER/replaced/$stamp" \
+            --chmod=Du+w --stats --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+            "${MOVE_TO_MIRROR[@]}" "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
+        fi
+        if [[ -z "$since" ]]; then
+            move_to_rsync mirror-modes "$stats" -rlptgoH --no-group --omit-dir-times --relative --existing --size-only \
+                --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+                "${MOVE_TO_MIRROR[@]}" "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
+        fi
         [[ -z "$label" ]] || move_to_copy_said "mirror" "$label" "$((SECONDS - start))" "$stats"
     fi
     if (( ${#MOVE_TO_MERGE[@]} )); then
         start=$SECONDS
-        move_to_fg rsync -aH --no-group --omit-dir-times --relative --update --stats --exclude="$MOVE_MARKER" -e "${MOVE_TO_SSH[*]}" \
-            "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" >"$stats" || { rm -f "$stats"; return 1; }
+        MOVE_TO_RSYNC_LABEL="$label"
+        if [[ -n "$since" ]]; then
+            if files="$(move_to_delta_files merge "$since" ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"})"; then
+                move_to_rsync merge "$stats" --info=progress2 -aH --no-group --omit-dir-times --relative --update --stats \
+                    --files-from="$files" --chmod=Du+w --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+                    / "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
+            else
+                say "rsync merge ${label:-pass}: nothing changed since the last pass"
+            fi
+        else
+            move_to_rsync merge "$stats" --info=progress2 -aH --no-group --omit-dir-times --relative --update --stats \
+                --chmod=Du+w --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+                "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
+            move_to_rsync merge-modes "$stats" -rlptgoH --no-group --omit-dir-times --relative --existing --size-only \
+                --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
+                "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
+        fi
         [[ -z "$label" ]] || move_to_copy_said "merge" "$label" "$((SECONDS - start))" "$stats"
     fi
     rm -f "$stats"
+    # This pass is now the one the next delta measures against.
+    mv "$MOVE_TO_DELTA_DIR/mirror.new" "$MOVE_TO_DELTA_DIR/mirror.list" 2>/dev/null || true
+    mv "$MOVE_TO_DELTA_DIR/merge.new" "$MOVE_TO_DELTA_DIR/merge.list" 2>/dev/null || true
+    mv "$MOVE_TO_DELTA_DIR/stamp.new" "$MOVE_TO_DELTA_DIR/stamp"
     return 0
 }
 
@@ -4719,8 +4995,14 @@ move_to_clone_missing() {
             "$log" "the origin of $w is $url, which the target may not be able to clone, so it is copied with rsync"
             continue
         fi
+        # A clone made on the target gets the public-text leak-check pre-push hook when the
+        # source checkout has one; without it a push from a moved session skips the check
+        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589).
+        local hook=0 src_common
+        if src_common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+            && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then hook=1; fi
         if out="$(move_remote "$target" "set -e
-d=$(printf '%q' "$dir") u=$(printf '%q' "$url")
+d=$(printf '%q' "$dir") u=$(printf '%q' "$url") hook=$hook
 if [ -e \"\$d\" ]; then
     if [ -d \"\$d\" ] && [ -z \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
         [ -w \"\$d\" ] || sudo -n rmdir \"\$d\" 2>/dev/null || { echo 'the path exists and is an empty directory this user cannot remove'; exit 3; }
@@ -4731,6 +5013,11 @@ if [ -e \"\$d\" ]; then
 fi
 s=\$(date +%s)
 git clone --quiet \"\$u\" \"\$d\" 2>&1 || { echo 'git clone failed'; exit 4; }
+if [ \"\$hook\" = 1 ]; then
+    i=\$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh
+    [ -x \"\$i\" ] || i=/mnt/nvme/\$(id -un)/frac-verify/shared/leak-check/install-prepush-hook.sh
+    \"\$i\" \"\$d\" || { echo 'pre-push hook install failed'; exit 5; }
+fi
 echo \"CLONED \$((\$(date +%s) - s))s \$(du -sh \"\$d/.git\" 2>/dev/null | cut -f1)\"" </dev/null 2>&1)"; then
             "$log" "cloned $url into $dir on $target (${out#CLONED }), so $w goes through git"
         else
@@ -4746,6 +5033,8 @@ echo \"CLONED \$((\$(date +%s) - s))s \$(du -sh \"\$d/.git\" 2>/dev/null | cut -
 # ~/src/machcsl-riscv was such a tree on 2026-11-03 - an unborn branch, everything staged - and
 # the push failed AFTER the hang-up, which rolled the move back.
 MOVE_TO_UNBORN=()
+# How long another move's push of the same repository to the same target stands for (minutes).
+MOVE_TO_PUSH_AGAIN_MIN="${AGENTBOX_MOVE_PUSH_AGAIN_MIN:-60}"
 move_to_git_native_plan() {
     local target="$1" w common keep p n
     local -a merge=()
@@ -4829,11 +5118,31 @@ move_to_git_native_prepush() {
         [[ -z "${done_[$common]:-}" ]] || continue
         done_[$common]=1
         start=$SECONDS
+        # A repository another move pushed to this target in the last hour is left alone: the
+        # branches of a shared checkout are the same for every session of it, and HARNESS and
+        # SQLPAGE each spent 55+ min pushing the branches of oss-verify-proofs-internal-src
+        # (17:05-18:05Z, 2026-11-03).
+        local stamp="$MOVE_TO_JOBS/pushed/$target$(tr / _ <<<"$common")"
+        if [[ -n "$(find "$stamp" -newermt "-$MOVE_TO_PUSH_AGAIN_MIN minutes" 2>/dev/null)" ]]; then
+            "$log" "the branches of $common went to $target less than $MOVE_TO_PUSH_AGAIN_MIN min ago (another move); not pushed again"
+            continue
+        fi
         theirs=()
         there="$(GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" git --git-dir="$common" ls-remote --heads "$MOVE_TO_USER@$target:$common" 2>/dev/null)" || there=""
         while read -r sha ref; do [[ -n "$ref" ]] && theirs[$ref]="$sha"; done <<<"$there"
         refs=()
+        # Only the branches this move's own worktrees have checked out: a shared checkout holds
+        # hundreds that belong to other sessions and other machines, and pushing all of them was
+        # the slowest step of the move (item 23, 2026-11-03).
+        local -A want=()
+        local w2 b
+        for w2 in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
+            [[ "${w2#*$'\t'}" == "$common" ]] || continue
+            b="$(git -C "${w2%%$'\t'*}" symbolic-ref -q --short HEAD 2>/dev/null)" || continue
+            [[ -n "$b" ]] && want[refs/heads/$b]=1
+        done
         while read -r sha ref; do
+            [[ -n "${want[$ref]:-}" ]] || continue
             [[ "${theirs[$ref]:-}" == "$sha" ]] || refs+=("$ref:$ref")
         done < <(git --git-dir="$common" for-each-ref --format='%(objectname) %(refname)' refs/heads 2>/dev/null)
         if (( ${#refs[@]} == 0 )); then
@@ -4841,6 +5150,7 @@ move_to_git_native_prepush() {
         elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git --git-dir="$common" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "${refs[@]}" >/dev/null 2>&1; then
             "$log" "pushed ${#refs[@]} branch(es) of $common before the hang-up ($((SECONDS - start))s)"
+            mkdir -p "${stamp%/*}" && : >"$stamp"
         else
             "$log" "${#refs[@]} branch(es) of $common were not all pushed ($((SECONDS - start))s; one the target has may not move forward); the move goes on"
         fi
@@ -4988,6 +5298,11 @@ move_to_unmark() {
 move_to_start() {
     local target="$1" sid="$2" cwd="$3" resume="$4" log run script
     shift 4
+    # The window the session had here (session:window name). The box gets it as
+    # AGENTBOX_MOVED_FROM_WINDOW and the target's window keeps it in the @stream option, so a
+    # stream's sessions can be counted on the target (pilot.py).
+    local from_window="${MOVE_TO_FROM_WINDOW:-}"
+    [[ -z "$from_window" ]] || set -- -e "AGENTBOX_MOVED_FROM_WINDOW=$from_window" "$@"
     log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
     run="$(printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' "$MOVE_TO_AGENTBOX" "$sid" "$log" \
         "$(printf '%q ' "$MOVE_TO_AGENTBOX" new --drop-gone-dirs "$@" -- omp --resume "$resume")")"
@@ -4999,13 +5314,15 @@ move_to_start() {
     run="$(printf 'mkdir -p %q; printf "pid=%%s\\nbox=%%s\\nwindow=%%s\\n" "$$" "${AGENTBOX_BOX:-}" "${TMUX_PANE:-}" >%q; trap "rm -f %q" EXIT; %s' \
         "${started%/*}" "$started" "$started" "$run")"
     run="$run; echo; echo 'agentbox: the box has exited; this window is a shell again'; exec bash -i"
-    script="s=$(printf '%q' "$MOVE_TO_TMUX_SESSION") n=$(printf '%q' "${sid:0:8}") c=$(printf '%q' "$cwd") r=$(printf '%q' "$run")
+    script="s=$(printf '%q' "$MOVE_TO_TMUX_SESSION") n=$(printf '%q' "${sid:0:8}") c=$(printf '%q' "$cwd") r=$(printf '%q' "$run") w=$(printf '%q' "$from_window")
 mkdir -p \"\$(dirname $(printf '%q' "$log"))\"
 if tmux has-session -t \"=\$s\" 2>/dev/null; then
-    tmux new-window -d -P -F '#{window_id}' -t \"=\$s:\" -n \"\$n\" -c \"\$c\" bash -i -c \"\$r\"
+    id=\"\$(tmux new-window -d -P -F '#{window_id}' -t \"=\$s:\" -n \"\$n\" -c \"\$c\" bash -i -c \"\$r\")\"
 else
-    tmux new-session -d -P -F '#{window_id}' -s \"\$s\" -n \"\$n\" -c \"\$c\" bash -i -c \"\$r\"
-fi"
+    id=\"\$(tmux new-session -d -P -F '#{window_id}' -s \"\$s\" -n \"\$n\" -c \"\$c\" bash -i -c \"\$r\")\"
+fi
+[ -z \"\$w\" ] || tmux set-option -w -t \"\$id\" @stream \"\${w#*:}\" >/dev/null 2>&1 || true
+printf '%s\\n' \"\$id\""
     move_remote "$target" "$script" </dev/null
 }
 
@@ -5253,12 +5570,18 @@ move_to_member() {
     elif hc="$(move_transcript_cwd "$MOVE_RESUME")"; then
         cwd="$hc"
     fi
+    # The window's NAME, not only its index: a stream's windows are named for the stream, and
+    # pilot.py counts a stream's sessions by that name. `at` holds session:index.pane, which says
+    # nothing about the stream once the session is on another machine.
+    local window
+    window="$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{session_name}:#{window_name}' 2>/dev/null || true)"
     jq -cn --arg sid "$sid" --argjson pid "$pid" --arg pane "$pane" --arg at "$at" --arg cwd "$cwd" \
         --arg resume "$MOVE_RESUME" --arg tmux_bin "$MOVE_TMUX_BIN" --argjson reroot "$reroot" \
+        --arg window "$window" \
         --argjson spec "$(move_json_array "${MOVE_SPEC[@]}")" \
         --argjson tmux "$(move_json_array ${MOVE_TMUX[@]+"${MOVE_TMUX[@]}"})" \
         '{sid: $sid, pid: $pid, box: "", pane: $pane, at: $at, cwd: $cwd, resume: $resume, spec: $spec,
-          tmux: $tmux, tmux_bin: $tmux_bin, reroot: $reroot}'
+          tmux: $tmux, tmux_bin: $tmux_bin, reroot: $reroot, window: $window}'
 }
 
 # move_to_job TARGET GROUP MEMBER-JSON…: the relauncher's job file, with the copy lists of every
@@ -5566,6 +5889,9 @@ move_to_in_box() {
 # after the 04:10Z hang-up, since it read only the `move --self` log. A relauncher stopped by a
 # signal says so, with the step it was in, so its log never ends at "copying".
 MOVE_TO_ACTIVE="$MOVE_TO_JOBS/active"
+# One relauncher per session: the lock each holds for its life, and the descriptors that hold them.
+MOVE_TO_LOCKS="$MOVE_TO_JOBS/locks"
+MOVE_TO_LOCK_FDS=()
 # Jobs a BOX queued because no tmux client there speaks to the host's server (move_to_in_box).
 # The host runs them: `agentbox move --run-queue`, which omp-memory-watch calls each pass.
 MOVE_TO_QUEUE="$MOVE_TO_JOBS/queue"
@@ -5603,7 +5929,7 @@ move_to_hold() {
     deadline=$((SECONDS + MOVE_TO_HOLD_WAIT))
     for s in "$@"; do
         printf 'target=%s\ndeadline=%s\npid=%s\n' "$target" "$(( $(date +%s) + MOVE_TO_HOLD_WAIT ))" "$BASHPID" >"$MOVE_TO_HOLD/$s"
-        envoy send --source envoy "$s" "agentbox: your move to $target is ready to hang you up (checks, clones and the first copy are done). Run \`agentbox move --go\` at your safe point within $((MOVE_TO_HOLD_WAIT / 60)) min; it hangs this session up and resumes it on $target. If you do not, the move is refused with nothing hung up, and the copy stays on $target for the next try. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+        envoy send --source envoy "$s" "agentbox: your move to $target is ready to hang you up (checks, clones and the first copy are done). Go on working; \`agentbox move --go\` is the ONLY moment this move stops you, and nothing stops until you run it. Run it at your next safe point within $((MOVE_TO_HOLD_WAIT / 60)) min; it hangs this session up and resumes it on $target. If you do not, the move is refused with nothing hung up, and the copy stays on $target for the next try. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
     done
     say "holding before the hang-up: waiting up to $((MOVE_TO_HOLD_WAIT / 60)) min for \`agentbox move --go\` from $*"
     while :; do
@@ -5674,12 +6000,16 @@ move_to_run() {
     if [[ "$(jq '.ssh | length' "$job")" -gt 0 ]]; then mapfile -t MOVE_TO_SSH < <(jq -r '.ssh[]' "$job"); fi
     me="${AGENTBOX_HOST:-$(hostname -s)}"
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    local sids=() pids=() boxes=() panes=() ats=() cwds=() resumes=() windows=() reroots=() there=()
+    local sids=() pids=() boxes=() panes=() ats=() cwds=() resumes=() windows=() reroots=() there=() from_windows=()
     for ((i = 0; i < n; i++)); do
         sids[i]="$(jq -r ".members[$i].sid" "$job")" pids[i]="$(jq -r ".members[$i].pid" "$job")"
         boxes[i]="$(jq -r ".members[$i].box" "$job")" panes[i]="$(jq -r ".members[$i].pane" "$job")"
         cwds[i]="$(jq -r ".members[$i].cwd" "$job")" resumes[i]="$(jq -r ".members[$i].resume" "$job")"
         ats[i]="$(jq -r ".members[$i].at" "$job")"
+        # The window the session had on this machine, as <tmux session>:<window name>: the target
+        # keeps it (AGENTBOX_MOVED_FROM_WINDOW, the window's @stream option) and the move log
+        # carries it, so a stream's sessions can be counted after the move.
+        from_windows[i]="$(jq -r ".members[$i].window // \"\"" "$job")"
         reroots[i]="$(jq -r ".members[$i].reroot // false" "$job")"
         # The transcript as the target names it: the same path, unless it is re-rooted there.
         there[i]="${resumes[i]}"
@@ -5711,6 +6041,19 @@ move_to_run() {
         text="agentbox: the move of session $sid to $target FAILED and the session is DOWN on $me: $why (An automated notice from agentbox.)"
         say "$sid: DOWN: $why"
         envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true
+        envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
+        lead="$(jq -r '.lead // empty' "$job" 2>/dev/null || true)"
+        [[ -z "$lead" ]] || envoy send --source envoy "$lead" "$text" >/dev/null 2>&1 || true
+    }
+
+    # A move that stops BEFORE the hang-up: every session goes on here, so none is DOWN, but the
+    # move did not happen and nobody watches its log. The sessions, the lead that asked for the
+    # move and the box-health role are told; before this only the sessions were (2026-11-03).
+    move_refused() {
+        local why="$1" text lead sid
+        shift
+        text="agentbox: the move to $target did NOT start and these sessions were not hung up ($*): $why (An automated notice from agentbox.)"
+        for sid in "$@"; do envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true; done
         envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
         lead="$(jq -r '.lead // empty' "$job" 2>/dev/null || true)"
         [[ -z "$lead" ]] || envoy send --source envoy "$lead" "$text" >/dev/null 2>&1 || true
@@ -5759,19 +6102,42 @@ move_to_run() {
         shift
         # One time for every line of the attempt: the halt rule counts an attempt by it.
         now="$(date -u +%FT%TZ)"
-        for j in "$@"; do lines+=("$now	${sids[j]}	$group	$me	$target	$result	${there[j]}"); done
+        for j in "$@"; do lines+=("$now	${sids[j]}	$group	$me	$target	$result	${there[j]}	${from_windows[j]}"); done
         move_to_log "$target" "${lines[@]}" || true
     }
     local all=()
     for ((i = 0; i < n; i++)); do all+=("$i"); done
+    # One relauncher per session, before any check: two `move --to-run` for the librarian ran at
+    # once at 17:32-17:34Z on 2026-11-03, because the first had not yet written its claim. The
+    # lock is held for this relauncher's life (the fd stays open) and says who holds it.
+    # Its own directory, not the claims': move_to_in_flight counts every claim with a live
+    # relauncher, and a lock held while this one waits for a slot would count as a move in flight.
+    mkdir -p "$MOVE_TO_LOCKS"
+    local lock fd holder
+    for ((i = 0; i < n; i++)); do
+        lock="$MOVE_TO_LOCKS/${sids[i]}.lock"
+        exec {fd}>>"$lock" || die "cannot open $lock, the one-relauncher-per-session lock; nothing was hung up"
+        if ! flock -n "$fd"; then
+            holder="$(sed -n 's/^pid=//p' "$lock" | tail -1)"
+            die "another move of ${sids[i]} runs (pid ${holder:-unknown}); nothing was hung up"
+        fi
+        : >"$lock"
+        printf 'pid=%s\njob=%s\n' "$BASHPID" "$job" >&"$fd"
+        MOVE_TO_LOCK_FDS+=("$fd")
+    done
     say "job $job: ${sids[*]} to $target"
     # The active files, and the one exit path that removes them (the EXIT trap of cmd_move, which
     # also clears the transcript index, runs this too). A signal says where it stopped.
     # Globals, since the EXIT trap runs after this function's locals are gone.
     MOVE_TO_ACTIVE_SIDS=("${sids[@]}")
+    # Only this relauncher's own claims: a claim another relauncher wrote stays (2026-11-03).
     move_to_active_clear() {
-        local s
-        for s in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do rm -f "$MOVE_TO_ACTIVE/$s" "$MOVE_TO_HOLD/$s"; done
+        local s who
+        for s in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do
+            who="$(sed -n 's/^pid=//p' "$MOVE_TO_ACTIVE/$s" 2>/dev/null | head -1)"
+            [[ -z "$who" || "$who" == "$BASHPID" ]] && rm -f "$MOVE_TO_ACTIVE/$s"
+            rm -f "$MOVE_TO_HOLD/$s"
+        done
     }
     move_to_run_exit() { move_to_active_clear; move_exit; }
     move_to_run_signal() {
@@ -5791,9 +6157,7 @@ move_to_run() {
     if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
         || ! move_to_dests_writable "$target" || ! move_to_target_worktrees "$target" || ! move_to_offbox; then
         say "refused, nothing was hung up: $MOVE_TO_WHY"
-        for ((i = 0; i < n; i++)); do
-            envoy send --source envoy "${sids[i]}" "agentbox: the move to $target did not start and this session was not hung up: $MOVE_TO_WHY. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
-        done
+        move_refused "$MOVE_TO_WHY" "${sids[@]}"
         return 2
     fi
     # From here the members' moves are in flight: a restarter that reads these leaves them alone.
@@ -5819,14 +6183,35 @@ move_to_run() {
     if ! move_to_git_native_push "$target" || ! move_to_copy "$target" "$stamp-before" "before the hang-up"; then
         [[ -n "$MOVE_TO_WHY" ]] || MOVE_TO_WHY="the first copy to $target failed (above)"
         say "refused, nothing was hung up: $MOVE_TO_WHY"
-        for ((i = 0; i < n; i++)); do
-            envoy send --source envoy "${sids[i]}" "agentbox: the move to $target did not start and this session was not hung up: $MOVE_TO_WHY. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
-        done
+        move_refused "$MOVE_TO_WHY" "${sids[@]}"
+        return 2
+    fi
+    # One more pass right before the hold, and another the moment `--go` arrives, both while the
+    # sessions still work: the first copy of a big tree is hours old by the hang-up (the
+    # librarian's mirror ran 15:10-16:18Z and still had 9.3 GB to send at 18:4xZ, 2026-11-03).
+    # Each is a delta of the one before it, so it costs a walk, not a copy.
+    MOVE_TO_STATE="copying what changed, before the hold"
+    if ! move_to_copy "$target" "$stamp-hold" "before the hold"; then
+        MOVE_TO_WHY="the copy before the hold failed (above)"
+        say "refused, nothing was hung up: $MOVE_TO_WHY"
+        move_refused "$MOVE_TO_WHY" "${sids[@]}"
         return 2
     fi
     MOVE_TO_STATE="holding before the hang-up (agentbox move --go)"
     if ! move_to_hold "$target" "${sids[@]}"; then
         say "refused, nothing was hung up: $MOVE_TO_WHY"
+        move_refused "$MOVE_TO_WHY" "${sids[@]}"
+        return 2
+    fi
+    # A path the session removed while the move held for its `--go` is dropped here, not after the
+    # hang-up: the librarian removed its worktree ~/src/legion-turnfix during the hold, and the
+    # native push then failed AFTER the hang-up and rolled the group back (17:27:06Z, 2026-11-03).
+    move_to_drop_gone
+    MOVE_TO_STATE="copying what changed, after the go and before the hang-up"
+    if ! move_to_copy "$target" "$stamp-go" "at the go"; then
+        MOVE_TO_WHY="the copy after the go failed (above)"
+        say "refused, nothing was hung up: $MOVE_TO_WHY"
+        move_refused "$MOVE_TO_WHY" "${sids[@]}"
         return 2
     fi
     MOVE_TO_STATE="hanging up ${sids[*]}"
@@ -5896,6 +6281,7 @@ move_to_run() {
         MOVE_TO_STATE="starting the sessions on $target"
         for ((i = 0; i < n; i++)); do
             member_spec "$i"
+            MOVE_TO_FROM_WINDOW="${from_windows[i]}"
             if ! windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${there[i]}" "${MOVE_SPEC[@]}")" || [[ -z "${windows[i]}" ]]; then
                 reason="failed: no tmux window for ${sids[i]} on $target"
                 break

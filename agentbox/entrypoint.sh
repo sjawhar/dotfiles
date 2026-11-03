@@ -165,6 +165,17 @@ if [ -n "${AGENTBOX_CRED_HELPERS:-}" ] && [ "$AGENTBOX_CRED_HELPERS" != "{}" ]; 
     fi
 fi
 
+# The box user's HOME in the password database, which is NOT $HOME: the image's user is `ubuntu`
+# with /home/ubuntu, while the box works in the host user's path (/home/sami). Every tool that
+# reads getpwuid instead of $HOME then looks in the wrong home - OpenSSH ignored
+# /home/sami/.ssh/config and went to port 22 with the default id_* files (VERIFY's box 19:26Z,
+# session 01a197e8 20:15Z, 2026-11-03). usermod -d changes only the record, moves nothing, and is
+# a no-op where the two are already the same.
+if [ "$(getent passwd "$AGENTBOX_USER" | cut -d: -f6)" != "$HOME" ]; then
+    usermod -d "$HOME" "$AGENTBOX_USER" 2>/dev/null \
+        || echo "agentbox: $AGENTBOX_USER still has another home in the password database; tools that read it, ssh among them, will not see $HOME" >&2
+fi
+
 # An ssh config for the other machines a box talks to (agentbox/box-ssh-config): `ssh
 # sami-rocqperf` from a box connected as ubuntu on port 22 and was refused, since the box has the
 # key and the known_hosts file but no entry naming the user, the port and those files (the cost

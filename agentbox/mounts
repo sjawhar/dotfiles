@@ -122,11 +122,20 @@ ro .ssh/google_compute_engine.pub
 # sami-devbox's key for sami-rocqperf's OpenSSH on tcp:443 (dispatch://INFRA-734, INFRA-993), and
 # that host's pinned key. Its only verifier is sami-rocqperf's authorized_keys, which accepts it
 # only from sami-devbox's tailnet address; GitHub never sees it. A session moved to sami-devbox
-# runs its scripts on sami-rocqperf with: ssh -i ~/.ssh/sami-rocqperf -p 443
-# -o UserKnownHostsFile=~/.ssh/known_hosts.sami-rocqperf sami@100.88.161.31. Absent on other hosts.
+# runs its scripts on sami-rocqperf with `ssh sami-rocqperf`: the box writes that entry at start
+# (agentbox/box-ssh-config) with the user, the port and these files, as the BOX sees them ($HOME,
+# never ~, since a box's home is the host user's path). Absent on other hosts.
 ro .ssh/sami-rocqperf
 ro .ssh/sami-rocqperf.pub
 ro .ssh/known_hosts.sami-rocqperf
+# The same for a box that must reach the machine it RUNS on. A box reaches any OTHER machine of
+# the tailnet as this node, which Tailscale SSH authenticates, but traffic to its own host does
+# not take that path: sshd answers and asks for a key, so `ssh sami-devbox` from a box on
+# sami-devbox was refused (VERIFY, 2026-11-03 19:26Z). Each entry is skipped where the file is
+# absent.
+ro .ssh/sami-devbox
+ro .ssh/sami-devbox.pub
+ro .ssh/known_hosts.sami-devbox
 
 # The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. This entry is
 # the POINTER, `path`, holding the script's absolute path; the script itself lives on /mnt/nvme,

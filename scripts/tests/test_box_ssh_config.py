@@ -59,10 +59,42 @@ class BoxSshConfig(unittest.TestCase):
         self.assertEqual(settings.get("port"), "443")
         self.assertIn(f"{self.home}/.ssh/sami-rocqperf", shown.stdout)
 
-    def test_a_machine_with_no_key_gets_no_entry_and_running_again_changes_nothing(self) -> None:
+    def test_the_entry_is_written_system_wide_because_ssh_reads_the_passwd_home(self) -> None:
+        """ssh reads the user config at the home the password database gives (getpwuid), which in
+        a box is /home/ubuntu for the box user while $HOME is the host user's path. So the user
+        file alone is never read: `ssh sami-rocqperf` from VERIFY's box went to port 22 and timed
+        out (19:26Z, 2026-11-03). The same entry goes to /etc/ssh/ssh_config.d, which every user
+        reads. Here the system directory is a temporary one, since a test writes nothing in /etc."""
+        self.key()
+        etc = self.home / "etc-ssh"
+        (etc / "ssh_config.d").mkdir(parents=True)
+        result = subprocess.run([str(SCRIPT), str(self.home)], capture_output=True, text=True, timeout=60,
+                                check=False, env={**os.environ, "AGENTBOX_SSH_SYSTEM_DIR": str(etc / "ssh_config.d")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        system = etc / "ssh_config.d" / "50-agentbox-sami-rocqperf.conf"
+        self.assertTrue(system.is_file(), list((etc / "ssh_config.d").iterdir()))
+        self.assertEqual(system.read_text(encoding="utf-8"),
+                         (self.home / ".ssh/config.d/sami-rocqperf.conf").read_text(encoding="utf-8"))
+        shown = subprocess.run(["ssh", "-F", str(system), "-G", "sami-rocqperf"],
+                               capture_output=True, text=True, timeout=60, check=False)
+        self.assertIn("port 443", shown.stdout)
+
+    def test_a_machine_with_no_key_is_reached_as_this_node_and_running_again_changes_nothing(self) -> None:
+        """Tailscale SSH authenticates the node, so a machine this box holds no key for still
+        gets an entry; its host key is taken on first contact and kept in the box's own file
+        (`ssh sami-devbox` from VERIFY's box was refused on the host key, 19:26Z 2026-11-03)."""
         self.key()
         self.assertEqual(self.run_it().returncode, 0)
-        self.assertFalse((self.home / ".ssh/config.d/sami-leanperf.conf").exists())
+        devbox = (self.home / ".ssh/config.d/sami-devbox.conf").read_text(encoding="utf-8")
+        self.assertEqual(devbox.splitlines(), [
+            "Host sami-devbox",
+            "  User sami",
+            "  Port 22",
+            f"  UserKnownHostsFile {self.home}/.ssh/known_hosts.agentbox",
+            "  StrictHostKeyChecking accept-new",
+        ])
+        self.assertTrue((self.home / ".ssh/known_hosts.agentbox").exists())
+        self.assertNotIn("IdentityFile", devbox)
         before = (self.home / ".ssh/config").read_text(encoding="utf-8")
         mine = (self.home / ".ssh/config.d/sami-rocqperf.conf")
         mine.write_text("Host sami-rocqperf\n  Port 2222\n", encoding="utf-8")
@@ -80,7 +112,8 @@ class BoxSshConfig(unittest.TestCase):
         self.assertEqual(lines[0], f"Include {self.home}/.ssh/config.d/*.conf")
         self.assertIn("Host github.com", lines)
         conf = (self.home / ".ssh/config.d/sami-leanperf.conf").read_text(encoding="utf-8")
-        self.assertNotIn("UserKnownHostsFile", conf, "no known_hosts file, no line for it")
+        self.assertIn(f"UserKnownHostsFile {self.home}/.ssh/known_hosts.agentbox", conf)
+        self.assertIn("IdentityFile", conf, "its key is mounted, so it is the only identity")
 
 
 if __name__ == "__main__":

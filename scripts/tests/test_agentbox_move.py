@@ -23,10 +23,12 @@ with the host tools stubbed first on PATH, and point `AGENTBOX_PROC` at a fixtur
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -102,6 +104,23 @@ class AgentboxMove(unittest.TestCase):
         self.temp_dir.cleanup()
 
     # ── fixtures ────────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def end_relauncher(proc: subprocess.Popen[bytes]) -> None:
+        """A move_to_run a test started, and everything it started, ended by its own process group:
+        a test that fails or times out must leave nothing running on this host."""
+        if proc.poll() is not None:
+            return
+        for signal_number in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, signal_number)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=20)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
     def make_proc(
         self,
         pid: int,
@@ -185,15 +204,24 @@ class AgentboxMove(unittest.TestCase):
         self.git("commit", "-qm", "one", cwd=path)
         return path
 
+    # A run of the script under test. The cap is generous because this host carries ~100 agent
+    # sessions: at load 300 a move that takes 20 s idle takes minutes, and a cap that fits an
+    # idle host fails tests for the load alone (AGENTBOX_TEST_TIMEOUT to change it).
+    TIMEOUT = float(os.environ.get("AGENTBOX_TEST_TIMEOUT", "900"))
+
     def run_bash(self, script: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        with subprocess.Popen(
             ["bash", "-c", f'source "{AGENTBOX}"\n{script}'],
-            capture_output=True,
-            text=True,
-            env={**self.env, **(extra_env or {})},
-            check=False,
-            timeout=300,
-        )
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**self.env, **(extra_env or {})}, start_new_session=True,
+        ) as proc:
+            try:
+                out, err = proc.communicate(timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # Nothing of a test outlives it: a move_to_run and its children die with it.
+                self.end_relauncher(proc)
+                raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
     def census(self) -> list[list[str]]:
         result = self.run_bash("move_census")
@@ -1412,9 +1440,18 @@ class AgentboxMove(unittest.TestCase):
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         # Two passes of the same two rsyncs: one before the hang-up, one after (only what changed).
-        first_mirror, first_merge, mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(first_mirror.replace("-before ", " "), mirror)
-        self.assertEqual(first_merge, merge)
+        # Each pass is a copy and a modes-only run after it (read-only source trees), twice: once
+        # before the hang-up and once after.
+        lines = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        # The first pass walks everything: a mirror, its modes-only run, a merge, its modes run.
+        # Every pass after it is a delta of the one before (--files-from), never a fresh walk.
+        self.assertGreaterEqual(len(lines), 4, lines)
+        for later in lines[4:]:
+            self.assertIn("--files-from=", later, lines)
+        mirror, merge = lines[0], lines[2]
+        for modes in (lines[1], lines[3]):
+            self.assertIn("--existing", modes)
+            self.assertNotIn("--chmod", modes)
         self.assertIn(f"--delete --backup --backup-dir={self.cutover}/replaced/", mirror)
         self.assertIn("--exclude=agentbox-moved", mirror)
         self.assertTrue(mirror.endswith(" sami@devbox:/"), mirror)
@@ -1424,7 +1461,8 @@ class AgentboxMove(unittest.TestCase):
         # mirror.
         self.assertIn(f"--exclude={self.src / 'other/.git'}/ ", mirror)
         self.assertIn(f"--exclude={self.worktree}/.git ", mirror)
-        self.assertIn(f"--update --stats --exclude=agentbox-moved -e ssh -o BatchMode=yes -o ConnectTimeout=20 {self.lane} sami@devbox:/", merge)
+        self.assertIn("--update --stats --chmod=Du+w --exclude=agentbox-moved", merge)
+        self.assertTrue(merge.endswith(f"{self.lane} sami@devbox:/"), merge)
         self.assertIn("through git:", run.stdout)
         for marker in (transcript.with_suffix("") / "agentbox-moved", self.home / ".omp/agentbox-moved" / self.TO):
             body = marker.read_text(encoding="utf-8")
@@ -1433,9 +1471,12 @@ class AgentboxMove(unittest.TestCase):
         [started] = [c for c in (self.remote / "TMUX").read_text(encoding="utf-8").splitlines() if c.startswith("new-")]
         self.assertIn("new-session -d -P -F #{window_id} -s moved -n 01a19700", started)
         # A --dir the target lacks is left out at launch there, as on a resume here.
-        self.assertIn(f"/target/agentbox new --drop-gone-dirs -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", started)
+        self.assertIn(f"/target/agentbox new --drop-gone-dirs -e AGENTBOX_MOVED_FROM_WINDOW=", started)
+        self.assertIn(f"-e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", started)
         [line] = self.move_log()
-        self.assertEqual(line[1:], [self.TO, "g-01a19700", "oldbox", "devbox", "moved", str(transcript)])
+        # The last column is the window the session came from on this machine (<tmux session>:<name>),
+        # which the target keeps as the window's @stream option.
+        self.assertEqual(line[1:], [self.TO, "g-01a19700", "oldbox", "devbox", "moved", str(transcript), "42507"])
         respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
         self.assertEqual(len(respawn), 1, respawn)
         self.assertIn("-t %81", respawn[0])
@@ -1600,20 +1641,33 @@ class AgentboxMove(unittest.TestCase):
         self.set_panes({999999900: ("%81", "agents:4.1")})
         self.target()
         active = self.root / "cache/omp/agentbox/move-to/active" / self.TO
-        # The third rsync is the first after the hang-up (mirror and merge went before it).
-        count = self.root / "RSYNC_N"
-        write_stub(self.stubs, "rsync", f'n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n >"{count}"; '
-                                        f'[ $n -ge 3 ] || exit 0; touch "{self.root}/IN_RSYNC"; sleep 60')
+        # The pass AFTER the hang-up is the one whose backup directory carries the bare stamp;
+        # every pass before it has a suffix (-before, -hold, -go). Only that one waits here.
+        write_stub(self.stubs, "rsync",
+                   'case "$*" in *-before\\ *|*-hold\\ *|*-go\\ *) exit 0 ;; esac\n'
+                   'case "$*" in *--backup-dir=*) ;; *) exit 0 ;; esac\n'
+                   f'touch "{self.root}/IN_RSYNC"; sleep 60')
+        # The session writes while the move holds, so the pass after the hang-up has work: a
+        # pass with nothing to send runs no rsync at all.
+        changing = self.worktree / "written-during-the-hold.txt"
         self.assertEqual(self.move_to().returncode, 0)
         [job] = self.jobs()
         self.set_pids()
         log = self.root / "relauncher.log"
-        proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nmove_to_run "{job}"'],
+        proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\n'
+                                 f'move_to_hold() {{ printf x >"{changing}"; }}\n'
+                                 f'move_to_run "{job}"'],
                                 env=self.env, stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
-        for _ in range(300):
+        # A relauncher this test leaves behind runs on the real host (two of them waited in their
+        # hold for an hour on 2026-11-03), so it dies with the test whatever happens here.
+        self.addCleanup(self.end_relauncher, proc)
+        # The pass after the hang-up is the fifth rsync of the move, and every pass before it
+        # walks its paths, so on a loaded host this wait is minutes, not seconds.
+        for _ in range(int(self.TIMEOUT * 10)):
             if (self.root / "IN_RSYNC").exists():
                 break
             time.sleep(0.1)
+        self.assertTrue((self.root / "IN_RSYNC").exists(), log.read_text(encoding="utf-8"))
         self.assertTrue(active.exists())
         proc.send_signal(15)
         proc.wait(timeout=30)
@@ -1660,7 +1714,243 @@ class AgentboxMove(unittest.TestCase):
         after = run.stdout.index("rsync mirror after the hang-up: ")
         self.assertLess(before, hangup)
         self.assertLess(hangup, after)
+        self.assertIn("rsync mirror before the hold", run.stdout)
+        self.assertIn("rsync mirror at the go", run.stdout)
         self.assertIn("7 files transferred, 1,234 bytes transferred file size, 1,000 bytes literal data", run.stdout)
+
+    def test_a_file_that_vanishes_while_it_is_copied_does_not_fail_the_move(self) -> None:
+        """A session at work writes and removes temporary files, so a pass of the copy ends with
+        rsync 24 ("some files vanished"). LANE-C's merge pass warned on
+        `...packet.json_.gstmp` (2026-11-03 14:46Z). 24 is a warning: what the first pass missed
+        the pass after the hang-up copies, and there a file the session no longer has is gone."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        write_stub(self.stubs, "rsync", 'printf "%s\\n" "$*" >>"$STUB_RSYNC"; '
+                   'case "$*" in *--update*) echo \'file has vanished: "/w/x.json_.gstmp"\' >&2; exit 24;; esac; exit 0')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("1 file(s) vanished while they were copied; the move goes on (rsync exit 24)", run.stdout)
+        self.assertNotIn("refused, nothing was hung up", run.stdout)
+        self.assertEqual(self.move_log()[0][5], "moved")
+        # Transient files are left out of both passes, so most of them never raise the warning.
+        sent = (self.root / "RSYNC").read_text(encoding="utf-8")
+        for pattern in ("--exclude=*.gstmp", "--exclude=.#*", "--exclude=*.tmp.*"):
+            self.assertEqual(sent.count(pattern), len(sent.splitlines()),
+                             f"{pattern} in every rsync of the move: {sent}")
+
+    def test_a_long_copy_says_where_it_is_and_an_rsync_that_fails_refuses_with_a_notice(self) -> None:
+        """LANE-C's pre-hang-up merge ran 76 minutes at 4 MB/s and logged nothing until it ended,
+        so its owners read it as a dead move (2026-11-03). Each pass now says where it is every
+        AGENTBOX_MOVE_RSYNC_TICK seconds, in the log and to each session that waits for it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        write_stub(self.stubs, "rsync", 'printf "%s\\n" "$*" >>"$STUB_RSYNC"; '
+                   'printf "  1,048,576  37%%    4.50MB/s    0:01:23 (xfr#9, to-chk=11/20)\\r"; sleep 3')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "1"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertRegex(run.stdout, r"rsync mirror: before the hang-up for \d+s: 1,048,576 37% 4.50MB/s 0:01:23")
+        self.assertIn("--info=progress2", (self.root / "RSYNC").read_text(encoding="utf-8"))
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
+        self.assertIn("your move goes on.", sent)
+        self.assertIn(self.TO, sent)
+
+    def test_a_copy_that_fails_before_the_hang_up_tells_the_lead_and_box_health(self) -> None:
+        """A move that stops before the hang-up leaves every session running, so none is DOWN and
+        nobody watches the log. Only the sessions were told before (2026-11-03)."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        write_stub(self.stubs, "rsync", 'printf "%s\\n" "$*" >>"$STUB_RSYNC"; echo "rsync: connection unexpectedly closed" >&2; exit 12')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("refused, nothing was hung up", run.stdout)
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
+        self.assertIn("notifications.role.lead-box-health", sent)
+        self.assertIn("did NOT start and these sessions were not hung up", sent)
+        self.assertIn(self.TO, sent)
+
+    def test_a_moved_session_keeps_the_name_of_the_window_it_came_from(self) -> None:
+        """A stream's windows are named for the stream and pilot.py counts a stream's sessions by
+        that name, which `session:index.pane` does not carry. The job, the move log, the box's
+        environment (AGENTBOX_MOVED_FROM_WINDOW) and the target window's @stream option hold it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        # This machine's tmux answers the window query with the stream's name.
+        write_stub(self.stubs, "tmux", "\n".join([
+            'case " $* " in',
+            '  *" list-panes "*) cat "$STUB_TMUX" 2>/dev/null; exit 0 ;;',
+            "esac",
+            f'printf "%s\\n" "$*" >>"{self.local_tmux}"',
+            'case " $* " in',
+            '  *"#{session_name}:#{window_name}"*) printf "agents:lane-c\\n" ;;',
+            '  *" display-message "*) printf "42507\\n" ;;',
+            "esac",
+            "exit 0",
+        ]))
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.assertEqual(json.loads(job.read_text(encoding="utf-8"))["members"][0]["window"], "agents:lane-c")
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # The target: the box's environment carries it, and the window it runs in keeps it.
+        started = (self.remote / "TMUX").read_text(encoding="utf-8")
+        self.assertIn("-e AGENTBOX_MOVED_FROM_WINDOW=agents:lane-c", started)
+        self.assertIn("set-option -w -t", started)
+        self.assertIn("@stream lane-c", started)
+        self.assertEqual(self.move_log()[0][7], "agents:lane-c")
+
+    def test_a_read_only_source_tree_arrives_twice_and_keeps_its_modes(self) -> None:
+        """LANE-C freezes its verification sets (0555 directories, 0444 files, checked against
+        sha256 manifests). rsync gives a directory its final mode BEFORE it fills it, so the
+        0555 directory of the first pass stopped the second with "mkdir: Permission denied"
+        (rsync 23, 16:19Z and 16:30Z on 2026-11-03). Real rsync here, over the stub ssh, with the
+        target's root under the fixture: both passes land and the modes end as the source's."""
+        self.target()
+        # Real rsync on this side; on the "target" side the stub puts every absolute path under
+        # one root, so the copy is observable and nothing outside the fixture is written.
+        write_stub(self.stubs, "rsync", 'exec /usr/bin/rsync "$@"')
+        far = self.remote / "root"
+        far.mkdir()
+        write_stub(self.remote / "bin", "rsync", "\n".join([
+            'args=("$@")',
+            'args[$(( ${#args[@]} - 1 ))]="$STUB_REMOTE/root/"',
+            'exec /usr/bin/rsync "${args[@]}"',
+        ]))
+        frozen = self.root / "frozen"
+        (frozen / "repro").mkdir(parents=True)
+        (frozen / "repro" / "evidence.txt").write_text("one\n", encoding="utf-8")
+        for path, mode in ((frozen / "repro" / "evidence.txt", 0o444), (frozen / "repro", 0o555), (frozen, 0o555)):
+            path.chmod(mode)
+        # The fixture's tearDown removes the root, so a frozen directory must be writable again
+        # whatever the test does.
+        def thaw() -> None:
+            for p in (frozen, frozen / "repro", frozen / "repro" / "gr17"):
+                if p.exists():
+                    p.chmod(0o755)
+        self.addCleanup(thaw)
+        run = self.run_bash(f'MOVE_TO_MIRROR=("{frozen}")\nMOVE_TO_MERGE=()\nmove_to_copy devbox st1',
+                            {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        there = Path(str(far) + str(frozen))
+        self.assertEqual((there / "repro/evidence.txt").read_text(encoding="utf-8"), "one\n")
+        self.assertEqual(oct((there / "repro").stat().st_mode)[-3:], "555")
+        self.assertEqual(oct((there / "repro/evidence.txt").stat().st_mode)[-3:], "444")
+        # A second pass, as every move runs one after the hang-up, with a directory and a file
+        # the first lacked: the target must mkdir inside a 0555 directory of the first pass.
+        (frozen / "repro").chmod(0o755)
+        (frozen / "repro" / "gr17").mkdir()
+        (frozen / "repro" / "gr17" / "evidence.txt").write_text("two\n", encoding="utf-8")
+        (frozen / "repro" / "gr17" / "evidence.txt").chmod(0o444)
+        (frozen / "repro" / "gr17").chmod(0o555)
+        (frozen / "repro").chmod(0o555)
+        self.addCleanup(lambda: (frozen / "repro" / "gr17").exists() and (frozen / "repro" / "gr17").chmod(0o755))
+        again = self.run_bash(f'MOVE_TO_MIRROR=("{frozen}")\nMOVE_TO_MERGE=()\nmove_to_copy devbox st2',
+                              {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual((there / "repro/gr17/evidence.txt").read_text(encoding="utf-8"), "two\n")
+        self.assertEqual(oct((there / "repro/gr17").stat().st_mode)[-3:], "555")
+        self.assertEqual(oct((there / "repro").stat().st_mode)[-3:], "555")
+
+    def test_a_path_gone_since_the_job_is_dropped_before_the_hang_up(self) -> None:
+        """A move holds for the session's `agentbox move --go`, and a session at work removes a
+        tree meanwhile: the librarian removed ~/src/legion-turnfix during the hold, and the native
+        push failed AFTER the hang-up with "has no commit to push", rolling the group back
+        (17:27:06Z, 2026-11-03). Every path is re-checked right before the hang-up."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        gone = doc["mirror"][0]
+        self.set_pids()
+        # The session removes it between the job and the hang-up, as a lane does during the hold.
+        run = self.run_bash(f'orig_move_to_hold() {{ :; }}\nmove_to_hold() {{ rm -rf "{gone}"; }}\nmove_to_run "{job}"',
+                            {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"gone since the job: not copied: {gone}", run.stdout)
+        self.assertEqual(self.move_log()[0][5], "moved")
+        for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()[2:]:
+            self.assertNotIn(f" {gone} ", f" {line} ", "a path that is gone is in no later pass")
+
+    def test_only_one_relauncher_runs_for_a_session(self) -> None:
+        """Two `move --to-run` for the librarian ran at once at 17:32-17:34Z on 2026-11-03: the
+        first had not yet written its claim, so the stop found no pid. The relauncher takes a
+        per-session lock before any check and says who holds it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        locks = self.root / "cache/omp/agentbox/move-to/locks"
+        locks.mkdir(parents=True, exist_ok=True)
+        lock = locks / f"{self.TO}.lock"
+        lock.write_text("pid=4242424\n", encoding="utf-8")
+        with lock.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn(f"another move of {self.TO} runs (pid 4242424); nothing was hung up", refused.stderr)
+        self.assertFalse((self.root / "RSYNC").exists(), "the second relauncher copies nothing")
+        # With the lock free the same job runs, and its own claim is the only one it removes.
+        ran = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+
+    def test_after_the_first_pass_only_what_changed_is_copied(self) -> None:
+        """The pass after the hang-up re-walked every tree in full: 14 mirrored and 192 merged
+        paths, ~49 GB, 5.8 GB read in 14 min with the librarian down (18:19-18:37Z, 2026-11-03).
+        Every pass after the first sends a --files-from list of what changed since the pass
+        before it, with what went since in it too, which rsync deletes on the target."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        doc = json.loads(job.read_text(encoding="utf-8"))
+        tree = next(Path(p) for p in doc["mirror"] if Path(p).is_dir())
+        gone = tree / "removed-during-the-move.txt"
+        gone.write_text("old\n", encoding="utf-8")
+        self.set_pids()
+        # The session works while the move holds: it writes one file and removes another.
+        run = self.run_bash(
+            f'move_to_hold() {{ printf x >"{tree}/written-during-the-move.txt"; rm -f "{gone}"; }}\n'
+            f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        passes = [line for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+                  if "--files-from" not in line and "--existing" not in line]
+        self.assertEqual(len(passes), 2, f"only the first mirror and merge walk everything: {passes}")
+        deltas = [line for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+                  if "--files-from" in line]
+        self.assertTrue(deltas, "every later pass is a delta")
+        for line in deltas:
+            self.assertNotIn(f"{tree} ", line, "a delta names no whole tree, only its list")
+        # The mirror delta deletes on the target what the session removed here.
+        self.assertTrue([line for line in deltas if "--delete-missing-args" in line], deltas)
+        # Three delta rounds while the session works or stops: before the hold, at the go, after
+        # the hang-up.
+        for label in ("before the hold", "at the go", "after the hang-up"):
+            self.assertIn(label, run.stdout, run.stdout)
 
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
@@ -1778,7 +2068,19 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(len(pushes), 1, pushes)
         self.assertIn("refs/heads/w1:refs/heads/w1", pushes[0])
         self.assertIn("refs/heads/w2:refs/heads/w2", pushes[0])
-        self.assertIn(f"pushed 3 branch(es) of {repo}/.git before the hang-up", result.stdout)
+        # Only the two branches these worktrees have checked out: the repository's other branches
+        # belong to other sessions and other machines, and pushing them all took 55+ min of two
+        # moves of oss-verify-proofs-internal-src (17:05-18:05Z, 2026-11-03).
+        self.assertNotIn("refs/heads/main", pushes[0], pushes[0])
+        self.assertIn(f"pushed 2 branch(es) of {repo}/.git before the hang-up", result.stdout)
+        # And a second move of the same repository to the same target within the hour makes none.
+        again = self.run_bash(
+            f'MOVE_TO_NATIVE=("{self.root}/w1\t{repo}/.git")\n'
+            'move_to_git_native_prepush devbox')
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("less than 60 min ago (another move); not pushed again", again.stdout)
+        self.assertEqual(len([l for l in log.read_text(encoding="utf-8").splitlines()
+                              if " push " in f" {l} "]), 1)
 
     def test_a_move_holds_before_the_hang_up_until_the_session_runs_go(self) -> None:
         """S3 restarted its 14 lanes during a 66-minute first copy (2026-11-03). The relauncher now
@@ -1796,7 +2098,8 @@ class AgentboxMove(unittest.TestCase):
         self.set_pids()
         log = self.root / "relauncher.log"
         proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nmove_to_run "{job}"'],
-                                env=self.env, stdout=log.open("w"), stderr=subprocess.STDOUT)
+                                env=self.env, stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
+        self.addCleanup(self.end_relauncher, proc)
         hold = self.root / "cache/omp/agentbox/move-to/hold" / self.TO
         for _ in range(1200):
             if hold.exists():
@@ -2373,7 +2676,10 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(1103, ppid=1101, cwd=lane, cmdline="/x/bin/omp __omp_worker_daemon_broker")
         self.make_proc(1104, comm="python3", ppid=1101, cwd=lane,
                        cmdline="/usr/bin/python3 -u /t/omp-python-runner-1000/runner-ab12.py")
-        self.make_proc(1105, comm="python3", ppid=1104, cwd=lane, cmdline="python3 serve.py")
+        # A subagent's own tool call: its environment says which session started it, so the lead
+        # that must stop it is named, not left to be found by hand (sami-rocqperf, 2026-11-03).
+        self.make_proc(1105, comm="python3", ppid=1104, cwd=lane, cmdline="python3 serve.py",
+                       environ={"OMP_SESSION_ID": "01a19700-0000-7000-8000-0000000f0009"})
         # A watcher the session started with `setsid`, and what that watcher started: the pane's
         # hang-up reaches neither, so neither is an orphan. Agents make no systemd units
         # (Sami, dispatch://INFRA-26/comment/615d0105-4ad1-4a2e-ae1c-01a1d8894b5c).
@@ -2390,7 +2696,9 @@ class AgentboxMove(unittest.TestCase):
         self.assertNotIn("HANDED-OFF", refused.stdout)
         self.assertIn("nothing was hung up: these processes of this session die with the hang-up", refused.stderr)
         self.assertIn("sleep 1000 (pid 1102)", refused.stderr)
-        self.assertIn("python3 serve.py (pid 1105)", refused.stderr)
+        self.assertIn("python3 serve.py (pid 1105, of session 01a19700-0000-7000-8000-0000000f0009)",
+                      refused.stderr)
+        self.assertIn("sleep 1000 (pid 1102)", refused.stderr)  # no environment of its own, no session named
         self.assertNotIn("__omp_worker", refused.stderr)
         self.assertNotIn("runner-ab12", refused.stderr)
         self.assertNotIn("watch.py", refused.stderr)
@@ -2511,6 +2819,41 @@ class AgentboxMove(unittest.TestCase):
                                "cmd_move --to devbox --dry-run")
         self.assertEqual(broken.returncode, 1)
         self.assertIn("move --to stopped with exit 1 and no message of its own", broken.stderr)
+
+    def test_leave_drops_the_left_tree_s_object_store_wherever_it_lives(self) -> None:
+        """INFRA-1018's move (2026-11-03 05:32Z) --leave'd ~/src/machcsl-riscv, whose objects are
+        a symlink to /mnt/nvme/<user>/git-objects/machcsl-riscv, and carried that 8.96 GB store.
+        A left tree is left out of the group's trees, so its storage is never taken either; this
+        holds that. A store a tree the move KEEPS borrows - a worktree of the left checkout -
+        still goes, since that tree needs it."""
+        shared = self.checkout("shared9")
+        store = self.root / "git-objects" / "shared9"
+        store.parent.mkdir(exist_ok=True)
+        shutil.move(str(shared / ".git/objects"), str(store))
+        os.symlink(store, shared / ".git/objects")
+        mine = self.checkout("mine9")
+        transcript = self.home / ".omp/agent/sessions/-src-shared9" / f"2026-11-03T00-00-00-000Z_{self.TO}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        self.make_proc(999999960, comm="bash", ppid=1, cwd=shared)
+        self.make_proc(999999961, ppid=999999960, cwd=shared, writes=(transcript,))
+        self.set_pids(999999961)
+        self.set_panes({999999960: ("%97", "agents:9.7")})
+        self.target()
+        run = self.run_bash(f'cd "{mine}"\nmove_own_omp() {{ echo 999999961; }}\n'
+                            f'cmd_move_to --to devbox --cwd "{mine}" --leave "{shared}" --dry-run --accept-orphans')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse([line for line in run.stdout.splitlines() if str(store) in line],
+                         f"the left tree's object store is not copied either: {run.stdout}")
+        self.assertIn(f"{shared} is not copied: it is in a tree this session --leave's", run.stderr)
+        # A worktree of the left checkout that the session keeps needs that store, so it goes.
+        own = self.root / "wt" / "mine9b"
+        self.git("worktree", "add", "-q", "-b", "mine9b", str(own), cwd=shared)
+        self.make_proc(999999962, comm="python3", ppid=999999961, cwd=own, writes=(own / "log",))
+        kept = self.run_bash(f'cd "{own}"\nmove_own_omp() {{ echo 999999961; }}\n'
+                             f'cmd_move_to --to devbox --cwd "{own}" --leave "{shared}" --dry-run --accept-orphans')
+        self.assertEqual(kept.returncode, 0, kept.stdout + kept.stderr)
+        self.assertNotIn(f"{store} is not copied", kept.stderr)
 
     def test_a_pipe_of_the_session_is_not_work_in_a_left_tree(self) -> None:
         """LINUX-1248, 2026-11-03: run from inside the checkout it leaves, its dry run was refused

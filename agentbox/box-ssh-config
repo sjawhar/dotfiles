@@ -3,36 +3,63 @@
 # (agentbox/entrypoint.sh). A box has the key and the pinned known_hosts for sami-rocqperf
 # (agentbox/mounts) but no entry that names the user, the port and those files, so `ssh
 # sami-rocqperf` from a box connected as the box user on port 22 and was refused (the cost
-# tracking lead's box on sami-devbox, 2026-11-03 15:04Z).
+# tracking lead's box on sami-devbox, 2026-11-03 15:04Z); and `ssh sami-devbox` from a box was
+# refused on its host key, since a box has no known_hosts of its own (VERIFY, 19:26Z).
 #
 #   box-ssh-config <home> [owner]
 #
-# For each machine whose key is mounted it writes <home>/.ssh/config.d/<host>.conf with the path
-# as the BOX sees it ($HOME, never ~, since the box's home is the host user's path), and puts one
-# `Include` line at the top of <home>/.ssh/config. It never writes over an entry that is there
-# already, and it is safe to run again.
+# For each machine it writes <home>/.ssh/config.d/<host>.conf with the paths as the BOX sees them
+# ($HOME, never ~, since the box's home is the host user's path) and copies it to
+# /etc/ssh/ssh_config.d, and it puts one `Include` line at the top of <home>/.ssh/config. A
+# machine whose key is mounted uses that key (sami-rocqperf's OpenSSH on 443 accepts it from this
+# tailnet address only); every other machine of the tailnet is reached as this node, which is
+# what Tailscale SSH authenticates. A host key that is pinned under the home is used as the only
+# truth for that machine; where none is, the first contact is accepted and recorded in the box's
+# own file. It writes over no entry that is there already and is safe to run again.
 set -uo pipefail
 home="${1:-$HOME}"
 owner="${2:-}"
-hosts=(sami-rocqperf sami-leanperf)
-port="${AGENTBOX_SSH_PORT:-443}"
+# <machine>:<port>. sami-rocqperf and sami-leanperf answer on 443 (dispatch://INFRA-734).
+hosts=("sami-rocqperf:${AGENTBOX_SSH_PORT:-443}" "sami-leanperf:${AGENTBOX_SSH_PORT:-443}" "sami-devbox:22")
 user="${AGENTBOX_SSH_USER:-sami}"
-wrote=0
-for h in "${hosts[@]}"; do
+system=""
+for entry in "${hosts[@]}"; do
+    h="${entry%%:*}"
+    port="${entry##*:}"
     key="$home/.ssh/$h"
-    [[ -r "$key" ]] || continue
     conf="$home/.ssh/config.d/$h.conf"
     [[ -e "$conf" ]] && continue
     mkdir -p "$home/.ssh/config.d" || continue
     {
         printf 'Host %s\n' "$h"
-        printf '  User %s\n  Port %s\n  IdentityFile %s\n  IdentitiesOnly yes\n' "$user" "$port" "$key"
-        [[ -r "$home/.ssh/known_hosts.$h" ]] && printf '  UserKnownHostsFile %s\n' "$home/.ssh/known_hosts.$h"
+        printf '  User %s\n  Port %s\n' "$user" "$port"
+        [[ -r "$key" ]] && printf '  IdentityFile %s\n  IdentitiesOnly yes\n' "$key"
+        if [[ -r "$home/.ssh/known_hosts.$h" ]]; then
+            printf '  UserKnownHostsFile %s\n' "$home/.ssh/known_hosts.$h"
+        else
+            printf '  UserKnownHostsFile %s\n  StrictHostKeyChecking accept-new\n' "$home/.ssh/known_hosts.agentbox"
+        fi
     } >"$conf" || continue
     chmod 600 "$conf"
     [[ -z "$owner" ]] || chown "$owner:$owner" "$conf" 2>/dev/null || true
-    wrote=$((wrote + 1))
 done
+touch "$home/.ssh/known_hosts.agentbox" 2>/dev/null || true
+[[ -z "$owner" ]] || chown "$owner:$owner" "$home/.ssh/known_hosts.agentbox" 2>/dev/null || true
+# The system-wide file too, and it is the one that works: ssh reads the USER config at the home
+# the password database gives (getpwuid), which for the box user `ubuntu` is /home/ubuntu, while
+# the box's $HOME is the host user's path (/home/sami). So a session in a box read no entry of
+# ours and went to port 22 as `ubuntu`: `ssh sami-rocqperf` from VERIFY's box timed out at 19:26Z
+# on 2026-11-03. /etc/ssh/ssh_config includes /etc/ssh/ssh_config.d/*.conf for every user.
+system="${AGENTBOX_SSH_SYSTEM_DIR:-/etc/ssh/ssh_config.d}"
+if [[ -d "$system" ]] || mkdir -p "$system" 2>/dev/null; then
+    for entry in "${hosts[@]}"; do
+        h="${entry%%:*}"
+        conf="$home/.ssh/config.d/$h.conf"
+        [[ -r "$conf" ]] || continue
+        cp -f "$conf" "$system/50-agentbox-$h.conf" 2>/dev/null \
+            && chmod 644 "$system/50-agentbox-$h.conf" 2>/dev/null || true
+    done
+fi
 include="Include $home/.ssh/config.d/*.conf"
 if [[ -d "$home/.ssh/config.d" ]] && ! grep -qxF "$include" "$home/.ssh/config" 2>/dev/null; then
     tmp="$home/.ssh/config.agentbox.$$"
