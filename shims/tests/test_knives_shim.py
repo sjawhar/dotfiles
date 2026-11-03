@@ -24,6 +24,27 @@ LOOP_TIMEOUT = 10
 
 MISE_WHICH = r"""
 cat > /dev/null
+if [[ "${1:-}" == install ]]; then
+    # `mise install -C / github:sjawhar/knives@<pin>`: puts a knives in the pin's install dir,
+    # then lingers as mise does while it rebuilds every tool's shims.
+    [[ "$#" == 4 && "$2 $3" == "-C /" && "$4" == github:sjawhar/knives@* ]] || { echo "unexpected mise $*" >&2; exit 99; }
+    echo install >> "${STUB_INSTALL_LOG:-/dev/null}"
+    if [[ -n "${STUB_INSTALL_FAIL:-}" ]]; then
+        echo "mise ERROR GitHub API rate limit exceeded" >&2
+        exit 1
+    fi
+    sleep "${STUB_INSTALL_SLEEP:-0}"
+    [[ -d "${MISE_DATA_DIR:?}" ]] || exit 1  # the test ended and removed its directory
+    version="${4#github:sjawhar/knives@}"
+    bin="${MISE_DATA_DIR:?mise was given no data dir}/installs/github-sjawhar-knives/$version/bin"
+    mkdir -p "$bin"
+    printf '#!/bin/bash\n[[ "$*" == --version ]] && { echo "knives %s"; exit 0; }\necho "INSTALLED knives $*"\n[[ -t 0 ]] || echo "stdin: $(cat)"\n' "$version" > "$bin/knives.tmp"
+    chmod +x "$bin/knives.tmp"
+    mv "$bin/knives.tmp" "$bin/knives"
+    echo "mise installed it (stdout)"
+    sleep "${STUB_INSTALL_LINGER:-0}"
+    exit 0
+fi
 [[ "$*" == "which -C / knives --tool github:sjawhar/knives" ]] || { echo "unexpected mise $*" >&2; exit 99; }
 if [[ -n "${STUB_MISE_LOG:-}" ]]; then
     echo call >> "$STUB_MISE_LOG"
@@ -288,7 +309,9 @@ class KnivesShimWithoutMise(ShimFixture):
 
     def test_a_missing_pin_names_every_path_tried(self) -> None:
         self.write_pin("4.0.0")
-        result = self.run_pinned(STUB_MISE_SLEEP="60", DOTFILES_KNIVES_MISE_TIMEOUT="1")
+        result = self.run_pinned(
+            STUB_MISE_SLEEP="60", DOTFILES_KNIVES_MISE_TIMEOUT="1", STUB_INSTALL_FAIL="1"
+        )
         self.assertEqual(result.returncode, 127, result.stdout)
         self.assertEqual(result.stdout, "")
         self.assertEqual(self.mise_calls(), 2)
@@ -300,6 +323,115 @@ class KnivesShimWithoutMise(ShimFixture):
             self.root / ".cache/dotfiles-knives-shim/4.0.0",
         ):
             self.assertIn(str(tried), result.stderr)
+        self.assertIn("could not install it", result.stderr)
+
+
+class KnivesShimInstallsANewPin(ShimFixture):
+    """mise.toml pins a knives no install dir holds yet (2026-11-03: 3.2.2 on sami-leanperf,
+    3.2.3 on sami-rocqperf): the shim installs that version under a lock and runs it, so gh
+    keeps working without a person running `mise install`."""
+
+    PIN = "5.0.0"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.install_log = self.root / "mise-installs"
+        config = self.root / ".config" / "mise" / "config.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(PIN_CONFIG.format(version=self.PIN), encoding="utf-8")
+
+    def installs(self) -> int:
+        if not self.install_log.exists():
+            return 0
+        return len(self.install_log.read_text(encoding="utf-8").splitlines())
+
+    def run_new_pin(self, stdin: str = "", **stub_env: str) -> subprocess.CompletedProcess[str]:
+        return self.run_shim(
+            SHIM.parent,
+            self.stale_dir,
+            args=("gh", "pr", "view"),
+            stdin=stdin,
+            extra_env={
+                "STUB_PIN_MISSING": "1",
+                "STUB_GH_DEPTH": "1",
+                "STUB_INSTALL_LOG": str(self.install_log),
+                **stub_env,
+            },
+        )
+
+    def test_the_new_pin_is_installed_and_run_with_stdin_and_stdout_untouched(self) -> None:
+        result = self.run_new_pin(stdin="payload")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "INSTALLED knives gh pr view\nstdin: payload\n")
+        self.assertEqual(self.installs(), 1)
+        self.assertIn(f"knives {self.PIN} (pinned in", result.stderr)
+        log = self.root / ".cache" / "dotfiles-knives-shim" / f"install-{self.PIN}.log"
+        self.assertIn("mise installed it (stdout)", log.read_text(encoding="utf-8"))
+
+        again = self.run_new_pin()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stdout, "INSTALLED knives gh pr view\nstdin: \n")
+        self.assertEqual(again.stderr, "")
+        self.assertEqual(self.installs(), 1)
+
+    def test_calls_at_the_same_time_install_once(self) -> None:
+        path = ":".join([str(self.stub_dir), str(SHIM.parent), "/usr/bin", "/bin"])
+        env = {
+            **self.env,
+            "PATH": path,
+            "STUB_PIN_MISSING": "1",
+            "STUB_INSTALL_LOG": str(self.install_log),
+            "STUB_INSTALL_SLEEP": "2",
+        }
+        calls = [
+            subprocess.Popen(
+                [str(SHIM), "status"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            for _ in range(8)
+        ]
+        for call in calls:
+            stdout, stderr = call.communicate(timeout=LOOP_TIMEOUT)
+            self.assertEqual(call.returncode, 0, stderr)
+            self.assertEqual(stdout, "INSTALLED knives status\nstdin: \n")
+        self.assertEqual(self.installs(), 1)
+
+    def test_knives_runs_once_in_place_while_mise_still_rebuilds_its_shims(self) -> None:
+        """After the install mise rebuilds every tool's shims, minutes on a loaded box; the
+        call runs knives without waiting for that, and leaves mise running."""
+        result = self.run_new_pin(STUB_INSTALL_LINGER="30")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "INSTALLED knives gh pr view\nstdin: \n")
+        self.assertEqual(self.installs(), 1)
+
+    def test_an_install_that_puts_nothing_in_place_in_time_fails(self) -> None:
+        result = self.run_new_pin(STUB_INSTALL_SLEEP="30", DOTFILES_KNIVES_INSTALL_TIMEOUT="1")
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertIn("had not put knives 5.0.0 in place after 1s", result.stderr)
+
+    def test_a_failed_install_fails_loudly_and_is_not_retried_at_once(self) -> None:
+        result = self.run_new_pin(STUB_INSTALL_FAIL="1")
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("exited 1", result.stderr)
+        self.assertIn("rate limit exceeded", result.stderr)
+        self.assertIn(f"Run `mise install github:sjawhar/knives@{self.PIN}`", result.stderr)
+
+        again = self.run_new_pin(STUB_INSTALL_FAIL="1")
+        self.assertEqual(again.returncode, 127, again.stdout)
+        self.assertIn("not trying again for 60 s", again.stderr)
+        self.assertEqual(self.installs(), 1)
+
+    def test_a_knives_call_under_the_install_does_not_install(self) -> None:
+        """mise runs its GitHub credential command while it installs; a knives call there must
+        not wait on the lock its ancestor holds."""
+        result = self.run_new_pin(DOTFILES_KNIVES_INSTALLING="1")
+        self.assertEqual(result.returncode, 127, result.stdout)
+        self.assertEqual(self.installs(), 0)
 
 
 if __name__ == "__main__":

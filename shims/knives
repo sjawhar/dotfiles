@@ -105,9 +105,93 @@ if [[ -z "$_knives" ]]; then
         fi
         (( _attempt == 1 )) && sleep 1
     done
+    # A pin no install dir holds is installed here, once per machine, and then run. A new pin
+    # goes live the moment mise.toml changes on a machine (an edit saved in the live checkout,
+    # a publish, a pull), and until a person ran `mise install`, every knives call, and so every
+    # gh call (shims/gh execs `knives gh`), failed: 3.2.2 at 04:45Z on sami-leanperf and 3.2.3
+    # at ~08:2xZ on sami-rocqperf, 2026-11-03. The lock is in mise's data dir, which agent boxes
+    # mount, so the host and its boxes install once between them; a call that waited on the lock
+    # finds the install and runs it. A failed install is not tried again for 60 s, so an outage
+    # does not make every gh call wait for an install of its own.
+    # The call runs knives once its binary is in place and answers `--version` with the pin,
+    # not when mise exits: after the install mise rebuilds every tool's shims, which took 2 to
+    # 4.5 more minutes on sami-rocqperf at load ~650 (2026-11-03 09:1xZ; the knives itself took
+    # 7 to 34 s). mise finishes that in its own session, so a call that ends does not cut it off.
+    _install_log=""
+    install_pin() {
+        local installed="$_mise_root/installs/github-sjawhar-knives/$_pin/bin/knives"
+        local lock="$_mise_root/.dotfiles-knives-install.lock"
+        local wait="${DOTFILES_KNIVES_INSTALL_TIMEOUT:-300}" fd="" rc=0 pid="" deadline
+        local failed_pin="" failed_at="" detach=()
+        _install_log="${_cache%/*}/install-$_pin.log"
+        # mise runs the GitHub credential command while it installs; a knives call under it
+        # must not wait on the lock this call holds.
+        [[ -z "${DOTFILES_KNIVES_INSTALLING:-}" ]] || return 1
+        pin_in_place() {
+            local version=""
+            [[ -f "$installed" && -x "$installed" ]] &&
+                version="$("$installed" --version < /dev/null 2> /dev/null)" &&
+                [[ " $version " == *" $_pin "* ]]
+        }
+        mkdir -p "${_install_log%/*}" "$_mise_root" 2>/dev/null || true
+        if command -v flock > /dev/null 2>&1 && exec {fd}>>"$lock"; then
+            if ! flock -w "$wait" "$fd"; then
+                echo "knives: waited ${wait}s for $lock, which another call holds while it installs knives $_pin" >&2
+                exec {fd}>&-
+                return 1
+            fi
+        fi
+        if ! pin_in_place; then
+            [[ -r "$lock.failed" ]] && read -r failed_pin failed_at < "$lock.failed" || true
+            if [[ "$failed_pin" == "$_pin" && "$failed_at" =~ ^[0-9]+$ ]] && (( _now - 10#$failed_at < 60 )); then
+                echo "knives: the install of knives $_pin failed $(( _now - 10#$failed_at ))s ago (log: $_install_log); not trying again for 60 s" >&2
+                rc=1
+            else
+                echo "knives: knives $_pin (pinned in $_config) is not installed on this machine; installing it now (\`mise install github:sjawhar/knives@$_pin\`, log: $_install_log)" >&2
+                command -v setsid > /dev/null 2>&1 && detach=(setsid)
+                # mise does not inherit the lock's fd: the lock is this call's until knives runs.
+                (
+                    [[ -z "$fd" ]] || exec {fd}>&-
+                    DOTFILES_KNIVES_INSTALLING=1 MISE_DATA_DIR="$_mise_root" exec "${detach[@]}" timeout 1800 \
+                        "$_mise" install -C / "github:sjawhar/knives@$_pin" < /dev/null > "$_install_log" 2>&1
+                ) &
+                pid=$!
+                deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + wait ))
+                rc=124
+                while (( ${EPOCHSECONDS:-$(date +%s)} < deadline )); do
+                    if pin_in_place; then
+                        rc=0
+                        break
+                    fi
+                    if ! kill -0 "$pid" 2>/dev/null; then
+                        rc=0
+                        wait "$pid" || rc=$?
+                        if pin_in_place; then rc=0; elif (( rc == 0 )); then rc=1; fi
+                        break
+                    fi
+                    sleep 0.5
+                done
+                if (( rc != 0 )); then
+                    printf '%s %s\n' "$_pin" "${EPOCHSECONDS:-$(date +%s)}" > "$lock.failed" 2>/dev/null || true
+                    if (( rc == 124 )); then
+                        echo "knives: \`mise install github:sjawhar/knives@$_pin\` had not put knives $_pin in place after ${wait}s; the end of its log:" >&2
+                    else
+                        echo "knives: \`mise install github:sjawhar/knives@$_pin\` exited $rc without knives $_pin in place; the end of its log:" >&2
+                    fi
+                    tail -n 20 "$_install_log" >&2 || true
+                fi
+            fi
+        fi
+        [[ -z "$fd" ]] || exec {fd}>&-
+        (( rc == 0 )) || return 1
+        _knives="$installed"
+    }
+    if [[ -z "$_knives" && -n "$_pin" ]]; then
+        install_pin || _knives=""
+    fi
     if [[ -z "$_knives" ]]; then
         if [[ -n "$_pin" ]]; then
-            echo "knives: ${BASH_SOURCE[0]}: knives $_pin (pinned in $_config) is not at any of: ${_tried[*]}; and \`mise which\` did not resolve it ($_why; mise's errors are above). Run \`mise install github:sjawhar/knives@$_pin\`." >&2
+            echo "knives: ${BASH_SOURCE[0]}: knives $_pin (pinned in $_config) is not at any of: ${_tried[*]}; \`mise which\` did not resolve it ($_why; mise's errors are above), and this shim could not install it (above${_install_log:+; log: $_install_log}). Run \`mise install github:sjawhar/knives@$_pin\`." >&2
         else
             echo "knives: ${BASH_SOURCE[0]}: no exact github:sjawhar/knives version pinned in $_config, and mise did not resolve the pinned github:sjawhar/knives ($_why; its errors are above)" >&2
         fi

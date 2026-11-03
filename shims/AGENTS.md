@@ -189,7 +189,16 @@ before handing the call to the real one.
   never a knives in a mise dir: a session keeps the PATH it started with, and that PATH names
   the install dir pinned back then. `-C /` keeps a project's own mise pin out, since the knives
   plugin every session loads is pinned machine-wide beside it. A third entry in one pid within
-  10 s exits with an error; `knives gh` enters twice by design, through `shims/gh`.
+  10 s exits with an error; `knives gh` enters twice by design, through `shims/gh`. An exact pin
+  that no install dir holds yet is installed by the shim itself (`mise install -C /
+  github:sjawhar/knives@<pin>`, its log in `~/.cache/dotfiles-knives-shim/install-<pin>.log`),
+  under a lock in mise's data dir that host and agent boxes share, and run as soon as its binary
+  answers `--version` with the pin; mise goes on rebuilding every tool's shims in its own
+  session, which took minutes more on a loaded box. A new pin goes live the moment `mise.toml`
+  changes on a machine, and every gh call failed until a person installed it (3.2.2 on
+  sami-leanperf and 3.2.3 on sami-rocqperf, 2026-11-03). A failed install is not tried again
+  for 60 s; `DOTFILES_KNIVES_INSTALL_TIMEOUT` (300 s by default) bounds the wait for the binary
+  and for the lock.
 - **`ssh-keygen`** drops `SSH_AUTH_SOCK` for `-Y`, the operations git and jj sign and verify commits
   with: the signing key is a file, and ssh-keygen asks the agent first, so a stuck agent socket
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
