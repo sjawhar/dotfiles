@@ -14,6 +14,15 @@
 #     has commits ops lacks, or when a new commit changes a file that holds a local change or adds a
 #     path an untracked file holds. A local change no new commit touches (a farm run's
 #     notes/ossv-n6-peaks.tsv, say) stays as it is, and the tools still follow.
+#   - Before the merge, a path a new commit writes whose file here already holds exactly ops' bytes
+#     is cleared, with a note: an untracked file is removed, and a tracked file's local change is
+#     undone (`git checkout`). The merge then writes the same bytes back, so nothing is lost.
+#     `agentbox move --to` makes such files: it copies a moved session's non-git paths, and
+#     sami-rocqperf's /home/sami/src/oss-verifier, which has no .git of its own, is one; on
+#     2026-11-03 at 06:53Z (the move of session 01a1959e) it put there 78 files that ops added later,
+#     75 of them byte for byte ops', and 2 tracked files ops later changed to the same bytes, and
+#     every run refused from about 09:05Z. A file whose bytes differ is left as it is, and the
+#     merge refuses, so its writer decides.
 # Any refusal exits non-zero, so the unit fails and unit-health-watch tells the box-health owner.
 # lane VMs keep the same tree with the stream's own agentvm/ossv-tree-sync, which stops on any local
 # change outside notes/status/; on this machine the stream's sessions write ledgers into the tree.
@@ -46,6 +55,29 @@ got="$(git -C "$tree" symbolic-ref --short -q HEAD || true)"
 [[ "$got" == "$branch" ]] || die "$tree is on '${got:-a detached HEAD}', not $branch; not touched"
 before="$(git -C "$tree" rev-parse HEAD)"
 timeout 120 git -C "$tree" fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+
+# clear_same: the paths that origin/$branch changes since HEAD and whose regular file here holds
+# its blob's bytes already (as git would store them, filters applied), when HEAD can move there
+# by fast-forward at all.
+clear_same() {
+    local p mode type oid
+    git -C "$tree" merge-base --is-ancestor HEAD "origin/$branch" || return 0
+    while IFS= read -r -d '' p; do
+        read -r mode type oid _ < <(git -C "$tree" ls-tree "origin/$branch" -- "$p")
+        [[ "$type" == blob && ( "$mode" == 100644 || "$mode" == 100755 ) ]] || continue
+        [[ -f "$tree/$p" && ! -L "$tree/$p" ]] || continue
+        [[ "$(git -C "$tree" hash-object -- "$p")" == "$oid" ]] || continue
+        if git -C "$tree" ls-files --error-unmatch -- "$p" > /dev/null 2>&1; then
+            git -C "$tree" diff --quiet -- "$p" && continue
+            git -C "$tree" checkout -q -- "$p"
+            say "note: $p held a local change equal to origin/$branch's bytes; undone, the merge writes the same"
+        else
+            rm -f -- "${tree:?}/$p"
+            say "note: untracked $p held origin/$branch's bytes; removed, the merge writes the same"
+        fi
+    done < <(git -C "$tree" diff --no-renames --name-only -z HEAD "origin/$branch")
+}
+clear_same
 timeout 120 git -C "$tree" merge -q --ff-only "origin/$branch" \
     || die "$tree stays at $before: git refused to fast-forward it to origin/$branch $(git -C "$tree" rev-parse "origin/$branch") (above)"
 after="$(git -C "$tree" rev-parse HEAD)"
