@@ -667,12 +667,27 @@ rocqperf_check() {
     fi
 }
 
+# The apt packages devbox/gce-host.sh adds for lanes (2026-11-03): python3 has pip and venv (the
+# N6 farm runs `python3 -m pip install --target`), and the commands of the other packages resolve.
+host_packages() {
+    local out dir c missing=""
+    out="$(python3 -m pip --version 2>&1)" && ok "python3 -m pip --version: $out" || fail "python3 -m pip --version: $(tail -1 <<<"$out")"
+    dir="$(mktemp -d)"
+    out="$(python3 -m venv "$dir/venv" 2>&1)" && [[ -x "$dir/venv/bin/python" ]] && ok "python3 -m venv: made $dir/venv" || fail "python3 -m venv: $(tail -1 <<<"$out")"
+    rm -rf "$dir"
+    for c in opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64; do
+        command -v "$c" >/dev/null || missing+=" $c"
+    done
+    [[ -z "$missing" ]] && ok "lane packages: opam m4 bwrap gdb stress-ng keyctl psql Xvfb qemu-img qemu-system-x86_64 resolve" || fail "lane packages: missing command(s):$missing"
+}
+
 host() {
     echo "== host $(hostname -s), $(stamp)"
     host_identity
     host_disks
     host_units
     host_follow
+    host_packages
     local missing
     mise_check
     missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"

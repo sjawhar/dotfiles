@@ -43,6 +43,13 @@ devbox_user="$(getent passwd "$DEVBOX_UID" | cut -d: -f1)"
 # socat, e2fsprogs: scripts/agentbox's host relays and box disk images;
 # build-essential, pkg-config, libssl-dev: a mise tool that falls back to `cargo install`;
 # rsync, sqlite3, zstd, git-lfs: the /home and data copies of the cutover, and lanes' everyday use;
+# python3-pip, python3-venv: the N6 farm's `python3 -m pip install --target` (oss-verifier
+#   bin/ossv-n6-farm) and lanes' venvs; Ubuntu's python3 has neither;
+# opam, m4, bubblewrap, libgmp-dev: lanes that build Rocq and OCaml with opam (m4 and libgmp-dev
+#   for its packages, bwrap for its sandbox), as on sami-rocqperf;
+# gdb, stress-ng, keyutils, libuv1-dev, postgresql-client: lanes' debugging, load runs, kernel
+#   keyring, libuv builds and psql to the shared Postgres, as on sami-rocqperf;
+# xvfb, qemu-utils, qemu-system-x86: lanes' headless X and VM images and runs, as on sami-rocqperf;
 # the Chrome libraries: agent-browser's Chrome for Testing on the host, which its installer only
 #   downloads (installers/agent-browser.sh).
 export DEBIAN_FRONTEND=noninteractive
@@ -54,6 +61,10 @@ packages=(
     socat e2fsprogs
     build-essential pkg-config libssl-dev
     rsync sqlite3 zstd git-lfs
+    python3-pip python3-venv
+    opam m4 bubblewrap libgmp-dev
+    gdb stress-ng keyutils libuv1-dev postgresql-client
+    xvfb qemu-utils qemu-system-x86
     sysstat
     libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libgbm1 libxkbcommon0
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libasound2t64 libpango-1.0-0 libcairo2
