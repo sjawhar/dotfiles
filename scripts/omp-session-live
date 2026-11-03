@@ -22,6 +22,10 @@
 # host cannot read its descriptors. When it holds none that can be seen (a transcript not opened
 # yet, a box that does not answer), it may run this one, and it counts.
 #
+# An id names the transcript omp finds in a sessions folder, so for an id or a prefix a path
+# counts, on a command line as in the descriptors, only inside a `sessions/` folder: omp-fork's
+# omp names and holds a copy outside one, and a running fork never blocks a resume of its source.
+#
 # --wait SECONDS: ask again every 2 s until no omp runs the session or SECONDS pass. A relaunch
 # that follows a hang-up (a move, a restart, `respawn-pane -k`) starts while the old omp is still
 # tearing down, and must not be refused for it.
@@ -99,13 +103,16 @@ for pid in ${pids[@]+"${pids[@]}"}; do
         elif [[ "$a" =~ ^${uuid}$ ]]; then id="$a"
         else continue; fi
         [[ "$id" == "$want"* ]] || continue
-        [[ -n "$file" ]] || { how="its command line names $id"; break; }
-        [[ "$a" == "$id" ]] && { byid=1; continue; }
-        if [[ "$a" != /* ]]; then
-            cwd="$(readlink "$P/$pid/cwd" 2>/dev/null)" || { byid=1; continue; }
-            a="$cwd/$a"
+        # A relative path is read from that omp's directory. Where that cannot be read, the id is
+        # all there is.
+        if [[ "$a" != "$id" && "$a" != /* ]]; then
+            if cwd="$(readlink "$P/$pid/cwd" 2>/dev/null)"; then a="$cwd/$a"; else a="$id"; fi
         fi
-        [[ "$(realpath -m -- "$a")" == "$file" ]] && { how="its command line names $file"; break; }
+        if [[ -z "$file" ]]; then
+            [[ "$a" == "$id" || "$a" == */sessions/* ]] && { how="its command line names $id"; break; }
+        elif [[ "$a" == "$id" ]]; then byid=1
+        elif [[ "$(realpath -m -- "$a")" == "$file" ]]; then how="its command line names $file"; break
+        fi
     done
     [[ -z "$how" && -n "${holds[$pid]:-}" ]] && how="it holds ${holds[$pid]} open"
     if [[ -z "$how" && -n "$byid" && -z "${other[$pid]:-}" ]]; then

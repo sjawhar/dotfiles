@@ -153,6 +153,21 @@ class OmpSessionLive(unittest.TestCase):
         self.assertEqual(forked.returncode, 0, forked.stderr)
         self.assertIn(f"LAUNCHED -p --mode json --session-dir {self.copy.parent} --resume {self.copy}", forked.stdout)
 
+    def test_a_running_fork_does_not_make_its_source_live_by_id(self) -> None:
+        """An id names the transcript omp finds in a sessions folder. omp-fork's omp names and holds
+        a copy outside one, so it never blocks a resume of its source by id (a pane restarter's
+        `omp --resume <id>` after the source's omp died, while a librarian round forks it)."""
+        self.omp(520, ["omp", "-p", "--mode", "json", "--session-dir", str(self.copy.parent), "--resume", str(self.copy)],
+                 holds=self.copy)
+        self.assert_not_live(SID)
+        self.assert_not_live(SID[:13])
+        resumed = self.resume("--resume", SID)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn(f"LAUNCHED --resume {SID}", resumed.stdout)
+        self.omp(521, ["omp", "--resume", str(self.transcript)])
+        self.omp(522, ["omp", "--resume", f"./{self.transcript.name}"], cwd=self.transcript.parent)
+        self.assertEqual(self.live(SID).stdout, f"521\tits command line names {SID}\n522\tits command line names {SID}\n")
+
     def test_the_live_transcript_is_live_by_any_spelling_of_its_path(self) -> None:
         self.omp(500, ["omp", "--resume", str(self.transcript)], holds=self.transcript)
         link = self.root / "link-to-lane"
