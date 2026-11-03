@@ -14,17 +14,24 @@ What one run does:
      merge, rebase or cherry-pick in progress. One exception: a path that SECRET_FILES in
      devbox/sami-devbox-provision names and git tracks (today secrets.env). Step 2 of the cutover
      copies the working copy there, which differs from its commit on purpose, so it may be
-     modified. It may not be deleted, renamed or in conflict.
+     modified. It may not be deleted, renamed or in conflict. A tracked file modified in the work
+     tree to exactly the bytes (and mode) origin/main holds at that path is no block either: the
+     fast-forward writes the same bytes, so step 5 discards that edit (`git checkout -- <file>`)
+     first and logs a note. On 2026-11-03 a hand install of pi-envoy 15.5.0 wrote main's new
+     omp/plugins/package.json and bun.lock into the checkout 69 s after the pin was pushed.
   3. Refuse when origin/main is not a fast-forward of HEAD: HEAD has commits origin/main lacks.
   4. Refuse when the commits to take change an exception file that is modified here. (`git merge
      --ff-only` keeps a modified file that the merge does not touch, and refuses one it does.)
   5. `git merge --ff-only origin/main`.
   6. After a fast-forward, and on each later run until it passes once at the current HEAD:
-     `mise install`, then `devbox/sami-devbox-check --pins` (the check's knives and mise-pin lines).
+     `mise install`, `bun install --frozen-lockfile` in omp/plugins (the plugins main pins, the
+     tracked lock never written), then `devbox/sami-devbox-check --pins` (the check's knives and
+     mise-pin lines).
   7. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
 
-It never stashes, resets, rebases, abandons, restores or deletes. A refusal leaves HEAD, the
+It never stashes, resets, rebases, abandons, restores or deletes, and discards only an edit whose
+bytes origin/main already holds, right before the fast-forward. A refusal leaves HEAD, the
 index and every file as they were. Alerts go over Envoy to the box-health owner the same way the
 box watches here send them: BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else
 the SRE session.
@@ -39,6 +46,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
@@ -321,6 +329,38 @@ def short(sha: str) -> str:
     return sha[:12] if sha else "none"
 
 
+def same_as_target(repo: Path, target: str, entries: list[tuple[str, str]]) -> set[str]:
+    """Paths modified in the work tree only (` M`) whose file is byte for byte, mode included, the
+    blob the target commit holds at that path."""
+    regular: list[str] = []
+    modes: dict[str, str] = {}
+    for code, path in entries:
+        if code != " M":
+            continue
+        try:
+            st = (repo / path).lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            modes[path] = "100755" if st.st_mode & stat.S_IXUSR else "100644"
+            regular.append(path)
+    if not regular:
+        return set()
+    listed = git(repo, "ls-tree", "-z", target, "--", *regular)
+    hashed = git(repo, "hash-object", "--", *regular)
+    blobs = hashed.stdout.split()
+    if listed.returncode != 0 or hashed.returncode != 0 or len(blobs) != len(regular):
+        return set()
+    wanted: dict[str, tuple[str, str]] = {}
+    for record in listed.stdout.split("\0"):
+        if "\t" in record:
+            meta, path = record.split("\t", 1)
+            mode, kind, blob = meta.split()
+            if kind == "blob":
+                wanted[path] = (mode, blob)
+    return {path for path, blob in zip(regular, blobs) if wanted.get(path) == (modes[path], blob)}
+
+
 def display_path(path: Path) -> str:
     """The path as a person types it: ~/.dotfiles rather than /home/<user>/.dotfiles."""
     home = str(Path.home())
@@ -355,15 +395,24 @@ def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
 
 
 def install_tools(repo: Path, options: argparse.Namespace) -> str:
-    """"" when `mise install` and the check's pin lines pass, else why."""
+    """"" when `mise install`, the omp plugins' frozen install and the check's pin lines pass, else why."""
     code, out = run_step(["mise", "install"], repo, options.mise_timeout)
     if code != 0:
         return f"`mise install` in {display_path(repo)} exited {code}:\n{tail(out)}"
+    # The omp plugins main pins (omp/plugins/package.json and bun.lock), installed exactly as
+    # locked: --frozen-lockfile never writes the tracked lock, and refuses when the two disagree.
+    # Without it a new pin reached node_modules only when someone installed it by hand, and on
+    # 2026-11-03 such a hand install wrote the pin into this checkout and stopped the follower.
+    plugins = repo / "omp/plugins"
+    if (plugins / "package.json").is_file():
+        code, out = run_step(["bun", "install", "--frozen-lockfile"], plugins, options.mise_timeout)
+        if code != 0:
+            return f"`bun install --frozen-lockfile` in {display_path(plugins)} exited {code}:\n{tail(out)}"
     check = repo / "devbox/sami-devbox-check"
     code, out = run_step([str(check), "--pins"], repo, options.check_timeout)
     if code != 0:
-        return f"`mise install` passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
-    log(f"tools: mise install and {check.name} --pins passed")
+        return f"`mise install` and the plugin install passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
+    log(f"tools: mise install, the plugins' frozen install and {check.name} --pins passed")
     for line in out.strip().splitlines():
         log(f"  {line}")
     return ""
@@ -446,8 +495,16 @@ def assess_and_follow(
 
     kept, note = kept_paths(repo, options.provision)
     entries, error = worktree_status(repo)
-    blocking = [f"{code} {path}" for code, path in entries if not (path in kept and code in KEPT_STATUSES)]
-    modified_kept = sorted(path for code, path in entries if path in kept and code in KEPT_STATUSES)
+    # A file edited in place to exactly the bytes the target commit holds (an installer, or a
+    # person, wrote main's new content before the fast-forward did) is no change to keep.
+    same = same_as_target(repo, target, entries) if target != head else set()
+    facts["same_as_target"] = sorted(same)
+    blocking = [
+        f"{code} {path}"
+        for code, path in entries
+        if path not in same and not (path in kept and code in KEPT_STATUSES)
+    ]
+    modified_kept = sorted(path for code, path in entries if path in kept and code in KEPT_STATUSES and path not in same)
     if error:
         blocking.append(f"git status failed: {error}")
     blocking += operations_in_progress(repo)
@@ -463,6 +520,11 @@ def assess_and_follow(
         )
         if modified_kept:
             why += f"\n  Kept on purpose and not judged: {', '.join(modified_kept)} (SECRET_FILES in devbox/sami-devbox-provision)."
+        if same:
+            why += (
+                f"\n  Not judged, since they hold {short(target)}'s bytes already: {', '.join(sorted(same))}"
+                " (their edits are discarded at the fast-forward)."
+            )
         if note:
             why += f"\n  {note}"
         why += "\n  Commit, move or delete them by hand; the next run fast-forwards."
@@ -503,6 +565,20 @@ def assess_and_follow(
             )
         elif not blocking:
             judged.add("merge")
+            if same:
+                # Discard the edits: the files hold the target's bytes already, so the fast-forward
+                # below writes the same bytes back, and nothing anyone wrote is lost.
+                discarded = git(repo, "checkout", "--", *sorted(same))
+                if discarded.returncode != 0:
+                    found["merge"] = (
+                        f"`git checkout -- {' '.join(sorted(same))}` in {display} exited {discarded.returncode}; HEAD stays at"
+                        f" {short(head)}:\n{tail(discarded.stdout + discarded.stderr)}"
+                    )
+                    return found, judged, facts
+                log(
+                    f"note: {', '.join(sorted(same))} held the bytes of {short(target)} already (edited in place before"
+                    " the fast-forward); discarded the edit, which the fast-forward writes back"
+                )
             merged = git(repo, "merge", "--ff-only", "--quiet", target, timeout=options.fetch_timeout)
             if merged.returncode != 0:
                 found["merge"] = (

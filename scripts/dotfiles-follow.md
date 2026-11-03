@@ -26,16 +26,24 @@ sami-devbox nothing pulled, and when someone did, nothing ran `mise install`, so
 1. `git fetch origin main`.
 2. **Refuses** while the checkout holds any change git sees: a tracked file modified, staged,
    deleted or in conflict; an untracked file that no `.gitignore` covers; a merge, rebase or
-   cherry-pick in progress. The kept files below are the one exception.
+   cherry-pick in progress. The kept files below are one exception. The other: a tracked file
+   modified in the work tree to exactly the bytes and mode origin/main holds at that path. The
+   fast-forward writes the same bytes, so the run discards that edit (`git checkout -- <file>`)
+   right before it, and logs a note. On 2026-11-03 a hand install of pi-envoy 15.5.0 wrote main's
+   new `omp/plugins/package.json` and `bun.lock` into sami-devbox's checkout 69 s after the pin
+   was pushed, and the follower stopped until a person discarded them. A file that differs from
+   main in any byte still refuses, and while anything refuses nothing is discarded.
 3. **Refuses** when origin/main is not a fast-forward of HEAD (HEAD has commits origin/main lacks).
 4. **Refuses** when the commits to take change a kept file that is modified here.
 5. `git merge --ff-only origin/main`. An alert when git refuses.
 6. After a fast-forward, and on each later run until it passes once at the current HEAD:
-   `mise install`, then `devbox/sami-devbox-check --pins` (the check's knives and mise-pin
-   lines). An alert when either fails; the next run tries again without a second alert.
+   `mise install`, `bun install --frozen-lockfile` in `omp/plugins` (the omp plugins main pins;
+   it never writes the tracked lock), then `devbox/sami-devbox-check --pins` (the check's knives
+   and mise-pin lines). An alert when any fails; the next run tries again without a second alert.
 
-It never stashes, resets, rebases, abandons, restores or deletes. A refusal leaves HEAD, the index
-and every file as they were.
+It never stashes, resets, rebases, abandons, restores or deletes, and it discards only an edit
+whose bytes origin/main already holds, right before the fast-forward. A refusal leaves HEAD, the
+index and every file as they were.
 
 ## The kept files: SECRET_FILES that git tracks
 

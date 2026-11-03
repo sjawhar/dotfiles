@@ -55,9 +55,12 @@ ensure_link "${DOTFILES_DIR}/omp/keybindings.yml" "${OMP_AGENT_DIR}/keybindings.
 ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
-# plugin installed from GitHub. The pins live in the committed
-# omp/plugins/package.json; bun install materializes them. Manage pins with omp plugin
-# install/upgrade - the resulting package.json/lockfile changes get committed here.
+# plugin installed from GitHub or npm. The pins live in the committed omp/plugins/package.json and
+# bun.lock, and they change only by a commit (made in a clone, then pushed; every machine pulls).
+# This installer installs exactly what they pin and writes no tracked file: `bun install
+# --frozen-lockfile` never rewrites bun.lock, and the marketplace step puts the committed
+# omp-plugins.lock.json back. On 2026-11-03 a hand upgrade that edited the pin in a following
+# machine's checkout (sami-devbox) stopped scripts/dotfiles-follow there.
 # jj snapshotting is omp/hooks/post/jj-snapshot.ts alone (see omp/AGENTS.md);
 # a stale extension copy is pruned so no second, awaited snapshotter loads.
 if [ -L "${OMP_AGENT_DIR}/extensions" ]; then rm "${OMP_AGENT_DIR}/extensions"; fi
@@ -85,7 +88,8 @@ ensure_link "${DOTFILES_DIR}/omp/extensions/span-account.ts" "${OMP_AGENT_DIR}/e
 # Only the entry is linked; its sibling modules resolve from the link's real path.
 ensure_link "${DOTFILES_DIR}/omp/extensions/experiments/index.ts" "${OMP_AGENT_DIR}/extensions/experiments.ts"
 ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
-(cd "${DOTFILES_DIR}/omp/plugins" && bun install) || echo "omp: plugin install failed; re-run after fixing git auth" >&2
+(cd "${DOTFILES_DIR}/omp/plugins" && bun install --frozen-lockfile) \
+    || echo "omp: plugin install failed (git auth, or package.json and bun.lock disagree: fix the pin in a commit)" >&2
 # The envoy and Legion extensions install from npm (@sjawhar/pi-envoy, @sjawhar/pi-legion). The old
 # git-pinned legion monorepo entry is gone from package.json, but bun install
 # does not prune its leftover directory — and OMP discovers extensions by
@@ -96,10 +100,11 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # records. The install record (installed_plugins.json) is machine-local; the lock entry is not, and
 # omp refuses to install a plugin whose name the lock already holds ("Runtime package name ...
 # conflicts") while exiting 0. So on a machine without the install, the stale lock entry is dropped
-# first; the install writes it back at the end of the map, and when that is the only difference the
-# committed bytes are put back so the checkout stays clean. An install behind the lock (another
-# machine upgraded and committed the lock) refreshes the marketplace catalog, which omp otherwise
-# keeps from the day it was added, and upgrades. An install that ends away from the lock is reported.
+# first, and after the install the committed bytes are put back, whatever omp wrote, so the
+# checkout stays clean. An install behind the lock (another machine upgraded and committed the
+# lock) refreshes the marketplace catalog, which omp otherwise keeps from the day it was added, and
+# upgrades, with the committed lock put back the same way. An install that ends away from the lock
+# is reported; the lock changes only by a commit.
 marketplace_plugin_version() {
     jq -r --arg p "$1" '.plugins[$p][0].version // empty' "${DOTFILES_DIR}/omp/plugins/installed_plugins.json" 2>/dev/null || true
 }
@@ -108,19 +113,20 @@ install_marketplace_plugin() {
     omp plugin marketplace list | grep -q "$marketplace" || omp plugin marketplace add "$marketplace"
     want=$(jq -r --arg n "${plugin%@*}" '.plugins[$n].version // empty' "$lock")
     have=$(marketplace_plugin_version "$plugin")
+    # The saved copy lives outside the checkout, and a failed omp call does not stop the restore
+    # (set -e), so no run leaves the lock changed or a stray file in the tracked tree.
+    local saved rc=0
+    saved="$(mktemp)"
+    cp "$lock" "$saved"
     if [ -z "$have" ]; then
-        cp "$lock" "${lock}.saved"
-        jq --arg name "${plugin%@*}" 'del(.plugins[$name])' "${lock}.saved" > "$lock"
-        omp plugin install "$plugin"
-        if cmp -s <(jq -S . "$lock") <(jq -S . "${lock}.saved"); then
-            mv "${lock}.saved" "$lock"
-        else
-            rm "${lock}.saved"
-        fi
+        jq --arg name "${plugin%@*}" 'del(.plugins[$name])' "$saved" > "$lock"
+        omp plugin install "$plugin" || rc=$?
     elif [ -n "$want" ] && [ "$have" != "$want" ]; then
-        omp plugin marketplace update "${plugin#*@}"
-        omp plugin upgrade "$plugin"
+        { omp plugin marketplace update "${plugin#*@}" && omp plugin upgrade "$plugin"; } || rc=$?
     fi
+    cp "$saved" "$lock"
+    rm -f "$saved"
+    (( rc == 0 )) || echo "omp: ${plugin}: omp plugin exited $rc" >&2
     have=$(marketplace_plugin_version "$plugin")
     if [ -z "$have" ]; then
         echo "omp: installing ${plugin} failed" >&2

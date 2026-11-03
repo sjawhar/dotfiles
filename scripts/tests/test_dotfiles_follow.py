@@ -43,6 +43,16 @@ exit 0
 FAKE_KNIVES = f"""#!/bin/sh
 echo "knives {PIN}"
 """
+FAKE_BUN = """#!/bin/sh
+# bun install --frozen-lockfile: logs where it ran, exits FAKE_BUN_RC.
+echo "bun $* in ${PWD##*/.dotfiles/}" >> "$FAKE_LOG"
+[ "${FAKE_BUN_RC:-0}" = 0 ] || echo "error: lockfile had changes, but lockfile is frozen" >&2
+exit "${FAKE_BUN_RC:-0}"
+"""
+PLUGINS_V1 = '{\n  "dependencies": {\n    "@sjawhar/pi-envoy": "15.1.2"\n  }\n}\n'
+PLUGINS_V2 = '{\n  "dependencies": {\n    "@sjawhar/pi-envoy": "15.5.0"\n  }\n}\n'
+LOCK_V1 = '{ "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@15.1.2"] }\n'
+LOCK_V2 = '{ "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@15.5.0"] }\n'
 
 
 class FakeEnvoy:
@@ -71,7 +81,7 @@ class Harness(unittest.TestCase):
         self.fake_log = root / "fake.log"
         fakebin = root / "bin"
         fakebin.mkdir()
-        for name, body in (("mise", FAKE_MISE), ("knives", FAKE_KNIVES)):
+        for name, body in (("mise", FAKE_MISE), ("knives", FAKE_KNIVES), ("bun", FAKE_BUN)):
             (fakebin / name).write_text(body)
             (fakebin / name).chmod(0o755)
         env = {
@@ -107,13 +117,16 @@ class Harness(unittest.TestCase):
         (self.upstream / "secrets.env").write_text("COMMITTED=1\n")
         (self.upstream / "scripts").mkdir()
         (self.upstream / "scripts" / "tool").write_text("v1\n")
-        (self.upstream / ".gitignore").write_text(".secrets/\nomp/*.local.yml\n")
+        (self.upstream / ".gitignore").write_text(".secrets/\nomp/*.local.yml\nomp/plugins/node_modules/\n")
+        (self.upstream / "omp" / "plugins").mkdir(parents=True)
+        (self.upstream / "omp" / "plugins" / "package.json").write_text(PLUGINS_V1)
+        (self.upstream / "omp" / "plugins" / "bun.lock").write_text(LOCK_V1)
         self.commit_upstream("initial")
         self.sh("git", "clone", "-q", str(self.origin), str(self.repo))
         # The copy step 2 makes: this machine's secrets.env differs from its commit.
         (self.repo / "secrets.env").write_text("COMMITTED=1\nWORKING_COPY=1\n")
         # Gitignored step-2 files and the separate .secrets repository are not git's business.
-        (self.repo / "omp").mkdir()
+        (self.repo / "omp").mkdir(exist_ok=True)
         (self.repo / "omp" / "models.local.yml").write_text("providers: {}\n")
         (self.repo / ".secrets").mkdir()
         (self.repo / ".secrets" / "secrets.local.env").write_text("X=1\n")
@@ -338,6 +351,80 @@ class Refuses(Harness):
         messages = self.run_follow(now=1_001_200.0)
         self.assertEqual(len(messages), 1)
         self.assertIn("CANNOT FETCH origin/main", messages[0])
+
+
+class TargetBytes(Harness):
+    """A tracked file edited in place to exactly the bytes main holds: on 2026-11-03 a hand install
+    of pi-envoy 15.5.0 on sami-devbox wrote main's new omp/plugins/package.json and bun.lock 69 s
+    after the pin was pushed, and the follower stopped until a person discarded the edits."""
+
+    def pin_upstream(self) -> str:
+        return self.commit_upstream(
+            "omp/plugins: pi-envoy 15.5.0",
+            omp__plugins__package_json=PLUGINS_V2,
+            omp__plugins__bun_lock=LOCK_V2,
+        )
+
+    def commit_upstream(self, message: str, **files: str) -> str:
+        # File names with dots: package_json -> package.json, bun_lock -> bun.lock.
+        renamed = {
+            name.replace("package_json", "package.json").replace("bun_lock", "bun.lock"): body
+            for name, body in files.items()
+        }
+        return super().commit_upstream(message, **renamed)
+
+    def test_an_edit_equal_to_main_is_discarded_and_the_fast_forward_goes_on(self) -> None:
+        new = self.pin_upstream()
+        plugins = self.repo / "omp/plugins"
+        (plugins / "package.json").write_text(PLUGINS_V2)
+        (plugins / "bun.lock").write_text(LOCK_V2)
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            messages = self.run_follow()
+        notes = [call.args[0] for call in logged.call_args_list if call.args[0].startswith("note:")]
+        print(f"\n===== edit equal to main: {len(messages)} message(s); log notes:", file=sys.stderr)
+        for line in notes:
+            print(f"  {line}", file=sys.stderr)
+        self.assertEqual(messages, [])
+        self.assertEqual(self.head(), new)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("omp/plugins/bun.lock, omp/plugins/package.json held the bytes of", notes[0])
+        self.assertEqual((plugins / "package.json").read_text(), PLUGINS_V2)
+        self.assertEqual((plugins / "bun.lock").read_text(), LOCK_V2)
+        # Only the kept secrets copy is still modified.
+        self.assertEqual(self.sh("git", "status", "--porcelain", cwd=self.repo), "M secrets.env")
+        self.assertEqual(self.state_data()["last_outcome"], "ok")
+        # And the plugins main pins are installed, frozen, in omp/plugins.
+        self.assertIn("bun install --frozen-lockfile in omp/plugins", self.fake_log.read_text())
+
+    def test_an_edit_that_differs_from_main_still_refuses(self) -> None:
+        self.pin_upstream()
+        (self.repo / "omp/plugins/package.json").write_text(PLUGINS_V2.replace("15.5.0", "15.6.0"))
+        self.assert_refused("edit that differs from main", "UNCOMMITTED CHANGES", " M omp/plugins/package.json")
+
+    def test_one_equal_edit_beside_one_that_differs_refuses_and_discards_neither(self) -> None:
+        self.pin_upstream()
+        (self.repo / "omp/plugins/package.json").write_text(PLUGINS_V2)
+        (self.repo / "omp/plugins/bun.lock").write_text("hand edit\n")
+        messages = self.assert_refused("equal edit beside a different one", "UNCOMMITTED CHANGES", " M omp/plugins/bun.lock")
+        self.assertNotIn(" M omp/plugins/package.json", messages[0])
+        self.assertIn("omp/plugins/package.json (their edits are discarded at the fast-forward)", messages[0])
+        self.assertEqual((self.repo / "omp/plugins/package.json").read_text(), PLUGINS_V2)
+
+    def test_an_equal_edit_with_another_mode_still_refuses(self) -> None:
+        self.pin_upstream()
+        path = self.repo / "omp/plugins/package.json"
+        path.write_text(PLUGINS_V2)
+        path.chmod(0o755)
+        self.assert_refused("equal bytes, other mode", "UNCOMMITTED CHANGES", " M omp/plugins/package.json")
+
+    def test_a_frozen_plugin_install_failure_alerts(self) -> None:
+        self.pin_upstream()
+        os.environ["FAKE_BUN_RC"] = "1"
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("TOOLS NOT INSTALLED", messages[0])
+        self.assertIn("bun install --frozen-lockfile", messages[0])
+        self.assertIn("lockfile is frozen", messages[0])
 
 
 if __name__ == "__main__":
