@@ -53,14 +53,6 @@ case ":${PI_CONFIG_FILES:-}:" in
     *) export PI_CONFIG_FILES="$overlay${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}" ;;
 esac
 
-# Native discovery runs before startup-safe extensions bind. An extension-only
-# resources_discover pool otherwise disappears from cached fresh TUI launches.
-skills_overlay="$(python3 "$DOTFILES_DIR/scripts/omp-skills-config")"
-case ":${PI_CONFIG_FILES:-}:" in
-    *":$skills_overlay:"*) ;;
-    *) export PI_CONFIG_FILES="$skills_overlay${PI_CONFIG_FILES:+:$PI_CONFIG_FILES}" ;;
-esac
-
 # installers/omp-embed.sh runs one embedding server per machine and records its URL. Pointed at
 # it, mnemopi spawns no ~1 GB embedding worker per session. Only while it answers: a dead server
 # would leave the session on keyword-only recall, while no URL keeps the in-process worker.

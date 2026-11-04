@@ -140,10 +140,12 @@ install_marketplace_plugin theorem-labs/core-ops core-ops@core-ops
 # its own install.
 install_marketplace_plugin anthropics/claude-plugins-official slack@claude-plugins-official
 
-# Skills: pools are declared once in skills-sources.json. shims/omp generates
-# native skills.customDirectories before launch, including fresh TUI sessions
-# whose extensions are deferred. dotfiles-skills.ts also refreshes the pools on
-# /reload-plugins. The retired flat symlink farm broke live snapshotted paths.
+# Skills: pools are declared once in skills-sources.json;
+# omp/extensions/dotfiles-skills.ts feeds them to
+# OMP via resources_discover at session start and /reload-plugins. The old
+# flat symlink farm (scripts/omp-sync-skills -> ~/.omp/agent/skills) is
+# retired: live sessions snapshotted farm paths, so every re-sync prune broke
+# them mid-flight.
 # Convergence: prune leftover farm symlinks on machines that predate the
 # retirement (real user-authored skill dirs in ~/.omp/agent/skills survive).
 [ -d "${HOME}/.omp/agent/skills" ] && find "${HOME}/.omp/agent/skills" -maxdepth 1 -type l -delete
