@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# devbox-offbox-probe <proc-root> <registry-dir> <merge-train-dir>
+#
+# The read-only half of scripts/devbox-offbox-watch, run ON sami-devbox. The watch ships it over
+# ssh stdin (`ssh sami-devbox bash -s -- ...`) rather than calling an installed copy, so the two
+# halves can never be a version apart: the box's ~/.dotfiles is published independently.
+#
+# It changes nothing. It prints `key=value` lines and one `===ENTRY <file>` … `===END` block per
+# registry entry. A value never spans lines; a registry entry is copied through byte for byte.
+#
+# <proc-root> is /proc in a real run. The tests give it a private tree holding a `pressure/io`
+# and a few `<pid>/stat` files, so the writeback-stall refusal is exercised without stalling the
+# box.
+set -uo pipefail
+
+proc="${1:-/proc}"
+registry="${2:?registry directory}"
+train="${3:-}"
+
+printf 'host=%s\n' "$(hostname -s)"
+printf 'now=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# --- writeback stall -------------------------------------------------------------------------
+# Two signals, either one is a stall: I/O pressure, and a process wedged in uninterruptible sleep
+# inside a filesystem teardown. On 2026-11-04 the box answered ssh while every write blocked, so
+# "it answers" is no evidence at all; `umount`/`fusermount3` in state D is the shape it had.
+full="$(awk '$1 == "full" { for (i = 2; i <= NF; i++) if (substr($i, 1, 6) == "avg10=") print substr($i, 7) }' \
+    "$proc/pressure/io" 2>/dev/null)"
+printf 'pressure_io_full_avg10=%s\n' "${full:-unknown}"
+
+# One awk over every `<pid>/stat` at once, not a bash loop per file: sami-devbox had 14,683
+# processes on 2026-11-04 and the loop took most of a minute, which is most of a run.
+stuck_names="$(awk '
+    {
+        pid = $1
+        rest = $0
+        sub(/^[0-9]+ \(/, "", rest)
+        close_paren = index(rest, ") ")
+        comm = substr(rest, 1, close_paren - 1)
+        split(substr(rest, close_paren + 2), field, " ")
+        if (field[1] == "D" && (comm == "umount" || comm == "umount2" || comm == "fusermount" || comm == "fusermount3"))
+            printf "%s%s:%s", (seen++ ? "," : ""), pid, comm
+    }
+' "$proc"/[0-9]*/stat 2>/dev/null || true)"
+stuck=0
+[[ -n "$stuck_names" ]] && stuck="$(tr -cd , <<<"$stuck_names" | wc -c)" && stuck=$((stuck + 1))
+printf 'writeback_d_count=%s\n' "$stuck"
+printf 'writeback_d_procs=%s\n' "$stuck_names"
+
+# --- the merge train -------------------------------------------------------------------------
+# Only facts. Which of them is an alert is the watch's decision, and its README says which rule
+# it used.
+if [[ -n "$train" && -d "$train" ]]; then
+    printf 'train_present=yes\n'
+    if [[ -r "$train/events.tsv" ]]; then
+        printf 'train_events_mtime=%s\n' "$(stat -c %Y "$train/events.tsv")"
+        printf 'train_events_last=%s\n' "$(tail -n 1 "$train/events.tsv" | cut -c1-200 | tr -d '\n')"
+    else
+        printf 'train_events_mtime=\n'
+    fi
+    if [[ -r "$train/queue.tsv" ]]; then
+        # Work waiting on the runner: anything not landed, dropped or returned.
+        printf 'train_queue_open=%s\n' "$(awk -F'\t' 'NR > 1 && $7 != "landed" && $7 != "dropped" && $7 != "returned" { n++ } END { print n + 0 }' "$train/queue.tsv")"
+        printf 'train_queue_states=%s\n' "$(awk -F'\t' 'NR > 1 { c[$7]++ } END { for (s in c) printf "%s:%s ", s, c[s] }' "$train/queue.tsv")"
+    fi
+    if [[ -r "$train/runner.lock" ]]; then
+        lock="$(tr -d '\n' <"$train/runner.lock")"
+        printf 'train_lock=%s\n' "$lock"
+        lock_pid="$(sed -n 's/.*pid \([0-9]\{1,\}\).*/\1/p' <<<"$lock")"
+        lock_agent="$(sed -n 's/.*agent \([0-9a-f-]\{36\}\).*/\1/p' <<<"$lock")"
+        printf 'train_lock_pid=%s\n' "$lock_pid"
+        printf 'train_lock_agent=%s\n' "$lock_agent"
+        if [[ -n "$lock_pid" && -d "$proc/$lock_pid" ]]; then
+            printf 'train_lock_pid_alive=yes\n'
+        else
+            printf 'train_lock_pid_alive=no\n'
+        fi
+    else
+        printf 'train_lock=\n'
+        printf 'train_lock_pid_alive=unknown\n'
+    fi
+else
+    printf 'train_present=no\n'
+fi
+
+# --- the registry ----------------------------------------------------------------------------
+if [[ -d "$registry" ]]; then
+    printf 'registry_present=yes\n'
+    for file in "$registry"/*.entry; do
+        [[ -r "$file" ]] || continue
+        printf '===ENTRY %s\n' "${file##*/}"
+        cat -- "$file"
+        printf '\n===END\n'
+    done
+else
+    printf 'registry_present=no\n'
+fi
+exit 0

@@ -1,0 +1,593 @@
+#!/usr/bin/env python3
+"""devbox-offbox-watch: watch sami-devbox from sami-rocqperf, and restart what the registry asks.
+
+    devbox-offbox-watch [--host HOST] [--registry DIR] [--train DIR] [--remote-proc DIR]
+                        [--sre ID] [--chief ID] [--verified-linux-lead ID]
+                        [--ssh-timeout S] [--state FILE] [--dry-run] [--once]
+
+Every 5 minutes (the `devbox-offbox-watch` user timer on sami-rocqperf). It runs OFF the machine
+it watches, which is the whole point: on 2026-11-04 sami-devbox stalled from about 16:40Z until a
+cloud reset at 18:05:53Z, and every session, every in-session loop and every watcher ON it died
+together while nothing off it noticed (dispatch://INFRA-993/ask/d13b86a5).
+
+Three duties.
+
+1. Session liveness, with restart. `<registry>/<session>.entry` holds, as plain key=value lines,
+   how to bring one session back and what its absence costs; its owner writes and updates it
+   (`/mnt/durable/sami/restart-registry/README.md`). For each entry with `auto_restart=yes` the
+   watch asks `omp-session-live <id>` ON sami-devbox -- the only liveness test there is here,
+   never an lsof on a transcript path, which on 11-03/04 reported a working lead dead and
+   "restored" it four times. A dead one is resumed in a new tmux window of its `tmux` session,
+   named for its `title`, from its `cwd`; when omp-session-live says it is live, its `after`
+   message is sent.
+
+2. The box itself. No ssh answer within --ssh-timeout on two runs in a row, or a writeback stall
+   that holds for 10 minutes, alerts the SRE and the chief of staff.
+
+3. The merge train (`--train`). Its operator, named in `runner.lock`, and the Verified Linux lead
+   hear when the queue holds work and `events.tsv` has not moved for 30 minutes, or when
+   `runner.lock` names a pid that is not running.
+
+Four limits on restarting, all mandatory:
+
+* Never during a writeback stall on sami-devbox: a process in state D running `umount` or
+  `fusermount3`, or `/proc/pressure/io` full avg10 above 5. A restarter without this rule would
+  have made 87 useless resumes on 2026-11-04.
+* At most 3 restarts in 10 minutes and 10 in an hour, across every session. Past that it reports
+  and stops; it restarts again once the windows empty on their own.
+* Never a session that has any live process naming it, even one omp-session-live does not count,
+  so it can never make a duplicate. A live box is never restarted or moved.
+* A session that dies again within 30 minutes of its restart is reported, not restarted again; it
+  stays blocked until it is seen live.
+
+Every restart and every refusal goes over Envoy to the SRE and to the holder of the session's
+role. A restart line names every `--dir` its resume gave the box: a box with too few of them
+looks healthy and fails hours later at one path (CURL, 2026-11-04).
+
+Envoy does not run on sami-devbox -- its hub is `envoy-hub.tail12ec1c.ts.net`, a tailnet node of
+its own -- so an alert about a dead sami-devbox still goes out. When the hub does not answer
+either, the message is written under `<state dir>/undelivered/` on this machine and the journal
+says so.
+
+It never kills, signals or stops any process.
+
+Exit status: 0 for a run that reached sami-devbox (quiet or not), 1 when it could not.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ENVOY = HERE / "envoy"
+PROBE = HERE / "devbox-offbox-probe"
+ACT = HERE / "devbox-offbox-act"
+
+DEFAULT_HOST = "sami-devbox"
+DEFAULT_REGISTRY = "/mnt/durable/sami/restart-registry/sessions"
+DEFAULT_TRAIN = "/mnt/nvme/sami/tmp/verified-linux/redesign/merge-train"
+DEFAULT_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+DEFAULT_CHIEF = "01a13dca-e979-7264-af32-f654ef57a6f5"
+DEFAULT_VL_LEAD = "01a15f9c-6bee-7127-b4f1-907ec8d3176d"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "devbox-offbox-watch"
+
+PRESSURE_LIMIT = 5.0          # /proc/pressure/io full avg10 above this is a stall
+STALL_ALERT_SECONDS = 600     # a stall that holds this long is an alert of its own
+RESTARTS_PER_10_MIN = 3
+RESTARTS_PER_HOUR = 10
+FLAP_SECONDS = 1800           # dead again within this of its restart: report, never restart again
+TRAIN_IDLE_SECONDS = 1800
+AWAIT_SECONDS = 180           # how long a restart waits for omp-session-live to say it is live
+ENTRY_KEYS = ("session", "title", "role", "tmux", "cwd", "resume", "after", "order",
+              "auto_restart", "owner_note")
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def utc(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def minutes(seconds: float) -> int:
+    return int(seconds // 60)
+
+
+# --------------------------------------------------------------------------------------------
+# sami-devbox, over ssh
+
+
+class Remote:
+    """The watched machine. Every call ships a script over stdin, so the two halves of this watch
+    are never a published version apart."""
+
+    def __init__(self, host: str, timeout: int) -> None:
+        self.host = host
+        self.timeout = timeout
+
+    def run(self, script: Path, args: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
+        command = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.timeout}",
+                   "-o", "StrictHostKeyChecking=accept-new", self.host, "bash", "-s", "--", *args]
+        return subprocess.run(command, input=script.read_text(), capture_output=True, text=True,
+                              timeout=timeout or (self.timeout + 60))
+
+
+def parse_probe(text: str) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """The probe's `key=value` lines, and one dict per `===ENTRY … ===END` block."""
+    facts: dict[str, str] = {}
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in text.splitlines():
+        if line.startswith("===ENTRY "):
+            current = {"_file": line[len("===ENTRY "):]}
+            continue
+        if line == "===END":
+            if current:
+                entries.append(current)
+            current = None
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if current is None:
+            facts[key] = value
+        elif key in ENTRY_KEYS:
+            current[key] = value
+    return facts, entries
+
+
+def usable(entry: dict[str, str]) -> str:
+    """Why this entry cannot be acted on, or "" when it can."""
+    missing = [k for k in ("session", "title", "tmux", "cwd", "resume") if not entry.get(k)]
+    if missing:
+        return f"no {', '.join(missing)}"
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                        entry["session"]):
+        return f"session={entry['session']} is not a session id"
+    if entry["_file"] != f"{entry['session']}.entry":
+        return f"the file is named {entry['_file']} but holds session={entry['session']}"
+    return ""
+
+
+def dir_list(resume: str) -> list[str]:
+    """Every `--dir PATH` the resume command gives the box, in order."""
+    try:
+        words = shlex.split(resume)
+    except ValueError:
+        words = resume.split()
+    return [words[i + 1] for i, word in enumerate(words[:-1]) if word == "--dir"]
+
+
+def describe_dirs(resume: str) -> str:
+    dirs = dir_list(resume)
+    if not dirs:
+        return "--dir list used (0): none -- the resume command names no --dir, so this is not a boxed session"
+    return f"--dir list used ({len(dirs)}): " + " ".join(dirs)
+
+
+# --------------------------------------------------------------------------------------------
+# Envoy
+
+
+class Reporter:
+    """Envoy, with a file on this machine for what Envoy would not take."""
+
+    def __init__(self, state_dir: Path, dry_run: bool) -> None:
+        self.undelivered = state_dir / "undelivered"
+        self.dry_run = dry_run
+
+    def send(self, targets: list[str], kind: str, text: str) -> None:
+        targets = [t for t in dict.fromkeys(targets) if t]
+        log(f"[{kind}] -> {', '.join(targets) or 'nobody'}: {text}")
+        if self.dry_run:
+            return
+        failed = []
+        for target in targets:
+            try:
+                done = subprocess.run([str(ENVOY), "send", "--source", "envoy",
+                                       "--message-file", "-", target],
+                                      input=text, capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.SubprocessError) as error:
+                log(f"  send to {target} failed: {error}")
+                failed.append(f"{target}: {error}")
+                continue
+            if done.returncode != 0:
+                detail = (done.stderr or done.stdout).strip()
+                log(f"  send to {target} failed: exit {done.returncode}: {detail}")
+                failed.append(f"{target}: exit {done.returncode}: {detail}")
+        if failed:
+            self.keep(kind, text, failed)
+
+    def keep(self, kind: str, text: str, failed: list[str]) -> None:
+        path = self.undelivered / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{kind}.txt"
+        try:
+            self.undelivered.mkdir(parents=True, exist_ok=True)
+            path.write_text("Envoy would not take this message.\n"
+                            + "".join(f"  {f}\n" for f in failed) + "\n" + text + "\n")
+            log(f"  kept at {path}")
+        except OSError as error:
+            log(f"  and it could not be kept at {path}: {error}")
+
+
+# --------------------------------------------------------------------------------------------
+# State
+
+
+def load_state(path: Path) -> dict:
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        state = {}
+    state.setdefault("ssh_fail_streak", 0)
+    state.setdefault("ssh_alerted", False)
+    state.setdefault("ssh_last_error", "")
+    state.setdefault("stall_since", None)
+    state.setdefault("stall_alerted", False)
+    state.setdefault("restarts", [])
+    state.setdefault("sessions", {})
+    state.setdefault("train", {})
+    return state
+
+
+def save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def session_state(state: dict, session: str) -> dict:
+    return state["sessions"].setdefault(session, {})
+
+
+def once(record: dict, key: str, on: bool) -> bool:
+    """True the first time `key` is on, then False until it has been off. The dedupe behind
+    "report every refusal" that keeps a standing refusal from being a message every 5 minutes."""
+    was = bool(record.get(key))
+    record[key] = on
+    return on and not was
+
+
+# --------------------------------------------------------------------------------------------
+# The run
+
+
+def check_box(facts: dict[str, str], state: dict, report: Reporter, now: float,
+              host: str, sre: str, chief: str) -> tuple[bool, str]:
+    """Is sami-devbox in a writeback stall? Alerts when one holds for STALL_ALERT_SECONDS."""
+    evidence = []
+    pressure = facts.get("pressure_io_full_avg10", "unknown")
+    try:
+        if float(pressure) > PRESSURE_LIMIT:
+            evidence.append(f"/proc/pressure/io full avg10={pressure}, over {PRESSURE_LIMIT}")
+    except ValueError:
+        pass
+    stuck = facts.get("writeback_d_count", "0")
+    if stuck.isdigit() and int(stuck) > 0:
+        evidence.append(f"{stuck} process(es) in state D running umount or fusermount3:"
+                        f" {facts.get('writeback_d_procs', '')}")
+    stalled = bool(evidence)
+    detail = "; ".join(evidence)
+    if not stalled:
+        if state["stall_alerted"]:
+            report.send([sre, chief], "stall-over",
+                        f"{host} is out of its writeback stall as of {utc(now)}"
+                        f" (/proc/pressure/io full avg10={pressure}, no umount or fusermount3 in state D)."
+                        f" devbox-offbox-watch is restarting registry sessions again.")
+        state["stall_since"] = None
+        state["stall_alerted"] = False
+        return False, ""
+    if state["stall_since"] is None:
+        state["stall_since"] = now
+    held = now - state["stall_since"]
+    if held >= STALL_ALERT_SECONDS and not state["stall_alerted"]:
+        state["stall_alerted"] = True
+        report.send([sre, chief], "stall",
+                    f"{host} WRITEBACK STALL: it answers ssh but has been stalled for"
+                    f" {minutes(held)} min, since {utc(state['stall_since'])}. Evidence: {detail}."
+                    f" devbox-offbox-watch is refusing every restart while it holds -- a resume now"
+                    f" would hang the way the 87 of 2026-11-04 did -- and it has killed nothing."
+                    f" It reports again when the stall clears.")
+    return True, detail
+
+
+def check_train(facts: dict[str, str], state: dict, report: Reporter, now: float,
+                train_dir: str, sre: str, vl_lead: str) -> None:
+    if facts.get("train_present") != "yes":
+        return
+    train = state["train"]
+    lock = facts.get("train_lock", "")
+    operator = facts.get("train_lock_agent", "")
+    open_items = facts.get("train_queue_open", "0")
+    targets = [operator, vl_lead, sre]
+    rule = ("Rule used: this watch's brief -- the queue holds work and events.tsv has had no new"
+            " line for 30 min, or runner.lock names a pid that is not running. The train's own"
+            " README states no stall condition of its own; its only word on a stopped runner is"
+            " the \"Taking over\" procedure, which this alert quotes.")
+
+    alive = facts.get("train_lock_pid_alive", "unknown")
+    if once(train, "lock_dead", alive == "no"):
+        report.send(targets, "train-runner-gone",
+                    f"MERGE TRAIN RUNNER GONE: {train_dir}/runner.lock names a pid that is not"
+                    f" running on the box. Lock: {lock or '(empty)'}. {open_items} queue item(s)"
+                    f" are open. To take over, per the train's README (\"Taking over\"): start"
+                    f" `TRAIN_AGENT=<your id> ./train.sh run` as a background job with no deadline"
+                    f" in that directory; it gets the lock once the old process is gone, adopts the"
+                    f" cycle if the head has not moved, and otherwise requeues the testing items."
+                    f" Then relay the outbox after each landing. {rule}")
+
+    mtime = facts.get("train_events_mtime", "")
+    if mtime and open_items.isdigit() and int(open_items) > 0:
+        idle = now - float(mtime)
+        if once(train, "events_idle", idle >= TRAIN_IDLE_SECONDS):
+            report.send(targets, "train-stuck",
+                        f"MERGE TRAIN STUCK: {train_dir} has {open_items} open queue item(s)"
+                        f" ({facts.get('train_queue_states', '').strip()}) and events.tsv has had no"
+                        f" new line for {minutes(idle)} min -- its last is from"
+                        f" {utc(float(mtime))}: {facts.get('train_events_last', '')}."
+                        f" runner.lock: {lock or '(empty)'}. Nothing was touched. {rule}")
+    else:
+        train["events_idle"] = False
+
+
+def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, bool], dict[str, list[str]]]:
+    """`omp-session-live` per id on sami-devbox, and every live process naming one."""
+    if not ids:
+        return {}, {}
+    # A fixed cost (one `ps` over 14,683 processes) plus about 0.75 s per `omp-session-live`.
+    done = remote.run(ACT, ["live", *ids], timeout=120 + 3 * len(ids))
+    if done.returncode != 0:
+        raise RuntimeError(f"liveness check failed: exit {done.returncode}:"
+                           f" {(done.stderr or done.stdout).strip()[:400]}")
+    live: dict[str, bool] = {}
+    procs: dict[str, list[str]] = {}
+    for line in done.stdout.splitlines():
+        parts = line.split(" ", 3)
+        if parts[0] == "live" and len(parts) >= 3:
+            live[parts[1]] = parts[2] == "1"
+        elif parts[0] == "proc" and len(parts) >= 4:
+            procs.setdefault(parts[1], []).append(f"pid {parts[2]}: {parts[3]}")
+    return live, procs
+
+
+def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict, now: float,
+            host: str, sre: str, dry_run: bool) -> None:
+    session, title = entry["session"], entry["title"]
+    targets = [sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
+    dirs = describe_dirs(entry["resume"])
+    log(f"restarting {title} ({session}) in tmux {entry['tmux']}, cwd {entry['cwd']}: {dirs}")
+    if dry_run:
+        log("  --dry-run: nothing was run")
+        return
+    done = remote.run(ACT, ["restart", entry["tmux"], title, entry["cwd"], entry["resume"]],
+                      timeout=180)
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout).strip()[:500]
+        report.send(targets, "restart-failed",
+                    f"RESTART FAILED for {title} ({session}) on {host}: the tmux window could not"
+                    f" be opened: {detail}. Resume line: {entry['resume']}. {dirs}."
+                    f" Nothing is running for this session; it needs a person.")
+        return
+    window = ""
+    for line in done.stdout.splitlines():
+        if line.startswith("window="):
+            window = line[len("window="):]
+    state["restarts"].append({"at": now, "session": session})
+    record = session_state(state, session)
+    record["last_restart"] = now
+    record["last_dirs"] = dir_list(entry["resume"])
+
+    waited = remote.run(ACT, ["await", session, str(AWAIT_SECONDS)], timeout=AWAIT_SECONDS + 60)
+    came_back = waited.stdout.strip() == "live"
+    after = entry.get("after", "")
+    if came_back and after:
+        report.send([session], "after-message", after)
+        after_said = "its after message was sent"
+    elif after:
+        after_said = "its after message was NOT sent, because omp-session-live has not seen it live yet"
+    else:
+        after_said = "it has no after message"
+    live_said = ("omp-session-live sees it live" if came_back else
+                 f"omp-session-live has NOT seen it live within {AWAIT_SECONDS} s -- look at the window")
+    recent = len([r for r in state["restarts"] if now - r["at"] < 3600])
+    report.send(targets, "restart",
+                f"RESTARTED {title} ({session}) on {host} at {utc(now)}. It was dead by"
+                f" omp-session-live, and no process on the box named it. New tmux window"
+                f" {window or '(unnamed)'} in tmux session {entry['tmux']}, cwd {entry['cwd']}."
+                f" {dirs}. Resume line run: {entry['resume']}. Now: {live_said}, and {after_said}."
+                f" Restarts in the last hour: {recent} of {RESTARTS_PER_HOUR}."
+                f" Why it matters: {entry.get('owner_note', '(the entry says nothing)')}")
+
+
+def run(args: argparse.Namespace) -> int:
+    now = time.time()
+    state_path = Path(args.state)
+    state = load_state(state_path)
+    report = Reporter(state_path.parent, args.dry_run)
+    remote = Remote(args.host, args.ssh_timeout)
+    me = socket.gethostname()
+
+    try:
+        probe = remote.run(PROBE, [args.remote_proc, args.registry, args.train],
+                           timeout=args.ssh_timeout + 60)
+        if probe.returncode != 0:
+            raise RuntimeError(f"exit {probe.returncode}: {(probe.stderr or probe.stdout).strip()[:300]}")
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        state["ssh_fail_streak"] += 1
+        state["ssh_last_error"] = str(error)[:300]
+        log(f"{args.host} did not answer: {error}")
+        if state["ssh_fail_streak"] >= 2 and not state["ssh_alerted"]:
+            state["ssh_alerted"] = True
+            report.send([args.sre, args.chief], "box-down",
+                        f"{args.host} DOWN: it has not answered ssh within {args.ssh_timeout} s on"
+                        f" {state['ssh_fail_streak']} runs in a row, the last at {utc(now)}"
+                        f" ({state['ssh_last_error']}). Nothing on it can be restarted and nothing"
+                        f" on it is watching itself. devbox-offbox-watch keeps asking every 5 min"
+                        f" from {me} and reports when it answers again.")
+        save_state(state_path, state)
+        return 1
+
+    if state["ssh_alerted"]:
+        report.send([args.sre, args.chief], "box-up",
+                    f"{args.host} answers ssh again as of {utc(now)}, after"
+                    f" {state['ssh_fail_streak']} failed runs. devbox-offbox-watch is checking the"
+                    f" registry's sessions again.")
+    state["ssh_fail_streak"] = 0
+    state["ssh_alerted"] = False
+
+    facts, entries = parse_probe(probe.stdout)
+    stalled, stall_detail = check_box(facts, state, report, now, args.host, args.sre, args.chief)
+    check_train(facts, state, report, now, args.train, args.sre, args.verified_linux_lead)
+
+    if facts.get("registry_present") != "yes":
+        log(f"no registry at {args.registry} on {args.host}: nothing to watch")
+        save_state(state_path, state)
+        return 0
+
+    good: list[dict[str, str]] = []
+    for entry in entries:
+        why = usable(entry)
+        if why:
+            log(f"skipping registry file {entry.get('_file')}: {why}")
+            continue
+        good.append(entry)
+    log(f"{len(good)} registry entries, {sum(1 for e in good if e.get('auto_restart') == 'yes')}"
+        f" with auto_restart=yes")
+
+    watched = [e for e in good if e.get("auto_restart") == "yes"
+               or session_state(state, e["session"]).get("blocked")]
+    watched.sort(key=lambda e: (int(e["order"]) if e.get("order", "").lstrip("-").isdigit() else 999,
+                                e["title"]))
+    try:
+        live, procs = liveness(remote, [e["session"] for e in watched])
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        log(f"liveness check failed: {error}")
+        save_state(state_path, state)
+        return 1
+
+    dead = []
+    for entry in watched:
+        session = entry["session"]
+        record = session_state(state, session)
+        if live.get(session):
+            record["last_seen_live"] = now
+            if record.get("blocked"):
+                log(f"{entry['title']} ({session}) is live again; unblocked")
+            record["blocked"] = False
+            record["blocked_reported"] = False
+            record["duplicate_reported"] = False
+            continue
+        dead.append(entry)
+
+    if not dead:
+        log("every watched session is live")
+        state["restarts"] = [r for r in state["restarts"] if now - r["at"] < 3600]
+        save_state(state_path, state)
+        return 0
+
+    left_for_stall: list[str] = []
+    left_for_limit: list[str] = []
+    for entry in dead:
+        session, title = entry["session"], entry["title"]
+        record = session_state(state, session)
+        targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
+
+        held = procs.get(session, [])
+        if held:
+            record["blocked"] = True
+            if once(record, "duplicate_reported", True):
+                report.send(targets, "refuse-duplicate",
+                            f"NOT RESTARTED {title} ({session}): omp-session-live says it is dead,"
+                            f" but {len(held)} live process(es) on {args.host} name it"
+                            f" -- {'; '.join(held[:5])}. A restart could make a duplicate, so none"
+                            f" was made and nothing was killed. This needs a person: either the"
+                            f" session is coming up, or something of it is left behind."
+                            f" Why it matters: {entry.get('owner_note', '(the entry says nothing)')}")
+            continue
+
+        since = now - float(record.get("last_restart") or 0)
+        if record.get("last_restart") and since < FLAP_SECONDS:
+            record["blocked"] = True
+            if once(record, "blocked_reported", True):
+                dirs = record.get("last_dirs") or []
+                report.send(targets, "refuse-flap",
+                            f"NOT RESTARTED {title} ({session}): it died again {minutes(since)} min"
+                            f" after devbox-offbox-watch restarted it at"
+                            f" {utc(record['last_restart'])}. A second restart is not made."
+                            f" It stays blocked until omp-session-live sees it live, so a person"
+                            f" decides: its resume line may be wrong, or whatever killed it is"
+                            f" still there. --dir list the restart used ({len(dirs)}):"
+                            f" {' '.join(dirs) if dirs else 'none'}. Resume line: {entry['resume']}."
+                            f" Why it matters: {entry.get('owner_note', '(the entry says nothing)')}")
+            continue
+        if record.get("blocked"):
+            continue
+
+        if stalled:
+            left_for_stall.append(f"{title} ({session})")
+            continue
+
+        ten = len([r for r in state["restarts"] if now - r["at"] < 600])
+        hour = len([r for r in state["restarts"] if now - r["at"] < 3600])
+        if ten >= RESTARTS_PER_10_MIN or hour >= RESTARTS_PER_HOUR:
+            left_for_limit.append(f"{title} ({session})")
+            continue
+
+        restart(remote, entry, report, state, now, args.host, args.sre, args.dry_run)
+
+    if once(state, "stall_refusal_reported", bool(left_for_stall)):
+        report.send([args.sre], "refuse-stall",
+                    f"NOT RESTARTED, {len(left_for_stall)} dead session(s) on {args.host}:"
+                    f" {', '.join(left_for_stall)}. The box is in a writeback stall"
+                    f" ({stall_detail}), where a resume hangs instead of starting -- a restarter"
+                    f" without this rule would have made 87 useless resumes on 2026-11-04."
+                    f" They are restarted on the first run after the stall clears. Nothing was"
+                    f" killed.")
+    if once(state, "limit_reported", bool(left_for_limit)):
+        ten = len([r for r in state["restarts"] if now - r["at"] < 600])
+        hour = len([r for r in state["restarts"] if now - r["at"] < 3600])
+        report.send([args.sre], "refuse-limit",
+                    f"NOT RESTARTED, {len(left_for_limit)} dead session(s) on {args.host}:"
+                    f" {', '.join(left_for_limit)}. The restart limit is reached: {ten} restart(s)"
+                    f" in the last 10 min (limit {RESTARTS_PER_10_MIN}) and {hour} in the last hour"
+                    f" (limit {RESTARTS_PER_HOUR}). devbox-offbox-watch has stopped restarting."
+                    f" It starts again by itself once those windows empty, so if this repeats,"
+                    f" something is resuming in a loop or the box is broken: look before it does.")
+
+    state["restarts"] = [r for r in state["restarts"] if now - r["at"] < 3600]
+    save_state(state_path, state)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--host", default=DEFAULT_HOST, help="the machine this one watches")
+    parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="restart registry on --host")
+    parser.add_argument("--train", default=DEFAULT_TRAIN, help="merge train directory on --host")
+    parser.add_argument("--remote-proc", default="/proc",
+                        help="procfs the stall test reads on --host; a private tree for the tests")
+    parser.add_argument("--sre", default=os.environ.get("BOX_HEALTH_OWNER") or DEFAULT_SRE)
+    parser.add_argument("--chief", default=DEFAULT_CHIEF, help="chief of staff's session")
+    parser.add_argument("--verified-linux-lead", default=DEFAULT_VL_LEAD)
+    parser.add_argument("--ssh-timeout", type=int, default=30)
+    parser.add_argument("--state", default=str(STATE_DIR / "state.json"))
+    parser.add_argument("--dry-run", action="store_true",
+                        help="say what would happen; start nothing and send nothing")
+    parser.add_argument("--once", action="store_true", help="accepted and ignored; a run is one pass")
+    args = parser.parse_args(argv)
+    log(f"devbox-offbox-watch on {socket.gethostname()} at {utc(time.time())}, watching {args.host}")
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

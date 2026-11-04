@@ -1,0 +1,18 @@
+[Unit]
+Description=Watch sami-devbox from this machine: restart the registry's dead sessions, alert on the box and on the merge train
+Documentation=file:%h/.dotfiles/scripts/devbox-offbox-watch.md
+
+[Service]
+Type=oneshot
+# It watches another machine, so it must not compete with this one's own work.
+Nice=15
+IOSchedulingClass=idle
+# A quiet run is one ssh probe (about 1 s) and one liveness call, which is one `omp-session-live`
+# per auto_restart=yes entry on sami-devbox at about 0.75 s each -- some 25 s at 30 entries. A run
+# that restarts a session waits up to 180 s for omp-session-live to see it live. 600 s rides out
+# both and still ends before the next 5-minute start.
+TimeoutStartSec=600
+# `envoy` is a bash script that needs the same tools a shell gives it, and ssh must find its config.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+ExecStart=%h/.dotfiles/scripts/devbox-offbox-watch

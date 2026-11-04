@@ -1,0 +1,13 @@
+[Unit]
+Description=Check sami-devbox and its restart registry every 5 min, from a machine that is not sami-devbox
+
+[Timer]
+OnActiveSec=1min
+# The brief's period. The box-down rule needs two failed runs, so it alerts 5-10 min into an
+# outage; the stall rule holds for 10 min before it alerts.
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

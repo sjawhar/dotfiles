@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# devbox-offbox-act <command> [args]
+#
+# The acting half of scripts/devbox-offbox-watch, run ON sami-devbox and shipped over ssh stdin
+# (`ssh sami-devbox bash -s -- <command> …`) so it is never a published version behind the watch.
+#
+#   live <session-id>…
+#       For each id, one `live <id> <0|1>` line from `omp-session-live` -- the ONLY liveness test
+#       there is here. Never an lsof on a transcript path: on 11-03/04 that reported a working
+#       lead dead and "restored" it four times while it worked.
+#       Then one `proc <id> <pid> <command line>` line per live process whose command line holds
+#       both `omp` and the id. That is the duplicate guard, and it is deliberately wider than
+#       omp-session-live: a resume still starting up, an omp in a box, a wrapper around one.
+#
+#   restart <tmux-session> <window-title> <cwd> <resume command>
+#       Open a new window named <window-title> in <tmux-session> (created detached if it does not
+#       exist) and run the resume command there through `bash -lc`, from <cwd>. The window keeps a
+#       login shell afterwards, so a resume that fails leaves its output on screen instead of
+#       closing the window. Prints `window=<tmux id>`.
+#
+#   await <session-id> <seconds>
+#       Ask omp-session-live every 5 s until the session is live or <seconds> pass. `live` or
+#       `dead`, exit 0 or 1.
+#
+# It never kills, signals or stops anything.
+set -uo pipefail
+
+export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.dotfiles/scripts:$HOME/.local/bin:$HOME/.mise/shims:/usr/local/bin:/usr/bin:/bin"
+export MISE_DATA_DIR="$HOME/.mise"
+live_test="$HOME/.dotfiles/scripts/omp-session-live"
+
+command="${1:?command}"
+shift
+
+case "$command" in
+live)
+    for id in "$@"; do
+        if "$live_test" "$id" >/dev/null 2>&1; then
+            printf 'live %s 1\n' "$id"
+        else
+            printf 'live %s 0\n' "$id"
+        fi
+    done
+    # One `ps` for every id at once, taken before the awk that reads it, so neither this ssh
+    # command nor the filter appears in its own answer. A bash loop over /proc instead took most
+    # of a minute on this box's 14,683 processes, which is most of a run.
+    #
+    # A process counts only when one of its words IS `omp` (`… -- omp --resume <id>`, an
+    # `agentbox` line, a docker run, the omp binary itself) and another holds the id. "The line
+    # contains omp somewhere" is not enough: a `grep` over transcripts under ~/.omp whose
+    # arguments name a session matched that way, and would have blocked that session's restart
+    # for as long as the grep ran.
+    snapshot="$(ps -eww -o pid=,args= 2>/dev/null)"
+    printf '%s\n' "$snapshot" | awk -v ids="$*" '
+        BEGIN { count = split(ids, id, " ") }
+        {
+            pid = $1
+            line = $0
+            sub(/^ *[0-9]+ +/, "", line)
+            runs_omp = 0
+            words = split(line, word, " ")
+            for (w = 1; w <= words; w++) {
+                base = word[w]
+                sub(/^.*\//, "", base)
+                if (base == "omp") { runs_omp = 1; break }
+            }
+            if (!runs_omp) next
+            for (i = 1; i <= count; i++)
+                if (index(line, id[i])) printf "proc %s %s %s\n", id[i], pid, substr(line, 1, 400)
+        }'
+    ;;
+restart)
+    session="${1:?tmux session}" title="${2:?window title}" cwd="${3:?cwd}" resume="${4:?resume}"
+    # An entry may write its tmux field as `agents:its-window`. A tmux session name holds no
+    # colon, so everything from the first one is the owner's note about where in that session the
+    # window used to be; the new window is named for the entry's title either way.
+    session="${session%%:*}"
+    [[ -d "$cwd" ]] || { printf 'error=cwd %s does not exist\n' "$cwd" >&2; exit 1; }
+    if ! tmux has-session -t "=$session" 2>/dev/null; then
+        tmux new-session -d -s "$session" -c "$cwd" || exit 1
+        printf 'created_tmux_session=%s\n' "$session"
+    fi
+    # One argument for tmux, which hands it to `sh -c`. The login shell after the resume keeps
+    # the window and its output when the resume exits. No newline inside the quoted string: bash's
+    # `%q` spells one as $'\n', which the `sh` tmux runs the argument with cannot read.
+    inner="$(printf 'exec bash -lc %q' "$resume; exec bash -l")"
+    window="$(tmux new-window -d -P -F '#{session_name}:#{window_index} #{window_id}' \
+        -t "=$session:" -n "$title" -c "$cwd" "$inner")" || exit 1
+    printf 'window=%s\n' "$window"
+    ;;
+await)
+    id="${1:?session id}" seconds="${2:-180}"
+    deadline=$((SECONDS + seconds))
+    while :; do
+        if "$live_test" "$id" >/dev/null 2>&1; then
+            echo live
+            exit 0
+        fi
+        ((SECONDS < deadline)) || break
+        sleep 5
+    done
+    echo dead
+    exit 1
+    ;;
+*)
+    echo "devbox-offbox-act: unknown command $command" >&2
+    exit 2
+    ;;
+esac
