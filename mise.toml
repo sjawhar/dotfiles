@@ -180,7 +180,7 @@ platforms.linux-x64   = { asset_pattern = "tt-x86_64-unknown-linux-musl.tar.gz" 
 platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz" }
 
 [tools.forward]
-version = "3.8.0"  # one laptop daemon accepts the dev VM inventory
+version = "3.8.1"  # filesystem-independent preview health probe
 # Public releases are verified with GitHub build attestations during installation.
 platforms.linux-x64   = { asset_pattern = "forward-x86_64-unknown-linux-musl.tar.gz" }
 platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.tar.gz" }
