@@ -17,6 +17,8 @@
 #     none, and the libraries take the VM's account from the metadata server;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
+#   - points omp's session-store fallback ledger at the durable disk, which the host and every
+#     agent box share, so one file holds the whole machine's fallbacks (below);
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
 #   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
@@ -210,6 +212,32 @@ if [[ -d "$nvme_home" ]]; then
     fi
     unset shared_gotmp
 fi
+
+# The fallback ledger of omp's Postgres session store (dispatch://INFRA-1192). Under
+# `session.storage: sql` a session that cannot read the connection file or reach the database
+# goes on using its file transcript and appends one line saying why; a warning nobody counts
+# lets a broken connection file degrade a fleet quietly. omp's default for that ledger is
+# `<agentDir>/session-sql-fallbacks.jsonl`, which inside an agent box is the box's own
+# filesystem: it dies with the box and the host's reading never sees it, which defeats the
+# count. `/mnt/durable/<host-user>` is bound into every box at its own path (scripts/agentbox),
+# so a line written inside a box is read on the host, and one file holds the whole machine.
+# `scripts/omp-session-fallbacks` is the reading.
+#
+# The host's user is not the box's — a box runs as `ubuntu` with the host's home — so the
+# directory comes from the one the launcher passed in (AGENTBOX_DURABLE; `none` when the host
+# has no durable disk), else this user's own, and no absolute path is committed. A caller's
+# value wins, and a machine without the directory keeps omp's own default.
+durable_home="${AGENTBOX_DURABLE:-/mnt/durable/${USER:-$(id -un)}}"
+if [[ -z "${OMP_SESSION_SQL_FALLBACK_LEDGER:-}" && "$durable_home" == /* && -d "$durable_home" ]]; then
+    ledger_dir="$durable_home/omp-session-sql"
+    if mkdir -p -m 700 "$ledger_dir" 2>/dev/null && [[ -w "$ledger_dir" ]]; then
+        export OMP_SESSION_SQL_FALLBACK_LEDGER="$ledger_dir/fallbacks.jsonl"
+    else
+        echo "agent-session: cannot write $ledger_dir, where a session-store fallback is recorded; omp keeps its own default, which the host's reading never sees" >&2
+    fi
+    unset ledger_dir
+fi
+unset durable_home
 
 prog=""
 if [[ "$agent" == */* ]]; then

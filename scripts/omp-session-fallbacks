@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""omp-session-fallbacks -- what the omp session store wrote to its fallback ledger in a window.
+
+    omp-session-fallbacks [WINDOW] [--file PATH]
+
+WINDOW is `3h` by default, and takes a unit: `45s`, `90m`, `3h`, `2d`.
+
+Under `session.storage: sql` (dispatch://INFRA-1192) a session that cannot read the connection
+file or reach the database goes on using its file transcript and appends one line to a ledger
+saying why. A warning nobody counts lets a broken connection file degrade the fleet quietly, so
+this is the reading: how many fell back in the window, for which of the three reasons, how many
+distinct sessions that is, and when the newest one was.
+
+`scripts/agent-session` points every session here and inside every agent box at
+`<durable dir>/omp-session-sql/fallbacks.jsonl`, which is the same file on the host and in every
+box, so this reads one file for the whole machine. NO LEDGER FILE IS THE NORMAL CASE and not an
+error: it means no session has ever fallen back on this machine.
+
+The file only grows, so it is read BACKWARDS in 64 KiB blocks and the walk stops at the first
+line older than the window (plus a minute of grace, since boxes append concurrently and their
+clocks are the same but their lines can interleave by a moment). A ledger of any size therefore
+costs one or two reads.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import UTC, datetime, timedelta
+
+# The three reasons omp records (packages/coding-agent/src/session/session-storage-fallback.ts),
+# printed in this order so a reading is comparable with the one before it even as counts change.
+REASONS = ("dsn-missing", "dsn-unreadable", "db-unreachable")
+BLOCK = 64 * 1024
+# Lines of different boxes can interleave by a moment around the cutoff; read this much further
+# back before stopping, and still count only what is inside the window.
+GRACE = timedelta(minutes=1)
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def window_seconds(text: str) -> int:
+    m = re.fullmatch(r"(\d+)([smhd])", text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"window {text!r} needs a unit: 45s, 90m, 3h, 2d")
+    return int(m.group(1)) * UNITS[m.group(2)]
+
+
+def default_ledger() -> str:
+    """The same path scripts/agent-session exports, derived the same way: the durable directory
+    the box launcher passed in (AGENTBOX_DURABLE; the box's own user is not the host's), else this
+    user's own. Empty when there is no durable disk, and then the caller must pass --file."""
+    configured = os.environ.get("OMP_SESSION_SQL_FALLBACK_LEDGER", "").strip()
+    if configured:
+        return configured
+    durable = os.environ.get("AGENTBOX_DURABLE", "").strip()
+    if durable == "none":
+        return ""
+    if not durable:
+        durable = f"/mnt/durable/{os.environ.get('USER') or os.getlogin()}"
+    return os.path.join(durable, "omp-session-sql", "fallbacks.jsonl")
+
+
+def tail_lines(path: str, stop_before: datetime):
+    """Every line of the file from the newest backwards, stopping once one is older than
+    `stop_before`. Yields (parsed dict or None, raw line)."""
+    with open(path, "rb") as f:
+        end = f.seek(0, os.SEEK_END)
+        rest = b""
+        pos = end
+        while pos > 0:
+            size = min(BLOCK, pos)
+            pos -= size
+            f.seek(pos)
+            chunk = f.read(size) + rest
+            parts = chunk.split(b"\n")
+            # The first part may be half a line; it waits for the next block (or, at the start of
+            # the file, is a whole line).
+            rest = parts[0] if pos > 0 else b""
+            head = parts[1:] if pos > 0 else parts
+            for raw in reversed(head):
+                if not raw.strip():
+                    continue
+                event = parse(raw)
+                yield event, raw
+                when = event and event.get("_when")
+                if when is not None and when < stop_before:
+                    return
+        if rest.strip():
+            yield parse(rest), rest
+
+
+def parse(raw: bytes):
+    try:
+        event = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    try:
+        # omp writes `toISOString()`, which 3.11+ reads directly, `Z` included. A stamp without
+        # an offset is read as UTC rather than dropped: it would otherwise not compare with the
+        # cutoff at all.
+        when = datetime.fromisoformat(str(event.get("ts", "")))
+        event["_when"] = when if when.tzinfo else when.replace(tzinfo=UTC)
+    except ValueError:
+        event["_when"] = None
+    return event
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="omp-session-fallbacks",
+        description="omp session-store fallbacks in a window, by reason and session.",
+    )
+    ap.add_argument("window", nargs="?", default="3h", help="how far back to read (default 3h)")
+    ap.add_argument("--file", help="the ledger to read (default: the one agent-session exports)")
+    args = ap.parse_args()
+
+    try:
+        seconds = window_seconds(args.window)
+    except argparse.ArgumentTypeError as err:
+        print(f"omp-session-fallbacks: {err}", file=sys.stderr)
+        return 2
+
+    path = args.file or default_ledger()
+    if not path:
+        print(
+            "omp-session-fallbacks: this machine has no durable disk (AGENTBOX_DURABLE=none), so "
+            "there is no shared ledger path; name one with --file",
+            file=sys.stderr,
+        )
+        return 2
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=seconds)
+    stamp = f"{args.window} (since {cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+
+    try:
+        events = list(tail_lines(path, cutoff - GRACE))
+    except FileNotFoundError:
+        print(f"no ledger file at {path} yet: no session has fallen back to the file store on this machine.")
+        return 0
+    except OSError as err:
+        print(f"omp-session-fallbacks: cannot read {path}: {err}", file=sys.stderr)
+        return 1
+
+    counts = dict.fromkeys(REASONS, 0)
+    other = {}
+    sessions = set()
+    malformed = 0
+    newest = None
+    for event, _raw in events:
+        if event is None or event.get("_when") is None:
+            malformed += 1
+            continue
+        if event["_when"] < cutoff:
+            continue
+        reason = str(event.get("reason", "unknown"))
+        if reason in counts:
+            counts[reason] += 1
+        else:
+            other[reason] = other.get(reason, 0) + 1
+        sessions.add(str(event.get("session_id", "?")))
+        if newest is None or event["_when"] > newest["_when"]:
+            newest = event
+
+    total = sum(counts.values()) + sum(other.values())
+    print(f"{path}: {total} fallback line(s) in the last {stamp}")
+    if total == 0:
+        # The file exists, so something fell back at some point; say when, since an old ledger and
+        # a quiet one read the same otherwise.
+        print("  none in the window (the file exists, so an older fallback is in it)")
+        if malformed:
+            print(f"  {malformed} unreadable line(s) in the lines scanned")
+        return 0
+    for reason in REASONS:
+        print(f"  {reason}: {counts[reason]}")
+    for reason in sorted(other):
+        print(f"  {reason} (not one omp records today): {other[reason]}")
+    print(f"  sessions: {len(sessions)}")
+    for session in sorted(sessions):
+        print(f"    {session}")
+    print(
+        f"  newest: {newest['_when'].strftime('%Y-%m-%dT%H:%M:%SZ')} "
+        f"session {newest.get('session_id', '?')} ({newest.get('reason', '?')}, host {newest.get('host', '?')})"
+    )
+    if malformed:
+        print(f"  {malformed} unreadable line(s) in the lines scanned")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
