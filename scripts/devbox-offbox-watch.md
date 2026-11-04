@@ -42,9 +42,22 @@ owner writes and updates its own file. The watch reads it and never writes it.
    running. The train's own README states no stall threshold of its own — only the "Taking over"
    procedure, which the alert quotes — so those two conditions are this watch's brief, and each
    alert says so.
-4. Liveness, for every entry with `auto_restart=yes`: `omp-session-live <id>` run on sami-devbox,
-   **and nothing else**. Never an `lsof` on a transcript path: on 11-03/04 that reported a working
-   lead dead and "restored" it four times while it worked.
+4. Liveness, for every entry with `auto_restart=yes`. **The file is the test that works**, and a
+   session is alive on any one of these readings:
+   - a process holding its transcript open **for writing**, on the host or inside a box, from the
+     box's own view (`docker exec`, which runs as root there and can read fds the host cannot);
+   - its transcript written in the last 120 seconds;
+   - a host process, a process in a box, or `omp-session-live`, naming it.
+
+   The last three are hints, never the only test. At 21:26Z on 2026-11-04 session `01a1a7fc` was
+   writing its transcript and sending Envoy messages while **no** process on the host and none
+   inside any of the 111 running boxes carried its id on a command line: it had been started from
+   a transcript path through a wrapper, and every command-line test is blind to that, however its
+   path rule is written. An `lsof` on a transcript path is still never used: a reader is not a
+   writer, and on 11-03/04 that mistake "restored" a working lead four times.
+
+   A session with no reading at all is a candidate, not a verdict, and only when every agent box
+   answered. One box that will not answer makes the whole run restart nothing.
 5. A dead one is restarted in a new tmux window of its `tmux` session, named for its `title`, from
    its `cwd`; when omp-session-live says it is live, its `after` message is sent.
 

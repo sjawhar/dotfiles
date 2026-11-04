@@ -4,13 +4,25 @@
 # The acting half of scripts/devbox-offbox-watch, run ON sami-devbox and shipped over ssh stdin
 # (`ssh sami-devbox bash -s -- <command> …`) so it is never a published version behind the watch.
 #
-#   live <session-id>…
-#       For each id, one `live <id> <0|1>` line from `omp-session-live` -- the ONLY liveness test
-#       there is here. Never an lsof on a transcript path: on 11-03/04 that reported a working
-#       lead dead and "restored" it four times while it worked.
-#       Then one `proc <id> <pid> <command line>` line per live process whose command line holds
-#       both `omp` and the id. That is the duplicate guard, and it is deliberately wider than
-#       omp-session-live: a resume still starting up, an omp in a box, a wrapper around one.
+#   live <freshness-seconds> <session-id>…
+#       Four readings per id, printed as their own lines. The caller decides; nothing here is a
+#       verdict on its own.
+#
+#         holder <id> host|<container> <pid>   a process holding that session's transcript open
+#                                              FOR WRITING, on the host and inside each box
+#         fresh  <id> <age seconds> <path>     its transcript was written within <freshness>
+#         proc   <id> <pid> <command line>     a host process whose words include `omp` and the id
+#         box    <id> <container> <command>    the same, inside an agent box
+#         live   <id> 0|1                      what `omp-session-live` says
+#
+#       The file is the test that works; argv is a hint. At 21:26Z on 2026-11-04 session
+#       01a1a7fc-a94f-72f8-9651-bd5ecd335709 was writing its transcript and sending Envoy
+#       messages while NO process on the host and none inside any of the 111 running boxes
+#       carried its id on a command line: it was started from a transcript path through a
+#       wrapper. Every argv test, however its path rule is written, is blind to that. So the
+#       caller reads `holder` and `fresh` first and `proc`/`box`/`live` only as further signals,
+#       and a session with no reading at all is not "dead", it is a candidate -- and only when
+#       `boxscan ok` says every agent box answered.
 #
 #   restart <tmux-session> <window-title> <cwd> <resume command>
 #       Open a new window named <window-title> in <tmux-session> (created detached if it does not
@@ -34,6 +46,41 @@ shift
 
 case "$command" in
 live)
+    fresh_window="${1:?freshness seconds}"
+    shift
+
+    # 1. The transcript, written within <freshness>. One find over the sessions root for every id
+    #    at once; `-newermt` lets the kernel do the filtering. A session waiting on a person
+    #    writes nothing for hours, so this is a positive signal only, never an absence proof.
+    while IFS= read -r line; do
+        when="${line%% *}"; path="${line#* }"
+        name="${path##*/}"
+        for id in "$@"; do
+            [[ "$name" == *"_$id.jsonl" ]] || continue
+            printf 'fresh %s %s %s\n' "$id" "$(( $(date +%s) - ${when%.*} ))" "$path"
+        done
+    done < <(find "$HOME/.omp/agent/sessions" -maxdepth 2 -name '*.jsonl' \
+        -newermt "-$fresh_window seconds" -printf '%T@ %p\n' 2>/dev/null || true)
+
+    # 2. Who holds a transcript of the session open FOR WRITING. omp's session writer keeps its
+    #    file open O_WRONLY|O_APPEND for its whole life, and only a writer runs a transcript: an
+    #    omp opens another session's file read-only whenever a tool reads it. On the host, only
+    #    omp processes are asked, since nothing else writes one.
+    for d in /proc/[0-9]*; do
+        c=""; read -r c 2>/dev/null <"$d/comm" || continue
+        [[ "$c" == omp ]] || continue
+        for fd in "$d"/fd/*; do
+            target="$(readlink "$fd" 2>/dev/null)" || continue
+            [[ "$target" == *.jsonl ]] || continue
+            flags="$(awk '/^flags:/ { print $2 }' "${fd/\/fd\//\/fdinfo\/}" 2>/dev/null)"
+            [[ "$flags" =~ ^[0-7]+$ ]] && (( (8#$flags & 3) != 0 )) || continue
+            for id in "$@"; do
+                [[ "${target##*/}" == *"_$id.jsonl" ]] || continue
+                printf 'holder %s host %s\n' "$id" "${d##*/}"
+            done
+        done
+    done
+
     for id in "$@"; do
         if "$live_test" "$id" >/dev/null 2>&1; then
             printf 'live %s 1\n' "$id"
@@ -88,14 +135,52 @@ live)
     if ! boxes="$(docker ps --filter name=agentbox- -q 2>/dev/null)"; then
         printf 'boxscan failed docker ps did not answer\n'
     else
-        failures=0
+        # The boxes are asked in parallel, 8 at a time. One `docker exec` per box for both
+        # readings (its descriptors and its command lines) and serially cost 140 s over 111
+        # boxes, which does not fit inside a 5-minute timer; in parallel it is a few seconds.
+        # `docker exec` runs as root in the box, so it sees every process's fds, which the host
+        # cannot for a box's uid -- that is what finds a session whose omp carries its id nowhere
+        # in an argv.
+        answers="$(mktemp -d)"
+        trap 'rm -rf "$answers"' EXIT
+        running=0
         for container in $boxes; do
-            if ! inner="$(timeout 15 docker exec "$container" ps -eo args= 2>/dev/null)"; then
-                printf 'boxerror %s\n' "$container"
-                failures=$((failures + 1))
-                continue
-            fi
-            printf '%s\n' "$inner" | awk -v ids="$*" -v box="$container" '
+            {
+                if inner="$(timeout 25 docker exec "$container" sh -c '
+                    for d in /proc/[0-9]*; do
+                        read -r comm <"$d/comm" 2>/dev/null || continue
+                        [ "$comm" = omp ] || continue
+                        for fd in "$d"/fd/*; do
+                            target=$(readlink "$fd" 2>/dev/null) || continue
+                            case "$target" in *.jsonl) ;; *) continue ;; esac
+                            n=${fd##*/}
+                            flags=$(awk "/^flags:/ { print \$2 }" "$d/fdinfo/$n" 2>/dev/null)
+                            [ -n "$flags" ] && [ $(( 0$flags & 3 )) -ne 0 ] || continue
+                            echo "HOLDS ${d#/proc/} $target"
+                        done
+                    done
+                    ps -eo args= | sed "s/^/ARGS /"' 2>/dev/null)"; then
+                    printf '%s\n' "$inner" >"$answers/$container"
+                else
+                    : >"$answers/$container.failed"
+                fi
+            } &
+            running=$((running + 1))
+            if ((running >= 8)); then wait -n 2>/dev/null || wait; running=$((running - 1)); fi
+        done
+        wait
+        failures="$(find "$answers" -name '*.failed' -printf . | wc -c)"
+        for path in "$answers"/*; do
+            [[ -f "$path" && "$path" != *.failed ]] || continue
+            container="${path##*/}"
+            while read -r kind pid target; do
+                [[ "$kind" == HOLDS ]] || continue
+                for id in "$@"; do
+                    [[ "${target##*/}" == *"_$id.jsonl" ]] || continue
+                    printf 'holder %s %s %s\n' "$id" "$container" "$pid"
+                done
+            done <"$path"
+            sed -n 's/^ARGS //p' "$path" | awk -v ids="$*" -v box="$container" '
                 BEGIN { count = split(ids, id, " ") }
                 {
                     runs_omp = 0
@@ -109,6 +194,11 @@ live)
                     for (i = 1; i <= count; i++)
                         if (index($0, id[i])) printf "box %s %s %s\n", id[i], box, substr($0, 1, 300)
                 }'
+        done
+        for path in "$answers"/*.failed; do
+            [[ -e "$path" ]] || continue
+            container="${path##*/}"
+            printf 'boxerror %s\n' "${container%.failed}"
         done
         if ((failures)); then
             printf 'boxscan failed %s container(s) did not answer\n' "$failures"

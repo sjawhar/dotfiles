@@ -377,38 +377,54 @@ def check_train(facts: dict[str, str], state: dict, report: Reporter, now: float
         train["events_idle"] = False
 
 
-def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, bool], dict[str, list[str]], dict[str, list[str]], str]:
-    """Two independent tests on sami-devbox, and every live process naming a session.
+# How recently the transcript must have been written to count on its own. A session waiting on a
+# person writes nothing for hours, so this is a positive signal only; the descriptor holder is
+# the test that answers for a quiet session.
+FRESH_SECONDS = 120
 
-    Returns `omp-session-live`'s answer per id, the host processes naming each id, the agentbox
-    containers whose own `ps` names each id, and why the box scan could not be trusted ("" when
-    it ran clean). A session is dead only when BOTH tests say so and the scan is clean: on
-    2026-11-04 omp-session-live called two live boxed sessions dead, because it counts a command
-    line's transcript path only inside a folder named `sessions` and theirs was `session`.
+
+def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict[str, str], str]:
+    """Every reading sami-devbox has about each session, and whether the box scan can be trusted.
+
+    Returns, per id, the reasons it is alive (strongest first) and, separately, the host and box
+    processes that merely name it, plus "" when every agent box answered.
+
+    The file is the test that works. At 21:26Z on 2026-11-04 session 01a1a7fc was writing its
+    transcript and sending Envoy messages while no process on the host and none inside any of the
+    111 running boxes carried its id on a command line: it had been started from a transcript
+    path through a wrapper. Every command-line test is blind to that, so a session counts as
+    alive when something holds its transcript open for writing, or the transcript moved in the
+    last FRESH_SECONDS, or any of the three weaker signals fires.
     """
     if not ids:
-        return {}, {}, {}, ""
-    # About 0.75 s per `omp-session-live`, one `ps` over 14,683 processes, and the box scan:
-    # 24 s over 116 containers, measured 2026-11-04.
-    done = remote.run(ACT, ["live", *ids], timeout=240 + 3 * len(ids))
+        return {}, {}, ""
+    # One `omp-session-live` per id (about 0.75 s), one `ps` and one descriptor pass on the host,
+    # and the box scan: 24 s over 116 containers, measured 2026-11-04.
+    done = remote.run(ACT, ["live", str(FRESH_SECONDS), *ids], timeout=300 + 3 * len(ids))
     if done.returncode != 0:
         raise RuntimeError(f"liveness check failed: exit {done.returncode}:"
                            f" {(done.stderr or done.stdout).strip()[:400]}")
-    live: dict[str, bool] = {}
-    procs: dict[str, list[str]] = {}
-    boxed: dict[str, list[str]] = {}
+    alive: dict[str, list[str]] = {}
+    named: dict[str, str] = {}
     scan = "the box scan printed no verdict"
     for line in done.stdout.splitlines():
         parts = line.split(" ", 3)
-        if parts[0] == "live" and len(parts) >= 3:
-            live[parts[1]] = parts[2] == "1"
+        if parts[0] == "holder" and len(parts) >= 4:
+            where = "on the host" if parts[2] == "host" else f"in box {parts[2]}"
+            alive.setdefault(parts[1], []).append(f"process {parts[3]} {where} holds its transcript open")
+        elif parts[0] == "fresh" and len(parts) >= 4:
+            alive.setdefault(parts[1], []).append(f"its transcript {parts[3]} was written {parts[2]} s ago")
         elif parts[0] == "proc" and len(parts) >= 4:
-            procs.setdefault(parts[1], []).append(f"pid {parts[2]}: {parts[3]}")
+            alive.setdefault(parts[1], []).append(f"host process {parts[2]} names it")
+            named[parts[1]] = f"pid {parts[2]}: {parts[3]}"
         elif parts[0] == "box" and len(parts) >= 4:
-            boxed.setdefault(parts[1], []).append(f"container {parts[2]}: {parts[3]}")
+            alive.setdefault(parts[1], []).append(f"a process in box {parts[2]} names it")
+            named[parts[1]] = f"box {parts[2]}: {parts[3]}"
+        elif parts[0] == "live" and len(parts) >= 3 and parts[2] == "1":
+            alive.setdefault(parts[1], []).append("omp-session-live says it is live")
         elif parts[0] == "boxscan":
             scan = "" if parts[1] == "ok" else " ".join(parts[1:])
-    return live, procs, boxed, scan
+    return alive, named, scan
 
 
 def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict, now: float,
@@ -526,7 +542,7 @@ def run(args: argparse.Namespace) -> int:
     watched.sort(key=lambda e: (int(e["order"]) if e.get("order", "").lstrip("-").isdigit() else 999,
                                 e["title"]))
     try:
-        live, procs, boxed, scan_failed = liveness(remote, [e["session"] for e in watched])
+        alive, named, scan_failed = liveness(remote, [e["session"] for e in watched])
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
         log(f"liveness check failed: {error}")
         save_state(state_path, state)
@@ -538,25 +554,13 @@ def run(args: argparse.Namespace) -> int:
     for entry in watched:
         session = entry["session"]
         record = session_state(state, session)
-        # Two independent tests, and a session is dead only when both say so. A box that could
-        # not be asked is not an empty box: "could not test" is never "dead".
-        if live.get(session) or boxed.get(session):
+        # Alive on ANY reading, with the transcript first. A command line that does not carry the
+        # id proves nothing: session 01a1a7fc was writing its transcript at 21:26Z on 2026-11-04
+        # while no process anywhere, host or box, named it.
+        reasons = alive.get(session) or []
+        if reasons:
             record["last_seen_live"] = now
-            if not live.get(session) and once(record, "blind_spot_reported", True):
-                where = "; ".join(boxed[session][:3])
-                log(f"{entry['title']} ({session}) is alive in a box that omp-session-live calls dead")
-                report.send([args.sre], "liveness-blind-spot",
-                            f"LIVENESS BLIND SPOT, nothing restarted: {entry['title']} ({session})"
-                            f" is alive -- an agentbox's own `ps` names it ({where}) -- and"
-                            f" `omp-session-live` on {args.host} says it is dead. That script is"
-                            f" what `agent-session` and `agentbox new` ask before every resume, so"
-                            f" their duplicate refusal is broken for this session too. Measured"
-                            f" cause on 2026-11-04: for a bare id it counts a command line's"
-                            f" transcript path only inside a folder named `sessions`, and a"
-                            f" --session-dir of `.../session/` is not one. This watch restarts"
-                            f" nothing a box names.")
-            elif live.get(session):
-                record["blind_spot_reported"] = False
+            log(f"{entry['title']} ({session}) is live: {reasons[0]}")
             if record.get("blocked"):
                 log(f"{entry['title']} ({session}) is live again; unblocked")
             # A restart whose session was not up inside its own run leaves the `after` message
@@ -611,7 +615,7 @@ def run(args: argparse.Namespace) -> int:
             record["stall_handover_reported"] = False
         targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
 
-        held = procs.get(session, [])
+        held = [named[session]] if session in named else []
         if held:
             record["blocked"] = True
             if once(record, "duplicate_reported", True):
