@@ -985,6 +985,65 @@ ensure_loopback_services() {
     return 0
 }
 
+# This machine's own `tailscale serve` listeners, which a box cannot reach: each is bound to the
+# tailnet address ON the tailscale0 device (`100.112.105.63%tailscale0:8448`), so a packet that
+# arrives over a box bridge is not accepted even though it reaches the host. Sessions verify
+# their dashboards by the tailnet URL and read the refusal as the service being down (2026-11-04:
+# curl to :8448 answered 000 in every box and 200 on the host). Each serve port gets a relay on
+# the box network's gateway, and the box resolves this machine's tailnet names to that gateway
+# (box_tailnet_hosts), so the URL works unchanged and TLS still verifies: the relay carries raw
+# TCP, the handshake is with the real serve listener, and the name is the one on its certificate.
+# Only the ports `tailscale serve` itself reports: tailscale's own ephemeral peerapi listener is
+# on that device too and is no one's service.
+# Boxes are for segregation, not isolation (Sami, dispatch://INFRA-702, 2026-11-04 00:50Z): a box
+# reaches what the host reaches.
+TAILNET_ADDRESS=""
+TAILNET_NAMES=()
+TAILNET_SERVE_PORTS=()
+tailnet_serve() {
+    TAILNET_ADDRESS=""
+    TAILNET_NAMES=()
+    TAILNET_SERVE_PORTS=()
+    command -v tailscale >/dev/null 2>&1 || return 0
+    local status
+    status="$(timeout 10 tailscale status --json 2>/dev/null)" || return 0
+    [[ -n "$status" ]] || return 0
+    TAILNET_ADDRESS="$(jq -r '[.Self.TailscaleIPs // [] | .[] | select(test(":") | not)][0] // ""' <<<"$status")"
+    [[ -n "$TAILNET_ADDRESS" ]] || return 0
+    mapfile -t TAILNET_NAMES < <(
+        jq -r '.Self.DNSName // "" | sub("\\.$"; "") | select(. != "")' <<<"$status"
+        jq -r '.Self.DNSName // "" | sub("\\..*$"; "") | select(. != "")' <<<"$status"
+    )
+    mapfile -t TAILNET_SERVE_PORTS < <(
+        timeout 10 tailscale serve status --json 2>/dev/null \
+            | jq -r '(.TCP // {}) | keys[]' 2>/dev/null | sort -un
+    )
+}
+
+# Not fatal: a box works without the host's dashboards, and a launch must not die of one.
+ensure_tailnet_serve() {
+    local port
+    tailnet_serve
+    [[ -n "$TAILNET_ADDRESS" ]] || return 0
+    for port in ${TAILNET_SERVE_PORTS[@]+"${TAILNET_SERVE_PORTS[@]}"}; do
+        ( ensure_tcp_forwarder "agentbox-tailnet-$port" "$port" "$TAILNET_ADDRESS:$port" ) \
+            || echo "agentbox: the relay of this machine's tailnet port $port did not start; this box cannot reach it (journalctl --user -u agentbox-tailnet-$port)" >&2
+    done
+    return 0
+}
+
+# `docker run --add-host` arguments: this machine's tailnet names, resolved in the box to the
+# gateway the relays above listen on. Every other host service is reachable there already, since
+# the gateway address is the host's (sshd binds 0.0.0.0), so the name keeps working for all of
+# them; a tailnet name of ANOTHER machine is untouched and still goes over the tailnet.
+box_tailnet_hosts() {
+    local name
+    [[ -n "$TAILNET_ADDRESS" && -n "$NETWORK_GATEWAY" ]] || return 0
+    for name in ${TAILNET_NAMES[@]+"${TAILNET_NAMES[@]}"}; do
+        printf '%s\n' "--add-host" "$name:$NETWORK_GATEWAY"
+    done
+}
+
 ensure_forwarders() {
     if "$DOTFILES_DIR/scripts/on-google-vm" 2>/dev/null; then
         # Google's metadata server refuses a Host header naming the relay, so a byte relay will
@@ -1005,6 +1064,7 @@ ensure_forwarders() {
     ensure_tmux_forwarder
     ensure_forward_channels || return 1
     ensure_loopback_services
+    ensure_tailnet_serve
 }
 
 # The allow-list, as docker -v arguments. rw dirs are created on the host
@@ -1839,6 +1899,10 @@ cmd_new() {
     if (( ${#box_repos[@]} )); then workdir="$BOXES/$box/${box_repos[0]}"; fi
     local tty=(-i)
     [[ -t 0 && -t 1 ]] && tty=(-it)
+    # This machine's tailnet names, pointed at the gateway its serve relays listen on
+    # (ensure_tailnet_serve), so a dashboard URL a session was given works inside the box.
+    local add_hosts=()
+    mapfile -t add_hosts < <(box_tailnet_hosts)
     # Not exec'd: close_box must run after the container exits, whatever the
     # exit reason.
     local rc=0 child sid="" stdin_fd
@@ -1850,7 +1914,7 @@ cmd_new() {
     docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         "${RESOURCE_ARGS[@]}" \
-        -w "$workdir" "${tty[@]}" \
+        -w "$workdir" "${tty[@]}" ${add_hosts[@]+"${add_hosts[@]}"} \
         "${mounts[@]}" "${env[@]}" "${user_env[@]}" "$tag" "${cmd[@]}" <&"$stdin_fd" &
     child=$!
     # The broker identity first (enroll_when_up), when the host can give one.
