@@ -208,8 +208,13 @@ DEFAULT_RESTART_REGISTRY = Path("/mnt/durable/sami/restart-registry/sessions")
 # working, and it is a file rather than a time window so that forgetting to remove it is
 # visible in every run's log line.
 DEFAULT_REBOOT_WINDOW = Path("/mnt/durable/sami/restart-registry/reboot-window")
-# Who hears it: the SRE session, by id and not by role. The box-health role may itself be one
-# of the sessions that died, and this is the one message that must not go to a dead reader.
+# Where omp keeps this machine's transcripts, one directory per working tree. Only 12 of the
+# 78 registry entries name a `.jsonl` in their resume line, so the id in a transcript's file
+# name is what finds the other 66.
+DEFAULT_TRANSCRIPTS = Path.home() / ".omp/agent/sessions"
+# Who hears a notice no entry routes: the SRE session, by id and not by role. The box-health
+# role may itself be held by one of the dead, and this is the one message that must not go to
+# a dead reader.
 DEAD_SESSION_TARGET = SRE
 
 
@@ -378,10 +383,44 @@ def registry_entries(directory: Path) -> list[dict]:
 _RESUME_TRANSCRIPT = re.compile(r"--resume\s+(\S+\.jsonl)")
 
 
-def entry_transcript(entry: dict) -> str:
-    """The transcript the entry's resume command would reopen, or ""."""
+def transcript_index(root: Path) -> dict[str, str]:
+    """Every omp transcript on this machine, by the session id in its name.
+
+    omp names a transcript `<timestamp>_<session id>.jsonl` under one directory per working
+    tree. Only 12 of this box's 78 registry entries name a `.jsonl` in their resume line -- 66
+    resume through `agentbox new … -- omp` and carry none -- so the id is what finds the rest:
+    this index resolved 73 of the 78 on 2026-11-04. It costs one scandir per tree, 0.01 s for
+    976 trees and 2,139 transcripts, which is why it is built once a pass rather than globbed
+    per session. Where a session has several, the newest name wins.
+    """
+    index: dict[str, str] = {}
+    try:
+        trees = [entry.path for entry in os.scandir(root) if entry.is_dir()]
+    except OSError as error:
+        log(f"transcripts under {root} cannot be listed: {error}")
+        return index
+    for tree in trees:
+        try:
+            for entry in os.scandir(tree):
+                name = entry.name
+                if not name.endswith(".jsonl") or "_" not in name:
+                    continue
+                session = name[: -len(".jsonl")].split("_", 1)[1]
+                kept = index.get(session)
+                if kept is None or name > os.path.basename(kept):
+                    index[session] = entry.path
+        except OSError:
+            continue
+    return index
+
+
+def entry_transcript(entry: dict, index: dict[str, str] | None = None) -> str:
+    """The transcript this session writes: the one its resume command names, else the one
+    whose file name carries its id."""
     match = _RESUME_TRANSCRIPT.search(entry.get("resume", ""))
-    return match.group(1) if match else ""
+    if match:
+        return match.group(1)
+    return (index or {}).get(entry.get("session", ""), "")
 
 
 def transcript_held(path: str) -> bool | None:
@@ -411,27 +450,34 @@ def transcript_held(path: str) -> bool | None:
     return None
 
 
-def dead_sessions(directory: Path, now: float, silence: float) -> tuple[list[dict], int]:
-    """(the sessions nobody will restart, how many entries were judged).
+def dead_sessions(
+    directory: Path, root: Path, now: float, silence: float
+) -> tuple[list[dict], int]:
+    """(the sessions that are gone, how many entries were judged).
 
-    One dict per dead session: its id, title, transcript and last write. Only entries with
-    auto_restart=yes are judged at all, and the cheap test (the file's mtime) runs before the
-    `sudo fuser` call, so a box with 78 live sessions makes a handful of fuser calls, not 78.
+    **Every** entry is judged, not only the ones that say `auto_restart=yes`. CHIEF, 2026-11-04:
+    a `no` means "do not bring me back", not "do not tell anyone I am gone", and a session that
+    will not come back by itself is exactly the one whose promises are most likely to be
+    inherited by nobody. His near-case that day: a build-trial session died about 11:28Z with
+    one of Sami's measured reruns due at 18:00. `auto_restart` decides only whether anything
+    would restart it, and the message says which it was.
+
+    One dict per gone session: its id, title, owner_note, the lead to tell, its transcript and
+    its last write. The cheap test (the file's mtime) runs before the `sudo fuser` call, so a
+    box with 78 registered sessions makes a handful of fuser calls, not 78.
     """
     found: list[dict] = []
     judged = 0
+    index = transcript_index(root)
     for entry in registry_entries(directory):
-        if entry.get("auto_restart", "").strip() != "yes":
-            continue
-        transcript = entry_transcript(entry)
+        transcript = entry_transcript(entry, index)
         if not transcript:
+            # No transcript anywhere for this id: nothing to judge, and nothing invented.
             continue
         judged += 1
         try:
             written = os.path.getmtime(transcript)
         except OSError:
-            # No transcript at all: the session never wrote one, or it was moved. Not a death
-            # this watch can describe, and not one it invents.
             continue
         if now - written < silence:
             continue
@@ -441,6 +487,10 @@ def dead_sessions(directory: Path, now: float, silence: float) -> tuple[list[dic
             {
                 "session": entry.get("session", ""),
                 "title": (entry.get("title", "") or "").strip() or "-",
+                "note": (entry.get("owner_note", "") or "").strip(),
+                "role": (entry.get("role", "") or "").strip(),
+                "lead": (entry.get("lead", "") or "").strip(),
+                "auto_restart": (entry.get("auto_restart", "") or "").strip() or "-",
                 "transcript": transcript,
                 "written": written,
             }
@@ -448,18 +498,66 @@ def dead_sessions(directory: Path, now: float, silence: float) -> tuple[list[dic
     return found, judged
 
 
+def dead_session_message(item: dict, registry: str, host: str) -> str:
+    """One notice: who is gone, what they had promised, and that nothing will bring them back.
+
+    The owner_note is the point of the message -- it is the promise that is about to be
+    inherited by nobody -- so it gets whatever room is left after the facts, and the entry file
+    is named for the rest of it and for the resume command.
+    """
+    restart = (
+        "The registry says auto_restart=yes, but nothing restarts sessions on this machine any"
+        " more"
+        if item["auto_restart"] == "yes"
+        else f"The registry says auto_restart={item['auto_restart']}, so nothing would have"
+        " brought it back in any case"
+    )
+    head = (
+        f"SESSION GONE AND NOT RESTARTED on {host}: {item['session']}"
+        f" ({item['title']}{', ' + item['role'] if item['role'] else ''})."
+        f" Last transcript write {iso(item['written'])}; no process holds it open."
+        f" {restart} (dispatch://INFRA-993). It stays down until a person resumes it:"
+        f" {registry}/{item['session']}.entry has the resume command. What it had promised: "
+    )
+    tail = " […]"
+    room = MESSAGE_LIMIT - len(head)
+    note = item["note"] or "the entry records no owner_note."
+    if room <= len(tail):
+        return head[:MESSAGE_LIMIT]
+    return head + (note if len(note) <= room else note[: room - len(tail)] + tail)
+
+
+def dead_session_target(item: dict) -> tuple[str, str]:
+    """(kind, where) the notice goes: ("topic", <role topic>) or ("session", <id>).
+
+    The stream lead when the entry names one in `lead=`, and the SRE otherwise. Nothing else in
+    an entry says who a session's lead is: `role` is the dead session's OWN role, so sending
+    there reaches the session that just died. Rather than guess a lead from a role's prefix,
+    an entry with no `lead=` goes to the SRE, who is always live and always reads -- and the
+    message names the dead session's role, so the SRE can hand it on. Whoever owns the registry
+    adds `lead=<role>` to an entry to route it straight.
+    """
+    if item["lead"]:
+        return "topic", f"notifications.role.{item['lead']}"
+    return "session", DEAD_SESSION_TARGET
+
+
 def report_dead_sessions(
     envoy: Envoy, state: "State", options: argparse.Namespace, now: float
 ) -> list[str]:
-    """Say each newly dead session once, to one person. Returns the ids said.
+    """Say each newly gone session once, to its stream lead. Returns the ids said.
 
-    It starts nothing, and it is the only part of this watch that writes to a session id rather
-    than to the box-health role: the role's own holder may be one of the dead.
+    **It starts nothing.** The restart duty belongs to the off-box watcher's gate list and
+    stays off until box-aware liveness is proved there on three ids (the SRE, 2026-11-04
+    21:58Z: tonight's four twin sessions came from an automatic resume, and a gap is the
+    cheaper failure). This is the reporting that closes that gap.
     """
     directory = Path(options.registry)
     if not directory.is_dir():
         return []
-    found, judged = dead_sessions(directory, now, options.dead_silence)
+    found, judged = dead_sessions(
+        directory, Path(options.transcripts), now, options.dead_silence
+    )
     known = state.data.setdefault("dead_sessions", {})
     alive = {item["session"] for item in found}
     for session in [sid for sid in known if sid not in alive]:
@@ -469,36 +567,42 @@ def report_dead_sessions(
     # arrive as 60 messages an hour later. A session that dies after the flag is removed is
     # new again and is said.
     quiet = Path(options.reboot_window).exists()
+    host = socket.gethostname()
     said = []
     for item in found:
         if item["session"] in known:
             continue
         if quiet:
             known[item["session"]] = now
-            log(f"dead session {item['session']} not said: {options.reboot_window} exists")
+            log(f"session {item['session']} gone, not said: {options.reboot_window} exists")
             continue
-        line = (
-            f"SESSION GONE AND NOT RESTARTED on {socket.gethostname()}:"
-            f" {item['session']} ({item['title']}). Its transcript was last written"
-            f" {iso(item['written'])} and no process holds it open. The registry says"
-            f" auto_restart=yes, and nothing restarts sessions on this machine any more"
-            f" (dispatch://INFRA-993), so it stays down until a person resumes it:"
-            f" the command is the `resume=` line of {options.registry}/{item['session']}.entry."
-        )[:MESSAGE_LIMIT]
+        message = dead_session_message(item, str(options.registry), host)
+        kind, where = dead_session_target(item)
         if options.print_alert or options.dry_run:
-            print(line + "\n")
+            print(f"to {where}:\n{message}\n")
         if options.dry_run:
             said.append(item["session"])
             continue
-        if not envoy.send(DEAD_SESSION_TARGET, line):
+        sent = (
+            envoy.publish(where, message)
+            if kind == "topic"
+            else envoy.send(where, message)
+        )
+        # A lead's topic with no holder reaches nobody, and this notice must not be the one
+        # that is lost: the SRE hears it instead, and the log says so.
+        if not sent and kind == "topic":
+            log(f"{where} refused it; telling {DEAD_SESSION_TARGET} instead")
+            sent = envoy.send(DEAD_SESSION_TARGET, message)
+            where = DEAD_SESSION_TARGET
+        if not sent:
             # Not recorded as said, so the next pass tries again.
             log(f"NOBODY HEARD IT: session {item['session']} is gone and Envoy refused")
             continue
-        log(f"told {DEAD_SESSION_TARGET}: session {item['session']} is gone")
+        log(f"told {where}: session {item['session']} ({item['title']}) is gone")
         said.append(item["session"])
         known[item["session"]] = now
     log(
-        f"restart registry: {judged} session(s) with auto_restart=yes judged,"
+        f"restart registry: {judged} registered session(s) judged,"
         f" {len(found)} gone, {len(said)} newly said"
         + (f"; quiet: {options.reboot_window} exists" if quiet else "")
     )
@@ -2270,6 +2374,13 @@ def main() -> int:
         default=DEFAULT_REBOOT_WINDOW,
         help="while this file exists, dead sessions are logged and nobody is told, for a"
         f" planned reboot (default {DEFAULT_REBOOT_WINDOW})",
+    )
+    parser.add_argument(
+        "--transcripts",
+        type=Path,
+        default=DEFAULT_TRANSCRIPTS,
+        help="where omp keeps this machine's transcripts, used to find a registered session's"
+        f" own file by its id (default {DEFAULT_TRANSCRIPTS})",
     )
     parser.add_argument(
         "--http-timeout",

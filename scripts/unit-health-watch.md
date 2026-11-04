@@ -236,25 +236,42 @@ Since 2026-11-04 nothing on sami-devbox or sami-rocqperf brings a crashed agent 
 night. The SRE chose the gap over an automatic resume — "a gap is the cheaper failure" — and
 asked for a report in its place. **This never starts anything.**
 
-Every pass, a session is gone when all three hold:
+Every pass, **every** entry in the restart registry is judged — not only the ones that say
+`auto_restart=yes`. CHIEF, 2026-11-04: a `no` means "do not bring me back", not "do not tell
+anyone I am gone", and a session that will not come back by itself is exactly the one whose
+promises are most likely to be inherited by nobody. His near-case that day was a build-trial
+session that died about 11:28Z with one of Sami's measured reruns due at 18:00. The first run
+of this rule found two such sessions on sami-devbox (TRACKB, HOSTOP), both `auto_restart=no`,
+both of which the narrower rule would have passed over in silence.
 
-- the restart registry (`--registry`, default
-  `/mnt/durable/sami/restart-registry/sessions/*.entry`) has an entry for it with
-  `auto_restart=yes`;
-- its transcript — the `--resume <path>.jsonl` of the entry's `resume=` line — has not been
-  written for `--dead-silence`, 15 minutes by default. A live session writes a line per tool
-  call;
+A registered session is gone when both hold:
+
+- its transcript has not been written for `--dead-silence`, 15 minutes by default. A live
+  session writes a line per tool call. The transcript is the `--resume <path>.jsonl` of the
+  entry's `resume=` line where there is one, and otherwise the file whose name carries the
+  session's id under `--transcripts` (`~/.omp/agent/sessions/*/<stamp>_<id>.jsonl`) — only 12
+  of this box's 78 entries name a path, 66 resume through `agentbox new … -- omp`, and the id
+  resolves 73 of the 78. The index costs one `scandir` per tree, 0.01 s for 976 trees;
 - no process holds that transcript open. The test is `sudo -n fuser` **on the host**, which
   sees a holder inside an agent box as well as one outside it (proved 2026-11-04 21:52Z on
-  01a1a292, 01a1a688 and 01a170e0). The mtime test runs first, so a box with 78 live sessions
-  makes a handful of `fuser` calls, not 78.
+  01a1a292, 01a1a688 and 01a170e0). The mtime test runs first, so a box with 78 registered
+  sessions makes a handful of `fuser` calls, not 78.
 
-Each newly gone id is **one Envoy message to the SRE's session id**, not to the box-health
-role, because the role's own holder may be one of the dead. It names the id, its title, when
-its transcript was last written, and where the resume command is. An id that comes back —
-written again, or held again — clears, so a later death is said again. A `fuser` that cannot
-run (no passwordless sudo, no binary, a timeout) answers nothing and no session is called gone
-on it: a sudo that stopped working must not announce 78 deaths.
+`auto_restart` decides nothing here; it decides only whether anything would restart the
+session, and the message says which it was.
+
+Each newly gone id is **one Envoy message naming its id, title, role, last transcript write
+and its `owner_note`** — the promise about to be inherited by nobody, which gets whatever room
+is left of the 600 characters, with the entry file named for the rest and for the resume
+command. It goes to the stream lead the entry names in `lead=` (`notifications.role.<lead>`),
+and to the SRE's session id when it names none: nothing else in an entry says who a session's
+lead is, since `role` is the dead session's *own* role and sending there reaches the session
+that just died. A lead topic nobody holds falls back to the SRE, logged. Whoever owns the
+registry adds `lead=<role>` to an entry to route it straight.
+
+An id that comes back — written again, or held again — clears, so a later death is said again.
+A `fuser` that cannot run (no passwordless sudo, no binary, a timeout) answers nothing and no
+session is called gone on it: a sudo that stopped working must not announce 78 deaths.
 
 **The planned-reboot window.** While `--reboot-window` exists
 (`/mnt/durable/sami/restart-registry/reboot-window` by default), the deaths are counted, logged
