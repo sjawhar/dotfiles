@@ -242,6 +242,24 @@ The brief must be where the box sees it (`~/src`, `/mnt/durable/sami`) or in a d
 which the box gets as a `--dir`. The worktree is a host directory, so it keeps its work after the box
 closes; `agent-workspace rm` refuses a tree with unpushed work.
 
+## The grading farm's CLI
+
+`installers/grade-farm.sh` (devbox/install.sh) installs `farm` as sami-rocqperf has it: a uv venv
+(CPython 3.13) at `/mnt/nvme/sami/farm-pkg/venv` with grade-farm from `farm-pkg/src`, the shim
+`farm-pkg/bin/farm`, a link `~/.local/bin/farm`, the config `~/.config/grade-farm/config`, and the
+box identity's key `/mnt/nvme/sami/boxid/sshkey`, made on this host and added to the OS Login
+profile of `sa_101805078591270564613` (the account of `boxid/gcloud-box`). sami-rocqperf's key is
+never copied. A box that runs `farm` gets
+`--dir /mnt/nvme/sami/farm-pkg --dir /mnt/nvme/sami/grade-farm --dir /mnt/nvme/sami/boxid`.
+
+The farm root `/mnt/nvme/sami/grade-farm` is state. Until the farm root moves here
+(dispatch://INFRA-993), it is a second root: its `fleet`, `boxes`, `peers`, `box_users`, `drain`,
+`box_images`, `host_class`, `holds`, `ssh_config`, `known_hosts`, `peer_keys.pub`, `disk_reserve`,
+`image_place`, `start_refused` and `no-start` were copied from sami-rocqperf's root on 2026-11-04
+(`rsync -a` of those names). `no-start` stays: this host starts and stops no VM, and runs no
+`farm fleet idle-stop`. A job claims its box on the box (`~/farm/claims`), so both roots can place
+jobs on the same running boxes.
+
 ## Step 3's first action
 
 `sami-devbox-provision --only speed` measures ssh over Tailscale from sami-rocqperf to sami-devbox

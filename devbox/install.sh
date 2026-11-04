@@ -46,6 +46,11 @@ bash "${DOTFILES_DIR}/installers/gcloud-boxid.sh"
 # installers/gh-app-host.sh).
 bash "${DOTFILES_DIR}/installers/gh-app-host.sh"
 
+# On a Google VM, the grading farm's CLI as sami-rocqperf has it: `farm` on PATH, its venv, its
+# config and the box identity's ssh key in OS Login. After gcloud-boxid.sh (the key goes in as
+# that identity) and gh-app-host.sh (it may clone grading-tools) (see installers/grade-farm.sh).
+bash "${DOTFILES_DIR}/installers/grade-farm.sh"
+
 # Model-spend records from every harness, now that gcloud acts as the box identity, which reads the collector's token,
 # with the host name as theorem.lane (see installers/agent-spend.sh).
 AGENT_SPEND_LANE="$(hostname -s)" bash "${DOTFILES_DIR}/installers/agent-spend.sh"
