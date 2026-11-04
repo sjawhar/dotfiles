@@ -65,8 +65,13 @@ falling back to the SRE session when nobody holds it. Each message is at most 60
 names a report file under the state directory that holds the full reasons and the consumer
 tables. A crossing still open is said again only on a new fact: a figure doubled or halved past
 the worst this crossing has already said, or a command newly at the top of its consumers; never
-because time passed. This watch only detects: it kills nothing, stops no worker and changes no
-limit.
+because time passed.
+
+It changes one thing about the box, and only this one: when the kernel is holding more than
+DYING_THRESHOLD dead cgroups and io pressure is low, each run asks user.slice to reclaim a
+bounded number of bytes so those groups can go, in steps, at most RECLAIM_BYTES and at most
+once a minute, stopping the moment io pressure reaches the bar (reclaim_dying, and
+load-swap-watch.md). It still kills nothing, stops no worker and changes no limit.
 """
 
 from __future__ import annotations
@@ -156,6 +161,40 @@ HUNG_COMMANDS = ("umount", "fusermount3")
 PROC = Path("/proc")
 # What the box-health lead does about either: the reset runbook, not a reboot.
 RESET_PLAN = "sami-rocqperf:/mnt/nvme/sami/scratch/devbox-provision/reset-plan-20261103.md"
+
+# The one thing this watch does to the box, and the only one: a bounded reclaim of the dead
+# cgroups the kernel is still holding (dispatch://INFRA-993).
+#
+# A cgroup whose processes are all gone stays alive while it still holds cached pages, and
+# every ended agent box, session scope and job leaves one. On sami-devbox on 2026-11-04 at
+# 19:01Z, after the 16:40-18:05Z stall and the reset, there were 928 of them, rising about 6 a
+# minute. That count is what the writeback switch stall grows out of: the kernel moves each
+# dead cgroup's inodes to its parent one at a time, and on these 7.0 kernels that crawls.
+#
+# Asking the parent slice to reclaim a bounded number of bytes frees those pages and the
+# kernel then lets the empty groups go. Measured by hand on this box at 19:02-19:03Z: one 4G
+# write took 476 ms and removed 88 groups; six 16G writes took 2.0, 1.3, 2.7, 2.8, 3.9 and
+# 8.3 s and took the count from 840 to 135, with /proc/pressure/io full avg10 peaking at 0.98.
+#
+# So: never below DYING_THRESHOLD, never while io pressure is at or over RECLAIM_IO_HOLD,
+# never more than RECLAIM_BYTES in one run, never more than once a RECLAIM_GAP, and in steps
+# of RECLAIM_STEP so the io pressure can be read between them and the run stopped early. The
+# write needs root and goes through `sudo -n`, which on this box needs no password and never
+# waits for one, as `perf` above already does.
+DYING_THRESHOLD = 400
+RECLAIM_BYTES = 16 * GIB
+RECLAIM_STEP = 4 * GIB
+# Well under IO_HOLD (50), which is the bar for a box whose tasks are stuck on a disk. This is
+# the bar for not making a busy disk busier: the hand runs above never passed 0.98.
+RECLAIM_IO_HOLD = 5.0
+RECLAIM_GAP = 60.0
+# One run never spends longer than this starting steps, and one step never runs longer than
+# RECLAIM_STEP_TIMEOUT. The unit's TimeoutStartSec is 120 s and an alerting pass already
+# spends about 16 s of it.
+RECLAIM_SECONDS = 20.0
+RECLAIM_STEP_TIMEOUT = 25.0
+RECLAIM_PATH = "/sys/fs/cgroup/user.slice/memory.reclaim"
+CGROUP_STAT = "/sys/fs/cgroup/cgroup.stat"
 
 # Per-host settings, by the host's short name. Every box runs this same script from its own
 # ~/.dotfiles, so a box whose CPU is meant to be full says so here, in git, where a reviewer sees
@@ -509,8 +548,120 @@ def sample_box() -> dict:
         "mem_available": memory.get("MemAvailable", 0),
         "mem_total": memory.get("MemTotal", 0),
         "pswpin": vmstat().get("pswpin", 0),
+        "dying": dying_descendants(),
         **kernel_stalls(),
     }
+
+
+def dying_descendants() -> int | None:
+    """How many dead cgroups the kernel still holds, from /sys/fs/cgroup/cgroup.stat.
+
+    One world-readable file, no sudo. None when the line is not there (cgroup v1, or a kernel
+    without it), and the reclaim below then never runs.
+    """
+    for line in read_text(CGROUP_STAT).splitlines():
+        if line.startswith("nr_dying_descendants"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def reclaim_dying(now: dict, options: argparse.Namespace, state_data: dict) -> dict | None:
+    """Ask user.slice to reclaim a bounded number of bytes, so the kernel can free the dead
+    cgroups holding those pages. The reading, or None when this run did not reclaim.
+
+    Every refusal is a reason, and every run that reclaims is one log line with the count
+    before, the count after, the bytes asked for, the seconds taken and the io pressure.
+    """
+    if not options.reclaim:
+        return None
+    before = now.get("dying")
+    if before is None:
+        return None
+    if before < options.dying_threshold:
+        return None
+    io_before = (now.get("io") or {}).get("full_avg10")
+    if io_before is None:
+        log(f"{before} dying cgroups, but this kernel reports no io pressure; not reclaiming")
+        return None
+    if io_before >= options.reclaim_io_hold:
+        log(
+            f"{before} dying cgroups, but io full avg10 is {io_before:.2f}, at or over the"
+            f" {options.reclaim_io_hold:g} this reclaim allows; not reclaiming"
+        )
+        return None
+    last = float(state_data.get("last_reclaim") or 0)
+    since = time.time() - last
+    if since < RECLAIM_GAP:
+        log(f"{before} dying cgroups; last reclaim {since:.0f}s ago, under the {RECLAIM_GAP:.0f}s gap")
+        return None
+    if options.dry_run:
+        log(f"{before} dying cgroups, io full avg10 {io_before:.2f}; would reclaim up to {gib(options.reclaim_bytes)}")
+        return None
+    # Recorded before the first write, so a run killed mid-reclaim still holds the next one off
+    # for a whole gap rather than letting the next pass start another.
+    state_data["last_reclaim"] = time.time()
+    asked = 0
+    steps = 0
+    stopped = ""
+    io_after = io_before
+    started = time.monotonic()
+    while asked < options.reclaim_bytes:
+        if time.monotonic() - started >= RECLAIM_SECONDS:
+            stopped = f"this run's {RECLAIM_SECONDS:.0f}s was spent"
+            break
+        step = min(RECLAIM_STEP, options.reclaim_bytes - asked)
+        command = ["sudo", "-n", "sh", "-c", f"echo {step} > {RECLAIM_PATH}"]
+        try:
+            done = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=RECLAIM_STEP_TIMEOUT,
+                stdin=subprocess.DEVNULL,
+                cwd="/",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            stopped = f"`{' '.join(command)}` did not finish: {error}"
+            break
+        steps += 1
+        if done.returncode != 0:
+            # EAGAIN is the kernel saying it could not free that much, not a failure of ours.
+            detail = (done.stderr.strip().splitlines() or [f"exit {done.returncode}"])[-1]
+            stopped = f"the write was refused (exit {done.returncode}): {detail[:160]}"
+            break
+        asked += step
+        io_after = pressure("io").get("full_avg10", io_after)
+        if io_after >= options.reclaim_io_hold:
+            stopped = f"io full avg10 reached {io_after:.2f}"
+            break
+    took = time.monotonic() - started
+    after = dying_descendants()
+    reading = {
+        "at": time.time(),
+        "before": before,
+        "after": after,
+        "asked": asked,
+        "steps": steps,
+        "seconds": took,
+        "io_before": io_before,
+        "io_after": io_after,
+        "stopped": stopped,
+    }
+    # One line a person can read without any other file: what it found, what it asked for,
+    # what it cost, and what the box's io pressure did while it ran.
+    log(
+        f"dying cgroup reclaim: {before} ->"
+        f" {after if after is not None else '?'} dying cgroups"
+        + (f" ({after - before:+d})" if after is not None else "")
+        + f", asked {gib(asked)} in {steps} step(s), {took:.1f}s,"
+        + f" io full avg10 {io_before:.2f} -> {io_after:.2f}"
+        + (f"; stopped early: {stopped}" if stopped else "")
+    )
+    state_data["last_reclaim_reading"] = reading
+    return reading
 
 
 # ------------------------------------------------------------------------------- the consumers
@@ -1765,6 +1916,10 @@ def run_once(options: argparse.Namespace) -> int:
     found = verdict(now, state.data["samples"], options)
     log(state_line(now))
 
+    # The one change this watch makes to the box, after the reading it alerts on is taken and
+    # said, so an alert never describes a box the reclaim has already changed.
+    reclaim_dying(now, options, state.data)
+
     # One incident per condition. They open, alert, re-send and clear on their own rules, so a CPU
     # shortage that recovered can never be carried into a swap line half an hour later.
     incidents: dict = state.data.setdefault("incidents", {})
@@ -1940,6 +2095,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=SWITCH_SAMPLE,
         help=f"seconds one `sudo -n perf stat` count of the switch rate runs for (default {SWITCH_SAMPLE:g})",
+    )
+    parser.add_argument(
+        "--reclaim",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="reclaim bounded memory from user.slice when the dying cgroup count is over"
+        " --dying-threshold, so the kernel can free those groups (default on)",
+    )
+    parser.add_argument(
+        "--dying-threshold",
+        type=int,
+        default=DYING_THRESHOLD,
+        help=f"reclaim only above this many dying cgroups (default {DYING_THRESHOLD})",
+    )
+    parser.add_argument(
+        "--reclaim-bytes",
+        type=int,
+        default=RECLAIM_BYTES,
+        help=f"the most one run may ask user.slice to reclaim (default {RECLAIM_BYTES // GIB} GiB,"
+        f" in {RECLAIM_STEP // GIB} GiB steps)",
+    )
+    parser.add_argument(
+        "--reclaim-io-hold",
+        type=float,
+        default=RECLAIM_IO_HOLD,
+        help="never start a reclaim, and stop one, when /proc/pressure/io full avg10 is at or"
+        f" over this (default {RECLAIM_IO_HOLD:g})",
     )
     parser.add_argument(
         "--umount-hung",

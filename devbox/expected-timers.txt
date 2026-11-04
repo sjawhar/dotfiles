@@ -1,0 +1,72 @@
+# The systemd user timers that must be enabled and running on this box.
+#
+# Why this file exists: on 2026-11-04 the box stalled from 16:40Z and was reset at 18:05:53Z.
+# Three watches did not come back: omp-memory-watch, omp-root-hang-watch and omp-login-watch.
+# Their .service files were linked in ~/.config/systemd/user and their .timer files were not,
+# so `systemctl --user list-timers` showed nothing and no watch was missed by anybody. The
+# memory watch was gone from 17:10:15Z to 18:59:11Z. Nothing on the box knew what should be
+# running, so nothing could say what was not.
+#
+# Two things read this file:
+#   - scripts/unit-health-watch, every 5 minutes. It alerts when a timer named here is missing
+#     from this user manager, is not enabled, or has not fired for more than three times its
+#     own interval.
+#   - installers/expected-timers.sh. It links and `enable --now`s every timer named here, which
+#     is idempotent: run it as often as you like, and after every reset of the box.
+#
+# How to add one: one timer name per line, with a comment saying who owns it. A name with no
+# `.timer` suffix gets one. `#` starts a comment anywhere in a line. Blank lines are ignored.
+# The unit files may live in ~/.dotfiles/omp/ or ~/.dotfiles/devbox/ (the installer links them
+# from there) or only in ~/.config/systemd/user (the installer enables what it finds and says
+# so). Nothing here names an absolute path.
+#
+# After the name a line may carry `key=value` fields. A value runs to the next `key=` or to
+# the end of the line, so a value may hold spaces. Two keys are read:
+#
+#   owner=<who>     Who the alert names. The comment after `#` may say it instead; the field
+#                   is what goes into the message.
+#   max_run=<span>  How long one run of this timer's service may take before unit-health-watch
+#                   says RUN NEVER ENDS: `3h`, `45m`, `90s`. Without it the watch uses its own
+#                   limit (two periods, or twice the unit's p99 run time), which knows nothing
+#                   about what the unit does. Only the unit's owner should set it.
+#
+# Removing a name is how you retire a timer: disable it, then delete its line. A name left here
+# for a timer nobody wants makes an alert every 5 minutes.
+
+# --- box health: the watches the box-health lead (the SRE) owns ---
+disk-fill-watch.timer              # owner: box-health lead. Filesystems heading for full.
+load-swap-watch.timer              # owner: box-health lead. CPU, swap, memory, kernel stalls.
+unit-health-watch.timer            # owner: box-health lead. This list, and every timer's runs.
+envoy-role-holder-watch.timer      # owner: box-health lead. Envoy role holders still alive.
+omp-dup-watch.timer                # owner: box-health lead. One omp per session id.
+omp-login-watch.timer              # owner: box-health lead. Sessions still have a provider login.
+omp-memory-watch.timer             # owner: omp lead. Sessions near their memory ceiling.
+omp-root-hang-watch.timer          # owner: box-health lead. A root session hung on a tool call.
+session-cpu-record.timer           # owner: box-health lead. Per-session CPU, for ranking later.
+stream-job.timer                   # owner: box-health lead. Runs every stream's own standing job.
+
+# --- the box's own housekeeping (devbox/) ---
+dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
+docker-cap.timer                   # owner: box-health lead. Docker build cache under its cap.
+gocache-cap.timer                  # owner: box-health lead. Go build cache under its cap.
+nvme-cache-cap.timer               # owner: box-health lead. uv, cargo and Go module caches.
+session-scratch-reap.timer         # owner: box-health lead. Dead sessions' scratch directories.
+session-tmp-reap.timer             # owner: box-health lead. The big disk's TMPDIR, daily.
+tmp-empty-prune.timer              # owner: box-health lead. Empty tmp* directories, daily.
+tmp-stale-reap.timer               # owner: box-health lead. The root disk's /tmp, hourly.
+
+# --- model routes ---
+ossv-box-gateway-key.timer         # owner: OSS Verify gateway lane. The gateway key in models.yml.
+ossv-box-gateway-token.timer       # owner: OSS Verify gateway lane. The gateway identity token.
+
+# --- lane timers whose unit files are machine-local, not in ~/.dotfiles ---
+# MACH's archive fires 20 min after each run ends and normally takes 5-7 min, but after the
+# reset of 2026-11-04 one run took 47 min: the shared request budget of its tracker client
+# sleeps while every lane re-downloads at once. The watch opened RUN NEVER ENDS at 43 min on
+# a run that was working, so its owner set the limit the unit really needs.
+agent-files-archive.timer  owner=01a16553 MACH  max_run=3h   # Archives each ended run.
+linux1263-reader.timer             # owner: the Verified Linux lane (LINUX-1263 runif reader).
+verified-linux-drift-check.timer   # owner: the Verified Linux lead. Its session's liveness.
+
+# --- shipped by Ubuntu's python3-launchpadlib, not by any lane ---
+launchpadlib-cache-clean.timer     # owner: the distribution package. Listed so it is not lost.

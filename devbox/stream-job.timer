@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the streams' standing jobs that are due, every 5 minutes
+
+[Timer]
+OnActiveSec=2min
+# Five minutes. This is how often the runner LOOKS; each job has its own `every` in its job
+# file, so the period here only sets how late a job can be: at most 5 minutes past its own
+# time. Shorter would add passes that find nothing.
+OnUnitActiveSec=5min
+AccuracySec=20s
+# No Persistent= here: systemd honours it only for OnCalendar timers, and the catch-up a job
+# file asks for with persistent=yes is the runner's own (scripts/stream-job, `due`). The first
+# pass after a start runs every job that is overdue.
+
+[Install]
+WantedBy=timers.target

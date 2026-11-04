@@ -62,7 +62,7 @@ their exit code.)
    `RandomizedDelaySec` + `AccuracySec` when that is longer, so an hourly or daily unit always
    has a run inside it.
 
-## The four conditions
+## The four conditions judged from a unit
 
 Each is judged on its own, opens and clears on its own, and is said once.
 
@@ -106,6 +106,54 @@ Each is judged on its own, opens and clears on its own, and is said once.
   and their `TimeoutStartSec` bounds only their start (infra977-trial-feed: `Type=simple`, 2 min,
   runs for hours).
 
+  A unit may be given its own limit instead, with `max_run=` on its line in the expected list
+  below. That replaces everything here, including `TimeoutStartSec` + `TimeoutStopSec`: it is
+  the owner's own statement of how long a run may take. `agent-files-archive` is the first one
+  (`max_run=3h`): it fires 20 min after each run ends and normally takes 5-7 min, but after
+  the reset of 2026-11-04 one run took 47 min, because the shared request budget of its
+  tracker client sleeps while every lane re-downloads at once, and this watch opened RUN NEVER
+  ENDS at 43 min on a run that was working.
+
+## The timers that must be there: devbox/expected-timers.txt
+
+The four conditions above are judged from a unit, so a timer that is simply **gone** is
+invisible to all of them. On 2026-11-04 the box stalled from 16:40Z and was reset at
+18:05:53Z, and three watches did not come back: `omp-memory-watch`, `omp-root-hang-watch` and
+`omp-login-watch`, each a linked `.service` in `~/.config/systemd/user` with no linked
+`.timer`. `systemctl --user list-timers` showed nothing, which is exactly what a healthy box
+with no such timer looks like. The memory watch was gone from 17:10:15Z to 18:59:11Z and
+nothing said so.
+
+So one plain list, `~/.dotfiles/devbox/expected-timers.txt` (`--expected`), holds the timers
+this box must have: one name per line, a `#` comment saying who owns it, and optional
+`key=value` fields after the name (`owner=`, `max_run=`). Three conditions come from it, each
+said once and cleared on its own:
+
+- **EXPECTED TIMER MISSING**: the user manager has no such timer (`LoadState=not-found`), or
+  it is masked. Nothing starts its service and nothing else would ever say so.
+- **EXPECTED TIMER NOT ENABLED**: the unit file is there but it is not enabled, so the next
+  reset of the box loses it, even if it happens to be running now.
+- **EXPECTED TIMER HAS NOT RUN**: it is enabled and has not fired for more than three of its
+  own periods. Three, not the two of TIMER STOPPED FIRING, because this is the coarse net for
+  a timer that came back wrong, not the fine one for a timer that stops.
+
+The cost is one small file read and, only for a name this box does not have enabled, one extra
+`systemctl show`; on a healthy box that call is never made.
+
+`installers/expected-timers.sh` is the other half: it links and `enable --now`s every timer in
+the same list, and is safe to run again at any time. A link is not an armed timer, which is
+the whole of what went wrong on 2026-11-04. `installers/expected-timers.sh --check` says what
+is unarmed and changes nothing.
+
+## The streams' standing jobs
+
+`scripts/stream-job` runs each stream's own standing job from a job file the stream owns
+(`scripts/stream-job.md`). This watch reads the same state, `~/.local/state/stream-jobs/<name>/`,
+and says **STREAM JOB NOT FINISHING** when a job has not finished within three times its own
+`every`, naming the owner its job file gives, when it last started and finished, its last exit
+and the last line it printed. It clears on the first run that finishes. The runner itself
+alerts nobody: one voice for a quiet job, and it is this one.
+
 ## Units with their own failure handler
 
 A unit whose `OnFailure=` names a handler (omp-session-sql-sweep, omp-login-watch,
@@ -126,7 +174,13 @@ All of one run's news is one message of at most 600 characters:
   `<service> <CONDITION> - <why>`; items that do not fit are counted (`N more in the report.`);
   conditions that cleared in the same run follow as `also <service> <CONDITION> cleared after
   <time>`;
-- or, when the run only clears, one line: `UNIT RUNS CLEARED on <host>: <service> <CONDITION>
+- when the run found nothing about a unit's runs and only something about the expected list or
+  a stream job, the first words are that condition instead, so the reader is not sent to the
+  journal of a unit that is not there: `EXPECTED TIMER MISSING on <host>, for the box-health
+  lead: <timer> EXPECTED TIMER MISSING - <timer> (owner <who>) is in <list> but this user
+  manager has no such timer (not-found); nothing starts its service, and nothing will say so.
+  Full report: <path>`;
+- or, when the run only clears, one line: `UNIT HEALTH CLEARED on <host>: <name> <CONDITION>
   cleared after <time>; ...`;
 - and last, always, `Full report: <path>`.
 

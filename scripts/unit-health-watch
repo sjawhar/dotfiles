@@ -15,8 +15,8 @@ systemd itself wrote about each run, so a unit that cannot speak is still seen.
 What one run does:
 
   1. Take the list of units from the timers themselves (`systemctl --user list-timers --all`
-     and every enabled timer unit file), never from a hand-written list, so a new timer is
-     covered the moment it is loaded.
+     and every enabled timer unit file), so a new timer is covered the moment it is loaded.
+     The hand-written list of step 4 adds to this; it never replaces it.
   2. For each timer that repeats (OnUnitActiveSec, OnUnitInactiveSec or OnCalendar), count the
      runs of its service in a window that is the last hour, or two periods when that is longer:
      started, completed, killed at the time limit (UNIT_RESULT=timeout), failed otherwise, and
@@ -32,7 +32,17 @@ What one run does:
          TimeoutStopSec (a run that never ends also stops the timer from starting the next).
      A unit with its own OnFailure= handler says its own failed runs, so the first two are not
      judged for it: one message per failure.
-  4. Say each new condition once, all of one run's news in one message of at most 600
+  4. Compare the timers this box has with the list of the timers it must have
+     (devbox/expected-timers.txt, `--expected`), and say a name in that list that is missing,
+     that is present but not enabled, or that has not fired for more than three of its own
+     periods. Steps 1 to 3 are judged from a unit, so a timer that is simply gone is invisible
+     to them: on 2026-11-04 the box was reset at 18:05:53Z and came back without
+     omp-memory-watch, omp-root-hang-watch and omp-login-watch, each a linked .service with no
+     .timer, and nothing said so for 55 minutes.
+  5. Read the streams' standing jobs (~/.config/stream-jobs/*.job and what scripts/stream-job
+     records for each) and say a job that has not finished within three of its own intervals,
+     naming the owner its job file gives.
+  6. Say each new condition once, all of one run's news in one message of at most 600
      characters that ends with the report file holding the counts, the last error systemd
      logged, the last line the unit printed, and what to read. A condition that still holds is
      not said again; its clear is one line.
@@ -115,11 +125,45 @@ HEADLINE = {
     "killed": "RUNS KILLED AT THE TIME LIMIT",
     "dead-timer": "TIMER STOPPED FIRING",
     "stuck": "RUN NEVER ENDS",
+    "timer-missing": "EXPECTED TIMER MISSING",
+    "timer-disabled": "EXPECTED TIMER NOT ENABLED",
+    "timer-stale": "EXPECTED TIMER HAS NOT RUN",
+    "job-stale": "STREAM JOB NOT FINISHING",
 }
-KINDS = tuple(HEADLINE)
+# The conditions judged from a timer this user manager has, one set per loaded unit.
+KINDS = ("no-completion", "killed", "dead-timer", "stuck")
+# The conditions judged from the expected list. They are about a timer the box may not have at
+# all, which has no unit, no service and no journal, so none of the four above can see it: they
+# are judged from a unit, and what this list is for is the unit that is not there. Keyed by
+# timer name, not by service.
+EXPECTED_KINDS = ("timer-missing", "timer-disabled", "timer-stale")
+# The condition judged from a stream job's state files, keyed by `job:<name>`.
+JOB_KINDS = ("job-stale",)
 # What a unit's OnFailure= handler already says: a run that failed. A stopped timer and a run
 # that never ends fail nothing, so no handler hears of them.
 FAILURE_KINDS = ("no-completion", "killed")
+
+# The timers that must be enabled on this box, one name per line (devbox/expected-timers.txt).
+# Found beside this script and not by an absolute path, so a copy run from another checkout
+# reads that checkout's list; `--expected` overrides it.
+DEFAULT_EXPECTED = (
+    Path(os.path.realpath(__file__)).parent.parent / "devbox/expected-timers.txt"
+)
+# A timer in that list that has not fired for more than this many of its own periods is said.
+# Three, not two: TIMER STOPPED FIRING already says a timer that stops while the box has it,
+# and this is the coarse net for a timer that came back wrong after a reset.
+EXPECTED_PERIODS = 3.0
+
+# The streams' standing jobs (scripts/stream-job): the job files, and the state the runner
+# writes under one directory per job. A job that has not finished within EXPECTED_PERIODS of
+# its own interval is said, with the owner its job file names.
+DEFAULT_STREAM_JOBS = (
+    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "stream-jobs"
+)
+DEFAULT_STREAM_JOB_STATE = (
+    Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "stream-jobs"
+)
 
 # RUN NEVER ENDS opened 13 times in a replay of this box's user journal (2026-11-01 10:50Z to
 # 11-03 03:34Z) at the old two-period floor, and every one of those runs ended by itself:
@@ -772,7 +816,14 @@ def systemd_ends(unit: dict) -> float | None:
 
 
 def stuck_earliest(unit: dict, options: argparse.Namespace) -> float:
-    """The shortest any limit below can be: the floor, or systemd's end when that is sooner."""
+    """The shortest any limit below can be: the floor, or systemd's end when that is sooner.
+
+    A `max_run` from the expected list replaces both, as it does in stuck_limit: the unit's
+    owner has said how long a run of it may take, and no run shorter than that is read as
+    stuck or needs its run time history looked up.
+    """
+    if unit.get("max_run"):
+        return float(unit["max_run"])
     ends = systemd_ends(unit)
     floor = stuck_floor(unit, options)
     return min(floor, ends) if ends else floor
@@ -847,6 +898,14 @@ def stuck_limit(
     ends = systemd_ends(unit)
     if ends and ends < limit:
         limit, source = ends, "its TimeoutStartSec + TimeoutStopSec"
+    # The owner's own figure wins over all of it, including systemd's. agent-files-archive is
+    # the case this exists for: OnUnitInactiveSec=20min and a normal cycle of 5-7 min, so the
+    # floor is 22 min, and after the reset of 2026-11-04 one run took 47 minutes because the
+    # shared request budget of its tracker client sleeps while every lane re-downloads at
+    # once. RUN NEVER ENDS opened at 43 min on a run that was working. Its owner asked for 3 h.
+    if unit.get("max_run"):
+        limit = float(unit["max_run"])
+        source = f"its max_run in {options.expected}"
     return limit, source
 
 
@@ -938,6 +997,331 @@ def clears(
     return True
 
 
+# ------------------------------------------- the expected timers, and the streams' own jobs
+
+
+# A line of the expected list: a timer name, then optional `key=value` fields. A value runs to
+# the next `key=` or to the end of the line, so `owner=01a16553 MACH` is one value.
+_FIELD_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\Z)")
+_EXPECTED_READ: dict[tuple[str, float, int], tuple[dict[str, dict], str]] = {}
+
+
+def expected_timers(path: Path) -> tuple[dict[str, dict], str]:
+    """({timer: its fields}, "" or why the list could not be read).
+
+    One name per line, `#` starts a comment anywhere, a name without `.timer` gets one. After
+    the name a line may carry `key=value` fields; two are read, and an unknown one is kept so
+    a reader of --report sees it:
+
+      owner=<who>     who to go to. The comment after `#` may say it instead; neither is read
+                      by any rule, both are printed in the alert.
+      max_run=<span>  how long one run of this unit's service may take before RUN NEVER ENDS
+                      (stuck_limit). Without it the limit is this watch's own, which knows
+                      nothing about what the unit does.
+
+    A list that cannot be read is said in this run's log and in the report, and alerts nobody:
+    a watch that wakes the lead about its own configuration file is a watch people turn off.
+
+    The result is memoised on the file's path, mtime and size, because one pass reads the list
+    twice (once for max_run, once for the expected conditions) and the file never changes
+    inside a pass.
+    """
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_mtime, stat.st_size)
+        if key in _EXPECTED_READ:
+            return _EXPECTED_READ[key]
+        text = path.read_text()
+    except OSError as error:
+        return {}, str(error)
+    entries: dict[str, dict] = {}
+    for line in text.splitlines():
+        body = line.split("#", 1)[0].strip()
+        if not body:
+            continue
+        name, _, rest = body.partition(" ")
+        if not name.endswith(".timer"):
+            name += ".timer"
+        fields = {
+            match.group(1).lower(): match.group(2).strip()
+            for match in _FIELD_RE.finditer(rest.strip())
+        }
+        entry: dict = {"owner": fields.pop("owner", ""), "extra": fields}
+        span = fields.pop("max_run", "")
+        if span:
+            seconds = parse_every(span)
+            if seconds:
+                entry["max_run"] = seconds
+            else:
+                log(f"  {path}: {name} has max_run={span!r}, which is not a time span; ignored")
+        entries[name] = entry
+    _EXPECTED_READ[key] = (entries, "")
+    return entries, ""
+
+
+EXPECTED_PROPS = [
+    "Id",
+    "Unit",
+    "LoadState",
+    "ActiveState",
+    "UnitFileState",
+    "TimersMonotonic",
+    "TimersCalendar",
+    "LastTriggerUSec",
+    "ActiveEnterTimestamp",
+]
+
+
+def expected_state(entries: dict[str, dict], units: list[dict]) -> dict[str, dict]:
+    """Each expected timer with what systemd says about it and what its line says: from `units`
+    where this box has the timer, and from one `systemctl show` for the rest.
+
+    A timer whose unit file is there but not enabled is in neither half of `timer_names()`, so
+    telling MISSING from NOT ENABLED needs that one call: systemd answers LoadState=not-found
+    for a name with no unit file anywhere, and a loaded unit with UnitFileState=disabled for
+    one that is only unarmed. On a box where every expected timer is enabled there is nothing
+    to ask and no call is made.
+    """
+    names = list(entries)
+    found = {
+        unit["timer"]: dict(unit) for unit in units if unit["timer"] in entries
+    }
+    unknown = [name for name in names if name not in found]
+    props = show(unknown, EXPECTED_PROPS) if unknown else {}
+    for name in unknown:
+        prop = props.get(name, {})
+        period, trigger = timer_period(prop) if prop else (None, "fires once")
+        found[name] = {
+            "timer": name,
+            "service": first(prop, "Unit"),
+            "load_state": first(prop, "LoadState") or "not-found",
+            "active_state": first(prop, "ActiveState"),
+            "unit_file_state": first(prop, "UnitFileState"),
+            "period": period,
+            "trigger": trigger,
+            "last_trigger": parse_when(first(prop, "LastTriggerUSec")),
+            "timer_since": parse_when(first(prop, "ActiveEnterTimestamp")),
+            "slack": 0.0,
+        }
+    for name, entry in entries.items():
+        found[name]["owner"] = entry.get("owner") or ""
+        if entry.get("max_run"):
+            found[name]["max_run"] = entry["max_run"]
+    return found
+
+
+def judge_expected(
+    states: dict[str, dict], now: float, options: argparse.Namespace, live: bool = True
+) -> dict[str, dict[str, str]]:
+    """{timer: {kind: why}} for every expected timer that is missing, unarmed or late.
+
+    The owner its line names, when it has one, goes in the text: the lead who reads the alert
+    should not have to open the list to learn whose timer it is.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for name, unit in sorted(states.items()):
+        kinds: dict[str, str] = {}
+        load = unit.get("load_state") or "not-found"
+        state = unit.get("unit_file_state") or ""
+        owner = f" (owner {unit['owner']})" if unit.get("owner") else ""
+        if load in {"not-found", "error", "bad-setting"} or (not state and not load):
+            kinds["timer-missing"] = (
+                f"{name}{owner} is in {options.expected} but this user manager has no such"
+                f" timer ({load}); nothing starts its service, and nothing will say so"
+            )
+        elif load == "masked" or state == "masked":
+            kinds["timer-missing"] = (
+                f"{name}{owner} is masked, so it cannot be started at all"
+            )
+        elif state not in ENABLED_STATES:
+            kinds["timer-disabled"] = (
+                f"{name}{owner} is {state or 'not installed'}, not enabled, so the next reset"
+                " of this box loses it; `systemctl --user enable --now` arms it"
+            )
+        elif (
+            live
+            and unit.get("period")
+            # A timer whose service is running has not stopped: an OnUnitInactiveSec timer is
+            # not even armed until the run ends. agent-files-archive fires 20 min after each
+            # run ends and a run of it may take 3 h (its max_run), so the clock below would
+            # otherwise say HAS NOT RUN of a unit that is working.
+            and unit.get("service_state") not in RUNNING_STATES
+        ):
+            base = unit.get("last_trigger") or unit.get("timer_since")
+            if unit.get("inactive_trigger") and unit.get("service_inactive_since"):
+                base = max(base or 0, unit["service_inactive_since"])
+            limit = EXPECTED_PERIODS * unit["period"] + (unit.get("slack") or 0.0)
+            if base and now - base > limit:
+                kinds["timer-stale"] = (
+                    f"{name}{owner} last fired {human_time(now - base)} ago ({iso(base)}) and"
+                    f" fires every {human_time(unit['period'])}, over the"
+                    f" {EXPECTED_PERIODS:g} periods this list allows"
+                )
+        if kinds:
+            found[name] = kinds
+    return found
+
+
+def parse_every(text: str) -> float | None:
+    """Seconds in a job file's `every`: `15m`, `1h`, `90s`, or a bare number of seconds.
+
+    A bare number in a systemd property is microseconds (parse_timespan); in a file a person
+    writes by hand it is seconds, which is the one difference.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return float(text)
+    return parse_timespan(text)
+
+
+def state_value(directory: Path, name: str) -> str:
+    try:
+        return (directory / name).read_text().strip()
+    except OSError:
+        return ""
+
+
+def state_when(directory: Path, name: str) -> float | None:
+    """The epoch seconds a stream-job state file opens with (`<epoch> <ISO stamp>`)."""
+    head = state_value(directory, name).split()
+    try:
+        return float(head[0]) if head else None
+    except ValueError:
+        return None
+
+
+def stream_jobs(options: argparse.Namespace) -> list[dict]:
+    """Every stream job this box has, with its owner, its interval and what the runner recorded.
+
+    The job files and the state are plain text that scripts/stream-job writes; this watch only
+    reads them, and a job directory it cannot read is a job with no last finish, which is
+    exactly the thing it says.
+    """
+    jobs: list[dict] = []
+    try:
+        files = sorted(Path(options.stream_jobs).glob("*.job"))
+    except OSError:
+        return jobs
+    for path in files:
+        try:
+            text = path.read_text()
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, sep, value = line.partition("=")
+            if sep:
+                fields[key.strip().lower()] = value.strip()
+        directory = Path(options.stream_job_state) / path.stem
+        jobs.append(
+            {
+                "name": path.stem,
+                "file": str(path),
+                "owner": fields.get("owner", "nobody named"),
+                "command": fields.get("command", ""),
+                "every": parse_every(fields.get("every", "")),
+                "file_mtime": mtime,
+                "last_start": state_when(directory, "last-start"),
+                "last_finish": state_when(directory, "last-finish"),
+                "last_exit": state_value(directory, "last-exit"),
+                "last_line": state_value(directory, "last-line"),
+                "state_dir": str(directory),
+            }
+        )
+    return jobs
+
+
+def judge_jobs(
+    jobs: list[dict], now: float, options: argparse.Namespace
+) -> dict[str, dict[str, str]]:
+    """{job name: {kind: why}} for every stream job that has not finished in three intervals."""
+    found: dict[str, dict[str, str]] = {}
+    for job in jobs:
+        if not job.get("every"):
+            continue
+        limit = EXPECTED_PERIODS * job["every"]
+        last, started = job.get("last_finish"), job.get("last_start")
+        if last is not None and now - last <= limit:
+            continue
+        if last is not None:
+            why = (
+                f"{job['name']} (owner {job['owner']}) last finished {human_time(now - last)}"
+                f" ago ({iso(last)}) and runs every {human_time(job['every'])}"
+            )
+            if started and started > last:
+                why += f"; a run started {human_time(now - started)} ago has not ended"
+            if job.get("last_exit") not in ("", "0"):
+                why += f"; its last exit was {job['last_exit']}"
+        else:
+            since = started or job.get("file_mtime")
+            if since and now - since <= limit:
+                continue
+            why = (
+                f"{job['name']} (owner {job['owner']}) has never finished since its job file"
+                f" was written {human_time(now - (since or now))} ago, and runs every"
+                f" {human_time(job['every'])}"
+            )
+        found[job["name"]] = {"job-stale": why}
+    return found
+
+
+def expected_text(
+    states: dict[str, dict],
+    jobs: list[dict],
+    timer_found: dict[str, dict[str, str]],
+    job_found: dict[str, dict[str, str]],
+    missing_list: str,
+) -> str:
+    """The expected list and the stream jobs as the report shows them."""
+    lines = [
+        f"{'expected timer':<36} {'state':<22} {'last fired':<20} {'owner':<20}  verdict"
+    ]
+    if missing_list:
+        lines.append(f"  the list could not be read: {missing_list}")
+    for name, unit in sorted(states.items()):
+        kinds = timer_found.get(name) or {}
+        verdict = (
+            "; ".join(HEADLINE[kind] for kind in EXPECTED_KINDS if kind in kinds) or "ok"
+        )
+        if unit.get("max_run"):
+            verdict += f" (max_run {human_time(unit['max_run'])})"
+        # A timer with no unit file reads ActiveState=inactive like a timer between runs, so
+        # the column says its LoadState instead: that is the difference the reader needs.
+        load = unit.get("load_state") or "not-found"
+        state = (
+            f"{unit.get('active_state') or '-'}/{unit.get('unit_file_state') or '-'}"
+            if load == "loaded"
+            else f"{load}/{unit.get('unit_file_state') or '-'}"
+        )
+        lines.append(
+            f"{name:<36} {state:<22} {iso(unit.get('last_trigger')):<20}"
+            f" {(unit.get('owner') or '-')[:20]:<20}  {verdict}"
+        )
+    lines.append("")
+    lines.append(f"{'stream job':<28} {'owner':<28} {'every':>6} {'last finish':<20}  verdict")
+    if not jobs:
+        lines.append("  no job files; the streams have written none yet")
+    for job in sorted(jobs, key=lambda item: item["name"]):
+        kinds = job_found.get(job["name"]) or {}
+        verdict = (
+            "; ".join(HEADLINE[kind] for kind in JOB_KINDS if kind in kinds)
+            or ("ok" if job.get("every") else "no `every`, not judged")
+        )
+        if job.get("last_exit") not in ("", "0", None):
+            verdict += f" (last exit {job['last_exit']})"
+        lines.append(
+            f"{job['name']:<28} {job['owner'][:28]:<28} {human_time(job.get('every')) if job.get('every') else '-':>6}"
+            f" {iso(job.get('last_finish')):<20}  {verdict}"
+        )
+    return "\n".join(lines)
+
+
 # ------------------------------------------------------------------------------- reading
 
 
@@ -1026,7 +1410,65 @@ ADVICE = {
     " `systemctl --user start <timer>` re-arms it once the reason it stopped is known.",
     "stuck": "A run that never ends holds the unit, so the timer cannot start the next one."
     " Read what the run is waiting on before stopping it.",
+    "timer-missing": "This box is meant to have this timer and does not. After the reset of"
+    " 2026-11-04 three watches came back as a linked .service with no .timer, so nothing fired"
+    " and nothing complained. `installers/expected-timers.sh` links and enables every timer in"
+    " the list and is safe to run again.",
+    "timer-disabled": "The timer exists but is not enabled, so it is gone at the next reset of"
+    " this box even though it may be running now. Enable it, or take its name out of the list"
+    " if it was retired on purpose.",
+    "timer-stale": "The timer is enabled and has not fired for three of its own periods. Either"
+    " its service never ends (see RUN NEVER ENDS for that unit) or the timer was stopped;"
+    " `systemctl --user list-timers <timer>` says which.",
+    "job-stale": "A stream's standing job stopped finishing. The owner named in the line owns"
+    " the job; the runner is scripts/stream-job and the job's own output is in its state"
+    " directory.",
 }
+
+
+def expected_block(name: str, unit: dict, kinds: dict[str, str], path: Path) -> str:
+    """One expected timer's news: what the list wants, what systemd has, and what to read."""
+    lines = [
+        f"{name}: "
+        + "; ".join(f"{HEADLINE[kind]} - {why}" for kind, why in kinds.items())
+        + "."
+    ]
+    lines.append(
+        f"  systemd now: load {unit.get('load_state') or '-'}, unit file"
+        f" {unit.get('unit_file_state') or '-'}, {unit.get('active_state') or 'not loaded'},"
+        f" every {human_time(unit.get('period'))}, last fired {iso(unit.get('last_trigger'))},"
+        f" service {unit.get('service') or 'unknown'}."
+    )
+    lines.append(
+        f"  Read: systemctl --user status {name}; systemctl --user list-timers --all {name};"
+        f" the list is {path}."
+    )
+    for kind in kinds:
+        lines.append(f"  {ADVICE[kind]}")
+    return "\n".join(lines)
+
+
+def job_block(job: dict, kinds: dict[str, str]) -> str:
+    """One stream job's news: who owns it, what it runs, and what the runner last recorded."""
+    lines = [
+        f"stream job {job['name']}: "
+        + "; ".join(f"{HEADLINE[kind]} - {why}" for kind, why in kinds.items())
+        + "."
+    ]
+    lines.append(
+        f"  Owner {job['owner']}; every {human_time(job.get('every'))}; last start"
+        f" {iso(job.get('last_start'))}, last finish {iso(job.get('last_finish'))}, last exit"
+        f" {job.get('last_exit') or '-'}."
+    )
+    if job.get("last_line"):
+        lines.append(f"  Last line it printed: {job['last_line'][:200]}")
+    lines.append(f"  Command: {job.get('command') or '-'}")
+    lines.append(
+        f"  Read: {job['file']}; {job['state_dir']}; journalctl --user -u stream-job.service."
+    )
+    for kind in kinds:
+        lines.append(f"  {ADVICE[kind]}")
+    return "\n".join(lines)
 
 
 def unit_block(
@@ -1206,6 +1648,13 @@ def assess(
     report passes none and reads what it needs.
     """
     units = discover()
+    # A `max_run=` in the expected list is the owner's own statement of how long a run of that
+    # unit may take; it is carried on the unit so stuck_limit uses it (see stuck_limit).
+    entries, _ = expected_timers(Path(options.expected))
+    for unit in units:
+        entry = entries.get(unit["timer"]) or {}
+        if entry.get("max_run"):
+            unit["max_run"] = entry["max_run"]
     periodic = [unit for unit in units if unit.get("period")]
     windows = {unit["service"]: window_for(unit, options) for unit in periodic}
     since = now - max(windows.values(), default=options.window)
@@ -1249,25 +1698,58 @@ def assess(
     return units, counts, findings, starts
 
 
+def assess_expected(
+    options: argparse.Namespace, now: float, units: list[dict], live: bool
+) -> tuple[dict, dict, list[dict], dict, str]:
+    """(expected timer states, their findings, the stream jobs, their findings, list error).
+
+    Cheap: the list is one small file, the stream jobs are a handful of small files, and the
+    only systemd call is the one `expected_state` makes for a name this box does not have
+    enabled.
+    """
+    entries, error = expected_timers(Path(options.expected))
+    states = expected_state(entries, units)
+    timer_found = judge_expected(states, now, options, live=live)
+    jobs = stream_jobs(options)
+    job_found = judge_jobs(jobs, now, options) if live else {}
+    return states, timer_found, jobs, job_found, error
+
+
 def run_once(options: argparse.Namespace) -> int:
     now = options.at or time.time()
     live = options.at is None
 
     if options.report:
         units, counts, findings, starts = assess(options, now, live)
+        states, timer_found, jobs, job_found, list_error = assess_expected(
+            options, now, units, live
+        )
         rows = [
             reading(unit, counts.get(unit["service"]), now, options) for unit in units
         ]
         if options.json:
             print(
                 json.dumps(
-                    {"at": iso(now), "units": rows, "findings": findings},
+                    {
+                        "at": iso(now),
+                        "units": rows,
+                        "findings": findings,
+                        "expected": {
+                            "list": str(options.expected),
+                            "error": list_error,
+                            "timers": states,
+                            "findings": timer_found,
+                        },
+                        "stream_jobs": {"jobs": jobs, "findings": job_found},
+                    },
                     indent=1,
                     sort_keys=True,
                 )
             )
         else:
             print(report_text(rows, findings, now, live))
+            print()
+            print(expected_text(states, jobs, timer_found, job_found, list_error))
         return 0
 
     envoy = Envoy(timeout=options.http_timeout)
@@ -1277,11 +1759,19 @@ def run_once(options: argparse.Namespace) -> int:
         return 0
     run_times: dict = state.data.setdefault("run_times", {})
     units, counts, findings, starts = assess(options, now, live, run_times)
+    states, timer_found, jobs, job_found, list_error = assess_expected(
+        options, now, units, live
+    )
+    if list_error:
+        log(f"the expected timer list {options.expected} could not be read: {list_error}")
     incidents: dict = state.data.setdefault("incidents", {})
     by_service = {unit["service"]: unit for unit in units if unit.get("period")}
+    by_job = {job["name"]: job for job in jobs}
     for service in [name for name in run_times if name not in by_service]:
         run_times.pop(service)
     opened: dict[str, dict[str, str]] = {}
+    opened_expected: dict[str, dict[str, str]] = {}
+    opened_jobs: dict[str, dict[str, str]] = {}
     cleared: list[str] = []
 
     for service, unit in sorted(by_service.items()):
@@ -1310,62 +1800,149 @@ def run_once(options: argparse.Namespace) -> int:
                     f"{service} {HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
                 )
                 incidents.pop(key)
-    # A unit whose timer is gone cannot be judged; its conditions close with that said.
+    # An expected timer, and a stream job, keep their own conditions. Their keys are the timer
+    # name and `job:<name>`, never a service, so the two sets cannot collide.
+    for name in sorted(states):
+        for kind in EXPECTED_KINDS:
+            key = f"{name}|{kind}"
+            incident = incidents.get(key)
+            why = (timer_found.get(name) or {}).get(kind)
+            if why:
+                if not incident:
+                    incidents[key] = {"opened_at": now, "why": why}
+                    opened_expected.setdefault(name, {})[kind] = why
+                else:
+                    incident["why"] = why
+            elif incident:
+                cleared.append(
+                    f"{name} {HEADLINE[kind]} cleared after {human_time(now - incident['opened_at'])}"
+                )
+                incidents.pop(key)
+    for name in sorted(by_job):
+        for kind in JOB_KINDS:
+            key = f"job:{name}|{kind}"
+            incident = incidents.get(key)
+            why = (job_found.get(name) or {}).get(kind)
+            if why:
+                if not incident:
+                    incidents[key] = {"opened_at": now, "why": why}
+                    opened_jobs.setdefault(name, {})[kind] = why
+                else:
+                    incident["why"] = why
+            elif incident:
+                cleared.append(
+                    f"stream job {name} {HEADLINE[kind]} cleared after"
+                    f" {human_time(now - incident['opened_at'])}"
+                )
+                incidents.pop(key)
+    # A unit whose timer is gone cannot be judged; its conditions close with that said. A name
+    # taken out of the expected list, or a job file deleted, closes the same way: the lead who
+    # removed it decided it, and this watch says so once and forgets it.
     for key in sorted(incidents):
-        service, _, kind = key.partition("|")
-        if service not in by_service:
+        name, _, kind = key.partition("|")
+        if kind in EXPECTED_KINDS:
+            if name not in states:
+                cleared.append(
+                    f"{name} {HEADLINE.get(kind, kind)} closed: it is no longer in {options.expected}"
+                )
+                incidents.pop(key)
+            continue
+        if kind in JOB_KINDS:
+            if name.removeprefix("job:") not in by_job:
+                cleared.append(
+                    f"{name} {HEADLINE.get(kind, kind)} closed: its job file is gone"
+                )
+                incidents.pop(key)
+            continue
+        if name not in by_service:
             cleared.append(
-                f"{service} {HEADLINE.get(kind, kind)} closed: no loaded timer starts this unit any more"
+                f"{name} {HEADLINE.get(kind, kind)} closed: no loaded timer starts this unit any more"
             )
             incidents.pop(key)
 
     host = socket.gethostname()
     message = ""
     report = ""
-    if opened or cleared:
+    any_opened = bool(opened or opened_expected or opened_jobs)
+    if any_opened or cleared:
         sections = [
             f"unit-health-watch on {host} at {iso(now)}. It only reports; it changed no unit."
         ]
-        if opened:
-            sections.append(
-                "Opened:\n\n"
-                + "\n\n".join(
-                    unit_block(
-                        by_service[service],
-                        counts[service],
-                        kinds,
-                        starts[service],
-                        now,
-                        own_line_for(service, counts[service], starts[service], now),
-                    )
-                    for service, kinds in sorted(opened.items())
-                )
+        blocks = [
+            unit_block(
+                by_service[service],
+                counts[service],
+                kinds,
+                starts[service],
+                now,
+                own_line_for(service, counts[service], starts[service], now),
             )
+            for service, kinds in sorted(opened.items())
+        ]
+        blocks += [
+            expected_block(name, states[name], kinds, Path(options.expected))
+            for name, kinds in sorted(opened_expected.items())
+        ]
+        blocks += [
+            job_block(by_job[name], kinds) for name, kinds in sorted(opened_jobs.items())
+        ]
+        if blocks:
+            sections.append("Opened:\n\n" + "\n\n".join(blocks))
         if cleared:
             sections.append("Cleared:\n" + "\n".join(f"  {line}." for line in cleared))
         rows = [reading(unit, counts.get(unit["service"]), now, options) for unit in units]
         sections.append("Every timer now:\n" + report_text(rows, findings, now, live))
+        sections.append(
+            f"The expected list ({options.expected}) and the stream jobs now:\n"
+            + expected_text(states, jobs, timer_found, job_found, list_error)
+        )
         sections.append(f"How it judges: {Path(os.path.realpath(__file__))}.md")
         report = "\n\n".join(sections)
-        path, error = write_report(options, now, "open" if opened else "clear", report)
+        path, error = write_report(options, now, "open" if any_opened else "clear", report)
         tail = (
             f"Full report: {path}"
             if not error
             else f"No report ({error}); `unit-health-watch --report` reads every timer now."
         )
-        if opened:
+        if any_opened:
             items = [
                 f"{service} {HEADLINE[kind]} - {why}"
                 for service, kinds in sorted(opened.items())
                 for kind, why in kinds.items()
             ]
-            message = fit(
-                f"UNIT RUNS NOT COMPLETING on {host}, for the box-health lead: ",
-                items + [f"also {line}" for line in cleared],
-                tail,
+            items += [
+                f"{name} {HEADLINE[kind]} - {why}"
+                for name, kinds in sorted(opened_expected.items())
+                for kind, why in kinds.items()
+            ]
+            items += [
+                f"stream job {name} {HEADLINE[kind]} - {why}"
+                for name, kinds in sorted(opened_jobs.items())
+                for kind, why in kinds.items()
+            ]
+            # The headline names what this run found. A run that found only a missing timer
+            # must not open with UNIT RUNS NOT COMPLETING: the lead reads the first words and
+            # goes to the journal of a unit that is not there.
+            first_kind = next(
+                (
+                    kind
+                    for kinds in (
+                        *opened.values(),
+                        *opened_expected.values(),
+                        *opened_jobs.values(),
+                    )
+                    for kind in kinds
+                ),
+                "",
             )
+            head = (
+                f"UNIT RUNS NOT COMPLETING on {host}, for the box-health lead: "
+                if opened
+                else f"{HEADLINE[first_kind]} on {host}, for the box-health lead: "
+            )
+            message = fit(head, items + [f"also {line}" for line in cleared], tail)
         else:
-            message = fit(f"UNIT RUNS CLEARED on {host}: ", cleared, tail)
+            message = fit(f"UNIT HEALTH CLEARED on {host}: ", cleared, tail)
     prune_reports(options)
 
     state.data["last_run"] = now
@@ -1380,8 +1957,11 @@ def run_once(options: argparse.Namespace) -> int:
     state.close()
 
     log(
-        f"checked {len(by_service)} periodic timer(s) of {len(units)}; open: {len(incidents)};"
-        f" new: {sum(len(kinds) for kinds in opened.values())}; cleared: {len(cleared)}"
+        f"checked {len(by_service)} periodic timer(s) of {len(units)},"
+        f" {len(states)} expected timer(s) and {len(jobs)} stream job(s);"
+        f" open: {len(incidents)}; new:"
+        f" {sum(len(kinds) for kinds in (*opened.values(), *opened_expected.values(), *opened_jobs.values()))};"
+        f" cleared: {len(cleared)}"
     )
     if not message:
         return 0
@@ -1452,6 +2032,24 @@ def main() -> int:
         type=Path,
         default=DEFAULT_STATE,
         help=f"state file (default {DEFAULT_STATE})",
+    )
+    parser.add_argument(
+        "--expected",
+        type=Path,
+        default=DEFAULT_EXPECTED,
+        help=f"the list of timers that must be enabled on this box (default {DEFAULT_EXPECTED})",
+    )
+    parser.add_argument(
+        "--stream-jobs",
+        type=Path,
+        default=DEFAULT_STREAM_JOBS,
+        help=f"the streams' job files, *.job (default {DEFAULT_STREAM_JOBS})",
+    )
+    parser.add_argument(
+        "--stream-job-state",
+        type=Path,
+        default=DEFAULT_STREAM_JOB_STATE,
+        help=f"what scripts/stream-job records per job (default {DEFAULT_STREAM_JOB_STATE})",
     )
     parser.add_argument(
         "--http-timeout",

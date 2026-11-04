@@ -284,6 +284,55 @@ the service's environment: every message then goes to that session alone, with n
 this is how the OSS Verify lane VMs (`ossv-agent-*`) send their alerts to the fleet monitoring
 owner instead of to this box's role holder. An invalid value stops the watch at start.
 
+## The one thing it changes: the dying cgroup reclaim
+
+Everything else here only reports. This does not: when the box is holding too many dead
+cgroups, each run asks the kernel to free a bounded number of bytes so they can go.
+
+A cgroup whose processes have all ended stays alive while it still holds cached pages. Every
+agent box that stops, every session scope, every job leaves one. On sami-devbox on 2026-11-04
+at 19:01Z, after the 16:40-18:05Z stall and the reset, there were 928 of them and the count
+was rising about 6 a minute. That count is what the writeback switch stall above grows out of:
+the kernel moves each dead cgroup's inodes to its parent's writeback one at a time, and on
+these 7.0 kernels that crawls.
+
+Writing a byte count to `/sys/fs/cgroup/user.slice/memory.reclaim` frees that much from the
+slice, and the kernel then lets the emptied groups go. Measured by hand on this box at
+19:02-19:03Z: one 4G write took 476 ms and removed 88 groups; six 16G writes took 2.0, 1.3,
+2.7, 2.8, 3.9 and 8.3 s and took the count from 840 to 135, with `io full avg10` peaking at
+0.98.
+
+The rule, with the bars it will not cross:
+
+- **Only over `--dying-threshold` dying cgroups** (400). Under it, nothing runs and nothing is
+  logged: a box with a few hundred dead groups is a box doing its job.
+- **Only while `/proc/pressure/io full avg10` is under `--reclaim-io-hold`** (5). Reclaim
+  reads and writes; a disk that is already the bottleneck is not given more work. A kernel
+  with no PSI never reclaims.
+- **At most `--reclaim-bytes` in one run** (16 GiB), in 4 GiB steps, and **at most one run a
+  minute**. Between steps it re-reads the io pressure and stops at once when it reaches the
+  bar. It also stops after 20 s of starting steps, so one pass can never outgrow the unit's
+  120 s `TimeoutStartSec`.
+- **The next run is held off before the first write, not after the last.** A pass killed
+  mid-reclaim still costs its successor a whole minute's wait.
+- `--no-reclaim` turns it off; `--dry-run` says what it would ask for and writes nothing.
+
+It needs root for that one write, and gets it through `sudo -n`, which on this box takes no
+password and never waits for one, exactly as the `perf` reading above already does. Nothing
+was changed to give it that: `sudo -n` was measured working from a `systemd-run --user` unit
+before the code was written.
+
+Each run that reclaims logs one line, and nothing else; there is no alert and no report:
+
+```
+2026-11-04T19:42:04Z dying cgroup reclaim: 987 -> 577 dying cgroups (-410), asked 16.0 GiB in 4 step(s), 7.4s, io full avg10 0.40 -> 0.18
+```
+
+and, when a step stopped it early, `; stopped early: io full avg10 reached 5.12` or the
+reason the write was refused. Each refusal to start is its own line (`… but io full avg10 is
+6.10, at or over the 5 this reclaim allows; not reclaiming`). Read them with `journalctl
+--user -u load-swap-watch.service | grep reclaim`.
+
 ## What it will not catch, and what these rules give up
 
 - **A box that is slow for another reason.** A saturated disk or a network stall shows up in

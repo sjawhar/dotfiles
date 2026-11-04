@@ -1,0 +1,15 @@
+[Unit]
+Description=Run each stream's own standing job from its job file in ~/.config/stream-jobs
+Documentation=file:%h/.dotfiles/scripts/stream-job.md
+
+[Service]
+Type=oneshot
+# Below the lanes, like disk-fill-watch: a standing job is never the work the box is for, and
+# the runner nices each job again on top of this.
+Nice=15
+IOSchedulingClass=idle
+# One pass runs its due jobs one at a time, each under its own timeout (10 min by default, and
+# a job file may ask for more). The limit here is above a pass of the default --max-jobs 8 at
+# that timeout, so systemd never kills a job the runner is still timing itself.
+TimeoutStartSec=90min
+ExecStart=%h/.dotfiles/scripts/stream-job

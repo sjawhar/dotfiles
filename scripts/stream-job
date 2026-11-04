@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Run each stream's own standing job, from a job file the stream owns.
+
+Why this exists: a stream's standing job runs a script in that stream's scratch directory, and
+no dotfiles unit may hold an absolute path (dotfiles AGENTS.md). So every lead who wanted a
+job on a timer hand-wrote a unit into ~/.config/systemd/user, where nobody reviews it and a
+rebuild of the box loses it. This is one reviewed runner on one dotfiles timer, and a lead
+writes one small file instead of a unit.
+
+What one run does, every 5 minutes:
+
+  1. Read ~/.config/stream-jobs/*.job. Each file is `key=value` lines and belongs to the stream
+     that wrote it (see stream-job.md for the keys).
+  2. Run the jobs that are due, one at a time, each `nice`, each under its own timeout, each
+     under its own lock so two copies of a job can never run together.
+  3. Record what happened under ~/.local/state/stream-jobs/<name>/: last-start, last-finish,
+     last-exit, last-line, and the run's whole output in last-output.
+
+It never runs two copies of a job, never runs a job whose last run is still going, and never
+runs more than --max-jobs jobs in one pass, so a box full of job files cannot be made to run
+them all at once.
+
+scripts/unit-health-watch reads the same state and alerts when a job stops finishing, naming
+the owner the job file gives. This runner alerts nobody: the watch is the one voice.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import os
+import re
+import shlex
+import subprocess
+import time
+from pathlib import Path
+
+DEFAULT_JOBS = (
+    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "stream-jobs"
+)
+DEFAULT_STATE = (
+    Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+    / "stream-jobs"
+)
+# A job says nothing about how long it may take, so it gets ten minutes. A job that needs more
+# says so in its own file; the runner is started every 5 minutes and runs its jobs one at a
+# time, so a long job delays the others rather than the box.
+DEFAULT_TIMEOUT = 600.0
+# One pass starts at most this many jobs. The rest are due again on the next pass.
+DEFAULT_MAX_JOBS = 8
+# The niceness every job runs at. This box carries load 100+ on 288 cores; a standing job is
+# never the work the box is for.
+NICE = 15
+# Of the job's output, this much is kept.
+OUTPUT_KEEP = 64 * 1024
+LINE_KEEP = 500
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_SPAN_UNITS = {"s": 1.0, "m": 60.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
+_SPAN_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(min|[smhd])?")
+TRUE = {"yes", "true", "1", "on"}
+
+
+def log(message: str) -> None:
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
+
+
+def parse_every(text: str) -> float | None:
+    """Seconds in `15m`, `1h`, `90s`, `2d`, or a bare number of seconds."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    total = 0.0
+    matched = False
+    for number, unit in _SPAN_RE.findall(text):
+        matched = True
+        total += float(number) * _SPAN_UNITS.get(unit or "s", 1.0)
+    return total if matched and total > 0 else None
+
+
+def stamp(when: float) -> str:
+    """What a `last-start` or `last-finish` file holds: epoch seconds, then a readable time.
+
+    Both, on one line, because two readers want different things: unit-health-watch takes the
+    first field, and a person reading the file wants to know when without converting anything.
+    """
+    return f"{when:.0f} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(when))}"
+
+
+def read_when(path: Path) -> float | None:
+    try:
+        head = path.read_text().split()
+    except OSError:
+        return None
+    try:
+        return float(head[0]) if head else None
+    except ValueError:
+        return None
+
+
+def write_state(directory: Path, name: str, text: str) -> None:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(text if text.endswith("\n") else text + "\n")
+    except OSError as error:
+        log(f"  cannot write {directory / name}: {error}")
+
+
+def read_job(path: Path) -> dict | None:
+    """One job file as a dict, or None with the reason logged.
+
+    A file this cannot understand is skipped and said, never guessed at: a job that runs the
+    wrong command in the wrong directory is worse than a job that does not run.
+    """
+    name = path.stem
+    if not NAME_RE.fullmatch(name):
+        log(f"  {path}: the name {name!r} is not plain enough for a state directory; skipped")
+        return None
+    try:
+        text = path.read_text()
+    except OSError as error:
+        log(f"  {path}: cannot read it: {error}")
+        return None
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            log(f"  {path}: ignoring the line {line[:60]!r}, which is not key=value")
+            continue
+        fields[key.strip().lower()] = value.strip()
+    command = fields.get("command", "")
+    every = parse_every(fields.get("every", ""))
+    missing = [key for key, value in (("command", command), ("every", every)) if not value]
+    if missing:
+        log(f"  {path}: no {' and no '.join(missing)}; skipped")
+        return None
+    workdir = Path(fields.get("workdir") or Path.home()).expanduser()
+    timeout = parse_every(fields.get("timeout", "")) or DEFAULT_TIMEOUT
+    return {
+        "name": name,
+        "file": str(path),
+        "owner": fields.get("owner", "nobody named"),
+        "command": command,
+        "workdir": workdir,
+        "every": every,
+        "timeout": timeout,
+        "persistent": fields.get("persistent", "").lower() in TRUE,
+    }
+
+
+def due(job: dict, directory: Path, now: float) -> tuple[bool, str]:
+    """(whether to run it now, why).
+
+    A job that has never run is due. Otherwise it is due `every` after its last START, so a job
+    that takes two minutes still runs on its own period and not on its period plus its run
+    time. `persistent` changes nothing here: the runner has no schedule of its own to miss, so
+    a run missed while the box was down is simply overdue when the box returns, and fires on
+    the first pass. A job that is NOT persistent skips a run it is more than one whole period
+    late for, which is what the key is for.
+    """
+    started = read_when(directory / "last-start")
+    if started is None:
+        return True, "it has never run"
+    late = now - started
+    if late < job["every"]:
+        return False, f"{job['every'] - late:.0f}s to go"
+    if not job["persistent"] and late > 2 * job["every"]:
+        # Not persistent: a box that was down does not owe this job the runs it missed. The
+        # next ordinary period runs it, and this pass only moves the clock on.
+        return True, f"{late:.0f}s late; not persistent, so this is the catch-up run"
+    return True, f"due {late - job['every']:.0f}s ago"
+
+
+def run_job(job: dict, directory: Path, now: float) -> str:
+    """Run one job under its own lock, record it, and give back one line for the log."""
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / "lock"
+    handle = open(lock, "a+")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return f"{job['name']}: a run of it still holds {lock}; left alone"
+        if not job["workdir"].is_dir():
+            write_state(directory, "last-exit", "no-workdir")
+            write_state(directory, "last-line", f"{job['workdir']} is not a directory")
+            return f"{job['name']}: {job['workdir']} is not a directory; not run"
+        write_state(directory, "last-start", stamp(now))
+        started = time.monotonic()
+        try:
+            done = subprocess.run(
+                ["nice", "-n", str(NICE), "/bin/sh", "-c", job["command"]],
+                capture_output=True,
+                text=True,
+                timeout=job["timeout"],
+                stdin=subprocess.DEVNULL,
+                cwd=str(job["workdir"]),
+            )
+            output = (done.stdout or "") + (done.stderr or "")
+            exit_code = str(done.returncode)
+        except subprocess.TimeoutExpired as error:
+            output = (error.stdout or "") if isinstance(error.stdout, str) else ""
+            exit_code = f"timeout after {job['timeout']:.0f}s"
+        except OSError as error:
+            output, exit_code = str(error), "did-not-start"
+        took = time.monotonic() - started
+        lines = [line for line in output.splitlines() if line.strip()]
+        write_state(directory, "last-output", output[-OUTPUT_KEEP:])
+        write_state(directory, "last-line", (lines[-1] if lines else "")[:LINE_KEEP])
+        write_state(directory, "last-exit", exit_code)
+        # Last of all, so a reader that sees a finish knows the rest is already written.
+        write_state(directory, "last-finish", stamp(time.time()))
+        return f"{job['name']}: exit {exit_code} in {took:.1f}s (owner {job['owner']})"
+    finally:
+        handle.close()
+
+
+def run_once(options: argparse.Namespace) -> int:
+    now = time.time()
+    try:
+        files = sorted(Path(options.jobs).glob("*.job"))
+    except OSError as error:
+        log(f"cannot read {options.jobs}: {error}")
+        return 0
+    if not files:
+        log(f"no job files in {options.jobs}")
+        return 0
+    ran = 0
+    for path in files:
+        job = read_job(path)
+        if job is None:
+            continue
+        directory = Path(options.state) / job["name"]
+        is_due, why = due(job, directory, now)
+        if not is_due:
+            if options.verbose:
+                log(f"  {job['name']}: {why}")
+            continue
+        if ran >= options.max_jobs:
+            log(f"  {job['name']}: {why}, but this pass has run {ran} already; next pass")
+            continue
+        if options.dry_run:
+            log(f"  {job['name']}: {why}; would run {shlex.quote(job['command'])}")
+            ran += 1
+            continue
+        log(f"  {job['name']}: {why}; running")
+        log("  " + run_job(job, directory, now))
+        ran += 1
+    log(f"{len(files)} job file(s), {ran} run")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--jobs", type=Path, default=DEFAULT_JOBS, help=f"job files (default {DEFAULT_JOBS})"
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=DEFAULT_STATE,
+        help=f"what each job's runs are recorded in (default {DEFAULT_STATE})",
+    )
+    parser.add_argument(
+        "--max-jobs",
+        type=int,
+        default=DEFAULT_MAX_JOBS,
+        help=f"start at most this many jobs in one pass (default {DEFAULT_MAX_JOBS})",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="say what is due; run nothing, record nothing"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="also say the jobs that are not due yet"
+    )
+    return run_once(parser.parse_args())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
