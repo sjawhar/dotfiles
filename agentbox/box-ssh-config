@@ -23,13 +23,14 @@ owner="${2:-}"
 hosts=("sami-rocqperf:${AGENTBOX_SSH_PORT:-443}" "sami-leanperf:${AGENTBOX_SSH_PORT:-443}" "sami-devbox:22")
 user="${AGENTBOX_SSH_USER:-sami}"
 system=""
+mkdir -p "$home/.ssh/config.d" || exit 1
+[[ -z "$owner" ]] || chown "$owner:$owner" "$home/.ssh" "$home/.ssh/config.d" 2>/dev/null || true
 for entry in "${hosts[@]}"; do
     h="${entry%%:*}"
     port="${entry##*:}"
     key="$home/.ssh/$h"
     conf="$home/.ssh/config.d/$h.conf"
     [[ -e "$conf" ]] && continue
-    mkdir -p "$home/.ssh/config.d" || continue
     {
         printf 'Host %s\n' "$h"
         printf '  User %s\n  Port %s\n' "$user" "$port"

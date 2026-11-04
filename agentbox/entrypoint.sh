@@ -16,23 +16,24 @@ set -euo pipefail
 [[ -n "${AGENTBOX_ENVOY_FORWARDER:-}" ]] || { echo "agentbox: AGENTBOX_ENVOY_FORWARDER is not set" >&2; exit 1; }
 [[ -n "${AGENTBOX_USER:-}" ]] || { echo "agentbox: AGENTBOX_USER is not set" >&2; exit 1; }
 
-# $HOME in the box is the host user's home PATH, and only the allow-listed paths under it
-# are mounts (agentbox/mounts); docker creates every parent those mounts need as a
-# root-owned directory of the box's own overlay. The image ships a /home/ubuntu skeleton
-# owned by the session user, so on a host whose user is `ubuntu` those parents were the
-# user's - but on a host whose user has any other name every one of them was root's, and
-# the session could write nothing outside the list: no ~/.docker (so no ghcr login and no
-# credHelpers), no ~/.config/gh-agent (so every gh call failed), no ~/.local/state/mise (a
-# warning on every mise command), measured on sami-rocqperf 2026-10-31. So give the
-# session user every directory of the overlay under $HOME. A mount is skipped by device -
-# a bind of a host path has an st_dev of its own - because chowning one would change the
-# host's directory; the host's own uid already arrives inside as the session user.
-home_dev="$(stat -c %d "$HOME")"
+# Set the password-database home before any relay starts as the session user.
+# usermod refuses to change a user whose processes already run.
+if [ "$(getent passwd "$AGENTBOX_USER" | cut -d: -f6)" != "$HOME" ]; then
+    usermod -d "$HOME" "$AGENTBOX_USER"
+fi
+
+# Give the session user its own home directories, not host mounts. Bind mounts
+# can have the same device number as the box home, so prune their exact paths.
+mount_targets="$(findmnt -rn -o TARGET --raw)"
+home_find=("$HOME" -xdev)
+while IFS= read -r mounted; do
+    printf -v mounted '%b' "$mounted"
+    [[ "$mounted" == "$HOME/"* ]] || continue
+    home_find+=(-path "$mounted" -prune -o)
+done <<<"$mount_targets"
 while IFS= read -r -d '' dir; do
-    if [[ "$(stat -c %d "$dir")" == "$home_dev" ]]; then
-        chown "$AGENTBOX_USER:$AGENTBOX_USER" "$dir"
-    fi
-done < <(find "$HOME" -xdev -type d -print0)
+    chown "$AGENTBOX_USER:$AGENTBOX_USER" "$dir"
+done < <(find "${home_find[@]}" -type d -print0)
 
 mkdir -p /var/log
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
@@ -95,52 +96,28 @@ for channel in ${forward_channels//,/ }; do
         </dev/null >>/var/log/forward-relay.log 2>&1 &
 done
 
-# Private agent-c images: the inner docker logs into ghcr.io with the
-# platform's read-only packages token (agent-tier GHCR_PULL_TOKEN), as the
-# session user so the secrets client finds its age key and the login lands in
-# the box's own ~/.docker (not mounted from the host; it dies with the box).
-# A failed login is reported, not fatal: public pulls still work.
-# Every step below runs from `/` (`env -C`), never the box's working directory: a mise shim on
-# PATH reads the tool files of whatever directory it runs in, so from a checkout it goes to
-# GitHub to resolve that tree's toolchains - and MISE_DATA_DIR, which points at the host's
-# store where the pinned tools already are, must be passed or mise looks in an empty default
-# and installs from the network too. On 2026-10-31 that cost a box its Docker Hub credential
-# helpers: `jq` in the block below ran without MISE_DATA_DIR, mise tried to resolve jq and the
-# workspace's rust-toolchain.toml anonymously, GitHub answered 403 rate-limited, and the box
-# started with an empty ~/.docker/config.json and a warning nobody was reading.
+# Private agent-c images: keep any host route copied into the box. Only a
+# registry with no auth, helper, or credential store gets the broker pull login.
+# Commands run from / so mise reads the host tool store, not a workspace pin.
 # shellcheck disable=SC2016  # the inner sh expands $GHCR_PULL_TOKEN; this shell must not
 if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --reset-env \
         env -C / HOME="$HOME" PATH="$PATH" MISE_DATA_DIR="${MISE_DATA_DIR:-}" \
-        sh -c 'secrets GHCR_PULL_TOKEN -- sh -c "printf %s \"\$GHCR_PULL_TOKEN\" | docker login ghcr.io -u trajectory-labs-pbc --password-stdin" >/dev/null 2>&1'; then
+        sh -c 'c="$HOME/.docker/config.json"; jq -e '\''.auths["ghcr.io"] != null or .credHelpers["ghcr.io"] != null or ((.credsStore // "") != "")'\'' "$c" >/dev/null 2>&1 && exit 0; secrets GHCR_PULL_TOKEN -- sh -c "printf %s \"\$GHCR_PULL_TOKEN\" | docker login ghcr.io -u trajectory-labs-pbc --password-stdin" >/dev/null 2>&1'; then
     echo "agentbox: ghcr.io login failed; private image pulls will fail until it is fixed" >&2
 fi
 
-# Docker Hub and dhi.io authenticate through scripts/docker-credential-secretsd,
-# which reads the org's pull-only token from the secrets store when docker asks,
-# so no token for them sits in the box. Merged into the box's config beside the
-# ghcr login; `agentbox doctor` checks the helper answers, because a config that
-# names a missing helper fails every Docker Hub pull, public images included.
+# Docker Hub and dhi.io get the existing broker helper only where the host
+# snapshot has no auth, helper, or global credential store for that registry.
 # shellcheck disable=SC2016  # the inner sh expands $HOME and $HELPERS; this shell must not
 if ! setpriv --reuid="$AGENTBOX_USER" --regid="$AGENTBOX_USER" --init-groups --reset-env \
         env -C / HOME="$HOME" PATH="$PATH" MISE_DATA_DIR="${MISE_DATA_DIR:-}" \
         HELPERS='{"dhi.io": "secretsd", "https://index.docker.io/v1/": "secretsd"}' \
-        sh -c 'c="$HOME/.docker/config.json"; mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } && jq --argjson h "$HELPERS" ".credHelpers = ((.credHelpers // {}) + \$h)" "$c" > "$c.tmp" && mv "$c.tmp" "$c"'; then
+        sh -c 'c="$HOME/.docker/config.json"; mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } && jq --argjson h "$HELPERS" ". as \$c | .credHelpers = ((if (.credsStore // \"\") != \"\" then {} else \$h | with_entries(select(.key as \$k | ((\$c.auths // {}) | has(\$k) | not))) end) + (.credHelpers // {}))" "$c" > "$c.tmp" && mv "$c.tmp" "$c"'; then
     echo "agentbox: docker credHelpers not written; Docker Hub pulls stay anonymous" >&2
 fi
 
-# Registries whose credential helper trades an identity the box already holds for a registry token,
-# so no token sits in the box: ECR (docker-credential-ecr-login, the instance role through the IMDS
-# relay) and Artifact Registry (docker-credential-gcloud, the machine's gcloud identity in the
-# mounted ~/.config/gcloud). The identity is already allowed - what was missing is that docker
-# only asks a helper when the config NAMES it for that registry host, and otherwise sends nothing.
-# ECR measured 2026-09-26, same box and role ten seconds apart: without the entry `docker manifest
-# inspect` returns "no basic auth credentials"; with it, the call authenticates as the instance
-# role. Artifact Registry measured 2026-11-02 in agentbox-3055672ec697: a manifest of a
-# us-east1-docker.pkg.dev image the host pulls answered "Unauthenticated request" until the gcloud
-# entry was added, then resolved. The host list comes from the machine's own config via
-# AGENTBOX_CRED_HELPERS (scripts/agentbox), so a box mirrors the host rather than carrying a second
-# list that can drift. An entry whose helper is not on PATH is skipped with a note: naming a
-# missing helper breaks every pull for that host, which is worse than no entry.
+# Retain existing host registry routes. Add available machine helpers only
+# where the Docker snapshot has neither an auth entry nor a credential store.
 # shellcheck disable=SC2016  # the inner sh expands $HOME, $v, $ok and $CRED_HELPERS; this shell must not
 cred_helpers_merge='
 c="$HOME/.docker/config.json"
@@ -153,7 +130,7 @@ for v in $(printf %s "$CRED_HELPERS" | jq -r "[.[]] | unique | .[]"); do
     fi
 done
 mkdir -p "$HOME/.docker" && { [ -s "$c" ] || echo "{}" > "$c"; } &&
-    jq --argjson h "$CRED_HELPERS" --arg ok "$ok" ".credHelpers = ((.credHelpers // {}) + (\$h | with_entries(select(.value as \$v | \$ok | split(\" \") | any(. == \$v)))))" "$c" > "$c.tmp" &&
+    jq --argjson h "$CRED_HELPERS" --arg ok "$ok" ". as \$c | .credHelpers = ((if (.credsStore // \"\") != \"\" then {} else \$h | with_entries(select(.value as \$v | \$ok | split(\" \") | any(. == \$v))) | with_entries(select(.key as \$k | ((\$c.auths // {}) | has(\$k) | not))) end) + (.credHelpers // {}))" "$c" > "$c.tmp" &&
     mv "$c.tmp" "$c"
 '
 if [ -n "${AGENTBOX_CRED_HELPERS:-}" ] && [ "$AGENTBOX_CRED_HELPERS" != "{}" ]; then
@@ -165,16 +142,6 @@ if [ -n "${AGENTBOX_CRED_HELPERS:-}" ] && [ "$AGENTBOX_CRED_HELPERS" != "{}" ]; 
     fi
 fi
 
-# The box user's HOME in the password database, which is NOT $HOME: the image's user is `ubuntu`
-# with /home/ubuntu, while the box works in the host user's path (/home/sami). Every tool that
-# reads getpwuid instead of $HOME then looks in the wrong home - OpenSSH ignored
-# /home/sami/.ssh/config and went to port 22 with the default id_* files (VERIFY's box 19:26Z,
-# session 01a197e8 20:15Z, 2026-11-03). usermod -d changes only the record, moves nothing, and is
-# a no-op where the two are already the same.
-if [ "$(getent passwd "$AGENTBOX_USER" | cut -d: -f6)" != "$HOME" ]; then
-    usermod -d "$HOME" "$AGENTBOX_USER" 2>/dev/null \
-        || echo "agentbox: $AGENTBOX_USER still has another home in the password database; tools that read it, ssh among them, will not see $HOME" >&2
-fi
 
 # An ssh config for the other machines a box talks to (agentbox/box-ssh-config): `ssh
 # sami-rocqperf` from a box connected as ubuntu on port 22 and was refused, since the box has the
