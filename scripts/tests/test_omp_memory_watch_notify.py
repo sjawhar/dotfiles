@@ -80,6 +80,7 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "escalate": 600.0,
         "wall_fraction": 0.98,
         "wall_cooldown": 900.0,
+        "wall_quiet_reclaimable": 0.50,
         "wall_burst": 3,
         "wall_burst_window": 900.0,
         "wall_top": 3,

@@ -159,7 +159,7 @@ class OomBiasInTheRunTest(unittest.TestCase):
     def options(self, **overrides) -> argparse.Namespace:
         values = dict(
             fraction=0.70, clear_fraction=0.62, sample_fraction=0.45, samples=24, unlimited_warn=16.8,
-            grace=60.0, escalate=600.0, wall_fraction=0.98, wall_cooldown=900.0, wall_burst=3,
+            grace=60.0, escalate=600.0, wall_fraction=0.98, wall_cooldown=900.0, wall_quiet_reclaimable=0.50, wall_burst=3,
             wall_burst_window=900.0, wall_top=3, wall_pending_max=400, wall_digest_mode="send", wall_urgent_anon=0.50,
             wall_pending_json=False, state=Path(self.tmp.name) / "state.json", http_timeout=8.0,
             dry_run=True, write_state=False, print_alert=False, oom_bias=True, oom_bias_adj=500,

@@ -54,8 +54,11 @@ and no model call:
      this whenever the pressure is reclaimable: on ossv-agent-open on 2026-10-30, 31 of 95
      worker scopes had touched their 24 GiB wall while every one of them sat under the 45%
      sampling level on unreclaimable memory, and only 4 were ever reported. A touch is rate
-     limited to one report per scope per `--wall-cooldown` (default 15 min) and is ONE message,
-     to the session owning the scope.
+     limited to one report per scope per `--wall-cooldown` (default 1 h) and is ONE message,
+     to the session owning the scope. A touch with oom and oom_kill both 0 and at least
+     `--wall-quiet-reclaimable` (0.50) of the ceiling in reclaimable page cache is not told at
+     all: that is a capped job working as designed (jailed `omp -p` readers on an 8 GiB scope
+     with 76-94% of it page cache, 2026-11-04). It is counted, and the next real report says so.
 
 Alerts go over Envoy to agent sessions only, never to a person, and each is at most 600
 characters ending in `Full report: <path>` (the whole detail, under reports/ beside the state
@@ -1490,6 +1493,20 @@ def wall_touch(
     peak_touch = peak >= peak_floor and peak > previous_peak
     if delta <= 0 and not peak_touch:
         return None
+    # A capped job working as designed: the kernel refused no allocation it could not satisfy
+    # (oom 0), killed nothing (oom_kill 0), and at least half the ceiling is page cache it can
+    # drop. Jailed `omp -p` readers on an 8 GiB run-r*.scope sat on their wall that way with
+    # 76-94% of it reclaimable and were reported every few minutes to the box-health owner
+    # (2026-11-04, e.g. pid 1047986 at 06:29Z): a notice nobody could act on. The touch is
+    # counted, not dropped, so the next real report says how many quiet ones came before it,
+    # and it does not start the cooldown, so a touch that turns dangerous is told at once.
+    oom = int(events.get("oom", 0))
+    oom_kill = int(events.get("oom_kill", 0))
+    free = reclaimable_bytes({"stats": target.get("stats"), "current": target.get("current"),
+                              "usage": target.get("usage")})
+    if oom == 0 and oom_kill == 0 and free is not None and free >= limit * options.wall_quiet_reclaimable:
+        memory["quiet"] = int(memory.get("quiet", 0)) + 1
+        return None
     last = memory.get("reported_at")
     if last and now - last < options.wall_cooldown:
         # Inside the cooldown the touch is real and already reported; count it so the next
@@ -1503,6 +1520,7 @@ def wall_touch(
     session = from_worker or named
     memory["reported_at"] = now
     suppressed = int(memory.pop("suppressed", 0))
+    quiet = int(memory.pop("quiet", 0))
     # Every process in the scope, not only the three named: the three largest explained 10-29%
     # of a scope at its ceiling in the open4 and open6 digests of 2026-10-30, and the question
     # that leaves -- one runaway, a crowd of small processes, or memory no process holds -- is
@@ -1537,6 +1555,7 @@ def wall_touch(
         stats={name: int(value) for name, value in (target.get("stats") or {}).items()},
         top=by_rss[: options.wall_top],
         suppressed=suppressed,
+        quiet=quiet,
         cooldown=options.wall_cooldown,
         # The levels `wall_state` judges this touch against, carried with it so the report and
         # the run that produced it can never disagree about what "near the limit" means.
@@ -3043,6 +3062,13 @@ def tell_wall_touch(
             f"\nIt also touched the wall {touch['suppressed']} more time(s) inside the"
             f" last {human(options.wall_cooldown)}, which this one report covers."
         )
+    if touch.get("quiet"):
+        body += (
+            f"\nBefore this, it touched the wall {touch['quiet']} time(s) that were not told: each"
+            " with oom and oom_kill 0 and at least"
+            f" {100 * options.wall_quiet_reclaimable:.0f}% of the ceiling reclaimable page cache,"
+            " a capped job working as designed."
+        )
     report = write_report(options, "wall", body, now)
     verdict = wall_verdict(touch)[0]
     entry = {
@@ -3523,7 +3549,14 @@ def main() -> int:
         help="memory.peak at or above this fraction of the ceiling counts as reaching the wall",
     )
     parser.add_argument(
-        "--wall-cooldown", type=float, default=900.0, help="seconds between wall reports for one scope"
+        "--wall-cooldown", type=float, default=3600.0,
+        help="seconds between wall reports for one scope (one an hour: at 15 min, one capped job"
+        " that sat on its wall all night was four reports an hour, 2026-11-04)",
+    )
+    parser.add_argument(
+        "--wall-quiet-reclaimable", type=float, default=0.50,
+        help="a wall touch with oom and oom_kill 0 and at least this fraction of the ceiling in"
+        " reclaimable page cache is a capped job working as designed: counted, never told",
     )
     parser.add_argument(
         "--wall-burst", type=int, default=3,

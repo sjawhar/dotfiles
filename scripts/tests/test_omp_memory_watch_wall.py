@@ -71,6 +71,7 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "escalate": 600.0,
         "wall_fraction": 0.98,
         "wall_cooldown": 900.0,
+        "wall_quiet_reclaimable": 0.50,
         "wall_burst": 3,
         "wall_burst_window": 900.0,
         "wall_top": 3,
@@ -221,6 +222,99 @@ class WallTriggerTest(unittest.TestCase):
         touch = WATCH.wall_touch(self.target(cgroup, name), walls, self.options, 1000.0, False)
         assert touch is not None
         self.assertEqual(touch["events_delta"], 3)
+
+    # ── a capped job working as designed ────────────────────────────────────────────────────
+    def jail_target(self, cgroup: str, name: str, limit: int) -> dict:
+        """As run_once builds it, memory.stat included: the split decides whether it is quiet."""
+        usage, current, fields = WATCH.scope_pressure(cgroup)
+        peak = WATCH.read_int(WATCH.CGROUP_ROOT / cgroup.strip("/") / "memory.peak")
+        return dict(
+            key=name, scope=name, cgroup=cgroup, pid=4242, limit=limit,
+            limit_from=f"memory.max of {name}", limited=True, usage=usage, current=current,
+            events=WATCH.memory_events(cgroup), peak_bytes=peak, swap_max=WATCH.swap_setting(cgroup),
+            stats=fields, measured="test",
+        )
+
+    def test_a_wall_of_page_cache_with_no_oom_is_not_told(self) -> None:
+        """Jailed `omp -p` readers on an 8 GiB run-r*.scope sat on their wall with 76-94% of it
+        page cache, oom 0, and were told to the box-health owner every few minutes (pid
+        1047986 at 06:29Z on 2026-11-04). That is the cap doing its job."""
+        jail = 8 * GIB
+        name = "run-rjail.scope"
+        # Seeded below the wall, so the first call is a baseline and not itself a touch.
+        cgroup = write_scope(self.root, name, limit=jail, events_max=0, peak=1 * GIB, current=1 * GIB,
+                             anon=int(GIB * 0.12))
+        walls: dict = {}
+        self.assertIsNone(
+            WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, 1000.0, False))
+        for moment, rises in ((1030.0, 40), (1060.0, 400), (1090.0, 4000)):
+            write_scope(self.root, name, limit=jail, events_max=rises, peak=jail, current=jail,
+                        anon=int(jail * 0.12))
+            self.assertIsNone(
+                WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, moment, False),
+                f"a cache-full wall with oom 0 was told at {moment}")
+        self.assertEqual(walls[name]["quiet"], 3, "the quiet touches were not counted")
+        self.assertNotIn("reported_at", walls[name], "a quiet touch started the cooldown")
+
+    def test_the_first_dangerous_touch_after_quiet_ones_is_told_at_once_and_counts_them(self) -> None:
+        """Quiet touches start no cooldown: a scope whose reclaim then fails is told THAT run."""
+        jail = 8 * GIB
+        name = "run-rturn.scope"
+        cgroup = write_scope(self.root, name, limit=jail, peak=1 * GIB, current=1 * GIB, anon=int(GIB * 0.12))
+        walls: dict = {}
+        self.assertIsNone(
+            WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, 1000.0, False))
+        write_scope(self.root, name, limit=jail, events_max=50, peak=jail, current=jail, anon=int(jail * 0.12))
+        self.assertIsNone(WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, 1030.0, False))
+        # Reclaim failed once: oom rises. Not quiet any more, whatever the cache says.
+        write_scope(self.root, name, limit=jail, events_max=90, peak=jail, current=jail,
+                    anon=int(jail * 0.12), oom=1)
+        touch = WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, 1060.0, False)
+        self.assertIsNotNone(touch, "a wall where reclaim failed was kept quiet")
+        assert touch is not None
+        self.assertEqual(touch["quiet"], 1)
+        self.assertEqual(touch["events_oom"], 1)
+
+    def test_each_condition_alone_makes_the_touch_told(self) -> None:
+        """Quiet needs ALL three: oom 0, oom_kill 0, and at least half the ceiling reclaimable."""
+        jail = 8 * GIB
+        for label, kwargs in (
+            ("oom", dict(anon=int(jail * 0.12), oom=2)),
+            ("oom_kill", dict(anon=int(jail * 0.12), oom_kill=1)),
+            ("mostly anon", dict(anon=int(jail * 0.60))),  # only 40% reclaimable
+        ):
+            with self.subTest(label):
+                name = f"run-r{label.replace(' ', '')}.scope"
+                cgroup = write_scope(self.root, name, limit=jail, peak=1 * GIB, current=1 * GIB,
+                                     anon=int(GIB * 0.12))
+                walls: dict = {}
+                self.assertIsNone(
+                    WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, 1000.0, False))
+                write_scope(self.root, name, limit=jail, events_max=7, peak=jail, current=jail, **kwargs)
+                self.assertIsNotNone(
+                    WATCH.wall_touch(self.jail_target(cgroup, name, jail), walls, self.options, 1030.0, False),
+                    f"{label}: a wall that is not just page cache was kept quiet")
+
+    def test_a_told_scope_is_told_at_most_once_an_hour(self) -> None:
+        """The default --wall-cooldown is an hour (it was 15 min: four notices an hour for one
+        job that sat on its wall)."""
+        source = Path(WATCH.__file__).read_text(encoding="utf-8")
+        self.assertRegex(source, r'"--wall-cooldown", type=float, default=3600\.0',
+                         "the default is no longer one report per scope per hour")
+        self.assertRegex(source, r'"--wall-quiet-reclaimable", type=float, default=0\.50')
+        name = "run-rhour.scope"
+        opts = options(self.root / "state.json", wall_cooldown=3600.0)
+        cgroup = write_scope(self.root, name, events_max=1, anon=int(CEILING * 0.9), current=CEILING, peak=CEILING)
+        walls: dict = {}
+        self.assertIsNotNone(WATCH.wall_touch(self.jail_target(cgroup, name, CEILING), walls, opts, 1000.0, False))
+        for index, moment in enumerate((1900.0, 2800.0, 4500.0), start=2):
+            write_scope(self.root, name, events_max=index, anon=int(CEILING * 0.9), current=CEILING, peak=CEILING)
+            self.assertIsNone(WATCH.wall_touch(self.jail_target(cgroup, name, CEILING), walls, opts, moment, False),
+                              f"told again {moment - 1000:.0f}s after the last report")
+        write_scope(self.root, name, events_max=9, anon=int(CEILING * 0.9), current=CEILING, peak=CEILING)
+        touch = WATCH.wall_touch(self.jail_target(cgroup, name, CEILING), walls, opts, 1000.0 + 3601, False)
+        assert touch is not None
+        self.assertEqual(touch["suppressed"], 3)
 
 
 class WallReportTest(unittest.TestCase):
