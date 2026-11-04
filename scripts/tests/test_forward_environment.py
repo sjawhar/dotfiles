@@ -55,7 +55,7 @@ class ForwardInstaller(unittest.TestCase):
         write_executable(
             self.dotfiles / "bin" / "mise",
             '''case "$*" in
-                "which forward"|"which omp"|"activate --shims bash"|"exec github:sjawhar/oh-my-pi -- omp browser-relay install") exit 0 ;;
+                "which forward"|"which omp"|"activate --shims bash"|"exec github:sjawhar/oh-my-pi -- omp browser-relay install --dir $HOME/.omp/browser-relay/extension") exit 0 ;;
                 *) echo "unexpected mise arguments: $*" >&2; exit 2 ;;
             esac''',
         )
@@ -64,7 +64,7 @@ class ForwardInstaller(unittest.TestCase):
             '''printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
             if [[ -n "${SYSTEMCTL_FAIL:-}" && "$*" == "$SYSTEMCTL_FAIL" ]]; then exit 1; fi
             case "$*" in
-                *list-unit-files*pcscd-bridge.service) printf '%s\n' "${PCSC_UNIT_FILES:-}" ;;
+                *list-unit-files*--type=service) printf '%s\n' "${PCSC_UNIT_FILES:-}" ;;
                 *list-units*pcscd-bridge.service) printf '%s\n' "${PCSC_ACTIVE_UNITS:-}" ;;
                 *list-units*|*list-unit-files*) cat "$LEGACY_UNITS" ;;
             esac''',
@@ -115,6 +115,11 @@ class ForwardInstaller(unittest.TestCase):
         self.assertEqual({key: config.get(key, value) for key, value in DEFAULT_PORTS.items()}, DEFAULT_PORTS)
         self.assertIn("--user enable --now forward-serve", self.systemctl_log.read_text().splitlines())
 
+    def test_serve_does_not_require_a_legacy_pcsc_bridge(self) -> None:
+        install = self.install("serve", SYSTEMCTL_FAIL="--user list-unit-files --no-legend --no-pager pcscd-bridge.service")
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertIn("--user restart forward-serve", self.systemctl_log.read_text().splitlines())
+
     def test_serve_stops_enabled_or_active_pcsc_bridge_before_start_without_deleting_unit(self) -> None:
         unit = self.home / ".config/systemd/user/pcscd-bridge.service"
         unit.parent.mkdir(parents=True)
@@ -137,7 +142,7 @@ class ForwardInstaller(unittest.TestCase):
 
     def test_serve_does_not_start_if_pcsc_ownership_transition_fails(self) -> None:
         for command in (
-            "--user list-unit-files --no-legend --no-pager pcscd-bridge.service",
+            "--user list-unit-files --no-legend --no-pager --type=service",
             "--user list-units --all --full --plain --no-legend --no-pager pcscd-bridge.service",
             "--user disable --now pcscd-bridge.service",
         ):
@@ -149,6 +154,16 @@ class ForwardInstaller(unittest.TestCase):
                 self.assertNotEqual(install.returncode, 0)
                 self.assertIn("pcscd-bridge", install.stderr)
                 self.assertFalse(any("forward-serve" in line for line in self.systemctl_log.read_text().splitlines()))
+
+    def test_daemon_installs_extension_at_the_flatpak_allowed_path(self) -> None:
+        log = self.root / "relay-install-args"
+        write_executable(self.dotfiles / "bin/mise", f'''case "$*" in
+            *browser-relay*) printf '%s\\n' "$@" > "{log}" ;;
+        esac''')
+        install = self.install("daemon")
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertEqual(log.read_text().splitlines()[-2:],
+                         ["--dir", str(self.home / ".omp/browser-relay/extension")])
 
     def test_daemon_generates_one_literal_peer_set_and_installs_one_daemon(self) -> None:
         install = self.install("daemon", STUB_HOSTNAME="sami")

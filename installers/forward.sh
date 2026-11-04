@@ -153,7 +153,7 @@ fi
 if [[ "$role" = serve ]]; then
     # The legacy SSH bridge owns the same PC/SC socket, even when disabled but
     # still active. Stop it before starting serve, retaining its unit for step 4.
-    bridge_files="$(systemctl --user list-unit-files --no-legend --no-pager pcscd-bridge.service)" \
+    bridge_files="$(systemctl --user list-unit-files --no-legend --no-pager --type=service)" \
         || fail "$role" "cannot list pcscd-bridge.service; check systemctl --user before retrying migration step 3."
     bridge_active="$(systemctl --user list-units --all --full --plain --no-legend --no-pager pcscd-bridge.service)" \
         || fail "$role" "cannot list loaded pcscd-bridge.service; check systemctl --user before retrying migration step 3."
@@ -179,7 +179,7 @@ for unit in "${units[@]}"; do
 done
 
 if [ "${1:-}" = daemon ]; then
-    "$MISE" exec "github:sjawhar/oh-my-pi" -- omp browser-relay install
+    "$MISE" exec "github:sjawhar/oh-my-pi" -- omp browser-relay install --dir "$HOME/.omp/browser-relay/extension"
     # A Flatpak Chrome cannot see ~/.omp by default, so "Load unpacked" below
     # would not even be able to open the directory. Grant read-only access to
     # exactly that path; the sandbox already shares the network namespace, so

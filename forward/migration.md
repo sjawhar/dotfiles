@@ -28,8 +28,10 @@ bash ~/.dotfiles/installers/forward.sh daemon
 
 This is migration step 2, not a dry run. It generates one daemon config, disables
 and stops legacy pair instances, and enables and restarts the single daemon and
-browser relay. It retains the old per-pair configs, template units, keys and SSH
-configuration.
+browser relay. The Chrome extension installs at `~/.omp/browser-relay/extension`
+regardless of the invoking omp profile; Flatpak Chrome receives read-only access
+to that same directory. The old per-pair configs, template units, keys and SSH
+configuration remain.
 The laptop channels become available to each VM when that VM completes step 3;
 coordinate steps 2 and 3 as one migration window.
 
@@ -61,8 +63,8 @@ coordinate steps 2 and 3 as one migration window.
    `~/.config/forward/config.toml`, not a committed machine-specific file. Before
    starting serve, the installer stops and disables an installed or loaded
    `pcscd-bridge.service`, including an active-but-disabled bridge, so Forward
-   can own `~/.pcscd/pcscd.comm`. It retains the bridge's unit file. A failed
-   ownership transition fails the install without starting serve. Both roles
+   can own `~/.pcscd/pcscd.comm`. The bridge is optional; its unit file is retained when present.
+   A failed ownership transition fails the install without starting serve. Both roles
    use Forward's default ports: URL 12800, callback bridge 12801, preview 12802,
    browser relay 12803, PC/SC 12804, grant feed 12805 and audio 12806. The callback
    lease is 300 seconds.
