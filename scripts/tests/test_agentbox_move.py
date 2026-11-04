@@ -2350,6 +2350,73 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(carried.count(str(inside / "file")), 0,
                          "a link whose target a listed tree already covers is not added again")
 
+    def test_a_resume_spec_never_carries_a_bare_path(self) -> None:
+        """`agentbox new` reads a word that is not a flag or a flag's value as a repository and
+        refuses the launch ("no checkout /home/sami/src//mnt/nvme/sami/gate-briefs"): LANE-E's
+        rollback pane held `--dir A B C`, its box exited at once, and the session was down on both
+        machines until a person respawned it (03:57:42Z, 2026-11-04). A --dir is dropped with its
+        value, and any stray word is dropped and named."""
+        self.moving_session()
+        keep = self.root / "keep"
+        tmp_like = self.root / "x" / "tmp-like-path"
+        for d in (keep, tmp_like):
+            d.mkdir(parents=True)
+        # --dir /tmp and a path that only LOOKS like tmp; an odd number of path words between two
+        # --dir words; a trailing --dir with no value.
+        run = self.run_bash(
+            f'move_spec_usable --dir "{self.lane}" --dir /tmp --dir "{tmp_like}" '
+            f'"{keep}" /stray/one /stray/two --dir "{keep}" -e K=v --dir')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        words = run.stdout.split()
+        self.assertEqual(words, ["--dir", str(self.lane), "--dir", str(tmp_like),
+                                 "--dir", str(keep), "-e", "K=v"], run.stdout)
+        # Every path in the output is the value of a --dir.
+        for k, word in enumerate(words):
+            if word.startswith("/"):
+                self.assertEqual(words[k - 1], "--dir", f"bare path {word}: {words}")
+        self.assertIn("--dir /tmp is left out", run.stderr)
+        self.assertIn("/stray/one is left out of this resume: it is not a flag", run.stderr)
+        self.assertIn("a --dir with no path is left out", run.stderr)
+        # The same through the pane command a rollback writes.
+        pane = self.run_bash(f'move_pane_command {self.TO} /t.jsonl --dir "{self.lane}" /stray/one --dir "{keep}"')
+        self.assertNotIn("/stray/one", pane.stdout)
+        self.assertIn(f"--dir {self.lane} --dir {keep} -- omp --resume /t.jsonl", pane.stdout)
+
+    def test_a_rolled_back_session_is_told_it_rolled_back_and_where_it_is(self) -> None:
+        """S3 was told "the move is done: this session was resumed in its agent box" at 03:57:58Z
+        on 2026-11-04 by a ROLLBACK, which had resumed it on the machine it started on. The
+        notice names the machine, and a rollback says it rolled back."""
+        self.moving_session()
+        # The waker fills in the machine it runs on.
+        self.assertIn("%HOST%", self.run_bash('printf %s "$MOVE_WAKE_NOTICE"').stdout)
+        # A rollback hands its own notice to the pane command, which passes it to the waker.
+        pane = self.run_bash(f'MOVE_PANE_WAKE_NOTICE="rolled back still on oldbox" '
+                             f'move_pane_command {self.TO} /t.jsonl --dir "{self.lane}"')
+        self.assertEqual(pane.returncode, 0, pane.stderr)
+        self.assertIn(f"move --wake {self.TO} " + r"rolled\ back\ still\ on\ oldbox </dev/null", pane.stdout)
+        # Without one, the waker's own notice (with the host) is used.
+        plain = self.run_bash(f'move_pane_command {self.TO} /t.jsonl --dir "{self.lane}"')
+        self.assertIn(f"move --wake {self.TO} </dev/null", plain.stdout)
+        # And a real rollback writes "ROLLED BACK" with this machine's name into the pane.
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        # A start that never opens a window on the target, so the group is rolled back AFTER the
+        # hang-up and each member is resumed here.
+        run = self.run_bash(f'move_to_start() {{ return 1; }}\nmove_to_run "{job}"',
+                            {"AGENTBOX_MOVE_RSYNC_TICK": "0", "AGENTBOX_MOVE_RETRY_WAIT": "0"})
+        self.assertIn("rolled back", run.stdout, run.stdout[-1500:])
+        panes = list((self.root / "cache/omp/agentbox/move-to/panes").glob("*.sh"))
+        respawned = (self.local_tmux.read_text(encoding="utf-8") if self.local_tmux.exists() else "")
+        written = " ".join(p.read_text(encoding="utf-8") for p in panes) + respawned
+        self.assertTrue(panes or "respawn-pane" in respawned, "the rollback respawned no pane")
+        self.assertIn("ROLLED\\ BACK", written, written[:2000])
+        self.assertIn("oldbox", written)
+        self.assertNotIn("the\\ move\\ is\\ done", written)
+
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
         target that had the clone. A merged common dir whose objects the target has is dropped

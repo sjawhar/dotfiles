@@ -3594,7 +3594,10 @@ move_respawn() {
 # from the pane command (move_pane_command), so a move from a box, whose own processes end with
 # that box, wakes its session too. It waits for the session's NEW process to register (an Envoy
 # update after the waker started, when the old omp is already gone) and sends the notice once.
-MOVE_WAKE_NOTICE='agentbox: the move is done: this session was resumed in its agent box. Go on with the work you were doing before the move. (An automated notice from agentbox, not a person.)'
+# %HOST% is the machine the session now runs on, filled in where the waker runs. A rollback passes
+# its own text (MOVE_PANE_WAKE_NOTICE): S3 was told "the move is done" at 03:57:58Z on 2026-11-04
+# when its move had failed and it was resumed back on the machine it started on.
+MOVE_WAKE_NOTICE='agentbox: the move is done: this session was resumed in its agent box on %HOST%. Go on with the work you were doing before the move. (An automated notice from agentbox, not a person.)'
 MOVE_WAKE_WAIT="${AGENTBOX_WAKE_WAIT:-600}"
 # move_wake_landed SID: true when the session really is running HERE - an omp of its own on this
 # machine (scripts/omp-session-live, which reads a box's processes too) and no move marker saying
@@ -3612,6 +3615,7 @@ move_wake_landed() {
 move_wake() {
     # The notice is the move's unless the caller names its own (agentbox-run.ts: a restart's).
     local sid="$1" notice="${2:-$MOVE_WAKE_NOTICE}" since seen waited=0
+    notice="${notice//%HOST%/${AGENTBOX_HOST:-$(hostname -s)}}"
     since="$(date +%s%3N)"
     while (( waited < MOVE_WAKE_WAIT )); do
         seen="$(envoy ps --json 2>/dev/null | jq -r --arg s "$sid" \
@@ -3645,22 +3649,46 @@ move_spec_usable() {
     local -a spec=("$@")
     # MOVE_SPEC_KEEP_GONE=1: a path that is absent HERE is kept (the target decides against its
     # own disk with --drop-gone-dirs); a path a box may never be given is dropped either way.
+    #
+    # A --dir is dropped WITH its value, and a word that is neither a flag nor a flag's value is
+    # dropped too: `agentbox new` reads a bare path as a repository name and refuses the whole
+    # launch ("no checkout /home/sami/src//mnt/nvme/sami/gate-briefs"), so LANE-E's rollback box
+    # exited at once and the session was down on both machines until a person respawned it
+    # (03:57:42Z, 2026-11-04). Whatever shape the spec arrives in, nothing but flags and their
+    # own values leaves here.
     while (( i <= ${#spec[@]} )); do
-        if [[ "${spec[i-1]}" == --dir ]]; then
-            d="${spec[i]:-}"
-            if $first; then
-                first=false
-            elif { [[ ! -d "$d" ]] && [[ -z "${MOVE_SPEC_KEEP_GONE:-}" ]]; } || move_dir_too_broad "$d"; then
-                echo "agentbox: --dir $d is left out of this resume: a box may not be given it" >&2
+        d="${spec[i-1]}"
+        case "$d" in
+            --dir)
+                local value="${spec[i]:-}"
                 i=$((i + 2))
-                continue
-            fi
-            out+=(--dir "$d")
-            i=$((i + 2))
-            continue
-        fi
-        out+=("${spec[i-1]}")
-        i=$((i + 1))
+                if [[ -z "$value" ]]; then
+                    echo "agentbox: a --dir with no path is left out of this resume" >&2
+                    continue
+                fi
+                if $first; then
+                    first=false
+                elif { [[ ! -d "$value" ]] && [[ -z "${MOVE_SPEC_KEEP_GONE:-}" ]]; } || move_dir_too_broad "$value"; then
+                    echo "agentbox: --dir $value is left out of this resume: a box may not be given it" >&2
+                    continue
+                fi
+                out+=(--dir "$value")
+                ;;
+            -e)
+                out+=(-e "${spec[i]:-}")
+                i=$((i + 2))
+                ;;
+            -*)
+                out+=("$d")
+                i=$((i + 1))
+                ;;
+            *)
+                # Not a flag and not consumed as one's value: `agentbox new` would read it as a
+                # repository. It is named and left out.
+                echo "agentbox: $d is left out of this resume: it is not a flag or a flag's value, and \`agentbox new\` would read it as a repository" >&2
+                i=$((i + 1))
+                ;;
+        esac
     done
     printf '%s\n' ${out[@]+"${out[@]}"}
 }
@@ -3672,8 +3700,11 @@ move_pane_command() {
     mapfile -t usable < <(move_spec_usable "$@")
     set -- ${usable[@]+"${usable[@]}"}
     log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
-    printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' \
-        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "$log" "$(printf '%q ' agentbox new --drop-gone-dirs "$@" -- omp --resume "$resume")"
+    # MOVE_PANE_WAKE_NOTICE: the notice the session gets when it is up again, when the caller has
+    # its own (a rollback); else the waker's own "the move is done".
+    printf '( setsid %q move --wake %q%s </dev/null >>%q 2>&1 & ); %s' \
+        "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "${MOVE_PANE_WAKE_NOTICE:+ $(printf '%q' "$MOVE_PANE_WAKE_NOTICE")}" "$log" \
+        "$(printf '%q ' agentbox new --drop-gone-dirs "$@" -- omp --resume "$resume")"
 }
 
 # The tmux server a relauncher drives its pane through: `-S <socket>` from the TARGET omp's own
@@ -6669,12 +6700,16 @@ move_to_run() {
     MOVE_TO_RESUMED=()
     resume_here() {
         local j inner rc pane_file
+        # What each member is told when it is up again here: the move FAILED and it is back on
+        # this machine - never "the move is done" (S3, 03:57:58Z 2026-11-04).
+        local rolled_back
+        rolled_back="agentbox: your move to $target did NOT complete and was ROLLED BACK: this session was resumed in an agent box on $me, the machine it was on before. Go on with your work here; nothing moved. The move log on $target and \`agentbox move --plan --to $target\` say why. (An automated notice from agentbox, not a person.)"
         for j in "$@"; do
             member_spec "$j"
             member_tmux "$j"
             if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "${panes[j]}" '#{pane_id}' >/dev/null 2>&1; then
                 # A pane that closed with its omp: a window of its own on the same tmux session.
-                if [[ -n "${ats[j]}" ]] && inner="$(move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")" \
+                if [[ -n "${ats[j]}" ]] && inner="$(MOVE_PANE_WAKE_NOTICE="$rolled_back" move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")" \
                     && pane_file="$(move_pane_script "${sids[j]}" "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i")" \
                     && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
                         bash -i "$pane_file" 2>/dev/null; then
@@ -6685,7 +6720,7 @@ move_to_run() {
                 fi
                 continue
             fi
-            inner="$(move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")"
+            inner="$(MOVE_PANE_WAKE_NOTICE="$rolled_back" move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")"
             move_respawn "${sids[j]}" "${panes[j]}" "${cwds[j]}" "$inner" "${MOVE_SPEC[*]}" && { MOVE_TO_RESUMED+=("${sids[j]}"); continue; }
             rc=$?
             if (( rc == 3 )); then
