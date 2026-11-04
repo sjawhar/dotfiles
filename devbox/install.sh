@@ -51,6 +51,10 @@ bash "${DOTFILES_DIR}/installers/gh-app-host.sh"
 # that identity) and gh-app-host.sh (it may clone grading-tools) (see installers/grade-farm.sh).
 bash "${DOTFILES_DIR}/installers/grade-farm.sh"
 
+# On a Google VM, box-side ssh config for Nickolai's machcsl VMs as the box identity (key, IAP Host
+# blocks, NICK_SSH_DIR command files). It never changes those VMs' metadata (see installers/nickvm-ssh.sh).
+bash "${DOTFILES_DIR}/installers/nickvm-ssh.sh"
+
 # Model-spend records from every harness, now that gcloud acts as the box identity, which reads the collector's token,
 # with the host name as theorem.lane (see installers/agent-spend.sh).
 AGENT_SPEND_LANE="$(hostname -s)" bash "${DOTFILES_DIR}/installers/agent-spend.sh"
