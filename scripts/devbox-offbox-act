@@ -68,6 +68,49 @@ live)
             for (i = 1; i <= count; i++)
                 if (index(line, id[i])) printf "proc %s %s %s\n", id[i], pid, substr(line, 1, 400)
         }'
+    # Second, independent test: every running agentbox container, asked for its own processes.
+    # It exists because `omp-session-live` answers "dead" for a live session whose transcript
+    # directory is not literally named `sessions` -- a `--session-dir` of `.../session/` is
+    # enough (measured 2026-11-04: 01a1a682-6912 and 01a1a682-6922, alive in
+    # agentbox-10842ee2b3b8 and its sibling, both reported dead). A resumed copy re-registers
+    # under the live session's id, takes its Envoy messages and roles, and on exit drops the
+    # original's registration, so the original keeps working and becomes unaddressable. The
+    # caller restarts only when BOTH tests say dead, and never when this one could not run.
+    #
+    # `boxscan ok` is printed only when every running container answered. A container that did
+    # not is a `boxerror` line and makes the scan not ok: a box that cannot be asked is not an
+    # empty box.
+    if ! boxes="$(docker ps -q 2>/dev/null)"; then
+        printf 'boxscan failed docker ps did not answer\n'
+    else
+        failures=0
+        for container in $boxes; do
+            if ! inner="$(timeout 15 docker exec "$container" ps -eo args= 2>/dev/null)"; then
+                printf 'boxerror %s\n' "$container"
+                failures=$((failures + 1))
+                continue
+            fi
+            printf '%s\n' "$inner" | awk -v ids="$*" -v box="$container" '
+                BEGIN { count = split(ids, id, " ") }
+                {
+                    runs_omp = 0
+                    words = split($0, word, " ")
+                    for (w = 1; w <= words; w++) {
+                        base = word[w]
+                        sub(/^.*\//, "", base)
+                        if (base == "omp") { runs_omp = 1; break }
+                    }
+                    if (!runs_omp) next
+                    for (i = 1; i <= count; i++)
+                        if (index($0, id[i])) printf "box %s %s %s\n", id[i], box, substr($0, 1, 300)
+                }'
+        done
+        if ((failures)); then
+            printf 'boxscan failed %s container(s) did not answer\n' "$failures"
+        else
+            printf 'boxscan ok %s containers\n' "$(printf '%s\n' "$boxes" | grep -c .)"
+        fi
+    fi
     ;;
 restart)
     session="${1:?tmux session}" title="${2:?window title}" cwd="${3:?cwd}" resume="${4:?resume}"

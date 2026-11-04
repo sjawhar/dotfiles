@@ -377,24 +377,38 @@ def check_train(facts: dict[str, str], state: dict, report: Reporter, now: float
         train["events_idle"] = False
 
 
-def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, bool], dict[str, list[str]]]:
-    """`omp-session-live` per id on sami-devbox, and every live process naming one."""
+def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, bool], dict[str, list[str]], dict[str, list[str]], str]:
+    """Two independent tests on sami-devbox, and every live process naming a session.
+
+    Returns `omp-session-live`'s answer per id, the host processes naming each id, the agentbox
+    containers whose own `ps` names each id, and why the box scan could not be trusted ("" when
+    it ran clean). A session is dead only when BOTH tests say so and the scan is clean: on
+    2026-11-04 omp-session-live called two live boxed sessions dead, because it counts a command
+    line's transcript path only inside a folder named `sessions` and theirs was `session`.
+    """
     if not ids:
-        return {}, {}
-    # A fixed cost (one `ps` over 14,683 processes) plus about 0.75 s per `omp-session-live`.
-    done = remote.run(ACT, ["live", *ids], timeout=120 + 3 * len(ids))
+        return {}, {}, {}, ""
+    # About 0.75 s per `omp-session-live`, one `ps` over 14,683 processes, and the box scan:
+    # 24 s over 116 containers, measured 2026-11-04.
+    done = remote.run(ACT, ["live", *ids], timeout=240 + 3 * len(ids))
     if done.returncode != 0:
         raise RuntimeError(f"liveness check failed: exit {done.returncode}:"
                            f" {(done.stderr or done.stdout).strip()[:400]}")
     live: dict[str, bool] = {}
     procs: dict[str, list[str]] = {}
+    boxed: dict[str, list[str]] = {}
+    scan = "the box scan printed no verdict"
     for line in done.stdout.splitlines():
         parts = line.split(" ", 3)
         if parts[0] == "live" and len(parts) >= 3:
             live[parts[1]] = parts[2] == "1"
         elif parts[0] == "proc" and len(parts) >= 4:
             procs.setdefault(parts[1], []).append(f"pid {parts[2]}: {parts[3]}")
-    return live, procs
+        elif parts[0] == "box" and len(parts) >= 4:
+            boxed.setdefault(parts[1], []).append(f"container {parts[2]}: {parts[3]}")
+        elif parts[0] == "boxscan":
+            scan = "" if parts[1] == "ok" else " ".join(parts[1:])
+    return live, procs, boxed, scan
 
 
 def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict, now: float,
@@ -512,18 +526,37 @@ def run(args: argparse.Namespace) -> int:
     watched.sort(key=lambda e: (int(e["order"]) if e.get("order", "").lstrip("-").isdigit() else 999,
                                 e["title"]))
     try:
-        live, procs = liveness(remote, [e["session"] for e in watched])
+        live, procs, boxed, scan_failed = liveness(remote, [e["session"] for e in watched])
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
         log(f"liveness check failed: {error}")
         save_state(state_path, state)
         return 1
+    if scan_failed:
+        log(f"the agentbox scan could not be trusted ({scan_failed}); nothing is called dead this run")
 
     dead = []
     for entry in watched:
         session = entry["session"]
         record = session_state(state, session)
-        if live.get(session):
+        # Two independent tests, and a session is dead only when both say so. A box that could
+        # not be asked is not an empty box: "could not test" is never "dead".
+        if live.get(session) or boxed.get(session):
             record["last_seen_live"] = now
+            if not live.get(session) and once(record, "blind_spot_reported", True):
+                where = "; ".join(boxed[session][:3])
+                log(f"{entry['title']} ({session}) is alive in a box that omp-session-live calls dead")
+                report.send([args.sre], "liveness-blind-spot",
+                            f"LIVENESS BLIND SPOT, nothing restarted: {entry['title']} ({session})"
+                            f" is alive -- an agentbox's own `ps` names it ({where}) -- and"
+                            f" `omp-session-live` on {args.host} says it is dead. That script is"
+                            f" what `agent-session` and `agentbox new` ask before every resume, so"
+                            f" their duplicate refusal is broken for this session too. Measured"
+                            f" cause on 2026-11-04: for a bare id it counts a command line's"
+                            f" transcript path only inside a folder named `sessions`, and a"
+                            f" --session-dir of `.../session/` is not one. This watch restarts"
+                            f" nothing a box names.")
+            elif live.get(session):
+                record["blind_spot_reported"] = False
             if record.get("blocked"):
                 log(f"{entry['title']} ({session}) is live again; unblocked")
             # A restart whose session was not up inside its own run leaves the `after` message
@@ -548,6 +581,24 @@ def run(args: argparse.Namespace) -> int:
         state["restarts"] = [r for r in state["restarts"] if now - r["at"] < 3600]
         save_state(state_path, state)
         return 0
+
+    if scan_failed:
+        # "Could not test" is never "dead". One of the two tests did not run, so this run reports
+        # and restarts nothing at all.
+        names = ", ".join(f"{e['title']} ({e['session']})" for e in dead)
+        if once(state, "scan_failed_reported", True):
+            report.send([args.sre], "refuse-untestable",
+                        f"NOT RESTARTED, {len(dead)} session(s) that look dead on {args.host}:"
+                        f" {names}. The second liveness test did not run ({scan_failed}), and a box"
+                        f" that cannot be asked is not an empty box. A resumed copy of a session"
+                        f" that is actually alive takes its Envoy registration and leaves the"
+                        f" original unaddressable, so this run restarts nothing. It tries again"
+                        f" in 5 minutes.")
+        log(f"box scan not trusted; {len(dead)} apparently dead session(s) left alone")
+        state["restarts"] = [r for r in state["restarts"] if now - r["at"] < 3600]
+        save_state(state_path, state)
+        return 0
+    state["scan_failed_reported"] = False
 
     left_for_stall: list[str] = []
     left_for_limit: list[str] = []
