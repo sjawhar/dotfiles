@@ -301,6 +301,28 @@ task:
 # the threshold. AGENTC-1288, Sami, 2026-09-30.
 compaction:
   methodOrder: [shake, remote, snapcompact, handoff, soft]
+  # Keep gateway Sol prompts under OpenAI's 272,000-token long-context line.
+  # Past it, OpenAI bills the WHOLE request at 2x input and cache rates and 1.5x
+  # output. Measured by the cost lead from OpenAI's own report: of $12,978 of Sol
+  # spend on the gateway project to ~09Z on 2026-11-04, $8,663 — 67% — was requests
+  # over that line, with average prompts of 271-336K sitting just the wrong side.
+  #
+  # The line counts TOTAL input INCLUDING cache reads (OpenAI's own example: 20,000
+  # new + 260,000 cache-read = a 280,000-token prompt at long-context rates). Our
+  # prompts are ~96% cached, so a bound on NEW tokens would save nothing; this bounds
+  # the whole context. 250,000 leaves 22,000 of headroom for the turn that triggers
+  # compaction.
+  #
+  # The "f" prefix is load-bearing: a bare number here is the BASE the threshold
+  # policy scales (percent of it), NOT a trigger, so `250000` would compact at some
+  # fraction of 250K and `"f250000"` compacts AT 250K
+  # (packages/coding-agent/src/config/compaction-threshold.ts, parseThresholdEntry).
+  # Keys are `provider/model-id`, exact or a `*`-terminated prefix; the prefix covers
+  # the effort suffixes (`:xhigh`, `:high`) the review and oracle roles pin.
+  # A per-agent task.agentCompactionThresholdOverrides entry still outranks these.
+  modelThresholds:
+    ossv-gateway-openai/openai/gpt-6.1-sol*: "f250000"
+    ossv-gateway/openai/gpt-6.1-sol*: "f250000"
 advisor:
   enabled: true
 # omp's own interceptor stays on in this shared file: a session that predates the experiments
