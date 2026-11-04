@@ -72,7 +72,10 @@ class CitedPost(unittest.TestCase):
                    '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n'
                    f'printf "%s\\n" "$*" >> {self.calls}\n'
                    'echo https://github.com/o/upstream/issues/12')
-        executable(self.bin / "dispatch",
+        # Ahead of shims/ on PATH: shims/dispatch (the omp plugin's CLI) would shadow a stub behind it.
+        self.front = self.tmp / "front"
+        self.front.mkdir()
+        executable(self.front / "dispatch",
                    f'd={self.fixtures}\n'
                    'case "$1 $3" in\n'
                    f'  "read {ASK}") cat "$d/ask.txt" ;;\n'
@@ -96,7 +99,7 @@ class CitedPost(unittest.TestCase):
     def run_gh(self, argv, cite=True):
         env = {
             "HOME": str(self.tmp), "USER": os.environ.get("USER", "u"), "LANG": "C.UTF-8",
-            "PATH": os.pathsep.join([str(SHIMS), str(self.bin), "/usr/bin", "/bin"]),
+            "PATH": os.pathsep.join([str(self.front), str(SHIMS), str(self.bin), "/usr/bin", "/bin"]),
             "TMPDIR": str(self.tmp), "DOTFILES_DIR": str(DOTFILES), "OMP_SESSION_ID": "sess-1",
             "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0", "GH_READ_CACHE_DIR": str(self.cache),
             "PUBLIC_LEAK_CHECK": "/bin/true",

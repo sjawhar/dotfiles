@@ -66,6 +66,14 @@ before handing the call to the real one.
   `~/.gitconfig`, not a repository's), names `gh-app.host-profile` (a machine with no person's
   login, sami-devbox: `installers/gh-app-host.sh`): there it answers through
   `gh-app-token <profile>` as an agent's does (`shims/tests/test_gh_host_credential.py`).
+  On that machine every other gh call outside an agent session that carries no `GH_TOKEN` or
+  `GITHUB_TOKEN` gets an installation token of the same profile for its target owner
+  (`gh-app-token <profile> --owner OWNER`, through the broker's machine login): the owner from
+  `-R`/`--repo`, `GH_REPO`, a `repos/OWNER/…` path of `gh api`, or the directory's origin remote,
+  else theorem-labs. Only a `ghs_` App token is used; for an owner the App does not cover the call
+  runs with no token, never the profile's personal fallback. Before this a host shell's gh had no
+  token there: `installers/agent-spend.sh` and the pre-push leak check failed (2026-11-04,
+  `shims/tests/test_gh_host_token.py`).
   `gh pr create` for an
   agent-c pull request that changes only documentation is refused unless its head is the
   day's `docs-batch/<topic>/<UTC date>` branch and that batch has not merged yet

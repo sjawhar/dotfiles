@@ -106,6 +106,41 @@ gh_shim_quote() {
     for a in "$@"; do out+=" $(printf '%q' "$a")"; done
     printf '%s' "$out"
 }
+# gh_shim_origin_slug: sets _slug to OWNER/REPO of this directory's origin remote on github.com,
+# else empty.
+gh_shim_origin_slug() {
+    local remote
+    remote="$(git remote get-url origin 2> /dev/null || true)"
+    _slug=""
+    case "$remote" in
+        *github.com[:/]*) _slug="${remote#*github.com[:/]}"; _slug="${_slug%/}"; _slug="${_slug%.git}" ;;
+    esac
+    [[ "$_slug" =~ ^[^/]+/[^/]+$ ]] || _slug=""
+}
+# gh_shim_target_owner ARGV…: sets _owner to the GitHub owner the call targets: -R/--repo, then
+# GH_REPO, then a `repos/OWNER/…` path of `gh api`, then the origin remote, else theorem-labs.
+gh_shim_target_owner() {
+    local a prev="" repo="" path=""
+    for a in "$@"; do
+        case "$prev" in -R | --repo) repo="$a" ;; esac
+        case "$a" in
+            --repo=*) repo="${a#--repo=}" ;;
+            -R?*) repo="${a#-R}" ;;
+        esac
+        [[ "${1:-}" == api && -z "$path" && "$a" =~ ^/?repos/([^/?]+)/ ]] && path="${BASH_REMATCH[1]}"
+        prev="$a"
+    done
+    [[ -n "$repo" ]] || repo="${GH_REPO:-}"
+    repo="${repo#https://}"
+    repo="${repo#github.com/}"
+    _owner="${repo%%/*}"
+    [[ -n "$_owner" ]] || _owner="$path"
+    if [[ -z "$_owner" ]]; then
+        gh_shim_origin_slug
+        _owner="${_slug%%/*}"
+    fi
+    [[ -n "$_owner" ]] || _owner=theorem-labs
+}
 # gh_shim_refuse WHY INSTEAD ARGV…: the shim itself refuses, before gh runs.
 gh_shim_refuse() {
     local why="$1" instead="$2"
@@ -280,12 +315,7 @@ if agent_context; then
     # GitHub repository, makes one routed read of it and exits on that.
     if [[ "${1:-}" == auth && "${2:-}" == status ]]; then
         echo "gh shim: agent session. gh calls are routed to the GitHub App for the target repo's owner (an owner without one gets the upstream token), minted per call; the user's own login is not used, so it is not reported."
-        _remote="$(git remote get-url origin 2>/dev/null || true)"
-        _slug=""
-        case "$_remote" in
-            *github.com[:/]*) _slug="${_remote#*github.com[:/]}"; _slug="${_slug%/}"; _slug="${_slug%.git}" ;;
-        esac
-        [[ "$_slug" =~ ^[^/]+/[^/]+$ ]] || _slug=""
+        gh_shim_origin_slug
         if [[ -z "$_slug" ]]; then
             echo "No GitHub repository in this directory to check. To check one, run a read against it, for example: gh api repos/<owner>/<repo> --jq .full_name"
             exit 0
@@ -478,6 +508,31 @@ if [[ "${1:-}" == auth && "${2:-}" == git-credential ]] &&
     [[ -n "$_host_profile" ]]; then
     [[ "${3:-}" == get ]] && exec gh-app-token "$_host_profile" get
     exit 0
+fi
+
+# The same machine's other gh calls from a host shell (an ssh command, a user unit, a pre-push hook)
+# had no token at all: no person's login exists there, and the App routing above is an agent
+# session's. installers/agent-spend.sh's `gh api` fetch failed, and a hooked push was refused because
+# the leak check could not read the repository's visibility (2026-11-04). So outside an agent session,
+# when the caller gives no GH_TOKEN or GITHUB_TOKEN, the call gets an installation token of the same
+# profile for its target owner, minted through the broker's machine login, as the git helper above
+# does. The owner comes from -R/--repo, GH_REPO, a `repos/OWNER/…` path of `gh api`, or this
+# directory's origin remote, else theorem-labs. Only an App installation token (ghs_) is used: for an
+# owner the App does not cover, gh-app-token answers the profile's personal fallback token, which is
+# refused here, and the call goes on with no token. `gh auth` verbs are left to the real gh.
+# GH_APP_TOKEN_MIN_LIFETIME: gh reads its token once per call; a cached token with under 30 minutes
+# left is replaced by a fresh one (`gh run watch` failed 401 on a 12-minute token, 2026-10-22).
+if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && "${1:-}" != auth ]] && ! agent_context &&
+    _host_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" &&
+    [[ -n "$_host_profile" ]]; then
+    gh_shim_target_owner "$@"
+    if _host_token="$(GH_APP_TOKEN_MIN_LIFETIME="${GH_APP_TOKEN_MIN_LIFETIME:-1800}" gh-app-token "$_host_profile" --owner "$_owner" 2> /dev/null)" &&
+        [[ "$_host_token" == ghs_* ]]; then
+        export GH_TOKEN="$_host_token"
+    else
+        echo "gh shim: no GitHub App installation token for owner $_owner (profile $_host_profile); gh runs with no token" >&2
+    fi
+    unset _host_token
 fi
 
 # real_gh: sets _real to the gh this shim hands the call to.

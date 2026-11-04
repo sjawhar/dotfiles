@@ -94,10 +94,11 @@ class HostCredential(unittest.TestCase):
         self.gh("auth", "git-credential", "get", cwd=repo)
         self.assertEqual(self.recorded(), ["real gh auth git-credential get"])
 
-    def test_other_gh_calls_are_unchanged(self):
+    def test_other_gh_calls_reach_the_real_gh(self):
+        # Their token is test_gh_host_token.py's subject; here only that the real gh runs them.
         self.machine_config(PROFILE)
         self.gh("api", "user")
-        self.assertEqual(self.recorded(), ["real gh api user"])
+        self.assertEqual(self.recorded()[-1], "real gh api user")
 
     def test_git_through_the_user_helper_gets_the_app_token(self):
         # ~/.gitconfig's own shape (the helper list reset, then gh's helper, for github.com) beside
