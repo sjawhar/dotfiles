@@ -10,17 +10,21 @@
 # has 589.0.0 at this path, installed by hand; this installer is that step in code.
 #
 # KUBE_CLUSTERS is the one list of the clusters this machine's sessions reach, as `<cluster>
-# <location>` in project theorem-agent-infra; each gets context gke_theorem-agent-infra_<location>_
-# <cluster>. `get-credentials` writes it with gke-gcloud-auth-plugin, which takes its token from
-# gcloud, so a context carries no credential. It also makes the context it writes the current one,
-# and every session on the machine shares ~/.kube/config (shims/gcloud, route_get_credentials_
-# kubeconfig: on 2026-11-02 a switch to grade-us-west1 failed every session's builds-* Jobs). So it
-# writes into a file of its own, and that file is merged in behind the shared one, whose current
-# context wins, and renamed over it. A file with no current context gets dispatch's, the context
-# every box doctor and the build pool use without naming one.
+# <location> [<name>.config]` in project theorem-agent-infra; each gets context gke_theorem-agent-
+# infra_<location>_<cluster>. `get-credentials` writes it with gke-gcloud-auth-plugin, which takes
+# its token from gcloud, so a context carries no credential. It also makes the context it writes
+# the current one, and every session on the machine shares ~/.kube/config (shims/gcloud, route_get_
+# credentials_kubeconfig: on 2026-11-02 a switch to grade-us-west1 failed every session's builds-*
+# Jobs). So it writes into a file of its own, ~/.kube/config.d/<cluster>, the file shims/gcloud
+# tells an agent session to export, and that file is merged in behind the shared one, whose
+# current context wins, and renamed over it. A file with no current context gets dispatch's, the
+# context every box doctor and the build pool use without naming one. A third field names one more
+# standalone file, ~/.kube/<name>.config, for a path tools name: sami-rocqperf had
+# ~/.kube/grade-us-west1.config, which agent-infra's spend/sizejob/README.md exports, and a box
+# without it made a private kubeconfig instead (dispatch://INFRA-993).
 #
-# Idempotent: installs only when the pinned version is not there, and writes a context only when
-# it is missing.
+# Idempotent: installs only when the pinned version is not there, and writes a kubeconfig or a
+# context only when it lacks the cluster's context.
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -37,7 +41,7 @@ KUBE_PROJECT=theorem-agent-infra
 # stockprobe-gke-* contexts, whose clusters no longer exist (`gcloud container clusters list`).
 KUBE_CLUSTERS=(
     "dispatch us-west1"
-    "grade-us-west1 us-west1-b"
+    "grade-us-west1 us-west1-b grade-us-west1.config"
 )
 KUBE_DEFAULT_CONTEXT="gke_${KUBE_PROJECT}_us-west1_dispatch"
 
@@ -108,23 +112,43 @@ if "$(dirname "${BASH_SOURCE[0]}")/../scripts/on-google-vm"; then
     fi
 fi
 
+# Writes the cluster's context alone into $1, unless $1 already holds it. A path that does not
+# exist yet: given an empty file, gcloud warns and leaves a backup of it.
+write_kubeconfig() {
+    local file="$1" cluster="$2" location="$3" context="$4" one
+    if KUBECONFIG="$file" kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$context"; then
+        echo "gcloud-sdk: $file already holds $context"
+        return
+    fi
+    one="$(mktemp -d)"
+    KUBECONFIG="$one/config" PATH="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin:$PATH" \
+        "$GCLOUD_SDK_BIN" container clusters get-credentials "$cluster" --location "$location" --project "$KUBE_PROJECT"
+    mkdir -p "$(dirname "$file")"
+    install -m 600 "$one/config" "$file"
+    rm -rf "$one"
+    echo "gcloud-sdk: wrote $file ($context)"
+}
+
 kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
 contexts="$(kubectl config get-contexts -o name 2>/dev/null || true)"
+# 0700, as shims/gcloud makes it.
+mkdir -p "$HOME/.kube"
+[[ -d "$HOME/.kube/config.d" ]] || mkdir -m 700 "$HOME/.kube/config.d"
 for entry in "${KUBE_CLUSTERS[@]}"; do
-    read -r cluster location <<<"$entry"
+    read -r cluster location named <<<"$entry"
     context="gke_${KUBE_PROJECT}_${location}_${cluster}"
+    own="$HOME/.kube/config.d/$cluster"
+    write_kubeconfig "$own" "$cluster" "$location" "$context"
+    if [[ -n "$named" ]]; then
+        write_kubeconfig "$HOME/.kube/$named" "$cluster" "$location" "$context"
+    fi
     if grep -qxF "$context" <<<"$contexts"; then
         echo "gcloud-sdk: kubectl context $context already present"
         continue
     fi
-    # A path that does not exist yet: given an empty file, gcloud warns and leaves a backup of it.
-    one="$(mktemp -d)"
-    KUBECONFIG="$one/config" PATH="$GCLOUD_SDK_ROOT/google-cloud-sdk/bin:$PATH" \
-        "$GCLOUD_SDK_BIN" container clusters get-credentials "$cluster" --location "$location" --project "$KUBE_PROJECT"
     mkdir -p "$(dirname "$kubeconfig")"
-    (umask 077 && KUBECONFIG="$kubeconfig:$one/config" kubectl config view --flatten >"$kubeconfig.gcloud-sdk.new")
+    (umask 077 && KUBECONFIG="$kubeconfig:$own" kubectl config view --flatten >"$kubeconfig.gcloud-sdk.new")
     mv -f "$kubeconfig.gcloud-sdk.new" "$kubeconfig"
-    rm -rf "$one"
     echo "gcloud-sdk: kubectl context $context added to $kubeconfig"
 done
 if [[ -z "$(KUBECONFIG="$kubeconfig" kubectl config current-context 2>/dev/null || true)" ]]; then
