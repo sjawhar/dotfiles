@@ -10,7 +10,9 @@
 # omp signs in to the gateway with the dev-box@ ID token instead
 # (installers/ossv-box-gateway-token.sh, dispatch://INFRA-993); the key file there is
 # for tools that need the key itself, a Claude Code `apiKeyHelper` among them. On any
-# other machine the unit would fail every run.
+# other machine the unit would fail every run. On sami-devbox the same unit also
+# renews the verified-grader stream's key for the pbc-gateway provider
+# (scripts/verified-grader-gateway-key, the script's second step).
 #
 # Why this exists: omp/models.local.yml on sami-rocqperf routes Claude and Sol traffic
 # through the gateway and names the key file as `apiKeyFile`; each run writes the

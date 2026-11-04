@@ -15,6 +15,11 @@
 # writes the key into ~/.omp/agent/models.yml (mode 0600) as a literal for each provider that names the file as
 # `apiKeyFile`, so omp starts no process to read it. A rotated key reaches each omp at its next start. The key passes
 # through this process only, and is never printed or logged.
+#
+# The second step, on sami-devbox, is scripts/verified-grader-gateway-key: the verified-grader stream's key, read
+# the same way, for the pbc-gateway provider. It runs whatever the first step did, each step logs its own reason,
+# and the unit fails when either fails. sami-rocqperf leaves it out: agentvm stopped that machine's writer when the
+# readers moved to sami-devbox (2026-11-04); add the host here to start it again.
 set -uo pipefail
 # The unit runs in systemd's non-login environment, whose PATH has no gcloud, and ossv-vm calls gcloud whenever its
 # instance cache misses: every run failed with "gcloud: command not found" from 2026-10-26 23:06Z until this line.
@@ -33,6 +38,7 @@ curl -fsS -m 20 -K <(printf 'header = "Authorization: Bearer %s"\n' "$t") \
   | jq -er .payload.data | base64 -d
 EOF
 )" || k=""
+rc=0
 case "$k" in
   sk-*)
     if ! { [ -s "$f" ] && [ "$(cat "$f")" = "$k" ]; }; then
@@ -44,13 +50,17 @@ case "$k" in
     "$HOME/.dotfiles/scripts/omp-models-build" || {
       logger -t ossv-box-gateway-key -- "omp-models-build failed"
       echo "ossv-box-gateway-key: omp-models-build failed" >&2
-      exit 1
+      rc=1
     }
     ;;
   *)
     rm -f "$f.new"
     logger -t ossv-box-gateway-key -- "no key from Secret Manager through ossv-model-gateway"
     echo "ossv-box-gateway-key: no key from Secret Manager through ossv-model-gateway" >&2
-    exit 1
+    rc=1
     ;;
 esac
+if [ "$(hostname -s)" = sami-devbox ]; then
+  "$HOME/.dotfiles/scripts/verified-grader-gateway-key" || rc=1
+fi
+exit "$rc"

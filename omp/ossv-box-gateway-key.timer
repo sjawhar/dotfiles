@@ -1,5 +1,5 @@
 [Unit]
-Description=sami-rocqperf and sami-devbox: put the model-gateway key back after a reboot, and every 10 minutes
+Description=sami-rocqperf and sami-devbox: put the model-gateway keys back after a reboot, and every 10 minutes
 
 [Timer]
 # At boot, because the key lives in tmpfs and a session that starts before it is there reaches no model.
