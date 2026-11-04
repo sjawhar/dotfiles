@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Give omp native skill directories before startup-deferred extensions bind."""
+
+import json
+import os
+from pathlib import Path
+import tempfile
+
+
+def main():
+    home = Path.home()
+    dotfiles = Path(os.environ.get("DOTFILES_DIR", home / ".dotfiles"))
+    manifest = json.loads((dotfiles / "skills-sources.json").read_text())
+    directories = []
+    for source in manifest["sources"]:
+        if source.get("omp") is False:
+            continue
+        directory = (
+            Path(source["ompSkillsDir"]).expanduser()
+            if "ompSkillsDir" in source
+            else dotfiles / source["root"] / "skills"
+        )
+        if directory.is_dir():
+            directories.append(str(directory))
+    output = home / ".cache/omp/dotfiles-skills.yml"
+    content = json.dumps({"skills": {"customDirectories": directories}}, indent=2) + "\n"
+    try:
+        unchanged = output.read_text() == content
+    except FileNotFoundError:
+        unchanged = False
+    if not unchanged:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=output.parent, delete=False) as temporary:
+            temporary.write(content)
+            staged = Path(temporary.name)
+        try:
+            staged.replace(output)
+        finally:
+            staged.unlink(missing_ok=True)
+    print(output)
+
+
+if __name__ == "__main__":
+    main()

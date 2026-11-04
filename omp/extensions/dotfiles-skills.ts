@@ -1,6 +1,6 @@
-// Feed dotfiles skill pools to OMP via the resources_discover extension event.
-// Reads the skill-pool manifest (skills-sources.json) at the dotfiles root.
-// Requires an OMP build that emits resources_discover (v17.3.8-sami.20260820+).
+// Refresh manifest skill pools on /reload-plugins, including pools added after launch.
+// shims/omp also supplies the native skills.customDirectories startup baseline:
+// startup-deferred extensions in omp 18.13.3/18.16.0 miss resources_discover.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
