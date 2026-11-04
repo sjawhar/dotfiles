@@ -260,35 +260,6 @@ The farm root `/mnt/nvme/sami/grade-farm` is state. Until the farm root moves he
 `farm fleet idle-stop`. A job claims its box on the box (`~/farm/claims`), so both roots can place
 jobs on the same running boxes.
 
-## Nickolai's machcsl VMs
-
-SCIENCE's Nickolai extract (judge `measure/progress/extract_nick.sh`, run by `nick_refresh.sh` and
-`daily.sh`) and `export_progress.sh` read machcsl-gcp-1, machcsl-gcp-2 (us-east1-b) and
-machcsl-gcp-3 (europe-west4-c), project theorem-research, over IAP. They are Nickolai's VMs, with
-metadata ssh keys (`enable-oslogin=FALSE`), so OS Login does not apply. On sami-rocqperf the reads
-log in as metadata user `sami` with `~/.ssh/google_compute_engine`, which is never copied.
-
-`installers/nickvm-ssh.sh` (devbox/install.sh) writes only box-side config under
-`/mnt/nvme/sami/boxid`: the key `nickvm-sshkey`, `nickvm/ssh_config` (user `boxid`, IAP through
-gcloud as `boxid/gcloud-box`), `nickvm/known_hosts` and `nickvm/machcsl-gcp-N.cmd`. A box gets
-`--dir /mnt/nvme/sami/boxid` and `NICK_SSH_DIR=/mnt/nvme/sami/boxid/nickvm`. The box identity
-(dev-sjawhar@) can open the IAP tunnel and has `compute.instances.setMetadata` on the three VMs.
-
-The key is not on the VMs: a box login gets `Permission denied (publickey)` (2026-11-04 smoke).
-The add-metadata step waits on Nickolai's yes. After it, run this on sami-devbox for each VM and
-zone (the installer prints the same line for each VM that lacks the key):
-
-```sh
-export CLOUDSDK_CONFIG=/mnt/nvme/sami/boxid/gcloud-box VM=machcsl-gcp-1 Z=us-east1-b
-gcloud compute instances describe $VM --project theorem-research --zone $Z --format=json \
-  | jq -r '.metadata.items[]|select(.key=="ssh-keys").value' >/tmp/$VM.keys
-echo "boxid:$(cat /mnt/nvme/sami/boxid/nickvm-sshkey.pub)" >>/tmp/$VM.keys
-gcloud compute instances add-metadata $VM --project theorem-research --zone $Z --metadata-from-file ssh-keys=/tmp/$VM.keys
-```
-
-`export_progress.sh` names `bet85-science/ssh/$NICKHOST.cmd` directly; it reads `NICK_SSH_DIR`
-only after SCIENCE changes that line.
-
 ## Step 3's first action
 
 `sami-devbox-provision --only speed` measures ssh over Tailscale from sami-rocqperf to sami-devbox
