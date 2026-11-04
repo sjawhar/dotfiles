@@ -2996,6 +2996,173 @@ def check_iops(
             print(text)
     return alerts, cleared
 
+# -------------------------------------------------------------------------- agent box images
+
+
+def agentbox_storage_paths() -> tuple[Path, Path]:
+    home = Path.home()
+    nvme = Path("/mnt/nvme") / home.name
+    boxes = Path(os.environ.get("AGENTBOX_BOXES", str(nvme / "agentbox/boxes" if nvme.is_dir() else home / "boxes")))
+    disks = Path(os.environ.get("AGENTBOX_DISKS", str(boxes.parent / "disks")))
+    caches = Path(os.environ.get("AGENTBOX_CACHE_ROOT", str(nvme / "box-cache" if nvme.is_dir() else home / ".cache/box-cache")))
+    return disks, caches
+
+
+def box_storage_reading(state: State, deadline: float) -> None:
+    """Report allocated image blocks, not the sum of their sparse capacity limits."""
+    disks, caches = agentbox_storage_paths()
+    images = 0
+    try:
+        for image in disks.glob("agentbox-*.img"):
+            if not image.is_symlink():
+                images += image.stat().st_blocks * 512
+    except OSError as error:
+        log(f"box images: cannot measure {disks}: {error}")
+        return
+    cache_bytes = 0
+    if caches.exists():
+        try:
+            result = subprocess.run(["du", "-sx", "-B1", "--", str(caches)],
+                                    capture_output=True, text=True, timeout=max(0.1, min(10, room(deadline))))
+            if result.returncode:
+                raise ValueError(result.stderr.strip())
+            cache_bytes = int(result.stdout.split()[0])
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError) as error:
+            log(f"box storage: images allocated {size(images)}; box-cache total unavailable: {error}")
+            return
+    state.data["box_storage"] = {"at": time.time(), "image_bytes": images,
+                                 "cache_bytes": cache_bytes, "total_bytes": images + cache_bytes}
+    log(f"box storage: images allocated {size(images)}; box-cache {size(cache_bytes)};"
+        f" total allocated {size(images + cache_bytes)} ({disks}, {caches})")
+
+
+def box_loop_image(home: str) -> str:
+    try:
+        dev = os.stat(home).st_dev
+        image = Path(f"/sys/dev/block/{os.major(dev)}:{os.minor(dev)}/loop/backing_file").read_text().strip()
+        return image if re.fullmatch(r"agentbox-[A-Za-z0-9-]+\.img", Path(image).name) else ""
+    except OSError:
+        return ""
+
+
+def box_home_from_inspect(row: dict) -> dict | None:
+    name = str(row.get("Name", "")).lstrip("/")
+    if not name.startswith("agentbox-") or not row.get("State", {}).get("Running"):
+        return None
+    env = dict(value.split("=", 1) for value in row.get("Config", {}).get("Env", []) if "=" in value)
+    for mount in row.get("Mounts", []):
+        if mount.get("Destination") != env.get("HOME"):
+            continue
+        home = mount.get("Source", "")
+        image = box_loop_image(home)
+        if image:
+            return {"name": name, "home": home, "image": image}
+    return None
+
+
+def running_box_homes() -> list[dict]:
+    """Inspect all running boxes in one Docker call after the name census."""
+    try:
+        names = subprocess.run(["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
+                               capture_output=True, text=True, timeout=5, check=True).stdout.split()
+        if not names:
+            return []
+        # A box may close after ps. Docker still returns valid rows for the other boxes.
+        result = subprocess.run(["docker", "inspect", *names], capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            log(f"box disk census: partial inspect: {result.stderr.strip()}")
+        return [box for row in json.loads(result.stdout) if (box := box_home_from_inspect(row))]
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        log(f"box disk census unavailable: {error}")
+        return []
+
+
+def box_disk_session(box: str) -> str:
+    # Reuse the launcher's transcript-based lookup. It never guesses from a shared cwd.
+    try:
+        result = subprocess.run(["bash", "-c", 'source "$1"; box_session_id "$2"', "bash",
+                                 str(Path(__file__).with_name("agentbox")), box],
+                                capture_output=True, text=True, timeout=8)
+        sid = result.stdout.strip()
+        return sid if UUID_RE.fullmatch(sid) else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def box_disk_dirs(home: str) -> str:
+    """Only the loop filesystem: never count the host binds mounted inside the box."""
+    incomplete = False
+    try:
+        result = subprocess.run(["sudo", "-n", "du", "-x", "-B1", "--max-depth=1", "--", home,
+                                 str(Path(home).parent / "tmp")], capture_output=True, text=True, timeout=15)
+        output = result.stdout
+        incomplete = bool(result.returncode)
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        incomplete = True
+    except OSError:
+        return "directory sizes unavailable"
+    rows = []
+    for line in output.splitlines():
+        count, _, path = line.partition("\t")
+        if path == home or not count.isdigit():
+            continue
+        label = "~/" + path[len(home) + 1:] if path.startswith(home + "/") else path.replace(str(Path(home).parent), "")
+        rows.append((int(count), label))
+    biggest = "; ".join(f"{size(count)} {path}" for count, path in sorted(rows, reverse=True)[:3])
+    if incomplete:
+        return (biggest + "; " if biggest else "") + "directory sizes incomplete"
+    return biggest or "no top-level directories"
+
+
+def check_agentboxes(options: argparse.Namespace, state: State, envoy: Envoy, deadline: float) -> int:
+    incidents = state.data.setdefault("box_disks", {})
+    alerts = 0
+    for box in running_box_homes():
+        measured = free_bytes(box["home"])
+        if not measured or not measured[1]:
+            continue
+        free, total = measured
+        used = 100 * (1 - free / total)
+        log(f"{box['name']}: home {used:.1f}% used, {gib(free)} free ({box['image']})")
+        if free * 100 > total * 15:
+            incidents.pop(box["name"], None)
+        if free * 10 > total:
+            continue
+        incident = incidents.setdefault(box["name"], {"told": []})
+        if incident.get("owner") in incident["told"] and BOX_HEALTH_SRE in incident["told"]:
+            continue
+        if room(deadline) < 23 + 2 * options.http_timeout:
+            log(f"{box['name']}: alert pending; this run has too little time for lookup and delivery")
+            continue
+        sid = box_disk_session(box["name"])
+        if sid:
+            incident["owner"] = sid
+        targets = list(dict.fromkeys([BOX_HEALTH_SRE] + ([sid] if sid else [])))
+        biggest = box_disk_dirs(box["home"])
+        body = (f"BOX DISK LOW on {socket.gethostname()}: {box['name']} home is {used:.1f}% used"
+                f" ({gib(free)} free). Biggest: {biggest}."
+                f" Session: {sid or 'not found; SRE must identify it'}."
+                f" Grow on the host: agentbox grow {box['name']} <size>."
+                " Running boxes get host-cache paths only at their next re-box.")
+        report = write_report(options.state, box["name"], time.time(), body + f"\nImage: {box['image']}\nHome: {box['home']}")
+        text = with_report(body, report)
+        for target in targets:
+            if target in incident["told"]:
+                continue
+            if options.dry_run:
+                log(f"DRY RUN -> {target}")
+            elif envoy.send(target, text):
+                incident["told"].append(target)
+                state.commit(options)
+            alerts += 1
+        if options.print_alert:
+            print(text)
+    return alerts
+
+
 
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
@@ -3190,6 +3357,8 @@ def run_once(options: argparse.Namespace) -> int:
     iops_alerts, iops_clears = check_iops(options, state, envoy, deadline)
     alerts += iops_alerts
     cleared += iops_clears
+    box_storage_reading(state, deadline)
+    alerts += check_agentboxes(options, state, envoy, deadline)
 
     # The scratch rule: name each young, big top-level entry of /tmp and of the checkout root
     # (~/src) ONCE, whether or not a mount is crossing. It is the measurement step before any

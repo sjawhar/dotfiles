@@ -49,6 +49,24 @@ Per mount, per run:
 | Said again | only on a **new fact**: free fell **25%** below the level the last message reported, free fell **under the floor** (a crossing opened on the rate alone), or time to full fell **under 1 h**. Never on a clock |
 | Clear | free ≥ floor × 1.5 **and** no df free-space fall that reaches full inside twice the horizon |
 
+### Agent box disks and host footprint
+
+The same timer checks each running `agentbox-*` container's loop-backed home filesystem.
+At 90% used, it sends an alert directly to the box's owning session and the SRE.
+The alert names the largest home directories and `/tmp`, plus the host command to grow the image.
+The session comes from `agentbox`'s transcript lookup, not a guess from its working directory.
+If no session is found, the SRE still receives the alert. Later runs retry the session lookup.
+Each recipient receives one alert per crossing. The alert rearms below 85% used.
+Failed sends remain pending for the next timer run.
+
+Every run logs actual allocated image bytes, box-cache bytes and their total.
+Images use `st_blocks`, so a sparse 128 GiB capacity does not count as 128 GiB of host use.
+Cache sizing uses `du`, with a 10-second limit. A failed measurement is reported as unavailable.
+The watch uses the launcher's default paths under `/mnt/nvme/<user>` or its home-directory fallback.
+If the launcher uses custom `AGENTBOX_DISKS` or `AGENTBOX_CACHE_ROOT`, give the watch the same values.
+`disk-fill-watch --dry-run --print-alert` prints the recipients and alert text without sending messages.
+No new systemd unit is needed.
+
 ### A crossing is said again only on a new fact
 
 In the 48 h to 2026-11-03 this watch sent 150 messages, 454 k characters — 66% of every
