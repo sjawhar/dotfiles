@@ -1100,6 +1100,9 @@ session_env() {
     # The machine the box runs on, since the box's own hostname is its name: what a marker of
     # `move --to` names as `from=`, which agentbox-run.ts and agent-session compare with it.
     e+=(-e "AGENTBOX_HOST=${AGENTBOX_HOST:-$(hostname -s)}")
+    # Identity groups boxes under their physical host. Profile connection settings stay unchanged.
+    local envoy_machine="${AGENTBOX_HOST:-$(hostname -s)}"
+    e+=(-e "ENVOY_MACHINE_ID=${envoy_machine%%.*}")
     # The durable disk and the host's figures for it, which `agentbox doctor --here` compares
     # with its own (DURABLE_CHECK); "none" on a host that has no durable directory.
     if [[ -n "$DURABLE_DIR" ]]; then
