@@ -40,6 +40,22 @@ DOTFILES = Path(__file__).resolve().parents[2]
 AGENTBOX = DOTFILES / "scripts" / "agentbox"
 
 
+def bun_dirs() -> list[str]:
+    """The directory of the bun this suite runs with, as a move finds bun on the host. Never a
+    mise shims directory, which holds every tool mise pins and would shadow /usr/bin's."""
+    found = shutil.which("bun")
+    if found and os.path.basename(os.path.dirname(found)) == "shims":
+        try:
+            found = subprocess.run(["mise", "which", "bun"], capture_output=True, text=True,
+                                   check=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            found = None
+    return [os.path.dirname(found)] if found else []
+
+
+BUN_DIRS = bun_dirs()
+
+
 def write_stub(directory: Path, name: str, body: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -78,7 +94,9 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
             "AGENTBOX_BOX": "",
             "HOME": str(self.home),
-            "PATH": f"{self.stubs}:/usr/bin:/bin",
+            # bun, which reads an omp's launch flags (move_omp_flags, through agentbox-run.ts),
+            # and nothing else of the caller's PATH.
+            "PATH": ":".join([str(self.stubs), *BUN_DIRS, "/usr/bin", "/bin"]),
             "DOTFILES_DIR": str(DOTFILES),
             "AGENTBOX_SRC": str(self.src),
             "AGENTBOX_BOXES": str(self.boxes),
@@ -928,6 +946,160 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("is not in any path the box gets", by["01a19700-0000-7000-8000-00000000f001"]["resume_refused"])
         self.assertEqual(doc["summary"]["resume_refused"], 1)
 
+    # ── the omp's own launch flags ──────────────────────────────────────────────────────────
+    S2 = "01a170e0-e386-7223-9afa-1de32c879230"
+
+    def flagged_session(self, argv: list[str]) -> Path:
+        """S2's shape (2026-11-04): an omp restarted by hand in its pane as `omp --config <file>
+        --resume <its nested transcript>`. `argv` is that omp's command line after the executable;
+        "{t}" stands for the transcript's path. Returns the transcript."""
+        nested = self.home / ".omp/agent/sessions/-lane" \
+            / "2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / f"2026-10-25T02-25-48-934Z_{self.S2}.jsonl"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("", encoding="utf-8")
+        self.nested_session(nested)
+        words = ["/home/u/.mise/installs/omp/18.16.0/bin/omp", *(w.replace("{t}", str(nested)) for w in argv)]
+        (self.proc / "1101" / "cmdline").write_bytes(b"".join(w.encode() + b"\0" for w in words))
+        write_stub(self.stubs, "agentbox", 'printf "%s\\0" "$@" >"$STUB_AGENTBOX_ARGV"')
+        return nested
+
+    def respawned_argv(self) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        """Run `move --self` up to its hand-off, build the pane command from exactly what it hands
+        the relauncher (move_pane_command, as move_relaunch does), and run that command's launcher
+        half against a stub `agentbox`: the argv a moved pane really starts."""
+        moved = self.run_bash(
+            'move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+            'move_hand_off() { local sid="$2" resume="$5"; shift 5; echo "PANE:$(move_pane_command "$sid" "$resume" "$@")"; }\n'
+            'cmd_move_self')
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        pane = [line[5:] for line in moved.stdout.splitlines() if line.startswith("PANE:")]
+        self.assertEqual(len(pane), 1, moved.stdout)
+        # The waker half (`( setsid … move --wake … & )`) is left out: it would wait for Envoy.
+        launcher = pane[0].split("); ", 1)[1]
+        argv_file = self.root / "AGENTBOX_ARGV"
+        subprocess.run(["bash", "-c", launcher], env={**self.env, "STUB_AGENTBOX_ARGV": str(argv_file)},
+                       check=True, capture_output=True, timeout=60)
+        return moved, argv_file.read_bytes().decode().split("\0")[:-1]
+
+    def test_a_move_resumes_the_omp_with_the_config_it_was_launched_with(self) -> None:
+        """S2's dry run at 12:52Z on 2026-11-04 would have respawned `omp --config
+        /mnt/nvme/sami/frac-verify/omp-bet59.yml --resume <jsonl>` as `omp --resume <jsonl>`: the
+        session back on the wrong configuration."""
+        config = "/mnt/nvme/sami/frac-verify/omp-bet59.yml"
+        nested = self.flagged_session(["--config", config, "--resume", "{t}"])
+        dry = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                            'cmd_move_self --dry-run')
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(f"-- omp --config {config} --resume {nested}\n", dry.stdout)
+        _, argv = self.respawned_argv()
+        self.assertEqual(argv[argv.index("--") + 1:], ["omp", "--config", config, "--resume", str(nested)])
+
+    def test_every_launch_flag_survives_the_move_and_no_message_is_replayed(self) -> None:
+        """No list of flags to keep: every flag and its value comes back, a value holding spaces
+        as one word, a `--flag=value` as written, and only the session source (which the move
+        names itself) and positional words (omp records one as a message the person typed) go."""
+        nested = self.flagged_session([
+            "--config", "/x/omp a.yml", "--model", "p/m", "--append-system-prompt", "two words here",
+            "--no-title", "--thinking=high", "--some-future-flag", "its value",
+            "--resume", "{t}", "a message typed at launch",
+        ])
+        kept = ["--config", "/x/omp a.yml", "--model", "p/m", "--append-system-prompt", "two words here",
+                "--no-title", "--thinking=high", "--some-future-flag", "its value"]
+        moved, argv = self.respawned_argv()
+        self.assertEqual(argv[argv.index("--") + 1:], ["omp", *kept, "--resume", str(nested)])
+        # The line the move prints is the same command, quoted so a person can paste it.
+        dry = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                            'cmd_move_self --dry-run')
+        line = next(l for l in dry.stdout.splitlines() if l.startswith("  agentbox new "))
+        words = shlex.split(line)
+        self.assertEqual(words[words.index("--") + 1:], ["omp", *kept, "--resume", str(nested)])
+
+    def test_a_move_that_cannot_read_the_launch_flags_refuses_before_the_hang_up(self) -> None:
+        """Moving without them is moving onto the wrong configuration, silently."""
+        self.flagged_session(["--config", "/x/a.yml", "--resume", "{t}"])
+        write_stub(self.stubs, "mise", "exit 1")
+        refused = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                                'move_hand_off() { echo HANDED-OFF; }\ncmd_move_self',
+                                {"PATH": f"{self.stubs}:/usr/bin:/bin"})
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertNotIn("HANDED-OFF", refused.stdout)
+        self.assertIn("launch flags", refused.stderr)
+        self.assertIn("nothing was hung up", refused.stderr)
+
+    # ── a nested session's record, and a set that looks short ───────────────────────────────
+    def timed_transcript(self, path: Path, calls: list[tuple[str, str, dict]]) -> Path:
+        """A transcript at `path` holding those (timestamp, tool, arguments) calls."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps({
+            "type": "message", "timestamp": ts,
+            "message": {"role": "assistant", "content": [{"type": "toolCall", "name": name, "arguments": args}]},
+        }) + "\n" for ts, name, args in calls), encoding="utf-8")
+        return path
+
+    def test_a_nested_session_s_record_is_read_through_its_own_omp(self) -> None:
+        """S2's transcript is one level below the bucket, inside the session that started it, and
+        the record reader lists only `<bucket>/<file>`: its record was read from no file, and its
+        dry run named its working directory and its one --dir while its transcript named
+        /mnt/nvme/sami/frac-verify 61 times that day. --self and --plan both read it now."""
+        sessions = self.home / ".omp/agent/sessions"
+        nested = sessions / "-lane" / "2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / f"2026-10-25T02-25-48-934Z_{self.S2}.jsonl"
+        state = self.home / "frac-verify"
+        (state / "s2-scratch").mkdir(parents=True)
+        (state / "s2-scratch" / "p3-cars.md").write_text("x\n", encoding="utf-8")
+        self.timed_transcript(nested, [
+            ("2026-11-01T10:00:00.000Z", "read", {"path": f"{state}/s2-scratch/p3-cars.md"}),
+        ])
+        self.nested_session(nested)
+        env = {"AGENTBOX_SESSION_ROOTS": str(sessions)}
+        moved = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                              'cmd_move_self --dry-run', env)
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn(f"--dir {state}/s2-scratch", moved.stdout)
+        self.assertIn("its own record today", moved.stdout)
+        plan = self.run_bash('move_image_bytes() { echo 280000000; }\nmove_free_bytes() { echo 900000000000; }\n'
+                             'cmd_move_plan --json', env)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        doc = {s["session"]: s for s in json.loads(plan.stdout)["sessions"]}
+        self.assertIn(f"{state}/s2-scratch", [d["path"] for d in doc[self.S2]["dirs"]])
+
+    def test_the_dry_run_says_when_the_inferred_set_is_much_smaller_than_the_transcript_s(self) -> None:
+        """The threshold, row by row: it warns when at least two trees the transcript names in
+        the last 24 hours are outside the box AND the box gets fewer than half of them; one tree
+        left out, or a box that gets most of them, is quiet. The record (today, from 12:00Z here)
+        sees none of the 10:00Z calls, as the record of a nested session saw nothing at all."""
+        sessions = self.home / ".omp/agent/sessions"
+        transcript = sessions / "-lane" / f"2026-11-01T09-00-00-000Z_{self.S2}.jsonl"
+        trees = {}
+        for name in ("a", "b", "c", "d", "e"):
+            trees[name] = self.home / "tmp" / name
+            trees[name].mkdir(parents=True)
+            (trees[name] / "f").write_text("x\n", encoding="utf-8")
+        env = {"AGENTBOX_SESSION_ROOTS": str(sessions), "AGENTBOX_MOVE_SINCE": "2026-11-01T12:00:00Z",
+               "AGENTBOX_MOVE_SHORT_SINCE": "2026-11-01T00:00:00Z"}
+        self.nested_session(transcript)
+
+        def dry_run(before: str, after: str) -> str:
+            calls = [("2026-11-01T10:00:00.000Z", "read", {"path": f"{trees[n]}/f"}) for n in before]
+            calls += [("2026-11-01T13:00:00.000Z", "read", {"path": f"{trees[n]}/f"}) for n in after]
+            self.timed_transcript(transcript, calls)
+            result = self.run_bash('move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+                                   'cmd_move_self --dry-run', env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        # Two trees named, the box gets neither: it says so, naming both.
+        out = dry_run("ab", "")
+        self.assertIn("WARNING: the inferred set looks short", out)
+        self.assertIn("names 2 trees", out)
+        self.assertIn(f"  {trees['a']}\n", out)
+        self.assertIn(f"  {trees['b']}\n", out)
+        # One tree left out is a file read elsewhere as often as a lost tree: quiet.
+        self.assertNotIn("WARNING", dry_run("a", ""))
+        # Two left out but the box gets three of five: the inference worked; quiet.
+        self.assertNotIn("WARNING", dry_run("ab", "cde"))
+
     def relaunch(self, environ: dict[str, str], respawn_fails: bool = False,
                  caller: dict[str, str] | None = None) -> list[str]:
         """Run the detached relauncher of `--all`/`move <id>`/`--now` for one session and return the
@@ -1197,6 +1369,8 @@ class AgentboxMove(unittest.TestCase):
         host_only = "/mnt/nvme/sami/tmp/a-path-this-box-does-not-have"
         self.assertFalse(Path(host_only).exists(), "the fixture needs a path this host lacks")
         self.target()  # for its tmux stub, which records what the pane is respawned with
+        # The box's omp, which move_own_omp names below: its launch flags go into the new box.
+        self.make_proc(999999901)
         nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
             / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
         env = {
@@ -1617,6 +1791,52 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(len(respawn), 1, respawn)
         self.assertIn("-t %81", respawn[0])
         self.assertIn(f"session {self.TO} moved to devbox", self.pane_command(respawn[0]))
+
+    def flagged_move_to(self, resume: bool) -> tuple[Path, Path]:
+        """A `move --to` job for a session whose omp runs as `omp --config '/x/omp a.yml' --resume
+        <transcript>`, against a target whose omp resumes (or, `resume` off, exits at once)."""
+        transcript = self.moving_session()
+        argv = ["omp", "--config", "/x/omp a.yml", "--resume", str(transcript)]
+        (self.proc / "999999901" / "cmdline").write_bytes(b"".join(w.encode() + b"\0" for w in argv))
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target(resume=resume)
+        moved = self.move_to()
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        [job] = self.jobs()
+        [member] = json.loads(job.read_text(encoding="utf-8"))["members"]
+        self.assertEqual(member["flags"], ["--config", "/x/omp a.yml"])
+        self.set_pids()
+        return transcript, job
+
+    def test_a_move_to_another_machine_keeps_the_omp_s_launch_flags(self) -> None:
+        transcript, job = self.flagged_move_to(resume=True)
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        [started] = [c for c in (self.remote / "TMUX").read_text(encoding="utf-8").splitlines() if c.startswith("new-")]
+        launcher = Path(started.rsplit(" ", 1)[1]).read_text(encoding="utf-8")
+        self.assertIn(f"-- omp --config /x/omp\\ a.yml --resume {transcript}", launcher)
+
+    def test_a_rolled_back_move_resumes_here_with_the_omp_s_launch_flags(self) -> None:
+        transcript, job = self.flagged_move_to(resume=False)
+        run = self.run_bash(f'move_to_run "{job}"')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("rolled back:", run.stdout)
+        respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
+        self.assertEqual(len(respawn), 1, respawn)
+        self.assertIn(f"-- omp --config /x/omp\\ a.yml --resume {transcript}", self.pane_command(respawn[0]))
+
+    def test_a_re_box_keeps_the_launch_flags_of_the_box_s_omp(self) -> None:
+        nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
+        self.make_proc(999999901, cmdline=f"omp --config /x/a.yml --resume {nested}")
+        result = self.run_bash('move_own_omp() { echo 999999901; }\ncmd_move_self --dry-run', {
+            "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa", "AGENTBOX_DIRS": f"{self.home}/lane",
+            "OMP_SESSION_ID": "01a19700-0000-7000-8000-000000000d09", "PI_SESSION_FILE": str(nested),
+            "TMUX_PANE": "%7",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"--dir {self.home}/lane -- omp --config /x/a.yml --resume {nested}\n", result.stdout)
 
     def clone_fixture(self) -> tuple[Path, Path, Path]:
         """A checkout with an origin, and a `target` whose paths are the same ones under another

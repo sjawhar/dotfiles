@@ -2766,11 +2766,27 @@ PYEOF
 # O_APPEND write of it is not torn by another worker's.
 MOVE_RECORD_CACHE=""
 MOVE_RECORD_JOBS="${AGENTBOX_MOVE_JOBS:-16}"
+#
+# Each argument is SID or SID:PID. A session the listing does not have is found through its own
+# omp (move_record_file): the listing reads only `<root>/<bucket>/<file>.jsonl`, and a session
+# started from another session's turn keeps its file one level deeper, in THAT session's
+# directory. S2 (01a170e0, `…/-Code-personal-theorem/<FRAC's 01a13b68 dir>/…_01a170e0….jsonl`)
+# was such a session: its record was read from no file at all, and its `move --self --dry-run`
+# at 12:52Z on 2026-11-04 named only its working directory and the one --dir it gave, while its
+# transcript named /mnt/nvme/sami/frac-verify (61 calls today), gate-runs and its tmp trees.
 move_record_prefetch() {
-    local sid pairs=()
+    local arg sid pid file pairs=()
+    # The listing once, in this shell (the $(…) below would each walk it again), and through the
+    # process only for a session the listing does not have, so a plan of ~100 sessions does not
+    # pay for a second lookup of every one (its resume check already makes one).
     move_read_transcripts
-    for sid in "$@"; do
-        [[ -n "${MOVE_TRANSCRIPT[$sid]:-}" ]] && pairs+=("$sid=${MOVE_TRANSCRIPT[$sid]}")
+    for arg in "$@"; do
+        sid="${arg%%:*}" pid=""
+        [[ "$arg" == *:* ]] && pid="${arg#*:}"
+        [[ -n "$sid" ]] || continue
+        file="${MOVE_TRANSCRIPT[$sid]:-}"
+        [[ -n "$file" ]] || file="$(move_record_file "$sid" "$pid")"
+        [[ -n "$file" ]] && pairs+=("$sid=$file")
     done
     (( ${#pairs[@]} )) || return 0
     MOVE_RECORD_CACHE="$(mktemp -t agentbox-record.XXXXXX)"
@@ -2783,27 +2799,39 @@ move_record_prefetch() {
     return 0
 }
 
-# One session's record candidates, as "<path>\t<why>".
-move_record_dirs() {
-    local sid="$1" file
-    [[ -n "$sid" ]] || return 0
-    if [[ -n "$MOVE_RECORD_CACHE" && -f "$MOVE_RECORD_CACHE" ]]; then
-        awk -F'\t' -v s="$sid" '$1 == s { print $3 "\t" $2 }' "$MOVE_RECORD_CACHE"
-        return 0
-    fi
-    # A session in this run's census is found through its own process (move_transcript, from its
-    # open files), not through a listing of every bucket: that listing took 14-156 s at load 450,
-    # most of a `move --to`'s time (2026-11-03).
-    file="${MOVE_TRANSCRIPT[$sid]:-}"
+# move_record_file SID [PID]: the transcript whose record is read for SID, in the order it always
+# was - the listing when this run has read it, else, for a session in this run's census, its own
+# process (that listing took 14-156 s at load 450, most of a `move --to`'s time, 2026-11-03), else
+# the listing - and then, new, through the session's own omp (PID) when the listing does not have
+# it: move_transcript finds the file the omp holds open, names in --resume, or keeps under its
+# agent directory at any depth, which is where a nested transcript is.
+move_record_file() {
+    local sid="$1" pid="${2:-}" file="${MOVE_TRANSCRIPT[$sid]:-}" row_pid="" _c _r
     if [[ -z "$file" && -n "${MT_ROW_OF[$sid]:-}" ]]; then
-        local _c pid _r
-        IFS="$SEP" read -r _c pid _r <<<"${MT_ROW_OF[$sid]}"
-        file="$(move_transcript "$pid" "$sid" 2>/dev/null || true)"
+        IFS="$SEP" read -r _c row_pid _r <<<"${MT_ROW_OF[$sid]}"
+        file="$(move_transcript "$row_pid" "$sid" 2>/dev/null || true)"
     fi
     if [[ -z "$file" ]]; then
         move_read_transcripts
         file="${MOVE_TRANSCRIPT[$sid]:-}"
     fi
+    if [[ -z "$file" && -n "$pid" && "$pid" != "$row_pid" ]]; then
+        file="$(move_transcript "$pid" "$sid" 2>/dev/null || true)"
+    fi
+    # A path the sweep deleted (move_transcript's last source) has nothing left to read.
+    [[ -n "$file" && -r "$file" ]] && printf '%s\n' "$file"
+    return 0
+}
+
+# One session's record candidates, as "<path>\t<why>". $2, when given, is the session's omp pid.
+move_record_dirs() {
+    local sid="$1" pid="${2:-}" file
+    [[ -n "$sid" ]] || return 0
+    if [[ -n "$MOVE_RECORD_CACHE" && -f "$MOVE_RECORD_CACHE" ]]; then
+        awk -F'\t' -v s="$sid" '$1 == s { print $3 "\t" $2 }' "$MOVE_RECORD_CACHE"
+        return 0
+    fi
+    file="$(move_record_file "$sid" "$pid")"
     [[ -n "$file" ]] || return 0
     python3 -c "$MOVE_RECORD_PY" "$MOVE_RECORD_SINCE" "$sid=$file" 2>/dev/null \
         | awk -F'\t' '{ print $3 "\t" $2 }'
@@ -2979,7 +3007,7 @@ move_dirs_why() {
                 if [[ -d "$path" ]]; then printf '%s\tits own record today, %s\n' "$path" "$why"
                 elif [[ -f "$path" ]]; then printf '%s\tits own record today, %s\n' "$path" "$why"
                 fi
-            done < <(move_record_dirs "$sid") | while IFS=$'\t' read -r path why; do
+            done < <(move_record_dirs "$sid" "$pid") | while IFS=$'\t' read -r path why; do
                 if [[ -f "$path" ]]; then
                     if $MOVE_EXACT && ! move_git_root_var "${path%/*}"; then printf 'FILE\t%s\t%s\n' "$path" "$why" >&3; continue; fi
                     path="${path%/*}"
@@ -3037,6 +3065,68 @@ move_dirs() { move_dirs_why "$@" | cut -f1; }
 move_spec() {
     local d
     while read -r d; do printf -- '--dir\n%s\n' "$d"; done < <(move_dirs "$@")
+}
+
+# ── is the inferred set short? ───────────────────────────────────────────────────────────────
+#
+# move_short_set PID TRANSCRIPT DIR…: a WARNING when the paths a box would get (DIR…) leave out
+# most of the trees the session's own transcript names, and nothing otherwise.
+#
+# It is a second, independent reading of the record. The inference above reads the record of
+# the file it LOOKS UP for the session, today only; this reads TRANSCRIPT, the file the box will
+# resume (move_resume_check found it, so it is the session's own), over the last 24 hours. Each
+# path one of its tool calls names is bounded exactly as an inferred candidate is (its git tree,
+# else the first directory below a shared root), and kept when it exists, is not in every box
+# already and is neither too broad nor one that dies with this omp. Those are the trees it names.
+#
+# "Much smaller" is: at least MOVE_SHORT_MIN (2) of those trees are outside every DIR, AND the
+# box gets fewer than half of them. Why both: a single tree named once and left out is what a
+# session that read one file elsewhere looks like, and the inference keeps today's anyway; the
+# half rule is what separates "the inference missed a tree" from "the inference read nothing".
+# Measured over sami-devbox's 35 live host sessions at 13:2xZ on 2026-11-04: by the unchanged
+# inference it warned for 2, S2 (its transcript named 20 trees, the box got 1) and 01a1a3a6 (14
+# trees, 3 in the box: worktrees it worked in from 23:02Z the day before, which a record read
+# from 00:00Z does not see). With S2's record read (move_record_file) it warns for 01a1a3a6 alone.
+# The 33 quiet ones include 01a1a2ff (3 of 16 trees outside the box), 01a1a3af (3 of 7) and
+# 01a1a350 (1 of 1): left-out trees, but not a set much smaller than the transcript's.
+MOVE_SHORT_MIN="${AGENTBOX_MOVE_SHORT_MIN:-2}"
+MOVE_SHORT_SINCE="${AGENTBOX_MOVE_SHORT_SINCE:-$(date -u -d '24 hours ago' +%FT%TZ 2>/dev/null || echo "$MOVE_RECORD_SINCE")}"
+MOVE_SHORT_TREES=() MOVE_SHORT_MISSING=()
+move_short_trees() {
+    local pid="$1" transcript="$2" path _why tree d covered
+    shift 2
+    local -A seen=() raw=()
+    MOVE_SHORT_TREES=() MOVE_SHORT_MISSING=()
+    [[ -n "$transcript" && -r "$transcript" ]] || return 0
+    MOVE_SCRATCH="$(move_omp_scratch "$pid")"
+    while IFS=$'\t' read -r _ _why path; do
+        path="${path%%:[0-9]*}"
+        [[ -n "$path" && -z "${raw[$path]:-}" ]] || continue
+        raw[$path]=1
+        [[ -f "$path" ]] && path="${path%/*}"
+        [[ -d "$path" ]] || continue
+        move_dir_in_box "$path" && continue
+        move_resolve_dir_var "$path"
+        tree="$MOVE_RESOLVED"
+        [[ -n "$tree" && -d "$tree" && -z "${seen[$tree]:-}" ]] || continue
+        seen[$tree]=1
+        if move_dir_in_box "$tree" || move_dir_too_broad "$tree" || move_dir_dies_with_omp "$tree"; then continue; fi
+        MOVE_SHORT_TREES+=("$tree")
+        covered=false
+        for d in "$@"; do move_within "$tree" "$d" && { covered=true; break; }; done
+        $covered || MOVE_SHORT_MISSING+=("$tree")
+    done < <(python3 -c "$MOVE_RECORD_PY" "$MOVE_SHORT_SINCE" "short=$transcript" 2>/dev/null)
+    return 0
+}
+move_short_set() {
+    local total missing kept
+    move_short_trees "$@"
+    total=${#MOVE_SHORT_TREES[@]} missing=${#MOVE_SHORT_MISSING[@]}
+    kept=$((total - missing))
+    (( missing >= MOVE_SHORT_MIN && kept * 2 < total )) || return 0
+    echo "agentbox: WARNING: the inferred set looks short. This session's own transcript names $total trees since $MOVE_SHORT_SINCE and the box gets $kept of them; NOT in the box (each is writable there and lost with it):"
+    printf '  %s\n' "${MOVE_SHORT_MISSING[@]}"
+    echo "  Add each one you still work in with --dir."
 }
 
 # Every live top-level omp process on this machine, one TSV row each:
@@ -3341,18 +3431,79 @@ move_resume_check() {
     return 1
 }
 
+# move_omp_flags PID: every launch flag the omp at PID was started with, in MOVE_OMP_FLAGS, so a
+# move resumes the session as `omp <those flags> --resume <transcript>`. The respawn used to be a
+# bare `omp --resume <transcript>`: S2 (01a170e0) ran as `omp --config
+# /mnt/nvme/sami/frac-verify/omp-bet59.yml --resume <jsonl>`, and its dry run at 12:52Z on
+# 2026-11-04 would have brought it back on the wrong configuration.
+#
+# Nothing here lists the flags to keep. The omp's own argv (/proc/PID/cmdline) is read, and only
+# what the move replaces is taken out: the session source (--resume, --session, --continue,
+# --fork, …; the move names its own) and positional words, which omp records as a message the
+# person typed. Telling a flag's value from a positional needs each flag's arity, which is
+# relaunchArgv's job in scripts/agentbox-run.ts, the box runner's restart: one implementation of
+# the rule, asked here through bun. An unknown long flag keeps the word after it as its value.
+# Returns 1, with MOVE_OMP_FLAGS_WHY, when the argv or bun cannot be read: a move that cannot say
+# how the session was launched must not guess, so the caller refuses before the hang-up.
+MOVE_OMP_FLAGS=() MOVE_OMP_FLAGS_WHY=""
+IFS= read -r -d '' MOVE_OMP_FLAGS_JS <<'JSEOF' || true
+const { relaunchArgv } = await import(process.env.AGENTBOX_RUN_TS);
+const words = (await Bun.stdin.text()).split("\0");
+if (words.at(-1) === "") words.pop();
+// argv[0] is the omp executable; relaunchArgv keeps it first and ends with `--resume <sid>`.
+const kept = relaunchArgv(["omp", ...words.slice(1)], "-").slice(1, -2);
+process.stdout.write(kept.map(w => `${w}\0`).join(""));
+JSEOF
+move_omp_flags() {
+    local pid="$1" bun argv out rc=0
+    MOVE_OMP_FLAGS=() MOVE_OMP_FLAGS_WHY=""
+    bun="$(command -v bun 2>/dev/null || mise which bun 2>/dev/null || true)"
+    if [[ -z "$bun" ]]; then
+        MOVE_OMP_FLAGS_WHY="no bun on PATH (nor through mise), which reads omp $pid's launch flags (scripts/agentbox-run.ts relaunchArgv), so they could not be carried"
+        return 1
+    fi
+    # The argv is copied to a regular file first: bun reads a stdin redirected from a /proc file,
+    # whose size is 0, as empty (measured on sami-devbox, bun 1.4.4), and the flags would be lost
+    # without a word. Both files hold NUL-separated words, as a value may hold spaces or newlines.
+    argv="$(mktemp -t agentbox-argv.XXXXXX)" && out="$(mktemp -t agentbox-flags.XXXXXX)" \
+        || { MOVE_OMP_FLAGS_WHY="no temporary file for omp $pid's launch flags"; rm -f "${argv:-}"; return 1; }
+    if ! cat "$PROC/$pid/cmdline" >"$argv" 2>/dev/null || [[ ! -s "$argv" ]]; then
+        rm -f "$argv" "$out"
+        MOVE_OMP_FLAGS_WHY="the command line of omp $pid ($PROC/$pid/cmdline) cannot be read, so the flags it was launched with could not be carried"
+        return 1
+    fi
+    AGENTBOX_RUN_TS="$DOTFILES_DIR/scripts/agentbox-run.ts" "$bun" -e "$MOVE_OMP_FLAGS_JS" \
+        <"$argv" >"$out" 2>/dev/null || rc=$?
+    if (( rc == 0 )); then mapfile -t -d '' MOVE_OMP_FLAGS <"$out"; fi
+    rm -f "$argv" "$out"
+    if (( rc != 0 )); then
+        MOVE_OMP_FLAGS_WHY="reading omp $pid's launch flags with $bun and scripts/agentbox-run.ts failed (exit $rc), so they could not be carried"
+        return 1
+    fi
+    return 0
+}
+
+# move_omp_line RESUME FLAG…: the omp command a moved pane runs, quoted for a person to read.
+move_omp_line() {
+    local resume="$1"
+    shift
+    printf 'omp%s --resume %s' "$( (( $# )) && printf ' %q' "$@")" "$resume"
+}
+
 # move_session_spec PID SID DIR…: the `agentbox new` options a move gives this session - the
-# session environment (move_session_env), then `--dir` for each DIR - in MOVE_SPEC, and the
-# resume check on them (move_resume_check: MOVE_RESUME or MOVE_RESUME_WHY, and its status).
+# session environment (move_session_env), then `--dir` for each DIR - in MOVE_SPEC, the resume
+# check on them (move_resume_check: MOVE_RESUME or MOVE_RESUME_WHY, and its status), and the
+# omp's launch flags in MOVE_OMP_FLAGS (move_omp_flags; one it cannot read is a refusal too).
 # `--self`, `move <id>` and `--plan` all ask this one function, so the plan shows exactly the
 # check a move will run.
-MOVE_SPEC=()
+MOVE_SPEC=() MOVE_SPEC_FLAGS=()
 move_session_spec() {
     local pid="$1" sid="$2" d
     shift 2
     mapfile -t MOVE_SPEC < <(move_session_env "$pid")
     for d in "$@"; do MOVE_SPEC+=(--dir "$d"); done
-    move_resume_check "$pid" "$sid" "${MOVE_SPEC[@]}"
+    move_resume_check "$pid" "$sid" "${MOVE_SPEC[@]}" || return 1
+    move_omp_flags "$pid" || { MOVE_RESUME_WHY="$MOVE_OMP_FLAGS_WHY"; return 1; }
 }
 
 # One census per run when MOVE_CENSUS_ONCE is on (a `move --to` or `--self` asks it to identify
@@ -3580,14 +3731,14 @@ cmd_move_plan() {
     echo "agentbox move --plan: reading this host's live omp sessions; progress on stderr, the table at the end." >&2
     local census_rows=() total=0 done_n=0
     mapfile -t census_rows < <(move_census)
-    local class pid sid pane at cwd detail spec reason line path why note resume
+    local class pid sid pane at cwd detail spec reason line path why note resume flags_note
     local dirs=() whys=() rows=() why_rows=() blocked=0 movable=0 sids=() refused_sids=()
     local -A counts=([host]=0 [no-pane]=0 [boxed]=0 [sandbox]=0 [subagent]=0)
     for line in "${census_rows[@]}"; do
         IFS="$SEP" read -r class pid sid pane at cwd detail <<<"$line"
         [[ "$class" == host || "$class" == no-pane ]] || continue
         total=$((total + 1))
-        [[ -n "$sid" ]] && sids+=("$sid")
+        [[ -n "$sid" ]] && sids+=("$sid:$pid")
     done
     echo "agentbox: ${#census_rows[@]} live omp processes, $total sessions to read (their processes and their records)." >&2
     # One pass over /proc for every session's process tree, and ONE python run over every
@@ -3636,10 +3787,11 @@ cmd_move_plan() {
         # The resume check the move will run, by the same function (move_session_spec), so a
         # person sees before any notice which sessions would not come back. Its spec, session
         # environment included, is the one the row shows.
-        resume=""
+        resume="" flags_note=""
         if [[ -n "$sid" ]]; then
             if move_session_spec "$pid" "$sid" "${dirs[@]+"${dirs[@]}"}"; then
                 resume="resume: $MOVE_RESUME"
+                (( ${#MOVE_OMP_FLAGS[@]} )) && flags_note="omp launch flags carried: $(printf '%q ' "${MOVE_OMP_FLAGS[@]}")"
             else
                 resume="REFUSED: $MOVE_RESUME_WHY"
                 refused_sids+=("$sid")
@@ -3658,6 +3810,7 @@ cmd_move_plan() {
         if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
             note="${note:+$note; }$MOVE_NOTICE_NOKIDS"
         fi
+        [[ -z "$flags_note" ]] || note="${note:+$note; }${flags_note% }"
         # What of the session the hang-up ends (move_orphans): the move refuses until it is a unit,
         # is stopped, or the session passes --accept-orphans.
         local orphans
@@ -3945,11 +4098,26 @@ move_spec_usable() {
     printf '%s\n' ${out[@]+"${out[@]}"}
 }
 
+# move_split_flags SPEC… [-- FLAG…]: the `agentbox new` options before the first `--` in
+# MOVE_SPLIT_SPEC and the omp launch flags after it (move_omp_flags) in MOVE_SPLIT_FLAGS. A spec
+# word is never `--` itself: it holds -e NAME=VALUE, --dir PATH and launcher flags.
+MOVE_SPLIT_SPEC=() MOVE_SPLIT_FLAGS=()
+move_split_flags() {
+    MOVE_SPLIT_SPEC=() MOVE_SPLIT_FLAGS=()
+    while (( $# )) && [[ "$1" != -- ]]; do MOVE_SPLIT_SPEC+=("$1"); shift; done
+    (( $# )) && shift
+    MOVE_SPLIT_FLAGS=("$@")
+}
+
+# move_pane_command SID RESUME SPEC… [-- FLAG…]: the line a moved pane runs; FLAG… are the omp's
+# own launch flags (move_omp_flags), given back to it before `--resume`.
 move_pane_command() {
     local sid="$1" resume="$2" log
     shift 2
-    local -a usable=()
-    mapfile -t usable < <(move_spec_usable "$@")
+    local -a usable=() flags=()
+    move_split_flags "$@"
+    flags=(${MOVE_SPLIT_FLAGS[@]+"${MOVE_SPLIT_FLAGS[@]}"})
+    mapfile -t usable < <(move_spec_usable ${MOVE_SPLIT_SPEC[@]+"${MOVE_SPLIT_SPEC[@]}"})
     set -- ${usable[@]+"${usable[@]}"}
     # The waker runs on the host after this box closes. XDG_CACHE_HOME belongs to the old box
     # and close_box removes it; ~/.cache/omp is a shared mount that survives the move. Make its
@@ -3960,7 +4128,7 @@ move_pane_command() {
     # its own (a rollback); else the waker's own "the move is done".
     printf '( setsid %q move --wake %q%s </dev/null >>%q 2>&1 & ); %s' \
         "$(readlink -f "${BASH_SOURCE[0]}")" "$sid" "${MOVE_PANE_WAKE_NOTICE:+ $(printf '%q' "$MOVE_PANE_WAKE_NOTICE")}" "$log" \
-        "$(printf '%q ' agentbox new --drop-gone-dirs "$@" -- omp --resume "$resume")"
+        "$(printf '%q ' agentbox new --drop-gone-dirs "$@" -- omp ${flags[@]+"${flags[@]}"} --resume "$resume")"
 }
 
 # The tmux server a relauncher drives its pane through: `-S <socket>` from the TARGET omp's own
@@ -3984,12 +4152,14 @@ move_target_tmux() {
     return 0
 }
 
-# move_relaunch PID SID PANE CWD RESUME SPEC…
+# move_relaunch PID SID PANE CWD RESUME SPEC… [-- FLAG…]
 move_relaunch() {
-    local pid="$1" sid="$2" pane="$3" cwd="$4" resume="$5" waited=0 inner
+    local pid="$1" sid="$2" pane="$3" cwd="$4" resume="$5" waited=0 inner omp_line
     shift 5
-    local spec=("$@")
-    echo "$(date -u +%FT%TZ) move $sid: pid $pid, pane $pane, cwd $cwd, resume $resume, spec ${spec[*]}"
+    move_split_flags "$@"
+    local spec=(${MOVE_SPLIT_SPEC[@]+"${MOVE_SPLIT_SPEC[@]}"}) flags=(${MOVE_SPLIT_FLAGS[@]+"${MOVE_SPLIT_FLAGS[@]}"})
+    omp_line="$(move_omp_line "$resume" ${flags[@]+"${flags[@]}"})"
+    echo "$(date -u +%FT%TZ) move $sid: pid $pid, pane $pane, cwd $cwd, resume $resume, spec ${spec[*]}, omp line $omp_line"
     move_target_tmux "$pid"
     echo "$(date -u +%FT%TZ) move $sid: tmux server ${MOVE_TMUX[1]:-from the environment of this process}, client $MOVE_TMUX_BIN"
     # Pids are reused: never signal one that is no longer this session's omp.
@@ -4011,7 +4181,7 @@ move_relaunch() {
     # drill session at 15:19:08Z this test passed and each respawn try then failed `can't find
     # pane` for 10 minutes, as for 01a16c67's pane %74 at 10:20:48-10:32:00Z.
     if [[ -z "$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "$pane" '#{pane_id}' 2>/dev/null)" ]]; then
-        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $resume"
+        echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- $omp_line"
         return 1
     fi
     # The launcher leaves out a --dir that is gone, or is not a directory, by the time it runs
@@ -4026,7 +4196,7 @@ move_relaunch() {
             echo "$(date -u +%FT%TZ) move $sid: --dir ${spec[i+1]} is not a directory; the box starts without it"
         fi
     done
-    inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"
+    inner="$(move_pane_command "$sid" "$resume" ${spec[@]+"${spec[@]}"} -- ${flags[@]+"${flags[@]}"})"
     if ! move_respawn "$sid" "$pane" "$cwd" "$inner" "${spec[*]}"; then
         echo "$(date -u +%FT%TZ) move $sid: pane $pane holds no process and would not respawn; the session is DOWN. Bring it back from a host session: $MOVE_TMUX_BIN ${MOVE_TMUX[*]:+${MOVE_TMUX[*]} }respawn-pane -k -t $pane -c $cwd bash -i -c '$inner; exec bash -i'"
         return 1
@@ -4165,18 +4335,24 @@ move_self_in_box() {
     [[ -n "$sid" ]] || die "no OMP_SESSION_ID in this box, so a relaunch could not name the session to resume"
     pane="${TMUX_PANE:-}"
     cwd="$PWD"
-    local spec=() own resume=""
-    # The session is resumed by its transcript's path and keeps its session environment, as a
-    # move from the host does (move_transcript, move_session_env); ~/.omp is the same path here.
+    local spec=() own resume="" flags=() flags_note=""
+    # The session is resumed by its transcript's path and keeps its session environment and its
+    # omp's launch flags, as a move from the host does (move_transcript, move_session_env,
+    # move_omp_flags); ~/.omp is the same path here.
     if own="$(move_own_omp)"; then
         resume="$(move_transcript "$own" "$sid" || true)"
         mapfile -t spec < <(move_session_env "$own")
+        move_omp_flags "$own" || die "session $sid cannot be moved: $MOVE_OMP_FLAGS_WHY; nothing was hung up"
+        flags=(${MOVE_OMP_FLAGS[@]+"${MOVE_OMP_FLAGS[@]}"})
+    else
+        flags_note="  (no omp process is an ancestor of this shell, so no launch flags of the session's omp could be read, and none are carried)"
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here, so a new box could not resume it; nothing was hung up"
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     echo "agentbox: this session is already in box ${AGENTBOX_BOX:-a box}; moving again into a new one with:"
-    echo "  agentbox new ${spec[*]} -- omp --resume $resume"
+    echo "  agentbox new ${spec[*]} -- $(move_omp_line "$resume" ${flags[@]+"${flags[@]}"})"
+    [[ -z "$flags_note" ]] || echo "$flags_note"
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
     if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     if [[ "$dry" == true ]]; then return 0; fi
@@ -4185,7 +4361,7 @@ move_self_in_box() {
     # exactly the new one ("a box may not be given it": LINUX-1301 and
     # /mnt/nvme/sami/linuxadapt/deploy-ossvtls1 at 05:05Z, 2026-11-04). The host's launcher
     # judges each path instead, with --drop-gone-dirs.
-    inner="$(MOVE_SPEC_KEEP_GONE=1 move_pane_command "$sid" "$resume" "${spec[@]}")"
+    inner="$(MOVE_SPEC_KEEP_GONE=1 move_pane_command "$sid" "$resume" "${spec[@]}" -- ${flags[@]+"${flags[@]}"})"
     # The host's tmux server, through the relay every box has. respawn-pane -k kills what the
     # pane runs - the `agentbox new` of THIS box, so this box and this process end with it - and
     # starts the new launcher in its place. tmux has the command before anything dies.
@@ -4289,9 +4465,13 @@ cmd_move_self() {
     move_session_spec "$pid" "$sid" "${dirs[@]}" \
         || die "session $sid cannot be moved: $MOVE_RESUME_WHY; nothing was hung up"
     spec=("${MOVE_SPEC[@]}")
+    local flags=(${MOVE_OMP_FLAGS[@]+"${MOVE_OMP_FLAGS[@]}"}) short
     if [[ -z "${MOVE_KIDS[$pid]:-}" ]]; then
         whys+=("  (this session has no live child process, so only its working directory, its own record and the last plan were read)")
     fi
+    # Trees its own transcript names that the box would not get (move_short_set): said, never a
+    # refusal, since the session is the one who knows whether it still works there.
+    short="$(move_short_set "$pid" "$MOVE_RESUME" "${dirs[@]}")"
     move_check_floor "$(move_image_bytes "$BOX_DISK_BYTES")" || exit 2
     # The relauncher hangs this omp up BEFORE it respawns the pane, so a pane the relauncher
     # cannot reach would leave the session down. The census may have found the pane from /proc
@@ -4305,14 +4485,16 @@ cmd_move_self() {
     move_orphans_gate "$pid" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"
     if $dry; then
         echo "agentbox: would hang omp $pid up and respawn pane $pane ($at) as:"
-        echo "  agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME"
+        echo "  agentbox new ${spec[*]} -- $(move_omp_line "$MOVE_RESUME" ${flags[@]+"${flags[@]}"})"
         echo "each path and why:"
         printf '%s\n' "${whys[@]}"
+        [[ -z "$short" ]] || printf '%s\n' "$short"
         echo "anything else you work in is NOT in that box and is lost with it: add it with --dir."
         return 0
     fi
     printf '%s\n' "agentbox: the box gets these paths:" "${whys[@]}"
-    move_hand_off "$pid" "$sid" "$pane" "$cwd" "$MOVE_RESUME" "${spec[@]}"
+    [[ -z "$short" ]] || printf '%s\n' "$short"
+    move_hand_off "$pid" "$sid" "$pane" "$cwd" "$MOVE_RESUME" "${spec[@]}" -- ${flags[@]+"${flags[@]}"}
 }
 
 # The idle test is ancestry, never `read proc://`: under a shared omp worker broker that lists the
@@ -4396,6 +4578,9 @@ cmd_move_notify() {
             continue
         fi
         spec=("${MOVE_SPEC[@]}")
+        local flags=(${MOVE_OMP_FLAGS[@]+"${MOVE_OMP_FLAGS[@]}"}) omp_line short
+        omp_line="$(move_omp_line "$MOVE_RESUME" ${flags[@]+"${flags[@]}"})"
+        short="$(move_short_set "$pid" "$MOVE_RESUME" "${dirs[@]}")"
         if ! move_check_floor "$image"; then return 2; fi
         if $now; then
             if ! move_orphans_gate "$pid" "" "$dry"; then
@@ -4403,13 +4588,16 @@ cmd_move_notify() {
                 continue
             fi
             if $dry; then
-                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME"
+                echo "agentbox: would relaunch pane $pane ($at) now: agentbox new ${spec[*]} -- $omp_line"
+                [[ -z "$short" ]] || printf '%s\n' "$short"
                 continue
             fi
-            move_hand_off "$pid" "$sid" "$pane" "$cwd" "$MOVE_RESUME" "${spec[@]}"
+            [[ -z "$short" ]] || printf '%s\n' "$short"
+            move_hand_off "$pid" "$sid" "$pane" "$cwd" "$MOVE_RESUME" "${spec[@]}" -- ${flags[@]+"${flags[@]}"}
             continue
         fi
-        local notice="${MOVE_NOTICE_HEAD//%PID%/$pid} \`agentbox new ${spec[*]} -- omp --resume $MOVE_RESUME\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
+        local notice="${MOVE_NOTICE_HEAD//%PID%/$pid} \`agentbox new ${spec[*]} -- $omp_line\`, $MOVE_NOTICE_TAIL $MOVE_NOTICE_DIRS $(printf '%s; ' "${whys[@]}" | sed 's/; $//'). $MOVE_NOTICE_ADD"
+        [[ -z "$short" ]] || notice+=" ${short//$'\n'/ }"
         # What dies with the hang-up, so the session decides before it runs the move.
         local orphans
         orphans="$(move_orphans "$pid")"
@@ -6132,14 +6320,16 @@ move_to_start_slot() {
     return 0
 }
 
-# move_to_start TARGET SID CWD RESUME SPEC…: one window in tmux session `moved` on the target,
-# resuming the session in a box as a same-host move resumes it (the waker beside the launcher,
-# and --drop-gone-dirs: a --dir after the first that the target does not have is left out, as on
-# a resume here, while a missing first one - the working directory - still refuses the launch);
-# prints the window's id.
+# move_to_start TARGET SID CWD RESUME SPEC… [-- FLAG…]: one window in tmux session `moved` on the
+# target, resuming the session in a box as a same-host move resumes it (the waker beside the
+# launcher, the omp's own launch flags, and --drop-gone-dirs: a --dir after the first that the
+# target does not have is left out, as on a resume here, while a missing first one - the working
+# directory - still refuses the launch); prints the window's id.
 move_to_start() {
     local target="$1" sid="$2" cwd="$3" resume="$4" log run script
     shift 4
+    move_split_flags "$@"
+    local -a flags=(${MOVE_SPLIT_FLAGS[@]+"${MOVE_SPLIT_FLAGS[@]}"})
     # The window the session had here (session:window name). The box gets it as
     # AGENTBOX_MOVED_FROM_WINDOW and the target's window keeps it in the @stream option, so a
     # stream's sessions can be counted on the target (pilot.py).
@@ -6150,12 +6340,12 @@ move_to_start() {
     # A path that is merely absent on the target is NOT dropped here - the target's launcher runs
     # --drop-gone-dirs and decides that itself, against its own disk.
     local -a usable=()
-    mapfile -t usable < <(MOVE_SPEC_KEEP_GONE=1 move_spec_usable "$@")
+    mapfile -t usable < <(MOVE_SPEC_KEEP_GONE=1 move_spec_usable ${MOVE_SPLIT_SPEC[@]+"${MOVE_SPLIT_SPEC[@]}"})
     set -- ${usable[@]+"${usable[@]}"}
     [[ -z "$from_window" ]] || set -- -e "AGENTBOX_MOVED_FROM_WINDOW=$from_window" "$@"
     log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
     run="$(printf '( setsid %q move --wake %q </dev/null >>%q 2>&1 & ); %s' "$MOVE_TO_AGENTBOX" "$sid" "$log" \
-        "$(printf '%q ' "$MOVE_TO_AGENTBOX" new --drop-gone-dirs "$@" -- omp --resume "$resume")")"
+        "$(printf '%q ' "$MOVE_TO_AGENTBOX" new --drop-gone-dirs "$@" -- omp ${flags[@]+"${flags[@]}"} --resume "$resume")")"
     # The launcher names itself in $MOVE_TO_CUTOVER/starting/<sid> on the target - its pid, the
     # window and the box it will make - so a rollback can cancel and reap it (PUB and PEER,
     # 2026-11-03: four `agentbox new` launchers on sami-devbox waited behind a stuck umount after
@@ -6457,9 +6647,10 @@ move_to_member() {
         --arg resume "$MOVE_RESUME" --arg tmux_bin "$MOVE_TMUX_BIN" --argjson reroot "$reroot" \
         --arg window "$window" \
         --argjson spec "$(move_json_array "${MOVE_SPEC[@]}")" \
+        --argjson flags "$(move_json_array ${MOVE_OMP_FLAGS[@]+"${MOVE_OMP_FLAGS[@]}"})" \
         --argjson tmux "$(move_json_array ${MOVE_TMUX[@]+"${MOVE_TMUX[@]}"})" \
         '{sid: $sid, pid: $pid, box: "", pane: $pane, at: $at, cwd: $cwd, resume: $resume, spec: $spec,
-          tmux: $tmux, tmux_bin: $tmux_bin, reroot: $reroot, window: $window}'
+          flags: $flags, tmux: $tmux, tmux_bin: $tmux_bin, reroot: $reroot, window: $window}'
 }
 
 # move_to_job TARGET GROUP MEMBER-JSON…: the relauncher's job file, with the copy lists of every
@@ -6652,7 +6843,7 @@ cmd_move_to() {
     echo "agentbox: group $group, ${#MOVE_TO_GROUP[@]} session(s): ${MOVE_TO_GROUP[*]}"
     move_to_print_lists "$target" "$not_carried"
     for m in "${members[@]}"; do
-        jq -r --arg t "$MOVE_TO_AGENTBOX" '"  \(.sid): tmux window moved:\(.sid[0:8]) on the target runs \($t) new \(.spec | join(" ")) -- omp --resume \(.resume)"' <<<"$m"
+        jq -r --arg t "$MOVE_TO_AGENTBOX" '"  \(.sid): tmux window moved:\(.sid[0:8]) on the target runs \($t) new \(.spec | join(" ")) -- omp \((.flags // []) | map(@sh + " ") | add // "")--resume \(.resume)"' <<<"$m"
     done
     if $dry && (( ${#would[@]} )); then
         MOVE_SAID=1
@@ -6718,9 +6909,12 @@ move_to_in_box() {
     pane="${TMUX_PANE:-}"
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so the host cannot put the session back in its pane if the move fails"
     cwd="$PWD"
+    local flags=()
     if own="$(move_own_omp)"; then
         resume="$(move_transcript "$own" "$sid" || true)"
         mapfile -t spec < <(move_session_env "$own")
+        move_omp_flags "$own" || die "session $sid cannot be moved: $MOVE_OMP_FLAGS_WHY; nothing was hung up"
+        flags=(${MOVE_OMP_FLAGS[@]+"${MOVE_OMP_FLAGS[@]}"})
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here; nothing was hung up"
@@ -6762,8 +6956,9 @@ move_to_in_box() {
     sock="$(tmux display-message -p '#{socket_path}' 2>/dev/null || true)"
     member="$(jq -cn --arg sid "$sid" --arg box "${AGENTBOX_BOX:-}" --arg pane "$pane" --arg cwd "$cwd" --arg resume "$resume" \
         --argjson spec "$(move_json_array "${spec[@]}")" --argjson tmux "$(move_json_array ${sock:+-S "$sock"})" \
-        '{sid: $sid, pid: 0, box: $box, pane: $pane, at: "", cwd: $cwd, resume: $resume, spec: $spec, tmux: $tmux, tmux_bin: ""}')"
-    echo "agentbox: session $sid, in box ${AGENTBOX_BOX:-?}, moves to $target as: $MOVE_TO_AGENTBOX new ${spec[*]} -- omp --resume $resume"
+        --argjson flags "$(move_json_array ${flags[@]+"${flags[@]}"})" \
+        '{sid: $sid, pid: 0, box: $box, pane: $pane, at: "", cwd: $cwd, resume: $resume, spec: $spec, flags: $flags, tmux: $tmux, tmux_bin: ""}')"
+    echo "agentbox: session $sid, in box ${AGENTBOX_BOX:-?}, moves to $target as: $MOVE_TO_AGENTBOX new ${spec[*]} -- $(move_omp_line "$resume" ${flags[@]+"${flags[@]}"})"
     move_to_print_lists "$target" "$(move_to_not_carried <<<"$touches")"
     if [[ "$dry" == true ]]; then echo "agentbox: --dry-run: nothing was hung up, copied or sent"; return 0; fi
     job="$(move_to_job "$target" "$group" "$member")" || die "could not write the move's job file under $MOVE_TO_JOBS"
@@ -6986,7 +7181,12 @@ move_to_run() {
     mapfile -t MOVE_TO_EXCLUDE < <(jq -r '.exclude[]' "$job")
     mapfile -t MOVE_TO_MKDIR < <(jq -r '(.mkdir // [])[]' "$job")
     say() { echo "$(date -u +%FT%TZ) move-to $group: $*"; }
-    member_spec() { mapfile -t MOVE_SPEC < <(jq -r ".members[$1].spec[]" "$job"); }
+    # MOVE_SPEC_FLAGS: the omp's own launch flags (move_omp_flags), NUL-separated through jq since
+    # a value may hold a newline; a job written before they were recorded has none.
+    member_spec() {
+        mapfile -t MOVE_SPEC < <(jq -r ".members[$1].spec[]" "$job")
+        mapfile -t -d '' MOVE_SPEC_FLAGS < <(jq -j ".members[$1].flags // [] | map(. + \"\\u0000\") | add // \"\"" "$job")
+    }
     member_tmux() {
         local rest
         mapfile -t MOVE_TMUX < <(jq -r ".members[$1].tmux[]" "$job")
@@ -7040,18 +7240,18 @@ move_to_run() {
             member_tmux "$j"
             if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "${panes[j]}" '#{pane_id}' >/dev/null 2>&1; then
                 # A pane that closed with its omp: a window of its own on the same tmux session.
-                if [[ -n "${ats[j]}" ]] && inner="$(MOVE_PANE_WAKE_NOTICE="$rolled_back" move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")" \
+                if [[ -n "${ats[j]}" ]] && inner="$(MOVE_PANE_WAKE_NOTICE="$rolled_back" move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}" -- ${MOVE_SPEC_FLAGS[@]+"${MOVE_SPEC_FLAGS[@]}"})" \
                     && pane_file="$(move_pane_script "${sids[j]}" "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i")" \
                     && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
                         bash -i "$pane_file" 2>/dev/null; then
                     say "${sids[j]}: pane ${panes[j]} is gone; resumed here in a new window of tmux session ${ats[j]%%:*}"
                     MOVE_TO_RESUMED+=("${sids[j]}")
                 else
-                    move_down "${sids[j]}" "pane ${panes[j]} is gone and no window could be opened; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- omp --resume ${resumes[j]}"
+                    move_down "${sids[j]}" "pane ${panes[j]} is gone and no window could be opened; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- $(move_omp_line "${resumes[j]}" ${MOVE_SPEC_FLAGS[@]+"${MOVE_SPEC_FLAGS[@]}"})"
                 fi
                 continue
             fi
-            inner="$(MOVE_PANE_WAKE_NOTICE="$rolled_back" move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")"
+            inner="$(MOVE_PANE_WAKE_NOTICE="$rolled_back" move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}" -- ${MOVE_SPEC_FLAGS[@]+"${MOVE_SPEC_FLAGS[@]}"})"
             move_respawn "${sids[j]}" "${panes[j]}" "${cwds[j]}" "$inner" "${MOVE_SPEC[*]}" && { MOVE_TO_RESUMED+=("${sids[j]}"); continue; }
             rc=$?
             if (( rc == 3 )); then
@@ -7067,7 +7267,7 @@ move_to_run() {
                 MOVE_TO_RESUMED+=("${sids[j]}")
                 continue
             fi
-            move_down "${sids[j]}" "pane ${panes[j]} would not respawn; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- omp --resume ${resumes[j]}"
+            move_down "${sids[j]}" "pane ${panes[j]} would not respawn; resume it by hand: agentbox new ${MOVE_SPEC[*]} -- $(move_omp_line "${resumes[j]}" ${MOVE_SPEC_FLAGS[@]+"${MOVE_SPEC_FLAGS[@]}"})"
         done
     }
     log_all() {
@@ -7318,7 +7518,7 @@ move_to_run() {
         for ((i = 0; i < n; i++)); do
             member_spec "$i"
             MOVE_TO_FROM_WINDOW="${from_windows[i]}"
-            if ! windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${there[i]}" "${MOVE_SPEC[@]}")" || [[ -z "${windows[i]}" ]]; then
+            if ! windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${there[i]}" "${MOVE_SPEC[@]}" -- ${MOVE_SPEC_FLAGS[@]+"${MOVE_SPEC_FLAGS[@]}"})" || [[ -z "${windows[i]}" ]]; then
                 reason="failed: no tmux window for ${sids[i]} on $target"
                 break
             fi
@@ -7343,7 +7543,7 @@ move_to_run() {
             for i in "${again[@]}"; do
                 member_spec "$i"
                 MOVE_TO_FROM_WINDOW="${from_windows[i]}"
-                if windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${there[i]}" "${MOVE_SPEC[@]}")" && [[ -n "${windows[i]}" ]]; then
+                if windows[i]="$(move_to_start "$target" "${sids[i]}" "${cwds[i]}" "${there[i]}" "${MOVE_SPEC[@]}" -- ${MOVE_SPEC_FLAGS[@]+"${MOVE_SPEC_FLAGS[@]}"})" && [[ -n "${windows[i]}" ]]; then
                     say "${sids[i]}: started again in window ${windows[i]} on $target"
                     retried+=("${there[i]}")
                 else
@@ -7488,7 +7688,7 @@ cmd_move_plan_to() {
                 local orphans
                 orphans="$(move_orphans "$pid")"
                 [[ -z "$orphans" ]] || text+=$'\n'"    DIES WITH THE MOVE (not a unit; the move refuses without --accept-orphans): $(move_orphans_list "$orphans")"
-                text+=$'\n'"    resume on $target: $(jq -r --arg t "$MOVE_TO_AGENTBOX" '"\($t) new \(.spec | join(" ")) -- omp --resume \(.resume)"' <<<"$p")"
+                text+=$'\n'"    resume on $target: $(jq -r --arg t "$MOVE_TO_AGENTBOX" '"\($t) new \(.spec | join(" ")) -- omp \((.flags // []) | map(@sh + " ") | add // "")--resume \(.resume)"' <<<"$p")"
                 copy+="$(move_to_transcript_paths "$(jq -r .resume <<<"$p")")"$'\n'
             else
                 refused=$((refused + 1))
