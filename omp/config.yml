@@ -242,20 +242,28 @@ retry:
       - anthropic/claude-opus-4-6
 task:
   maxRecursionDepth: 3
-  # 0 disables omp's soft per-subagent request budget (default 200). Without this,
-  # crossing 200 assistant requests steers a subagent to wrap up, 1.5x the budget
-  # (300) FORCE-STOPS its turn, and a few requests later it is hard-aborted.
-  # Measured cost on this box: five OSS Verify subagents stopped mid-work on
-  # 2026-11-04, one mid-proof, and Enroll19b killed at 305 requests on 2026-10-25 --
-  # 200 x 1.5 = 300 plus the grace window, exactly. Each stop costs a restart and a
-  # context reload, and a proof agent legitimately runs past 300 requests.
-  # Set to 0 at 09:38Z 2026-11-04 by the omp lead at the OSS Verify lead's request,
-  # under that stream's standing rule: "Never limit an agent's conversation: no
-  # request budget, token cap or compaction threshold" (dispatch://OSSV goals-md).
-  # This is box-wide: no stream keeps the guard. If a stream wants it back, the
-  # narrower lever is task.agentSoftRequestBudget, whose per-agent entry REPLACES
-  # both this value and an agent's lower bundled cap.
-  softRequestBudget: 0
+  # omp's soft per-subagent request budget. The shipped default is 200: crossing it
+  # steers a subagent to wrap up, 1.5x (300) FORCE-STOPS its turn, and a few requests
+  # later it is hard-aborted. Measured cost on this box: five OSS Verify subagents
+  # stopped mid-work on 2026-11-04, one mid-proof, and Enroll19b killed at 305
+  # requests on 2026-10-25 -- 200 x 1.5 = 300 plus the grace window, exactly. Each
+  # stop costs a restart and a context reload, and a proof agent legitimately runs
+  # past 300 requests.
+  #
+  # 5000, not 0. OSS Verify's standing rule is "Never limit an agent's conversation"
+  # (dispatch://OSSV goals-md, "Models, spend, agents"), and 0 would match it
+  # literally. But this file is box-wide: 0 removes the floor for every stream,
+  # including those with no such rule, on a machine running 80k+ model calls since
+  # 23:00Z. 5000 is sixteen times the longest run that has ever been stopped here, so
+  # it cannot stop real work, and it still halts a subagent stuck in a loop that
+  # never finishes. Chosen 09:40Z 2026-11-04 by the omp lead; it supersedes the 0 set
+  # two minutes earlier at the OSS Verify lead's request, after the chief of staff
+  # pointed out that "no budget at all, fleet-wide" and "a budget high enough never to
+  # stop real work" are different changes and only the second keeps a stop on a loop.
+  #
+  # If a stream needs a literal 0, the narrower lever is task.agentSoftRequestBudget,
+  # whose per-agent entry REPLACES both this value and an agent's lower bundled cap.
+  softRequestBudget: 5000
   agentModelOverrides:
     # These types named Opus 5.5 while the roles above ran on Opus 5 (2026-10-29 to 2026-11-01),
     # because a lead measured that a weaker verdict changes the result: reviewer and the
