@@ -60,6 +60,16 @@ for the grace window, counted by `sudo -n perf stat` only while a `+inode_switch
 busy or the crossing is open); and UMOUNT HUNG, an umount or fusermount3 in D state for over
 UMOUNT_HUNG seconds, timed from /proc/<pid>/sched. Both say the reset plan and the cause.
 
+When either stall alert opens, the run takes the evidence that says WHICH HALF of that kernel
+bug this box has, once per episode and never twice in a minute: the kernel stack and wchan of
+every task in D state, `echo w > /proc/sysrq-trigger` and the blocked-task traces it writes
+(read back with a bounded `dmesg --since`), and the writeback switch kworkers with their CPU
+time. It goes into the same report the alert names, under WHICH HALF OF THE STALL, with the
+reading in plain words: `cleanup_offline_cgwb` in the stacks is the scanning half, which kernel
+7.0.0-1017 fixes, and `cgroup_writeback_umount` without it is the waiting half, which 1017 does
+not fix and which needs the box images split off the shared filesystem (capture_stacks;
+kernel-stall-options.md). `--capture-stacks` takes it by hand and prints the section.
+
 Alerts go over Envoy to agent sessions only, never to a person: the box-health lead's role,
 falling back to the SRE session when nobody holds it. Each message is at most 600 characters and
 names a report file under the state directory that holds the full reasons and the consumer
@@ -522,6 +532,357 @@ def switch_rate(seconds: float, workers: list[dict], proc: Path | None = None) -
     reading["queued"] = counts.get(SWITCH_EVENTS[1])
     reading["rate"] = reading["switched"] / seconds
     return reading
+
+
+# ------------------------------------------------- which half of the stall this box has
+
+# Both halves of this kernel bug look the same from outside: umounts wedged in D state, a
+# kworker at 100%, container starts failing with "failed to pre-register with sysbox-fs".
+# Only the kernel stacks of the blocked tasks tell them apart, and the answer decides whether a
+# reboot is worth a maintenance window (kernel-stall-options.md §1b, dispatch://INFRA-993):
+#
+#   the SCANNING half -- `cleanup_offline_cgwb()` re-walks a dying cgroup's inode lists from the
+#   same end on every pass, so draining one is quadratic (torvalds f6988c90671e). Ubuntu's
+#   linux-gcp-7.0 7.0.0-1017 carries that fix and this machine can install it.
+#
+#   the WAITING half -- `cgroup_writeback_umount()` still does a global `synchronize_rcu()` and
+#   `flush_workqueue(isw_wq)`, so every umount waits on every other superblock's switches. The
+#   fix is 31c1d19ead2c, mainline 7.2 only, which no Ubuntu 24.04 kernel will ever carry, and
+#   the answer becomes splitting the box images off the one shared filesystem.
+#
+# Every stall so far ended in a reset that took the evidence with it. So the moment a stall
+# alert opens, this takes the evidence once -- the D-state tasks' stacks and wchans, `echo w >
+# /proc/sysrq-trigger` and the blocked-task traces it writes, and the switch kworkers with
+# their CPU time -- and writes it into the same report the alert already names, with the
+# reading in plain words.
+SCAN_FUNCTION = "cleanup_offline_cgwb"
+WAIT_FUNCTION = "cgroup_writeback_umount"
+# What makes a sysrq trace part of this stall, so a flood of unrelated blocked tasks is counted
+# rather than kept.
+STALL_FUNCTIONS = (SCAN_FUNCTION, WAIT_FUNCTION, "inode_switch_wbs", "isw_prepare_wbs_switch")
+# What a switch kworker carries in its comm (`kworker/5:2+inode_switch_wbs`) or in its stack.
+SWITCH_NAMES = ("inode_switch_wbs", SCAN_FUNCTION)
+# Bounds, because a stall is when the box can least afford a big capture: one `echo w` on this
+# box at 2026-11-04T21:14Z wrote 3,701 dmesg lines with nothing wrong, and a stalled box has
+# hundreds of tasks in D state.
+STACK_MAX_TASKS = 40
+STACK_MAX_WORKERS = 20
+STACK_MAX_DMESG = 4000
+STACK_KEEP_BLOCKS = 25
+STACK_HEAD_LINES = 30
+STACK_SETTLE = 2.0
+# sysrq w writes a lot of lines, so: once per episode (run_once), and never twice in a minute.
+STACK_GAP = 60.0
+SYSRQ_PATH = "/proc/sysrq-trigger"
+STACK_HEADING = "WHICH HALF OF THE STALL (stack evidence)"
+
+
+def d_state_tasks(proc: Path | None = None, limit: int = STACK_MAX_TASKS) -> list[dict]:
+    """Every task in state D now, with its comm, its wchan and how long it has been blocked.
+
+    The umount and fusermount3 come first, since their wait is the question, then the
+    longest-blocked. comm, stat, wchan and sched are world-readable; the stack is not
+    (read_kernel_stacks). Time blocked is read as kernel_stalls reads it: a task in D state does
+    not run, so `se.exec_start` is when it blocked.
+    """
+    proc = proc or PROC
+    try:
+        uptime = float(read_text(str(proc / "uptime")).split()[0])
+    except (IndexError, ValueError):
+        uptime = 0.0
+    tasks: list[dict] = []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        base = proc / name
+        try:
+            data = (base / "stat").read_text()
+            state = data[data.rfind(")") + 2 :].split()[0]
+        except (OSError, IndexError):
+            continue
+        if state != "D":
+            continue
+        started = _exec_start(base)
+        tasks.append(
+            {
+                "pid": int(name),
+                "comm": data[data.find("(") + 1 : data.rfind(")")],
+                "wchan": read_text(str(base / "wchan")).strip() or "unreadable",
+                "blocked": max(0.0, uptime - started / 1000) if started is not None and uptime else None,
+            }
+        )
+    tasks.sort(key=lambda task: (task["comm"] not in HUNG_COMMANDS, -(task["blocked"] or 0)))
+    return tasks[:limit]
+
+
+def read_kernel_stacks(pids: list[int], timeout: float = 30.0) -> tuple[dict[int, str], str]:
+    """`/proc/<pid>/stack` for each pid, in one `sudo -n` run, and why it could not be read.
+
+    This is the decisive reading: it names the kernel function the task is in, where wchan names
+    only the outermost one. The file is root-only, and one shell loop rather than one sudo per
+    pid, since a stalled box has dozens of blocked tasks and each sudo costs a fork.
+    """
+    if not pids:
+        return {}, ""
+    script = 'for pid in "$@"; do echo "##PID $pid"; cat "/proc/$pid/stack" 2>&1 || true; done'
+    command = ["sudo", "-n", "sh", "-c", script, "stacks", *[str(pid) for pid in pids]]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd="/")
+    except (OSError, subprocess.SubprocessError) as error:
+        return {}, f"`sudo -n cat /proc/<pid>/stack` did not run: {error}"
+    if done.returncode != 0 and not done.stdout.strip():
+        detail = (done.stderr.strip().splitlines() or [f"exit {done.returncode}"])[-1]
+        return {}, f"`sudo -n cat /proc/<pid>/stack` failed (exit {done.returncode}): {detail[:200]}"
+    stacks: dict[int, str] = {}
+    pid: int | None = None
+    for line in done.stdout.splitlines():
+        if line.startswith("##PID "):
+            try:
+                pid = int(line.split()[1])
+            except (IndexError, ValueError):
+                pid = None
+            else:
+                stacks[pid] = ""
+            continue
+        if pid is not None and line.strip():
+            stacks[pid] = f"{stacks[pid]}\n{line.strip()}".strip()
+    return stacks, ""
+
+
+def switch_kworkers(proc: Path | None = None, limit: int = STACK_MAX_WORKERS) -> tuple[list[dict], str]:
+    """The kworkers doing writeback switching, by name or by stack, with their CPU time.
+
+    A kworker names its work item in its comm while it runs one (`kworker/5:2+inode_switch_wbs`),
+    so the comm finds the switch workers for free. One that is inside `cleanup_offline_cgwb`
+    under another work item does not say so in its comm, so the stacks of the kworkers that are
+    running or blocked are read too -- those only, since the idle pool here is hundreds of
+    threads and reading them all would cost more than the capture is worth.
+    """
+    proc = proc or PROC
+    candidates: list[dict] = []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        base = proc / name
+        try:
+            data = (base / "stat").read_text()
+            comm = data[data.find("(") + 1 : data.rfind(")")]
+            state = data[data.rfind(")") + 2 :].split()[0]
+        except (OSError, IndexError):
+            continue
+        if not comm.startswith("kworker/"):
+            continue
+        named = any(piece in comm for piece in SWITCH_NAMES)
+        if not named and state not in ("R", "D"):
+            continue
+        ticks = _proc_ticks(base)
+        candidates.append(
+            {
+                "pid": int(name),
+                "comm": comm,
+                "state": state,
+                "named": named,
+                # A worker running a work item of this queue says so with `+`; one that last ran
+                # one and is now idle says so with `-`, and is kept because its CPU time is the
+                # record of how long the drain has had it (kernel_stalls).
+                "busy": comm.endswith(SWITCH_WORKER),
+                "cpu_seconds": ticks / CLOCK_TICK if ticks is not None else None,
+            }
+        )
+    candidates.sort(key=lambda worker: (not worker["busy"], not worker["named"], -(worker["cpu_seconds"] or 0)))
+    candidates = candidates[: limit * 2]
+    stacks, error = read_kernel_stacks([worker["pid"] for worker in candidates])
+    workers = []
+    for worker in candidates:
+        stack = stacks.get(worker["pid"], "")
+        if worker["named"] or any(piece in stack for piece in SWITCH_NAMES):
+            workers.append(dict(worker, stack=stack))
+    return workers[:limit], error
+
+
+def dmesg_since(start: float, timeout: float = 120.0) -> tuple[list[str], str]:
+    """The kernel log since `start`, bounded by the kernel's own filter and then by line count.
+
+    `dmesg --since` rather than the whole buffer: the buffer on this box holds hours of other
+    machinery, and what is wanted is only what the sysrq this run issued produced.
+    """
+    command = ["sudo", "-n", "dmesg", "--time-format=iso", "--since", f"@{int(start)}"]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd="/")
+    except (OSError, subprocess.SubprocessError) as error:
+        return [], f"`{' '.join(command)}` did not run: {error}"
+    if done.returncode != 0:
+        detail = (done.stderr.strip().splitlines() or [f"exit {done.returncode}"])[-1]
+        return [], f"`{' '.join(command)}` failed (exit {done.returncode}): {detail[:200]}"
+    return done.stdout.splitlines(), ""
+
+
+def dmesg_blocks(lines: list[str]) -> list[list[str]]:
+    """The kernel log cut into one block per blocked task, as `echo w` prints them: a `task:`
+    line and the call trace under it. Anything before the first `task:` line is its own block."""
+    blocks: list[list[str]] = []
+    for line in lines:
+        if " task:" in line or line.startswith("task:") or not blocks:
+            blocks.append([])
+        blocks[-1].append(line)
+    return [block for block in blocks if block]
+
+
+def sysrq_blocked_state(settle: float = STACK_SETTLE) -> dict:
+    """Ask the kernel for every blocked task's stack, and read back only what it wrote.
+
+    `echo w > /proc/sysrq-trigger` is the one thing here that touches the machine, and it only
+    prints: it syncs nothing, unmounts nothing and writes to no filesystem. What it costs is
+    kernel log lines, which is why the capture happens at most once an episode and never twice
+    in a minute.
+    """
+    reading: dict = {"ok": False, "error": "", "lines": 0, "blocks": 0, "stall_blocks": 0, "kept": [], "text": ""}
+    # A second of margin: the kernel's log clock and ours are not the same clock.
+    start = time.time() - 1
+    command = ["sudo", "-n", "sh", "-c", f"echo w > {SYSRQ_PATH}"]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=30, cwd="/")
+    except (OSError, subprocess.SubprocessError) as error:
+        reading["error"] = f"`{' '.join(command)}` did not run: {error}"
+        return reading
+    if done.returncode != 0:
+        detail = (done.stderr.strip().splitlines() or [f"exit {done.returncode}"])[-1]
+        reading["error"] = f"`{' '.join(command)}` failed (exit {done.returncode}): {detail[:200]}"
+        return reading
+    reading["ok"] = True
+    time.sleep(settle)
+    lines, error = dmesg_since(start)
+    if error:
+        reading["error"] = error
+        return reading
+    reading["lines"] = len(lines)
+    blocks = dmesg_blocks(lines[:STACK_MAX_DMESG])
+    reading["blocks"] = len(blocks)
+    stall = [block for block in blocks if any(name in "\n".join(block) for name in STALL_FUNCTIONS)]
+    reading["stall_blocks"] = len(stall)
+    # The traces of this stall whole, and otherwise the head of what the sysrq printed, so a
+    # capture that names neither function still shows what the kernel did say.
+    kept = stall[:STACK_KEEP_BLOCKS] or [lines[:STACK_HEAD_LINES]]
+    reading["kept"] = kept
+    reading["text"] = "\n".join("\n".join(block) for block in kept)
+    return reading
+
+
+def half_verdict(texts: list[str]) -> str:
+    """Which half of the bug the stacks name: scanning, waiting, neither, or unreadable.
+
+    `cleanup_offline_cgwb` decides when it appears at all. `cgroup_writeback_umount` is in every
+    umount's stack by construction -- the umount calls it -- so it only answers the question when
+    the scan function appears nowhere and the time is therefore going into the wait.
+    """
+    joined = "\n".join(text for text in texts if text)
+    if not joined.strip():
+        return "unreadable"
+    if SCAN_FUNCTION in joined:
+        return "scanning"
+    if WAIT_FUNCTION in joined:
+        return "waiting"
+    return "neither"
+
+
+HALF_READING = {
+    "scanning": (
+        f"The stacks name {SCAN_FUNCTION}: the scanning half; kernel 7.0.0-1017 fixes this."
+        " Take the maintenance window and install linux-gcp-7.0 7.0.0-1017.19~24.04.1."
+    ),
+    "waiting": (
+        f"The stacks name {WAIT_FUNCTION}, or a wait inside it, and never {SCAN_FUNCTION}: the"
+        " waiting half; 1017 does not fix this, the box images must be split off the shared"
+        " filesystem."
+    ),
+    "neither": (
+        f"The stacks name neither {SCAN_FUNCTION} nor {WAIT_FUNCTION}, so this capture does not"
+        " say which half of the bug we have, and the stall may not be this bug at all."
+    ),
+    "unreadable": (
+        "No kernel stack could be read, so this capture does not say which half of the bug we"
+        " have. The reasons are above; `sudo -n` is what it needs."
+    ),
+}
+HALF_SHORT = {
+    "scanning": "the scanning half; 7.0.0-1017 fixes it",
+    "waiting": "the waiting half; 1017 does not fix it",
+    "neither": "neither function named",
+    "unreadable": "no stack could be read",
+}
+
+
+def capture_stacks(when: float, proc: Path | None = None) -> dict:
+    """The whole capture: D-state tasks with their stacks and wchans, the sysrq blocked-task
+    traces, the switch kworkers with their CPU time, and the reading those add up to."""
+    started = time.monotonic()
+    tasks = d_state_tasks(proc)
+    stacks, task_error = read_kernel_stacks([task["pid"] for task in tasks])
+    for task in tasks:
+        task["stack"] = stacks.get(task["pid"], "")
+    workers, worker_error = switch_kworkers(proc)
+    sysrq = sysrq_blocked_state()
+    texts = [task["stack"] for task in tasks] + [worker["stack"] for worker in workers] + [sysrq["text"]]
+    return {
+        "at": when,
+        "seconds": time.monotonic() - started,
+        "tasks": tasks,
+        "workers": workers,
+        "sysrq": sysrq,
+        "errors": [error for error in (task_error, worker_error) if error],
+        "half": half_verdict(texts),
+    }
+
+
+def stack_section(capture: dict) -> str:
+    """The capture as the report reads it, under one heading."""
+    sysrq = capture["sysrq"]
+    lines = [
+        STACK_HEADING,
+        f"Taken at {iso(capture['at'])} in {capture['seconds']:.1f} s, once for this episode"
+        f" (never twice within {human_time(STACK_GAP)}).",
+        "",
+        f"The reading: {HALF_READING[capture['half']]}",
+    ]
+    for error in capture["errors"]:
+        lines.append(f"Not read: {error}")
+    lines += ["", f"Tasks in D state ({len(capture['tasks'])}, umount and fusermount3 first, at most {STACK_MAX_TASKS}):"]
+    if not capture["tasks"]:
+        lines.append("  none")
+    for task in capture["tasks"]:
+        blocked = human_time(task["blocked"]) if task["blocked"] is not None else "unknown"
+        lines.append(f"  pid {task['pid']} {task['comm']}, blocked {blocked}, wchan {task['wchan']}")
+        for frame in (task["stack"] or "stack unreadable").splitlines():
+            lines.append(f"      {frame}")
+    lines += ["", f"Writeback switch kworkers ({len(capture['workers'])}):"]
+    if not capture["workers"]:
+        lines.append("  none")
+    for worker in capture["workers"]:
+        cpu = f"{worker['cpu_seconds']:.1f} s of CPU" if worker["cpu_seconds"] is not None else "CPU time unreadable"
+        doing = "running a switch work item now" if worker["busy"] else f"idle, state {worker['state']}"
+        lines.append(f"  pid {worker['pid']} {worker['comm']} ({doing}), {cpu} since boot")
+        for frame in (worker["stack"] or "stack unreadable").splitlines():
+            lines.append(f"      {frame}")
+    lines += ["", f"echo w > {SYSRQ_PATH} (blocked-task traces):"]
+    if not sysrq["ok"] or sysrq["error"]:
+        lines.append(f"  {sysrq['error'] or 'it did not run'}")
+    if sysrq["ok"]:
+        lines.append(
+            f"  it wrote {sysrq['lines']} kernel log lines, {sysrq['blocks']} blocked-task traces,"
+            f" of which {sysrq['stall_blocks']} name this stall; kept"
+            f" {len(sysrq['kept'])} (at most {STACK_KEEP_BLOCKS})."
+        )
+        for line in sysrq["text"].splitlines():
+            lines.append(f"  {line}")
+    return "\n".join(lines)
 
 
 def sample_box() -> dict:
@@ -1740,6 +2101,7 @@ def compose_message(
     report: str,
     when: float,
     host: str,
+    capture: dict | None = None,
 ) -> str:
     """The one Envoy message of a run. Its first line is the worst verdict, which carries the
     decision: what, where, how bad. Any other verdict follows on its own line, then who acts and
@@ -1758,6 +2120,11 @@ def compose_message(
         # context give way first when the message is long.
         if any(kind in STALL_KINDS for kind in speaking):
             keep = [STALL_ACTION]
+            if capture:
+                # The one line that says the evidence exists, as short as it can be: the reading
+                # is the reader's whole question (reboot or not), and what it costs is a little
+                # of the verdict line's detail, which the report holds whole.
+                keep.append(f"Stack evidence in the report: {HALF_SHORT[capture['half']]}.")
         actions = dict.fromkeys(phrase for kind in speaking for phrase in ACTION.get(kind, ()))
         if actions:
             optional.append(f"DO (box-health owner): {'; '.join(actions)}.")
@@ -1767,9 +2134,16 @@ def compose_message(
 
 
 def report_text(
-    items: list[dict], now: dict, options: argparse.Namespace, consumers: str, when: float, host: str
+    items: list[dict],
+    now: dict,
+    options: argparse.Namespace,
+    consumers: str,
+    when: float,
+    host: str,
+    capture: dict | None = None,
 ) -> str:
-    """Everything the message leaves out: the full reasons, the history and the consumer tables."""
+    """Everything the message leaves out: the full reasons, the history, the consumer tables and
+    the stack evidence of which half of the kernel stall this is (stack_section)."""
     lines = [f"load-swap-watch on {host} at {iso(when)}", f"Box: {state_line(now)}."]
     cpu = now["cpu"].get("some_avg60")
     io = now["io"].get("some_avg60")
@@ -1802,6 +2176,8 @@ def report_text(
         lines += what_it_means(kind)
     if consumers:
         lines += ["", consumers]
+    if capture:
+        lines += ["", stack_section(capture)]
     lines += [
         "",
         "A crossing still open is said again only on a new fact, measured against the worst this"
@@ -1814,6 +2190,22 @@ def report_text(
         " timer. Now: `load-swap-watch --consumers`. Every run: `journalctl --user -u load-swap-watch`.",
     ]
     return "\n".join(lines) + "\n"
+
+
+def stall_episode(items: list[dict]) -> str:
+    """The episode key of the kernel stall this run is speaking about, or "" when it speaks of
+    none: the kind and opening time of the OLDEST open stall crossing, so a stall that starts as
+    a hung umount and grows a writeback crossing half an hour later is still one episode and
+    gets one capture."""
+    opened = [
+        (item["incident"].get("opened_at") or 0.0, item["kind"])
+        for item in items
+        if item["event"] != "clear" and item["kind"] in STALL_KINDS
+    ]
+    if not opened:
+        return ""
+    at, kind = min(opened)
+    return f"{kind}:{at:.0f}"
 
 
 def prune_reports(directory: Path, when: float) -> None:
@@ -2030,11 +2422,33 @@ def run_once(options: argparse.Namespace) -> int:
             top = top_of(measured, item["kind"])
             if top and top[0] not in tops:
                 tops.append(top[0])
+
+    # The evidence that says which half of the kernel bug this stall is, taken while the stall
+    # is on: once per episode, and never twice in a minute, since `echo w` writes thousands of
+    # kernel log lines. It goes into the same report the alert already names.
+    capture = None
+    episode = stall_episode(items)
+    taken = state.data.get("stack_capture") or {}
+    if not episode:
+        pass
+    elif options.no_stack_capture:
+        log("stack evidence not taken: --no-stack-capture")
+    elif options.dry_run:
+        log(f"dry run: no stack evidence taken for episode {episode} (it would write to {SYSRQ_PATH})")
+    elif taken.get("episode") == episode:
+        log(f"stack evidence for episode {episode} was already taken at {iso(taken.get('at'))}: {taken.get('half')}")
+    elif when - (taken.get("at") or 0) < STACK_GAP:
+        log(f"stack evidence held off: the last capture was {human_time(when - taken['at'])} ago, one a minute")
+    else:
+        capture = capture_stacks(when)
+        state.data["stack_capture"] = {"episode": episode, "at": when, "half": capture["half"]}
+        log(f"stack evidence taken in {capture['seconds']:.1f} s: {HALF_SHORT[capture['half']]}")
+
     label = "alert" if any(item["event"] == "alert" for item in items) else "still" if speaking else "clear"
     directory = options.state.parent / "reports"
-    text = report_text(items, now, options, consumers, when, host)
+    text = report_text(items, now, options, consumers, when, host, capture)
     report = "" if options.dry_run else write_report(directory, label, when, text)
-    message = compose_message(items, now, options, measured, report, when, host)
+    message = compose_message(items, now, options, measured, report, when, host, capture)
     # Recorded as said before it is sent, so a run killed mid-send cannot say it twice.
     state.commit(options)
     if options.print_alert or options.dry_run:
@@ -2212,6 +2626,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="print who is using the CPU and holding the swap now, and exit; decides nothing",
     )
     parser.add_argument("--json", action="store_true", help="with --consumers, print one JSON object")
+    parser.add_argument(
+        "--capture-stacks",
+        action="store_true",
+        help=(
+            "take the stack evidence now and print the report section it would write, then exit;"
+            f" this is the one hand-run path that writes to {SYSRQ_PATH}"
+        ),
+    )
+    parser.add_argument(
+        "--no-stack-capture",
+        action="store_true",
+        help=f"alert on a stall without taking the stack evidence (no write to {SYSRQ_PATH})",
+    )
     options = parser.parse_args(argv)
     host = socket.gethostname().split(".")[0]
     options.cpu_rule = (
@@ -2223,6 +2650,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main() -> int:
     options = parse_args()
     box_health_owner()  # refuse an unusable BOX_HEALTH_OWNER before any work
+
+    # The hand-run proof that the capture works, and the way to take the evidence during a
+    # stall when no crossing is open yet.
+    if options.capture_stacks:
+        print(stack_section(capture_stacks(time.time())))
+        return 0
 
     if options.consumers:
         # The hand-run path names processes too, so it needs the same two lookups.

@@ -194,7 +194,12 @@ class Base(unittest.TestCase):
     # -- running it
 
     def options(self, *extra: str) -> argparse.Namespace:
-        return WATCH.parse_args(["--state", str(self.state), "--sample-seconds", "0.01", *extra])
+        # --no-stack-capture: the stack evidence is the one part of a stall alert that reads the
+        # real machine (sudo, /proc/<pid>/stack, /proc/sysrq-trigger), which no test may do. Its
+        # own tests are test_load_swap_watch_stacks.py.
+        return WATCH.parse_args(
+            ["--state", str(self.state), "--sample-seconds", "0.01", "--no-stack-capture", *extra]
+        )
 
     def run_watch(self, *extra: str) -> None:
         WATCH.run_once(self.options(*extra))

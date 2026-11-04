@@ -195,6 +195,47 @@ inodes in one burst that drains at once. bpftrace on `writeback:inode_switch_wbs
 four others 4,338 each, the rest under 3,000. The stall was one old cgroup at 57-200/s for over
 an hour.
 
+### Which half of the stall: the stack evidence
+
+This box's stall has two halves, and only one of them a reboot fixes
+(`/mnt/nvme/sami/scratch/eng-ops-infra898/kernel-stall-options.md`, dispatch://INFRA-993):
+
+- the **scanning** half is `cleanup_offline_cgwb()` re-walking a dying cgroup's inode lists from
+  the same end on every pass, which makes a drain quadratic (torvalds `f6988c90671e`,
+  CVE-2026-98538). Ubuntu's `linux-gcp-7.0` 7.0.0-1017.19~24.04.1 carries the fix and this
+  machine can install it, so a 30-minute window buys it.
+- the **waiting** half is `cgroup_writeback_umount()`'s global `synchronize_rcu()` and
+  `flush_workqueue(isw_wq)`, which every umount on the box waits behind. The fix is
+  `31c1d19ead2c`, mainline 7.2 only; no Ubuntu 24.04 kernel will carry it, and the answer is to
+  split the box images off the one shared filesystem instead.
+
+From outside they look identical, and every stall so far ended in a reset that took the
+evidence with it. So when a stall alert opens, the run takes the evidence **once per episode,
+and never twice within a minute**, and writes it into the same report under
+`WHICH HALF OF THE STALL (stack evidence)`:
+
+- the kernel stack (`sudo -n cat /proc/<pid>/stack`, one run for all of them) and the `wchan` of
+  every task in `D` state, umount and fusermount3 first, at most 40. The stack is the decisive
+  one: it names the kernel function, where `wchan` names only the outermost;
+- `echo w > /proc/sysrq-trigger` through `sudo -n`, read back with a bounded `dmesg --since`,
+  keeping the blocked-task traces that name this stall (at most 25) and otherwise the head of
+  what it printed;
+- the writeback switch kworkers, by their comm (`kworker/5:2+inode_switch_wbs`) or by their
+  stack, with their CPU time, running ones first.
+
+The reading is in the report in plain words, and one line of the message carries it:
+`cleanup_offline_cgwb` anywhere means the scanning half and 7.0.0-1017 fixes it;
+`cgroup_writeback_umount` **without** it means the waiting half and 1017 does not. That order is
+the rule because every umount's stack holds `cgroup_writeback_umount` by construction — the
+umount calls it — so only the scan frame says where the time is going. Naming neither, or
+reading no stack at all, is said as that and nothing more.
+
+What it costs, measured on this box on 2026-11-04 at 21:20Z with nothing wrong: **4.4 s** and
+**3,021 kernel log lines** for one capture (80 blocked-task traces). On a stalled box the caps —
+40 tasks, 20 kworkers, 4,000 dmesg lines, 25 traces — are what bound it. It syncs nothing,
+unmounts nothing and writes to no filesystem but the report. `load-swap-watch --capture-stacks`
+takes it by hand and prints the section; `--no-stack-capture` alerts without it.
+
 ## What the message says, and what the report holds
 
 **The message is at most 600 characters** and ends with `Full report: <path>`. Its first ~200
