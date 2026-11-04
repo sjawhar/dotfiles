@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Give omp native skill directories before startup-deferred extensions bind."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,8 @@ def main():
         )
         if directory.is_dir():
             directories.append(str(directory))
-    output = home / ".cache/omp/dotfiles-skills.yml"
+    root_key = hashlib.sha256(str(dotfiles.resolve()).encode()).hexdigest()[:16]
+    output = home / f".cache/omp/dotfiles-skills-{root_key}.yml"
     content = json.dumps({"skills": {"customDirectories": directories}}, indent=2) + "\n"
     try:
         unchanged = output.read_text() == content

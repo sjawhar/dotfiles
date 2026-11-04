@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Manifest skill pools must reach native discovery before extensions load."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -19,7 +20,8 @@ class SkillConfig(unittest.TestCase):
         self.home = Path(self.temp.name) / "home"
         self.dots = self.home / "dots"
         self.dots.mkdir(parents=True)
-        self.output = self.home / ".cache/omp/dotfiles-skills.yml"
+        root_key = hashlib.sha256(str(self.dots.resolve()).encode()).hexdigest()[:16]
+        self.output = self.home / f".cache/omp/dotfiles-skills-{root_key}.yml"
 
     def generate(self, sources):
         (self.dots / "skills-sources.json").write_text(json.dumps({"sources": sources}))
@@ -57,6 +59,20 @@ class SkillConfig(unittest.TestCase):
         second.mkdir(parents=True)
         self.assertEqual(self.generate([{"root": "vendor/first"}, {"root": "vendor/second"}]).returncode, 0)
         self.assertEqual(json.loads(self.output.read_text())["skills"]["customDirectories"], [str(pool), str(second)])
+
+    def test_another_dotfiles_copy_cannot_replace_a_running_sessions_overlay(self):
+        pool = self.dots / "vendor/first/skills"
+        pool.mkdir(parents=True)
+        first = self.generate([{"root": "vendor/first"}])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        first_output = Path(first.stdout.strip())
+        first_content = first_output.read_text()
+        self.dots = self.home / "another-dots"
+        self.dots.mkdir()
+        second = self.generate([])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(first_output.read_text(), first_content)
+        self.assertNotEqual(first.stdout.strip(), second.stdout.strip())
 
     def test_launcher_loads_native_overlay_once_and_keeps_caller_precedence(self):
         repository = SCRIPT.parent.parent
