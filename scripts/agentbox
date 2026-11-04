@@ -220,6 +220,29 @@ if [[ -z "$OSSV_SSH" && -d "/mnt/nvme/$(id -un)/oss-verifier/ssh" ]]; then OSSV_
 COMPUTE_INVENTORY="${AGENTBOX_COMPUTE_INVENTORY:-}"
 if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVENTORY="/mnt/nvme/$(id -un)/compute-inventory"; fi
 [[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
+# The grading farm's three host paths (installers/grade-farm.sh), in every box whose host has
+# them, each at its own path — never /mnt/nvme/<user> whole (Sami,
+# dispatch://INFRA-702/comment/11d4bf79-4369-4beb-8691-ec688cee53ab):
+#   farm-pkg     the package `farm` is: ~/.local/bin/farm, which every box has through the
+#                .local/bin mount, is a SYMLINK to farm-pkg/bin/farm, so in a box without this
+#                directory `farm` is a dangling link and every call dies `No such file or
+#                directory`. That is what every box on sami-devbox had after the 18:05Z re-box
+#                on 2026-11-04, and it stopped the release builds. Bound READ-ONLY: the shim,
+#                its grading-tools clone and its venv are written by installers/grade-farm.sh
+#                on the host alone, and a run writes nothing in it.
+#   grade-farm   the farm root (FARM_DIR: fleet, boxes, ssh_config, known_hosts, the no-start
+#                switch and the ssh control sockets each run opens). Read-write.
+#   boxid        the box identity's ssh key and its gcloud configuration, whose token cache
+#                gcloud rewrites on every refresh. Read-write.
+# AGENTBOX_FARM_PKG, AGENTBOX_FARM_ROOT and AGENTBOX_FARM_BOXID replace the paths, as
+# AGENTBOX_COMPUTE_INVENTORY replaces the ledger's. Each is empty when the host has no such
+# directory (a machine with no grading farm), and an empty one binds nothing.
+FARM_PKG="${AGENTBOX_FARM_PKG:-/mnt/nvme/$(id -un)/farm-pkg}"
+FARM_ROOT="${AGENTBOX_FARM_ROOT:-/mnt/nvme/$(id -un)/grade-farm}"
+FARM_BOXID="${AGENTBOX_FARM_BOXID:-/mnt/nvme/$(id -un)/boxid}"
+[[ "$FARM_PKG" == /* && -d "$FARM_PKG" ]] || FARM_PKG=""
+[[ "$FARM_ROOT" == /* && -d "$FARM_ROOT" ]] || FARM_ROOT=""
+[[ "$FARM_BOXID" == /* && -d "$FARM_BOXID" ]] || FARM_BOXID=""
 # The durable filesystem as `agentbox doctor` compares it: device number, total blocks, block
 # size, available blocks. The device and not statfs's filesystem id: two stat builds on this host
 # print the id's two words in opposite orders (`stat -f -c %i`, 2026-11-02), while a bind keeps
@@ -407,6 +430,15 @@ box_dir_bound_why() {
     [[ "$path" == "$HOME/.dotfiles" || "$path" == "$DOTFILES_DIR" ]] && { echo "every box has the dotfiles"; return 0; }
     if [[ -n "$DURABLE_DIR" ]] && move_within "$path" "$DURABLE_DIR"; then
         echo "every box has the durable disk $DURABLE_DIR"; return 0
+    fi
+    if [[ -n "$FARM_PKG" ]] && move_within "$path" "$FARM_PKG"; then
+        echo "every box has the grading farm's package $FARM_PKG READ-ONLY"; return 0
+    fi
+    if [[ -n "$FARM_ROOT" ]] && move_within "$path" "$FARM_ROOT"; then
+        echo "every box has the grading farm's root $FARM_ROOT"; return 0
+    fi
+    if [[ -n "$FARM_BOXID" ]] && move_within "$path" "$FARM_BOXID"; then
+        echo "every box has the grading farm's box identity $FARM_BOXID"; return 0
     fi
     for p in "$SRC"/*; do
         [[ -L "$p" ]] || continue
@@ -1268,6 +1300,13 @@ mount_args() {
         mkdir -p "$COMPUTE_INVENTORY" || { echo "agentbox: cannot make $COMPUTE_INVENTORY, the compute ledger every box writes" >&2; return 1; }
         box_dir_have "$COMPUTE_INVENTORY" || a+=(-v "$COMPUTE_INVENTORY:$COMPUTE_INVENTORY")
     fi
+    # The grading farm's three paths (FARM_PKG read-only, FARM_ROOT and FARM_BOXID read-write;
+    # see them above), bound here as the durable disk is and for the same reason: a --dir that
+    # names one, or a path under one, is recognised by box_dir_bound_why and so never reaches
+    # BOX_MOUNTS, and docker refuses two mounts at one destination.
+    [[ -z "$FARM_PKG" ]] || a+=(-v "$FARM_PKG:$FARM_PKG:ro")
+    [[ -z "$FARM_ROOT" ]] || a+=(-v "$FARM_ROOT:$FARM_ROOT")
+    [[ -z "$FARM_BOXID" ]] || a+=(-v "$FARM_BOXID:$FARM_BOXID")
     a+=(-v "$BOXES/$box:$BOXES/$box")
     # $HOME and /tmp inside the box's own directory, so the box's disk limit covers the two
     # places a session writes without being told where. Without them both land in the
@@ -2409,6 +2448,11 @@ move_in_box_paths() {
     done < <(find "$SRC" -mindepth 1 -maxdepth 1 -type l -print0 2>/dev/null | xargs -0 -r realpath -q -- 2>/dev/null || true)
     while read -r p; do [[ -n "$p" ]] && MOVE_IN_BOX+=("$HOME/$p"); done < <(mounts_of rw; mounts_of ro)
     [[ -z "$DURABLE_DIR" ]] || MOVE_IN_BOX+=("$DURABLE_DIR")
+    # The grading farm's three paths: every box binds them (mount_args), so a move never names
+    # one and a --dir that does is bound no second time.
+    [[ -z "$FARM_PKG" ]] || MOVE_IN_BOX+=("$FARM_PKG")
+    [[ -z "$FARM_ROOT" ]] || MOVE_IN_BOX+=("$FARM_ROOT")
+    [[ -z "$FARM_BOXID" ]] || MOVE_IN_BOX+=("$FARM_BOXID")
 }
 
 move_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }

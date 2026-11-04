@@ -99,6 +99,12 @@ class AgentboxDirs(unittest.TestCase):
             # The compute ledger every box binds, pinned to the fixture: by default it is this
             # host's real /mnt/nvme/<user>/compute-inventory.
             "AGENTBOX_COMPUTE_INVENTORY": str(self.root / "compute-inventory"),
+            # The grading farm's three paths, pinned to the fixture for the same reason: by
+            # default they are this host's real /mnt/nvme/<user>/{farm-pkg,grade-farm,boxid}.
+            # Absent unless a test makes them.
+            "AGENTBOX_FARM_PKG": str(self.root / "farm-pkg"),
+            "AGENTBOX_FARM_ROOT": str(self.root / "grade-farm"),
+            "AGENTBOX_FARM_BOXID": str(self.root / "boxid"),
         }
 
     def tearDown(self) -> None:
@@ -322,6 +328,43 @@ class AgentboxDirs(unittest.TestCase):
         self.assertTrue(ledger.is_dir())
         self.assertIn(f"{ledger}:{ledger}", self.binds_of(args))
         self.assertEqual(self.env_of(args).get("AGENTBOX_COMPUTE_INVENTORY"), str(ledger))
+
+    def test_every_box_binds_the_grading_farm_paths_and_only_those_three(self) -> None:
+        """`farm` is ~/.local/bin/farm, a symlink to /mnt/nvme/<user>/farm-pkg/bin/farm, so a box
+        without that directory has a dangling link and every farm call dies (sami-devbox,
+        2026-11-04 18:05Z, which stopped the release builds). Each box binds the package
+        read-only and the farm root and the box identity read-write, each at its own path, and
+        /mnt/nvme/<user> as a whole is never bound (Sami, dispatch://INFRA-702)."""
+        pkg, root, boxid = (self.root / "nvme" / n for n in ("farm-pkg", "grade-farm", "boxid"))
+        for d in (pkg, root, boxid):
+            d.mkdir(parents=True)
+        self.env |= {"AGENTBOX_FARM_PKG": str(pkg), "AGENTBOX_FARM_ROOT": str(root),
+                     "AGENTBOX_FARM_BOXID": str(boxid)}
+        binds = self.binds_of(self.run_args_of("--dir", str(self.lane)))
+        self.assertIn(f"{pkg}:{pkg}:ro", binds)
+        self.assertNotIn(f"{pkg}:{pkg}", binds)
+        self.assertIn(f"{root}:{root}", binds)
+        self.assertIn(f"{boxid}:{boxid}", binds)
+        nvme = self.root / "nvme"
+        self.assertNotIn(f"{nvme}:{nvme}", binds)
+
+    def test_a_host_without_the_grading_farm_binds_none_of_its_paths(self) -> None:
+        """The fixture's three paths do not exist, as on a machine with no grading farm. The
+        allow-list's own ~/.config/grade-farm is a home path and is bound as ever."""
+        binds = self.binds_of(self.run_args_of("--dir", str(self.lane)))
+        gone = [str(self.root / n) for n in ("farm-pkg", "grade-farm", "boxid")]
+        self.assertEqual([b for b in binds if b.split(":")[0] in gone], [])
+
+    def test_a_dir_naming_a_grading_farm_path_is_not_bound_twice(self) -> None:
+        """docker refuses two mounts at one destination and ends the launch."""
+        root = self.root / "nvme" / "grade-farm"
+        root.mkdir(parents=True)
+        self.env["AGENTBOX_FARM_ROOT"] = str(root)
+        result = self.launch("--dir", str(self.lane), "--dir", str(root))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        binds = self.binds_of(self.run_args.read_text(encoding="utf-8").splitlines())
+        self.assertEqual([b for b in binds if b.startswith(f"{root}:")], [f"{root}:{root}"])
+        self.assertIn("grading farm's root", result.stderr + result.stdout)
 
     def test_doctor_checks_the_compute_ledger_is_writable(self) -> None:
         ledger = self.root / "ledger"

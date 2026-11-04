@@ -90,8 +90,10 @@ rw .config/mailbox
 rw .config/agent-spend
 # the transcript store's endpoint and reader/writer logins, so `tq` and the audits that read it work in a box
 rw .config/transcript-store
-# the grading farm's machine-local paths (installers/grade-farm.sh), so `farm` in a box given
-# --dir for farm-pkg, grade-farm and boxid under /mnt/nvme/<user> uses the host's farm root and key
+# the grading farm's machine-local paths (installers/grade-farm.sh), so `farm` in a box uses the
+# host's farm root and key. The three host paths this file names — /mnt/nvme/<user>/farm-pkg
+# read-only, grade-farm and boxid read-write — are bound by scripts/agentbox itself (FARM_PKG,
+# FARM_ROOT, FARM_BOXID), so no lane passes --dir for them any more.
 rw .config/grade-farm
 # Dispatch and Envoy: envoy.json, which a box session without a profile of its
 # own reads, and a profile's own envoy.json may link to (envoy/AGENTS.md)
