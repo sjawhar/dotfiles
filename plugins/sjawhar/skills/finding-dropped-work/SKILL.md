@@ -36,7 +36,7 @@ Each row that is not DONE leaves the audit with one of these, the same hour:
 | The row | Action |
 |---|---|
 | You can do it now | Deliver it. Done means deployed, merged or measured, as the request needs, with the evidence linked. |
-| It takes longer, or someone else does it | Put it on a Dispatch issue that a session claims. The spec says what done means (deployed, merged, measured) and a date. |
+| It takes longer | Do it now, in this session or in a subagent it starts and waits for, until it is delivered as above. An issue for later, a follow-up or a hand-off to another agent is deferral, and deferred work does not come back. |
 | It waits on the user | Open a Dispatch ask on its issue (`skill://dispatch`). A chat question, a note, a peer message, a comment on an answered ask or a review request is not an ask. |
 | A Dispatch record names a local file | Upload the file as an artifact on that issue and link it. |
 | The result sits in a document, artifact or chat line with no ask | Open an ask that links the result and asks the user's next step with it: an ask block at the end of that document, else a `dispatch ask`. An artifact notifies nobody. |
@@ -52,5 +52,5 @@ Then report done, with the audit's counts: rows found, rows closed by each actio
 |---|---|
 | Audit from memory or the compaction summary | A fresh agent reads the transcript. |
 | "Done" = written in the spec, approval requested, or sent to an agent | Done is delivered and checked. |
-| A follow-up kept in a todo list or notes | A claimed issue with done and a date. |
+| A follow-up kept in a todo list, notes or a new issue | The work done now, as "It takes longer" says. |
 | A wait reported in chat because the user is online | An ask. A chat question is gone after the turn; an ask stays open where the user and the stream see it. |

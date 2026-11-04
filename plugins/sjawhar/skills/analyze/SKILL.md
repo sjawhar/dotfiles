@@ -1,6 +1,6 @@
 ---
 name: analyze
-description: Use when code changes in the working copy need a quality pass before a commit or a PR. Also use when asked to analyze recent changes.
+description: Use before you commit or open a PR on code you wrote; not when dispatched to review someone's diff. Use it at the analyze step of opening-a-pr, when you finished a task and the working copy or your unpushed commits hold your own changes, or when someone asks you to analyze changes you just made.
 ---
 
 # Analyze

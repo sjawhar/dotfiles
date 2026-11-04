@@ -1,6 +1,6 @@
 ---
 name: taking-a-new-request
-description: "Use the moment a person sends a request while this session is already working on something else: a new ask, \"also do X\", \"while you're at it\", a pasted link or error, or a request to fold work into what is running. Also when you are tempted to treat it as part of the current work because the subjects look alike, and when you must say what a running session can and cannot absorb."
+description: 'Use when a mid-task message asks for work beyond your current goal, not a re-review or next round. Typical words: "new task", "new job", "also do X", "while you''re at it", a changed direction that adds requirements, or a pasted link or error that needs its own fix, from a person, a lead or a parent agent. Also when you are tempted to fold such a request into the running work because the subjects or files look alike, and when you must say what a running session can and cannot absorb.'
 ---
 
 # Taking a new request while working

@@ -1,6 +1,6 @@
 ---
 name: design-review
-description: Use when asked to review a plan or design before implementation, or when a plan needs architecture, security, UX, performance and bug review.
+description: Use when asked for a multi-agent review of a plan or design; not when you are its single reviewer. Use it when a person or coordinator wants one plan or design reviewed, before it is built, by separate architecture, security, UX, performance and bug reviewers at once, or names this skill.
 ---
 
 # Design review
