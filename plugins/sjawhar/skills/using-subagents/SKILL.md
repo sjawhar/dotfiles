@@ -38,6 +38,7 @@ Run `envoy_whoami` once. If it returns a session ID, every brief carries your se
 
 - Address every message to one session id; a broadcast (`agent://all`) interrupts each working lane, and lanes given different broadcasts act on contradictory instructions.
 - Take the time from `date -u`; a message's `at` stamp is when it was sent, and delivery lags, so it is a receipt and not the clock.
+- A subagent runs **inside its parent's process**, so a parent that finishes ends every child it still has, with no notice to anyone. A lane waiting on an external job (a k8s Job, a farm grade, a long build) is the easy one to lose, because it does not look like work in progress: dispatch it as a **sibling at top level**, never as a child of an agent that is about to report, and do not let a parent complete while a child waits. Measured on 2026-11-04: a watcher holding a fork member's pre-registered analysis died when its parent reported, after 7h37m of waiting; the k8s Job had completed and all three result sets were in GCS, so nothing was lost but the 40 minutes before anyone noticed it had gone. Nothing reports such a death — `read proc://` no longer listing a lane is the only signal.
 
 Push a branch after every reviewed task, and keep no subagent's work unpushed past its own task: a branch that exists only in a working copy is one bad command from gone.
 
