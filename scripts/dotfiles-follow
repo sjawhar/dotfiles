@@ -19,14 +19,17 @@ What one run does:
      fast-forward writes the same bytes, so step 5 discards that edit (`git checkout -- <file>`)
      first and logs a note. On 2026-11-03 a hand install of pi-envoy 15.5.0 wrote main's new
      omp/plugins/package.json and bun.lock into the checkout 69 s after the pin was pushed.
+     The marketplace lock, omp/plugins/omp-plugins.lock.json, is follow-managed: any local change
+     is discarded to HEAD before judging other changes or fast-forwarding, even at current HEAD.
+     Its pins change only by pulling commits; an interrupted plugin upgrade cannot block follow.
   3. Refuse when origin/main is not a fast-forward of HEAD: HEAD has commits origin/main lacks.
   4. Refuse when the commits to take change an exception file that is modified here. (`git merge
      --ff-only` keeps a modified file that the merge does not touch, and refuses one it does.)
   5. `git merge --ff-only origin/main`.
-  6. After a fast-forward, and on each later run until it passes once at the current HEAD:
-     `mise install`, `bun install --frozen-lockfile` in omp/plugins (the plugins main pins, the
-     tracked lock never written), then `devbox/sami-devbox-check --pins` (the check's knives and
-     mise-pin lines).
+  6. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
+     `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace update/upgrade
+     for each marketplace plugin not at its committed lock version (a best-effort restore of the
+     tracked lock afterward), then `devbox/sami-devbox-check --pins` (knives and mise-pin lines).
   7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs). It installs the pre-push hook in every
@@ -35,11 +38,11 @@ What one run does:
   8. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
 
-It never stashes, resets, rebases, abandons, restores or deletes, and discards only an edit whose
-bytes origin/main already holds, right before the fast-forward. A refusal leaves HEAD, the
-index and every file as they were. Alerts go over Envoy to the box-health owner the same way the
-box watches here send them: BOX_HEALTH_OWNER when it is set, else the `lead-box-health` role, else
-the SRE session.
+It never stashes, resets, rebases, abandons or deletes. It restores only the follow-managed
+marketplace lock, before judging dirty files and after plugin commands. Other edits are discarded
+only when origin/main already holds their bytes, right before the fast-forward. Apart from that
+lock recovery, a refusal leaves HEAD, the index and every file as they were. Alerts go over Envoy
+to BOX_HEALTH_OWNER when set, else the `lead-box-health` role, else the SRE session.
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ import getpass
 import json
 import os
 import re
+import signal
 import socket
 import stat
 import subprocess
@@ -378,31 +382,126 @@ def display_path(path: Path) -> str:
 # ------------------------------------------------------------------------------- tools
 
 
+MARKETPLACE_LOCK = "omp/plugins/omp-plugins.lock.json"
+MARKETPLACE_COMMAND_TIMEOUT = 60.0
+MARKETPLACE_TIMEOUT = 300.0
+
+
 def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
     try:
-        done = subprocess.run(
+        proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=timeout,
+            errors="replace",
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
             # The check reads mise.toml from DOTFILES_DIR: this checkout's, whichever it is.
             env={**os.environ, "DOTFILES_DIR": str(cwd)},
         )
-        return done.returncode, (done.stdout or "") + (done.stderr or "")
-    except subprocess.TimeoutExpired as error:
-        out = error.stdout or ""
-        if isinstance(out, bytes):
-            out = out.decode(errors="replace")
-        return 124, f"{out}\n{' '.join(argv)}: timed out after {timeout:.0f}s"
+        timed_out = False
+        try:
+            try:
+                proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        finally:
+            # A shim may leave children behind. Kill its group and drain before normal cleanup;
+            # an interruption that bypasses this is repaired by the next run's lock recovery.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            out, err = proc.communicate()
+        output = (out or "") + (err or "")
+        if timed_out:
+            return 124, f"{output}\n{' '.join(argv)}: timed out after {timeout:.0f}s"
+        return proc.returncode, output
     except OSError as error:
         return 127, f"{' '.join(argv)}: {error}"
 
 
+def install_marketplace_plugins(repo: Path, timeout: float) -> str:
+    """Return why any marketplace pin is missing; try to restore the follow-managed lock."""
+    plugins = repo / "omp/plugins"
+    lock = repo / MARKETPLACE_LOCK
+    if not lock.is_file():
+        return ""
+    installed_path = plugins / "installed_plugins.json"
+    package = plugins / "package.json"
+    try:
+        saved = lock.read_bytes()
+        wanted = json.loads(saved).get("plugins", {})
+        dependencies = json.loads(package.read_text()).get("dependencies", {}) if package.is_file() else {}
+        installed = json.loads(installed_path.read_text()).get("plugins", {}) if installed_path.is_file() else {}
+    except (OSError, ValueError) as error:
+        return f"Cannot read omp plugin pins or installed records: {error}"
+
+    failures: list[str] = []
+    omp = str(repo / "shims/omp")
+    deadline = time.monotonic() + MARKETPLACE_TIMEOUT
+    try:
+        for name, pin in wanted.items():
+            try:
+                if name in dependencies:
+                    continue
+                want = pin.get("version")
+                if not want:
+                    failures.append(f"omp marketplace plugin {name} has no committed version in {display_path(lock)}.")
+                    continue
+                matches = [
+                    plugin for plugin in installed
+                    if plugin.rpartition("@")[0] == name and plugin.rpartition("@")[2]
+                ]
+                if len(matches) != 1:
+                    failures.append(
+                        f"omp marketplace plugin {name} has no unique installed marketplace source;"
+                        " run install.sh once to establish its install record."
+                    )
+                    continue
+                plugin = matches[0]
+                records = installed[plugin]
+                have = records[0].get("version", "") if records else ""
+                if have == want:
+                    continue
+                # Like installers/omp.sh: refresh the catalog before upgrading, then check the
+                # installed record. Upgrade selects latest, which need not be the committed pin.
+                source = plugin.rpartition("@")[2]
+                for args in (["plugin", "marketplace", "update", source], ["plugin", "upgrade", plugin]):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        failures.append(f"{plugin}: marketplace step's {MARKETPLACE_TIMEOUT:g}s budget exhausted; retry next run.")
+                        break
+                    command_timeout = min(timeout, MARKETPLACE_COMMAND_TIMEOUT, remaining)
+                    code, out = run_step([omp, *args], repo, command_timeout)
+                    if code != 0:
+                        failures.append(f"{plugin}: `omp {' '.join(args)}` exited {code}:\n{tail(out)}")
+                        break
+                else:
+                    current = json.loads(installed_path.read_text()).get("plugins", {}).get(plugin, [])
+                    have = current[0].get("version", "") if current else ""
+                    if have != want:
+                        failures.append(f"{plugin} is {have or 'not installed'}, but {display_path(lock)} records {want}.")
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
+                failures.append(f"{name}: cannot install marketplace pin: {error}")
+    finally:
+        try:
+            restored = git(repo, "checkout", "--", MARKETPLACE_LOCK, timeout=15)
+            restore_failed = restored.returncode != 0
+        except OSError:
+            restore_failed = True
+        if restore_failed:
+            try:
+                lock.write_bytes(saved)
+            except OSError as error:
+                failures.append(f"Cannot restore {display_path(lock)} after omp plugin commands: {error}")
+    return "\n".join(failures)
+
+
 def install_tools(repo: Path, options: argparse.Namespace) -> str:
-    """"" when `mise install`, the omp plugins' frozen install and the check's pin lines pass, else why."""
+    """Return why mise, Bun, marketplace plugins or the check's pin lines did not pass."""
     code, out = run_step(["mise", "install"], repo, options.mise_timeout)
     if code != 0:
         return f"`mise install` in {display_path(repo)} exited {code}:\n{tail(out)}"
@@ -415,11 +514,14 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
         code, out = run_step(["bun", "install", "--frozen-lockfile"], plugins, options.mise_timeout)
         if code != 0:
             return f"`bun install --frozen-lockfile` in {display_path(plugins)} exited {code}:\n{tail(out)}"
+    why = install_marketplace_plugins(repo, options.mise_timeout)
+    if why:
+        return why
     check = repo / "devbox/sami-devbox-check"
     code, out = run_step([str(check), "--pins"], repo, options.check_timeout)
     if code != 0:
-        return f"`mise install` and the plugin install passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
-    log(f"tools: mise install, the plugins' frozen install and {check.name} --pins passed")
+        return f"`mise install` and the plugin installs passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
+    log(f"tools: mise install, frozen Bun install, marketplace pins and {check.name} --pins passed")
     for line in out.strip().splitlines():
         log(f"  {line}")
     return ""
@@ -532,9 +634,10 @@ class State:
 
 
 def assess_and_follow(
-    repo: Path, options: argparse.Namespace, state: dict
+    repo: Path, options: argparse.Namespace, state: State
 ) -> tuple[dict[str, str], set[str], dict]:
     """Do the run's work. Returns ({kind: why} found now, kinds judged this run, facts)."""
+    data = state.data
     found: dict[str, str] = {}
     judged: set[str] = {"fetch", "dirty", "not-ff"}
     facts: dict = {"fast_forwarded": False}
@@ -543,8 +646,8 @@ def assess_and_follow(
     fetched = git(repo, "fetch", "--quiet", options.remote, options.branch, timeout=options.fetch_timeout)
     target_ref = f"refs/remotes/{options.remote}/{options.branch}"
     if fetched.returncode != 0:
-        failures = int(state.get("fetch_failures", 0)) + 1
-        state["fetch_failures"] = failures
+        failures = int(data.get("fetch_failures", 0)) + 1
+        data["fetch_failures"] = failures
         log(f"fetch failed ({failures} run(s) in a row): {fetched.stderr.strip()}")
         if failures >= options.fetch_grace:
             found["fetch"] = (
@@ -553,7 +656,7 @@ def assess_and_follow(
                 f"  The checks below used the {target_ref} of the last fetch that worked."
             )
     else:
-        state["fetch_failures"] = 0
+        data["fetch_failures"] = 0
 
     head = rev(repo, "HEAD")
     target = rev(repo, target_ref)
@@ -564,6 +667,26 @@ def assess_and_follow(
 
     kept, note = kept_paths(repo, options.provision)
     entries, error = worktree_status(repo)
+    if any(path == MARKETPLACE_LOCK for _code, path in entries):
+        # This lock is a follow-managed generated pin: followers change its pins only by pulling
+        # commits, never by hand-editing the live checkout. Any local change is an anomaly to
+        # discard, including the marketplace write that stopped follow on 2026-11-03 and an
+        # interrupted upgrade. Restore HEAD even when the bytes differ from target or it is current.
+        judged.add("merge")
+        # Persist the retry before removing its dirty-lock trigger: termination afterward must
+        # not leave a clean lock and a stale tools-success marker that skips installation.
+        data["tools_ok_head"] = None
+        state.commit()
+        discarded = git(repo, "checkout", "HEAD", "--", MARKETPLACE_LOCK, timeout=15)
+        if discarded.returncode != 0:
+            found["merge"] = (
+                f"Cannot restore follow-managed {MARKETPLACE_LOCK} to HEAD in {display};"
+                f" git checkout exited {discarded.returncode}:\n{tail(discarded.stdout + discarded.stderr)}"
+            )
+            return found, judged, facts
+        facts["restored_marketplace_lock"] = True
+        log(f"note: restored follow-managed {MARKETPLACE_LOCK} to HEAD {short(head)}; discarded local pin anomaly")
+        entries, error = worktree_status(repo)
     # A file edited in place to exactly the bytes the target commit holds (an installer, or a
     # person, wrote main's new content before the fast-forward did) is no change to keep.
     same = same_as_target(repo, target, entries) if target != head else set()
@@ -662,14 +785,14 @@ def assess_and_follow(
 
     # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
     if head == target and "dirty" not in found and (
-        facts["fast_forwarded"] or state.get("tools_ok_head") != head
+        facts["fast_forwarded"] or data.get("tools_ok_head") != head
     ):
         judged.add("tools")
         why = install_tools(repo, options)
         if why:
             found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
         else:
-            state["tools_ok_head"] = head
+            data["tools_ok_head"] = head
     return found, judged, facts
 
 
@@ -683,7 +806,7 @@ def run_once(options: argparse.Namespace) -> int:
         return 0
     data = state.data
     incidents: dict = data.setdefault("incidents", {})
-    found, judged, facts = assess_and_follow(repo, options, data)
+    found, judged, facts = assess_and_follow(repo, options, state)
     judged.add("hooks")
     why = sweep_hooks(options)
     if why:
@@ -724,9 +847,13 @@ def run_once(options: argparse.Namespace) -> int:
         if facts["fast_forwarded"]
         else "It changed nothing in the checkout"
     )
+    if facts.get("restored_marketplace_lock"):
+        changed = "It restored the follow-managed marketplace lock to HEAD"
+        if facts["fast_forwarded"]:
+            changed += f" and fast-forwarded the checkout to {short(facts.get('head', ''))}"
     footer = (
         f"From dotfiles-follow on {host} (scripts/dotfiles-follow.md). {changed}:"
-        " it never stashes, resets, rebases, abandons or restores."
+        " it never stashes, resets, rebases or abandons. Only the follow-managed marketplace lock is restored."
     )
     if opened:
         messages.append(f"DOTFILES NOT FOLLOWING MAIN on {host} ({where}).\n\n{blocks(opened)}\n\n{footer}")
