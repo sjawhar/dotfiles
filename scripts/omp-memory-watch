@@ -2610,7 +2610,27 @@ process.stdout.write(kept.map(w => `${w}\\0`).join(""));
 # Flag reads a run may make: about 30 ms each (bun 1.4.4, sami-rocqperf, 2026-11-04), and only
 # for a pane whose omp process this watch has not read yet, so a steady box makes none.
 FLAG_READS = 12
+# How long one read may take. A session that comes back without a flag is recoverable; one that
+# never comes back is not (the box-health owner, who owns this watch, 2026-11-04), so the read
+# is the only thing a slow box costs: the resume itself never waits on it and never stops for it.
+FLAG_READ_TIMEOUT = 2.0
+# A read is not even begun while the box's disk is stalled: `full avg10` of /proc/pressure/io is
+# the share of the last 10 s in which EVERY runnable task waited on IO. Above this the box is in
+# a writeback stall -- the state the lead's omp died in at 16:55:51Z on 2026-11-04 -- and
+# starting a bun there buys a 2 s timeout, not an argv. The resume goes ahead without the flags.
+IO_STALL_AVG10 = 5.0
 _BUN: str | None = None
+
+
+def io_stall_avg10() -> float:
+    """`full avg10` of the box's IO pressure, 0.0 when the kernel does not report it."""
+    try:
+        for line in (PROC_ROOT / "pressure" / "io").read_text().splitlines():
+            if line.startswith("full "):
+                return float(line.split("avg10=", 1)[1].split()[0])
+    except (OSError, ValueError, IndexError):
+        return 0.0
+    return 0.0
 
 
 def bun_path() -> str:
@@ -2643,27 +2663,38 @@ def launch_flags(words: list[str], budget: dict | None = None) -> tuple[list[str
     source (--resume, --session, --continue, --fork, …; a resume names its own) and the
     positional words. None is NOT an empty flag list: it means they could not be read, and the
     caller must say so rather than resume as though the session had none.
+
+    Nothing here can stop a resume: every failure -- no bun, an unreadable argv, a writeback
+    stall, the run's reads spent, a read past FLAG_READ_TIMEOUT -- answers None with its reason,
+    the pane is resumed bare, and the next run reads the pane again while its omp still runs.
     """
     if len(words) < 2:
-        return ([], "") if words else (None, "its command line could not be read")
+        return ([], "") if words else (None, "read failed, bare resume: its command line could not be read")
     bun = bun_path()
     if not bun:
-        return None, ("no bun on PATH (nor through mise), which reads the launch flags"
-                      " (scripts/agentbox-run.ts relaunchArgv)")
+        return None, ("read failed, bare resume: no bun on PATH (nor through mise), which reads the"
+                      " launch flags (scripts/agentbox-run.ts relaunchArgv)")
+    stalled = io_stall_avg10()
+    if stalled > IO_STALL_AVG10:
+        return None, (f"read skipped, bare resume: the box is in a writeback stall (IO pressure full"
+                      f" avg10 {stalled:.1f}, over {IO_STALL_AVG10:.0f})")
     if budget is not None:
         if budget.get("flags", 0) <= 0:
-            return None, "this run's flag reads were spent; the next run reads them"
+            return None, "read skipped, bare resume: this run's flag reads were spent; the next run reads them"
         budget["flags"] -= 1
     try:
         done = subprocess.run(
             [bun, "-e", LAUNCH_FLAGS_JS], input="\0".join(words).encode("utf8", "replace"),
-            capture_output=True, timeout=20, env=dict(os.environ, AGENTBOX_RUN_TS=str(AGENTBOX_RUN_TS)),
+            capture_output=True, timeout=FLAG_READ_TIMEOUT,
+            env=dict(os.environ, AGENTBOX_RUN_TS=str(AGENTBOX_RUN_TS)),
         )
+    except subprocess.TimeoutExpired:
+        return None, f"read failed, bare resume: {bun} did not answer within {FLAG_READ_TIMEOUT:.0f} s"
     except (OSError, subprocess.SubprocessError) as failure:
-        return None, f"reading the launch flags with {bun} failed ({failure})"
+        return None, f"read failed, bare resume: {bun} could not be run ({failure})"
     if done.returncode != 0:
-        return None, (f"reading the launch flags with {bun} and scripts/agentbox-run.ts failed"
-                      f" (exit {done.returncode})")
+        return None, (f"read failed, bare resume: {bun} and scripts/agentbox-run.ts exited"
+                      f" {done.returncode}")
     kept = done.stdout.decode("utf8", "replace").split("\0")
     if kept and kept[-1] == "":
         kept.pop()

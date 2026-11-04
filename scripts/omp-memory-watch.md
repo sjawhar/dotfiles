@@ -80,12 +80,16 @@ respawn asks through bun, never a second copy of it here. A pane is read once pe
 at most 12 reads a run (about 30 ms each; bun is resolved with `mise which`, so the mise shim
 never installs anything inside the pass), and a record is carried forward only while the same
 pid and start time run in that pane, so it can never hold the flags of a process that has been
-replaced. When they could not be read — no bun, an unreadable `/proc` entry, the run's reads
-spent — the record holds **no flags rather than a guess**: the session is resumed on omp's
-defaults, the journal line and the report say `WITHOUT the flags it was launched with (<why>)`,
-and the next run reads the pane again while its omp still runs. Why: a bare resume brought a
-session back on another profile, model or configuration than it ran on (S4 lost its `--profile`
-at 16:36Z on 2026-11-04); `agentbox move` fixed the same defect in its own respawn the same day.
+replaced. **A read never costs a resume**: no bun, an unreadable `/proc` entry, the run's 12
+reads spent, a bun that does not answer within 2 s, or a box in a writeback stall (`full avg10`
+of `/proc/pressure/io` over 5, when starting a bun buys a timeout and not an argv) each leave
+the record with **no flags rather than a guess**. The session is resumed anyway, on omp's
+defaults; the journal line and the report say `WITHOUT the flags it was launched with (read
+failed, bare resume: <why>)`; and the next run reads the pane again while its omp still runs. A
+session that comes back without a flag is recoverable, one that never comes back is not (the
+box-health owner, 2026-11-04). Why any of it: a bare resume brought a session back on another
+profile, model or configuration than it ran on (S4 lost its `--profile` at 16:36Z on
+2026-11-04); `agentbox move` fixed the same defect in its own respawn that day.
 
 The pass is bounded, because at load 425 on 2026-11-02 an unbounded one took 33 s and the unit
 killed the next period's run at its 25 s limit. Every process is read once, from its

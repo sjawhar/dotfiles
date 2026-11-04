@@ -751,6 +751,24 @@ class LaunchFlagsTest(unittest.TestCase):
         "go on with the work",
     ]
 
+    def setUp(self) -> None:
+        """A procfs of its own, reporting a box that is not stalled, so a real IO storm on the
+        machine running the suite cannot decide these tests."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.proc = Path(tmp.name)
+        (self.proc / "pressure").mkdir()
+        self.pressure(0.40)
+        original = WATCH.PROC_ROOT
+        WATCH.PROC_ROOT = self.proc
+        self.addCleanup(setattr, WATCH, "PROC_ROOT", original)
+
+    def pressure(self, full_avg10: float) -> None:
+        (self.proc / "pressure" / "io").write_text(
+            f"some avg10={full_avg10 + 10:.2f} avg60=1.00 avg300=1.00 total=1\n"
+            f"full avg10={full_avg10:.2f} avg60=1.00 avg300=1.00 total=1\n"
+        )
+
     def test_the_session_source_and_the_prompt_are_dropped_and_the_rest_kept(self) -> None:
         """omp records a positional as a message the person typed, and the resume names its own
         session: everything else is how the session was configured."""
@@ -772,6 +790,34 @@ class LaunchFlagsTest(unittest.TestCase):
         flags, why = WATCH.launch_flags(self.ARGV, budget)
         self.assertIsNone(flags)
         self.assertIn("the next run reads them", why)
+
+    def test_no_read_is_begun_while_the_box_is_in_a_writeback_stall(self) -> None:
+        """The state the lead's omp died in at 16:55:51Z on 2026-11-04: starting a bun there buys
+        a timeout, not an argv. The read is skipped; the resume is not (box-health owner)."""
+        self.pressure(61.25)
+        budget = {"flags": 3}
+        flags, why = WATCH.launch_flags(self.ARGV, budget)
+        self.assertIsNone(flags)
+        self.assertIn("writeback stall (IO pressure full avg10 61.2, over 5)", why)
+        # The read was never begun, so it spent none of the run's reads.
+        self.assertEqual(budget["flags"], 3)
+        self.pressure(0.40)
+        self.assertEqual(WATCH.io_stall_avg10(), 0.40)
+
+    def test_a_read_that_does_not_answer_in_time_gives_a_bare_resume(self) -> None:
+        original = WATCH.subprocess.run
+
+        def slow(argv, **kw):
+            raise WATCH.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+        WATCH.subprocess.run = slow
+        self.addCleanup(setattr, WATCH.subprocess, "run", original)
+        WATCH._BUN = "/h/.mise/installs/bun/1.4.4/bin/bun"
+        self.addCleanup(setattr, WATCH, "_BUN", None)
+        flags, why = WATCH.launch_flags(self.ARGV, {"flags": 3})
+        self.assertIsNone(flags)
+        self.assertIn("read failed, bare resume", why)
+        self.assertIn("did not answer within 2 s", why)
 
     def test_flags_are_carried_only_while_the_same_process_runs(self) -> None:
         reads = []
