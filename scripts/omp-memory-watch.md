@@ -70,7 +70,22 @@ holds open, else the `--resume` id on its command line; for a pane running `agen
 -- omp …`, the launcher's own line, else (once per pane per 5 min, one box per run, since each
 `docker exec` costs about 1.5 s) the omp inside that one box. The state file keeps, per pane, the
 session, the working directory, the window (`#{window_id}`, since `renumber-windows` is on and a
-window's index changes) and for a box the launcher's spec.
+window's index changes), the flags its omp was launched with, and for a box the launcher's spec.
+
+**The launch flags are read while the process lives**, since a dead omp has no argv to read: the
+omp's own `/proc/<pid>/cmdline` (for a box pane, the launcher's line after its `--`, because the
+boxed omp runs under another uid) less the session source and the positional words, by
+`relaunchArgv` of `scripts/agentbox-run.ts` — the box runner's rule, the one `agentbox move`'s
+respawn asks through bun, never a second copy of it here. A pane is read once per omp process,
+at most 12 reads a run (about 30 ms each; bun is resolved with `mise which`, so the mise shim
+never installs anything inside the pass), and a record is carried forward only while the same
+pid and start time run in that pane, so it can never hold the flags of a process that has been
+replaced. When they could not be read — no bun, an unreadable `/proc` entry, the run's reads
+spent — the record holds **no flags rather than a guess**: the session is resumed on omp's
+defaults, the journal line and the report say `WITHOUT the flags it was launched with (<why>)`,
+and the next run reads the pane again while its omp still runs. Why: a bare resume brought a
+session back on another profile, model or configuration than it ran on (S4 lost its `--profile`
+at 16:36Z on 2026-11-04); `agentbox move` fixed the same defect in its own respawn the same day.
 
 The pass is bounded, because at load 425 on 2026-11-02 an unbounded one took 33 s and the unit
 killed the next period's run at its 25 s limit. Every process is read once, from its
@@ -84,8 +99,8 @@ A recorded pane that is now **idle** — its shell has no child process, or tmux
 resumed as the lead does it by hand, with no prompt after the id:
 
 ```sh
-tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c '( setsid ~/.dotfiles/scripts/agentbox move --wake <id> <notice> & ); cd <cwd> && ~/.dotfiles/shims/omp --resume <id>; exec bash -i'
-tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c '( setsid ~/.dotfiles/scripts/agentbox move --wake <id> <notice> & ); cd <cwd> && ~/.dotfiles/scripts/agentbox new <spec> -- omp --resume <id>; exec bash -i'
+tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c '( setsid ~/.dotfiles/scripts/agentbox move --wake <id> <notice> & ); cd <cwd> && ~/.dotfiles/shims/omp <its launch flags> --resume <id>; exec bash -i'
+tmux respawn-pane -k -t <pane> -c <cwd> bash -i -c '( setsid ~/.dotfiles/scripts/agentbox move --wake <id> <notice> & ); cd <cwd> && ~/.dotfiles/scripts/agentbox new <spec> -- omp <its launch flags> --resume <id>; exec bash -i'
 ```
 
 with `~` expanded: the shim by its absolute path, because a pane that starts omp from `PATH` can
@@ -588,6 +603,7 @@ owner the moment it is seen, as one message naming the touch's own report.
 | OOM kill during a crossing | `memory.events` `oom_kill` of the crossing's scope, against its value when the crossing opened |
 | OOM bias | `cgroup.procs` of each capped omp scope, `/proc/<pid>/comm`, `/proc/<pid>/stat` (parent), `/proc/<pid>/oom_score_adj` (read, and written upward) |
 | Panes | `tmux list-panes -a`, `/proc/<pid>/task/*/children` below each pane, an omp's open session file or `--resume` id, `docker exec` into one box when nothing else names its session |
+| A session's launch flags (resume only) | `/proc/<pid>/cmdline` of the live omp, or of its box launcher after `--`, through `relaunchArgv` of `scripts/agentbox-run.ts` (bun, resolved with `mise which`) |
 | Whether a session ended on purpose | the last entry of its transcript, by `normal_exit_at` in `envoy-role-holder-watch` |
 | Whether `agentbox move` owns a session's respawn, or gave up | `~/.cache/omp/agentbox/move-<id>.log` |
 
