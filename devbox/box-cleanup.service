@@ -1,0 +1,19 @@
+[Unit]
+Description=One daily pass over every disk cleaner on this box, with one log and two alerts
+Documentation=file:%h/.dotfiles/devbox/box-cleanup.md
+# No ConditionPath* here. Each cleaner carries its own, which devbox/box-cleanup checks per step
+# and records as "skipped" — a box without Docker must still get its /tmp swept.
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+# The union of what the seven units set. gocache-cap and nvme-cache-cap need mise's shims for
+# `go`; the rest ran with the plain system PATH, which this contains.
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=MISE_DATA_DIR=%h/.mise
+# Seven steps, each killed at 30 minutes by the script (BOX_CLEANUP_STEP_TIMEOUT), so a run
+# cannot pass 3.5 hours however stuck one cleaner is. 4 hours leaves the script room to write
+# its log and alert after the last step rather than being killed mid-write.
+TimeoutStartSec=4h
+ExecStart=%h/.dotfiles/devbox/box-cleanup

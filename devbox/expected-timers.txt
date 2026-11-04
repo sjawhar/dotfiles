@@ -40,20 +40,28 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 envoy-role-holder-watch.timer      # owner: box-health lead. Envoy role holders still alive.
 omp-dup-watch.timer                # owner: box-health lead. One omp per session id.
 omp-login-watch.timer              # owner: box-health lead. Sessions still have a provider login.
-omp-memory-watch.timer             # owner: omp lead. Sessions near their memory ceiling.
+# omp-memory-watch.timer was here. Sami, 2026-11-04 17:10:29Z: "I don't know what OMP memory
+# watch is, but yeah, you can stop it." Disabled at 21:26Z and taken out of this list, which is
+# what had re-armed it at 19:44Z. It does not come back in any form without his say.
 omp-root-hang-watch.timer          # owner: box-health lead. A root session hung on a tool call.
-session-cpu-record.timer           # owner: box-health lead. Per-session CPU, for ranking later.
+# session-cpu-record.timer was here. It is now the stream job of the same name
+# (~/.config/stream-jobs/session-cpu-record.job, every 5 min); its first run through the runner
+# was 21:42:08Z, exit 0, 142 sessions. The timer was disabled at 21:42Z. unit-health-watch
+# watches the job instead, and names the same owner.
 stream-job.timer                   # owner: box-health lead. Runs every stream's own standing job.
 
 # --- the box's own housekeeping (devbox/) ---
 dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
-docker-cap.timer                   # owner: box-health lead. Docker build cache under its cap.
-gocache-cap.timer                  # owner: box-health lead. Go build cache under its cap.
-nvme-cache-cap.timer               # owner: box-health lead. uv, cargo and Go module caches.
-session-scratch-reap.timer         # owner: box-health lead. Dead sessions' scratch directories.
-session-tmp-reap.timer             # owner: box-health lead. The big disk's TMPDIR, daily.
-tmp-empty-prune.timer              # owner: box-health lead. Empty tmp* directories, daily.
-tmp-stale-reap.timer               # owner: box-health lead. The root disk's /tmp, hourly.
+# box-cleanup replaces the seven cleaner timers that were here (dispatch://INFRA-993/ask/d44b73ba,
+# 2026-11-04 21:02Z: "Fold into about 4"): docker-cap, gocache-cap, nvme-cache-cap,
+# session-scratch-reap, session-tmp-reap, tmp-empty-prune and tmp-stale-reap. Each keeps its own
+# script and its own rules, run as a step with the ConditionPath* its unit had; what changed is
+# that one schedule runs them, one log records what each freed, and one alert speaks when the
+# cleaning stops working. The seven were disabled at 21:48Z, after box-cleanup.service had run
+# all seven under systemd at 21:40:17-21:47:11Z, 0 failed (devbox/box-cleanup.md).
+# max_run is its own 4h TimeoutStartSec: seven steps, each killed at 30 min, and session-tmp-reap
+# alone took 409-828 s on 2026-11-04.
+box-cleanup.timer  max_run=4h        # owner: box-health lead. Every disk cleaner, once a day.
 
 # --- model routes ---
 ossv-box-gateway-key.timer         # owner: OSS Verify gateway lane. The gateway key in models.yml.

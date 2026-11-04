@@ -32,4 +32,36 @@ else
     echo "NOTE: /mnt/nvme/sami/tmp is absent here; the records go under \$XDG_STATE_HOME instead."
 fi
 
-arm_user_timer omp session-cpu-record
+# Since 2026-11-04 this is a stream job where the box has the runner, not a timer of its own:
+# sami-devbox's 23 user timers were folded into about four
+# (dispatch://INFRA-993/ask/d44b73ba), and a 5-minute recorder with no alert of its own is
+# exactly what scripts/stream-job exists to run. The runner's own timer fires it, and
+# unit-health-watch reads the same state and names the owner below when it stops finishing.
+#
+# Not every machine has the runner: sami-rocqperf had session-cpu-record.timer enabled and no
+# stream-job.timer at all on 2026-11-04, and writing a job file there would have left it with no
+# recorder. So the runner decides which of the two this machine gets, and a machine never ends
+# up with both.
+jobs="${XDG_CONFIG_HOME:-$HOME/.config}/stream-jobs"
+if systemctl --user is-enabled --quiet stream-job.timer 2>/dev/null; then
+    mkdir -p "$jobs"
+    cat >"$jobs/session-cpu-record.job" <<'JOB'
+# Per-session CPU on this box, sampled so sessions can be ranked afterwards. Owner: the
+# box-health lead, who is who unit-health-watch names when this job stops finishing. timeout is
+# the old unit's TimeoutStartSec: one sample cost ~0.5 CPU-seconds and ~18 s of wall clock at
+# load 300, and a run that cannot finish is killed so runs never pile up on the 5-minute period.
+owner=01a18385-f8c8-74a9-b6ff-694fb5fe87a7
+command=$HOME/.dotfiles/scripts/session-cpu-record sample
+every=5m
+timeout=4m
+JOB
+    echo "session-cpu-record: $jobs/session-cpu-record.job written; scripts/stream-job runs it"
+    if systemctl --user is-enabled --quiet session-cpu-record.timer 2>/dev/null; then
+        systemctl --user disable --now session-cpu-record.timer
+        echo "session-cpu-record: the old timer was armed here too and has been disabled"
+    fi
+else
+    echo "session-cpu-record: this machine has no stream-job.timer, so it keeps its own timer."
+    rm -f "$jobs/session-cpu-record.job"
+    arm_user_timer omp session-cpu-record
+fi

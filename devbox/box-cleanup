@@ -1,0 +1,535 @@
+#!/bin/bash
+# box-cleanup: one daily pass over every disk cleaner this box has, one log, two alerts.
+#
+# Until 2026-11-04 the seven cleaners below each had a timer of their own: docker-cap and
+# gocache-cap hourly, nvme-cache-cap hourly, session-scratch-reap every two minutes,
+# tmp-stale-reap hourly, session-tmp-reap and tmp-empty-prune daily. Seven schedules, seven
+# journals, and no one line anywhere saying what the box got back. Sami folded them into one
+# daily job (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b, 2026-11-04 21:02Z).
+#
+# THIS IS ONE SCHEDULE AND ONE LOG, NOT A NEW DELETION POLICY. Each cleaner is run as it stands,
+# unchanged, with its own caps, its own ages and its own refusals. Nothing here decides what to
+# delete; the only new judgements are when the cleaners run, what the run records, and when it
+# speaks.
+#
+# What one run does:
+#   1. reads the free bytes of every local filesystem;
+#   2. runs each cleaner in turn, re-reading those filesystems after each one, so the log says
+#      what each cleaner gave back;
+#   3. writes one human line to the journal and one JSON object to the log;
+#   4. alerts the box-health lead over Envoy in two cases, and in no others:
+#        - a filesystem is under its floor AFTER the run (the floors disk-fill-watch alerts at:
+#          18 GiB on /, 84 GB on /mnt/nvme, 20 GiB elsewhere, each held to a tenth of its own
+#          filesystem as disk-fill-watch holds them, so a small partition is not floored at a
+#          size it never has);
+#        - the run freed nothing at all on three days running, which is what a cleaner that has
+#          quietly stopped working looks like from outside.
+#
+# A step that fails is counted, said, and does not stop the rest: a broken docker-cap must not
+# keep /tmp from being swept. unit-health-watch reports the unit itself if a run never ends.
+#
+# The free-bytes figures are what the filesystem gained across that step, not a measurement of
+# what the cleaner deleted: 80 agent sessions write to these disks throughout. A step can
+# therefore read as negative, which the log prints as it is rather than hiding.
+#
+#   box-cleanup                 run every cleaner, log, alert if either rule says so
+#   box-cleanup --dry-run       print the steps and the filesystems, run nothing
+#   box-cleanup --only NAME     run one cleaner (repeatable), still logs
+#   box-cleanup --no-alert      run and log, send nothing
+#   box-cleanup --report        print the log's last runs and the state, run nothing
+#
+# Overrides, for a test against a scratch tree: BOX_CLEANUP_STATE, BOX_CLEANUP_LOG,
+# BOX_CLEANUP_ENVOY_URL, BOX_CLEANUP_STEP_TIMEOUT, BOX_CLEANUP_DF (a command printing df's
+# output, so a test can feed it filesystems that are not this machine's).
+set -uo pipefail
+
+here="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+state_file="${BOX_CLEANUP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/state.json}"
+log_file="${BOX_CLEANUP_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/log.jsonl}"
+envoy_url="${BOX_CLEANUP_ENVOY_URL:-http://127.0.0.1:9020}"
+step_timeout="${BOX_CLEANUP_STEP_TIMEOUT:-30m}"
+
+# Box health on this machine belongs to the SRE session, as it does for unit-health-watch,
+# load-swap-watch and disk-fill-watch: the role topic first, that session when nobody holds it.
+BOX_HEALTH_TOPIC="notifications.role.lead-box-health"
+SRE="01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+# One Envoy notice, and the detail is in the log this names. The sibling watches use 600.
+MESSAGE_LIMIT=600
+# Days of freeing nothing before the second rule speaks. Three, not one: a box whose caches are
+# already under their caps and whose sessions all still live frees nothing on a quiet day, and
+# that is not a fault. Three such days in a row is.
+ZERO_DAYS=3
+# Runs in a row one cleaner may fail before it is said. The same three, for the same reason: a
+# single failure is a busy box or a lock held, three is a cleaner that has stopped working.
+STEP_FAIL_RUNS=3
+
+GIB=1073741824
+GB=1000000000
+# The floors disk-fill-watch alerts at (scripts/disk-fill-watch, FLOORS), so one number means the
+# same thing to both. A mount it has no floor for takes its --default-floor, 20 GiB.
+floor_for() { # floor_for MOUNT TOTAL_BYTES
+    local mount="$1" total="$2" floor cap
+    case "$mount" in
+        /) floor=$((18 * GIB)) ;;
+        /mnt/nvme) floor=$((84 * GB)) ;;
+        *) floor=$((20 * GIB)) ;;
+    esac
+    # Held to a tenth of the filesystem, as disk-fill-watch holds its own (MAX_FLOOR_FRACTION):
+    # an 84 GB floor on a 100 GB disk would alert for as long as the machine existed.
+    cap=$((total / 10))
+    if ((total > 0 && floor > cap)); then floor=$cap; fi
+    echo "$floor"
+}
+
+# The cleaners, in the order they run. Cheapest and most self-contained first, so a long
+# docker-cap cannot keep the small sweeps from happening at all.
+#
+#   <name>|<paths one of which must exist>|<command>
+#
+# Each is run exactly as its own timer ran it, with the same environment and the same condition.
+# The paths are that unit's own `ConditionPathIsDirectory`/`ConditionPathExists` lines, which
+# systemd checked before each run and which nothing checks once the timers are gone: a step
+# whose target is not on this machine is recorded as skipped, not run and not failed.
+# devbox/session-scratch-reap is listed twice because it is two jobs: the reaper, and --tmp,
+# which only reports. tmp-stale-reap carries TMP_REAP_RUN_SECONDS from its own unit, which is
+# the budget it stops its walk at.
+user="$(id -un)"
+STEPS=(
+    "tmp-empty-prune|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/tmp-empty-prune"
+    "tmp-stale-reap|/tmp|TMP_REAP_RUN_SECONDS=1680 $here/tmp-stale-reap --apply"
+    "session-scratch-reap|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|$here/session-scratch-reap"
+    "session-tmp-reap|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/session-scratch-reap --tmp"
+    "gocache-cap|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
+    "nvme-cache-cap|/mnt/nvme/$user|$here/nvme-cache-cap"
+    "docker-cap|/var/run/docker.sock|$here/docker-cap"
+)
+
+usage() {
+    echo "usage: box-cleanup [--dry-run] [--only NAME]... [--no-alert] [--report]" >&2
+    exit 2
+}
+
+dry_run=no no_alert=no report=no
+only=()
+while (($#)); do
+    case "$1" in
+        --dry-run) dry_run=yes ;;
+        --no-alert) no_alert=yes ;;
+        --report) report=yes ;;
+        --only)
+            shift
+            [[ $# -gt 0 ]] || usage
+            only+=("$1")
+            ;;
+        -h | --help) usage ;;
+        *)
+            echo "box-cleanup: unknown argument '$1'" >&2
+            usage
+            ;;
+    esac
+    shift
+done
+
+stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+say() { echo "$(stamp) box-cleanup: $*"; }
+
+# join_with SEP ITEM...: "a, b, c". `${array[*]}` with IFS joins on one character only, and
+# these separators are two.
+join_with() {
+    local sep="$1" out=""
+    shift
+    local item
+    for item in "$@"; do out+="${out:+$sep}$item"; done
+    printf '%s' "$out"
+}
+
+# human BYTES: the size a reader can hold in their head, signed.
+human() {
+    local bytes="$1" sign=""
+    if ((bytes < 0)); then
+        sign="-"
+        bytes=$((-bytes))
+    fi
+    if ((bytes >= GB)); then
+        printf '%s%s GB' "$sign" "$(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1000000000 }')"
+    elif ((bytes >= 1000000)); then
+        printf '%s%s MB' "$sign" "$(awk -v b="$bytes" 'BEGIN { printf "%.0f", b / 1000000 }')"
+    else
+        printf '%s%s B' "$sign" "$bytes"
+    fi
+}
+
+# filesystems: one line per filesystem a cleaner here can free, "<mount> <avail> <total>".
+#
+# The filesystems are found from the cleaners' own paths, not from a list of every local
+# filesystem: this host had 216 agentbox loop mounts under /mnt/nvme/<user>/agentbox/boxes when
+# this was written (`df --local` on 2026-11-04 listed them all), and a box's own disk is neither
+# freed by anything here nor a disk whose floor means anything. Each path's filesystem is read
+# once, however many paths land on it.
+#
+# What each path is for: / is tmp-stale-reap's /tmp and the root disk everything else needs;
+# the scratch and nvme roots are nvme-cache-cap's caches and session-scratch-reap's per-session
+# directories; the two tmp roots are tmp-empty-prune's and session-tmp-reap's TMPDIR, which is
+# /mnt/scratch/<user>/tmp where devbox/gce-disks made it and /mnt/nvme/<user>/tmp otherwise;
+# and Docker's data root is what docker-cap frees, wherever Docker was configured to keep it.
+cleaner_paths() {
+    local user docker_root
+    user="$(id -un)"
+    echo /
+    echo "$HOME"
+    for path in "/mnt/nvme/$user" "/mnt/scratch/$user" "/mnt/nvme/$user/tmp" "/mnt/scratch/$user/tmp"; do
+        [[ -d "$path" ]] && echo "$path"
+    done
+    docker_root="$(timeout 10 docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
+    [[ -d "${docker_root:-}" ]] && echo "$docker_root"
+    return 0
+}
+
+# One disk, one line. On sami-devbox /home, /mnt/nvme and /var/lib/docker are three mount points
+# of the same device (/dev/nvme41n1, 17.6 TB), so a df by path counts that disk three times and
+# would treble every byte it frees. The lines are therefore keyed by device, and the name kept
+# is the one a floor is written for (/, /mnt/nvme), or the shortest otherwise.
+filesystems() {
+    if [[ -n "${BOX_CLEANUP_DF:-}" ]]; then
+        eval "$BOX_CLEANUP_DF"
+        return
+    fi
+    local paths=()
+    mapfile -t paths < <(cleaner_paths)
+    df -B1 --output=source,target,avail,size "${paths[@]}" 2>/dev/null |
+        awk 'NR > 1 && $2 ~ /^\// {
+            source = $1; target = $2
+            named = (target == "/" || target == "/mnt/nvme")
+            if (!(source in keep)) { keep[source] = target; named_kept[source] = named }
+            else if (named && !named_kept[source]) { keep[source] = target; named_kept[source] = 1 }
+            else if (!named_kept[source] && length(target) < length(keep[source])) { keep[source] = target }
+            avail[source] = $3; size[source] = $4
+        }
+        END { for (source in keep) print keep[source], avail[source], size[source] }' |
+        sort
+}
+
+# read_free: fills the associative arrays AVAIL and TOTAL from one df.
+declare -A AVAIL TOTAL
+read_free() {
+    local mount avail total
+    AVAIL=()
+    TOTAL=()
+    while read -r mount avail total; do
+        [[ -n "$mount" ]] || continue
+        AVAIL["$mount"]="$avail"
+        TOTAL["$mount"]="$total"
+    done < <(filesystems)
+}
+
+# mounts_sorted: the mount points read_free found, in order, and nothing at all when it found
+# none (an unquoted `${!AVAIL[@]}` of an empty array still prints one empty line).
+mounts_sorted() {
+    ((${#AVAIL[@]})) || return 0
+    printf '%s\n' "${!AVAIL[@]}" | sort
+}
+
+json_string() { # minimal JSON escaping for the strings this writes
+    local text="$1"
+    text="${text//\\/\\\\}"
+    text="${text//\"/\\\"}"
+    text="${text//$'\t'/ }"
+    text="${text//$'\n'/ }"
+    printf '%s' "$text"
+}
+
+# The state this job keeps between runs, in one small JSON file:
+#   zero_days        consecutive runs that gained nothing anywhere
+#   alerted_at_days  the zero_days the second alert last went out at, so it says it once
+#   step_fails       per step, how many runs in a row it has failed
+#   step_last_exit   per step, the exit of its last run, for the message
+#   step_alerted     per step, the streak its alert last went out at
+declare -A STEP_FAILS STEP_LAST_EXIT STEP_ALERTED
+zero_days=0 alerted_at=0
+
+load_state() {
+    [[ -r "$state_file" ]] || return 0
+    local kind name value
+    while read -r kind name value; do
+        case "$kind" in
+            zero_days) zero_days="$name" ;;
+            alerted_at) alerted_at="$name" ;;
+            fail) STEP_FAILS["$name"]="$value" ;;
+            exit) STEP_LAST_EXIT["$name"]="$value" ;;
+            alerted) STEP_ALERTED["$name"]="$value" ;;
+        esac
+    done < <(
+        python3 - "$state_file" <<'PY' 2>/dev/null
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    data = {}
+print("zero_days", int(data.get("zero_days", 0)))
+print("alerted_at", int(data.get("alerted_at_days", 0)))
+for key, prefix in (("step_fails", "fail"), ("step_last_exit", "exit"), ("step_alerted", "alerted")):
+    for name, value in (data.get(key) or {}).items():
+        if name and " " not in name:
+            print(prefix, name, int(value))
+PY
+    )
+}
+
+# The steps go in a file, not down a pipe: `python3 -` takes its PROGRAM from stdin, so a
+# heredoc program and piped data cannot both be there. They were, and every step's streak was
+# silently dropped (caught by the harness run of 2026-11-04 21:38Z, which wrote "step_fails":{}
+# for a step that had just run).
+write_state() {
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null
+    local name steps
+    steps="$(mktemp)" || return 1
+    for name in "${!STEP_FAILS[@]}"; do
+        printf '%s\t%d\t%d\t%d\n' "$name" "${STEP_FAILS[$name]:-0}" \
+            "${STEP_LAST_EXIT[$name]:-0}" "${STEP_ALERTED[$name]:-0}"
+    done >"$steps"
+    python3 -c "$WRITE_STATE_PY" "$state_file" "$(stamp)" "$zero_days" "$alerted_at" "$steps"
+    rm -f "$steps"
+}
+
+read -r -d '' WRITE_STATE_PY <<'PY' || true
+import json, sys
+path, at, zero_days, alerted_at, steps = sys.argv[1:6]
+fails, exits, alerted = {}, {}, {}
+for line in open(steps):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) != 4:
+        continue
+    name, fail, code, said = parts
+    fails[name], exits[name], alerted[name] = int(fail), int(code), int(said)
+json.dump({
+    "at": at,
+    "zero_days": int(zero_days),
+    "alerted_at_days": int(alerted_at),
+    "step_fails": fails,
+    "step_last_exit": exits,
+    "step_alerted": alerted,
+}, open(path, "w"), indent=1, sort_keys=True)
+open(path, "a").write("\n")
+PY
+
+# tell MESSAGE: the role topic, and the SRE's session when nothing holds the role. Failing to
+# send is said in the journal and never swallowed: an alert nobody got is the thing this job
+# exists to prevent.
+tell() {
+    local message="$1" body sent=no
+    message="${message:0:$MESSAGE_LIMIT}"
+    body="{\"topic\": \"$BOX_HEALTH_TOPIC\", \"message\": \"$(json_string "$message")\", \"source\": \"envoy\"}"
+    if curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+        -d "$body" "$envoy_url/v1/messages/publish" >/dev/null 2>&1; then
+        sent=yes
+    else
+        body="{\"target_session\": \"$SRE\", \"message\": \"$(json_string "$message")\", \"source\": \"envoy\"}"
+        if curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+            -d "$body" "$envoy_url/v1/messages/send" >/dev/null 2>&1; then
+            sent=yes
+        fi
+    fi
+    if [[ "$sent" == yes ]]; then
+        say "told the box-health lead: $message"
+    else
+        say "COULD NOT SEND over Envoy at $envoy_url: $message" >&2
+    fi
+    [[ "$sent" == yes ]]
+}
+
+if [[ "$report" == yes ]]; then
+    echo "state: $state_file"
+    [[ -r "$state_file" ]] && cat "$state_file"
+    echo "log: $log_file"
+    [[ -r "$log_file" ]] && tail -n 5 "$log_file"
+    exit 0
+fi
+
+# What runs this pass.
+run_steps=()
+for entry in "${STEPS[@]}"; do
+    name="${entry%%|*}"
+    if ((${#only[@]})); then
+        for wanted in "${only[@]}"; do
+            [[ "$wanted" == "$name" ]] && run_steps+=("$entry")
+        done
+    else
+        run_steps+=("$entry")
+    fi
+done
+if ((${#only[@]})) && ((${#run_steps[@]} != ${#only[@]})); then
+    echo "box-cleanup: --only named a step this box does not have; the steps are:" >&2
+    for entry in "${STEPS[@]}"; do echo "  ${entry%%|*}" >&2; done
+    exit 2
+fi
+
+if [[ "$dry_run" == yes ]]; then
+    echo "box-cleanup --dry-run: nothing is run."
+    echo "steps:"
+    for entry in "${run_steps[@]}"; do
+        IFS='|' read -r name needs command <<<"$entry"
+        printf '  %-22s %s\n' "$name" "$command"
+        printf '  %-22s runs when one of these exists: %s\n' "" "$needs"
+    done
+    echo "filesystems, and the floor each is judged against after the run:"
+    read_free
+    for mount in $(mounts_sorted); do
+        printf '  %-16s %14s free of %14s, floor %s\n' "$mount" \
+            "$(human "${AVAIL[$mount]}")" "$(human "${TOTAL[$mount]}")" \
+            "$(human "$(floor_for "$mount" "${TOTAL[$mount]}")")"
+    done
+    echo "state: $state_file"
+    echo "log:   $log_file"
+    exit 0
+fi
+
+load_state
+started="$(stamp)"
+started_epoch="$(date -u +%s)"
+read_free
+
+declare -A BEFORE
+summary=() json_steps=() failed_steps=() failed=0 total_freed=0 total_gained=0
+for entry in "${run_steps[@]}"; do
+    IFS='|' read -r name needs command <<<"$entry"
+
+    # The step's own condition, as its unit's ConditionPath* lines held it: any one path.
+    present=no
+    for path in $needs; do [[ -e "$path" ]] && present=yes; done
+    if [[ "$present" == no ]]; then
+        say "$name: skipped, none of its paths is on this machine ($needs)"
+        summary+=("$name skipped")
+        json_steps+=("{\"step\": \"$name\", \"freed\": 0, \"seconds\": 0, \"exit\": null, \"skipped\": true}")
+        continue
+    fi
+
+    BEFORE=()
+    for mount in "${!AVAIL[@]}"; do BEFORE["$mount"]="${AVAIL[$mount]}"; done
+
+    step_start="$(date -u +%s)"
+    output="$(timeout "$step_timeout" bash -c "$command" 2>&1)"
+    rc=$?
+    step_seconds=$(($(date -u +%s) - step_start))
+    [[ -n "$output" ]] && printf '%s\n' "$output" | sed "s/^/  $name: /"
+
+    read_free
+    freed=0 gained_here=0 where=""
+    for mount in "${!AVAIL[@]}"; do
+        before="${BEFORE[$mount]:-${AVAIL[$mount]}}"
+        delta=$((AVAIL[$mount] - before))
+        if ((delta != 0)); then
+            freed=$((freed + delta))
+            ((delta > 0)) && gained_here=$((gained_here + delta))
+            where+="${where:+, }$mount $(human "$delta")"
+        fi
+    done
+    total_freed=$((total_freed + freed))
+    total_gained=$((total_gained + gained_here))
+
+    STEP_LAST_EXIT["$name"]="$rc"
+    state_word=ok
+    if ((rc == 124)); then
+        state_word="TIMED OUT after $step_timeout"
+        failed=$((failed + 1))
+        failed_steps+=("$name")
+        STEP_FAILS["$name"]=$((${STEP_FAILS[$name]:-0} + 1))
+    elif ((rc != 0)); then
+        state_word="FAILED (exit $rc)"
+        failed=$((failed + 1))
+        failed_steps+=("$name")
+        STEP_FAILS["$name"]=$((${STEP_FAILS[$name]:-0} + 1))
+    else
+        # The first run that works clears both the streak and the fact that it was said.
+        STEP_FAILS["$name"]=0
+        STEP_ALERTED["$name"]=0
+    fi
+    say "$name: $(human "$freed")${where:+ (${where})} in ${step_seconds}s, $state_word"
+    summary+=("$name $(human "$freed")")
+    json_steps+=("{\"step\": \"$name\", \"freed\": $freed, \"gained\": $gained_here, \"seconds\": $step_seconds, \"exit\": $rc}")
+done
+
+# The floors, judged on what is left after the run.
+low=() json_fs=()
+for mount in $(mounts_sorted); do
+    avail="${AVAIL[$mount]}"
+    total="${TOTAL[$mount]}"
+    floor="$(floor_for "$mount" "$total")"
+    json_fs+=("{\"mount\": \"$(json_string "$mount")\", \"free\": $avail, \"total\": $total, \"floor\": $floor}")
+    if ((avail < floor)); then
+        low+=("$mount $(human "$avail") free, under its $(human "$floor") floor")
+    fi
+done
+
+# "Freed nothing" is judged on what came BACK, not on the net change. The first run of this job
+# on sami-devbox (2026-11-04 21:20-21:34Z) ended at -51.2 GB net while every cleaner worked
+# perfectly: eighty sessions write to these disks throughout, and the biggest single figure was
+# -48.8 GB on /mnt/nvme during a step that deletes nothing at all (session-tmp-reap reports).
+# A net-change rule would therefore have called a healthy box dead within three days, which is
+# the one thing an alert must not do. So the day is counted against the sum of the POSITIVE
+# per-step changes: three days in which not one step coincided with any space coming back.
+# That errs towards silence, so the failing-step rule below carries the sharper signal.
+if ((total_gained <= 0)); then
+    zero_days=$((zero_days + 1))
+else
+    zero_days=0
+    alerted_at=0
+fi
+
+# A cleaner that fails every run has stopped working, whatever the disks do. Counted per step,
+# reset by the first run of that step that succeeds.
+#
+# Both rules below are said ONCE and repeated only when the streak has DOUBLED since it was
+# last said, which is load-swap-watch's rule and for its reason: a longer streak is time
+# passing, not a new fact, and an alert that repeats daily while nobody acts teaches the reader
+# to skip it. A run that works clears the count and the fact that it was said.
+streak_said=() said_now=()
+for name in "${!STEP_FAILS[@]}"; do
+    ((STEP_FAILS[$name] >= STEP_FAIL_RUNS)) || continue
+    streak_said+=("$name (${STEP_FAILS[$name]} runs, last exit ${STEP_LAST_EXIT[$name]})")
+    said="${STEP_ALERTED[$name]:-0}"
+    ((said == 0 || STEP_FAILS[$name] >= said * 2)) && said_now+=("$name")
+done
+
+line="$(join_with ', ' "${summary[@]}")"
+free_line=""
+for mount in $(mounts_sorted); do
+    free_line+="${free_line:+, }$mount $(human "${AVAIL[$mount]}") free"
+done
+say "run: $line; total $(human "$total_freed"); $free_line; $failed failed; $(($(date -u +%s) - started_epoch))s"
+
+mkdir -p "$(dirname "$log_file")" 2>/dev/null
+{
+    printf '{"at": "%s", "seconds": %d, "freed": %d, "gained": %d, "failed": %d, "zero_days": %d, "steps": [' \
+        "$started" "$(($(date -u +%s) - started_epoch))" "$total_freed" "$total_gained" "$failed" "$zero_days"
+    (
+        IFS=,
+        printf '%s' "${json_steps[*]}"
+    )
+    printf '], "filesystems": ['
+    (
+        IFS=,
+        printf '%s' "${json_fs[*]}"
+    )
+    printf ']}\n'
+} >>"$log_file"
+
+# What it speaks about, and nothing else.
+if [[ "$no_alert" == no ]] && ((${#low[@]})); then
+    tell "DISK UNDER ITS FLOOR AFTER THE DAILY CLEANUP on $(hostname -s): $(join_with '; ' "${low[@]}"). Every cleaner ran; $(human "$total_gained") came back and it cannot free more, so what holds the disk is live work. Read $log_file, and disk-fill-watch's report for the writers."
+fi
+
+# The cleaning has stopped working. A failing cleaner is named first and on its own: it also
+# makes the run gain nothing, and two messages for one fault is how a channel stops being read.
+if [[ "$no_alert" == no ]] && ((${#said_now[@]})); then
+    if tell "A CLEANER HAS STOPPED WORKING on $(hostname -s): $(join_with '; ' "${streak_said[@]}"). The other steps still run; this one has not finished a run in three days, so whatever it holds under its cap is growing. Read $log_file and journalctl --user -u box-cleanup.service."; then
+        for name in "${said_now[@]}"; do STEP_ALERTED["$name"]="${STEP_FAILS[$name]}"; done
+    fi
+elif [[ "$no_alert" == no ]] && ((${#streak_said[@]} == 0)) && ((zero_days >= ZERO_DAYS)) &&
+    ((alerted_at == 0 || zero_days >= alerted_at * 2)); then
+    if tell "THE DAILY CLEANUP HAS FREED NOTHING FOR $zero_days RUNS on $(hostname -s): not one byte came back from any of its ${#run_steps[@]} cleaners, and none of them failed. Either the box is genuinely quiet, or the cleaning has stopped working while the disks fill. Read $log_file; run box-cleanup --only <step> by hand to see one."; then
+        alerted_at=$zero_days
+    fi
+fi
+write_state
+
+((failed == 0))

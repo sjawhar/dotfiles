@@ -11,6 +11,17 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# STOPPED, 2026-11-04. Sami at 17:10:29Z: "I don't know what OMP memory watch is, but yeah, you
+# can stop it." The timer was disabled at 21:26Z, its name taken out of
+# devbox/expected-timers.txt, and it does not come back in any form without his say
+# (dispatch://INFRA-993). This installer is what would quietly bring it back, so it refuses.
+# When he says so, run it with OMP_MEMORY_WATCH_REARM=<the dispatch link to his answer>.
+if [[ -z "${OMP_MEMORY_WATCH_REARM:-}" ]]; then
+    echo "omp-memory-watch: stopped on Sami's word of 2026-11-04 (dispatch://INFRA-993) and not" >&2
+    echo "  re-armed without his. With his answer: OMP_MEMORY_WATCH_REARM=<link> $0" >&2
+    exit 1
+fi
+
 command -v python3 >/dev/null || {
     echo "omp-memory-watch: python3 not on PATH; the watch is a python3 script" >&2
     exit 1
