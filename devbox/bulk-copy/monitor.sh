@@ -74,6 +74,11 @@ while :; do
     inc=$(jq -r '.incidents | keys | join(",")' /mnt/nvme/sami/tmp/disk-fill-watch/state.json 2>/dev/null)
     [[ -n $inc ]] && lwhy+="disk-fill-watch:$inc "
   fi
+  # Which local alerts stop the /mnt/nvme/sami-and-home unit (Main, 2026-11-04 04:2xZ): for the
+  # /mnt/nvme/sami trees only alerts on /mnt/nvme; for home (nv_devs holds nvme0n1, the root disk)
+  # every local alert, `/` included. lfloor in the log is this answer.
+  if [[ " $(cat "$DIR/nv_devs" 2>/dev/null) " == *" nvme0n1 "* ]]; then lstop=$lwhy
+  else lstop=$(tr ' ' '\n' <<<"$lwhy" | grep -E '/mnt/nvme' | tr '\n' ' '); fi
   dv=$(ssh -o BatchMode=yes -o ConnectTimeout=20 sami@sami-devbox \
     'df -B1 --output=target,avail / /mnt/nvme /mnt/scratch /mnt/durable | tail -n +2' 2>/dev/null)
   if [[ -z $dv ]]; then
@@ -95,7 +100,7 @@ while :; do
     if [[ " $DUR_UNITS " == *" $u "* ]]; then
       stop=$([[ -n $dwhy && $dwhy != devbox-unreachable\  ]] || (( dheld )) && echo 1 || echo 0)
     else
-      stop=$([[ -n $lwhy || $dwhy == *floor* ]] || (( high >= 5 || nheld )) && echo 1 || echo 0)
+      stop=$([[ -n $lstop || $dwhy == *floor* ]] || (( high >= 5 || nheld )) && echo 1 || echo 0)
     fi
     if (( stop )); then sudo -n systemctl freeze "$u" 2>/dev/null; else sudo -n systemctl thaw "$u" 2>/dev/null; fi
   done
@@ -103,5 +108,5 @@ while :; do
   [[ -s $DIR/HOLD ]] && dwhy+="hold:$(head -c 80 "$DIR/HOLD" | tr -s ' \n' '_') "
   if [[ -z $dwhy ]]; then echo OK >"$DIR/gate.state.tmp"; else echo "PAUSE $dwhy" >"$DIR/gate.state.tmp"; fi
   mv "$DIR/gate.state.tmp" "$DIR/gate.state"
-  echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lwhy ]] && echo 1 || echo 0) high50=$high high95=$dhigh dbusy=$dbusy dcalm=$dcalm dheld=$dheld nv_rawait_max=${nmax}ms nheld=$nheld gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
+  echo "$(date -u +%FT%TZ) ${stats}io_some60=$psome io_full60=$pfull load=$load lfloor=$([[ -n $lstop ]] && echo 1 || echo 0) high50=$high high95=$dhigh dbusy=$dbusy dcalm=$dcalm dheld=$dheld nv_rawait_max=${nmax}ms nheld=$nheld gate=$(cat "$DIR/gate.state") local=[$lwhy]" >>"$DIR/monitor-$HOST.log"
 done
