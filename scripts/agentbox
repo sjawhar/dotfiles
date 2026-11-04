@@ -4177,7 +4177,19 @@ move_respawn() {
 # its own text (MOVE_PANE_WAKE_NOTICE): S3 was told "the move is done" at 03:57:58Z on 2026-11-04
 # when its move had failed and it was resumed back on the machine it started on.
 MOVE_WAKE_NOTICE='agentbox: the move is done: this session was resumed in its agent box on %HOST%. Go on with the work you were doing before the move. (An automated notice from agentbox, not a person.)'
+# The waker polls fast for MOVE_WAKE_WAIT seconds (every 5 s), then slowly (every
+# MOVE_WAKE_SLOW) until MOVE_WAKE_TOTAL, because a box that is slow to come up is the normal
+# case on a loaded host and not a reason to leave a session asleep: after the 17:0xZ resumes on
+# 2026-11-04, 76 of 83 wake logs in ~/.cache/omp/agentbox ended in the give-up line (35 at
+# 17:09Z alone) and each of those sessions then sat at its prompt for about an hour, about 70
+# agent-hours in one afternoon. A poll costs one `envoy ps --json` (0.34 s on this host,
+# measured 2026-11-04) and nothing else: the /proc census of move_wake_landed, 5.7 s here, runs
+# only after a registration newer than the waker is seen, so it is paid once. At 60 s the slow
+# phase costs a twelfth of what the fast phase costs, and 90 waiting sessions together spend
+# about half a core.
 MOVE_WAKE_WAIT="${AGENTBOX_WAKE_WAIT:-600}"
+MOVE_WAKE_SLOW="${AGENTBOX_WAKE_SLOW:-60}"
+MOVE_WAKE_TOTAL="${AGENTBOX_WAKE_TOTAL:-7200}"
 # move_wake_landed SID: true when the session really is running HERE - an omp of its own on this
 # machine (scripts/omp-session-live, which reads a box's processes too) and no move marker saying
 # it left this machine.
@@ -4193,10 +4205,10 @@ move_wake_landed() {
 }
 move_wake() {
     # The notice is the move's unless the caller names its own (agentbox-run.ts: a restart's).
-    local sid="$1" notice="${2:-$MOVE_WAKE_NOTICE}" since seen waited=0
+    local sid="$1" notice="${2:-$MOVE_WAKE_NOTICE}" since seen waited=0 step=5 slow_said=false
     notice="${notice//%HOST%/${AGENTBOX_HOST:-$(hostname -s)}}"
     since="$(date +%s%3N)"
-    while (( waited < MOVE_WAKE_WAIT )); do
+    while (( waited < MOVE_WAKE_TOTAL )); do
         seen="$(envoy ps --json 2>/dev/null | jq -r --arg s "$sid" \
             '[(if type == "array" then . else (.sessions // []) end)[] | select(.session_id == $s) | .updated_at // 0] | max // 0' 2>/dev/null || true)"
         # An Envoy registration says the session is up SOMEWHERE: R3A's rolled-back copy on its
@@ -4208,10 +4220,18 @@ move_wake() {
             echo "$(date -u +%FT%TZ) move $sid: the resumed session registered on Envoy; wake notice sent"
             return 0
         fi
-        sleep 5
-        waited=$((waited + 5))
+        # The slow phase: the box is taking longer than a healthy one does, which is not a
+        # reason to stop waiting for it. Said once, so a reader of the log sees the stall and
+        # when it began.
+        if (( waited >= MOVE_WAKE_WAIT )) && ! $slow_said; then
+            step="$MOVE_WAKE_SLOW"
+            slow_said=true
+            echo "$(date -u +%FT%TZ) move $sid: still not registered after ${MOVE_WAKE_WAIT}s; this box is slow to come up. Polling every ${MOVE_WAKE_SLOW}s now, up to ${MOVE_WAKE_TOTAL}s in all"
+        fi
+        sleep "$step"
+        waited=$((waited + step))
     done
-    echo "$(date -u +%FT%TZ) move $sid: the resumed session did not register on Envoy within ${MOVE_WAKE_WAIT}s; no wake notice sent, so it waits at its prompt until something reaches it"
+    echo "$(date -u +%FT%TZ) move $sid: the resumed session did not register on Envoy within ${MOVE_WAKE_TOTAL}s; no wake notice sent, so it waits at its prompt until something reaches it"
     return 1
 }
 

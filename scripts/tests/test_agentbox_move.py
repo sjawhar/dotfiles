@@ -1417,7 +1417,7 @@ class AgentboxMove(unittest.TestCase):
         run = self.run_bash('move_own_omp() { return 1; }\ncmd_move_self --only-dirs --dir "$HOME"', {
             **env, "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa", "OMP_SESSION_ID": sid,
             "PI_SESSION_FILE": str(self.session_file(sid)), "TMUX": f"{sock},0,0", "TMUX_PANE": pane,
-            "AGENTBOX_WAKE_WAIT": "5",
+            "AGENTBOX_WAKE_WAIT": "5", "AGENTBOX_WAKE_TOTAL": "5",
         })
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         deadline = time.monotonic() + 10
@@ -1541,12 +1541,12 @@ class AgentboxMove(unittest.TestCase):
         # The notice goes only when an omp of this session runs on THIS machine: a registration
         # says the session is up somewhere, and R3A's rolled-back copy on its old machine made
         # its move say "the move is done" with nothing hung up (01:39Z, 2026-11-04).
-        nowhere = self.run_bash(f"MOVE_WAKE_WAIT=0\nmove_wake {sid}")
+        nowhere = self.run_bash(f"MOVE_WAKE_WAIT=0\nMOVE_WAKE_TOTAL=0\nmove_wake {sid}")
         self.assertEqual(nowhere.returncode, 1, nowhere.stdout)
         self.assertEqual((self.root / "STUB_ENVOY").read_text(encoding="utf-8"), "")
         self.make_proc(999999921, cwd=self.root, session=sid)
         self.set_pids(999999921)
-        result = self.run_bash(f"MOVE_WAKE_WAIT=10\nmove_wake {sid}")
+        result = self.run_bash(f"MOVE_WAKE_WAIT=10\nMOVE_WAKE_TOTAL=10\nmove_wake {sid}")
         self.assertEqual(result.returncode, 0, result.stderr)
         sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
         self.assertEqual(sent[:4], ["send", "--source", "envoy", sid])
@@ -1563,9 +1563,38 @@ class AgentboxMove(unittest.TestCase):
             'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
         )
         write_stub(self.stubs, "sleep", "exit 0")
-        result = self.run_bash(f"MOVE_WAKE_WAIT=10\nmove_wake {sid}")
+        result = self.run_bash(f"MOVE_WAKE_WAIT=10\nMOVE_WAKE_TOTAL=10\nmove_wake {sid}")
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("did not register on Envoy", result.stdout)
+        self.assertIn("did not register on Envoy within 10s", result.stdout)
+        self.assertEqual((self.root / "STUB_ENVOY").read_text(encoding="utf-8"), "")
+
+    def test_the_waker_keeps_waiting_slowly_once_the_fast_phase_is_over(self) -> None:
+        """A box slow to come up is the normal case on a loaded host, not a reason to leave a
+        session asleep: after the 17:0xZ resumes on 2026-11-04, 76 of 83 wake logs ended in the
+        give-up line (35 at 17:09Z) and each of those sessions sat at its prompt for about an
+        hour. The waker polls every 5 s for MOVE_WAKE_WAIT, then every MOVE_WAKE_SLOW until
+        MOVE_WAKE_TOTAL, says once that it has slowed down, and names the total when it gives up."""
+        sid = "01a19700-0000-7000-8000-000000020004"
+        write_stub(
+            self.stubs,
+            "envoy",
+            f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":1}}]\'; '
+            'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
+        )
+        write_stub(self.stubs, "sleep", 'printf "%s\\n" "$1" >>"$STUB_SLEEPS"; exit 0')
+        sleeps = self.root / "sleeps"
+        result = self.run_bash(
+            f"MOVE_WAKE_WAIT=10\nMOVE_WAKE_SLOW=60\nMOVE_WAKE_TOTAL=130\nmove_wake {sid}",
+            {"STUB_SLEEPS": str(sleeps)},
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        # Two polls 5 s apart, then one every 60 s to the total: 10 + 60 + 60 = 130.
+        self.assertEqual(sleeps.read_text(encoding="utf-8").split(), ["5", "5", "60", "60"])
+        slowed = [line for line in result.stdout.splitlines() if "slow to come up" in line]
+        self.assertEqual(len(slowed), 1, result.stdout)
+        self.assertIn("still not registered after 10s", slowed[0])
+        self.assertIn("Polling every 60s now, up to 130s in all", slowed[0])
+        self.assertIn("did not register on Envoy within 130s", result.stdout)
         self.assertEqual((self.root / "STUB_ENVOY").read_text(encoding="utf-8"), "")
 
 
