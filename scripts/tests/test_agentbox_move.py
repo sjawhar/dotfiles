@@ -1263,6 +1263,14 @@ class AgentboxMove(unittest.TestCase):
             'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
         )
         write_stub(self.stubs, "sleep", "exit 0")
+        # The notice goes only when an omp of this session runs on THIS machine: a registration
+        # says the session is up somewhere, and R3A's rolled-back copy on its old machine made
+        # its move say "the move is done" with nothing hung up (01:39Z, 2026-11-04).
+        nowhere = self.run_bash(f"MOVE_WAKE_WAIT=0\nmove_wake {sid}")
+        self.assertEqual(nowhere.returncode, 1, nowhere.stdout)
+        self.assertEqual((self.root / "STUB_ENVOY").read_text(encoding="utf-8"), "")
+        self.make_proc(999999921, cwd=self.root, session=sid)
+        self.set_pids(999999921)
         result = self.run_bash(f"MOVE_WAKE_WAIT=10\nmove_wake {sid}")
         self.assertEqual(result.returncode, 0, result.stderr)
         sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
@@ -1456,21 +1464,28 @@ class AgentboxMove(unittest.TestCase):
         self.set_pids()
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        # Two passes of the same two rsyncs: one before the hang-up, one after (only what changed).
-        # Each pass is a copy and a modes-only run after it (read-only source trees), twice: once
-        # before the hang-up and once after.
         lines = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
-        # The first pass walks everything: a mirror, its modes-only run, a merge, its modes run.
-        # Every pass after it is a delta of the one before (--files-from), never a fresh walk.
-        self.assertGreaterEqual(len(lines), 4, lines)
-        for later in lines[4:]:
-            self.assertIn("--files-from=", later, lines)
-        mirror, merge = lines[0], lines[2]
-        for modes in (lines[1], lines[3]):
-            self.assertIn("--existing", modes)
-            self.assertNotIn("--chmod", modes)
-        self.assertIn(f"--delete --backup --backup-dir={self.cutover}/replaced/", mirror)
+        # Read by what each rsync IS, not by its position: the first pass walks (a mirror of this
+        # session's own paths with --delete, a mirror of the shared ones without it, a merge), a
+        # modes-only run follows each (--existing, no data, no --chmod), and every pass after the
+        # first is a delta of the one before (--files-from), never a fresh walk.
+        walks = [l for l in lines if "--existing" not in l and "--files-from" not in l]
+        modes = [l for l in lines if "--existing" in l]
+        deltas = [l for l in lines if "--files-from" in l]
+        self.assertEqual(len(walks) + len(modes) + len(deltas), len(lines), lines)
+        self.assertTrue(modes, lines)
+        for line in modes:
+            self.assertNotIn("--chmod", line)
+        [mirror] = [l for l in walks if " --delete " in f" {l} "]
+        [merge] = [l for l in walks if "--update" in l]
+        shared = [l for l in walks if l not in (mirror, merge)]
+        for line in shared:
+            self.assertNotIn("--delete", line, "a shared tree is mirrored without --delete")
+        # What a mirror replaces is kept beside it on the destination's own filesystem: a relative
+        # backup dir, so the kept file is renamed, never copied across filesystems.
+        self.assertIn("--delete --backup --backup-dir=.agentbox-replaced-", mirror)
         self.assertIn("--exclude=agentbox-moved", mirror)
+        self.assertIn("--exclude=.agentbox-replaced-*", mirror)
         self.assertTrue(mirror.endswith(" sami@devbox:/"), mirror)
         self.assertIn(f" {transcript} ", mirror)
         # The target has a clone of both repositories (the stub's target is this machine), so
@@ -1606,7 +1621,9 @@ class AgentboxMove(unittest.TestCase):
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn("through git:", run.stdout)
-        _m1, _g1, _mirror, merge = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        # The merge of the first pass, by what it is: a walk (no --files-from) that only updates.
+        [merge] = [l for l in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+                   if "--update" in l and "--files-from" not in l]
         self.assertIn(f"{self.lane} {self.src / 'other/.git'} {self.src / 'repo/.git'} sami@devbox:/", merge)
 
     def test_a_tree_moved_through_git_keeps_its_branch_head_and_uncommitted_change(self) -> None:
@@ -1913,8 +1930,13 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f"gone since the job: not copied: {gone}", run.stdout)
         self.assertEqual(self.move_log()[0][5], "moved")
-        for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()[2:]:
+        # Every pass AFTER the hang-up: the dropped path is in none of them.
+        after = run.stdout.index("hung up after")
+        for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines():
+            if "--files-from" not in line:
+                continue
             self.assertNotIn(f" {gone} ", f" {line} ", "a path that is gone is in no later pass")
+        self.assertLess(run.stdout.index(f"gone since the job: not copied: {gone}"), after)
 
     def test_only_one_relauncher_runs_for_a_session(self) -> None:
         """Two `move --to-run` for the librarian ran at once at 17:32-17:34Z on 2026-11-03: the
@@ -1971,7 +1993,9 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         passes = [line for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
                   if "--files-from" not in line and "--existing" not in line]
-        self.assertEqual(len(passes), 2, f"only the first mirror and merge walk everything: {passes}")
+        # The first pass walks: the mirror of this session's own paths, the mirror of the shared
+        # ones (no --delete), and the merge. Every pass after it is a delta.
+        self.assertLessEqual(len(passes), 3, f"only the first pass walks everything: {passes}")
         deltas = [line for line in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
                   if "--files-from" in line]
         self.assertTrue(deltas, "every later pass is a delta")
@@ -2136,6 +2160,68 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
         self.assertIn("hangs this session up within seconds", ok.stdout)
         self.assertFalse((hold / self.TO).exists())
+
+    def test_a_mirror_into_a_tree_many_sessions_share_never_deletes(self) -> None:
+        """BP's mirror of /mnt/nvme/sami/worktrees deleted 72,862 files of other sessions on the
+        target, and one of /theorem/knives-ws deleted 457,862 (2026-11-03/04). A path under a
+        shared root is mirrored without --delete; a session's own path still gets it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        shared = self.home / "Code" / "personal" / "theorem"
+        shared.mkdir(parents=True, exist_ok=True)
+        private = self.root / "lane-private"
+        private.mkdir(exist_ok=True)
+        run = self.run_bash(f'MOVE_TO_MIRROR=("{shared}" "{private}")\nMOVE_TO_MERGE=()\n'
+                            'move_to_copy devbox st1 "before the hang-up"',
+                            {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        calls = (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
+        deleting = [c for c in calls if "--delete " in f"{c} "]
+        self.assertTrue(deleting, calls)
+        for call in deleting:
+            self.assertIn(str(private), call)
+            self.assertNotIn(str(shared), call, "a shared tree is never mirrored with --delete")
+        self.assertTrue([c for c in calls if str(shared) in c and "--delete" not in c],
+                        "the shared tree is still copied, without --delete")
+        self.assertIn("mirrored WITHOUT --delete", run.stdout)
+
+    def test_another_session_s_transcript_in_the_directory_is_not_carried(self) -> None:
+        """A subagent that became a session of its own keeps its transcript under its parent's
+        directory. A --delete mirror of FRAC's directory removed METARQ's live 203 MB transcript
+        on sami-devbox, where METARQ runs (01:54:30Z, 2026-11-04)."""
+        transcript = self.moving_session()
+        other = f"2026-11-03T10-00-00-000Z_{self.TO2}"
+        (transcript.with_suffix("") / f"{other}.jsonl").write_text("{}\n", encoding="utf-8")
+        (transcript.with_suffix("") / other).mkdir()
+        (transcript.with_suffix("") / "Sub.jsonl").write_text("{}\n", encoding="utf-8")
+        run = self.run_bash(f'say() {{ :; }}\nMOVE_TO_MIRROR=("{transcript.with_suffix("")}")\nMOVE_TO_EXCLUDE=()\n'
+                            f'move_to_exclude_other_sessions {self.TO}\n'
+                            'printf "%s\\n" ${MOVE_TO_EXCLUDE[@]+"${MOVE_TO_EXCLUDE[@]}"}')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        excluded = run.stdout.splitlines()
+        self.assertIn(str(transcript.with_suffix("") / f"{other}.jsonl"), excluded)
+        self.assertIn(str(transcript.with_suffix("") / other), excluded)
+        self.assertFalse([e for e in excluded if e.endswith("Sub.jsonl")],
+                         "this session's own subagent transcript still goes")
+        # And the session directory itself is never mirrored with --delete.
+        shared = self.run_bash(f'move_path_shared "{transcript.with_suffix("")}" && echo SHARED || echo own')
+        self.assertEqual(shared.stdout.strip(), "SHARED")
+
+    def test_a_resume_leaves_out_a_dir_the_launcher_would_refuse(self) -> None:
+        """R3A's rollback respawned its pane with the box's old --dir list, which held /tmp;
+        `agentbox new` refused the launch and the pane sat at a shell (01:44-01:50Z, 2026-11-04).
+        The first --dir is where the box works, so it is kept whatever it is."""
+        self.moving_session()
+        gone = self.root / "gone-since"
+        run = self.run_bash(f'move_spec_usable --dir "{self.lane}" -e X=1 --dir /tmp --dir "{gone}" --dir "{self.worktree}"')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.split(), ["--dir", str(self.lane), "-e", "X=1", "--dir", str(self.worktree)])
+        self.assertIn("--dir /tmp is left out of this resume", run.stderr)
+        first = self.run_bash('move_spec_usable --dir /tmp -e X=1')
+        self.assertEqual(first.stdout.split(), ["--dir", "/tmp", "-e", "X=1"],
+                         "the first --dir is the session's own working directory and is kept")
 
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
@@ -2507,7 +2593,9 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(f"agentbox new --drop-gone-dirs -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}",
                       self.pane_command(respawn[0]))
         [line] = self.move_log()
-        self.assertTrue(line[5].startswith(f"failed: not resumed on devbox within 0s: {self.TO}"), line)
+        # "twice": a start that fails is tried once more before the group rolls back.
+        self.assertTrue(line[5].startswith("failed: not resumed on devbox within 0s"), line)
+        self.assertIn(self.TO, line[5])
 
     def test_a_working_directory_missing_on_the_target_puts_the_session_back_here(self) -> None:
         """The box on the target cannot start without its first --dir, which --drop-gone-dirs never
