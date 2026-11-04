@@ -28,7 +28,19 @@ modelRoles:
   # devbox: code-reviewer on this list was served by
   # ossv-gateway/openai/gpt-6.1-sol). Their chains below end on Codex Sol and
   # name no Anthropic model, so a gate with nothing reachable refuses.
+  #
+  # 2026-11-04: both roles lead on the gateway's Flex tier
+  # (`openai/gpt-6.1-sol-flex`, the cheaper queued tier of the same model),
+  # approved by the INFRA lead on agentvm's measurement of 40 review-sized
+  # calls: p50 6.9 s, p95 30.2 s, max 48.6 s, 0 failures. `-flex` (not
+  # `-flex-only`) promotes itself to standard on a real 429, a server-fault
+  # 5xx or a timeout with no answer, and the standard ids follow it here, so a
+  # machine that does not declare Flex falls through to standard rather than
+  # failing. Undo = revert this commit; the triggers are fallback share over
+  # 10%, p95 over 90 s, or any handler timeout.
   review:
+    - ossv-gateway-openai/openai/gpt-6.1-sol-flex:xhigh
+    - ossv-gateway/openai/gpt-6.1-sol-flex:xhigh
     - ossv-gateway-openai/openai/gpt-6.1-sol:xhigh
     - ossv-gateway/openai/gpt-6.1-sol:xhigh
   # The Legion plugin's agents name these two roles: oracle for oracle and
@@ -43,6 +55,8 @@ modelRoles:
   # descriptions say, and which a caller who needs a cross-family read answers
   # by dispatching sol by name.
   oracle:
+    - ossv-gateway-openai/openai/gpt-6.1-sol-flex:high
+    - ossv-gateway/openai/gpt-6.1-sol-flex:high
     - ossv-gateway-openai/openai/gpt-6.1-sol:high
     - ossv-gateway/openai/gpt-6.1-sol:high
   deep: openai-codex/gpt-5.6-terra:xhigh
@@ -194,6 +208,19 @@ retry:
     # `openai/gpt-6.1-sol` through a bash tool call; with the gateway
     # unreachable, and on a machine without the provider, the spawn fell to
     # Codex Sol and refused (`usage_limit_reached`) instead of answering.
+    # The Flex tier the @review and @oracle chains lead on. Named explicitly so
+    # `ossv-gateway-openai/*: []` below does not leave a Flex call without a
+    # fallback: the other machine's Flex id first, then the standard tier.
+    ossv-gateway-openai/openai/gpt-6.1-sol-flex:
+      - ossv-gateway/openai/gpt-6.1-sol-flex
+      - ossv-gateway-openai/openai/gpt-6.1-sol
+      - ossv-gateway/openai/gpt-6.1-sol
+      - openai-codex/gpt-6.1-sol
+    ossv-gateway/openai/gpt-6.1-sol-flex:
+      - ossv-gateway-openai/openai/gpt-6.1-sol-flex
+      - ossv-gateway-openai/openai/gpt-6.1-sol
+      - ossv-gateway/openai/gpt-6.1-sol
+      - openai-codex/gpt-6.1-sol
     ossv-gateway-openai/openai/gpt-6.1-sol:
       - ossv-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
