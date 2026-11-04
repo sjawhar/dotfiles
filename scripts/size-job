@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# size-job: run agent-infra's spend/sizejob/sizejob.py (#1810) as a command, as the running-heavy-jobs skill names it
+# ("size-job --probe <template> --apply <template>"). Runs the copy on agent-infra's origin/main, unpacked once per
+# commit into a cache, so no session's working checkout or branch decides which size-job runs.
+# AGENT_INFRA_REPO overrides where the agent-infra clone is (default ~/src/agent-infra).
+set -euo pipefail
+
+repo="${AGENT_INFRA_REPO:-$HOME/src/agent-infra}"
+if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+	echo "size-job: no agent-infra clone at $repo (set AGENT_INFRA_REPO)" >&2
+	exit 2
+fi
+
+# A fetch that fails (offline, or another session holding the ref lock) leaves the last fetched main, which is a
+# valid size-job; say so rather than fail.
+if ! timeout 30 git -C "$repo" fetch -q origin main 2>/dev/null; then
+	echo "size-job: could not fetch agent-infra main; using the last fetched copy" >&2
+fi
+rev=$(git -C "$repo" rev-parse --verify -q origin/main) || {
+	echo "size-job: $repo has no origin/main" >&2
+	exit 2
+}
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/size-job/$rev"
+if [[ ! -f "$cache/spend/sizejob/sizejob.py" ]]; then
+	mkdir -p "$(dirname "$cache")"
+	tmp=$(mktemp -d "$cache.tmp.XXXXXX")
+	git -C "$repo" archive "$rev" spend | tar -x -C "$tmp"
+	# Another session may have unpacked the same commit meanwhile; either copy is identical.
+	mv -T "$tmp" "$cache" 2>/dev/null || rm -rf "$tmp"
+fi
+
+exec python3 "$cache/spend/sizejob/sizejob.py" "$@"
