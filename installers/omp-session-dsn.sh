@@ -3,9 +3,12 @@
 # (dispatch://INFRA-1192): the Cloud SQL Auth Proxy to agents-postgres on 127.0.0.1:5432, and the
 # timer that keeps the DSN for omp_sessions in tmpfs (scripts/omp-session-dsn).
 #
-# Standalone installer — not sourced by install.sh, and it enables nothing. omp's Postgres session
-# store is a default-off slice its owner has not merged yet, so a running proxy and a DSN file
-# would be two processes and one file nothing reads. The last line prints what arms them.
+# Standalone installer — not sourced by install.sh, and it enables nothing itself. On sami-devbox
+# both units were armed by hand at 2026-11-04 20:57Z, once the database, the login and the proxy
+# were proved (dispatch://INFRA-1192): the DSN sits at $XDG_RUNTIME_DIR/omp-session-sql/dsn and
+# psql logs in through it as the machine's IAM database user, with no password anywhere. Run this
+# again after a change to a unit, then restart what changed. The last lines print the arming
+# commands, for a machine where they are not armed.
 #
 # Run it on sami-devbox. The machine's Application Default Credentials must be a service account
 # with roles/cloudsql.client and roles/cloudsql.instanceUser on theorem-agent-infra and an IAM
@@ -35,8 +38,8 @@ done
 systemctl --user daemon-reload
 
 cat << 'EOF'
-omp-session-dsn: units linked, nothing enabled. To arm them, once omp's Postgres session store has
-merged and the harness reads the DSN:
+omp-session-dsn: units linked. This script enables nothing. To arm them on a machine where they
+are not armed yet:
 
   systemctl --user enable --now cloud-sql-proxy-agents-postgres.service
   systemctl --user enable --now omp-session-dsn.timer
