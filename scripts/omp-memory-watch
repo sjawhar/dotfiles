@@ -495,6 +495,37 @@ def memory_events(cgroup: str) -> dict[str, int]:
     return counters
 
 
+def pressure_line(cgroup: str) -> str:
+    """One plain line from the scope's memory.pressure (cgroup v2 PSI), read now.
+
+    The librarian's eval harness asked for it (2026-11-04 12:25Z): an eval arm ran near its
+    21.91 GiB ceiling at 11:51-12:01Z and then ended at its time limit after its cgroup was
+    gone, and no report held its stall totals, so nobody could say afterwards whether it had
+    stalled. A file that cannot be read is named as such; it never fails the report.
+    """
+    read_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if not cgroup:
+        return "memory.pressure not readable: no cgroup recorded for this scope"
+    try:
+        text = (CGROUP_ROOT / cgroup.strip("/") / "memory.pressure").read_text()
+    except OSError as error:
+        return f"memory.pressure not readable: {error.strerror or error}"
+    parts = []
+    for line in text.splitlines():
+        kind, _, rest = line.partition(" ")
+        fields = dict(item.split("=", 1) for item in rest.split() if "=" in item)
+        try:
+            parts.append(
+                f"{kind} avg60 {float(fields['avg60']):.2f}%, total {int(fields['total']) / 1e6:.1f} s"
+            )
+        except (KeyError, ValueError):
+            continue
+    if not parts:
+        return f"memory.pressure not readable: no some/full lines in {text.strip()[:80]!r}"
+    return f"Memory pressure (memory.pressure at {read_at}): " + "; ".join(parts)
+
+
+
 def swap_setting(cgroup: str) -> str:
     """The scope's memory.swap.max as written ("0", "max", a byte count), or "" when unreadable.
 
@@ -1003,6 +1034,7 @@ def alert_text(scope: str, incident: dict, now: float, kind: str) -> str:
            if incident.get("transcript_parent") else "")
         + f". Measured: {incident.get('measured') or 'unrecorded'}.",
         memory,
+        pressure_line(incident.get("pressure_cgroup") or incident.get("cgroup") or ""),
         composition,
         f"Your own self-watch: {incident.get('self_watch')}.",
         "DO, on your own terms and before the kernel decides for you: write your handover files"
@@ -1294,6 +1326,7 @@ def wall_text(touch: dict) -> str:
         + f" memory.events oom {touch.get('events_oom', 0)}, oom_kill"
         f" {touch.get('events_oom_kill', 0)}.",
         f"Where that memory is, by memory.stat: {stat_split(touch.get('stats') or {})}.",
+        pressure_line(touch.get("cgroup") or ""),
         f"The scope holds {touch.get('task_count') or 0} processes holding"
         f" {gib(touch.get('rss_sum') or 0)} of RSS between them,"
         f" {100 * int(touch.get('rss_sum') or 0) / max(peak, 1):.0f}% of the peak."
@@ -1531,6 +1564,7 @@ def wall_touch(
     return dict(
         at=now,
         scope=target["scope"],
+        cgroup=target["cgroup"],
         key=key,
         session=session,
         worker_session=from_worker,
@@ -1572,7 +1606,8 @@ def clear_text(scope: str, incident: dict, cause: str, now: float) -> str:
         f" is back under {gib(incident.get('warn_at') or 0)}. What cleared it: {cause}. "
         f"The crossing opened at {iso(opened)}, cleared at {iso(now)}, lasted {human(now - opened)},"
         f" and peaked at {gib(incident.get('peak') or 0)} of a {gib(incident.get('limit') or 0)} ceiling. "
-        "No action is needed. From omp-memory-watch on " + socket.gethostname() + "."
+        "No action is needed. From omp-memory-watch on " + socket.gethostname() + ".\n"
+        + pressure_line(incident.get("pressure_cgroup") or incident.get("cgroup") or "")
     )
 
 
@@ -3326,6 +3361,7 @@ def run_once(options: argparse.Namespace) -> int:
             incident.setdefault("oom_kill_base", int(target["events"].get("oom_kill", 0)))
         incident["pid"] = pid
         incident["scope"] = scope
+        incident["pressure_cgroup"] = cgroup
         incident["limit"] = limit
         incident["limit_from"] = limit_from
         incident["limited"] = target["limited"]
