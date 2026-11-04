@@ -7,9 +7,13 @@ description: "Use before any text reaches a person outside Theorem: a GitHub iss
 
 Sami approves every outside message by default ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). The lockdown is on because outside messages were low quality, and it loosens as each routine is captured in a skill or template and a party's reaction is gauged ([OSSV-271 ask c75d17dd](https://dispatch.tail12ec1c.ts.net/issues/OSSV-271/asks/c75d17dd-bb18-4cb3-be3c-957da82655be), 2026-11-01). The test is not who the reader is but whether the message is a vetted routine or novel contact.
 
+**An outside message is one a person outside Theorem reads, not one that is publicly visible.** A reply in a bot-opened thread on a pull request Theorem authors is public writing, which the leak gate covers, but no outside person reads it; the same thread on a contributor's pull request is read by that contributor, so it is an outside message.
+
 ## Goes without his approval
 
-All three hold:
+**Oh My Pi (`can1357/oh-my-pi`) is a standing exception: messages to it go out without his approval.** His words: "Until we get this under control, I need to approve every message, except for messages to Oh My Pie; those can go out" ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27). This covers both kinds of thread above, on our pull requests and on contributors'. Do not ask him again.
+
+For any other project, all three hold:
 
 - **A routine with a skill or template behind it** (`references/approval.md` lists the ones there are). A formulaic message with nothing guiding it is not yet a routine, and waits.
 - **The process below ran** — the scales passed and a fresh reviewer cut the exact text that goes out; "followed the process" means those happened, not that someone read it.
@@ -19,7 +23,7 @@ A new enrollee counts even with no prior rapport: the control is the template an
 
 ## Waits for him
 
-Any one:
+Any one, except for Oh My Pi (above):
 
 - **Novel contact into a space we do not run** — a first contact, or the early contributions, to a project that has not enrolled. Do not send 13 pull requests into a cold repository before he has gauged how its maintainers react.
 - **No skill or template yet**, or a message that is not that template sent largely unchanged.

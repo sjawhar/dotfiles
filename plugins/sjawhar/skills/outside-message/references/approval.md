@@ -21,4 +21,4 @@ A project we do not run starts at "approve each", so he sees how its maintainers
 
 He makes that call once per project. Record it where the project's stream keeps its enrollment record, so no agent promotes a party on its own judgement, and so a later reader can see who decided it.
 
-One named project already goes out without his approval; [OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53) names it.
+One named project already goes out without his approval: Oh My Pi (`can1357/oh-my-pi`). His words, in [OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53): "except for messages to Oh My Pie; those can go out". `SKILL.md` carries it beside the conditions.
