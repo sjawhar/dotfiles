@@ -55,10 +55,14 @@ class TokenLocking(unittest.TestCase):
         self.calls.write_text("")
         self.runtime = root / "run"
         self.runtime.mkdir()
+        # The script's own default is the machine's /run/user/$UID/post-review, shared by every
+        # agent box; a test must not write a token there, so each run names a scratch cache.
+        self.cache = self.runtime / "post-review"
         self.env = {
             **os.environ,
             "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
             "XDG_RUNTIME_DIR": str(self.runtime),
+            "POST_REVIEW_CACHE_DIR": str(self.cache),
             "STUB_CALLS": str(self.calls),
         }
 
@@ -105,7 +109,7 @@ class TokenLocking(unittest.TestCase):
 
         stuck = self.caller(wait=60)
         time.sleep(2)
-        lock_path = self.runtime / "post-review" / "acme-widgets.lock"
+        lock_path = self.cache / "acme-widgets.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -156,6 +160,52 @@ class TokenLocking(unittest.TestCase):
         self.assertIn('TOKEN_SECRET = "LEGION_REVIEW_APP"', source)
         self.assertNotIn("PRIVATE_KEY", source)
         self.assertIn('"--github-owner",\n            owner,\n            "--github-repo",\n            repo,', source)
+
+# cache_dir() asked in a child process, so each case gets its own environment.
+WHERE = f"""
+import importlib.machinery, importlib.util
+loader = importlib.machinery.SourceFileLoader("post_review", {str(SCRIPT)!r})
+spec = importlib.util.spec_from_loader("post_review", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+print(module.cache_path("acme", "widgets"))
+"""
+
+
+class CacheDirectory(unittest.TestCase):
+    """The token cache is the machine's, not one box's.
+
+    An agent box has a private /run/user/$UID, so while the cache followed $XDG_RUNTIME_DIR each
+    box asked Sami for its own grant of the human-tier review secret, and a box recreated by
+    `agentbox move` threw away the hour its session already had.
+    """
+
+    def where(self, **env: str) -> Path:
+        run = subprocess.run([sys.executable, "-c", WHERE], capture_output=True, text=True,
+                             env={**os.environ, **env}, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return Path(run.stdout.strip())
+
+    def test_a_private_runtime_directory_does_not_move_the_cache(self):
+        with tempfile.TemporaryDirectory() as box:
+            got = self.where(XDG_RUNTIME_DIR=box, POST_REVIEW_CACHE_DIR="")
+        self.assertEqual(got.parent, Path(f"/run/user/{os.getuid()}/post-review"))
+
+    def test_a_context_without_the_shared_directory_still_has_a_cache(self):
+        """The fallback: $XDG_RUNTIME_DIR, so a box created before agentbox bound the shared
+        directory in, or a pod with no /run/user/$UID, still reuses its own hour."""
+        with tempfile.TemporaryDirectory() as root:
+            shared = Path(root) / "shared"
+            shared.mkdir(mode=0o500)
+            runtime = Path(root) / "run"
+            runtime.mkdir()
+            try:
+                got = self.where(XDG_RUNTIME_DIR=str(runtime),
+                                 POST_REVIEW_CACHE_DIR=str(shared / "post-review"))
+                self.assertEqual(got.parent, runtime / "post-review")
+            finally:
+                shared.chmod(0o700)
+
 
 
 if __name__ == "__main__":

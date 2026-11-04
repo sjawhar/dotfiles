@@ -543,6 +543,61 @@ put_keyfile() {
     printf '%s' "$content" >"$tmp" && mv -fT "$tmp" "$(box_keydir "$box")/$name"
 }
 
+# A session's broker identity belongs to the SESSION, not to the box it is running in today.
+# Before this, a box's key was generated inside it, into tmpfs, and its enrollment was keyed by
+# the box's name, so `agentbox move` — or any respawn that makes a new box — gave the session a
+# new key and a new enrollment id. A pending credential request is bound to the enrollment id
+# alone (broker requests/machine_read.go: a release to any other enrollment is NOT_YOURS), and
+# ending an enrollment cancels every request still pending under it and revokes its grants
+# (broker enroll.go endEnrollment). So a move orphaned every card Sami had not yet answered and
+# threw away every grant he had already given (dispatch://INFRA-1167; the orphans of 2026-11-04
+# are b4cc297b and 7363fc76).
+#
+# So the key is generated on the HOST, once per omp session id, and the runtime id the broker
+# keys the enrollment by is that session rather than the box: the same key under the same runtime
+# id gets the SAME enrollment back (broker enroll.go recoverConflict), pending requests and
+# grants included. The directory is under $RUN_BASE, the host's own tmpfs: 0700, no box mounts
+# it, and it clears at a reboot — which ends every session anyway, so there is nothing for a key
+# on disk to follow.
+session_keydir() { echo "$RUN_BASE/session-keys/$1"; }
+
+# The session's key and the thumbprint of it, made at that session's first box and reused by
+# every box after. keygen overwrites key.pem, so it runs only where there is none; the thumbprint
+# is kept beside the key because keygen is the one thing that prints one. Sets SESSION_TP.
+ensure_session_key() {
+    local sid="$1" skd tp
+    skd="$(session_keydir "$sid")"
+    SESSION_TP=""
+    mkdir -p -m 700 "$RUN_BASE/session-keys" "$skd" || return 1
+    if [[ -s "$skd/key.pem" && -s "$skd/thumbprint" ]]; then
+        SESSION_TP="$(<"$skd/thumbprint")"
+        [[ "$SESSION_TP" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
+        return 0
+    fi
+    tp="$(agent-secrets keygen --out "$skd" 2>"$RUN_BASE/session-keys/keygen-error")" || return 1
+    tp="${tp//[[:space:]]/}"
+    [[ "$tp" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
+    (umask 077; printf '%s\n' "$tp" >"$skd/thumbprint") || return 1
+    SESSION_TP="$tp"
+}
+
+# A session key outlives its box on purpose; it must not outlive the sessions. tmpfs clears at a
+# reboot, and a directory nothing has enrolled for a week belongs to a session long gone.
+prune_session_keys() {
+    [[ -d "$RUN_BASE/session-keys" ]] || return 0
+    find "$RUN_BASE/session-keys" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
+        -exec rm -rf {} + 2>/dev/null || true
+    return 0
+}
+
+# put_keyfile for a file whose bytes must arrive whole: a PEM read through `$(<…)` loses its last
+# newline, and the key the box signs with is not a thing to hand over approximately.
+copy_keyfile() {
+    local box="$1" name="$2" src="$3" tmp
+    tmp="$(mktemp "$RUN_BASE/$box/.keyfile.XXXXXX")" || return 1
+    cat "$src" >"$tmp" && chmod 600 "$tmp" && mv -fT "$tmp" "$(box_keydir "$box")/$name"
+}
+
 # How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error
 # (`agentbox doctor` reports it), then key.pem and the enrollment.pending marker removed, so the
 # box has no broker identity and its agents use secretsd, as when the host could not enroll it.
@@ -567,33 +622,55 @@ wait_for_running() {
     done
 }
 
-# Enroll a running box with the secrets broker. The key is generated INSIDE the box by a
-# process in its namespaces, into its private runtime dir (tmpfs, this box only); only the
-# public thumbprint comes back. The enrollment is made from the host with the launcher
-# credential, which no box can read, and the client writes the enrollment id beside the key.
-# sid is the box's omp session id when known (the broker wakes that session on a decision),
-# else empty. Ten attempts 3 s apart. The enrollment.pending marker (cmd_new creates it before
-# docker run) is renewed before keygen and before each attempt: from the legion #1589 release a
-# client in the box waits on a marker younger than 160 s, so it stays fresh for exactly as long
-# as the launcher is still working, however slow the broker. Success removes the marker and
-# every error file; every other end is enroll_failed. The box runs on either way. Re-running is
-# safe: the broker answers a repeat of the same key with the same enrollment.
+# Enroll a running box with the secrets broker. A box whose omp session id is known enrolls as
+# that SESSION: the host's key for it (ensure_session_key) and the runtime id `session-<sid>`, so
+# the same session in a new box gets the same enrollment id back and keeps the cards Sami has not
+# answered and the grants he has given. A box with no session id (a `--` command that is not omp,
+# `doctor`, an `omp --no-session` run) keeps the old shape: a key generated INSIDE the box by a
+# process in its namespaces, into its private runtime dir (tmpfs, this box only), enrolled under
+# the box's own name, with only the public thumbprint coming back.
+#
+# The enrollment is made from the host with the launcher credential, which no box can read, and
+# the client writes the enrollment id beside the key. Ten attempts 3 s apart. The
+# enrollment.pending marker (cmd_new creates it before docker run) is renewed before the key step
+# and before each attempt: from the legion #1589 release a client in the box waits on a marker
+# younger than 160 s, so it stays fresh for exactly as long as the launcher is still working,
+# however slow the broker. Success removes the marker and every error file; every other end is
+# enroll_failed. The box runs on either way. Re-running is safe: the broker answers a repeat of
+# the same key under the same runtime id with the same enrollment.
 enroll_box() {
-    local box="$1" sid="$2" keydir errfile tp eid attempt
+    local box="$1" sid="$2" keydir errfile tp eid attempt skd="" runtime="$1"
     keydir="$(box_keydir "$box")"
     errfile="$RUN_BASE/$box/enroll.attempt-error"
     broker_ready || { enroll_failed "$box" "not enrolled: $BROKER_UNREADY"; return 1; }
     put_keyfile "$box" enrollment.pending ""
-    if ! tp="$(docker exec --user ubuntu "$box" agent-secrets keygen --out "/run/user/$UID_/agent-secrets" 2>"$errfile")"; then
-        enroll_failed "$box" "agent-secrets keygen failed in $box: $(<"$errfile")"
-        return 1
+    if [[ -n "$sid" ]]; then
+        prune_session_keys
+        if ensure_session_key "$sid"; then
+            skd="$(session_keydir "$sid")"
+            tp="$SESSION_TP"
+            runtime="session-$sid"
+            touch "$skd"
+            copy_keyfile "$box" key.pem "$skd/key.pem" \
+                || { enroll_failed "$box" "could not give $box the key of session $sid"; return 1; }
+        else
+            # Not fatal: the box still gets an identity of its own, it just does not carry the
+            # session's pending cards into its next box.
+            echo "agentbox: no host key for session $sid ($(cat "$RUN_BASE/session-keys/keygen-error" 2>/dev/null)); $box enrolls under its own name and its pending broker cards will not follow the session" >&2
+        fi
     fi
-    tp="${tp//[[:space:]]/}"
-    if [[ ! "$tp" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
-        enroll_failed "$box" "agent-secrets keygen printed no thumbprint: '$tp'"
-        return 1
+    if [[ -z "$skd" ]]; then
+        if ! tp="$(docker exec --user ubuntu "$box" agent-secrets keygen --out "/run/user/$UID_/agent-secrets" 2>"$errfile")"; then
+            enroll_failed "$box" "agent-secrets keygen failed in $box: $(<"$errfile")"
+            return 1
+        fi
+        tp="${tp//[[:space:]]/}"
+        if [[ ! "$tp" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+            enroll_failed "$box" "agent-secrets keygen printed no thumbprint: '$tp'"
+            return 1
+        fi
     fi
-    local args=(enroll --helper --runtime-id "$box" --thumbprint "$tp")
+    local args=(enroll --helper --runtime-id "$runtime" --thumbprint "$tp")
     [[ -n "$sid" ]] && args+=(--session-id "$sid")
     for attempt in $(seq 1 10); do
         put_keyfile "$box" enrollment.pending ""
@@ -603,8 +680,26 @@ enroll_box() {
             [[ -n "$eid" && -s "$keydir/enrollment" ]] \
                 || { enroll_failed "$box" "agent-secrets enroll printed '$eid' and left $keydir/enrollment empty"; return 1; }
             printf '%s\n' "$eid" >"$RUN_BASE/$box/enrollment-id"
+            if [[ -n "$skd" ]]; then
+                # Which box holds the session's enrollment now: the waiter an earlier box left
+                # behind reads this and leaves the enrollment alone (unenroll_box).
+                printf '%s\n' "$sid" >"$RUN_BASE/$box/enrollment-session"
+                printf '%s\n' "$eid" >"$skd/enrollment-id"
+                printf '%s\n' "$box" >"$skd/owner"
+            fi
             rm -f "$keydir/enrollment.pending" "$keydir/enrollment.error" "$errfile"
             return 0
+        fi
+        # A live enrollment of this session under a key the host no longer holds — its key dir
+        # went with a reboot while the old lease still ran — refuses every attempt with the same
+        # 409 until that lease lapses, up to 15 minutes. Rather than leave the box with no
+        # identity for that long, fall back to the box's own runtime id, where any key is
+        # accepted; the session gets its continuity back at its next box.
+        if [[ -n "$skd" && "$(<"$errfile")" == *ALREADY_ENROLLED* ]]; then
+            echo "agentbox: the broker still holds a live enrollment for session $sid under a key this host does not have; $box enrolls under its own name and its pending broker cards will not follow the session" >&2
+            skd="" runtime="$box"
+            args=(enroll --helper --runtime-id "$runtime" --thumbprint "$tp")
+            [[ -n "$sid" ]] && args+=(--session-id "$sid")
         fi
         (( attempt < 10 )) && sleep 3
     done
@@ -660,15 +755,48 @@ enroll_when_up() {
     enroll_failed "$box" "$box ended before it was enrolled"
 }
 
+# How long a session's enrollment is held for the box that comes back with it. A move's respawn
+# takes well under a minute, and the broker ends an enrollment nothing renews within 15 minutes
+# anyway, so this only decides how much of that window a session that has really ended keeps.
+AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
+
 # Revoke a box's enrollment and every grant under it: the id the host recorded at enrollment,
 # never the box-writable copy. Idempotent on the broker; a failure is noted, and the lease the
 # box stopped renewing lapses within 15 minutes.
+#
+# A SESSION's enrollment (enroll_box, when the box had an omp session id) is not this box's to
+# end: revoking it cancels every credential request Sami has not yet answered and revokes every
+# grant he has given (broker enroll.go endEnrollment), which is precisely what `agentbox move`
+# must not do. So it goes to a detached waiter that gives the session its grace to come back in
+# another box — the next box writes its own name into the session's `owner` — and ends the
+# enrollment only if none did. Detached because close_box runs in the pane the respawn is taking
+# back, and nothing may wait here.
 unenroll_box() {
-    local box="$1" eid
+    local box="$1" eid sid="" skd
     [[ -s "$RUN_BASE/$box/enrollment-id" ]] || return 0
     eid="$(<"$RUN_BASE/$box/enrollment-id")"
-    AGENT_SECRETS_URL="$AGENT_SECRETS_URL" agent-secrets unenroll --helper --enrollment "$eid" \
-        || echo "agentbox: unenroll $box ($eid) failed; the broker drops it when its lease lapses (15 min)" >&2
+    if [[ -s "$RUN_BASE/$box/enrollment-session" ]]; then
+        sid="$(<"$RUN_BASE/$box/enrollment-session")"
+    fi
+    if [[ -z "$sid" ]]; then
+        AGENT_SECRETS_URL="$AGENT_SECRETS_URL" agent-secrets unenroll --helper --enrollment "$eid" \
+            || echo "agentbox: unenroll $box ($eid) failed; the broker drops it when its lease lapses (15 min)" >&2
+        return 0
+    fi
+    skd="$(session_keydir "$sid")"
+    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" bash -c '
+        sleep "$1"
+        [[ "$(cat "$2/owner" 2>/dev/null)" == "$3" ]] || {
+            echo "$(date -u +%FT%TZ) $3: session $4 came back in $(cat "$2/owner" 2>/dev/null); enrollment $5 left alone"
+            exit 0
+        }
+        rm -rf "${2:?}"
+        echo "$(date -u +%FT%TZ) $3: session $4 did not come back; ending enrollment $5"
+        agent-secrets unenroll --helper --enrollment "$5" \
+            || echo "$(date -u +%FT%TZ) $3: unenroll $5 failed; the broker drops it when its lease lapses (15 min)"
+    ' agentbox-unenroll "$AGENTBOX_UNENROLL_GRACE" "$skd" "$box" "$sid" "$eid" \
+        </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
+    return 0
 }
 
 # Run a command as a fresh process under the user manager: a child of systemd --user, inside
@@ -1263,6 +1391,14 @@ mount_args() {
     for key_dir in "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"; do
         box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir")
     done
+    # The review App's installation token cache (scripts/post-review). It is the machine's, not
+    # the box's: each mint is a grant of a human-tier secret that Sami approves by hand, and
+    # while the cache followed the box's private /run/user/$UID every box asked him again, and a
+    # box made by `agentbox move` threw away the hour its session already had. A directory, so
+    # the rename post-review's mint does is seen at once by every box.
+    mkdir -p -m 700 "/run/user/$UID_/post-review"
+    box_dir_named "/run/user/$UID_/post-review" \
+        || a+=(-v "/run/user/$UID_/post-review:/run/user/$UID_/post-review")
     # The shared ssh identity bin/ossv-vm uses to reach the gateway VM, where the host has it:
     # without it `ossv-vm` in a box cannot reach that VM at all (agentvm, 2026-11-03). A box is
     # for segregation, not for keeping a session from what its host gives it (Sami,

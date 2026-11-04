@@ -45,6 +45,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import time
 
 TOKEN_SECRET = "LEGION_REVIEW_APP"  # the broker's github-app secret of App 5341243
@@ -56,11 +57,37 @@ def die(message: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
+# The review App's installation token belongs to the machine, not to one agent box. A box gets a
+# private /run/user/$UID (scripts/agentbox mount_args), so a cache under $XDG_RUNTIME_DIR was one
+# cache per box: each box asked Sami for its own grant of the human-tier review secret — the thing
+# cached_token exists to stop — and a box recreated by `agentbox move` threw away the hour already
+# granted to its session. agentbox binds the host's /run/user/$UID/post-review into every box at
+# that same path, so the fixed path is the shared one and $XDG_RUNTIME_DIR is not.
+# POST_REVIEW_CACHE_DIR stands in for that shared path; the tests use it.
+def cache_dir() -> pathlib.Path:
+    # The shared machine directory first. The fallbacks keep a context that does not have it
+    # posting on a cache of its own: a box created before the bind (whose own /run/user/$UID is
+    # private and writable, so it behaves exactly as it did before), a pod or a VM with no
+    # per-user runtime directory, a different uid.
+    shared = os.environ.get("POST_REVIEW_CACHE_DIR") or f"/run/user/{os.getuid()}/post-review"
+    candidates = [pathlib.Path(shared)]
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        candidates.append(pathlib.Path(runtime) / "post-review")
+    candidates.append(pathlib.Path(tempfile.gettempdir()) / f"post-review-{os.getuid()}")
+    for directory in candidates:
+        try:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if os.access(directory, os.W_OK | os.X_OK):
+            return directory
+    die(f"no writable token cache directory among {', '.join(str(c) for c in candidates)}")
+    raise AssertionError  # die raises
+
+
 def cache_path(owner: str, repo: str) -> pathlib.Path:
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    directory = pathlib.Path(base) / "post-review"
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return directory / f"{owner}-{repo}.token"
+    return cache_dir() / f"{owner}-{repo}.token"
 
 
 def cached_token(path: pathlib.Path) -> str | None:

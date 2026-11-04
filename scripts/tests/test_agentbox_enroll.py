@@ -69,8 +69,10 @@ case "$*" in
 esac
 """
 
-# enroll records the marker's mtime as it saw it, then prints the enrollment id and writes it into
-# the key dir, as the real client does. renew fails at once, and ends its loop on the third run.
+# keygen writes a key to --out and prints its thumbprint, as the host's session keygen and the
+# in-box one both do. enroll records the marker's mtime as it saw it, then prints the enrollment
+# id and writes it into the key dir, as the real client does. renew fails at once, and ends its
+# loop on the third run.
 AGENT_SECRETS_STUB = r"""
 case "$1" in
     machine)
@@ -79,12 +81,40 @@ case "$1" in
         echo none
         echo "agent-secrets machine login-status: no machine login has run on this helper; run: agent-secrets machine login" >&2
         exit 1 ;;
+    keygen)
+        out=""
+        while (( $# )); do [[ "$1" == --out ]] && out="$2"; shift; done
+        echo "keygen $out" >>"$STUB_CALLS"
+        case "${STUB_KEYGEN:-ok}" in
+            ok) (umask 077; printf 'KEY %s\n' "${STUB_KEY:-k1}" >"$out/key.pem"); echo "$STUB_THUMBPRINT" ;;
+            fail) echo "keygen: no /run/user dir" >&2; exit 1 ;;
+            empty) ;;
+        esac ;;
     enroll)
         echo "enroll $* marker-mtime=$(stat -c %Y "$AGENT_SECRETS_KEY_DIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
         case "${STUB_ENROLL:-ok}" in
             ok) echo enr-123 >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo enr-123 ;;
             fail) echo "broker unreachable" >&2; exit 1 ;;
             nofile) echo enr-123 ;;
+            idempotent)
+                # As the broker: an enrollment is keyed by (runtime id, key), so the same pair
+                # gets the same id back and any other pair gets its own.
+                rt="" tp=""
+                while (( $# )); do
+                    [[ "$1" == --runtime-id ]] && rt="$2"
+                    [[ "$1" == --thumbprint ]] && tp="$2"
+                    shift
+                done
+                id="enr-$(printf '%s|%s' "$rt" "$tp" | cksum | cut -d' ' -f1)"
+                echo "$id" >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo "$id" ;;
+            conflict)
+                # A live enrollment of this session under a key this host no longer has.
+                rt=""
+                while (( $# )); do [[ "$1" == --runtime-id ]] && rt="$2"; shift; done
+                case "$rt" in
+                    session-*) echo "409 ALREADY_ENROLLED this runtime is already enrolled and live" >&2; exit 1 ;;
+                    *) echo enr-box >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo enr-box ;;
+                esac ;;
         esac ;;
     unenroll) echo "unenroll $*" >>"$STUB_CALLS" ;;
     renew)
@@ -153,6 +183,7 @@ class EnrollFixture(unittest.TestCase):
             "STUB_CALLS": str(self.calls),
             "STUB_KEYDIR": str(self.keydir),
             "STUB_RUN_BASE": str(self.run_base),
+            "STUB_THUMBPRINT": THUMBPRINT,
             **stubs,
         }
         # 300 s, not 60: the slow-box test below deliberately runs 400 passes of the wait, each
@@ -194,6 +225,16 @@ class AgentboxEnroll(EnrollFixture):
         self.assertIn(f"--thumbprint {THUMBPRINT}", enroll)
         self.assertIn("--session-id sid-1", enroll)
         self.assertNotIn("--kind", enroll)
+        # The enrollment is the SESSION's, so the broker keys it by the session and not by the
+        # box, and the key it holds was made on the host, never inside the box.
+        self.assertIn("--runtime-id session-sid-1", enroll)
+        self.assertEqual((self.hostdir / "enrollment-session").read_text(), "sid-1\n")
+        self.assertEqual([c for c in self.calls_matching("docker ") if " keygen " in c], [])
+        session = self.run_base / "session-keys" / "sid-1"
+        self.assertEqual((session / "key.pem").read_text(), (self.keydir / "key.pem").read_text())
+        self.assertEqual((session / "owner").read_text(), "box1\n")
+        self.assertEqual(oct((session / "key.pem").stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(session.stat().st_mode & 0o777), "0o700")
 
     def test_gives_up_after_ten_attempts_with_the_marker_fresh_throughout(self) -> None:
         started = time.time()
@@ -308,6 +349,104 @@ class AgentboxEnroll(EnrollFixture):
                 )
                 self.assertIn("unready:", result.stdout, result.stderr)
                 self.assertIn(reason, result.stdout)
+
+
+class SessionIdentity(EnrollFixture):
+    """A session's broker identity follows the session, not the box it is running in.
+
+    A pending credential request is bound to the enrollment id alone, and ending an enrollment
+    cancels every request still pending under it and revokes its grants (legion
+    packages/envoy/internal/broker/enroll/enroll.go endEnrollment). So a key made inside the box
+    and an enrollment keyed by the box's name meant `agentbox move` orphaned every card Sami had
+    not answered and threw away every grant he had given (dispatch://INFRA-1167).
+    """
+
+    def second_box(self, name: str = "box2") -> Path:
+        """A box dir as mount_args makes one, for the box the session moves into."""
+        keydir = self.run_base / name / "run-user" / "agent-secrets"
+        keydir.mkdir(parents=True)
+        (keydir / "enrollment.pending").write_text("")
+        return keydir
+
+    def test_the_same_session_in_a_new_box_gets_the_same_enrollment(self) -> None:
+        two = self.second_box()
+        # STUB_KEY and STUB_THUMBPRINT change between the boxes: a key made for the second box
+        # would be a different one, and the test would see it.
+        first = self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.bash(
+            "enroll_box box2 sid-1", STUB_ENROLL="idempotent", STUB_KEY="k2", STUB_THUMBPRINT="B" * 43
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(
+            (self.run_base / "box2" / "enrollment-id").read_text(),
+            (self.run_base / "box1" / "enrollment-id").read_text(),
+        )
+        self.assertEqual(two.joinpath("key.pem").read_text(), (self.keydir / "key.pem").read_text())
+        for call in self.calls_matching("enroll "):
+            self.assertIn("--runtime-id session-sid-1", call)
+            self.assertIn(f"--thumbprint {THUMBPRINT}", call)
+        # One keygen for the session, at its first box; the second box reuses the host's key.
+        self.assertEqual(len(self.calls_matching("keygen ")), 1)
+        self.assertEqual((self.run_base / "session-keys" / "sid-1" / "owner").read_text(), "box2\n")
+
+    def test_a_different_session_gets_an_enrollment_of_its_own(self) -> None:
+        self.second_box()
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
+        self.bash("enroll_box box2 sid-2", STUB_ENROLL="idempotent", STUB_KEY="k2", STUB_THUMBPRINT="B" * 43)
+        self.assertNotEqual(
+            (self.run_base / "box2" / "enrollment-id").read_text(),
+            (self.run_base / "box1" / "enrollment-id").read_text(),
+        )
+
+    def test_a_box_with_no_session_still_makes_its_key_inside_the_box(self) -> None:
+        """A `--` command that is not omp, `doctor`, an `omp --no-session` run."""
+        result = self.bash('enroll_box box1 ""')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (enroll,) = self.calls_matching("enroll ")
+        self.assertIn("--runtime-id box1", enroll)
+        self.assertNotIn("--session-id", enroll)
+        self.assertEqual(len([c for c in self.calls_matching("docker ") if " keygen " in c]), 1)
+        self.assertFalse((self.run_base / "session-keys").exists())
+        self.assertFalse((self.hostdir / "enrollment-session").exists())
+
+    def test_a_live_enrollment_under_a_key_this_host_lost_falls_back_to_the_box(self) -> None:
+        """After a reboot the host's key dir is gone while the old lease runs on. The box takes
+        an identity of its own rather than waiting out the 409 for fifteen minutes."""
+        result = self.bash("enroll_box box1 sid-1", STUB_ENROLL="conflict")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("enrolls under its own name", result.stderr)
+        runtimes = [c.split("--runtime-id ")[1].split()[0] for c in self.calls_matching("enroll ")]
+        self.assertEqual(runtimes, ["session-sid-1", "box1"])
+        self.assertEqual((self.hostdir / "enrollment-id").read_text(), "enr-box\n")
+        self.assertFalse((self.hostdir / "enrollment-session").exists())
+
+    def unenroll_calls(self, deadline: float = 20.0) -> list[str]:
+        """The waiter unenroll_box leaves behind is detached; wait for it to have run."""
+        log = self.run_base / "session-keys" / "unenroll.log"
+        end = time.time() + deadline
+        while time.time() < end:
+            if log.exists() and log.read_text().strip():
+                break
+            time.sleep(0.2)
+        return self.calls_matching("unenroll ")
+
+    def test_a_session_that_came_back_in_another_box_keeps_its_enrollment(self) -> None:
+        self.second_box()
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
+        self.bash("enroll_box box2 sid-1", STUB_ENROLL="idempotent")
+        # box1 closing after the move must not cancel what the session has pending.
+        self.bash("unenroll_box box1", AGENTBOX_UNENROLL_GRACE="0")
+        self.assertEqual(self.unenroll_calls(), [])
+        self.assertIn("left alone", (self.run_base / "session-keys" / "unenroll.log").read_text())
+        self.assertTrue((self.run_base / "session-keys" / "sid-1" / "key.pem").exists())
+
+    def test_a_session_that_did_not_come_back_ends_its_enrollment_and_its_key(self) -> None:
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
+        self.bash("unenroll_box box1", AGENTBOX_UNENROLL_GRACE="0")
+        (call,) = self.unenroll_calls()
+        self.assertIn("--enrollment ", call)
+        self.assertFalse((self.run_base / "session-keys" / "sid-1").exists())
 
 
 class EnrollWhenUp(EnrollFixture):
