@@ -34,15 +34,20 @@ command -v docker >/dev/null || { echo "omp-embed: docker is required (installer
 
 docker pull "$IMAGE" >/dev/null
 
+# --cpus 16: an embedding burst (a bank re-embed) otherwise takes every core of the host, and on
+# sami-devbox it slowed every session (omp lead's yes, 2026-11-04 01:47Z). `docker update` applies it
+# to a container made before this line without a restart.
+EMBED_CPUS="${OMP_EMBED_CPUS:-16}"
 current_image="$(docker inspect --format '{{.Config.Image}}' "$NAME" 2>/dev/null || true)"
 if [ "$current_image" = "$IMAGE" ]; then
+    docker update --cpus "$EMBED_CPUS" "$NAME" >/dev/null
     docker start "$NAME" >/dev/null
 else
     [ -n "$current_image" ] && docker rm -f "$NAME" >/dev/null
     # --auto-truncate: mnemopi caps input at 8192 chars, well past this model's
     # 512 tokens; fastembed truncates silently, so the server must too.
     # --max-client-batch-size 256: mnemopi re-embeds a bank in batches of 128.
-    docker run -d --name "$NAME" --restart unless-stopped \
+    docker run -d --name "$NAME" --restart unless-stopped --cpus "$EMBED_CPUS" \
         -p "127.0.0.1:${PORT}:80" \
         -v omp-embed-hf:/data \
         "$IMAGE" --model-id "$MODEL" --auto-truncate --max-client-batch-size 256 --payload-limit 8000000 >/dev/null
