@@ -43,12 +43,15 @@ the dirty-lock anomaly that stopped the follower after a marketplace install on 
 4. **Refuses** when the commits to take change a kept file that is modified here.
 5. `git merge --ff-only origin/main`. An alert when git refuses.
 6. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
-   `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each non-Bun plugin
-   whose installed version differs from `omp-plugins.lock.json`, `shims/omp plugin marketplace
-   update <source>` and `shims/omp plugin upgrade <name>@<source>`. Sources come from the local
-   `installed_plugins.json`; an unknown source is reported with instructions to run `install.sh`
-   once. Each changed plugin is attempted even if another fails, with a 60 s command cap and
-   300 s marketplace-phase budget. Normal cleanup tries to restore the tracked lock in a
+   `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
+   non-Bun marketplace plugin whose installed version differs from `omp-plugins.lock.json`,
+   `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
+   A unique `installed_plugins.json` record identifies its source. Lock entries with no record
+   are silently skipped: these include vendored plugins such as compound-engineering and new
+   marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow
+   only upgrades existing installs. Multiple matching records are a reported ambiguity.
+   Each changed registered plugin is attempted even if another fails, with a 60 s command cap
+   and 300 s marketplace-phase budget. Normal cleanup tries to restore the tracked lock in a
    `finally`, with saved bytes as fallback if `git checkout --` fails. An interrupted run may
    leave it dirty: the next run restores HEAD before fast-forwarding or retrying installation.
    An upgrade to a catalog version other than the committed pin is a failure too. Finally,
@@ -97,11 +100,14 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | the hook sweep is missing, ran past its bound, or could not hook a public checkout | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed |
 | `git fetch` failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
 
-All of one run's new conditions go in one message, `DOTFILES NOT FOLLOWING MAIN on <host>`. A
-condition that still holds after `--escalate` (2 h) is said once more (`STILL NOT FOLLOWING MAIN`);
-a cleared one is said once (`DOTFILES FOLLOWING MAIN AGAIN`). Messages go where every box watch
-here sends them: `BOX_HEALTH_OWNER` (a drop-in that `ensure_box_health_owner` writes), else the
-`lead-box-health` role, else the SRE session.
+All of one run's new conditions go in one message. Its headline considers **all open conditions**:
+if only tools/hooks remain open and HEAD is at origin/main, it says `<host> is on main, but a
+post-update step failed`. Any open fetch, dirty-checkout, ancestry, kept-file or merge condition
+keeps `DOTFILES NOT FOLLOWING MAIN on <host>`. A condition that still holds after `--escalate`
+(2 h) is said once more, with the corresponding post-update or `STILL NOT FOLLOWING MAIN`
+headline; a cleared one is said once (`DOTFILES FOLLOWING MAIN AGAIN`). Messages go where every
+box watch here sends them: `BOX_HEALTH_OWNER` (a drop-in that `ensure_box_health_owner` writes),
+else the `lead-box-health` role, else the SRE session.
 
 The run exits 0 after a refusal: the alert is the report, so `unit-health-watch` does not say the
 same thing a second time. A2 (`devbox/sami-devbox-check`, `host_follow`) reads the state file and
@@ -115,5 +121,6 @@ each case builds a throwaway origin and clone with the real provision and check 
 stand-in `mise`, `knives` and `bun`. Refusal cases assert that HEAD, the index and each file are
 unchanged, except for follow-managed lock recovery. Marketplace cases use a stub `shims/omp`
 that records commands, changes installed versions and rewrites the tracked lock. They cover
-upgrades, skips, aggregated failures, decoding, unknown sources, timeout cleanup and recovery
-from arbitrary dirty-lock contents before a fast-forward or a same-HEAD retry.
+upgrades, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources,
+alert classification and escalation, timeout cleanup and recovery from arbitrary dirty-lock
+contents before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint.

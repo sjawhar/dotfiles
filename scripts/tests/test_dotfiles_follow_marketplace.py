@@ -133,6 +133,9 @@ class MarketplacePlugins(Harness):
             wanted["plugins"][name]["version"] = "2.0.0"
         # A lock entry for a Bun dependency must not be treated as a marketplace pin.
         wanted["plugins"]["@sjawhar/pi-envoy"]["version"] = "99.0.0"
+        wanted["plugins"]["compound-engineering"] = {
+            "version": "3.32.0", "enabledFeatures": None, "enabled": True,
+        }
         self.want_lock = json.dumps(wanted, indent=2) + "\n"
         self.target = self.commit_upstream(
             "bump marketplace pins",
@@ -189,17 +192,36 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.calls()[-1], ["plugin", "upgrade", "core-ops@core-ops"])
         self.assert_clean_lock()
 
-    def test_unknown_source_reports_install_once_and_keeps_going(self) -> None:
-        self.take_upstream()
+    def test_unregistered_plugin_is_skipped_silently_and_follow_stays_clean(self) -> None:
         installed = json.loads(self.installed_path.read_text())
         del installed["plugins"]["dev-infra@verification-skills"]
         self.installed_path.write_text(json.dumps(installed))
-        why = FOLLOW.install_tools(self.repo, self.options())
-        self.assertIn("dev-infra", why)
-        self.assertIn("source", why)
-        self.assertIn("install.sh", why)
-        self.assertFalse(any("dev-infra@verification-skills" in args for args in self.calls()))
+        self.assertEqual(self.run_follow(), [])
+        self.assertEqual(self.head(), self.target)
+        self.assertEqual(self.state_data()["last_outcome"], "ok")
+        self.assertEqual(self.state_data()["tools_ok_head"], self.target)
+        self.assertEqual(self.calls(), [
+            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "upgrade", "verification-skills@verification-skills"],
+            ["plugin", "marketplace", "update", "core-ops"],
+            ["plugin", "upgrade", "core-ops@core-ops"],
+        ])
+        self.assertNotIn("dev-infra@verification-skills", json.loads(self.installed_path.read_text())["plugins"])
         self.assertEqual(self.version("core-ops"), "2.0.0")
+        self.assert_clean_lock()
+
+    def test_ambiguous_marketplace_source_is_reported_and_other_plugins_continue(self) -> None:
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@another-source"] = installed["plugins"]["dev-infra@verification-skills"]
+        self.installed_path.write_text(json.dumps(installed))
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("TOOLS NOT INSTALLED", messages[0])
+        self.assertIn("dev-infra", messages[0])
+        self.assertIn("source", messages[0])
+        self.assertEqual(self.version("core-ops"), "2.0.0")
+        self.assertFalse(any(args[:2] == ["plugin", "upgrade"] and args[2].startswith("dev-infra@") for args in self.calls()))
+        self.assertEqual(self.state_data()["last_outcome"], "tools")
         self.assert_clean_lock()
 
     def test_catalog_latest_different_from_pin_is_a_tool_failure(self) -> None:
@@ -244,6 +266,8 @@ class MarketplacePlugins(Harness):
         messages = self.run_follow()
         self.assertEqual(self.head(), self.target)
         self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", messages[0].splitlines()[0])
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
         self.assertIn("dev-infra@verification-skills", messages[0])
         self.assertIn("next run tries again", messages[0])
@@ -264,6 +288,63 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.run_follow(now=1_001_200.0), [])
         self.assertEqual(len(self.calls()), 8)
         self.assert_clean_lock()
+
+    def test_post_update_alerts_escalate_once_with_on_main_headline(self) -> None:
+        os.environ["FAKE_OMP_FAIL"] = "dev-infra"
+        os.environ["FAKE_SWEEP"] = "failed"
+        opened = self.run_follow()
+        self.assertEqual(len(opened), 1)
+        self.assertIn("is on main, but a post-update step failed", opened[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", opened[0].splitlines()[0])
+        self.assertIn("TOOLS NOT INSTALLED", opened[0])
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED", opened[0])
+        self.assertEqual(self.head(), self.target)
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        escalated = self.run_follow(now=1_007_200.0)
+        self.assertEqual(len(escalated), 1)
+        self.assertIn("is on main, but a post-update step is still failing", escalated[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", escalated[0].splitlines()[0])
+        self.assertIn("2.0h after the first alert", escalated[0])
+        self.assertEqual(self.run_follow(now=1_007_800.0), [])
+        os.environ["FAKE_OMP_FAIL"] = ""
+        os.environ["FAKE_SWEEP"] = "ok"
+        cleared = self.run_follow(now=1_008_400.0)
+        self.assertEqual(len(cleared), 1)
+        self.assertIn("TOOLS NOT INSTALLED cleared", cleared[0])
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED cleared", cleared[0])
+        self.assertEqual(self.state_data()["last_outcome"], "ok")
+
+    def test_follow_failure_takes_headline_priority_over_hook_failure_at_main(self) -> None:
+        self.assertEqual(self.run_follow(), [])
+        (self.repo / "scripts/tool").write_text("another person's edit\n")
+        os.environ["FAKE_SWEEP"] = "failed"
+        opened = self.run_follow(now=1_000_600.0)
+        self.assertEqual(len(opened), 1)
+        self.assertIn("DOTFILES NOT FOLLOWING MAIN", opened[0].splitlines()[0])
+        self.assertIn("UNCOMMITTED CHANGES", opened[0])
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED", opened[0])
+        self.assertEqual(self.head(), self.target)
+        self.assertEqual((self.repo / "scripts/tool").read_text(), "another person's edit\n")
+
+    def test_existing_follow_failure_keeps_priority_when_only_new_hook_failure_opens(self) -> None:
+        self.assertEqual(self.run_follow(), [])
+        data = self.state_data()
+        data["tools_ok_head"] = None
+        self.state.write_text(json.dumps(data))
+        self.sh("git", "remote", "set-url", "origin", str(self.home / "missing.git"), cwd=self.repo)
+        os.environ["FAKE_MISE_RC"] = "1"
+        opened = self.run_follow(now=1_000_600.0, fetch_grace=1)
+        self.assertEqual(len(opened), 1)
+        self.assertIn("DOTFILES NOT FOLLOWING MAIN", opened[0].splitlines()[0])
+        self.assertIn("CANNOT FETCH origin/main", opened[0])
+        self.assertIn("TOOLS NOT INSTALLED", opened[0])
+        self.assertEqual(self.head(), self.target)
+        os.environ["FAKE_SWEEP"] = "failed"
+        newer = self.run_follow(now=1_001_200.0, fetch_grace=1)
+        self.assertEqual(len(newer), 1)
+        self.assertIn("DOTFILES NOT FOLLOWING MAIN", newer[0].splitlines()[0])
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED", newer[0])
+        self.assertEqual(set(self.state_data()["incidents"]), {"fetch", "tools", "hooks"})
 
     def wait_for_child_write_window(self, marker: Path) -> None:
         child = json.loads(marker.read_text())

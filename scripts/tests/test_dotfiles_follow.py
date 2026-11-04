@@ -352,6 +352,8 @@ class Refuses(Harness):
         changed = {name for name in before["files"].keys() | after["files"].keys() if before["files"].get(name) != after["files"].get(name)}
         self.assertEqual(changed, {"mise.toml"})
         self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", messages[0].splitlines()[0])
         self.assertIn(f"It fast-forwarded the checkout to {new[:12]} and changed nothing else", messages[0])
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
         self.assertIn("`mise install`", messages[0])
@@ -370,6 +372,8 @@ class Refuses(Harness):
         self.commit_upstream("pin a newer knives", **{"mise.toml": '[tools]\n"github:sjawhar/knives" = "9.9.9"\n'})
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", messages[0].splitlines()[0])
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
         self.assertIn("FAIL knives: want 'knives 9.9.9', got: knives 3.2.2", messages[0])
 
@@ -399,6 +403,8 @@ class PrePushHooks(Harness):
         os.environ["FAKE_SWEEP"] = "failed"
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", messages[0].splitlines()[0])
         self.assertIn("PRE-PUSH HOOK NOT INSTALLED", messages[0])
         self.assertIn("/src/broken", messages[0])
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
@@ -490,6 +496,8 @@ class TargetBytes(Harness):
         os.environ["FAKE_BUN_RC"] = "1"
         messages = self.run_follow()
         self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertNotIn("NOT FOLLOWING MAIN", messages[0].splitlines()[0])
         self.assertIn("TOOLS NOT INSTALLED", messages[0])
         self.assertIn("bun install --frozen-lockfile", messages[0])
         self.assertIn("lockfile is frozen", messages[0])

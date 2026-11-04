@@ -28,8 +28,9 @@ What one run does:
   5. `git merge --ff-only origin/main`.
   6. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace update/upgrade
-     for each marketplace plugin not at its committed lock version (a best-effort restore of the
-     tracked lock afterward), then `devbox/sami-devbox-check --pins` (knives and mise-pin lines).
+     for registered marketplace plugins not at their committed lock versions (a best-effort lock
+     restore afterward), then `devbox/sami-devbox-check --pins` (knives and mise-pin lines).
+     Lock entries without an installed marketplace record are skipped; install.sh bootstraps them.
   7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs). It installs the pre-push hook in every
@@ -37,6 +38,8 @@ What one run does:
      pass that does not end within --sweep-timeout, or a missing sweep is a condition.
   8. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
+     When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
+     not that the checkout failed to follow. Any open follow failure keeps the not-following headline.
 
 It never stashes, resets, rebases, abandons or deletes. It restores only the follow-managed
 marketplace lock, before judging dirty files and after plugin commands. Other edits are discarded
@@ -92,6 +95,7 @@ HEADLINE = {
     "hooks": "PRE-PUSH HOOK NOT INSTALLED",
 }
 KINDS = tuple(HEADLINE)
+POST_FOLLOW_KINDS = {"tools", "hooks"}
 # A tracked exception file may differ from its commit in the work tree or the index; any other
 # status of it (deleted, renamed, in conflict) is a change like any other.
 KEPT_STATUSES = {" M", "M ", "MM"}
@@ -424,7 +428,7 @@ def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
 
 
 def install_marketplace_plugins(repo: Path, timeout: float) -> str:
-    """Return why any marketplace pin is missing; try to restore the follow-managed lock."""
+    """Return why an installed marketplace pin is missing; try to restore the managed lock."""
     plugins = repo / "omp/plugins"
     lock = repo / MARKETPLACE_LOCK
     if not lock.is_file():
@@ -447,19 +451,23 @@ def install_marketplace_plugins(repo: Path, timeout: float) -> str:
             try:
                 if name in dependencies:
                     continue
-                want = pin.get("version")
-                if not want:
-                    failures.append(f"omp marketplace plugin {name} has no committed version in {display_path(lock)}.")
-                    continue
                 matches = [
                     plugin for plugin in installed
                     if plugin.rpartition("@")[0] == name and plugin.rpartition("@")[2]
                 ]
-                if len(matches) != 1:
+                # The lock also contains vendored plugins. Follow upgrades registered installs;
+                # installing a new marketplace plugin is install.sh's job, not this step's.
+                if not matches:
+                    continue
+                if len(matches) > 1:
                     failures.append(
                         f"omp marketplace plugin {name} has no unique installed marketplace source;"
                         " run install.sh once to establish its install record."
                     )
+                    continue
+                want = pin.get("version")
+                if not want:
+                    failures.append(f"omp marketplace plugin {name} has no committed version in {display_path(lock)}.")
                     continue
                 plugin = matches[0]
                 records = installed[plugin]
@@ -837,6 +845,8 @@ def run_once(options: argparse.Namespace) -> int:
     host = socket.gethostname().split(".")[0]
     display = display_path(repo)
     where = f"{display} at {short(facts.get('head', ''))}, {options.remote}/{options.branch} at {short(facts.get('target', ''))}"
+    on_main = bool(facts.get("head")) and facts["head"] == facts.get("target")
+    post_update_only = on_main and incidents.keys() <= POST_FOLLOW_KINDS
 
     def blocks(chosen: dict[str, str]) -> str:
         return "\n\n".join(f"{HEADLINE[kind]}: {why}" for kind, why in chosen.items())
@@ -856,10 +866,18 @@ def run_once(options: argparse.Namespace) -> int:
         " it never stashes, resets, rebases or abandons. Only the follow-managed marketplace lock is restored."
     )
     if opened:
-        messages.append(f"DOTFILES NOT FOLLOWING MAIN on {host} ({where}).\n\n{blocks(opened)}\n\n{footer}")
+        headline = (
+            f"{host} is on main, but a post-update step failed"
+            if post_update_only else f"DOTFILES NOT FOLLOWING MAIN on {host}"
+        )
+        messages.append(f"{headline} ({where}).\n\n{blocks(opened)}\n\n{footer}")
     if escalated:
+        headline = (
+            f"{host} is on main, but a post-update step is still failing"
+            if post_update_only else f"STILL NOT FOLLOWING MAIN on {host}"
+        )
         messages.append(
-            f"STILL NOT FOLLOWING MAIN on {host}, {human_time(options.escalate)} after the first alert"
+            f"{headline}, {human_time(options.escalate)} after the first alert"
             f" ({where}).\n\n{blocks(escalated)}\n\n{footer}"
         )
     if cleared:
