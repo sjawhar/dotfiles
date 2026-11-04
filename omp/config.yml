@@ -250,16 +250,23 @@ task:
   # stop costs a restart and a context reload, and a proof agent legitimately runs
   # past 300 requests.
   #
-  # 5000, not 0. OSS Verify's standing rule is "Never limit an agent's conversation"
-  # (dispatch://OSSV goals-md, "Models, spend, agents"), and 0 would match it
-  # literally. But this file is box-wide: 0 removes the floor for every stream,
+  # 5000, not 0, and the authority for that is Sami's own recorded decisions rather
+  # than a standing-rules line. He asked whether a parent is told it can resume a
+  # subagent stopped at 200 (dispatch://INFRA-28/ask/7c8ca516-4bcf-4458-a519-dd17e8f8451d)
+  # and accepted, on dispatch://INFRA-315, either of: the subagent "finishes without a
+  # stop at 200, or the parent resumes it within one minute without a person". A 5000
+  # budget satisfies the first branch for every run this box has ever produced.
+  #
+  # An earlier version of this comment cited OSS Verify's standing rule "Never limit
+  # an agent's conversation". That line carries no link to a decision, and goals-md
+  # says of itself that an instruction without one is someone's reading; the OSS
+  # Verify lead corrected the citation and withdrew their request for 0. Kept here so
+  # nobody restores 0 on the strength of the reading.
+  #
+  # Why not 0 even so: this file is box-wide, so 0 removes the floor for every stream,
   # including those with no such rule, on a machine running 80k+ model calls since
-  # 23:00Z. 5000 is sixteen times the longest run that has ever been stopped here, so
-  # it cannot stop real work, and it still halts a subagent stuck in a loop that
-  # never finishes. Chosen 09:40Z 2026-11-04 by the omp lead; it supersedes the 0 set
-  # two minutes earlier at the OSS Verify lead's request, after the chief of staff
-  # pointed out that "no budget at all, fleet-wide" and "a budget high enough never to
-  # stop real work" are different changes and only the second keeps a stop on a loop.
+  # 23:00Z. 5000 is sixteen times the longest run ever stopped here (305 requests), so
+  # it cannot stop real work, and it still halts a subagent looping without end.
   #
   # If a stream needs a literal 0, the narrower lever is task.agentSoftRequestBudget,
   # whose per-agent entry REPLACES both this value and an agent's lower bundled cap.
