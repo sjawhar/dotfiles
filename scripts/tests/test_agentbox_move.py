@@ -72,6 +72,11 @@ class AgentboxMove(unittest.TestCase):
         for name in ("STUB_PGREP", "STUB_TMUX", "STUB_DOCKER", "STUB_ENVOY"):
             (self.root / name).write_text("", encoding="utf-8")
         self.env = {
+            # These tests run INSIDE a box themselves (every session does now), and the script
+            # takes its in-box paths when it finds the box identity file. Pointed at a path that
+            # does not exist, so each test exercises the host's own behaviour.
+            "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
+            "AGENTBOX_BOX": "",
             "HOME": str(self.home),
             "PATH": f"{self.stubs}:/usr/bin:/bin",
             "DOTFILES_DIR": str(DOTFILES),
@@ -121,6 +126,14 @@ class AgentboxMove(unittest.TestCase):
                 break
             except subprocess.TimeoutExpired:
                 continue
+
+    @staticmethod
+    def pane_command(call: str) -> str:
+        """What a respawned or new pane runs. tmux is given a FILE, never the line itself: a box
+        spec with hundreds of --dir paths was "command too long" and no window opened
+        (2026-11-03). The line is in that file."""
+        last = call.rsplit(" ", 1)[-1]
+        return Path(last).read_text(encoding="utf-8") if last.endswith(".sh") else call
 
     def make_proc(
         self,
@@ -1004,7 +1017,7 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(f"move {sid}: --dir {gone} no longer exists; the box starts without it", result.stdout)
         respawn = [c for c in args.read_text(encoding="utf-8").splitlines() if " respawn-pane " in f" {c} "]
         self.assertEqual(len(respawn), 1, respawn)
-        self.assertIn("agentbox new --drop-gone-dirs --dir", respawn[0])
+        self.assertIn("agentbox new --drop-gone-dirs --dir", self.pane_command(respawn[0]))
 
     def test_a_session_file_names_the_session_in_full_and_a_truncated_name_is_no_id(self) -> None:
         """A prefix would resume another session, so only the 36-character id in the transcript's
@@ -1296,7 +1309,10 @@ class AgentboxMove(unittest.TestCase):
             "  has-session) exit 1 ;;",
             "  new-window|new-session)",
             '    if [[ ! -e "$STUB_REMOTE/FAIL" ]]; then',
-            '      r="$(printf "%s" "$*" | grep -o -- "--resume [^ ;]*" | tail -1)"',
+            # The launcher line reaches the target as a FILE (tmux takes a pane's command as
+            # arguments, and a long spec made it "command too long"), so the stub reads it.
+            '      line="$*"; f="${line##* }"; [ -r "$f" ] && line="$(cat "$f")"',
+            '      r="$(printf "%s" "$line" | grep -o -- "--resume [^ ;]*" | tail -1)"',
             '      pid=$((4000000001 + $(wc -l <"$STUB_REMOTE/PGREP")))',
             '      mkdir -p "$AGENTBOX_PROC/$pid/fd"',
             '      printf "omp\\0--resume\\0%s\\0" "${r#--resume }" >"$AGENTBOX_PROC/$pid/cmdline"',
@@ -1470,10 +1486,14 @@ class AgentboxMove(unittest.TestCase):
             self.assertIn("from=oldbox\nto=devbox\n", body)
             self.assertIn(f"transcript={transcript}\n", body)
         [started] = [c for c in (self.remote / "TMUX").read_text(encoding="utf-8").splitlines() if c.startswith("new-")]
+        # tmux is given a FILE, never the launcher line itself (a long spec was "command too
+        # long" and no window opened, 2026-11-03); the line is in that file.
+        self.assertRegex(started, r" bash -i \S+/start/\S+\.sh$")
+        launcher = Path(started.rsplit(" ", 1)[1]).read_text(encoding="utf-8")
         self.assertIn("new-session -d -P -F #{window_id} -s moved -n 01a19700", started)
         # A --dir the target lacks is left out at launch there, as on a resume here.
-        self.assertIn(f"/target/agentbox new --drop-gone-dirs -e AGENTBOX_MOVED_FROM_WINDOW=", started)
-        self.assertIn(f"-e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", started)
+        self.assertIn("/target/agentbox new --drop-gone-dirs -e AGENTBOX_MOVED_FROM_WINDOW=", launcher)
+        self.assertIn(f"-e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", launcher)
         [line] = self.move_log()
         # The last column is the window the session came from on this machine (<tmux session>:<name>),
         # which the target keeps as the window's @stream option.
@@ -1481,7 +1501,7 @@ class AgentboxMove(unittest.TestCase):
         respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
         self.assertEqual(len(respawn), 1, respawn)
         self.assertIn("-t %81", respawn[0])
-        self.assertIn(f"session {self.TO} moved to devbox", respawn[0])
+        self.assertIn(f"session {self.TO} moved to devbox", self.pane_command(respawn[0]))
 
     def clone_fixture(self) -> tuple[Path, Path, Path]:
         """A checkout with an origin, and a `target` whose paths are the same ones under another
@@ -1812,7 +1832,11 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         # The target: the box's environment carries it, and the window it runs in keeps it.
         started = (self.remote / "TMUX").read_text(encoding="utf-8")
-        self.assertIn("-e AGENTBOX_MOVED_FROM_WINDOW=agents:lane-c", started)
+        # The launcher line is in the file tmux is given, not in the tmux command (a long spec
+        # was "command too long", 2026-11-03).
+        [window_line] = [c for c in started.splitlines() if c.startswith("new-")]
+        launcher = Path(window_line.rsplit(" ", 1)[1]).read_text(encoding="utf-8")
+        self.assertIn("-e AGENTBOX_MOVED_FROM_WINDOW=agents:lane-c", launcher)
         self.assertIn("set-option -w -t", started)
         self.assertIn("@stream lane-c", started)
         self.assertEqual(self.move_log()[0][7], "agents:lane-c")
@@ -1906,16 +1930,23 @@ class AgentboxMove(unittest.TestCase):
         locks = self.root / "cache/omp/agentbox/move-to/locks"
         locks.mkdir(parents=True, exist_ok=True)
         lock = locks / f"{self.TO}.lock"
-        lock.write_text("pid=4242424\n", encoding="utf-8")
+        lock.write_text(f"pid={os.getpid()}\n", encoding="utf-8")
         with lock.open("a") as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             refused = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn(f"another move of {self.TO} runs (pid 4242424); nothing was hung up", refused.stderr)
+        self.assertIn(f"another move of {self.TO} runs (pid {os.getpid()}); nothing was hung up", refused.stderr)
         self.assertFalse((self.root / "RSYNC").exists(), "the second relauncher copies nothing")
-        # With the lock free the same job runs, and its own claim is the only one it removes.
-        ran = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
-        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        # A lock whose holder is GONE is taken, not obeyed: a killed relauncher's children keep
+        # its open file, and six moves were refused by such locks (00:37-00:40Z, 2026-11-03).
+        with lock.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock.write_text("pid=999999999\n", encoding="utf-8")
+            stale = self.run_bash(f'move_to_run "{job}"', {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertIn("which is gone; taking it", stale.stdout + stale.stderr)
+        self.assertNotIn("another move of", stale.stderr)
+        # The lock is gone with the run that took it, so the next move of this session takes it.
+        self.assertFalse([line for line in stale.stderr.splitlines() if "another move of" in line])
 
     def test_after_the_first_pass_only_what_changed_is_copied(self) -> None:
         """The pass after the hang-up re-walked every tree in full: 14 mirrored and 192 merged
@@ -2086,6 +2117,25 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(str(carried), dirs, f"a carried directory outside the box's own paths is bound: {dirs}")
         self.assertNotIn(f"{self.src}/repo/.git", dirs, "a git directory is not bound; the tree brings its storage")
         self.assertNotIn(str(inside), dirs, "a checkout every box clones for itself is not bound")
+
+    def test_go_refuses_when_the_relauncher_that_would_hang_up_is_gone(self) -> None:
+        """`--go` only removes the hold file; the relauncher does the hang-up. One started from a
+        box died while it waited in the queue (LANE-E, twice on 2026-11-03), and a session that
+        ran --go then waited for a hang-up that never came."""
+        self.target()
+        hold = self.root / "cache/omp/agentbox/move-to/hold"
+        hold.mkdir(parents=True, exist_ok=True)
+        (hold / self.TO).write_text("target=devbox\ndeadline=99999999999\npid=999999999\n", encoding="utf-8")
+        gone = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(gone.returncode, 1, gone.stdout + gone.stderr)
+        self.assertIn("the relauncher of this move (pid 999999999) is GONE", gone.stderr)
+        self.assertIn("agentbox move --to devbox", gone.stderr)
+        # With a live relauncher it goes through, and the hold file is spent.
+        (hold / self.TO).write_text(f"target=devbox\ndeadline=99999999999\npid={os.getpid()}\n", encoding="utf-8")
+        ok = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("hangs this session up within seconds", ok.stdout)
+        self.assertFalse((hold / self.TO).exists())
 
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
@@ -2454,7 +2504,8 @@ class AgentboxMove(unittest.TestCase):
         self.assertTrue((transcript.with_suffix("") / "Sub.jsonl").exists())
         respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
         self.assertEqual(len(respawn), 1, respawn)
-        self.assertIn(f"agentbox new --drop-gone-dirs -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}", respawn[0])
+        self.assertIn(f"agentbox new --drop-gone-dirs -e OMP_PROFILE=pbc --dir {self.worktree} --dir {self.lane} -- omp --resume {transcript}",
+                      self.pane_command(respawn[0]))
         [line] = self.move_log()
         self.assertTrue(line[5].startswith(f"failed: not resumed on devbox within 0s: {self.TO}"), line)
 
@@ -2476,7 +2527,7 @@ class AgentboxMove(unittest.TestCase):
         [line] = self.move_log()
         self.assertEqual(line[5], f"failed: the working directory {self.worktree} of {self.TO} is not on devbox")
         respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
-        self.assertIn(f"-- omp --resume {transcript}", respawn[0])
+        self.assertIn(f"-- omp --resume {transcript}", self.pane_command(respawn[0]))
 
     def test_a_working_directory_the_move_does_not_copy_and_the_target_lacks_is_refused_first(self) -> None:
         """A session working in a root of many sessions' trees (here the fixture's ~/tmp) gets no
@@ -3377,7 +3428,9 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual((member["box"], member["pid"], member["resume"]), ("agentbox-0123456789ab", 0, str(transcript)))
         self.assertEqual(member["spec"], ["-e", "OMP_PROFILE=pbc", "--dir", str(self.lane)])
         [call] = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "run-shell" in c]
-        self.assertIn(f"run-shell -b -t %81 setsid {AGENTBOX} move --to-run {job}", call)
+        # setsid --fork, not setsid: without the fork the relauncher stays a child of the
+        # run-shell job and dies with it as soon as it waits (LANE-E, 2026-11-03).
+        self.assertIn(f"run-shell -b -t %81 setsid --fork {AGENTBOX} move --to-run {job}", call)
         # The host's relauncher hangs the box up with docker and moves it as any other.
         write_stub(self.stubs, "docker", '[[ "$1" == inspect ]] && exit 1; printf "%s\\n" "$*" >>"$STUB_DOCKER"; exit 0')
         run = self.run_bash(f'move_to_run "{job}"')

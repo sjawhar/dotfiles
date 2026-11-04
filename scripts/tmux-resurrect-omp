@@ -42,10 +42,17 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
 
+# A transcript's own file NAME: the timestamp, the id, `.jsonl`. The directories above it say
+# nothing about whose it is (a subagent's sits under its parent's).
+SESSION_IN_NAME = re.compile(
+    r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl"
+)
 SESSION_FILE = re.compile(
     r"/\.omp/agent/sessions/(?P<bucket>[^/]+)/"
     r"\d{4}-\d{2}-\d{2}T[0-9-]+Z_(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"
@@ -168,15 +175,53 @@ def named_session(command: str) -> str | None:
     session resumed into a pane that has not written since — an agent idle at
     its prompt, which is exactly the state autosave finds — has no fd to read.
     Its own argv still names the session.
+
+    Only a WHOLE argument counts (`--resume X`, `-r X`, `--restore=X`), and the
+    id is read from the LAST path component of its value: a prompt that holds
+    `git ls-tree -r f1006fe8` named a session that way, and a subagent's
+    transcript sits under its parent's directory, so the parent's id is in the
+    path of every child (2026-11-03, dotfiles c9aeae7b for the same rule in
+    scripts/agentbox).
     """
-    for m in RESUME_ARG.finditer(command):
-        value = m.group("value")
-        in_path = SESSION_FILE.search(value)
-        if in_path:
-            return in_path.group("sid")
-        if SESSION_ID.fullmatch(value):
-            return value
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    values: list[str] = []
+    for index, word in enumerate(words):
+        if word in ("--resume", "--restore", "-r"):
+            if index + 1 < len(words):
+                values.append(words[index + 1])
+        elif word.startswith(("--resume=", "--restore=", "-r=")):
+            values.append(word.split("=", 1)[1])
+    for value in values:
+        name = value.rsplit("/", 1)[-1]
+        in_name = SESSION_IN_NAME.fullmatch(name)
+        if in_name:
+            return in_name.group("sid")
+        if SESSION_ID.fullmatch(name):
+            return name
     return None
+
+
+# A session `agentbox move --to <machine>` took to another machine must never be resumed here:
+# the move leaves `agentbox-moved` in the session's own directory and as
+# ~/.omp/agentbox-moved/<id>, with `from=` the machine it left (scripts/agent-session,
+# scripts/omp-memory-watch read the same marker). omp-memory-watch resumed the omp lead on
+# sami-rocqperf at 23:59:57Z on 2026-11-03 while its move to sami-devbox was in flight; a save
+# file that still holds such a pane would do it again at the next restore.
+MOVED_INDEX = Path.home() / ".omp" / "agentbox-moved"
+
+
+def moved_away(sid: str) -> bool:
+    """True when that session moved away FROM this machine."""
+    try:
+        text = (MOVED_INDEX / sid).read_text(errors="replace")
+    except OSError:
+        return False
+    fields = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    here = os.environ.get("AGENTBOX_HOST") or socket.gethostname().split(".")[0]
+    return bool(fields) and fields.get("from") == here
 
 
 def cmdline(pid: int) -> str:
@@ -308,6 +353,9 @@ def rewrite(save_file: Path) -> tuple[int, int]:
             sid = host_session_for(pane_pid, full_command)
             if sid is None:
                 continue
+        if moved_away(sid):
+            # It runs on another machine now; the pane is left as saved.
+            continue
         fields[10] = ":" + resume_command(spec, sid)
         lines[i] = FIELD_SEP.join(fields)
         rewritten += 1

@@ -125,12 +125,19 @@ NETWORK=agentbox
 # user-<uid>.slice by its name. Boxes and host sessions then share that slice's one ceiling
 # (MemoryMax=92% from /etc/systemd/system/user-.slice.d/60-omp-memory-guard.conf), as host
 # sessions alone did before; docker's default parent, system.slice, has no such ceiling.
-BOX_MEMORY="${AGENTBOX_MEMORY:-24g}"
+# The default follows the machine: a twentieth of its memory, never under 24 GiB (shims/omp uses
+# the same formula for a host session, dotfiles 306d0323). 24 GiB was measured on sami-rocqperf,
+# a 251 GiB machine, and on sami-devbox (2.2 TiB) it left 8 boxes at their limit with kernel OOM
+# kills every few minutes on 2026-11-03. So: rocqperf 24g, devbox 109g.
+box_mem_total_kb="$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+box_default_g=$(( ${box_mem_total_kb:-0} / 20 >> 20 ))
+(( box_default_g >= 24 )) || box_default_g=24
+BOX_MEMORY="${AGENTBOX_MEMORY:-${box_default_g}g}"
 BOX_CPUS="${AGENTBOX_CPUS:-8}"
 # Swap a box may use beyond its memory limit; docker takes the two added together (--memory-swap).
 BOX_SWAP=8g
 # A box above these starves the machine instead of its own session, so the launcher refuses it.
-BOX_MEMORY_CAP=96g
+BOX_MEMORY_CAP="$((box_default_g * 4))g"
 BOX_CPUS_CAP=32
 # Processes per box: a fork bomb inside one otherwise takes the host's pid space.
 BOX_PIDS=8192
@@ -199,6 +206,9 @@ DURABLE_DIR="${AGENTBOX_DURABLE:-/mnt/durable/$(id -un)}"
 # failed its ledger write in `ossv-vm create` (2026-11-03 03:01Z, FileNotFoundError). The
 # launcher passes it as AGENTBOX_COMPUTE_INVENTORY, which doctor checks; empty when the host has
 # no /mnt/nvme/<user>.
+# The shared ssh identity and known_hosts of bin/ossv-vm, in every box whose host has it.
+OSSV_SSH="${AGENTBOX_OSSV_SSH:-}"
+if [[ -z "$OSSV_SSH" && -d "/mnt/nvme/$(id -un)/oss-verifier/ssh" ]]; then OSSV_SSH="/mnt/nvme/$(id -un)/oss-verifier/ssh"; fi
 COMPUTE_INVENTORY="${AGENTBOX_COMPUTE_INVENTORY:-}"
 if [[ -z "$COMPUTE_INVENTORY" && -d "/mnt/nvme/$(id -un)" ]]; then COMPUTE_INVENTORY="/mnt/nvme/$(id -un)/compute-inventory"; fi
 [[ "$DURABLE_DIR" == /* && -d "$DURABLE_DIR" ]] || DURABLE_DIR=""
@@ -379,6 +389,14 @@ box_add_mount() {
 
 # Does the box get this path without being told? Either it has it by construction ($SRC, the
 # dotfiles, the home allow-list) or something already in BOX_MOUNTS contains it.
+# box_dir_named PATH: true when a --dir of this launch names exactly that path, so the launch
+# binds it read-write and no default read-only bind of it may be added beside it.
+box_dir_named() {
+    local p
+    for p in ${BOX_DIRS[@]+"${BOX_DIRS[@]}"}; do [[ "$p" == "$1" ]] && return 0; done
+    return 1
+}
+
 box_dir_have() {
     local path="$1" p
     move_dir_in_box "$path" && return 0
@@ -923,6 +941,31 @@ mount_args() {
     for p in ${BOX_MOUNTS[@]+"${BOX_MOUNTS[@]}"}; do
         a+=(-v "$p:$p")
     done
+    # The object stores the shared checkouts BORROW. A checkout under $SRC may keep its
+    # objects elsewhere and name it in objects/info/alternates (the oss-verifier clones:
+    # /mnt/nvme/<user>/oss-verifier/oss-verify-proofs-internal and -src). A box's own clone of
+    # such a repository inherits that alternates file, so without the store the box has a
+    # repository git refuses to read: the release owner's box on sami-devbox answered "unable to
+    # normalize alternate object path" and it made a full clone of its own (23:47Z, 2026-11-03).
+    local alt_file alt_line alt_dir
+    local -A alt_seen=()
+    for alt_file in "$SRC"/*/.git/objects/info/alternates "$SRC"/*/.git/modules/*/objects/info/alternates; do
+        [[ -r "$alt_file" ]] || continue
+        while IFS= read -r alt_line; do
+            [[ -n "$alt_line" && "$alt_line" != \#* ]] || continue
+            case "$alt_line" in /*) alt_dir="$alt_line" ;; *) alt_dir="${alt_file%/info/alternates}/$alt_line" ;; esac
+            alt_dir="$(readlink -f "$alt_dir" 2>/dev/null || true)"
+            [[ -n "$alt_dir" && -d "$alt_dir" ]] || continue
+            # The repository that holds the store, not its objects directory alone: a box that
+            # reads the store also reads its config and packs through the same path.
+            [[ "$alt_dir" == */objects ]] && alt_dir="${alt_dir%/objects}"
+            [[ -z "${alt_seen[$alt_dir]:-}" ]] || continue
+            alt_seen[$alt_dir]=1
+            box_dir_have "$alt_dir" && continue
+            a+=(-v "$alt_dir:$alt_dir")
+        done <"$alt_file"
+    done
+
     # The durable disk, whole (DURABLE_DIR). It holds what every box needs from it besides a
     # lane's staging and caches: the transcripts archived to omp-sessions-moved, behind symlinks
     # under ~/.omp/agent/sessions (without them a resumed omp exits `Session "<id>" not found`,
@@ -1020,9 +1063,20 @@ mount_args() {
     # them every box's omp found no gateway key and every Claude subagent a boxed session started
     # fell back to the direct Anthropic login: 78 of 78 boxed starts, 0 of 302 host starts, from
     # 2026-11-01 22:30Z to 2026-11-02 08:10Z. A host that has no such key gets an empty directory.
+    # A session that WRITES one of them (agentvm's gateway-key writer, 2026-11-03) names it with
+    # --dir, and then it is bound read-write instead: docker refuses two mounts at one
+    # destination, so the read-only one is left out rather than added beside it.
     mkdir -p -m 700 "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"
-    a+=(-v "/run/user/$UID_/ossv-box:/run/user/$UID_/ossv-box:ro")
-    a+=(-v "/run/user/$UID_/verified-grader:/run/user/$UID_/verified-grader:ro")
+    local key_dir
+    for key_dir in "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"; do
+        box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir:ro")
+    done
+    # The shared ssh identity bin/ossv-vm uses to reach the gateway VM, where the host has it:
+    # without it `ossv-vm` in a box cannot reach that VM at all (agentvm, 2026-11-03). A box is
+    # for segregation, not for keeping a session from what its host gives it (Sami,
+    # dispatch://INFRA-702/comment/41bdfb9d-18d5-4cd6-a5dd-75771b45cee7), so it is bound as the
+    # host has it.
+    [[ -z "$OSSV_SSH" ]] || box_dir_named "$OSSV_SSH" || a+=(-v "$OSSV_SSH:$OSSV_SSH")
     # The relayed host tmux server (ensure_tmux_forwarder), as a directory holding
     # tmux-<box uid>/default, so a bare `tmux` in the box under TMUX_TMPDIR (session_env) finds
     # it and a relay restarted since the box started is seen at once. A host with no tmux has
@@ -3468,7 +3522,13 @@ move_respawn() {
     run="$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i"
     while (( attempt < MOVE_RESPAWN_TRIES )); do
         attempt=$((attempt + 1))
-        if err="$("$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$run" 2>&1)"; then
+        local run_file
+        run_file="$(move_pane_script "$sid" "$run")" || run_file=""
+        if err="$(if [[ -n "$run_file" ]]; then
+                "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" respawn-pane -k -t "$pane" -c "$cwd" bash -i "$run_file" 2>&1
+            else
+                "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" respawn-pane -k -t "$pane" -c "$cwd" bash -i -c "$run" 2>&1
+            fi)"; then
             echo "$(date -u +%FT%TZ) move $sid: pane $pane respawned into agentbox new $what"
             if ! two="$(move_one_omp "$sid")"; then
                 echo "$(date -u +%FT%TZ) move $sid: TWO omp processes hold this session after the respawn: $(tr '\n' ' ' <<<"$two"); end the older one by its pid" >&2
@@ -3786,7 +3846,7 @@ move_self_identify() {
 
 cmd_move_self() {
     local dry=false a usage="$MOVE_USAGE" in_box=false raw_dirs=()
-    [[ -n "${AGENTBOX_BOX:-}" || -e /etc/agentbox-identity ]] && in_box=true
+    [[ -n "${AGENTBOX_BOX:-}" || -e "$AGENTBOX_IDENTITY_FILE" ]] && in_box=true
     # --dir is the session's own answer to an inference that missed something: a path it works in
     # that no process of it had open when the plan ran. On the host each is checked exactly as
     # `agentbox new --dir` checks it (add_box_dir); in a box it cannot be, since the path is the
@@ -4016,6 +4076,10 @@ MOVE_TO_LOG="$MOVE_TO_CUTOVER/move-log.tsv"
 MOVE_TO_READY="$MOVE_TO_CUTOVER/target-ready"
 MOVE_TO_AGENTBOX="${AGENTBOX_MOVE_TARGET_AGENTBOX:-$HOME/.dotfiles/scripts/agentbox}"
 MOVE_TO_TMUX_SESSION=moved
+# The file every box has, which says a process runs in one. A variable, not the literal path,
+# because the tests of this script now run INSIDE a box themselves (every session does), where
+# the literal would make each of them take the in-box path and test nothing of the host's.
+AGENTBOX_IDENTITY_FILE="${AGENTBOX_IDENTITY_FILE:-/etc/agentbox-identity}"
 MOVE_TO_START_WAIT="${AGENTBOX_MOVE_START_WAIT:-300}"
 MOVE_TO_SETTLE="${AGENTBOX_MOVE_SETTLE:-30}"
 MOVE_TO_POLL="${AGENTBOX_MOVE_POLL:-5}"
@@ -4857,6 +4921,20 @@ move_to_copy_said() {
     say "rsync $kind $label: ${secs}s, ${files:-?} files transferred, ${total:-?} transferred file size, ${literal:-?} literal data"
 }
 
+# move_pane_script SID BODY: BODY in a file, and the file's path. tmux takes a pane's command as
+# ARGUMENTS, and a box spec with hundreds of --dir paths made it too long: the omp lead's job
+# carried 792 words (18 KB), `new-window` on the target failed, and 40 respawn attempts answered
+# "command too long", which left the session DOWN (23:49-23:59Z, 2026-11-03). A file keeps every
+# tmux command the same length whatever the spec holds.
+move_pane_script() {
+    local sid="$1" body="$2" path
+    mkdir -p "$MOVE_TO_JOBS/panes" || return 1
+    path="$MOVE_TO_JOBS/panes/$sid.sh"
+    printf '%s\n' "$body" >"$path" || return 1
+    chmod +x "$path" || return 1
+    printf '%s\n' "$path"
+}
+
 # A long child of the relauncher (rsync, git push), run so that a signal reaches the relauncher at
 # once: bash runs a trap only after its foreground child exits, and a TERM to a relauncher in the
 # middle of a long copy otherwise waits for the copy. MOVE_TO_CHILD is what the handler stops.
@@ -5457,12 +5535,19 @@ move_to_start() {
     run="$(printf 'mkdir -p %q; printf "pid=%%s\\nbox=%%s\\nwindow=%%s\\n" "$$" "${AGENTBOX_BOX:-}" "${TMUX_PANE:-}" >%q; trap "rm -f %q" EXIT; %s' \
         "${started%/*}" "$started" "$started" "$run")"
     run="$run; echo; echo 'agentbox: the box has exited; this window is a shell again'; exec bash -i"
-    script="s=$(printf '%q' "$MOVE_TO_TMUX_SESSION") n=$(printf '%q' "${sid:0:8}") c=$(printf '%q' "$cwd") r=$(printf '%q' "$run") w=$(printf '%q' "$from_window")
+    # The run line goes to the target as a FILE, and tmux is given that file: a box spec with
+    # hundreds of --dir paths made the inline command too long for tmux, so no window opened on
+    # the target and 40 respawns answered "command too long" (the omp lead, 23:49-23:59Z,
+    # 2026-11-03). The file is written through stdin, so no command line carries it either.
+    local runfile="$MOVE_TO_CUTOVER/start/$sid.sh"
+    printf '%s\n' "$run" | move_remote "$target" "mkdir -p $(printf '%q' "${runfile%/*}") && cat >$(printf '%q' "$runfile") && chmod +x $(printf '%q' "$runfile")" \
+        || { echo "agentbox: could not write the launcher script $runfile on $target" >&2; return 1; }
+    script="s=$(printf '%q' "$MOVE_TO_TMUX_SESSION") n=$(printf '%q' "${sid:0:8}") c=$(printf '%q' "$cwd") r=$(printf '%q' "$runfile") w=$(printf '%q' "$from_window")
 mkdir -p \"\$(dirname $(printf '%q' "$log"))\"
 if tmux has-session -t \"=\$s\" 2>/dev/null; then
-    id=\"\$(tmux new-window -d -P -F '#{window_id}' -t \"=\$s:\" -n \"\$n\" -c \"\$c\" bash -i -c \"\$r\")\"
+    id=\"\$(tmux new-window -d -P -F '#{window_id}' -t \"=\$s:\" -n \"\$n\" -c \"\$c\" bash -i \"\$r\")\"
 else
-    id=\"\$(tmux new-session -d -P -F '#{window_id}' -s \"\$s\" -n \"\$n\" -c \"\$c\" bash -i -c \"\$r\")\"
+    id=\"\$(tmux new-session -d -P -F '#{window_id}' -s \"\$s\" -n \"\$n\" -c \"\$c\" bash -i \"\$r\")\"
 fi
 [ -z \"\$w\" ] || tmux set-option -w -t \"\$id\" @stream \"\${w#*:}\" >/dev/null 2>&1 || true
 printf '%s\\n' \"\$id\""
@@ -5781,7 +5866,7 @@ move_to_is_ready() {
 
 cmd_move_to() {
     local target="" dry=false clear=false in_box=false raw_dirs=() me new_cwd="" p
-    [[ -n "${AGENTBOX_BOX:-}" || -e /etc/agentbox-identity ]] && in_box=true
+    [[ -n "${AGENTBOX_BOX:-}" || -e "$AGENTBOX_IDENTITY_FILE" ]] && in_box=true
     while (( $# )); do
         case "$1" in
             --to) [[ -n "${2:-}" && "$2" != -* ]] || die "--to takes a machine name, e.g. --to sami-devbox. $MOVE_USAGE"; target="$2"; shift ;;
@@ -6020,7 +6105,12 @@ move_to_in_box() {
     if [[ "$dry" == true ]]; then echo "agentbox: --dry-run: nothing was hung up, copied or sent"; return 0; fi
     job="$(move_to_job "$target" "$group" "$member")" || die "could not write the move's job file under $MOVE_TO_JOBS"
     local box_tmux run_cmd started=false
-    run_cmd="$(printf 'setsid %q move --to-run %q </dev/null >>%q 2>&1' \
+    # --fork: `setsid` alone execs in place when it is not already a process group leader, so the
+    # relauncher stayed a child of tmux's run-shell job and died with it the moment it had to wait
+    # (LANE-E, 23:35:38Z and 23:58:46Z on 2026-11-03: "waiting: N moves in flight" then "stopped by
+    # signal TERM" in the same second). With --fork it is a session of its own, and the run-shell
+    # returns at once.
+    run_cmd="$(printf 'setsid --fork %q move --to-run %q </dev/null >>%q 2>&1' \
         "$(readlink -f "${BASH_SOURCE[0]}")" "$job" "$MOVE_TO_JOBS/$group.log")"
     if box_tmux="$(move_box_tmux)" && "$box_tmux" run-shell -b -t "$pane" "$run_cmd"; then
         started=true
@@ -6119,7 +6209,15 @@ cmd_move_go() {
     f="$MOVE_TO_HOLD/$sid"
     [[ -e "$f" ]] || die "no move of session $sid is waiting for --go (nothing under $MOVE_TO_HOLD); run \`agentbox move --to <machine>\` first"
     target="$(sed -n 's/^target=//p' "$f")"
+    local relauncher
+    relauncher="$(sed -n 's/^pid=//p' "$f")"
     rm -f "$f"
+    # The relauncher must still be there to do the hang-up: when it is gone, nothing moves this
+    # session and nothing hangs it up, and the session must know at once rather than wait (a
+    # relauncher started from a box died in the queue twice on 2026-11-03, LANE-E).
+    if [[ -n "$relauncher" ]] && ! kill -0 "$relauncher" 2>/dev/null; then
+        die "the relauncher of this move (pid $relauncher) is GONE, so --go hangs nothing up and this session stays here. Nothing was hung up; ask for the move again: agentbox move --to ${target:-<machine>}"
+    fi
     echo "agentbox: --go: the move to ${target:-the target} hangs this session up within seconds and resumes it there. End your turn now."
 }
 # move_to_in_flight GROUP: the other groups with a live relauncher's active claim, space-separated.
@@ -6226,15 +6324,16 @@ move_to_run() {
     # its pane is gone; none that runs on the target. MOVE_TO_RESUMED holds those that came back.
     MOVE_TO_RESUMED=()
     resume_here() {
-        local j inner rc
+        local j inner rc pane_file
         for j in "$@"; do
             member_spec "$j"
             member_tmux "$j"
             if ! "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" display-message -p -t "${panes[j]}" '#{pane_id}' >/dev/null 2>&1; then
                 # A pane that closed with its omp: a window of its own on the same tmux session.
                 if [[ -n "${ats[j]}" ]] && inner="$(move_pane_command "${sids[j]}" "${resumes[j]}" "${MOVE_SPEC[@]}")" \
+                    && pane_file="$(move_pane_script "${sids[j]}" "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i")" \
                     && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
-                        bash -i -c "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i" 2>/dev/null; then
+                        bash -i "$pane_file" 2>/dev/null; then
                     say "${sids[j]}: pane ${panes[j]} is gone; resumed here in a new window of tmux session ${ats[j]%%:*}"
                     MOVE_TO_RESUMED+=("${sids[j]}")
                 else
@@ -6251,8 +6350,9 @@ move_to_run() {
             fi
             # The pane went while the move ran: a window of its own on the same tmux session.
             if (( rc == 2 )) && [[ -n "${ats[j]}" ]] \
+                && pane_file="$(move_pane_script "${sids[j]}" "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i")" \
                 && "$MOVE_TMUX_BIN" "${MOVE_TMUX[@]}" new-window -d -t "${ats[j]%%:*}:" -n "${sids[j]:0:8}" -c "${cwds[j]}" \
-                    bash -i -c "$inner; echo; echo 'agentbox: the box has exited; this pane is a shell again'; exec bash -i" 2>/dev/null; then
+                    bash -i "$pane_file" 2>/dev/null; then
                 say "${sids[j]}: pane ${panes[j]} is gone; resumed here in a new window of tmux session ${ats[j]%%:*}"
                 MOVE_TO_RESUMED+=("${sids[j]}")
                 continue
@@ -6281,8 +6381,18 @@ move_to_run() {
         lock="$MOVE_TO_LOCKS/${sids[i]}.lock"
         exec {fd}>>"$lock" || die "cannot open $lock, the one-relauncher-per-session lock; nothing was hung up"
         if ! flock -n "$fd"; then
+            # A relauncher's children (rsync, ssh) inherit the open file and hold its lock after
+            # it is killed, so a dead relauncher's lock can outlive it: six moves were refused by
+            # locks whose pid was gone (00:37-00:40Z, 2026-11-03). The pid in the file decides.
             holder="$(sed -n 's/^pid=//p' "$lock" | tail -1)"
-            die "another move of ${sids[i]} runs (pid ${holder:-unknown}); nothing was hung up"
+            if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+                die "another move of ${sids[i]} runs (pid $holder); nothing was hung up"
+            fi
+            say "the lock of ${sids[i]} was left by pid ${holder:-unknown}, which is gone; taking it"
+            exec {fd}>&-
+            rm -f "$lock"
+            exec {fd}>>"$lock" || die "cannot open $lock, the one-relauncher-per-session lock; nothing was hung up"
+            flock -n "$fd" || die "another move of ${sids[i]} took its lock just now; nothing was hung up"
         fi
         : >"$lock"
         printf 'pid=%s\njob=%s\n' "$BASHPID" "$job" >&"$fd"
@@ -6542,7 +6652,7 @@ cmd_move_plan_to() {
     # parent there is agentbox-run.ts, which the host census reads as "no pane" (GRADE, boxed with
     # `move --self`, 2026-11-03 13:30Z). move_to_in_box plans exactly what a move from the box
     # would carry, and changes nothing.
-    if [[ -n "${AGENTBOX_BOX:-}" || -e /etc/agentbox-identity ]]; then
+    if [[ -n "${AGENTBOX_BOX:-}" || -e "$AGENTBOX_IDENTITY_FILE" ]]; then
         [[ "$mode" != group ]] || die "in a box, \`move --plan --to\` plans this session only; --group is for a host session"
         [[ "$mode" != all ]] || die "in a box, \`move --plan --to\` plans this session only; --all is for a host session, where it reads every session"
         move_to_in_box "$target" true

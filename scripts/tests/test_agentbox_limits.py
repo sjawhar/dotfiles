@@ -30,6 +30,9 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 AGENTBOX = DOTFILES / "scripts" / "agentbox"
 GATEWAY = "172.31.0.1"
+# This machine's memory, which the box default and cap follow.
+MEM_TOTAL_KB = int(next(line.split()[1] for line in open("/proc/meminfo", encoding="utf-8")
+                        if line.startswith("MemTotal:")))
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -89,6 +92,11 @@ class AgentboxLimits(unittest.TestCase):
         self.boxes = self.root / "boxes"
         self.disks = self.root / "disks"
         self.env = {
+            # These tests run INSIDE a box themselves (every session does now), and the script
+            # takes its in-box paths when it finds the box identity file. Pointed at a path that
+            # does not exist, so each test exercises the host's own behaviour.
+            "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
+            "AGENTBOX_BOX": "",
             "HOME": str(self.home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "DOTFILES_DIR": str(self.root / "dotfiles"),
@@ -134,7 +142,10 @@ class AgentboxLimits(unittest.TestCase):
             self.assertEqual(args[args.index(flag) + 1], value, args)
 
     def test_every_box_gets_the_measured_defaults(self) -> None:
-        self.assert_limits(self.run_args_of(), "24g", "32g", "8")
+        # The default follows the machine (a twentieth of its memory, floor 24 GiB), so this test
+        # computes what this machine's is: 24g on sami-rocqperf, 109g on sami-devbox.
+        want = max(24, int(MEM_TOTAL_KB / 20) >> 20)
+        self.assert_limits(self.run_args_of(), f"{want}g", f"{want + 8}g", "8")
 
     def test_flags_override_one_box(self) -> None:
         args = self.run_args_of("--memory", "48g", "--cpus", "16")
@@ -149,7 +160,7 @@ class AgentboxLimits(unittest.TestCase):
 
     def test_a_value_above_the_cap_is_refused_before_any_box_starts(self) -> None:
         for options, naming in (
-            (("--memory", "200g"), ("--memory", "200g", "96g")),
+            (("--memory", "9000g"), ("--memory", "9000g", f"{max(24, int(MEM_TOTAL_KB / 20) >> 20) * 4}g")),
             (("--cpus", "64"), ("--cpus", "64", "32")),
         ):
             with self.subTest(options[0]):
@@ -247,6 +258,38 @@ class AgentboxLimits(unittest.TestCase):
         result = self.launch(AGENTBOX_DISK="600g")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("AGENTBOX_DISK", result.stderr)
+
+
+    def test_the_memory_default_follows_the_machine_and_the_cap_is_four_times_it(self) -> None:
+        """24 GiB was measured on sami-rocqperf (251 GiB); on sami-devbox (2.2 TiB) it left eight
+        boxes at their limit with kernel OOM kills every few minutes (2026-11-03). The default is
+        a twentieth of the machine's memory with a 24 GiB floor, as shims/omp computes a host
+        session's (dotfiles 306d0323), and the per-box cap is four times that."""
+        for mem_total_kb, memory, swap, cap in (
+            (263897780, "24g", "32g", "96g"),        # sami-rocqperf, 251 GiB: unchanged
+            (2303551644, "109g", "117g", "436g"),    # sami-devbox, 2.2 TiB
+            (503316480, "24g", "32g", "96g"),        # 480 GiB: still at the floor
+            (527765504, "25g", "33g", "100g"),       # just above it
+        ):
+            meminfo = self.root / f"meminfo-{mem_total_kb}"
+            meminfo.write_text(f"MemTotal:       {mem_total_kb} kB\nMemFree:        1 kB\n", encoding="utf-8")
+            # /proc/meminfo is read with awk; this stub answers for another machine and passes
+            # every other awk call through.
+            write_stub(self.root / "bin2", "awk", "\n".join([
+                'args=("$@")',
+                'last=$(( ${#args[@]} - 1 ))',
+                f'[ "${{args[$last]}}" = /proc/meminfo ] && args[$last]="{meminfo}"',
+                'exec /usr/bin/awk "${args[@]}"',
+            ]))
+            result = subprocess.run(
+                ["bash", "-c", f'source "{AGENTBOX}"\necho "$BOX_MEMORY $BOX_SWAP $BOX_MEMORY_CAP"'],
+                capture_output=True, text=True, check=False, timeout=60,
+                env={**self.env, "PATH": f"{self.root}/bin2:{self.env['PATH']}"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.split(), [memory, "8g", cap],
+                             f"MemTotal {mem_total_kb} kB: {result.stdout} {result.stderr}")
+            self.assertEqual(swap, f"{int(memory[:-1]) + 8}g", "the swap docker gets is the memory plus 8 GiB")
+
 
 
 if __name__ == "__main__":

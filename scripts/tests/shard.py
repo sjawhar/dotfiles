@@ -6,7 +6,8 @@ import subprocess
 import sys
 import unittest
 
-MODULES = ["test_agentbox_move", "test_box_ssh_config", "test_agentbox_box_home"]
+MODULES = ["test_agentbox_move", "test_box_ssh_config", "test_agentbox_box_home",
+           "test_agentbox_limits", "test_agentbox_dirs", "test_tmux_resurrect_omp"]
 SHARDS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 
 ids: list[str] = []

@@ -74,6 +74,11 @@ class AgentboxDirs(unittest.TestCase):
         self.run_args = self.root / "run-args"
         self.boxes = self.root / "boxes"
         self.env = {
+            # These tests run INSIDE a box themselves (every session does now), and the script
+            # takes its in-box paths when it finds the box identity file. Pointed at a path that
+            # does not exist, so each test exercises the host's own behaviour.
+            "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
+            "AGENTBOX_BOX": "",
             "HOME": str(self.home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "DOTFILES_DIR": str(self.root / "dotfiles"),
@@ -96,19 +101,19 @@ class AgentboxDirs(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def launch(self, *options: str) -> subprocess.CompletedProcess[str]:
+    def launch(self, *options: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
         script = f'source "{AGENTBOX}"\n{NO_HOST}cmd_new {" ".join(options)} -- omp\n'
         return subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
             text=True,
-            env=self.env,
+            env={**self.env, **extra_env},
             check=False,
             timeout=120,
         )
 
-    def run_args_of(self, *options: str) -> list[str]:
-        result = self.launch(*options)
+    def run_args_of(self, *options: str, **extra_env: str) -> list[str]:
+        result = self.launch(*options, **extra_env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.run_args.read_text(encoding="utf-8").splitlines()
 
@@ -448,6 +453,35 @@ class AgentboxDirs(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"--dir '{spec[1]}', the first --dir", result.stderr)
         self.assertFalse(self.run_args.exists(), "no box may start")
+
+
+    def test_a_box_binds_the_stores_its_checkouts_borrow_and_the_shared_ssh_identity(self) -> None:
+        """A checkout under ~/src may keep its objects elsewhere and name it in
+        objects/info/alternates (the oss-verifier clones). A box's own clone inherits that file,
+        so without the store its git answers "unable to normalize alternate object path": the
+        release owner's box on sami-devbox made a full clone of its own instead (23:47Z,
+        2026-11-03). bin/ossv-vm's shared ssh identity is bound for the same reason:
+        without it `ossv-vm` in a box cannot reach the gateway VM (agentvm)."""
+        store = self.root / "oss-verifier" / "oss-verify-proofs-internal"
+        # $SRC of this fixture is self.src, whose repo1 is the checkout that borrows the store.
+        (store / "objects").mkdir(parents=True)
+        alternates = self.src / "repo1" / ".git" / "objects" / "info"
+        alternates.mkdir(parents=True)
+        (alternates / "alternates").write_text(f"{store}/objects\n", encoding="utf-8")
+        ssh_dir = self.root / "oss-verifier" / "ssh"
+        ssh_dir.mkdir(parents=True)
+        args = self.run_args_of(f"--dir {self.lane}", **{"AGENTBOX_OSSV_SSH": str(ssh_dir)})
+        self.assertIn(f"{store}:{store}", args, args)
+        self.assertIn(f"{ssh_dir}:{ssh_dir}", args, args)
+
+    def test_a_dir_the_box_binds_read_only_by_default_is_read_write_when_it_is_named(self) -> None:
+        """agentvm's gateway-key writer writes /run/user/<uid>/verified-grader, which every box
+        binds read-only. A --dir naming it binds it read-write instead, and the read-only bind is
+        left out: docker refuses two mounts at one destination (2026-11-03)."""
+        key_dir = f"/run/user/{os.getuid()}/verified-grader"
+        args = self.run_args_of(f"--dir {key_dir}")
+        self.assertIn(f"{key_dir}:{key_dir}", args, args)
+        self.assertNotIn(f"{key_dir}:{key_dir}:ro", args, args)
 
 
 if __name__ == "__main__":
