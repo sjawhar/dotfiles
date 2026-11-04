@@ -3,7 +3,7 @@
 # (GCLOUD_SAMI, human tier: Sami approves each grant on the broker page, for at most an hour;
 # dispatch://INFRA-1031). Day-to-day work stays on the box identity; this is for admin actions.
 #
-#   gcloud-broker [--reason R] [--] <gcloud args...>
+#   gcloud-broker [--reason R] [--] <command...>        (gcloud-broker gcloud compute instances list …)
 #
 # The broker releases a one-hour Google access token, never the refresh token. The command runs in
 # a throwaway CLOUDSDK_CONFIG, removed on exit, so no person's login and no box configuration is
@@ -17,10 +17,10 @@ if [ "${1:-}" = --reason ]; then
   shift 2
 fi
 [ "${1:-}" = -- ] && shift
-[ $# -gt 0 ] || { echo "usage: gcloud-broker [--reason R] [--] <gcloud args...>" >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: gcloud-broker [--reason R] [--] <command...>" >&2; exit 2; }
 
 if [ "${GCLOUD_BROKER_INNER:-}" != 1 ]; then
-  GCLOUD_BROKER_INNER=1 exec secret-run --reason "$reason" GCLOUD_SAMI -- "$0" -- "$@"
+  GCLOUD_BROKER_INNER=1 exec secret-run --reason "$reason" --ttl 1h --wait "${GCLOUD_BROKER_WAIT:-15m}" GCLOUD_SAMI -- "$0" -- "$@"
 fi
 
 [ -n "${GCLOUD_SAMI:-}" ] || { echo "gcloud-broker: the broker released no GCLOUD_SAMI token" >&2; exit 1; }
@@ -32,4 +32,4 @@ unset GCLOUD_SAMI GCLOUD_BROKER_INNER GCLOUD_ACCOUNT CLOUDSDK_ACTIVE_CONFIG_NAME
   CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT GOOGLE_APPLICATION_CREDENTIALS
 mkdir "$dir/config"
 CLOUDSDK_CONFIG="$dir/config" CLOUDSDK_AUTH_ACCESS_TOKEN_FILE="$dir/token" CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
-  gcloud "$@"
+  "$@"

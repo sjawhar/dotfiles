@@ -4,7 +4,7 @@
 # broker-azure holds Owner on the subscription; dispatch://INFRA-1031). Day-to-day work stays on
 # the box identity (shims/az); this is for admin actions.
 #
-#   az-broker [--reason R] [--] <az args...>
+#   az-broker [--reason R] [--] <command...>        (az-broker az vm list --subscription …)
 #
 # The broker releases {"tenant_id","client_id","federated_token","expires_at"}. The wrapper signs
 # in with `az login --service-principal --federated-token @FILE` in a throwaway AZURE_CONFIG_DIR,
@@ -19,10 +19,10 @@ if [ "${1:-}" = --reason ]; then
   shift 2
 fi
 [ "${1:-}" = -- ] && shift
-[ $# -gt 0 ] || { echo "usage: az-broker [--reason R] [--] <az args...>" >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: az-broker [--reason R] [--] <command...>" >&2; exit 2; }
 
 if [ "${AZ_BROKER_INNER:-}" != 1 ]; then
-  AZ_BROKER_INNER=1 exec secret-run --reason "$reason" AZURE_ADMIN -- "$0" -- "$@"
+  AZ_BROKER_INNER=1 exec secret-run --reason "$reason" --ttl 1h --wait "${AZ_BROKER_WAIT:-15m}" AZURE_ADMIN -- "$0" -- "$@"
 fi
 
 [ -n "${AZURE_ADMIN:-}" ] || { echo "az-broker: the broker released no AZURE_ADMIN login" >&2; exit 1; }
@@ -37,4 +37,4 @@ mkdir "$dir/config"
 export AZURE_CONFIG_DIR="$dir/config"
 az login --service-principal --username "$client" --tenant "$tenant" \
   --federated-token "@$dir/token" --allow-no-subscriptions --output none
-az "$@"
+"$@"
