@@ -264,21 +264,40 @@ fi
 # floor). A session already inside a ceiling's scope (OMP_MEMORY_SCOPE, set below) takes no
 # default of its own: an omp it starts shares its scope and counts against it.
 # OMP_MEMINFO names another meminfo file, for the tests.
+#
+# A machine that gives its sessions no ceiling says so in a file of its own, outside this repo:
+# ${XDG_CONFIG_HOME:-$HOME/.config}/omp/memory-max, holding `off` or a systemd size (`48G`). The
+# ceiling protects a box many people's sessions share; Sami's personal machine (oryx, 62 GiB) runs
+# one assistant session with its subagents, and the 24 GiB default killed it with all of them on
+# 2026-11-04 at 18:20Z, with 30 GiB of the machine still free. A machine without the file keeps
+# the default. A caller's OMP_MEMORY_MAX wins over the file, and `off` there starts that one launch
+# with no scope. A session started with no ceiling exports OMP_MEMORY_SCOPE=off, so an omp it
+# starts takes no default either. Where scripts/omp-memory-watch runs, its adopt pass still puts
+# an uncapped session into a scope at the default.
 if [[ -z "${OMP_MEMORY_SCOPE:-}" ]]; then
-    mem_total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "${OMP_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)
-    mem_default_g=$(( ${mem_total_kb:-0} / 20 >> 20 ))
-    ((mem_default_g >= 24)) || mem_default_g=24
-    mem_clamp_g=$((mem_default_g * 4))
-    : "${OMP_MEMORY_MAX:=${mem_default_g}G}"
-    if [[ "$OMP_MEMORY_MAX" =~ ^([0-9]+)([KMGT]?)$ ]]; then
-        mem_bytes=${BASH_REMATCH[1]}
-        case "${BASH_REMATCH[2]}" in
-            K) mem_bytes=$((mem_bytes << 10)) ;; M) mem_bytes=$((mem_bytes << 20)) ;;
-            G) mem_bytes=$((mem_bytes << 30)) ;; T) mem_bytes=$((mem_bytes << 40)) ;;
-        esac
-        if ((mem_bytes > mem_clamp_g << 30)); then
-            echo "omp: OMP_MEMORY_MAX=$OMP_MEMORY_MAX is above the ${mem_clamp_g}G ceiling for one session; using ${mem_clamp_g}G." >&2
-            OMP_MEMORY_MAX=${mem_clamp_g}G
+    memory_max_file="${XDG_CONFIG_HOME:-$HOME/.config}/omp/memory-max"
+    if [[ -z "${OMP_MEMORY_MAX:-}" && -r "$memory_max_file" ]]; then
+        OMP_MEMORY_MAX=$(tr -d '[:space:]' <"$memory_max_file")
+    fi
+    if [[ "${OMP_MEMORY_MAX:-}" == off ]]; then
+        unset OMP_MEMORY_MAX
+        export OMP_MEMORY_SCOPE=off
+    else
+        mem_total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "${OMP_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)
+        mem_default_g=$(( ${mem_total_kb:-0} / 20 >> 20 ))
+        ((mem_default_g >= 24)) || mem_default_g=24
+        mem_clamp_g=$((mem_default_g * 4))
+        : "${OMP_MEMORY_MAX:=${mem_default_g}G}"
+        if [[ "$OMP_MEMORY_MAX" =~ ^([0-9]+)([KMGT]?)$ ]]; then
+            mem_bytes=${BASH_REMATCH[1]}
+            case "${BASH_REMATCH[2]}" in
+                K) mem_bytes=$((mem_bytes << 10)) ;; M) mem_bytes=$((mem_bytes << 20)) ;;
+                G) mem_bytes=$((mem_bytes << 30)) ;; T) mem_bytes=$((mem_bytes << 40)) ;;
+            esac
+            if ((mem_bytes > mem_clamp_g << 30)); then
+                echo "omp: OMP_MEMORY_MAX=$OMP_MEMORY_MAX is above the ${mem_clamp_g}G ceiling for one session; using ${mem_clamp_g}G." >&2
+                OMP_MEMORY_MAX=${mem_clamp_g}G
+            fi
         fi
     fi
 fi

@@ -222,6 +222,13 @@ before handing the call to the real one.
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
   deliberately not set: it throttles a session into reclaim instead of killing it, which looks
   like a lane that is thinking.
+  A machine whose sessions should have no cap says so in its own
+  `${XDG_CONFIG_HOME:-$HOME/.config}/omp/memory-max`, outside this repo: `off`, or a size that
+  replaces the default (clamped the same way). Oryx, Sami's personal machine, holds `off`: one
+  assistant session with its subagents on 62 GiB, killed at the 24 GiB default with 30 GiB free
+  (2026-11-04). The dev boxes have no such file. A caller's `OMP_MEMORY_MAX` wins over the file
+  (`off` for one launch); a session with no cap exports `OMP_MEMORY_SCOPE=off`, so the omps it
+  starts take no default either.
   Inside an agent box (`AGENTBOX_IDENTITY_FILE`, `/etc/agentbox-identity`) it asks for no scope at
   all: the box's own cgroup is already this session's ceiling, and the shim says that in one line
   instead of reporting a refusal the agent cannot act on, which was the first line of every boxed
