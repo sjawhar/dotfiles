@@ -74,12 +74,16 @@
 //     ADC is the metadata server, and a box_credential_config.json there is one
 //     carried over from an Azure box, whose token source a Google VM lacks.
 //
-// Subagents load no extensions but share the parent process, and their
-// session_start events fire process-wide. A session family deliberately
-// shares one identity (one set of eyes): subagent transcripts live *inside*
-// the top-level session's directory as <AgentName>.jsonl, so only transcripts
-// with a <timestamp>_<uuid>.jsonl basename re-point the env. Session
-// switch/branch re-points to the new top-level session.
+// omp binds this extension to every subagent too, and a subagent shares its
+// parent's process and environment. A session family deliberately shares one
+// identity (one set of eyes), so a subagent (`ctx.agent.kind === "sub"`)
+// leaves the env alone. A top-level session — including a subagent transcript
+// resumed on its own after a crash (`omp --resume <dir>/<Agent>.jsonl`) —
+// exports the id of the session its transcript belongs to (see
+// attributedSessionId). Session switch/branch re-points to the new session.
+// A top-level session whose transcript names no session runs unattributed:
+// it drops the identity it inherited (the launching session's, which did not
+// write this session's commits) and says so at start.
 //
 // Attribution must degrade to *no* trailer, never a *wrong* one: stale
 // overlays (from a parent OMP process or an earlier session) are stripped
@@ -89,10 +93,11 @@
 // ~/.cache/omp/jj/ and are never cleaned up here: jj tolerates a missing
 // path in JJ_CONFIG, and cache semantics make the directory safe to purge.
 // session_start awaits the jj call below, so it is bounded: a jj that never
-// answers (a PATH wrapper that loops) degrades to no trailer instead of
-// holding the session past omp's 30 s extension-handler deadline.
+// answers (a PATH wrapper that loops) falls back to jj's default user config
+// paths instead of holding the session past omp's 30 s extension-handler
+// deadline.
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -101,6 +106,44 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 export const TOP_LEVEL_TRANSCRIPT = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_(${UUID})\\.jsonl$`);
+const SESSION_DIRECTORY = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_(${UUID})$`);
+
+/**
+ * The session id a transcript's commits are attributed to: the top-level
+ * session it belongs to. A top-level transcript is `<ts>Z_<uuid>.jsonl`; a
+ * subagent's sits in that session's directory, `<ts>Z_<uuid>/<Agent>.jsonl`
+ * (`<ts>Z_<uuid>/<Agent>/<Agent>.<Child>.jsonl` one level down), next to the
+ * session's own `<ts>Z_<uuid>.jsonl`. So the nearest enclosing `<ts>Z_<uuid>`
+ * directory names the owner, but only when that transcript sits beside it as a
+ * regular file: a directory that merely looks like one (a cwd or scratch path
+ * above a hand-placed transcript) names no session, and the transcript is
+ * unattributed. Only the nearest such directory counts.
+ *
+ * Not the transcript's own header id: `omp --resume <header id>` of a subagent
+ * transcript answers `Session "<id>" not found` (omp 18.16.0), and
+ * `ls ~/.omp/agent/sessions/*\/*_<id>*.jsonl`, agentbox, omp-dup-watch and
+ * agent-spend find only top-level ids. The owning session's id is the one a
+ * reader of a commit can follow back, and the one that subagent's commits
+ * carried before its parent died. Keep it so.
+ */
+export function attributedSessionId(file: string): string | undefined {
+	const own = TOP_LEVEL_TRANSCRIPT.exec(path.basename(file))?.[1];
+	if (own) return own;
+	for (let dir = path.dirname(file); dir !== path.dirname(dir); dir = path.dirname(dir)) {
+		const id = SESSION_DIRECTORY.exec(path.basename(dir))?.[1];
+		if (id) return isRegularFile(`${dir}.jsonl`) ? id : undefined;
+	}
+	return undefined;
+}
+
+function isRegularFile(file: string): boolean {
+	try {
+		return statSync(file).isFile();
+	} catch {
+		return false;
+	}
+}
+
 // Shared overlay filename grammar — the Legion extension emits the same shape
 // so either implementation can recognize and strip the other's stale overlays.
 const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
@@ -154,7 +197,7 @@ export function agentGoogleCredentials(env: NodeJS.ProcessEnv = process.env, onG
 // them in printed order reproduces the effective user config exactly
 // (verified: `jj config list --user` is identical).
 const inheritedJjConfig = process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "";
-let basePromise: Promise<string | undefined> | undefined;
+let basePromise: Promise<string> | undefined;
 
 export async function userConfigChain(
 	timeoutMs = JJ_CONFIG_PATH_TIMEOUT_MS,
@@ -173,9 +216,37 @@ export async function userConfigChain(
 	}
 }
 
-function jjConfigBase(): Promise<string | undefined> {
-	basePromise ??= inheritedJjConfig ? Promise.resolve(inheritedJjConfig) : userConfigChain();
+/**
+ * jj's own user config files when it cannot be asked (`jj config path --user`
+ * on jj 0.46). A path that does not exist is skipped by jj.
+ */
+function defaultUserConfigChain(env: NodeJS.ProcessEnv = process.env): string {
+	const home = env.HOME || homedir();
+	return [path.join(home, ".jjconfig.toml"), path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "jj", "config.toml")].join(":");
+}
+
+function jjConfigBase(): Promise<string> {
+	// Asked without JJ_CONFIG: jj prints JJ_CONFIG's own entries when it is set,
+	// so an inherited chain of nothing but overlays came back as the "user"
+	// chain and the launcher's trailer stayed on every jj commit. With no
+	// answer, jj's default paths stand in: leaving JJ_CONFIG unset is no
+	// remedy, since the bash tool's commands still saw the inherited value.
+	const { JJ_CONFIG: _ignored, ...env } = process.env;
+	basePromise ??= inheritedJjConfig
+		? Promise.resolve(inheritedJjConfig)
+		: userConfigChain(JJ_CONFIG_PATH_TIMEOUT_MS, env).then(
+				(chain) => (chain && withoutOverlays(chain)) || defaultUserConfigChain(env),
+			);
 	return basePromise;
+}
+
+/**
+ * JJ_CONFIG without any session's attribution overlay: the inherited chain
+ * stripped, else the user chain. Never empty: an empty JJ_CONFIG drops the
+ * user config, and with it commit signing.
+ */
+async function dropOverlays(): Promise<void> {
+	process.env.JJ_CONFIG = (process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "") || (await jjConfigBase());
 }
 
 export default function (pi: ExtensionAPI) {
@@ -185,15 +256,36 @@ export default function (pi: ExtensionAPI) {
 	if (googleCredentials) process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
 	const set = async (
 		_event: unknown,
-		ctx: { sessionManager?: { getSessionFile?: () => string | undefined } },
+		ctx: {
+			agent?: { kind: "main" | "sub" };
+			hasUI?: boolean;
+			ui?: { notify: (message: string, type?: "info" | "warning" | "error") => void };
+			sessionManager?: { getSessionFile?: () => string | undefined };
+		},
 	) => {
+		if (ctx.agent?.kind === "sub") return; // a subagent keeps its family's identity
 		const file = ctx.sessionManager?.getSessionFile?.();
-		const id = file ? TOP_LEVEL_TRANSCRIPT.exec(path.basename(file))?.[1] : undefined;
-		if (!id) return; // subagent or unpersisted session — keep the top-level identity
+		const id = file ? attributedSessionId(file) : undefined;
+		if (!id) {
+			// An unpersisted session (`--no-session`) started from another session's
+			// shell is that session's work, so it keeps the inherited identity.
+			if (!file && process.env.OMP_SESSION_ID) return;
+			// Emptied, not deleted: with `delete`, the bash tool's commands still saw
+			// the launcher's OMP_SESSION_ID and shims/git still wrote its trailer
+			// (measured 2026-11-03, omp 18.16.0). shims/git ignores an empty id.
+			process.env.OMP_SESSION_ID = "";
+			process.env.PI_COMMIT_TRAILERS = "";
+			await dropOverlays();
+			const warning = file
+				? `session-env: this session is NOT attributed. Its transcript ${file} belongs to no omp session found on disk: its file name is not <timestamp>Z_<uuid>.jsonl, and the nearest <timestamp>Z_<uuid> directory above it, if there is one, has no <timestamp>Z_<uuid>.jsonl transcript beside it. It runs with an empty OMP_SESSION_ID, and every commit it makes gets no Omp-Session trailer. Add "Omp-Session: <id>" by hand to each commit, with the id of the session this work belongs to.`
+				: "session-env: this session is NOT attributed. It has no transcript and inherited no OMP_SESSION_ID, so every commit it makes gets no Omp-Session trailer. Add \"Omp-Session: <id>\" to each commit by hand.";
+			if (ctx.hasUI && ctx.ui) ctx.ui.notify(warning, "error");
+			else process.stderr.write(`${warning}\n`);
+			return;
+		}
 		process.env.OMP_SESSION_ID = id;
 		process.env.PI_COMMIT_TRAILERS = `Omp-Session: ${id}`;
 		const base = await jjConfigBase();
-		if (!base) return;
 		const overlay = path.join(OVERLAY_DIR, `omp-attribution-${id}.toml`);
 		if (process.env.JJ_CONFIG?.split(":").includes(overlay)) return; // already active — never rewrite a live layer
 		try {
