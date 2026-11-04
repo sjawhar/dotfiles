@@ -1,0 +1,14 @@
+[Unit]
+Description=forward opener daemon for authorized dev VMs
+# The compositor supplies browser and clipboard access; the wrapper discovers
+# WAYLAND_DISPLAY if the user manager started before the compositor.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.dotfiles/forward/forward-daemon --config %h/.config/forward/config.toml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

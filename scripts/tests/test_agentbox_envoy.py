@@ -106,6 +106,19 @@ class AgentboxEnvoy(unittest.TestCase):
                 self.assertEqual(names & set(ENVOY_VARS), set(), values)
                 self.assertIn(f"AGENTBOX_ENVOY_FORWARDER={GATEWAY}:9020", values)
 
+    def test_discovery_failure_stops_launch_before_docker_run(self) -> None:
+        config = self.home / ".config/forward/config.toml"
+        config.parent.mkdir()
+        config.write_text('listen = "127.0.0.2"\nbridge_port = "bad"\n', encoding="utf-8")
+        script = f'source "{AGENTBOX}"\n{NO_HOST}cmd_new repo1 -- true\n'
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, env=self.env, check=False, timeout=60
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot discover forward channels", result.stderr)
+        self.assertIn("bridge_port", result.stderr)
+        self.assertFalse(self.run_args.exists(), "launch ran a container after discovery failed")
+
     def test_a_box_mounts_the_neutral_file_directory_writable(self) -> None:
         """Profile files remain accessible at the host path without an invented write restriction."""
         legion = self.home / ".config" / "legion"

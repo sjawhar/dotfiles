@@ -239,7 +239,7 @@ done
 # shellcheck source=laptop/cosmic-settings.sh
 source "${LAPTOP_DIR}/cosmic-settings.sh"
 
-# Laptop daemon role opens tunneled URLs without colliding with the SSH LocalForward on 12802.
+# One tailnet daemon serves every VM in forward/hosts.toml; this runs migration step 2.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
 
 # shellcheck source=laptop/trajectory-route.sh

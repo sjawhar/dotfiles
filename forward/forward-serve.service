@@ -2,7 +2,7 @@
 Description=forward file server and callback bridge (read-only preview)
 
 [Service]
-ExecStart=%h/.dotfiles/forward/forward-serve
+ExecStart=%h/.dotfiles/forward/forward-serve --config %h/.config/forward/config.toml
 Restart=always
 RestartSec=2
 

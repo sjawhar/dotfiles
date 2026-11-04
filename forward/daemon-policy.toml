@@ -1,0 +1,19 @@
+# URL policy for the single laptop daemon. Forward adds each authorized peer's
+# preview endpoint (<literal IP>:12802); no broad host or loopback allowance.
+mode = "allowlist"
+# Bypass shims/xdg-open, which would send the URL back into forward.
+opener = ["/usr/bin/xdg-open"]
+clipboard = ["wl-copy"]
+allow = [
+  "*.anthropic.com",
+  "accounts.google.com",
+  "auth.openai.com",
+  "claude.ai",
+  "d-9267c4f5db.awsapps.com",
+  "device.sso.*.amazonaws.com",
+  "github.com",
+  "oidc.us-west-2.amazonaws.com",
+  "production-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "staging-trajectory-labs.auth.us-west-2.amazoncognito.com",
+  "viewer.hawk.internal.trajectorylabs.com",
+]

@@ -857,26 +857,94 @@ ensure_tmux_forwarder() {
     return 0
 }
 
-# forward's channels are TCP listeners on this host's loopback (forward/AGENTS.md gives each
-# machine a listen/peer pair; here 127.0.0.2 and 127.0.0.1), and a box has a loopback of its
-# own, so inside one every channel refused the connection while forward's mounted unix
-# sockets (arm.sock, pcscd.comm) worked: a box could hold a port for the laptop but could
-# not open a URL on it or ask for a browser grant. Each listener gets what the Envoy API
-# gets - a forwarder on the box network's gateway here, and a relay in the box that puts it
-# back on its own address and port (agentbox/entrypoint.sh). The ports are read from the
-# host, never listed, because they come from forward's per-machine config: its reserved
-# 128xx range, which the using-forward skill says forward refuses to forward for anything
-# else. FORWARD_CHANNELS is what the box is told about (session_env).
+# Legacy SSH pairs need their configured loopback channels relayed into a box's
+# own loopback. Tailnet addresses route directly and must not be bound in the box.
+# Match each role-specific endpoint against live listeners, including custom
+# ports outside 128xx; the port-only gateway cannot relay two addresses per port.
 FORWARD_CHANNELS=()
 forward_channels() {
-    mapfile -t FORWARD_CHANNELS < <(
-        ss -Hltn | awk '{ print $4 }' | grep -E '^127\.0\.0\.[0-9]+:128[0-9][0-9]$' | sort -u
-    )
+    local channels
+    FORWARD_CHANNELS=()
+    if [[ "${XDG_CONFIG_HOME:-$HOME/.config}" != "$HOME/.config" ]]; then
+        echo "agentbox: XDG_CONFIG_HOME must be unset or exactly $HOME/.config; Forward's user units and agent boxes use ~/.config/forward." >&2
+        return 1
+    fi
+    channels="$(python3 - "$HOME/.config/forward/config.toml" "$ENVOY_PORT" "$IMDS_PORT" "${LOOPBACK_SERVICE_PORTS[*]}" <<'PY'
+import ipaddress
+from pathlib import Path
+import subprocess
+import sys
+import tomllib
+
+path = Path(sys.argv[1])
+try:
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        sys.exit(0)
+    addresses = {}
+    for key, default in (("listen", "127.0.0.1"), ("peer", "")):
+        value = config.get(key, default)
+        if not value:
+            continue
+        address = ipaddress.ip_address(value)
+        if address.version == 4 and address.is_loopback:
+            addresses[key] = str(address)
+    wanted = set()
+    if "listen" in addresses:
+        wanted.add(f"{addresses['listen']}:12802")  # File preview is not configurable.
+    if "peer" in addresses:
+        wanted.add(f"{addresses['peer']}:12800")  # URL channel is not configurable.
+    for role, key, default in (
+        ("listen", "bridge_port", 12801),
+        ("listen", "grant_port", 12805),
+        ("peer", "relay_port", 12803),
+        ("peer", "pcsc_port", 12804),
+        ("peer", "pulse_port", 12806),
+    ):
+        port = config.get(key, default)
+        if type(port) is not int or not 0 <= port <= 65535:
+            raise ValueError(f"{key} must be an integer port from 0 to 65535")
+        if port and role in addresses:
+            wanted.add(f"{addresses[role]}:{port}")
+    if wanted:
+        listeners = subprocess.check_output(["ss", "-Hltn"], text=True)
+        found = {fields[3] for line in listeners.splitlines() if len(fields := line.split()) >= 4}
+        routes = {}
+
+        def claim(port, target):
+            previous = routes.get(port)
+            if previous is not None and previous != target:
+                raise ValueError(f"{previous} and {target} share gateway port {port}; the port-only agentbox forwarder cannot relay both; configure distinct channel ports")
+            routes[port] = target
+            return previous is None
+
+        envoy_port, imds_port = sys.argv[2:4]
+        claim(envoy_port, f"127.0.0.1:{envoy_port}")
+        claim(imds_port, "metadata service")
+        service_ports = set(sys.argv[4].split())
+        for endpoint in sorted(found):
+            host, _, port = endpoint.rpartition(":")
+            if port in service_ports and host.startswith("127.0.0."):
+                claim(port, endpoint)
+        channels = []
+        for channel in sorted(wanted & found):
+            if claim(channel.rsplit(":", 1)[1], channel):
+                channels.append(channel)
+        for channel in channels:
+            print(channel)
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    sys.exit(f"agentbox: cannot discover forward channels from {path}: {error}; fix the serve config or rerun installers/forward.sh serve.")
+PY
+)" || return 1
+    if [[ -n "$channels" ]]; then
+        mapfile -t FORWARD_CHANNELS <<<"$channels"
+    fi
 }
 
 ensure_forward_channels() {
     local channel
-    forward_channels
+    forward_channels || return 1
     for channel in "${FORWARD_CHANNELS[@]}"; do
         ensure_tcp_forwarder "agentbox-fwd-${channel##*:}" "${channel##*:}" "$channel"
     done
@@ -935,7 +1003,7 @@ ensure_forwarders() {
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
     ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
     ensure_tmux_forwarder
-    ensure_forward_channels
+    ensure_forward_channels || return 1
     ensure_loopback_services
 }
 
@@ -1204,7 +1272,7 @@ session_env() {
     # which cannot see the host's loopback; a host with neither passes none and the box starts
     # without them. The entrypoint relays every entry the same way, so a service rides the list
     # named for forward's channels and no image change is needed for one.
-    forward_channels
+    forward_channels || return 1
     loopback_services
     local relays=("${FORWARD_CHANNELS[@]}" ${LOOPBACK_SERVICES[@]+"${LOOPBACK_SERVICES[@]}"})
     e+=(-e "AGENTBOX_FORWARD_CHANNELS=$(IFS=,; echo "${relays[*]}")")
@@ -1758,7 +1826,9 @@ cmd_new() {
     # box's agent-secrets that an enrollment is on its way; enroll_box renews it and ends it
     # either way. A box with no broker identity gets no marker and no key.
     if (( use_broker )); then : >"$(box_keydir "$box")/enrollment.pending"; fi
-    mapfile -t env < <(session_env "$box")
+    local env_out
+    env_out="$(session_env "$box")" || exit 1
+    mapfile -t env <<<"$env_out"
     # omp runs under the in-box runner so `restart` can relaunch it in the same
     # container (scripts/agentbox-run.ts); any other command runs bare.
     local cmd=("$@")
@@ -7808,7 +7878,9 @@ cmd_doctor() {
     local mount_out
     mount_out="$(mount_args "$box")" || die "doctor: the box's mounts could not be built (above)"
     mapfile -t mounts <<<"$mount_out"
-    mapfile -t env < <(session_env "$box")
+    local env_out
+    env_out="$(session_env "$box")" || die "doctor: the box's environment could not be built (above)"
+    mapfile -t env <<<"$env_out"
     # The doctor box runs detached so it can be enrolled like a real box (enroll_box needs the
     # container up) before the checks run inside it; `sleep` is its session command, and the
     # entrypoint has finished — inner dockerd up, ghcr login done — once that sleep exists. It

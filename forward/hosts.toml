@@ -1,0 +1,8 @@
+# Tailscale names resolved only when installers/forward.sh is deliberately run.
+# Add a VM here, then reinstall daemon on the laptop and serve on that VM.
+laptop = "sami"
+dev_vms = [
+  "oryx",
+  "sami-devbox",
+  "sami-rocqperf",
+]

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Regression coverage for forward roles: relay environment, devbox pairing."""
+"""Forward installer output, failure safety, relay environment, and legacy pairs."""
 
 from __future__ import annotations
 
-import os
+import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -22,40 +23,70 @@ def write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-class ForwardServeEnvironment(unittest.TestCase):
+class ForwardInstaller(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.dotfiles = self.root / "dotfiles"
         self.home = self.root / "home"
-        self.config_home = self.root / "config"
+        self.config_home = self.home / ".config"
         self.stub_dir = self.root / "bin"
+        self.lookups = self.root / "tailscale"
         (self.dotfiles / "bin").mkdir(parents=True)
-        (self.dotfiles / "forward").mkdir()
+        shutil.copytree(FORWARD, self.dotfiles / "forward")
         self.home.mkdir()
         self.stub_dir.mkdir()
-
+        self.lookups.mkdir()
+        self.systemctl_log = self.root / "systemctl.log"
+        self.legacy_units = self.root / "legacy-units"
+        self.legacy_units.write_text("", encoding="utf-8")
+        for name, address in {
+            "self": "100.80.0.1",
+            "self-vm": "100.80.0.3",
+            "sami": "100.80.0.1",
+            "oryx": "100.80.0.2",
+            "sami-devbox": "100.80.0.3",
+            "sami-rocqperf": "100.80.0.5",
+        }.items():
+            (self.lookups / name).write_text(address + "\n", encoding="utf-8")
+        (self.dotfiles / "agent-secrets").mkdir()
+        for name in ("broker-url.sh", "broker.env"):
+            shutil.copyfile(DOTFILES / "agent-secrets" / name, self.dotfiles / "agent-secrets" / name)
         write_executable(
             self.dotfiles / "bin" / "mise",
-            'if [ "${1:-}" = "which" ] || [ "${1:-}" = "exec" ]; then exit 0; fi',
+            '''case "$*" in
+                "which forward"|"which omp"|"activate --shims bash"|"exec github:sjawhar/oh-my-pi -- omp browser-relay install") exit 0 ;;
+                *) echo "unexpected mise arguments: $*" >&2; exit 2 ;;
+            esac''',
         )
-        write_executable(self.stub_dir / "systemctl", 'echo "$*" >> "$SYSTEMCTL_LOG"')
-        write_executable(self.stub_dir / "hostname", 'echo "${STUB_HOSTNAME:-somebox}"')
-        self.systemctl_log = self.root / "systemctl.log"
-        for name in (
-            "config-serve-somebox.toml",
-            "forward-serve.service",
-            "omp-browser-relay.service",
-        ):
-            (self.dotfiles / "forward" / name).write_text("test\n", encoding="utf-8")
+        write_executable(
+            self.stub_dir / "systemctl",
+            '''printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+            if [[ -n "${SYSTEMCTL_FAIL:-}" && "$*" == "$SYSTEMCTL_FAIL" ]]; then exit 1; fi
+            case "$*" in
+                *list-unit-files*pcscd-bridge.service) printf '%s\n' "${PCSC_UNIT_FILES:-}" ;;
+                *list-units*pcscd-bridge.service) printf '%s\n' "${PCSC_ACTIVE_UNITS:-}" ;;
+                *list-units*|*list-unit-files*) cat "$LEGACY_UNITS" ;;
+            esac''',
+        )
+        write_executable(self.stub_dir / "hostname", 'echo "${STUB_HOSTNAME:-sami-devbox}"')
+        write_executable(
+            self.stub_dir / "tailscale",
+            '''[[ "$#" -ge 2 && "$#" -le 3 && "$1" == ip && "$2" == -4 ]] || exit 2
+            cat "$TAILSCALE_FIXTURES/${3:-$TAILSCALE_SELF}"''',
+        )
+        write_executable(self.stub_dir / "ssh-keygen", "exit 99")
+        write_executable(self.stub_dir / "flatpak", "exit 1")
         self.env = {
-            **os.environ,
             "DOTFILES_DIR": str(self.dotfiles),
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.config_home),
-            "PATH": f"{self.stub_dir}:{os.environ['PATH']}",
+            "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "SYSTEMCTL_LOG": str(self.systemctl_log),
+            "LEGACY_UNITS": str(self.legacy_units),
+            "TAILSCALE_FIXTURES": str(self.lookups),
         }
+        self.config = self.config_home / "forward" / "config.toml"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -65,128 +96,279 @@ class ForwardServeEnvironment(unittest.TestCase):
             ["bash", str(INSTALLER), role],
             capture_output=True,
             text=True,
-            env={**self.env, **env},
+            env={**self.env, "TAILSCALE_SELF": "self-vm" if role == "serve" else "self", **env},
+            timeout=30,
             check=False,
         )
 
-    def shell_relay_url(self) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["bash", "-c", 'source "$1"; printf "%s" "${BROWSER_RELAY_URL-}"', "--", str(BASHRC)],
-            capture_output=True,
-            text=True,
-            env=self.env,
-            check=False,
-        )
+    def installed_config(self) -> dict:
+        return tomllib.loads(self.config.read_text(encoding="utf-8"))
 
-    def test_serve_role_installs_no_relay_environment_or_overlay(self) -> None:
-        """The ambient relay endpoint is gone; grants supply per-session endpoints."""
+    def test_serve_generates_own_tailnet_address_and_literal_laptop_peer(self) -> None:
         install = self.install("serve")
-
         self.assertEqual(install.returncode, 0, install.stderr)
-        self.assertFalse(
-            (self.config_home / "environment.d" / "browser-relay.conf").exists()
-        )
-        self.assertFalse((self.config_home / "omp" / "browser-relay.yml").exists())
-        shell = self.shell_relay_url()
-        self.assertEqual(shell.returncode, 0, shell.stderr)
-        self.assertEqual(shell.stdout, "")
+        config = self.installed_config()
+        self.assertEqual(config["listen"], "100.80.0.3")
+        self.assertEqual(config["peer"], "100.80.0.1")
+        self.assertNotIn("peers", config)
+        self.assertEqual(config["forward_ttl_secs"], 300)
+        self.assertEqual({key: config.get(key, value) for key, value in DEFAULT_PORTS.items()}, DEFAULT_PORTS)
+        self.assertIn("--user enable --now forward-serve", self.systemctl_log.read_text().splitlines())
 
-    def test_serve_role_removes_a_stale_relay_environment_and_overlay(self) -> None:
-        """Reinstalling cleans up what bypass-era installs wrote."""
-        environment_dir = self.config_home / "environment.d"
-        environment_dir.mkdir(parents=True)
-        (environment_dir / "browser-relay.conf").write_text(
-            "BROWSER_RELAY_URL=http://stale.test\n", encoding="utf-8"
-        )
-        omp_dir = self.config_home / "omp"
-        omp_dir.mkdir(parents=True)
-        (omp_dir / "browser-relay.yml").symlink_to(self.dotfiles / "gone.yml")
-
-        install = self.install("serve")
-
-        self.assertEqual(install.returncode, 0, install.stderr)
-        self.assertFalse((environment_dir / "browser-relay.conf").exists())
-        self.assertFalse((omp_dir / "browser-relay.yml").is_symlink())
-
-    def test_daemon_role_installs_no_relay_environment(self) -> None:
-        """The laptop role never had the ambient endpoint and must not gain one."""
-        install = self.install("daemon")
-
-        self.assertEqual(install.returncode, 0, install.stderr)
-        self.assertFalse(
-            (self.config_home / "environment.d" / "browser-relay.conf").exists()
-        )
-        self.assertFalse((self.config_home / "omp" / "browser-relay.yml").exists())
-
-    def test_serve_role_installs_the_hosts_own_pairing(self) -> None:
-        """Each devbox runs its own pair's addresses: a shared one made oryx mint another host's preview URLs."""
-        (self.dotfiles / "forward" / "config-serve-oryx.toml").write_text("oryx\n", encoding="utf-8")
-        link = self.home / ".config" / "forward" / "config.toml"
-        for host in ("oryx", "somebox"):
-            with self.subTest(host=host):
-                install = self.install("serve", STUB_HOSTNAME=host)
+    def test_serve_stops_enabled_or_active_pcsc_bridge_before_start_without_deleting_unit(self) -> None:
+        unit = self.home / ".config/systemd/user/pcscd-bridge.service"
+        unit.parent.mkdir(parents=True)
+        unit.symlink_to(DOTFILES / "devbox/pcscd-bridge.service")
+        for state in (
+            {"PCSC_UNIT_FILES": "pcscd-bridge.service enabled enabled"},
+            {"PCSC_ACTIVE_UNITS": "pcscd-bridge.service loaded active running Bridge"},
+        ):
+            with self.subTest(state=state):
+                if self.systemctl_log.exists():
+                    self.systemctl_log.unlink()
+                install = self.install("serve", STUB_HOSTNAME="oryx", **state)
                 self.assertEqual(install.returncode, 0, install.stderr)
-                self.assertEqual(link.resolve(), (self.dotfiles / "forward" / f"config-serve-{host}.toml").resolve())
+                log = self.systemctl_log.read_text().splitlines()
+                self.assertLess(log.index("--user disable --now pcscd-bridge.service"),
+                                log.index("--user enable --now forward-serve"))
+                self.assertTrue(unit.is_symlink())
+                self.assertEqual(unit.resolve(), DOTFILES / "devbox/pcscd-bridge.service")
+                self.assertTrue((self.home / ".pcscd").is_dir())
 
-    def test_serve_role_fails_on_a_host_without_its_own_pairing(self) -> None:
-        install = self.install("serve", STUB_HOSTNAME="unpaired")
+    def test_serve_does_not_start_if_pcsc_ownership_transition_fails(self) -> None:
+        for command in (
+            "--user list-unit-files --no-legend --no-pager pcscd-bridge.service",
+            "--user list-units --all --full --plain --no-legend --no-pager pcscd-bridge.service",
+            "--user disable --now pcscd-bridge.service",
+        ):
+            with self.subTest(command=command):
+                if self.systemctl_log.exists():
+                    self.systemctl_log.unlink()
+                install = self.install("serve", PCSC_UNIT_FILES="pcscd-bridge.service disabled enabled",
+                                       SYSTEMCTL_FAIL=command)
+                self.assertNotEqual(install.returncode, 0)
+                self.assertIn("pcscd-bridge", install.stderr)
+                self.assertFalse(any("forward-serve" in line for line in self.systemctl_log.read_text().splitlines()))
 
-        self.assertNotEqual(install.returncode, 0)
-        self.assertEqual(
-            install.stderr.strip(),
-            "forward.sh serve: this machine (unpaired) has no forward pair; add "
-            "forward/config-serve-unpaired.toml and forward/config-daemon-unpaired.toml",
+    def test_daemon_generates_one_literal_peer_set_and_installs_one_daemon(self) -> None:
+        install = self.install("daemon", STUB_HOSTNAME="sami")
+        self.assertEqual(install.returncode, 0, install.stderr)
+        config = self.installed_config()
+        self.assertEqual(config["listen"], "100.80.0.1")
+        self.assertEqual(config["peers"], ["100.80.0.2", "100.80.0.3", "100.80.0.5"])
+        self.assertNotIn("peer", config)
+        self.assertEqual(config["mode"], "allowlist")
+        self.assertEqual(config["opener"], ["/usr/bin/xdg-open"])
+        self.assertEqual(config["clipboard"], ["wl-copy"])
+        self.assertIn("github.com", config["allow"])
+        self.assertNotIn("127.0.0.3:12802", config["allow"])
+        self.assertEqual({key: config.get(key, value) for key, value in DEFAULT_PORTS.items()}, DEFAULT_PORTS)
+        log = self.systemctl_log.read_text().splitlines()
+        self.assertIn("--user enable --now forward-daemon", log)
+        self.assertIn("--user enable --now omp-browser-relay", log)
+        self.assertFalse(any("enable --now forward-daemon@" in line for line in log))
+        unit = self.home / ".config/systemd/user/forward-daemon.service"
+        self.assertEqual(unit.resolve(), self.dotfiles / "forward/forward-daemon.service")
+
+    def test_inventory_alone_adds_a_vm_without_pair_files(self) -> None:
+        (self.dotfiles / "forward/hosts.toml").write_text(
+            'laptop = "sami"\ndev_vms = ["sami-devbox", "new-vm"]\n', encoding="utf-8",
         )
-        self.assertFalse((self.home / ".config" / "forward" / "config.toml").is_symlink())
+        (self.lookups / "new-vm").write_text("100.80.0.6\n", encoding="utf-8")
+        install = self.install("daemon")
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertEqual(self.installed_config()["peers"], ["100.80.0.3", "100.80.0.6"])
+
+    def test_reinstall_keeps_configuration_identical(self) -> None:
+        for role in ("daemon", "serve"):
+            with self.subTest(role=role):
+                first = self.install(role)
+                self.assertEqual(first.returncode, 0, first.stderr)
+                contents = self.config.read_bytes()
+                self.systemctl_log.unlink()
+                second = self.install(role)
+                self.assertEqual(second.returncode, 0, second.stderr)
+                self.assertEqual(self.config.read_bytes(), contents)
+                self.assertFalse(self.config.is_symlink())
+                services = ("forward-daemon", "omp-browser-relay") if role == "daemon" else ("forward-serve",)
+                log = self.systemctl_log.read_text().splitlines()
+                for service in services:
+                    self.assertIn(f"--user restart {service}", log)
+
+    def test_retry_restarts_daemon_after_failed_install_already_replaced_config(self) -> None:
+        first = self.install("daemon")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("100.80.0.2", self.installed_config()["peers"])
+        (self.dotfiles / "forward/hosts.toml").write_text(
+            'laptop = "sami"\ndev_vms = ["sami-devbox"]\n', encoding="utf-8",
+        )
+        failed = self.install("daemon", SYSTEMCTL_FAIL="--user enable --now forward-daemon")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(self.installed_config()["peers"], ["100.80.0.3"])
+        replacement = self.config.read_bytes()
+        self.systemctl_log.unlink()
+        retry = self.install("daemon")
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(self.config.read_bytes(), replacement)
+        self.assertIn("--user restart forward-daemon", self.systemctl_log.read_text().splitlines())
+
+    def test_noncanonical_config_home_is_rejected_before_writes_or_service_changes(self) -> None:
+        for role in ("serve", "daemon"):
+            for config_home in (str(self.root / "elsewhere"), "relative"):
+                with self.subTest(role=role, config_home=config_home):
+                    install = self.install(role, XDG_CONFIG_HOME=config_home)
+                    self.assertNotEqual(install.returncode, 0)
+                    self.assertIn("XDG_CONFIG_HOME", install.stderr)
+                    self.assertFalse(self.config_home.exists())
+                    self.assertFalse((self.root / "elsewhere").exists())
+                    self.assertFalse(self.systemctl_log.exists())
+
+    def test_unset_config_home_uses_the_systemd_and_box_config_path(self) -> None:
+        self.env.pop("XDG_CONFIG_HOME")
+        install = self.install("serve")
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertEqual(self.installed_config()["listen"], "100.80.0.3")
+
+    def test_role_units_pass_canonical_config_despite_user_manager_environment(self) -> None:
+        write_executable(self.dotfiles / "bin/mise", 'printf "%s\\n" "$@"')
+        for role, wrapper in (("serve", "forward-serve"), ("daemon", "forward-daemon")):
+            with self.subTest(role=role):
+                unit = (FORWARD / f"{wrapper}.service").read_text(encoding="utf-8")
+                command = next(line.removeprefix("ExecStart=") for line in unit.splitlines() if line.startswith("ExecStart="))
+                arguments = shlex.split(command.replace("%h", str(self.home)))[1:]
+                self.assertEqual(arguments, ["--config", str(self.config)])
+                result = subprocess.run(
+                    ["bash", str(FORWARD / wrapper), *arguments],
+                    env={**self.env, "XDG_CONFIG_HOME": str(self.root / "user-manager-config")},
+                    capture_output=True, text=True, timeout=30, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["exec", "--", "forward", role, "--config", str(self.config)])
+
+    def test_serve_refuses_an_unknown_vm_before_changing_config_or_units(self) -> None:
+        install = self.install("serve", STUB_HOSTNAME="unknown-vm")
+        self.assertNotEqual(install.returncode, 0)
+        self.assertIn("unknown-vm", install.stderr)
+        self.assertIn("hosts.toml", install.stderr)
+        self.assertFalse(self.config.exists())
         self.assertFalse(self.systemctl_log.exists())
 
-    def test_daemon_role_runs_one_daemon_per_pair(self) -> None:
-        (self.dotfiles / "forward" / "config-daemon-oryx.toml").write_text("oryx\n", encoding="utf-8")
-        (self.dotfiles / "forward" / "forward-daemon@.service").write_text("test\n", encoding="utf-8")
+    def test_failed_or_invalid_lookup_preserves_previous_config_and_services(self) -> None:
+        for role, lookup in (("daemon", "sami-devbox"), ("daemon", "self"), ("serve", "sami"), ("serve", "self-vm")):
+            for answer in (None, "", "not-an-ip\n", "192.0.2.3\n", "100.80.0.8\n100.80.0.9\n"):
+                with self.subTest(role=role, lookup=lookup, answer=answer):
+                    self.config.parent.mkdir(parents=True, exist_ok=True)
+                    self.config.write_text('listen = "127.0.0.9"\n', encoding="utf-8")
+                    prior = self.config.read_bytes()
+                    if self.systemctl_log.exists():
+                        self.systemctl_log.unlink()
+                    path = self.lookups / lookup
+                    original = path.read_bytes()
+                    if answer is None:
+                        path.unlink()
+                    else:
+                        path.write_text(answer, encoding="utf-8")
+                    install = self.install(role)
+                    path.write_bytes(original)
+                    self.assertNotEqual(install.returncode, 0)
+                    self.assertIn("tailscale", install.stderr)
+                    self.assertIn("ip -4", install.stderr)
+                    self.assertEqual(self.config.read_bytes(), prior)
+                    self.assertFalse(self.systemctl_log.exists())
 
+    def test_invalid_inventory_fails_before_writing_config_or_changing_units(self) -> None:
+        inventory = self.dotfiles / "forward/hosts.toml"
+        for contents in (
+            'laptop = "sami"\ndev_vms = []\n',
+            'laptop = "sami"\ndev_vms = ["oryx", "oryx"]\n',
+            'laptop = "sami"\ndev_vms = ["bad name"]\n',
+            'laptop = "sami"\ndev_vms = ["sami"]\n',
+        ):
+            with self.subTest(contents=contents):
+                inventory.write_text(contents, encoding="utf-8")
+                install = self.install("daemon")
+                self.assertNotEqual(install.returncode, 0)
+                self.assertIn("hosts.toml", install.stderr)
+                self.assertFalse(self.config.exists())
+                self.assertFalse(self.systemctl_log.exists())
+
+    def test_duplicate_peer_address_is_not_silently_accepted(self) -> None:
+        (self.lookups / "sami-devbox").write_text("100.80.0.2\n", encoding="utf-8")
         install = self.install("daemon")
+        self.assertNotEqual(install.returncode, 0)
+        self.assertIn("oryx", install.stderr)
+        self.assertIn("sami-devbox", install.stderr)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.systemctl_log.exists())
 
-        self.assertEqual(install.returncode, 0, install.stderr)
-        pair_config = self.home / ".config" / "forward" / "config-oryx.toml"
-        self.assertEqual(pair_config.resolve(), (self.dotfiles / "forward" / "config-daemon-oryx.toml").resolve())
-        enabled = self.systemctl_log.read_text(encoding="utf-8").splitlines()
-        self.assertIn("--user enable --now forward-daemon@oryx", enabled)
-        self.assertNotIn("--user enable --now forward-daemon", enabled)
-        self.assertFalse((self.home / ".config" / "forward" / "config.toml").is_symlink())
-
-    def test_daemon_role_removes_the_old_default_pair(self) -> None:
-        """Reinstalling cleans up the default daemon an earlier install left, and stays idempotent."""
-        user_dir = self.home / ".config" / "systemd" / "user"
-        forward_dir = self.home / ".config" / "forward"
+    def test_migration_disables_legacy_instances_without_deleting_artifacts(self) -> None:
+        self.legacy_units.write_text(
+            "forward-daemon@oryx.service enabled enabled\n"
+            "forward-tunnel@sami-devbox.service loaded active running Tunnel\n"
+            "forward-tunnel@retired-vm.service enabled enabled\n"
+            "forward-daemon@.service disabled enabled\n",
+            encoding="utf-8",
+        )
+        user_dir = self.home / ".config/systemd/user"
+        forward_dir = self.home / ".config/forward"
+        ssh_dir = self.home / ".ssh"
         user_dir.mkdir(parents=True)
         forward_dir.mkdir(parents=True)
-        (user_dir / "forward-daemon.service").symlink_to(self.dotfiles / "gone.service")
-        (forward_dir / "config.toml").symlink_to(self.dotfiles / "gone.toml")
-
-        for _ in range(2):
-            install = self.install("daemon")
-            self.assertEqual(install.returncode, 0, install.stderr)
-            self.assertFalse((user_dir / "forward-daemon.service").is_symlink())
-            self.assertFalse((forward_dir / "config.toml").is_symlink())
-        log = self.systemctl_log.read_text(encoding="utf-8").splitlines()
-        self.assertIn("--user disable --now forward-daemon.service", log)
-
-    def test_daemon_role_tunnels_only_loopback_pairs(self) -> None:
-        """A pair listening on loopback is carried over an SSH tunnel and needs forward-tunnel@<pair>; a tailnet pair must not get one."""
-        forward = self.dotfiles / "forward"
-        (forward / "config-daemon-oryx.toml").write_text('listen = "fd7a:115c:a1e0::e03b:5c61"\n', encoding="utf-8")
-        (forward / "config-daemon-vm.toml").write_text('listen = "127.0.0.1"\npeer = "127.0.0.1"\n', encoding="utf-8")
+        ssh_dir.mkdir()
+        legacy = {
+            path: path.read_bytes()
+            for path in (self.dotfiles / "forward").glob("config-*-*.toml")
+        }
         for unit in ("forward-daemon@.service", "forward-tunnel@.service"):
-            (forward / unit).write_text("test\n", encoding="utf-8")
-
+            (user_dir / unit).symlink_to(self.dotfiles / "forward" / unit)
+        (forward_dir / "config-oryx.toml").symlink_to(self.dotfiles / "forward/config-daemon-oryx.toml")
+        for name in ("config.local", "authorized_keys", "forward-tunnel"):
+            (ssh_dir / name).write_text("keep me\n", encoding="utf-8")
+        self.config.symlink_to(self.dotfiles / "forward/config-daemon-oryx.toml")
         install = self.install("daemon")
-
         self.assertEqual(install.returncode, 0, install.stderr)
-        enabled = self.systemctl_log.read_text(encoding="utf-8").splitlines()
-        self.assertIn("--user enable --now forward-tunnel@vm", enabled)
-        self.assertNotIn("--user enable --now forward-tunnel@oryx", enabled)
-        tunnel_unit = self.home / ".config" / "systemd" / "user" / "forward-tunnel@.service"
-        self.assertEqual(tunnel_unit.resolve(), (forward / "forward-tunnel@.service").resolve())
+        log = self.systemctl_log.read_text().splitlines()
+        for unit in ("forward-daemon@oryx.service", "forward-tunnel@sami-devbox.service", "forward-tunnel@retired-vm.service"):
+            self.assertIn(f"--user disable --now {unit}", log)
+        self.assertNotIn("--user disable --now forward-daemon@.service", log)
+        for path, contents in legacy.items():
+            self.assertEqual(path.read_bytes(), contents)
+        for unit in ("forward-daemon@.service", "forward-tunnel@.service"):
+            self.assertTrue((user_dir / unit).is_symlink())
+        self.assertTrue((forward_dir / "config-oryx.toml").is_symlink())
+        for name in ("config.local", "authorized_keys", "forward-tunnel"):
+            self.assertEqual((ssh_dir / name).read_text(), "keep me\n")
+        self.assertFalse(self.config.is_symlink())
+
+    def test_systemd_failure_does_not_report_a_successful_install(self) -> None:
+        for command in ("--user enable --now forward-daemon", "--user restart forward-daemon"):
+            with self.subTest(command=command):
+                install = self.install("daemon", SYSTEMCTL_FAIL=command)
+                self.assertNotEqual(install.returncode, 0)
+                self.assertIn("forward-daemon", install.stderr)
+
+    def test_roles_remove_only_stale_ambient_relay_configuration(self) -> None:
+        for role in ("serve", "daemon"):
+            with self.subTest(role=role):
+                environment_dir = self.config_home / "environment.d"
+                environment_dir.mkdir(parents=True, exist_ok=True)
+                (environment_dir / "browser-relay.conf").write_text("BROWSER_RELAY_URL=http://stale.test\n")
+                omp_dir = self.config_home / "omp"
+                omp_dir.mkdir(exist_ok=True)
+                overlay = omp_dir / "browser-relay.yml"
+                overlay.symlink_to(self.dotfiles / "gone.yml")
+                install = self.install(role)
+                self.assertEqual(install.returncode, 0, install.stderr)
+                self.assertFalse((environment_dir / "browser-relay.conf").exists())
+                self.assertFalse(overlay.is_symlink())
+
+    def test_shell_does_not_gain_an_ambient_relay_endpoint(self) -> None:
+        shell = subprocess.run(
+            ["bash", "-c", 'source "$1"; printf "%s" "${BROWSER_RELAY_URL-}"', "--", str(BASHRC)],
+            capture_output=True, text=True, env=self.env, timeout=30, check=False,
+        )
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertEqual(shell.stdout, "")
 
 
 def preview_host(address: str) -> str:
@@ -218,8 +400,8 @@ def is_tunnel(config: dict) -> bool:
     return config["listen"].startswith("127.")
 
 
-class CommittedForwardPairs(unittest.TestCase):
-    """Each devbox config and its laptop daemon config must name each other."""
+class CommittedLegacyForwardPairs(unittest.TestCase):
+    """The retained legacy pairs remain internally consistent until step 4."""
 
     def pairs(self) -> list[tuple[str, str]]:
         pairs = []
