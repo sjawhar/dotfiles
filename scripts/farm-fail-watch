@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+"""The build farm's failure watch: what killed a farm job, and what the lane should do.
+
+Why this exists, and why it had to change (dispatch://OSSV-175, 2026-11-04):
+
+  Kubernetes reports an ephemeral-storage eviction of a container as `OOMKilled` with exit
+  137, exactly as it reports a memory kill. The watch read the exit code and the memory
+  limit and never looked at the disk peak, so on 2026-11-04 at 21:09Z it told an OSS Verify
+  lane that farm/20261104t210028z-2d717d (spirv-tools/spvtools_binary_parser_fuzzer,
+  oft-check) was OOM-killed at its 8503Mi memory limit and advised at least 1.25 x that.
+  The pod's own numbers: memory peak 1.89 GiB of 8503Mi (22%), disk peak 19.66 GiB of a
+  4Gi ephemeral-storage request (491%), and the kernel's `oom_kill` counter 0. The kill was
+  disk. A lane that followed the advice would have bought memory it did not need and been
+  killed again at the same disk size.
+
+So the rule here is: NEVER name a resource from the exit code. Compare each peak against
+ITS OWN bound -- memory peak against the memory limit, disk peak against the
+ephemeral-storage request -- and name the one that was at its bound. Name both when both
+are near theirs, saying which was closer. When the evidence does not separate them, say so;
+"the kill reason is not distinguishable from these" is a better message than a confident
+wrong one. The advice then follows the named resource, and a disk kill never advises a
+memory raise.
+
+Evidence, in the order it is preferred (each part is optional; the message says what was
+missing):
+  the pod            `kubectl -n <ns> get pod <pod> -o json`: the job container's
+                     terminated reason and exit code, and the container's own memory limit
+                     and ephemeral-storage request. A killed pod is often already gone.
+  result.json        the farm's own record, gs://<bucket>/out/ossv/<run>/result.json:
+                     memory_peak_bytes, disk_peak_bytes, oom_kill, the failed pods.
+  usage.json         the sampler's last sample, beside it, when result.json has no peaks.
+  job.json           gs://<bucket>/in/ossv/<run>/job.json: the unit, the kind, the sizes
+                     the job asked for and `size.mode`, which the measured-size warning
+                     below needs.
+The bucket is the one the farm recorded for the run in $OSSV_N6_DIR/job-buckets/<run>
+(/mnt/nvme/<user>/ossv-n6 by default), else $OSSV_RUNS_BUCKET.
+
+The second defect of that night is another team's (the CI/CD lead, bin/ossv-job-farm): the
+farm's measured sizing keys a size by unit, kind and compute class and NOT by whether the
+job has a build store, so a store-less run of a unit whose history is store-backed is sized
+at that history's disk peak (about 1.6 GiB there) and killed at about 20 GiB. This watch
+does not fix it; where it reports a disk kill of a job whose size came from the index
+(`size.mode=measured`) it adds one line naming the risk and telling the lane to pass
+`--disk` explicitly.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+
+GIB = 1 << 30
+
+# A resource is AT its bound when its peak reaches this share of it. The kernel kills a
+# container AT memory.max, and the kubelet evicts a pod at or past its ephemeral-storage
+# request, so the resource that ended the job reads at or above 1.0 -- but the last sample
+# before a kill is a sample, not the instant of death (the sampler here reads every 15 s),
+# so a peak a little under the bound still counts.
+AT_BOUND = 0.95
+# NEAR its bound: close enough that it cannot be ruled out while the other is at its bound.
+NEAR_BOUND = 0.80
+# The margin a new size gets over the measured peak, matching the farm's own disk rule
+# (max(4Gi, 1.3 x the peak)) and its memory margin.
+MARGIN = 1.3
+# The memory case's other arm: when the largest single process held less than this share of
+# the limit, no single process can be made to fit by a bigger pod -- the job ran too many at
+# once, and serialising is the fix, not memory.
+SERIALISE_SHARE = 0.5
+# The memory case's fallback when the sampler recorded no per-process memory (CURL,
+# 2026-11-04 21:25Z). `cpu_last_cores` at the last sample before the kill, against the job's
+# core count: at or above this share of it, many processes were running when the total
+# reached the limit -- the parallel case. farm/20261104t204327z-bda302 read 29.336 of 31.0
+# cores (95%) with a 56.8 GiB peak at its 56Gi limit: 29 processes of about 2 GiB each.
+PARALLEL_SHARE = 0.7
+# At or below this many cores, the others had finished and one process was alone: the
+# single oversized step, the one shape a bigger pod fixes.
+ALONE_CORES = 1.5
+# The N6 farm's runs bucket, where a run's job.json and result.json live when this machine
+# has no job-buckets record of the run (devbox/sami-devbox-check, N6_BUCKETS).
+RUNS_BUCKET = "gs://theorem-ossv-runs"
+
+
+def gib(value: float | None) -> str:
+    """BYTES as GiB, for a message a person reads."""
+    return "unknown" if value is None else f"{value / GIB:.2f} GiB"
+
+
+def share(peak: float | None, bound: float | None) -> float | None:
+    """PEAK as a share of its own BOUND, or None when either is unknown."""
+    if peak is None or not bound:
+        return None
+    return peak / bound
+
+
+def pct(value: float | None) -> str:
+    return "unknown" if value is None else f"{value:.0%}"
+
+
+def size_bytes(text: str | int | float | None) -> int | None:
+    """A Kubernetes quantity ("8503Mi", "4Gi", "2000000") as bytes."""
+    if text is None:
+        return None
+    if isinstance(text, (int, float)):
+        return int(text)
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([EPTGMK]i?|m)?\s*", str(text))
+    if not match:
+        return None
+    scale = {
+        None: 1, "": 1, "m": 0.001,
+        "K": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9, "T": 10 ** 12, "P": 10 ** 15, "E": 10 ** 18,
+        "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40, "Pi": 1 << 50, "Ei": 1 << 60,
+    }[match.group(2)]
+    return int(float(match.group(1)) * scale)
+
+
+def whole_gib(value: float) -> str:
+    """A size a lane can pass to the farm: whole GiB, rounded up, at least 1Gi."""
+    return f"{max(1, math.ceil(value / GIB))}Gi"
+
+
+def unit_name(label: str | None) -> str | None:
+    """The unit as a lane writes it. The pod label carries `__` where the name has `/`,
+    since a label value may not hold a slash."""
+    return label.replace("__", "/", 1) if label else label
+
+
+def bound_text(raw, byte_count: float | None) -> str:
+    """A bound as the lane passed it and as a size to compare: "8503Mi (8.30 GiB)"."""
+    if byte_count is None:
+        return "unknown"
+    return f"{raw} ({gib(byte_count)})" if raw else gib(byte_count)
+
+
+# --- the evidence -------------------------------------------------------------------------
+
+
+def number(value) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def pod_evidence(pod: dict | None) -> dict:
+    """The job container's end and its own bounds, from a pod object. {} for no pod."""
+    if not pod:
+        return {}
+    found: dict = {}
+    for status in (pod.get("status") or {}).get("containerStatuses") or []:
+        if status.get("name") != "job":
+            continue
+        terminated = (status.get("state") or {}).get("terminated") or {}
+        found["reason"] = terminated.get("reason")
+        found["exit_code"] = terminated.get("exitCode")
+        found["finished_at"] = terminated.get("finishedAt")
+    for container in (pod.get("spec") or {}).get("containers") or []:
+        if container.get("name") != "job":
+            continue
+        resources = container.get("resources") or {}
+        limits = resources.get("limits") or {}
+        requests = resources.get("requests") or {}
+        found["memory_limit_text"] = limits.get("memory") or requests.get("memory")
+        found["memory_limit_bytes"] = size_bytes(found["memory_limit_text"])
+        # Ephemeral storage is evicted against the REQUEST, which is what the pod is
+        # guaranteed; a limit above it does not keep the pod alive on a squeezed node.
+        found["disk_request_text"] = (
+            requests.get("ephemeral-storage") or limits.get("ephemeral-storage"))
+        found["disk_request_bytes"] = size_bytes(found["disk_request_text"])
+    reason = (pod.get("status") or {}).get("reason")
+    if reason:
+        found["pod_reason"] = reason
+    message = (pod.get("status") or {}).get("message")
+    if message:
+        found["pod_message"] = message
+    return {key: value for key, value in found.items() if value is not None}
+
+
+def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
+    """Everything the verdict is allowed to read, in one dict.
+
+    The pod is preferred for the bounds and the end, because it is what the kubelet acted
+    on; job.json's sizes are what the farm ASKED for, which an admission policy may have
+    changed. The peaks come from the farm's record, which is the only place they exist once
+    the pod is gone.
+    """
+    job = job or {}
+    result = result or {}
+    from_pod = pod_evidence(pod)
+    failed = (result.get("failed_pods") or [{}])[-1]
+    terminated = ((failed.get("job") or {}).get("terminated")) or {}
+    found = {
+        "run": job.get("id") or result.get("run"),
+        "unit": unit_name((job.get("labels") or {}).get("ossv-unit")),
+        "kind": (job.get("labels") or {}).get("ossv-kind"),
+        "pod": from_pod.get("name") or failed.get("name"),
+        "owner": (job.get("omp_session") or {}).get("id") or (job.get("labels") or {}).get("ossv-owner"),
+        "reason": from_pod.get("reason") or terminated.get("reason"),
+        "exit_code": from_pod.get("exit_code", terminated.get("exitCode")),
+        "finished_at": from_pod.get("finished_at") or terminated.get("finishedAt") or result.get("finished"),
+        "pod_reason": from_pod.get("pod_reason") or failed.get("reason"),
+        "pod_message": from_pod.get("pod_message") or failed.get("message"),
+        "memory_limit_bytes": from_pod.get("memory_limit_bytes", size_bytes(job.get("memory"))),
+        "memory_limit_text": from_pod.get("memory_limit_text") or job.get("memory"),
+        "disk_request_bytes": from_pod.get("disk_request_bytes", size_bytes(job.get("disk"))),
+        "disk_request_text": from_pod.get("disk_request_text") or job.get("disk"),
+        "memory_peak_bytes": number(result.get("memory_peak_bytes")),
+        "memory_peak_kind": result.get("memory_peak_kind"),
+        "disk_peak_bytes": number(result.get("disk_peak_bytes")),
+        "disk_peak_kind": result.get("disk_peak_kind"),
+        "oom_kill": number(result.get("oom_kill")) or 0,
+        # The sampler records this only when it saw the processes; absent for a job that
+        # died between two samples, as farm/20261104t210028z-2d717d did (23 s of life).
+        "largest_process_bytes": number(
+            result.get("largest_process_bytes") or result.get("max_rss_bytes")),
+        # The last sample's cores, the stand-in for the per-process test when the log has
+        # no per-process memory in it (CURL, 2026-11-04 21:25Z).
+        "cpu_last_cores": number(result.get("cpu_last_cores")),
+        "cpu_peak": number(result.get("cpu_peak")),
+        "cpu_limit_cores": number(result.get("cpu_limit_cores")),
+        "cpu_limit": number(job.get("cpu_limit")),
+        "cpu": number(job.get("cpu")),
+        "size_mode": (job.get("size") or {}).get("mode"),
+        "size_index": (job.get("size") or {}).get("index"),
+        "store": job.get("store"),
+        "recent_disk_peaks": [number(peak.get("disk_peak_bytes"))
+                              for peak in (job.get("size") or {}).get("recent_peaks") or []],
+    }
+    return found
+
+
+# --- the verdict --------------------------------------------------------------------------
+
+
+def verdict(found: dict) -> dict:
+    """Which resource was at its bound: "memory", "disk", "both" or "unknown".
+
+    Never the exit code: an ephemeral-storage eviction and a memory kill are both
+    `OOMKilled`, exit 137. Each peak is compared with its own bound, and the kernel's
+    `oom_kill` counter settles a memory kill on its own, since nothing but the memcg OOM
+    killer raises it.
+    """
+    memory = share(found.get("memory_peak_bytes"), found.get("memory_limit_bytes"))
+    disk = share(found.get("disk_peak_bytes"), found.get("disk_request_bytes"))
+    kernel_oom = (found.get("oom_kill") or 0) > 0
+    at_memory = kernel_oom or (memory is not None and memory >= AT_BOUND)
+    at_disk = disk is not None and disk >= AT_BOUND
+    near_memory = at_memory or (memory is not None and memory >= NEAR_BOUND)
+    near_disk = at_disk or (disk is not None and disk >= NEAR_BOUND)
+    state = {"memory_share": memory, "disk_share": disk, "kernel_oom": kernel_oom,
+             "memory_known": memory is not None, "disk_known": disk is not None}
+
+    if near_memory and near_disk:
+        closer = "memory" if kernel_oom or (memory or 0) >= (disk or 0) else "disk"
+        return dict(state, resource="both", closer=closer, why=(
+            "both were at or near their own bound"
+            + (", and the kernel's oom_kill counter names memory" if kernel_oom else "")))
+    if near_memory:
+        return dict(state, resource="memory", closer="memory", why=(
+            f"the kernel's oom_kill counter is {int(found.get('oom_kill') or 0)}" if kernel_oom
+            else "the memory peak reached its limit while the disk peak did not reach its request"))
+    if near_disk:
+        return dict(state, resource="disk", closer="disk", why=(
+            "the disk peak passed its ephemeral-storage request while the memory peak stayed"
+            " well under its limit"))
+    return dict(state, resource="unknown", closer=None, why=(
+        "neither peak reached its own bound"
+        if memory is not None and disk is not None
+        else "a peak or a bound is missing, so the two cannot be compared"))
+
+
+def memory_advice(found: dict) -> str:
+    """The memory case: serialise when the job ran many processes at once, size at 1.3 x the
+    measured peak when one process was alone and simply too big.
+
+    The first test is the per-process one: the largest single process under half the limit
+    means no bigger pod helps. The sampler records that only when it saw the processes, and
+    a job that dies between two samples leaves none -- the log of
+    farm/20261104t204327z-bda302 (killed at 56Gi, 21:22:12Z) was ten lines with no
+    per-process memory in it at all. So when it is missing, `cpu_last_cores` at the last
+    sample stands in (CURL, 2026-11-04 21:25Z): near the job's core count, many processes
+    were running when the total reached the limit -- the parallel case, whose answer is
+    fewer at once at the same limit; near 1, the others had finished and one process was
+    alone -- the single oversized step, and only then is a bigger pod right. That is weaker
+    evidence than the per-process samples, and the wording says so.
+    """
+    peak = found.get("memory_peak_bytes")
+    limit = found.get("memory_limit_bytes")
+    largest = found.get("largest_process_bytes")
+    cores = found.get("cpu_last_cores")
+    core_count = found.get("cpu_limit_cores") or found.get("cpu_limit") or found.get("cpu")
+    sized = (f"--memory {whole_gib(MARGIN * peak)} (1.3 x the {gib(peak)} peak)"
+             if peak is not None else None)
+
+    if largest is not None and limit:
+        if largest < SERIALISE_SHARE * limit:
+            return (f"SERIALISE: the largest single process held {gib(largest)}, under half the"
+                    f" {gib(limit)} limit, so the job ran too many at once and a bigger pod buys"
+                    " nothing. Run the steps one at a time (fewer jobs, -j1).")
+        return (f"RAISE MEMORY to {sized}."
+                if sized else "RAISE MEMORY: no memory peak was recorded, so resubmit once"
+                " with the sampler's record kept and size from that peak at 1.3 x.")
+
+    weaker = ("no per-process samples in this job's log; from cpu_last_cores"
+              f" {cores:.2f} of {float(core_count):.0f} cores at the last sample"
+              if cores is not None and core_count else None)
+    if weaker and cores >= PARALLEL_SHARE * float(core_count):
+        return (f"SERIALISE, probably: {weaker}, this looks like the parallel case -- many"
+                " processes running when the total reached the limit. The answer is fewer at"
+                " once at the same limit (-j fewer), not a bigger pod. Confirm from the next"
+                " run's per-process samples before buying memory.")
+    if weaker and cores <= ALONE_CORES:
+        return (f"RAISE MEMORY to {sized}. {weaker}, this looks like one process alone -- the"
+                " single oversized step, which only a bigger pod fixes."
+                if sized else f"RAISE MEMORY: {weaker}, this looks like one process alone, but"
+                " no memory peak was recorded to size from; resubmit once with the sampler's"
+                " record kept.")
+    if sized is None:
+        return ("RAISE MEMORY: no memory peak was recorded, so resubmit once with the"
+                " sampler's record kept and size from that peak at 1.3 x.")
+    advice = f"RAISE MEMORY to {sized}."
+    if weaker:
+        advice += (f" {weaker}, which is neither the parallel case nor one process alone, so"
+                   " the serialise test is unsettled; keep the next run's per-process samples.")
+    else:
+        advice += (" The largest single process was not recorded and the last sample has no"
+                   " cpu_last_cores, so the serialise test could not be applied.")
+    return advice
+
+
+def disk_advice(found: dict) -> str:
+    peak = found.get("disk_peak_bytes")
+    if peak is None:
+        return ("RAISE DISK: no disk peak was recorded, so resubmit once with the sampler's"
+                " record kept and size from that peak at 1.3 x.")
+    return (f"RAISE DISK to --disk {whole_gib(MARGIN * peak)} (1.3 x the {gib(peak)} peak)."
+            " Do not raise memory: it was not the bound.")
+
+
+def store_warning(found: dict) -> str | None:
+    """The other team's defect, named where it bites: a disk kill of a job the index sized.
+
+    The farm's measured size is keyed by unit, kind and compute class and not by whether the
+    job has a build store, so a store-less run of a unit whose history is store-backed gets
+    that history's disk peak and is killed. Fixing it is the CI/CD lead's (bin/ossv-job-farm).
+    """
+    if found.get("size_mode") != "measured":
+        return None
+    peaks = [peak for peak in found.get("recent_disk_peaks") or [] if peak]
+    history = f" Its recent runs' disk peaks are about {gib(max(peaks))}." if peaks else ""
+    return ("WARNING: this job's size came from the index (size.mode=measured). The farm keys a"
+            " measured size by unit, kind and compute class and NOT by whether the job has a"
+            f" build store, so a store-less run of a store-backed unit is sized from"
+            f" store-backed history and killed.{history} Pass --disk explicitly until the farm's"
+            " sizing is fixed (the CI/CD lead's, bin/ossv-job-farm).")
+
+
+def message(found: dict, call: dict | None = None) -> str:
+    """The whole message as the lane receives it."""
+    call = call or verdict(found)
+    memory = (f"memory peak {gib(found.get('memory_peak_bytes'))} of its"
+              f" {bound_text(found.get('memory_limit_text'), found.get('memory_limit_bytes'))}"
+              f" limit ({pct(call['memory_share'])})")
+    disk = (f"disk peak {gib(found.get('disk_peak_bytes'))} of its"
+            f" {bound_text(found.get('disk_request_text'), found.get('disk_request_bytes'))}"
+            f" ephemeral-storage request ({pct(call['disk_share'])})")
+    head = (f"FARM JOB KILLED: {found.get('run')}"
+            f" ({found.get('unit')}, {found.get('kind')})"
+            f" at {found.get('finished_at')}, {found.get('reason')}, exit {found.get('exit_code')}.")
+    lines = [head]
+
+    if call["resource"] == "memory":
+        lines.append(f"MEMORY was at its bound: {memory}; {disk}. ({call['why']}.)")
+        lines.append(memory_advice(found))
+    elif call["resource"] == "disk":
+        lines.append(f"DISK, not memory: {disk}; {memory}."
+                     " Kubernetes reports an ephemeral-storage eviction as OOMKilled, exit 137,"
+                     " exactly as it reports a memory kill, so the exit code names neither.")
+        lines.append(disk_advice(found))
+    elif call["resource"] == "both":
+        lines.append(f"BOTH were at their bound: {memory}; {disk}."
+                     f" {call['closer'].upper()} was closer to its own bound.")
+        lines.append(memory_advice(found))
+        lines.append(disk_advice(found).replace(" Do not raise memory: it was not the bound.", ""))
+    else:
+        lines.append(f"NOT DISTINGUISHABLE: killed at exit {found.get('exit_code')}"
+                     f" ({found.get('reason')}); {memory}; {disk};"
+                     " the kill reason is not distinguishable from these"
+                     f" ({call['why']}).")
+        lines.append("DO NOT raise either size blindly. Resubmit the job once with the sampler's"
+                     " record kept and read the peak that moves; if it is gone for good, ask the"
+                     " farm for this run's result.json.")
+
+    if call["resource"] in ("disk", "both"):
+        warning = store_warning(found)
+        if warning:
+            lines.append(warning)
+    return "\n".join(lines)
+
+
+# --- reading a real job ---------------------------------------------------------------------
+
+
+def run_text(args: list[str], timeout: int = 90) -> str | None:
+    try:
+        done = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 and done.stdout.strip() else None
+
+
+def bucket_roots() -> list[str]:
+    """Where the farm's run index may be on this machine. A box's own user is not the host
+    user whose /mnt/nvme the farm writes under (ubuntu in a box, sami on the host), so the
+    directories are looked for rather than built from $USER."""
+    named = os.environ.get("OSSV_N6_DIR")
+    if named:
+        return [named]
+    return sorted(path for path in glob.glob("/mnt/nvme/*/ossv-n6") if os.path.isdir(path))
+
+
+def bucket_of(run: str) -> str | None:
+    """The bucket the farm recorded for this run, else $OSSV_RUNS_BUCKET, else the farm's
+    own bucket -- the one devbox/sami-devbox-check names as the N6 runs bucket."""
+    for root in bucket_roots():
+        try:
+            with open(os.path.join(root, "job-buckets", run), encoding="utf-8") as handle:
+                recorded = handle.read().strip()
+        except OSError:
+            continue
+        if recorded:
+            return recorded
+    return os.environ.get("OSSV_RUNS_BUCKET") or RUNS_BUCKET
+
+
+def read_object(bucket: str, path: str) -> dict | None:
+    text = run_text(["gcloud", "storage", "cat", f"{bucket}/{path}"])
+    try:
+        return json.loads(text) if text else None
+    except json.JSONDecodeError:
+        return None
+
+
+def read_pod(namespace: str, pod: str, context: str) -> dict | None:
+    text = run_text(["kubectl", "--context", context, "-n", namespace, "get", "pod", pod, "-o", "json"])
+    try:
+        return json.loads(text) if text else None
+    except json.JSONDecodeError:
+        return None
+
+
+def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
+    """The evidence for a job id ("farm/<run>" or "<run>"), and what could not be read."""
+    run = run_id.split("/", 1)[1] if "/" in run_id else run_id
+    missing: list[str] = []
+    bucket = bucket_of(run)
+    job = result = None
+    if bucket:
+        job = read_object(bucket, f"in/ossv/{run}/job.json")
+        result = read_object(bucket, f"out/ossv/{run}/result.json")
+        if result is None:
+            result = read_object(bucket, f"out/ossv/{run}/usage.json")
+            if result is None:
+                missing.append("result.json and usage.json")
+        if job is None:
+            missing.append("job.json")
+    else:
+        missing.append("the run's bucket (no job-buckets record, no OSSV_RUNS_BUCKET)")
+    pod = None
+    names = [pod.get("name") for pod in ((result or {}).get("failed_pods") or []) if pod.get("name")]
+    namespace = (job or {}).get("namespace") or "builds-ossv"
+    if names:
+        pod = read_pod(namespace, names[-1], context)
+        if pod is None:
+            missing.append(f"the pod {names[-1]} (gone from the cluster)")
+    else:
+        missing.append("the pod (no failed pod recorded)")
+    found = evidence(job, result, pod)
+    if not found.get("pod") and names:
+        found["pod"] = names[-1]
+    return found, missing
+
+
+def send(owner: str, text: str) -> bool:
+    """One Envoy message to the lane that owns the job."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    done = subprocess.run([os.path.join(here, "envoy"), "send", owner, text],
+                          capture_output=True, text=True, timeout=60)
+    if done.returncode != 0:
+        print(f"farm-fail-watch: envoy send to {owner} failed: {done.stderr.strip()}", file=sys.stderr)
+    return done.returncode == 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Say what killed a farm job, and what its lane should do about it.")
+    parser.add_argument("job", help="the job id, farm/<run> or <run>")
+    parser.add_argument("--context", default="gke_theorem-agent-infra_us-west1_dispatch",
+                        help="the kubectl context the farm's namespace is in")
+    parser.add_argument("--send", action="store_true",
+                        help="send the message to the job's owning session over Envoy"
+                             " (without it, the message is printed and nobody is told)")
+    parser.add_argument("--to", help="send to this session id instead of the job's owner")
+    parser.add_argument("--json", action="store_true", help="print the evidence and the verdict")
+    options = parser.parse_args(argv)
+
+    found, missing = collect(options.job, options.context)
+    call = verdict(found)
+    text = message(found, call)
+    if missing:
+        text += "\nCould not be read: " + "; ".join(missing) + "."
+    if options.json:
+        print(json.dumps({"evidence": found, "verdict": call, "missing": missing,
+                          "message": text}, indent=1, sort_keys=True))
+        return 0
+    print(text)
+    if options.send:
+        owner = options.to or found.get("owner")
+        if not owner:
+            print("farm-fail-watch: no owner session to send to", file=sys.stderr)
+            return 1
+        return 0 if send(owner, text) else 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
