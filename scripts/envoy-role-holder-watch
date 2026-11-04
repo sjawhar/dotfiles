@@ -14,8 +14,9 @@ What one run does, mechanically, with no model call:
 
   1. GET /v1/sessions  -- every session Envoy lists as live, with its roles, host, dir and the
      timestamp of its last heartbeat.
-  2. For each role whose holder session is on THIS machine (now, or remembered from an earlier
-     run in the state file), establish what can be established about that holder from four
+  2. For each remembered role, first check the holder's current host in the session list or
+     the point registry. Skip a holder registered on another host, regardless of heartbeat age.
+     For a local holder, establish what can be established from four
      sources: an `omp` process that names the session on its command line, in the file name of
      an open transcript, or in that transcript's own header; any process at all holding the
      session's transcript open; how long ago that transcript was last written, in the session
@@ -26,6 +27,9 @@ What one run does, mechanically, with no model call:
      the lane works -- see DEFAULT_DIR_GRACE -- but it is the only thing that can end an alert
      about a holder none of the four can ever see, which on 2026-10-30 was four alerts in 33
      minutes on a role claimed by a process that is not an omp session.
+     Before alerting on a holder absent from the registry, check the other developer hosts
+     with `ssh <host> omp-session-live <id>`, under a short timeout. Each alert retains the
+     checked hosts and the approximate time of the next reading.
   3. The watch calls no role route at all. GET /v1/roles/<role> is how Envoy releases a claim
      whose holder has left the session bucket (role_holder.go resolveLiveRoleHolder, still so on
      origin/main at d157fc868, checked 2026-10-29 09:50Z), and that holder is exactly the one
@@ -150,6 +154,10 @@ DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
 # The procfs every process read goes through. A module constant so tests can point it at a tree.
 PROC_ROOT = Path("/proc")
+# The developer hosts that can run a moved holder when its Envoy registration has expired.
+DEFAULT_CHECK_HOSTS = ("sami-devbox", "sami-rocqperf", "sami-leanperf")
+REMOTE_SECONDS = 3.0
+
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 TEAM_TOPIC = "notifications.team."
@@ -635,14 +643,14 @@ def write_report(options: argparse.Namespace, kind: str, text: str, now: float) 
     return path
 
 
-def short_message(report: Path, *parts: str) -> str:
+def short_message(report: Path, *parts: str, required: tuple[str, ...] = ()) -> str:
     """At most MESSAGE_LIMIT characters: `parts` in order while they fit, then the report path.
 
     The first part is the decision -- what, where, how long, who acts -- and is always there,
     cut if it must be; every later part is kept whole or left out, so a long working directory
     drops a closing sentence rather than leave half of one.
     """
-    tail = f" Full report: {report}"
+    tail = "".join("\n" + line for line in required) + f"\nFull report: {report}"
     room = MESSAGE_LIMIT - len(tail)
     head = ""
     for index, part in enumerate(" ".join(part.split()) for part in parts if part):
@@ -654,10 +662,19 @@ def short_message(report: Path, *parts: str) -> str:
     return guard_verdict(head + tail)
 
 
-def compose(options: argparse.Namespace, kind: str, full: str, now: float, *parts: str) -> tuple[str, Path]:
-    """Write `full` to its report and return (the short message that names it, the report)."""
+def next_reading(now: float) -> str:
+    return f"Next reading: {iso(max(now, time.time()) + 30)} (about 30 s). Please wait one cycle before escalating."
+
+
+def compose(
+    options: argparse.Namespace, kind: str, full: str, now: float, *parts: str,
+    required: tuple[str, ...] = (),
+) -> tuple[str, Path]:
+    """Keep the next reading and checked hosts even when the decision must be shortened."""
+    required = (*required, next_reading(now))
+    full += "\n" + "\n".join(required)
     report = write_report(options, kind, guard_verdict(full), now)
-    return short_message(report, *parts), report
+    return short_message(report, *parts, required=required), report
 
 
 # --------------------------------------------------------------------------- Envoy transport
@@ -762,6 +779,65 @@ class Envoy:
             log(f"  publish to {topic} failed: {status} {body}")
         return status == 200
 
+
+# --------------------------------------------------------------------------- host ownership
+
+
+def short_host(host: str) -> str:
+    return host.split(".")[0]
+
+
+def session_host(session: dict) -> str:
+    # machine_id is usually the listener (envoy-hub), not the session's physical host.
+    return short_host(session.get("host") or session.get("machine_id") or "")
+
+
+def local_hostnames(host: str, sessions: list[dict]) -> set[str]:
+    """The host and its boxes, including boxes started before host registration was fixed."""
+    names = {short_host(host)}
+    if any(session_host(session).startswith("agentbox-") for session in sessions):
+        try:
+            done = subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}"], capture_output=True,
+                text=True, timeout=REMOTE_SECONDS, stdin=subprocess.DEVNULL,
+            )
+            if done.returncode == 0:
+                names.update(short_host(name) for name in done.stdout.splitlines() if name)
+        except (OSError, subprocess.SubprocessError):
+            pass  # An unknown box is not judged here. Its next registration can identify it.
+    return names
+
+
+def remote_presence(holder: str, host: str, hosts: list[str]) -> tuple[str, dict[str, str]]:
+    """A live host, if found, and each SSH result. An SSH failure is not an absence."""
+    checked: dict[str, str] = {}
+    for target in dict.fromkeys(hosts):
+        if short_host(target) == short_host(host):
+            continue
+        check_time("the remote holder checks")
+        try:
+            done = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", target,
+                 "omp-session-live", shlex.quote(holder)],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                timeout=min(REMOTE_SECONDS, max(0.1, _RUN["deadline"] - time.time())),
+            )
+            if done.returncode == 0:
+                checked[target] = "live omp"
+                return target, checked
+            checked[target] = "no live omp" if done.returncode == 1 else f"SSH/check failed ({done.returncode})"
+        except subprocess.TimeoutExpired:
+            checked[target] = "timed out"
+        except (OSError, subprocess.SubprocessError) as error:
+            checked[target] = f"SSH/check failed ({type(error).__name__})"
+    return "", checked
+
+
+def checked_hosts(host: str, remote: dict[str, str]) -> str:
+    return "Hosts checked: " + ", ".join(
+        [short_host(host)] + [name if result == "no live omp" else f"{name} ({result})"
+                              for name, result in remote.items()]
+    ) + "."
 
 # --------------------------------------------------------------- this machine's omp processes
 
@@ -1593,6 +1669,7 @@ def holder_evidence(
     dir_grace: float = DEFAULT_DIR_GRACE,
     walk: bool = True,
     deep: bool = True,
+    registry_result: tuple[int, dict] | None = None,
 ) -> dict:
     """Every source this watch has on one holder, and what each one answered.
 
@@ -1667,7 +1744,7 @@ def holder_evidence(
               " sighting"))
         )
     else:
-        status, body = envoy.registry(holder)
+        status, body = registry_result if registry_result is not None else envoy.registry(holder)
         if status == 404:
             registry_state = "absent"
             sources.append(
@@ -2155,6 +2232,11 @@ def clear_text(
         f" The unseen holder was {holder}; the incident opened at {iso(opened)}, cleared at"
         f" {iso(now)}, and lasted {human(now - opened)}."
     )
+    if kind == "elsewhere":
+        return guard_verdict(
+            f"ENVOY ROLE HOLDER OUTSIDE THIS HOST: closed this host's alert on {role}. {cause}."
+            " A remote registration does not establish that the holder is alive." + tail
+        )
     if kind == "quiet":
         lines = [
             f"ENVOY ROLE HOLDER UNSEEN, NOT ALERTING AGAIN: role {role}'s holder is still unseen"
@@ -2210,6 +2292,12 @@ def clear_head(role: str, incident: dict, holder: str, cause: str, now: float, k
     """The decision of a clear, in order of what a reader needs: the full text is in the report."""
     opened = incident.get("opened_at") or now
     lasted = f"The incident opened {iso(opened)} and lasted {human(now - opened)}."
+    if kind == "elsewhere":
+        return [
+            f"ENVOY ROLE HOLDER OUTSIDE THIS HOST: closed this host's alert on {role}. {cause}.",
+            "A remote registration does not establish that the holder is alive.",
+            lasted,
+        ]
     if kind == "quiet":
         return [
             f"ENVOY ROLE HOLDER UNSEEN, NOT ALERTING AGAIN: role {role}'s holder {holder} is still"
@@ -3228,6 +3316,7 @@ def check_roles(
     options: argparse.Namespace, state: State, envoy: Envoy, sessions: list[dict],
     live: dict[str, dict], held: dict[str, int], roles_state: dict, incidents: dict,
     suppressed: dict, pane_of: dict[str, str], host: str, started: float,
+    local_names: set[str] | None = None,
 ) -> tuple[int, int]:
     """(alerts, clears) for every Envoy role whose holder session is on this machine.
 
@@ -3236,12 +3325,14 @@ def check_roles(
     starts with.
     """
     alerts = clears = 0
+    local_names = local_names or {short_host(host)}
+    remote_results: dict[str, tuple[str, dict[str, str]]] = {}
 
     for role in sorted(roles_state, key=lambda name: ((roles_state[name] or {}).get("checked_at") or 0, name)):
         check_time("the role checks")
         record = roles_state[role]
         holder = record.get("holder")
-        if not holder or record.get("host") != host:
+        if not holder or short_host(record.get("host") or "") not in local_names:
             continue
         record["checked_at"] = started
         key = f"{role}|{holder}"
@@ -3281,6 +3372,24 @@ def check_roles(
             state.commit(options)
             continue
 
+        # A remembered host is not ownership: the same session id can move to another host.
+        entry = live.get(holder)
+        registry_result = None
+        if entry is None:
+            registry_result = envoy.registry(holder)
+            if registry_result[0] == 200:
+                entry = registry_result[1]
+                live[holder] = entry
+        where = session_host(entry) if entry else ""
+        if where and where not in local_names:
+            cause = f"holder registered on {where}. This host skips it. Its host's watch judges it"
+            if incident and send_clear(envoy, options, role, incident, holder, cause, started, "elsewhere"):
+                clears += 1
+            log(f"{role}: skipping {holder}: {cause}")
+            incidents.pop(key, None)
+            roles_state.pop(role, None)
+            state.commit(options)
+            continue
         # A holder the last walk missed is walked for again only after TRANSCRIPT_REWALK.
         rewalk = started - (record.get("transcript_missed_at") or 0) >= TRANSCRIPT_REWALK
         # An incident that is finished -- a recorded normal exit, or an alert quieted on the
@@ -3294,6 +3403,7 @@ def check_roles(
             evidence = holder_evidence(
                 envoy, holder, held, live, options.write_grace, started,
                 record.get("dir") or "", options.dir_grace, rewalk, not finished,
+                registry_result,
             )
         except StepCut as cut:
             # A source this role needed was not read: nothing is decided for it -- no alert, no
@@ -3497,6 +3607,24 @@ def check_roles(
             state.commit(options)
             continue
 
+        remote = {}
+        if evidence["registry"] == "absent":
+            if holder not in remote_results:
+                remote_results[holder] = remote_presence(
+                    holder, host, getattr(options, "check_hosts", DEFAULT_CHECK_HOSTS),
+                )
+            found_host, remote = remote_results[holder]
+            if found_host:
+                cause = f"omp-session-live found the holder on {found_host}; do not resume it here"
+                if send_clear(envoy, options, role, incident, holder, cause, started):
+                    clears += 1
+                log(f"{role}: {cause}")
+                incidents.pop(key, None)
+                state.commit(options)
+                continue
+        incident["hosts_checked"] = checked_hosts(host, remote)
+        incident["remote_checks"] = remote
+
         if not incident.get("alerted_at"):
             incident["transcript"] = evidence["transcript"]
             incident["swept"] = evidence["swept"]
@@ -3517,10 +3645,12 @@ def check_roles(
             full = alert_text(
                 role, incident, holder, started, kind, suppression_lines(started, suppressed),
             )
+            full += "\n" + "\n".join(f"{name}: {result}" for name, result in remote.items())
             text, report = compose(
                 options, f"role-{role}-alert", full, started,
                 *alert_head(role, incident, holder, started, kind),
                 *suppression_note(started),
+                required=(incident["hosts_checked"],),
             )
             # On disk before a single message leaves: a resent first alert is worse than a late one.
             incident["alerted_at"] = started
@@ -3538,6 +3668,7 @@ def check_roles(
                     f" ({holder}) since {iso(incident['opened_at'])}, so a message to"
                     f" notifications.role.{role} may reach nobody. This watch cannot see that"
                     " session; it does NOT establish that it stopped.",
+                    required=(incident["hosts_checked"], next_reading(started)),
                 )
                 if not options.dry_run:
                     envoy.publish(topic, headline)
@@ -3569,13 +3700,13 @@ def check_roles(
                 " No further alert goes out for this holder unless a source sees it again or its"
                 " transcript is found to end in a normal exit. You own looking at the pane."
             )
-            head = alert_head(role, incident, holder, started, kind)
             text, report = compose(
                 options, f"role-{role}-repeat", full, started,
-                head[0],
-                f"First alerted at {first_alert}; this is the only repeat, and you own looking"
-                " at the pane.",
-                *head[1:],
+                f"ENVOY ROLE HOLDER UNSEEN: {role} ({holder}). REPEAT of the incident first seen"
+                f" at {first_seen}. First alerted at {first_alert}. This is"
+                f" {human(started - incident['alerted_at'])} after its first alert, and the only"
+                " repeat. This does not prove the holder stopped.",
+                required=(incident["hosts_checked"],),
             )
             incident["escalated_at"] = started
             log_change(state, logged, f"escalated:{started}")
@@ -3664,7 +3795,7 @@ def run_period(options: argparse.Namespace) -> int:
     # and flushed to disk BEFORE any message goes out, so a crash between the two can never
     # resend a first alert.
     incidents: dict = state.data.setdefault("incidents", {})
-    host = socket.gethostname()
+    host = os.environ.get("AGENTBOX_HOST") or socket.gethostname()
 
     try:
         sessions = envoy.sessions()
@@ -3675,10 +3806,11 @@ def run_period(options: argparse.Namespace) -> int:
     live = {
         session["session_id"]: session for session in sessions if session.get("session_id")
     }
+    local_names = local_hostnames(host, sessions)
     local = [
         session
         for session in sessions
-        if (session.get("host") or session.get("machine_id")) == host and session.get("roles")
+        if session_host(session) in local_names and session.get("roles")
     ]
     # Every step from here can run out of the run's budget, and each raises OutOfTime between
     # two units of work rather than inside one. A half-read process table would make live
@@ -3737,7 +3869,7 @@ def run_period(options: argparse.Namespace) -> int:
             phase("panes")
             alerts, clears = check_roles(
                 options, state, envoy, sessions, live, held, roles_state, incidents, suppressed,
-                pane_of, host, started,
+                pane_of, host, started, local_names,
             )
         except OutOfTime as where:
             stopped = str(where)
@@ -3820,6 +3952,10 @@ def main() -> int:
         ),
     )
     parser.add_argument("--http-timeout", type=float, default=8.0)
+    parser.add_argument(
+        "--check-hosts", nargs="+", default=list(DEFAULT_CHECK_HOSTS), metavar="HOST",
+        help="SSH hosts checked before an alert when Envoy has no holder registration",
+    )
     parser.add_argument("--dry-run", action="store_true", help="decide and log, send nothing")
     parser.add_argument("--write-state", action="store_true", help="with --dry-run, still write the state file")
     parser.add_argument("--print-alert", action="store_true", help="print the alert text it would send")

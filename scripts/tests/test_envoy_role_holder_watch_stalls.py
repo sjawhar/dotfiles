@@ -132,6 +132,7 @@ class StalledRead(unittest.TestCase):
             state=self.state, dry_run=True, write_state=True, print_alert=False, http_timeout=1.0,
             grace=60.0, write_grace=120.0, dir_grace=300.0, escalate=600.0, pane_grace=180.0,
             move_grace=1800.0, budget=budget,
+            check_hosts=(),
         )
         self.logs.clear()
         began = time.monotonic()

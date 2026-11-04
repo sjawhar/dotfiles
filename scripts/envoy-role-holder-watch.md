@@ -51,9 +51,13 @@ Three defects, all fixed here:
 
 One run, with no model call:
 
-1. `GET /v1/sessions` — every session Envoy lists live, with its roles, host, dir and the
-   timestamp of its last heartbeat. Roles whose holder is on this machine go into the state file,
-   so a holder that later drops out of the registry is still watched.
+1. `GET /v1/sessions` gives each holder's host. The watch compares short hostnames, so a fully qualified hostname also matches.
+   A box that registers under its physical host belongs to that host's watch.
+   For a box that registers under its container name, `docker ps` identifies which host owns it, with a 3 s limit.
+   Roles on this host enter the state file, so the watch remembers a holder after its registration expires.
+   A current registration on another host overrides the remembered host, even when its heartbeat is stale.
+   The watch skips that holder and removes its local incident. It clears any alert it sent before the move.
+   When the session list omits the holder, the watch also reads `GET /v1/registry/<id>` before it decides ownership.
 2. Four sources on each holder, each of which can say *found* and none of which can say *gone*:
 
    | Source | What it reads |
@@ -71,11 +75,14 @@ One run, with no model call:
    it is pure the watch will leave it out, because its answer adds nothing to the verdict — the
    holder of a claim is the session the watch has already failed to find — and what that costs
    is below.
-4. **A holder is only ever UNSEEN, never dead.** A role alerts when **every** source has been
-   silent for the 60 s grace. One silent source — most often the registry, which drops live
-   sessions on a loaded box inside its 300 s TTL — is logged and never alerts, never opens an
-   incident and never asks anyone to restart anything. Every message says which of the two it
-   established, and `guard_verdict` refuses to send one that claims the holder is dead.
+4. **A holder is only ever unseen, never dead.** A role alerts when every local source stays silent for the 60 s grace.
+   If the registry has no holder record, the watch first runs `ssh <host> omp-session-live <id>` on the other developer hosts.
+   The default list is `sami-devbox`, `sami-rocqperf`, and `sami-leanperf`, excluding this host.
+   `--check-hosts HOST…` replaces that list for a different fleet.
+   Each SSH call uses non-interactive authentication, a 2 s connection limit, and a 3 s total limit within the run budget.
+   A live remote omp prevents the alert. A timeout or SSH error stays explicitly unknown, not absent.
+   Alerts list each host checked. The report gives each SSH result, including failures.
+   One silent local source does not open an incident. `guard_verdict` refuses an alert that calls a holder dead.
 
 Timing: last sighting + 60 s grace + at most one 30 s period, so about a minute.
 
@@ -177,9 +184,7 @@ does not make the next one repeat everything.
 
 Expected volume after, at this box's ~120 runs an hour: **about 160 lines an hour** from the
 watch (1.3 a run measured over 24 runs) against about 3,700, plus systemd's own three lines a
-run, which this file does not control. Messages are unchanged in number — the review of
-2026-11-03 classed all of this watcher's alerts in 48 h as true positives, and nothing here
-changes when one is sent — and each is at most 600 characters instead of up to 2,404.
+run, which this file does not control. Each message is at most 600 characters.
 
 ## What these bounds give up
 
@@ -480,12 +485,11 @@ Agent sessions only, never a person:
   recently messaged a role, so this is the closest cheap substitute; when the dead session had no
   team topic, the alert says that the peers could not be named.
 
-Every message is at most **600 characters** and ends with `Full report: <path>`. The message is
-the decision — which role, which holder, how long, what is and is not established, and the two
-steps that cost nothing and cannot hurt a live lane — and the report file holds the whole alert:
-one line per source, the warning about the claim, the handover files, who else was told, the
-suppressions and their reasons. A pane alert of **2,404 characters** went out on
-2026-11-01T10:01Z and its first 200 characters were what its reader acted on.
+Every message is at most **600 characters** and ends with `Full report: <path>`.
+Each alert includes a separate `Next reading:` line with an approximate UTC time, one 30 s cycle later.
+Readers should wait that cycle before escalating. A slow run or an exhausted budget can delay a holder's next check.
+Role alerts also retain `Hosts checked:` even when the decision text needs shortening.
+The report holds the full decision, each source, remote check results, the claim warning, handover files, recipients, and suppressions.
 
 Reports go to `<state dir>/reports/<UTC YYYYmmddTHHMMSSZ>-<kind>.txt`
 (`/mnt/nvme/sami/tmp/envoy-role-holder-watch/reports/` here), and each run deletes the ones
@@ -497,8 +501,7 @@ line per source saying what that source answered. Both carry the line that reads
 
 > ESTABLISHED: I cannot see this session. NOT established: that the holder has stopped.
 
-and then the remedy, in order, stopping as soon as one answers (the report carries all four;
-the message carries the first two):
+The report gives these checks in order. The short message includes the checks that fit after the required timing and host lines:
 
 1. **Look at the pane** this watch last saw the session running in, or the `tmux list-panes`
    command that finds it by title or directory.
@@ -523,6 +526,7 @@ the message carries the first two):
 ```sh
 scripts/envoy-role-holder-watch --dry-run --print-alert   # decide and print, send nothing
 scripts/envoy-role-holder-watch --grace 60 --write-grace 120 --escalate 600 --pane-grace 180 --budget 60  # the unit's defaults
+scripts/envoy-role-holder-watch --dry-run --print-alert --check-hosts sami-devbox sami-rocqperf sami-leanperf
 ```
 
 ## Turning it off
@@ -534,8 +538,9 @@ systemctl --user list-timers envoy-role-holder-watch.timer     # when it next ru
 journalctl --user -u envoy-role-holder-watch.service -n 50     # what the last runs decided
 ```
 
-`installers/envoy-role-holder-watch.sh` arms it (links `omp/envoy-role-holder-watch.{service,timer}`
-into `~/.config/systemd/user`). Beside the state file the watch keeps two things it can lose
+Run `installers/envoy-role-holder-watch.sh` on each machine that hosts sessions, including `sami-devbox`.
+It arms the existing `omp/envoy-role-holder-watch.{service,timer}` units in `~/.config/systemd/user`.
+Beside the state file the watch keeps two things it can lose
 without harm: `headers.json`, the transcript headers of the last run, and `reports/`, the full
 text of each message it has sent in the last seven days. Deleting
 `/mnt/nvme/sami/tmp/envoy-role-holder-watch/state.json` forgets every open incident and every

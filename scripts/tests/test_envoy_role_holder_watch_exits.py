@@ -167,6 +167,7 @@ class Incident(unittest.TestCase):
         options = argparse.Namespace(
             state=self.state, dry_run=dry_run, write_state=True, print_alert=False,
             http_timeout=1.0, grace=60.0, write_grace=120.0, dir_grace=300.0, escalate=600.0,
+            check_hosts=(),
         )
         WATCH.run_once(options)
         return [line for line in self.logs if line.startswith(ROLE)]

@@ -339,6 +339,7 @@ class NormalExitTest(Lane):
         options = argparse.Namespace(
             state=self.state, dry_run=True, write_state=True, print_alert=False,
             http_timeout=1.0, grace=60.0, write_grace=120.0, dir_grace=300.0, escalate=600.0,
+            check_hosts=(),
         )
         WATCH.run_once(options)
         return [line for line in self.logs if EXIT_ROLE in line]
@@ -454,6 +455,7 @@ class TranscriptLookupCostTest(Lane):
         options = argparse.Namespace(
             state=state, dry_run=True, write_state=True, print_alert=False,
             http_timeout=1.0, grace=60.0, write_grace=120.0, dir_grace=300.0, escalate=600.0,
+            check_hosts=(),
         )
 
         def holding() -> dict:
