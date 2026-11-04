@@ -1602,9 +1602,15 @@ mount_args() {
     # created here so it is the user's, 0700, not a root-owned mountpoint.
     # agent-secrets/ holds the box's broker key (written by keygen inside the box) and its
     # enrollment id (written by the launcher, enroll_box): tmpfs, this box only, gone with it.
+    # 0700 for the directory itself, not only its key dirs: a plain mkdir takes the launcher
+    # umask, 002 in these sessions, and left it 0775 (all 20 live boxes on 2026-11-04 at
+    # 22:13Z). secretsd refuses to start on a runtime directory other users may write
+    # ("writable by other users"), so a boxed session that started its own secretsd got none.
+    # The chmod stays beside the -m, since $RUN_BASE/$box may exist already from enroll_box.
     local run_user="$RUN_BASE/$box/run-user"
+    mkdir -p -m 700 "$run_user"
     mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd" "$run_user/envoy" "$run_user/agent-secrets"
-    chmod 700 "$run_user/secretsd" "$run_user/agent-secrets"
+    chmod 700 "$run_user" "$run_user/secretsd" "$run_user/agent-secrets"
     a+=(-v "$run_user:/run/user/$UID_")
     a+=(-v "$(dirname "$BUS_SOCK"):/run/user/$UID_/bus")
     [[ -S "$SECRETSD_SOCK" ]] || die "secretsd socket $SECRETSD_SOCK missing (systemctl --user status secretsd.socket)"
