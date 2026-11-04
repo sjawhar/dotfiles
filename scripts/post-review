@@ -28,6 +28,9 @@ Write the reviewer's prompt as a check for correctness and data loss, not as an 
 refused a GPT-6.1 Sol review whose prompt said "try to break it" ("flagged for possible
 cybersecurity risk", 2026-11-03 12:58Z, ~/.omp/logs/omp.2026-11-03.34578.log).
 
+A review of a pull request that adds or changes a Kubernetes Job manifest checks it against
+theorem-labs/verification-skills plugins/dev-infra/skills/running-heavy-jobs/references/review-checklist.md.
+
 Usage:
   post-review [--model <id>] [--dry-run] <pr> <40-char head sha> APPROVE|REQUEST_CHANGES|COMMENT
               <body-file> <owner/repo>
