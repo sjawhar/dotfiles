@@ -140,6 +140,17 @@ before handing the call to the real one.
   another session's unpushed commits in such a repository can be rewritten without
   `--ignore-immutable`. Read-only commands (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`,
   …) skip the check.
+  In an agent session, `jj git push` also runs the shared public leak check before
+  sending anything. The shim resolves push aliases (up to eight levels) in jj's
+  startup invocation context; lookup/decoding failures and deeper expansions
+  refuse. The checked expanded argv is the actual push argv. jj's dry-run resolves
+  remote patterns and bookmark/tag selectors; each GitHub destination's full
+  old/new ref updates go to the check's pre-push interface. Every destination must
+  pass before any actual push. A failed dry-run, unreadable plan or nonzero check
+  refuses; without a check, only a destination confirmed private passes.
+  Non-GitHub destinations pass unchanged. `--quiet` needs a second dry-run with
+  only that rendering flag removed to read the plan. The gate does not depend on
+  jj's git executable or git's hooks, and aliases cannot bypass `--deleted` refusal.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration. The prune runs
   when the repository's common directory, resolved through symlinks, lies under a temporary

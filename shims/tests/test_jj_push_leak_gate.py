@@ -256,7 +256,8 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def jj(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         self.keep_cache_fresh()
-        return run_bounded(["jj", *args], cwd or self.repo, self.env)
+        # These cases target shims/git, independently of the stronger jj entry gate.
+        return run_bounded([getattr(self, "jj_binary", str(real_jj())), *args], cwd or self.repo, self.env)
 
     def ok(self, *args: str) -> str:
         r = self.jj(*args)

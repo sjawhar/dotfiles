@@ -3,11 +3,10 @@
 # its git worktree locked. From inside an agent box every other box's workspace
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
-# still removes it. In an agent session `jj git push --deleted` is also refused,
-# and where scripts/omp-session-trailer says no (`git config omp.sessionTrailer
-# false`, or a throwaway repository) the session's Omp-Session trailer is dropped
-# (both below). Everything else goes straight to
-# the real jj.
+# still removes it. In an agent session it refuses `jj git push --deleted` and
+# checks outgoing GitHub pushes with the shared public leak check. Where
+# scripts/omp-session-trailer says no, it drops the session's Omp-Session trailer.
+# Everything else goes straight to the real jj.
 set -euo pipefail
 
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
@@ -85,18 +84,69 @@ agent_context() {
     done
     return 1
 }
+push_refuse() {
+    printf 'error: jj shim: %s\n' "$@" >&2
+    exit 1
+}
 # Locate the subcommand past jj's global options, same approach as shims/git's
 # search for `worktree`.
 _pargs=("$@")
-_pi=0
-while ((_pi < ${#_pargs[@]})); do
-    case "${_pargs[_pi]}" in
-        -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
-        -*) _pi=$((_pi + 1)) ;;
-        *) break ;;
-    esac
-done
+command_index() {
+    _pi=0
+    while ((_pi < ${#_pargs[@]})); do
+        case "${_pargs[_pi]}" in
+            -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
+            -*) _pi=$((_pi + 1)) ;;
+            *) break ;;
+        esac
+    done
+}
+command_index
+resolve_aliases() {
+    local name config="" loaded=0 depth
+    local -a alias=()
+    for ((depth = 0; depth <= 8; depth++)); do
+        name="${_pargs[_pi]:-}"
+        case "$name" in
+            "" | abandon | absorb | backout | bisect | bookmark | b | commit | ci | config | describe | desc | diff | diffedit | duplicate | edit | evolog | file | fix | gerrit | git | help | interdiff | log | metaedit | new | next | op | operation | parallelize | prev | rebase | redo | resolve | restore | revert | root | show | sign | simplify-parents | sparse | split | squash | status | st | tag | undo | unsign | util | version | workspace) return 0 ;;
+        esac
+        ((depth < 8)) || push_refuse "alias expansion exceeds 8 levels. Nothing was pushed."
+        if ((loaded == 0)); then
+            # jj expands aliases in its invocation context BEFORE applying -R
+            # or --config/--config-file. Including those here could read a
+            # different alias from the one jj will execute and miss a push.
+            config="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" --no-pager --color=never config list aliases --include-defaults --template 'name ++ " = " ++ value ++ "\n"' 2>/dev/null)" ||
+                push_refuse "cannot read alias configuration for $name. Nothing was pushed."
+            loaded=1
+        fi
+        # Decode TOML without shell evaluation; NUL delimiters preserve every
+        # alias argument, including whitespace and newlines. Empty/error output
+        # from the decoder is a refusal, never an unguarded fallback.
+        mapfile -d '' -t alias < <(python3 -c '
+import sys, tomllib
+try:
+    value = tomllib.loads(sys.stdin.read()).get("aliases", {}).get(sys.argv[1])
+    if value is None:
+        result = ["missing"]
+    elif isinstance(value, list) and value and all(isinstance(v, str) and "\0" not in v for v in value):
+        result = ["found", *value]
+    else:
+        result = ["error"]
+except Exception:
+    result = ["error"]
+for value in result:
+    sys.stdout.buffer.write(value.encode() + b"\0")
+' "$name" <<< "$config")
+        case "${alias[0]:-}" in
+            missing) return 0 ;;
+            found) _pargs=("${_pargs[@]:0:_pi}" "${alias[@]:1}" "${_pargs[@]:_pi+1}") ;;
+            *) push_refuse "cannot resolve alias $name. Nothing was pushed." ;;
+        esac
+        command_index
+    done
+}
 if agent_context; then
+    resolve_aliases
     if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
         for _parg in "${_pargs[@]:_pi+2}"; do
             [[ "$_parg" == -- ]] && break
@@ -162,6 +212,133 @@ trailer_on() {
     [[ "$target" == /* ]] || target="$repo/store/$target"
     "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" git --git-dir="$target" > /dev/null 2>&1
 }
+git_target() {
+    local d="" repo target="" a prev=""
+    for a in "$@"; do
+        [[ "$a" == -- ]] && break
+        case "$prev" in -R | --repository) d="$a" ;; esac
+        case "$a" in --repository=* | -R=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
+        prev="$a"
+    done
+    d="${d:-$PWD}"
+    [[ "$d" == /* ]] || d="$PWD/$d"
+    d="${d%/}"
+    while [[ ! -d "$d/.jj" ]]; do
+        [[ -n "$d" ]] || return 0 # no jj repository: jj says so itself
+        d="${d%/*}"
+    done
+    repo="$d/.jj/repo"
+    if [[ -f "$repo" ]]; then # a secondary workspace names its repository
+        IFS= read -r target < "$repo" || true
+        [[ -n "$target" ]] || return 1
+        [[ "$target" == /* ]] || target="$d/.jj/$target"
+        repo="$target"
+        target=""
+    fi
+    IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
+    [[ -n "$target" ]] || return 0 # not git-backed, so no remote
+    [[ "$target" == /* ]] || target="$repo/store/$target"
+    printf '%s\n' "$target"
+}
+
+push_gate() {
+    local target out rc=0 a remote="" kind ref action old new url slug check pointer visibility line
+    local zero=0000000000000000000000000000000000000000
+    local scripts="${BASH_SOURCE[0]%/*}/../scripts"
+    local header='^Changes to push to (.+):$'
+    local update='^  (bookmark|tag): (.+) \[(.*)\]$'
+    local add='^add to ([0-9a-f]+)$' delete='^delete from ([0-9a-f]+)$'
+    local move='^move (forward|backward|sideways) from ([0-9a-f]+) to ([0-9a-f]+)$'
+    local -a display=() remotes=()
+    local -A updates=()
+    for a in "${_pargs[@]:_pi+2}"; do
+        [[ "$a" == -- ]] && break
+        case "$a" in --help | -h) return 0 ;; esac
+    done
+    target="$(git_target "$@")" || push_refuse "cannot find the backing git repository. Nothing was pushed."
+    [[ -n "$target" ]] || push_refuse "cannot find the backing git repository. Nothing was pushed."
+
+    # jj resolves the caller's selectors and remote patterns itself. Never run
+    # the real push until every destination's dry-run updates pass the check.
+    out="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" "$@" --dry-run --color=never 2>&1)" || rc=$?
+    if ((rc)); then printf '%s\n' "$out" >&2; exit "$rc"; fi
+    if [[ -z "$out" ]]; then
+        # --quiet hides the plan. First run above retains every argument; a
+        # second dry-run changes only that rendering flag, never push selection.
+        for a in "$@"; do [[ "$a" == --quiet ]] || display+=("$a"); done
+        out="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" "${display[@]}" --dry-run --color=never 2>&1)" || rc=$?
+        if ((rc)); then printf '%s\n' "$out" >&2; exit "$rc"; fi
+    fi
+    while IFS= read -r line; do
+        if [[ "$line" =~ $header ]]; then
+            remote="${BASH_REMATCH[1]}"
+            remotes+=("$remote")
+            updates["$remote"]=""
+        elif [[ "$line" =~ $update ]]; then
+            [[ -n "$remote" ]] || push_refuse "cannot parse jj's dry-run destination. Nothing was pushed."
+            kind="${BASH_REMATCH[1]}" ref="${BASH_REMATCH[2]}" action="${BASH_REMATCH[3]}"
+            old="$zero" new="$zero"
+            if [[ "$action" =~ $add ]]; then new="${BASH_REMATCH[1]}"
+            elif [[ "$action" =~ $delete ]]; then old="${BASH_REMATCH[1]}"
+            elif [[ "$action" =~ $move ]]; then old="${BASH_REMATCH[2]}" new="${BASH_REMATCH[3]}"
+            else push_refuse "cannot parse jj's dry-run update: $line" "Nothing was pushed."
+            fi
+            if [[ "$new" != "$zero" ]]; then
+                new="$(git --git-dir="$target" rev-parse --verify "$new^{commit}" 2>/dev/null)" ||
+                    push_refuse "cannot resolve jj's outgoing commit. Nothing was pushed."
+            fi
+            if [[ "$old" != "$zero" ]]; then
+                old="$(git --git-dir="$target" rev-parse --verify "$old^{commit}" 2>/dev/null)" ||
+                    push_refuse "cannot resolve jj's remote commit. Nothing was pushed."
+            fi
+            if [[ "$kind" == bookmark ]]; then ref="refs/heads/$ref"; else ref="refs/tags/$ref"; fi
+            updates["$remote"]+="$ref $new $ref $old"$'\n'
+        elif [[ -n "$remote" && "$line" == '  '* ]]; then
+            push_refuse "cannot parse jj's dry-run update: $line" "Nothing was pushed."
+        fi
+    done <<< "$out"
+    if ((${#remotes[@]} == 0)); then
+        [[ "$out" == *'Nothing changed.'* ]] || push_refuse "jj's dry-run gave no readable push plan. Nothing was pushed."
+        return 0
+    fi
+    check="${PUBLIC_LEAK_CHECK:-}"
+    [[ -n "$check" ]] || check="$(command -v public-leak-check.sh 2>/dev/null || true)"
+    pointer="${XDG_CONFIG_HOME:-$HOME/.config}/public-leak-check/path"
+    if [[ -z "$check" && -s "$pointer" ]]; then IFS= read -r check < "$pointer" || true; fi
+    for remote in "${remotes[@]}"; do
+        local urls
+        urls="$(git --git-dir="$target" remote get-url --push --all "$remote" 2>/dev/null)" ||
+            push_refuse "cannot read push remote $remote. Nothing was pushed."
+        [[ -n "$urls" ]] || push_refuse "push remote $remote has no URL. Nothing was pushed."
+        while IFS= read -r url; do
+            slug="$("$scripts/github-repo-visibility" --slug "$url")" ||
+                push_refuse "cannot identify push remote $remote. Nothing was pushed."
+            [[ "$slug" != not-github ]] || continue
+            [[ -n "${updates[$remote]}" ]] || push_refuse "jj's dry-run gave no updates for $remote. Nothing was pushed."
+            if [[ ! -x "$check" ]]; then
+                visibility="$("$scripts/github-repo-visibility" "$url")" || visibility=""
+                [[ "$visibility" != private ]] || continue
+                push_refuse "this machine has no public leak check, and $remote is not confirmed private. Nothing was pushed." \
+                    "Point PUBLIC_LEAK_CHECK at the check, put public-leak-check.sh on PATH, or write its path in $pointer."
+            fi
+            rc=0
+            out="$(GIT_DIR="$target" bash "$check" "$remote" "$url" 2>&1 <<< "${updates[$remote]}")" || rc=$?
+            if ((rc)); then
+                while IFS= read -r line; do printf 'error: %s\n' "$line"; done <<< "$out" >&2
+                push_refuse "the public leak check did not pass (exit $rc). Nothing was pushed."
+            fi
+            [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+        done <<< "$urls"
+    done
+}
+if agent_context && [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+    # Execute the same expanded argv that is checked, not a second alias lookup.
+    set -- "${_pargs[@]}"
+    push_gate "$@"
+fi
+# Alias expansion is for the push guards; keep the existing trailer dispatch.
+_pargs=("$@")
+command_index
 if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
     case "${_pargs[_pi]:-}" in
         "" | log | st | status | show | diff | evolog | interdiff | op | help | config | version | root | file | bookmark | b | tag | workspace | sparse | util | git) ;;
