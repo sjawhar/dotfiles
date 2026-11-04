@@ -205,6 +205,22 @@ elif [ -n "$needed" ] && [ -n "$sudo" ]; then
     $sudo sh -c "printf '%s' '${needed# }' > '$CGROUP_ROOT/cgroup.subtree_control'" 2>/dev/null || true
 fi
 
+# A cgroup an earlier run made and left behind: its command detached a process that outlived it,
+# so the directory could not be removed (systemd's own scope lives on in that case too, but its
+# manager removes it when the last process goes, and a box has no manager to do that). Each run
+# removes the EMPTY ones its predecessors left, before it makes its own, which costs one readdir
+# and never touches a cgroup that still holds a process or one a run named with --unit.
+sweep_left_behind() {
+    local dir
+    for dir in "$CGROUP_ROOT"/agentbox-run-*.scope; do
+        [ -d "$dir" ] || continue
+        [ "$dir" = "$scope" ] && continue
+        [ -s "$dir/cgroup.procs" ] && continue
+        rmdir "$dir" 2>/dev/null || { [ -n "$sudo" ] && $sudo rmdir "$dir" 2>/dev/null; } || true
+    done
+}
+sweep_left_behind
+
 if [ -n "$sudo" ]; then
     $sudo mkdir "$scope" || die "could not make the cgroup $scope (is sudo without a password set up in this box?). Nothing ran"
     $sudo chown -R "$(id -u):$(id -g)" "$scope" || die "could not take ownership of $scope. Nothing ran"
@@ -213,8 +229,13 @@ else
 fi
 
 cleanup() {
-    local status=$?
-    [ -d "$scope" ] && { rmdir "$scope" 2>/dev/null || { [ -n "$sudo" ] && $sudo rmdir "$scope" 2>/dev/null; }; }
+    local status=$? left
+    if [ -d "$scope" ]; then
+        rmdir "$scope" 2>/dev/null || { [ -n "$sudo" ] && $sudo rmdir "$scope" 2>/dev/null; } || {
+            left="$(wc -l < "$scope/cgroup.procs" 2>/dev/null || echo 0)"
+            $quiet || echo "shims/systemd-run: $scope stays: $left process(es) the command left behind still run in it, and the cap still holds them. The next run here removes it once they end" >&2
+        }
+    fi
     [ -n "${gate_dir:-}" ] && rm -rf "$gate_dir"
     return $status
 }
