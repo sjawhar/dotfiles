@@ -68,6 +68,7 @@ class AgentboxDirs(unittest.TestCase):
         write_stub(stubs, "curl", "exit 7")
         write_stub(stubs, "agent-secrets", "echo none; exit 1")
         write_stub(self.root / "dotfiles" / "scripts", "envoy-nats-seed", "exit 1")
+        (self.root / "dotfiles/scripts/agentbox-docker-snapshot").symlink_to(DOTFILES / "scripts/agentbox-docker-snapshot")
         (self.root / "dotfiles" / "agentbox").mkdir(parents=True, exist_ok=True)
         (self.root / "dotfiles" / "agentbox" / "mounts").symlink_to(DOTFILES / "agentbox" / "mounts")
         (self.root / "dotfiles" / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
@@ -177,12 +178,11 @@ class AgentboxDirs(unittest.TestCase):
                 self.assertIn(naming, result.stderr)
                 self.assertFalse(self.run_args.exists(), "a box started despite the refusal")
 
-    def test_a_directory_inside_the_box_tree_is_refused(self) -> None:
+    def test_a_directory_inside_another_box_tree_is_available(self) -> None:
         inside = self.boxes / "agentbox-1" / "knives"
         inside.mkdir(parents=True)
-        result = self.launch("--dir", str(inside))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("inside the box tree", result.stderr)
+        args = self.run_args_of("--dir", str(inside))
+        self.assertIn(f"{inside}:{inside}", self.binds_of(args))
 
     def tree_with_store(self, name: str) -> tuple[Path, Path]:
         """A checkout whose `.git/objects` is a SYMLINK to a store outside it, as
@@ -237,11 +237,9 @@ class AgentboxDirs(unittest.TestCase):
         existed, naming neither the flag nor a fix (measured 2026-11-01). The box cannot be given
         the host's copy of any of them, so the refusal belongs at the start."""
         (self.home / ".omp" / "run").mkdir(parents=True)
-        (self.home / ".config" / "jj" / "repos").mkdir(parents=True)
         for path, naming in (
             ("/tmp", "/tmp of its own"),
             (str(self.home / ".omp" / "run"), "omp broker"),
-            (str(self.home / ".config" / "jj" / "repos"), "jj metadata"),
         ):
             with self.subTest(path):
                 result = self.launch("--dir", path)
@@ -251,12 +249,9 @@ class AgentboxDirs(unittest.TestCase):
                 self.assertFalse(self.run_args.exists(), "a box started despite the refusal")
 
     def test_a_directory_every_box_has_is_bound_once_and_said_so(self) -> None:
-        """`--dir ~/src` and `--dir <an allow-list entry>` are what a session working in one of
-        them asks for, and binding the path twice is the same docker refusal. The box has the
-        directory either way, so the launch keeps it as the working directory, does not bind it
-        again, and says which mount it already comes from."""
+        """An explicit default shared-state entry needs no duplicate mount."""
         (self.home / ".aws").mkdir()
-        for path, naming in ((str(self.src), f"every box has {self.src}"), (str(self.home / ".aws"), "read-write")):
+        for path, naming in ((str(self.home / ".aws"), "read-write"),):
             with self.subTest(path):
                 result = self.launch("--dir", path)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -455,13 +450,8 @@ class AgentboxDirs(unittest.TestCase):
         self.assertFalse(self.run_args.exists(), "no box may start")
 
 
-    def test_a_box_binds_the_stores_its_checkouts_borrow_and_the_shared_ssh_identity(self) -> None:
-        """A checkout under ~/src may keep its objects elsewhere and name it in
-        objects/info/alternates (the oss-verifier clones). A box's own clone inherits that file,
-        so without the store its git answers "unable to normalize alternate object path": the
-        release owner's box on sami-devbox made a full clone of its own instead (23:47Z,
-        2026-11-03). bin/ossv-vm's shared ssh identity is bound for the same reason:
-        without it `ossv-vm` in a box cannot reach the gateway VM (agentvm)."""
+    def test_a_named_checkout_carries_its_borrowed_store_and_gateway_ssh_identity(self) -> None:
+        """Storage follows the selected checkout; unrelated workspace roots stay private."""
         store = self.root / "oss-verifier" / "oss-verify-proofs-internal"
         # $SRC of this fixture is self.src, whose repo1 is the checkout that borrows the store.
         (store / "objects").mkdir(parents=True)
@@ -470,14 +460,12 @@ class AgentboxDirs(unittest.TestCase):
         (alternates / "alternates").write_text(f"{store}/objects\n", encoding="utf-8")
         ssh_dir = self.root / "oss-verifier" / "ssh"
         ssh_dir.mkdir(parents=True)
-        args = self.run_args_of(f"--dir {self.lane}", **{"AGENTBOX_OSSV_SSH": str(ssh_dir)})
+        args = self.run_args_of(f"--dir {self.src / 'repo1'}", **{"AGENTBOX_OSSV_SSH": str(ssh_dir)})
         self.assertIn(f"{store}:{store}", args, args)
         self.assertIn(f"{ssh_dir}:{ssh_dir}", args, args)
 
-    def test_a_dir_the_box_binds_read_only_by_default_is_read_write_when_it_is_named(self) -> None:
-        """agentvm's gateway-key writer writes /run/user/<uid>/verified-grader, which every box
-        binds read-only. A --dir naming it binds it read-write instead, and the read-only bind is
-        left out: docker refuses two mounts at one destination (2026-11-03)."""
+    def test_a_named_runtime_key_directory_is_bound_writable_once(self) -> None:
+        """The gateway-key writer keeps writable access without duplicate mount destinations."""
         key_dir = f"/run/user/{os.getuid()}/verified-grader"
         args = self.run_args_of(f"--dir {key_dir}")
         self.assertIn(f"{key_dir}:{key_dir}", args, args)

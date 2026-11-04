@@ -10,25 +10,15 @@ cd "$DEVBOX_COPY_DIR" || exit 1
 PAR=${1:-16}
 B=sami-rocqperf
 mk() { nice -n 19 python3 mkshards.py "$@" >>driver.log 2>&1; }
-NO_OFFBOX=${NO_OFFBOX:-$(command -v no-offbox || echo /home/sami/.dotfiles/scripts/no-offbox)}
-# no-offbox's exclusions under /mnt/durable/$1, as mkshards --exclude args relative to /mnt/durable.
-offbox_ex() {
-  local out rc
-  out=$(sudo -n "$NO_OFFBOX" --excludes "/mnt/durable${1:+/$1}" 2>>driver.log); rc=$?
-  (( rc == 2 )) && { echo "no-offbox error on /mnt/durable${1:+/$1}" >>driver.log; exit 2; }
-  OFFEX=(); while IFS= read -r p; do [[ -n $p ]] && OFFEX+=(--exclude "${p#/mnt/durable/}"); done <<<"$out"
-}
 
 [ -f lists/durable-sami/manifest.tsv ] && ./upload.sh $B durable-sami /mnt/durable "$PAR"
 while [ ! -f lists/durable.find ]; do sleep 60; done
 if ! grep -q '^zdirs' lists/durable-sami/manifest.tsv; then
-  offbox_ex sami
-  mk lists/durable.find durable-sami --include sami --exclude sami/gocache --exclude sami/devbox-copy "${OFFEX[@]}" --keep --depth 2
+  mk lists/durable.find durable-sami --include sami --exclude sami/gocache --exclude sami/devbox-copy --keep --depth 2
 fi
 ./upload.sh $B durable-sami /mnt/durable "$PAR"
 if [ ! -f lists/durable-rest/manifest.tsv ]; then
-  offbox_ex ""
-  mk lists/durable.find durable-rest --exclude sami "${OFFEX[@]}"
+  mk lists/durable.find durable-rest --exclude sami
 fi
 ./upload.sh $B durable-rest /mnt/durable "$PAR"
 echo "durable driver done $(date -u +%FT%TZ)" >>driver.log

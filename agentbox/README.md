@@ -84,7 +84,7 @@ the secrets helper, then starts a throwaway box and checks it from inside. Run i
 ## Build the image
 
 You need not build by hand: `agentbox new` builds the image the first time. The tag is a hash of
-`Dockerfile`, `entrypoint.sh` and `agentbox_sandbox_skips.py`, so an edit to any of them makes a new image on
+`Dockerfile`, `entrypoint.sh`, `box-ssh-config`, and `agentbox_sandbox_skips.py`, so an edit makes a new image on
 the next launch. To build now, and list the running boxes that use an older image:
 
 ```bash
@@ -92,6 +92,13 @@ the next launch. To build now, and list the running boxes that use an older imag
 ```
 
 It runs `docker buildx build --builder default --load -t agentbox:<hash> ~/.dotfiles/agentbox`.
+
+The image includes `/usr/bin/mksquashfs` from `squashfs-tools`.
+Internal Docker readiness checks use the inner Unix socket without changing the selected user context.
+
+`scripts/docker-registry-auth-check REGISTRY configured` checks the effective credential route.
+Use `retrieve` instead to check native `get` or inline credentials. Neither mode logs in, writes Docker config,
+or prints credential values.
 
 ## Start and manage boxes
 
@@ -121,17 +128,20 @@ for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --h
 - **Where boxes live.** `<boxes>` is `/mnt/nvme/<user>/agentbox/boxes` when `/mnt/nvme/<user>` exists, else
   `~/boxes`. Each box's disk limit is a sparse ext4 image loop-mounted at `<boxes>/<box>`; it holds the clones,
   the box's `$HOME` and its `/tmp`.
-- **Mounts.** From your home directory a box gets `~/src` (every checkout), `~/.dotfiles` and the paths in
-  `mounts`, each at its own path. There is no GitHub
-  login, no GitHub ssh key and no docker login in a box (only the jj signing key and the Compute Engine ssh key
-  are mounted from `~/.ssh`): git pushes go through the repository's GitHub App (`gh-app-routes.gitconfig`).
+- **Mounts.** A box gets `~/src`, `~/.dotfiles`, and the shared home paths in `mounts`, all at their own paths.
+  Shared configuration and SSH state are writable. `/mnt/durable/<host-user>` is bound when present;
+  other host paths (trees under `/mnt/nvme/<host-user>`) only through a named or inferred `--dir`. The box keeps its own home and `/tmp`.
+  Docker state is a complete host snapshot in that private home. A later host Docker login needs a new box.
+  Own-host GitHub and Azure configuration is visible. App/machine defaults and existing login approvals stay unchanged.
 - **The user.** The session runs as `ubuntu` (uid 1000). To host daemons a box process is a subordinate uid,
   not yours, which is why the session bus, tmux and the metadata service reach the box through relays.
 - **Metadata service.** A relay on the box network's gateway (port 8169) reaches `169.254.169.254`. On a Google
   Cloud VM (`scripts/on-google-vm`) it is `scripts/agentbox-gce-metadata-relay`, which rewrites the Host header,
   and the box gets `GCE_METADATA_HOST`, `GCE_METADATA_ROOT` and `GCE_METADATA_IP`, so gcloud and Google client
   libraries act as the VM's service account. Elsewhere it is a plain relay for the AWS metadata service
-  (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). Containers started inside the box cannot reach it.
-- **Envoy.** The host's Envoy API on `127.0.0.1:9020` is relayed into the box.
-- **Sandbox tests do not run in a box.** Sysbox handles `/proc` mounts itself, so bubblewrap cannot start.
-  Such tests skip, and pytest prints a red banner naming them.
+  (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). AgentBox adds no metadata firewall to nested workloads.
+- **Envoy.** The host API is relayed into the box. `ENVOY_MACHINE_ID` is the physical host's short name,
+  not the container name. Profile connection settings still come from `envoy.json` without launcher overrides.
+  See [the access audit](access-audit.md) for the restriction history and authorization.
+- **Sandbox namespaces.** A setuid network-namespace sandbox runs in a box. A sandbox that needs another user
+  namespace with its own `/proc` cannot run under this Sysbox version. Such tests report their skips.

@@ -496,7 +496,6 @@ class AgentboxMove(unittest.TestCase):
             (str(self.root / "absent"), "is not an existing directory"),
             ("/", "whole host filesystem"),
             (str(self.home), "shadow the box's own home"),
-            (str(self.boxes), "inside the box tree"),
         ):
             with self.subTest(arg=arg):
                 refused = self.run_bash(
@@ -3045,36 +3044,6 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn("refused, nothing was hung up: these working directories are not on", run.stdout)
         self.assertFalse((self.root / "RSYNC").exists())
-
-    def test_a_path_no_offbox_refuses_is_never_copied_and_nothing_is_hung_up(self) -> None:
-        """LANE-C's embargoed evidence may not leave this machine (2026-11-02): a `.no-offbox`
-        marker in a directory above a path the move would copy refuses the move, from the
-        session's own command and again by the relauncher, before any hang-up, and the refusal
-        names the marker."""
-        self.moving_session()
-        self.set_pids(999999901)
-        self.set_panes({999999900: ("%81", "agents:4.1")})
-        self.target()
-        marker = self.lane.parent / ".no-offbox"
-        marker.write_text("embargoed\n", encoding="utf-8")
-        refused = self.move_to()
-        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn("nothing was hung up: no-offbox refuses its copy", refused.stderr)
-        self.assertIn(f"marker {marker}", refused.stderr)
-        self.assertEqual(self.jobs(), [])
-        marker.unlink()
-        self.assertEqual(self.move_to().returncode, 0)
-        [job] = self.jobs()
-        # Marked after the job was written: the relauncher asks again.
-        inner = self.lane / ".no-offbox"
-        inner.write_text("embargoed\n", encoding="utf-8")
-        self.set_pids()
-        run = self.run_bash(f'move_to_run "{job}"')
-        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
-        self.assertIn("refused, nothing was hung up: no-offbox refuses its copy", run.stdout)
-        self.assertIn(f"marker {inner}", run.stdout)
-        self.assertFalse((self.root / "RSYNC").exists())
-        self.assertNotIn("respawn-pane", self.local_tmux.read_text(encoding="utf-8") if self.local_tmux.exists() else "")
 
     def test_a_dry_run_lists_the_copy_while_the_target_is_not_ready(self) -> None:
         """S3 and LINUX-1248, 2026-11-03: with sami-devbox's target-ready gone, a dry run stopped

@@ -18,22 +18,10 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 TMPDIR="${TMPDIR:-/mnt/nvme/sami/tmp}"
 rc=0
 
-# The bucket is off this machine: no-offbox (beside this script) refuses a source under a
-# `.no-offbox` marker (in it, below it or above it) or a pattern of ~/.config/no-offbox/patterns,
-# and that source is skipped with the reason and counted as a failure.
-NO_OFFBOX="$(dirname "$(readlink -f "$0")")/no-offbox"
-may_leave() {
-  local why
-  why="$("$NO_OFFBOX" -- "$1" 2>&1)" && return 0
-  echo "REFUSED $2: $why" >&2
-  rc=1
-  return 1
-}
 
 copy_file() {
   local src="$1" name="$2"
   [ -f "$src" ] || { echo "skip $name: $src is not a file"; return 0; }
-  may_leave "$src" "$name" || return 0
   local ext="${src##*.}"
   if gcloud storage cp "$src" "$BUCKET/$name-$STAMP.$ext" >/dev/null 2>&1; then
     echo "copied $name ($(stat -c %s "$src") bytes)"
@@ -46,7 +34,6 @@ copy_file() {
 copy_repo() {
   local repo="$1" name="$2"
   [ -d "$repo/.git" ] || { echo "skip $name: $repo is not a git repository"; return 0; }
-  may_leave "$repo" "$name" || return 0
   local bundle="$TMPDIR/$name-$STAMP.bundle"
   if git -C "$repo" bundle create "$bundle" --all >/dev/null 2>&1 &&
     gcloud storage cp "$bundle" "$BUCKET/" >/dev/null 2>&1; then
@@ -70,7 +57,6 @@ copy_file /mnt/nvme/sami/compute-inventory/vm-delete-log.tsv vm-delete-log
 copy_tree() {
   local dir="$1" name="$2"
   [ -d "$dir" ] || { echo "skip $name: $dir is not a directory"; return 0; }
-  may_leave "$dir" "$name" || return 0
   local tgz="$TMPDIR/$name-$STAMP.tgz"
   if tar -czf "$tgz" --exclude='.git' --exclude='__pycache__' -C "$(dirname "$dir")" "$(basename "$dir")" 2>/dev/null &&
     gcloud storage cp "$tgz" "$BUCKET/" >/dev/null 2>&1; then

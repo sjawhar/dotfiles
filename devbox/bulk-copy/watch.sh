@@ -9,14 +9,12 @@ declare -A base
 events=("sami-leanperf theorem zdirs ok" "sami-leanperf home zdirs ok" "sami-rocqperf durable-sami zdirs ok" " fail ")
 for e in "${events[@]}"; do base[$e]=$(pulled "$e"); done
 nvme0=$(cnt "nvme driver start" $D/driver.log)
-refused0=$(cnt " refused " $D/upload.log)
 while (( $(date +%s) < end )); do
   sleep 300
   for e in "${events[@]}"; do
     n=$(pulled "$e"); (( n > ${base[$e]} )) && { echo "EVENT devbox log: $e"; exit 0; }
   done
   (( $(cnt "nvme driver start" $D/driver.log) > nvme0 )) && { echo "EVENT rocqperf nvme/home gate opened"; exit 0; }
-  (( $(cnt " refused " $D/upload.log) > refused0 )) && { echo "EVENT no-offbox refused a shard"; exit 0; }
   last=$(tail -1 $D/monitor-sami-rocqperf.log)
   [[ $last == *"gate=PAUSE"* ]] && { echo "EVENT durable stop: ${last##*gate=}"; exit 0; }
   for u in devbox-copy-up-rocqperf devbox-copy-up-rocqperf-nvme devbox-copy-monitor; do

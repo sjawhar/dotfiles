@@ -13,8 +13,7 @@
 # host process has no broker session; gh-app-token registers one under the machine login
 # (`secret-run --register`).
 #
-# Such a machine has no GitHub ssh key either (a key is a person's login), so ssh remotes of
-# github.com are fetched and pushed over https, through the same helper.
+# Route GitHub remotes through the App's HTTPS helper even when their configured URL uses SSH.
 #
 # The machine is told by scripts/on-google-vm: sami-devbox is the Google VM, and the one machine
 # whose spec bars a person's login. Anywhere else nothing changes.

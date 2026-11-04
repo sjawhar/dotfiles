@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""scripts/agentbox passes a box no variable that overrides an envoy.json field.
+"""Box identity is physical-host identity. Profile connection settings remain profile-owned.
 
 A box session reads Dispatch and Envoy from the envoy.json its profile reads, as a host session
 does: ENVOY_URL, ENVOY_NATS_URL or NATS_NKEY_SEED_FILE in the box's environment would override the
 file's field, and turn Envoy on for a named profile that has no envoy.json. The box reaches the
 host's listener at the file's own loopback URL through its entrypoint's relay, so the launcher
 names that relay's target instead (AGENTBOX_ENVOY_FORWARDER, the host forwarder at the network
-gateway), and mounts the host's ~/.config/legion read-only, where the neutral envoy.json lives.
+gateway), and mounts the host's ~/.config/legion writable, where the neutral envoy.json lives.
 
 Technique: source scripts/agentbox (its source guard runs nothing) with `docker`, `git`,
 `agent-secrets`, `curl` and `sleep` stubbed first on PATH, and run cmd_new with the steps that
@@ -67,6 +67,7 @@ class AgentboxEnvoy(unittest.TestCase):
         write_stub(stubs, "agent-secrets", 'echo none; exit 1')
         self.seed = self.root / "run" / "envoy" / "nats-nkey-seed-omp-session"
         write_stub(self.root / "dotfiles" / "scripts", "envoy-nats-seed", f'echo "{self.seed}"')
+        (self.root / "dotfiles/scripts/agentbox-docker-snapshot").symlink_to(DOTFILES / "scripts/agentbox-docker-snapshot")
         (self.root / "dotfiles" / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
         self.run_args = self.root / "run-args"
         self.env = {
@@ -96,7 +97,7 @@ class AgentboxEnvoy(unittest.TestCase):
         args = self.run_args.read_text(encoding="utf-8").splitlines()
         return [args[i + 1] for i, arg in enumerate(args) if arg == "-e"]
 
-    def test_no_box_gets_an_envoy_variable(self) -> None:
+    def test_no_box_gets_an_envoy_connection_override(self) -> None:
         for name, command in (("default profile", ("omp",)), ("named profile", ("omp", "--profile", "theorem"))):
             with self.subTest(name):
                 values = self.box_env(*command)
@@ -104,13 +105,8 @@ class AgentboxEnvoy(unittest.TestCase):
                 self.assertEqual(names & set(ENVOY_VARS), set(), values)
                 self.assertIn(f"AGENTBOX_ENVOY_FORWARDER={GATEWAY}:9020", values)
 
-    def test_a_box_mounts_the_neutral_file_directory_read_only(self) -> None:
-        """agentbox/mounts lists ~/.config/legion read-only, so a box session without a profile of
-        its own reads the neutral envoy.json, and a named profile's link to it resolves, while no
-        box can rewrite it. The real mount_args against the real mounts file, with the host paths
-        it writes under (the box's runtime dir, secretsd's socket) moved into scratch; it still
-        creates /run/user/<uid>/forward and /run/user/<uid>/envoy when they are missing, as every
-        launch does."""
+    def test_a_box_mounts_the_neutral_file_directory_writable(self) -> None:
+        """Profile files remain accessible at the host path without an invented write restriction."""
         legion = self.home / ".config" / "legion"
         legion.mkdir(parents=True)
         secretsd = self.root / "secretsd.sock"
@@ -129,8 +125,9 @@ class AgentboxEnvoy(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         args = result.stdout.splitlines()
         binds = [args[i + 1] for i, arg in enumerate(args) if arg == "-v"]
-        self.assertIn(f"{legion.resolve()}:{legion}:ro", binds)
-        self.assertEqual([bind for bind in binds if bind.endswith(f":{legion}")], [], binds)
+        self.assertIn(f"{legion.resolve()}:{legion}", binds)
+        self.assertNotIn(f"{legion.resolve()}:{legion}:ro", binds)
+
 
 
 if __name__ == "__main__":

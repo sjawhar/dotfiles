@@ -85,7 +85,7 @@ set -euo pipefail
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 SRC="${AGENTBOX_SRC:-$HOME/src}"
 # A box's checkouts, and the template clone per repo every one of them is copied from
-# (clone_checkout; outside every box mount, so no box can change it). Both go on the machine's big
+# (clone_checkout). Both go on the machine's big
 # disk where it has one, /mnt/nvme/<user>, tested as `.bashrc` tests it for the language caches:
 # a clone per box per repo does not fit on the root disk of sami-rocqperf, which held 11 GiB free
 # of 495 GiB on 2026-10-31 against an 18 GiB floor, while /mnt/nvme had 94 GiB. They move
@@ -334,33 +334,22 @@ BOX_DIRS=()
 # destination), and the git object store of a named tree is bound although nobody named it.
 BOX_MOUNTS=()
 
-# A destination every box binds from a source of its OWN, so the host's copy cannot be given to
-# it at all. Measured 2026-11-01: `--dir /tmp`, `--dir ~/.omp/run`, `--dir ~/.config/jj/repos`
-# and `--dir /run/user/<uid>` each ended the launch with `docker: Error response from daemon:
-# Duplicate mount point: <path>` - after the box directory and its disk image had been made, and
-# naming neither the flag that caused it nor anything to do about it. Each of these exists
-# because the host's copy would break the box: its own /tmp inside its disk limit, its own
-# ~/.omp/run (a shared one lets one box's omp broker delete every other box's live scope), its
-# own writable jj metadata under a read-only parent, its own runtime dir holding the relayed
-# sockets. Printed reason, empty when the path is not one of them.
+# These exact destinations belong to the box. Replacing them breaks its disk
+# accounting or runtime brokers rather than adding access to shared host state.
 box_dir_private_why() {
     case "$1" in
         /tmp) echo "every box has a /tmp of its own, inside its disk limit" ;;
         "$HOME/.omp/run") echo "every box has its own ~/.omp/run, or one box's omp broker deletes another's live scopes" ;;
-        "$HOME/.config/jj/repos") echo "every box has its own writable copy of this jj metadata" ;;
         "/run/user/$UID_") echo "every box has a runtime dir of its own, holding the host's sockets at their usual paths" ;;
         *) return 1 ;;
     esac
 }
 
-# A path every box already has AT THAT SAME PATH, and how it gets it. Binding it again is the
-# docker refusal above (`--dir ~/.config/jj`, a read-only allow-list entry, died exactly that way
-# on 2026-11-01), and it would change nothing: the box has the directory either way. So such a
-# --dir is kept as the box's working directory and simply not bound again, with this reason
-# printed, since a flag that quietly does nothing is what sent a lane hunting through a build.
+# Keep an already mounted --dir as the working directory without a duplicate bind.
 box_dir_bound_why() {
     local path="$1" p
     [[ "$path" == "$SRC" ]] && { echo "every box has $SRC"; return 0; }
+    [[ "$path" == "$HOME/.docker" ]] && { echo "every box has a private snapshot of the host Docker config at this path"; return 0; }
     [[ "$path" == "$HOME/.dotfiles" || "$path" == "$DOTFILES_DIR" ]] && { echo "every box has the dotfiles"; return 0; }
     if [[ -n "$DURABLE_DIR" ]] && move_within "$path" "$DURABLE_DIR"; then
         echo "every box has the durable disk $DURABLE_DIR"; return 0
@@ -389,8 +378,7 @@ box_add_mount() {
 
 # Does the box get this path without being told? Either it has it by construction ($SRC, the
 # dotfiles, the home allow-list) or something already in BOX_MOUNTS contains it.
-# box_dir_named PATH: true when a --dir of this launch names exactly that path, so the launch
-# binds it read-write and no default read-only bind of it may be added beside it.
+# box_dir_named PATH: true when --dir names this exact mount destination.
 box_dir_named() {
     local p
     for p in ${BOX_DIRS[@]+"${BOX_DIRS[@]}"}; do [[ "$p" == "$1" ]] && return 0; done
@@ -434,22 +422,15 @@ add_box_dir_storage() {
     return 0
 }
 
-# One --dir, validated and resolved, with everything the box needs to USE it. Refused: a path
-# that is not a directory (a box cannot be given something that does not exist yet, and a typo
-# would otherwise be a silent empty mount); `/`, which is the host's whole filesystem; $HOME or
-# the box tree, each of which would shadow a mount the box needs (the box's own $HOME holds the
-# allow-list, and <boxes>/<box> is the box's filesystem); and a path the box keeps its own copy
-# of (box_dir_private_why), which docker would have refused later with a message naming neither
-# the flag nor a fix. Every refusal happens while the arguments are being read, before a box
-# directory, a disk image or a container exists.
+# Validate --dir before allocating a box. A directory must exist. The container
+# root, private home, tmp, and runtime destinations cannot be replaced.
 add_box_dir() {
     local raw="$1" path why
     [[ -d "$raw" ]] || die "--dir '$raw' is not an existing directory"
     path="$(readlink -f "$raw")" || die "--dir '$raw' cannot be resolved"
     case "$path" in
-        /) die "--dir / would give the box the whole host filesystem" ;;
+        /) die "--dir / would replace the box root filesystem with the whole host filesystem" ;;
         "$HOME") die "--dir $HOME would shadow the box's own home and its allow-list ($MOUNTS_FILE); name the directory you work in" ;;
-        "$BOXES"|"$BOXES"/*) die "--dir '$path' is inside the box tree $BOXES, which every box already has" ;;
     esac
     why="$(box_dir_private_why "$path")" \
         && die "--dir '$path' cannot be given to a box: $why; name the directory you work in instead"
@@ -666,7 +647,7 @@ repos() {
 image_tag() {
     local h
     h="$(cat "$DOTFILES_DIR/agentbox/Dockerfile" "$DOTFILES_DIR/agentbox/entrypoint.sh" \
-        "$DOTFILES_DIR/agentbox/agentbox_sandbox_skips.py" | sha256sum | cut -c1-12)"
+        "$DOTFILES_DIR/agentbox/box-ssh-config" "$DOTFILES_DIR/agentbox/agentbox_sandbox_skips.py" | sha256sum | cut -c1-12)"
     echo "agentbox:$h"
 }
 
@@ -975,7 +956,7 @@ mount_args() {
     [[ -z "$DURABLE_DIR" ]] || a+=(-v "$DURABLE_DIR:$DURABLE_DIR")
     if [[ -n "$COMPUTE_INVENTORY" ]]; then
         mkdir -p "$COMPUTE_INVENTORY" || { echo "agentbox: cannot make $COMPUTE_INVENTORY, the compute ledger every box writes" >&2; return 1; }
-        a+=(-v "$COMPUTE_INVENTORY:$COMPUTE_INVENTORY")
+        box_dir_have "$COMPUTE_INVENTORY" || a+=(-v "$COMPUTE_INVENTORY:$COMPUTE_INVENTORY")
     fi
     a+=(-v "$BOXES/$box:$BOXES/$box")
     # $HOME and /tmp inside the box's own directory, so the box's disk limit covers the two
@@ -984,38 +965,60 @@ mount_args() {
     # limit of any kind here: a home path outside the allow-list is silently writable
     # (agentbox/AGENTS.md) and /tmp is where every tool puts its scratch. Docker nests binds by
     # destination, so every allow-listed path below still mounts on top of this $HOME, and the
-    # entrypoint's chown walks the bind rather than the overlay (it follows $HOME's own device).
+    # startup prunes exact host mountpoints before assigning private home directories.
     mkdir -p "$BOXES/$box/home" "$BOXES/$box/tmp"
     chmod 1777 "$BOXES/$box/tmp"
     # When the box started, so close_box can tell what the session wrote in its home from what the
     # launch put there, and what the session's last box left in its home (box_home_carry).
     : >"$BOXES/$box/.started"
     seed_box_home "$box"
+    local docker_source="${DOCKER_CONFIG:-$HOME/.docker}"
+    local docker_snapshot="$BOXES/$box/docker-config" docker_links="$BOXES/$box/docker-binds"
+    "$DOTFILES_DIR/scripts/agentbox-docker-snapshot" "$docker_source" "$docker_snapshot" "$docker_links" || return 1
+    a+=(-v "$docker_snapshot:$HOME/.docker")
+    local docker_target docker_alias docker_helper docker_invocation docker_logical docker_exec
+    local docker_source_real helper_index=0
+    docker_source_real="$(readlink -f "$docker_source" 2>/dev/null || true)"
+    while IFS= read -r -d '' docker_target && IFS= read -r -d '' docker_alias; do
+        a+=(-v "$docker_target:$docker_alias")
+    done <"$docker_links"
+    mkdir -p "$BOXES/$box/docker-helpers"
+    a+=(-v "$BOXES/$box/docker-helpers:/opt/agentbox/docker-helpers")
+    while IFS= read -r docker_helper; do
+        docker_invocation="$(command -v "docker-credential-$docker_helper" 2>/dev/null)" || continue
+        [[ "$docker_invocation" == /* ]] || docker_invocation="$PWD/$docker_invocation"
+        docker_target="$(readlink -f "$docker_invocation")" || continue
+        [[ -f "$docker_target" ]] || continue
+        docker_logical="$(readlink -f "${docker_invocation%/*}")/${docker_invocation##*/}"
+        if [[ -n "$docker_source_real" ]] && move_within "$docker_logical" "$docker_source_real"; then
+            docker_exec="$HOME/.docker/${docker_logical#"$docker_source_real"/}"
+        elif box_dir_have "$docker_invocation" && box_dir_have "$docker_target"; then
+            [[ "${docker_invocation%/*}" == "$HOME/.mise/shims" ]] && continue
+            docker_exec="$docker_invocation"
+        else
+            docker_exec="/opt/agentbox/docker-helper-bin/$helper_index/${docker_invocation##*/}"
+            (( helper_index += 1 ))
+            a+=(-v "$docker_target:$docker_exec")
+        fi
+        printf '#!/bin/bash\nexec %q "$@"\n' "$docker_exec" >"$BOXES/$box/docker-helpers/docker-credential-$docker_helper"
+        chmod 755 "$BOXES/$box/docker-helpers/docker-credential-$docker_helper"
+    done < <(jq -r '[(.credHelpers // {} | .[]), (.credsStore // empty)] | unique | .[]' "$docker_snapshot/config.json" 2>/dev/null)
     a+=(-v "$BOXES/$box/home:$HOME")
     a+=(-v "$BOXES/$box/tmp:/tmp")
     [[ "$DOTFILES_DIR" == "$SRC"/* || "$(readlink -f "$DOTFILES_DIR")" == "$(readlink -f "$HOME/.dotfiles")" ]] \
         || a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
     a+=(-v "$HOME/.dotfiles:$HOME/.dotfiles")
     while read -r p; do
-        mkdir -p "$HOME/$p"
-        a+=(-v "$HOME/$p:$HOME/$p")
+        if [[ ! -e "$HOME/$p" ]]; then
+            case "$p" in .npmrc|.gitconfig) continue ;; esac
+            mkdir -p "$HOME/$p"
+        fi
+        a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p")
     done < <(mounts_of rw)
     while read -r p; do
         [[ -e "$HOME/$p" ]] || continue
         a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p:ro")
     done < <(mounts_of ro)
-    # jj creates a per-repo metadata dir under ~/.config/jj/repos/<id> the
-    # first time it touches a repository. The ro bind of .config/jj above
-    # (agentbox/mounts) is deliberate — a box must not rewrite jj metadata the
-    # host and other boxes trust — but it also made that first contact fail
-    # with EROFS for any repository the host had not seen (a fresh clone,
-    # `jj workspace add`). Overlay a box-private writable repos dir on top:
-    # docker nests binds by destination, the parent stays ro, and the dirs are
-    # cheap re-creatable metadata that lives under the box dir and dies with
-    # it. The host-side mkdirs keep docker from creating a mountpoint inside
-    # the ro parent.
-    mkdir -p "$HOME/.config/jj/repos" "$BOXES/$box/jj-user-repos"
-    a+=(-v "$BOXES/$box/jj-user-repos:$HOME/.config/jj/repos")
     # omp's runtime state under ~/.omp/run (daemon brokers, their sockets,
     # tokens and leases) holds for one PID and network namespace only: a
     # broker that starts deletes every sibling scope older than 5 minutes whose
@@ -1056,27 +1059,19 @@ mount_args() {
     # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
-    # The model gateway's key files, read-only, as directories so the writer's `mv -f` refresh
-    # reaches a running box: ossv-box/ (scripts/ossv-box-gateway-key, read by the ossv-gateway
-    # provider's `!cat` in omp/models.local.yml) and verified-grader/ (agent-infra
-    # model-gateway/box/verified-grader-gateway-key, read by the pbc-gateway provider). Without
-    # them every box's omp found no gateway key and every Claude subagent a boxed session started
-    # fell back to the direct Anthropic login: 78 of 78 boxed starts, 0 of 302 host starts, from
-    # 2026-11-01 22:30Z to 2026-11-02 08:10Z. A host that has no such key gets an empty directory.
-    # A session that WRITES one of them (agentvm's gateway-key writer, 2026-11-03) names it with
-    # --dir, and then it is bound read-write instead: docker refuses two mounts at one
-    # destination, so the read-only one is left out rather than added beside it.
+    # Gateway state is shared writable. A named --dir already supplies the same
+    # destination, so avoid a duplicate bind. Directories show atomic key refreshes.
     mkdir -p -m 700 "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"
     local key_dir
     for key_dir in "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"; do
-        box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir:ro")
+        box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir")
     done
     # The shared ssh identity bin/ossv-vm uses to reach the gateway VM, where the host has it:
     # without it `ossv-vm` in a box cannot reach that VM at all (agentvm, 2026-11-03). A box is
     # for segregation, not for keeping a session from what its host gives it (Sami,
     # dispatch://INFRA-702/comment/41bdfb9d-18d5-4cd6-a5dd-75771b45cee7), so it is bound as the
     # host has it.
-    [[ -z "$OSSV_SSH" ]] || box_dir_named "$OSSV_SSH" || a+=(-v "$OSSV_SSH:$OSSV_SSH")
+    [[ -z "$OSSV_SSH" ]] || box_dir_have "$OSSV_SSH" || a+=(-v "$OSSV_SSH:$OSSV_SSH")
     # The relayed host tmux server (ensure_tmux_forwarder), as a directory holding
     # tmux-<box uid>/default, so a bare `tmux` in the box under TMUX_TMPDIR (session_env) finds
     # it and a relay restarted since the box started is seen at once. A host with no tmux has
@@ -1104,7 +1099,7 @@ session_env() {
     e+=(-e "MISE_DATA_DIR=$HOME/.mise")
     # $HOME/.dotfiles/bin holds gitignored binaries (mise, a local jj) a
     # checkout under test does not have.
-    e+=(-e "PATH=$DOTFILES_DIR/shims:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    e+=(-e "PATH=$DOTFILES_DIR/shims:/opt/agentbox/docker-helpers:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     e+=(-e "JJ_CONFIG=$HOME/.config/jj/config.toml:$DOTFILES_DIR/.jjconfig.toml")
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
     # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
@@ -1120,7 +1115,8 @@ session_env() {
     # "Unauthenticated request" for Artifact Registry, 2026-11-02). Pass the host's OWN entries for
     # those two helpers so a box mirrors the machine and no second list can drift; empty when the
     # host has none. No other helper: secretsd's entries are the entrypoint's own.
-    e+=(-e "AGENTBOX_CRED_HELPERS=$(jq -c '(.credHelpers // {}) | with_entries(select(.value == "ecr-login" or .value == "gcloud"))' "$HOME/.docker/config.json" 2>/dev/null || echo '{}')")
+    e+=(-e "DOCKER_CONFIG=$HOME/.docker")
+    e+=(-e "AGENTBOX_CRED_HELPERS=$(jq -c '(.credHelpers // {}) | with_entries(select(.value == "ecr-login" or .value == "gcloud"))' "$BOXES/$box/docker-config/config.json" 2>/dev/null || echo '{}')")
     # Also the inner dockerd's firewall rule (agentbox/entrypoint.sh).
     e+=(-e "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://$NETWORK_GATEWAY:$IMDS_PORT")
     e+=(-e "AGENTBOX_IMDS_FORWARDER=$NETWORK_GATEWAY:$IMDS_PORT")
@@ -1135,10 +1131,7 @@ session_env() {
         e+=(-e "GCE_METADATA_HOST=$NETWORK_GATEWAY:$IMDS_PORT" -e "GCE_METADATA_ROOT=$NETWORK_GATEWAY:$IMDS_PORT")
         e+=(-e "GCE_METADATA_IP=$NETWORK_GATEWAY:$IMDS_PORT")
     fi
-    # The host's Envoy forwarder, which the entrypoint relays the box's own
-    # 127.0.0.1:$ENVOY_PORT to. No Envoy or Dispatch variable: a box session reads
-    # its profile's envoy.json as a host session does (agentbox/mounts has the
-    # neutral file's directory), and a variable here would override that file.
+    # Relay the profile's loopback URL without overriding connection settings or credentials.
     e+=(-e "AGENTBOX_ENVOY_FORWARDER=$NETWORK_GATEWAY:$ENVOY_PORT")
     # Each forward channel this host serves and each loopback service it has (loopback_services),
     # "addr:port,…", for the box's own relays (entrypoint.sh). Read here rather than in the box,
@@ -2173,7 +2166,7 @@ move_git_storage() {
 # the config, but not what it points at: `shims/gh` refuses `gh pr edit|create|comment` unless it
 # finds the public-text leak check, whose location is `~/.config/public-leak-check/path`, holding
 # `/mnt/nvme/sami/frac-verify/shared/leak-check/public-leak-check.sh`. The pointer is in
-# `agentbox/mounts` (`ro .config/public-leak-check`); the script is on /mnt/nvme, so a box had
+# `agentbox/mounts` (`rw .config/public-leak-check`); the script is on /mnt/nvme, so a box had
 # the pointer and nothing to follow it to, and every public text write from a box was refused
 # (dispatch://INFRA-702, 2026-11-01). Each file here is read for one absolute path on its first
 # line, and the directory holding that path goes into the spec. Adding another is one line.
@@ -4203,9 +4196,6 @@ cmd_move_notify() {
 # moved while the target's provisioning has not written $MOVE_TO_READY, after two failed moves
 # in a row, or once a session id was found running on both machines, until the box-health lead
 # runs `agentbox move --to <machine> --clear-halt`.
-# Nor is a group moved, and nothing hung up, while no-offbox refuses any path it would copy
-# (move_to_offbox): a `.no-offbox` marker in, below or above it, or a pattern of
-# ~/.config/no-offbox/patterns.
 #
 # A session of a group of several only says it is at its safe point (a ready file); the last one
 # of the group to run `move --to` moves them all, and each other one is asked over Envoy to run
@@ -4442,7 +4432,6 @@ move_to_halted() {
 # MOVE_TO_WHY and returns 1 when it does not. A session the target already runs is running on
 # both machines, which halts every later move too.
 MOVE_TO_WHY=""
-NO_OFFBOX="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/no-offbox"
 # The state of the target's health check (devbox/sami-devbox-check), from its newest log
 # $MOVE_TO_CUTOVER/a2-<UTC stamp>.log there: it deletes target-ready when it starts and writes it
 # again only after a run with no failure, usually 8-13 minutes later.
@@ -4631,26 +4620,6 @@ move_to_cwds_present() {
     return 0
 }
 
-# move_to_offbox: no path of MOVE_TO_MIRROR or MOVE_TO_MERGE leaves this machine when no-offbox
-# (beside this script) refuses it: a `.no-offbox` marker in it, below it or in any directory above
-# it, or a line of ~/.config/no-offbox/patterns (LANE-C's embargoed BET-357 evidence, 2026-11-02).
-# The marker means refusal, never a prompt. Asked BEFORE the hang-up, by the session's own command
-# and again by the relauncher; any status but 0 refuses, so a checker that is missing or fails
-# refuses too. Needs the two lists built. Sets MOVE_TO_WHY and returns 1.
-move_to_offbox() {
-    local out rc=0
-    (( ${#MOVE_TO_MIRROR[@]} + ${#MOVE_TO_MERGE[@]} )) || return 0
-    # Through move_to_fg: a TERM to the relauncher must reach this check too. It ran on after a
-    # stop on 2026-11-03 17:34Z and held the relauncher's trap until a person killed it.
-    local said
-    said="$(mktemp)"
-    move_to_fg "$NO_OFFBOX" -- ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"} >"$said" 2>&1 || rc=$?
-    out="$(cat "$said")"
-    rm -f "$said"
-    (( rc == 0 )) && return 0
-    MOVE_TO_WHY="no-offbox refuses its copy (status $rc), so it may not leave this machine: $(tr '\n' ' ' <<<"$out")"
-    return 1
-}
 
 # move_to_src_trees CWD PID: "mirror\t<path>" for each git working tree under $SRC the session's
 # own live processes name (its working directory, theirs, the files they hold open for writing),
@@ -6410,7 +6379,6 @@ cmd_move_to() {
     move_to_cwds_present "$target" "${cwds[@]}" || move_to_or_would "$MOVE_TO_WHY"
     move_to_dests_writable "$target" || move_to_or_would "$MOVE_TO_WHY"
     move_to_target_worktrees "$target" || move_to_or_would "$MOVE_TO_WHY"
-    move_to_offbox || move_to_or_would "$MOVE_TO_WHY"
     # What of THIS session dies with the hang-up; each other member asks its own when it runs this.
     move_orphans_gate "$MOVE_SELF_PID" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"
     # Each other session of the group says itself that it is at its safe point.
@@ -6526,8 +6494,6 @@ move_to_in_box() {
         while IFS= read -r p; do procs+=("$PROC/$p/cwd" "$PROC/$p/fd"); done < <(move_read_kids; move_descendants "$own")
         (( ${#procs[@]} )) && touches="$(find "${procs[@]}" -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null || true)"
     fi
-    # The box may not see every pattern file or marker; the relauncher on the host asks again.
-    move_to_offbox || die "no move to $target; nothing was hung up: $MOVE_TO_WHY"
     if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "no move to $target; nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     local group="g-${sid:0:8}" member job sock
     # The host server's own socket path, asked through the relay: the relauncher runs under that
@@ -6936,7 +6902,7 @@ move_to_run() {
     move_to_wait_flight "$group"
     MOVE_TO_STATE="checking $target"
     if ! move_to_preflight "$target" "${sids[@]}" || ! move_to_cwds_present "$target" "${cwds[@]}" \
-        || ! move_to_dests_writable "$target" || ! move_to_target_worktrees "$target" || ! move_to_offbox; then
+        || ! move_to_dests_writable "$target" || ! move_to_target_worktrees "$target"; then
         say "refused, nothing was hung up: $MOVE_TO_WHY"
         move_refused "$MOVE_TO_WHY" "${sids[@]}"
         return 2
@@ -7410,9 +7376,8 @@ probe_secrets() {
     echo "GHCR_PULL_TOKEN, $n bytes"
 }
 probe_dockerhub() {
-    d="$(printf "%s" https://index.docker.io/v1/ | timeout 20 docker-credential-secretsd get 2>&1)"
-    jq -e ".Secret | length > 0" >/dev/null 2>&1 <<<"$d" || { echo "$d"; return 1; }
-    echo "the helper answers with the org pull token"
+    local root="${DOTFILES_DIR:-$HOME/.dotfiles}"
+    "$root/scripts/docker-registry-auth-check" https://index.docker.io/v1/ retrieve --timeout 20
 }
 probe_aws() {
     arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"
@@ -7504,25 +7469,23 @@ check_durable() {
 probe_label() {
     case "$1" in
         secrets)     echo "secrets agent-tier" ;;
-        dockerhub)   echo "docker-credential-secretsd for Docker Hub" ;;
+        dockerhub)   echo "Docker Hub effective credential route" ;;
         aws)         echo "aws" ;;
         hawk)        echo "hawk-token" ;;
         google)      echo "google-user-token" ;;
         gcloud)      echo "gcloud auth list" ;;
         gke)         echo "kubectl auth can-i create jobs (builds)" ;;
-        dockerauths) echo ".docker holds the box ghcr login" ;;
     esac
 }
 probe_command() {
     case "$1" in
         secrets)     echo "secrets GHCR_PULL_TOKEN -- sh -c 'echo \${#GHCR_PULL_TOKEN}'" ;;
-        dockerhub)   echo "printf %s https://index.docker.io/v1/ | docker-credential-secretsd get" ;;
+        dockerhub)   echo "$DOTFILES_DIR/scripts/docker-registry-auth-check https://index.docker.io/v1/ retrieve --timeout 20" ;;
         aws)         echo "aws sts get-caller-identity" ;;
         hawk)        echo "hawk-token" ;;
         google)      echo "google-user-token" ;;
         gcloud)      echo "gcloud auth list" ;;
         gke)         echo "kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs" ;;
-        dockerauths) echo "secrets GHCR_PULL_TOKEN -- sh -c 'echo \${#GHCR_PULL_TOKEN}'" ;;
     esac
 }
 PROBE_NAMES=(secrets dockerhub aws hawk google gcloud gke)
@@ -7537,22 +7500,16 @@ fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
 for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token agent-secrets; do
     command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
 done
-for d in .config/gh .ssh/id_ed25519 .gnupg .config/agent-secrets; do
+for d in .config/agent-secrets; do
     [ -e "$HOME/$d" ] && fail "$d is present in the box" || ok "$d absent"
 done
-# .config/gcloud is a mount now (agentbox/mounts), checked entry by entry with the rest of the
-# allow-list below, and the identity it carries is the box one - a keyless external_account
-# bound to this machine, which gcloud exchanges for a dev-<name>@theorem-agent-infra token
-# through the metadata relay - answered by probe_gcloud/probe_gke against the host. What that
-# directory must hold for agent-c is the devbox WIF ADC file, which deploy.py (_DEVBOX_WIF_ADC)
-# requires for any devN up/destroy and agent-c meta/infra/pulumi/scripts/provision_devbox_wif_adc.py
-# writes; a box that writes it now writes the copy on the host, so the next slot apply keeps it.
-# The SDK itself is read-only in the box: gcloud writes only under its config dir.
+# The Google SDK and complete config are shared writable with this host.
 sdk="$HOME/.gcloud/google-cloud-sdk"
 [ -x "$sdk/bin/gcloud" ] && ok "the Google Cloud SDK is mounted ($sdk)" || fail "no Google Cloud SDK at $sdk: gcloud and gke-gcloud-auth-plugin cannot run in this box"
 mounted() { awk -v t="$1" "\$5 == t { f = 1 } END { exit !f }" /proc/self/mountinfo; }
 writable() { if [ -d "$1" ]; then touch "$1/.doctor.$$" 2>/dev/null && rm -f "$1/.doctor.$$"; else (: >>"$1") 2>/dev/null; fi; }
 while read -r m p; do
+    case "$p" in .npmrc|.gitconfig) [ -e "$HOME/$p" ] || { echo "note box: optional config $p absent"; continue; } ;; esac
     case "$m" in
         rw) mounted "$HOME/$p" && writable "$HOME/$p" && ok "rw $p" || fail "rw $p: not a writable mount (mounts entry newer than this box: relaunch to pick it up)";;
         ro) [ -e "$HOME/$p" ] || { echo "note box: ro $p absent (not on the host)"; continue; }
@@ -7560,15 +7517,9 @@ while read -r m p; do
     esac
 done < <(cat "$DOTFILES_DIR/agentbox/mounts"; [ -r "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts" ] && cat "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts")
 r="$(python3 -c "import socket,os; s=socket.socket(socket.AF_UNIX); s.connect(os.environ[\"DBUS_SESSION_BUS_ADDRESS\"].split(\"=\",1)[1]); s.sendall(b\"\\0AUTH EXTERNAL 31303030\\r\\n\"); print(s.recv(64).split()[0].decode())" 2>&1)"; [ "$r" = OK ] && ok "session bus (keyring) reachable through the relay" || fail "session bus: $r"
-# ~/.ssh holds only what the allow-list names under .ssh/ (the jj signing pair, the Compute Engine
-# key, the sami-devbox key for sami-rocqperf), each where the host has it: never a GitHub identity.
-ssh_ok=" $( { cat "$DOTFILES_DIR/agentbox/mounts"; [ -r "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts" ] && cat "$DOTFILES_DIR/.secrets/dotfiles/agentbox/mounts"; } | awk "\$1 == \"ro\" || \$1 == \"rw\" { print \$2 }" | tr "\n" " ") "
-ssh_extra=""
-for e in $(ls -A "$HOME/.ssh" 2>/dev/null); do case "$ssh_ok" in *" .ssh/$e "*) ;; *) ssh_extra="$ssh_extra $e" ;; esac; done
-[ -z "$ssh_extra" ] && ok ".ssh holds only allow-listed files: $(ls -A "$HOME/.ssh" | tr "\n" " ")" || fail ".ssh holds files outside the allow-list:$ssh_extra"
-# The ghcr login the entrypoint makes needs the machine to hold GHCR_PULL_TOKEN, so the host
-# decides whether its absence is a defect or this machine (see PROBE_FUNCS).
-auths="$(jq -r ".auths | keys | join(\",\")" "$HOME/.docker/config.json" 2>/dev/null)"; [ "$auths" = ghcr.io ] && echo "@probe dockerauths ok only the box ghcr login" || echo "@probe dockerauths fail auths: ${auths:-none}"
+# SSH state is shared with the host, without a key-name allow-list.
+[ -d "$HOME/.ssh" ] && ok ".ssh is shared host state" || fail ".ssh is missing"
+jq -e "type == \"object\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "Docker config loaded without filtering host logins" || fail "Docker config is missing or invalid"
 [ "$(stat -c %U /run/user/$(id -u))" = ubuntu ] && ok "runtime dir owned by ubuntu" || fail "runtime dir owner $(stat -c %U /run/user/$(id -u))"
 # The disk limit (AGENTBOX_DISK, set by the launcher): one filesystem of the box own, holding the
 # workspace, HOME and /tmp, and not the container root overlay, which has no limit of any kind
@@ -7593,17 +7544,16 @@ out="$(gh api user 2>&1)"; case "$out" in *"Resource not accessible by integrati
 gs="$(gh auth status 2>&1)"; case "$gs" in *"own login is not used"*|*"not logged"*) ok "gh auth: no user login";; *) fail "gh auth status shows a login: $(head -1 <<<"$gs")";; esac
 # The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. A box that
 # cannot reach it refuses every public text write, which is a box no lead can work in; it needs
-# BOTH the pointer (ro .config/public-leak-check in agentbox/mounts) and the script it names,
-# which lives outside every box mount and arrives as a --dir of the spec a move builds.
+# BOTH the writable config pointer and the script it names, on shared host storage.
 lp="$HOME/.config/public-leak-check/path"
 if [ ! -r "$lp" ]; then
-    fail "public-leak-check pointer $lp is not in the box (agentbox/mounts: ro .config/public-leak-check); gh pr edit/create/comment will be refused"
+    fail "public-leak-check pointer $lp is not in the box (agentbox/mounts: rw .config/public-leak-check); gh pr edit/create/comment will be refused"
 else
     ls="$(head -1 "$lp" 2>/dev/null)"
     if [ -x "$ls" ]; then ok "public-text leak check reachable ($ls)"
     else fail "public-leak-check names $ls, which this box does not have; add it to the box (agentbox move --self --dir $(dirname "$ls" 2>/dev/null)) or gh pr edit/create/comment is refused"; fi
 fi
-jq -e ".credHelpers[\"https://index.docker.io/v1/\"] == \"secretsd\"" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "docker config names the secretsd helper for Docker Hub" || fail "docker config: no secretsd credHelper for Docker Hub"
+jq -e ".auths[\"https://index.docker.io/v1/\"] != null or .credHelpers[\"https://index.docker.io/v1/\"] != null or ((.credsStore // \"\") != \"\")" "$HOME/.docker/config.json" >/dev/null 2>&1 && ok "Docker Hub credential route configured" || fail "Docker config has no Docker Hub credential route"
 [ -z "${AGENT_SECRETS_HELPER_SOCK:-}" ] && [ ! -S "/run/user/$(id -u)/agent-secrets/helper.sock" ] && ok "no helper socket in the box (a box is not a host session)" || fail "helper socket reachable from the box"
 # A box with no broker identity is a supported state, not a defect: one started before the key
 # dir existed, or while the host could not enroll boxes (no key, no enrollment.error). Its agents
@@ -7658,7 +7608,7 @@ else
 fi
 c="$(curl -s -m 3 -o /dev/null -w %{http_code} "${MNEMOPI_EMBEDDING_API_URL:-http://none}/../health" 2>/dev/null)"; [ "$c" = 200 ] && ok "mnemopi embed" || echo "note box: mnemopi embed $c"
 n="$(timeout 20 forward doctor 2>&1 | grep -cE "accepted|reachable|accepts")"; echo "@forward-ok $n"
-timeout 30 docker info >/dev/null 2>&1 && ok "inner docker answers" || fail "inner docker"
+timeout 30 docker --host=unix:///var/run/docker.sock info >/dev/null 2>&1 && ok "inner docker answers" || fail "inner docker"
 exit $fails
 '
 
@@ -7679,10 +7629,9 @@ remove_doctor_box() {
 report_probes() {
     local box_out="$1" host_out name box_line host_line box_state box_detail host_state host_detail label
     host_out="$(bash -c "$PROBE_FUNCS probe_run ${PROBE_NAMES[*]}" 2>/dev/null)"
-    for name in "${PROBE_NAMES[@]}" dockerauths; do
+    for name in "${PROBE_NAMES[@]}"; do
         box_line="$(sed -n "s/^@probe $name //p" <<<"$box_out" | head -1)"
-        # The box's ghcr login is made from GHCR_PULL_TOKEN, so the secrets probe is its host side.
-        host_line="$(sed -n "s/^@probe ${name/dockerauths/secrets} //p" <<<"$host_out" | head -1)"
+        host_line="$(sed -n "s/^@probe $name //p" <<<"$host_out" | head -1)"
         label="$(probe_label "$name")"
         if [[ -z "$box_line" ]]; then fail "box: $label: the box reported no answer"; continue; fi
         box_state="${box_line%% *}"; box_detail="${box_line#* }"
@@ -7813,7 +7762,7 @@ cmd_doctor_here() {
     # Inside a box there is no host answer to compare with, so a credential the machine itself
     # may not hold is reported and never counted: `agentbox doctor` on the host is what tells a
     # box defect from a login this machine is missing.
-    for name in "${PROBE_NAMES[@]}" dockerauths; do
+    for name in "${PROBE_NAMES[@]}"; do
         line="$(sed -n "s/^@probe $name //p" <<<"$out" | head -1)"
         case "$line" in
             ok\ *) ok "box: $(probe_label "$name"): ${line#ok }" ;;

@@ -79,19 +79,11 @@ in_box() {
     [[ "$got" == yes ]] && ok "build pool: kubectl -n builds auth can-i create jobs: yes" || fail "build pool: kubectl -n builds auth can-i create jobs: $got"
     got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
     [[ "$got" == yes ]] && ok "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes" || fail "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: $got"
-    # Artifact Registry: docker sends a token to a *-docker.pkg.dev host only when the box's
-    # config names docker-credential-gcloud for it, which agentbox/entrypoint.sh writes only when
-    # the helper is on PATH (installers/gcloud-sdk.sh links it into ~/.local/bin), and the helper
-    # must answer with a token. Without it a pull failed "Unauthenticated" (dispatch://INFRA-993).
-    if ! got="$(command -v docker-credential-gcloud)"; then
-        fail "Artifact Registry: docker-credential-gcloud is not on PATH"
-    elif [[ "$(jq -r '.credHelpers["us-east1-docker.pkg.dev"] // empty' "$HOME/.docker/config.json" 2>/dev/null)" != gcloud ]]; then
-        fail "Artifact Registry: ~/.docker/config.json names no gcloud credHelper for us-east1-docker.pkg.dev"
-    elif out="$(printf %s us-east1-docker.pkg.dev | timeout 60 docker-credential-gcloud get 2>&1)" \
-        && [[ "$(jq -r '.Secret // "" | length' <<<"$out" 2>/dev/null)" -gt 0 ]]; then
-        ok "Artifact Registry: $got get us-east1-docker.pkg.dev returns a token, and docker's config routes that host to it"
+    # Artifact Registry: retrieve through Docker's configured helper, store, or inline auth.
+    if out="$("$DOTFILES_DIR/scripts/docker-registry-auth-check" us-east1-docker.pkg.dev retrieve --timeout 60)"; then
+        ok "Artifact Registry: $out"
     else
-        fail "Artifact Registry: docker-credential-gcloud get us-east1-docker.pkg.dev: $(tail -1 <<<"$out")"
+        fail "Artifact Registry: ${out:-Docker credential check returned no result}"
     fi
 
     moved_gcloud_config_check
@@ -139,14 +131,12 @@ in_box() {
     return "$fails"
 }
 
-# The host's own sshd from the box: a box's connection to sami-devbox's tailnet address reaches
-# OpenSSH, which accepts the key installers/agentbox-host-ssh.sh makes only from the agentbox
-# network. The box has that key, its pinned host key and its ssh entry only once agentbox/mounts
-# names the three files (agentbox/box-ssh-config writes the entry); until then this is a WAIT.
+# SSH access needs the individual key/pin files or a containing writable host
+# directory. A similarly named sibling is not coverage for these paths.
 host_sshd_check() {
     local h=sami-devbox f out rc=0 missing=""
     for f in ".ssh/$h" ".ssh/$h.pub" ".ssh/known_hosts.$h"; do
-        awk -v p="$f" '!/^[[:space:]]*(#|$)/ && $2 == p { found = 1 } END { exit !found }' \
+        awk -v p="$f" '!/^[[:space:]]*(#|$)/ && (($2 == p && ($1 == "rw" || $1 == "ro")) || ($1 == "rw" && index(p, $2 "/") == 1)) { found = 1 } END { exit !found }' \
             "$DOTFILES_DIR/agentbox/mounts" || missing+=" $f"
     done
     if [[ -n "$missing" ]]; then
@@ -386,10 +376,9 @@ mise_check() {
     [[ -z "$missing" ]] && ok "mise: every pin in mise.toml is installed" || fail "mise ls --missing: $(tr '\n' ';' <<<"$missing")"
 }
 
-# The pinned tools, the inner docker's ghcr.io login, and omp's Slack MCP credential, as a
-# session in a box sees them.
+# Pinned tools, Docker's configured GHCR route, and the session's Slack MCP credential.
 tools_check() {
-    local got live model
+    local got live model rc
     # The public-text leak check shims/gh requires before gh pr create/edit/comment: the pointer
     # and the script it names, both in the box.
     got="$(cat "$HOME/.config/public-leak-check/path" 2>&1)"
@@ -397,13 +386,16 @@ tools_check() {
 
     knives_check
 
-    got="$(jq -r '(.auths // {}) | keys | join(",")' "$HOME/.docker/config.json" 2>&1)"
-    if [[ ",$got," == *,ghcr.io,* ]]; then
-        ok "docker in the box: logged in to ghcr.io (auths: $got)"
+    rc=0
+    got="$("$DOTFILES_DIR/scripts/docker-registry-auth-check" ghcr.io configured)" || rc=$?
+    if (( rc == 0 )); then
+        ok "docker in the box: $got"
+    elif (( rc != 10 )); then
+        fail "docker in the box: ${got:-Docker credential check returned no result}"
     elif ! secrets GHCR_PULL_TOKEN -- true >/dev/null 2>&1; then
-        echo "WAIT docker in the box: no ghcr.io login: ghcr.io takes only a classic personal access token for org packages (the sjawhar-agent App token gets 403); a classic PAT from a machine user means creating an account, which is Sami's decision; no session needs a private ghcr image now"
+        echo "WAIT docker in the box: no GHCR credential route; this host has no GHCR_PULL_TOKEN and no private ghcr image is required"
     else
-        fail "docker in the box: GHCR_PULL_TOKEN resolves but ~/.docker/config.json has no ghcr.io login (auths: ${got:-none})"
+        fail "docker in the box: GHCR_PULL_TOKEN resolves but Docker has no credential route for ghcr.io"
     fi
 
     # agent.db is not copied to this machine and it holds no person's login (INFRA-993 decision

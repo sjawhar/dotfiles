@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Copy one host Docker config into a new private directory and record safe external binds.
+
+Usage: agentbox-docker-snapshot SOURCE DEST BIND_FILE
+BIND_FILE contains NUL-delimited source/destination pairs. No host file is changed.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+EXTERNAL_ROOT = Path("/opt/agentbox/docker-external")
+
+
+def snapshot(source: Path, destination: Path, bind_file: Path) -> None:
+    source = source.absolute().resolve()
+    destination = destination.absolute()
+    if destination.is_relative_to(source):
+        raise ValueError("snapshot destination is inside its source")
+    destination.mkdir(parents=True)
+    if source.is_dir():
+        shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
+    destination.chmod(destination.stat().st_mode | stat.S_IRWXU)
+
+    # Docker writes config.json at startup. It must never remain a link to host state.
+    primary = source / "config.json"
+    copied_primary = destination / "config.json"
+    if primary.is_symlink():
+        copied_primary.unlink(missing_ok=True)
+        try:
+            shutil.copy2(primary, copied_primary, follow_symlinks=True)
+        except FileNotFoundError:
+            pass  # A missing host config is also absent in the private snapshot.
+
+    links: list[Path] = []
+    for current, directories, files in os.walk(destination, followlinks=False):
+        parent = Path(current)
+        parent.chmod(parent.stat().st_mode | stat.S_IRWXU)
+        for name in sorted(directories + files):
+            link = parent / name
+            if link.is_symlink():
+                links.append(link)
+
+    aliases: dict[Path, Path] = {}
+    bindings: list[tuple[Path, Path]] = []
+    for link in links:
+        original = source / link.relative_to(destination)
+        try:
+            target = original.resolve()
+        except (OSError, RuntimeError):
+            target = None
+        if target is not None and target.is_relative_to(source):
+            private_target = destination / target.relative_to(source)
+            replacement = os.path.relpath(private_target, link.parent)
+        elif target is not None and target.is_relative_to(destination):
+            replacement = os.path.relpath(target, link.parent)
+        else:
+            # External resources never occupy /tmp, runtime sockets, or private-copy paths.
+            alias = aliases.get(target) if target is not None else None
+            if alias is None:
+                alias = EXTERNAL_ROOT / str(len(aliases) + len(links)) if target is None else EXTERNAL_ROOT / str(len(aliases))
+                if target is not None:
+                    aliases[target] = alias
+                    if target.exists():
+                        bindings.append((target, alias))
+            replacement = str(alias)
+        link.unlink()
+        link.symlink_to(replacement)
+
+    with bind_file.open("wb") as output:
+        for host, boxed in bindings:
+            output.write(os.fsencode(host) + b"\0" + os.fsencode(boxed) + b"\0")
+
+
+def main() -> int:
+    if len(sys.argv) != 4:
+        print("usage: agentbox-docker-snapshot SOURCE DEST BIND_FILE", file=sys.stderr)
+        return 2
+    try:
+        snapshot(*(Path(value) for value in sys.argv[1:]))
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"agentbox: Docker snapshot failed ({type(error).__name__})", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

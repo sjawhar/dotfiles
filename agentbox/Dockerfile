@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-jwt python3-cryptography build-essential pkg-config libssl-dev \
         tmux less procps xz-utils unzip zstd rsync file acl \
         python3-pip python3-yaml python3-venv postgresql-client sqlite3 socat wget bc bsdextrautils bubblewrap \
-        inotify-tools \
+        inotify-tools squashfs-tools \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \
@@ -57,10 +57,9 @@ RUN install -d /opt/agentbox/python/agentbox_sandbox_skips-1.dist-info \
         > /opt/agentbox/python/agentbox_sandbox_skips-1.dist-info/entry_points.txt
 ENV PYTHONPATH=/opt/agentbox/python
 
-# The entrypoint runs as root: it starts the inner dockerd, firewalls the
-# metadata forwarder off the containers the box starts, relays the box's own
-# Envoy address to the host's Envoy forwarder, logs the inner docker into
-# ghcr.io as ubuntu, then drops to ubuntu for the session command.
+# The entrypoint starts inner Docker and host-service relays, preserves host
+# credential routes, then runs the session as its user. AgentBox adds no
+# metadata firewall to nested workloads.
 COPY box-ssh-config /usr/local/bin/box-ssh-config
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/box-ssh-config

@@ -42,7 +42,7 @@ Slash commands take neither route. OMP loads prompt templates from exactly two h
 - My own repos (knives, secretsd, legion) expose their omp extensions via an `omp` manifest in the repo root `package.json` and are consumed from GitHub with a pinned ref. A path or symlink into a local checkout is a prototyping state, never a landed one.
 - Nothing committed in this directory may contain an absolute path or reference a machine-local checkout.
 - Config dirs hold config. Executables live in `shims/` (wrappers), `scripts/` (utilities), or come from mise — never in a `bin/` under a config dir.
-- Every agent launcher gets the same session environment — gh-app `GIT_CONFIG_*` routing, dotfiles shims first on `PATH`, the secrets-broker identity. On the host, `shims/omp` and `scripts/cld` exec their agent through `scripts/agent-session`, which is the one place that environment is set up; `scripts/agentbox` sets up a box's. None of them sets an Envoy or Dispatch variable: every session reads its `envoy.json` (`envoy/AGENTS.md`).
+- Every agent launcher gets the same session environment: gh-app `GIT_CONFIG_*` routing, dotfiles shims first on `PATH`, and the secrets-broker identity. Host launchers use `scripts/agent-session`; `scripts/agentbox` builds the box environment. Connection settings and credentials come from each profile's `envoy.json`, not launcher overrides. AgentBox sets `ENVOY_MACHINE_ID` from the short `AGENTBOX_HOST` for physical-host grouping. That identity variable neither enables a profile connection nor changes its server or credentials.
 
 ## How changes take effect
 

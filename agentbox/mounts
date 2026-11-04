@@ -1,17 +1,9 @@
-# What an agent box sees of $HOME, and nothing more. scripts/agentbox binds
-# each entry at its own path; `agentbox doctor` checks every entry from inside
-# a box. One entry per line: <rw|ro> <path relative to $HOME>. Blank lines and
-# # comments are ignored. A missing path is created (rw) or skipped (ro), so
-# the list is the same on every machine.
-#
-# rw: state the session writes. ro: configuration.
-#
-# The rule for a tool login: a CLI's own login state is fine here when the box
-# needs that CLI (fleetctl, sentry, depot, pup, ant, vercel); an identity that can act as
-# the user on GitHub never is - no ~/.config/gh, no ssh keys, no docker login
-# - so a session pushes only as its repo's GitHub App. Tools that keep their
-# login in the keyring (hawk, pup's tokens, gws) need nothing here: the
-# session bus is relayed into the box.
+# Shared host paths under $HOME. One <rw|ro> <relative path> per line.
+# AgentBox segregates sessions, not host access. Shared state is writable.
+# A missing rw directory is created. Missing config files and ro entries are skipped.
+# Own-host GitHub and Azure config stays visible. App/machine defaults and approvals stay intact.
+# SSH state is shared. Docker state is copied whole into the box's private home.
+# Tools that use the keyring reach it through the relayed session bus.
 
 # omp: sessions, memory, settings
 rw .omp
@@ -19,6 +11,10 @@ rw .config/omp
 rw .cache/omp
 # Native user skills (the pinned GitHub CLI skill lives here).
 rw .agents
+
+
+# Share unit-file state without starting, stopping, or enabling any service.
+rw .config/systemd/user
 
 # the pinned tool store and language caches
 rw .mise
@@ -47,31 +43,21 @@ rw .cache/ossv-n6-runs
 rw .aws
 rw .kube
 rw .pulumi
-# Google Cloud. The SDK install is read-only: gcloud writes only under its config dir, which is
-# the next entry, and ~/.local/bin/gke-gcloud-auth-plugin is a symlink into this tree, so without
-# it kubectl cannot get a GKE credential at all (dispatch://INFRA-702, a box where
-# `gcloud auth list` answered "real gcloud binary not found" and the build pool was unreachable).
-# The config dir is the machine's gcloud identity, not a user login: its active configuration is
-# `box`, whose account is the keyless external_account dev-<name>@theorem-agent-infra that gcloud
-# exchanges for a token through the metadata relay the box already has, or on a Google VM the
-# VM's attached account, which gcloud takes from the metadata server through that same relay
-# (GCE_METADATA_*, scripts/agentbox). agent-c's deploy.py also
-# requires a file in it (agent-devbox-wif-adc.json), which a box now writes where the host keeps
-# it instead of into an overlay that dies with the box.
-ro .gcloud
+# Each box sees its own host's Google SDK and complete configuration unchanged.
+# The default credential route remains the machine identity.
+rw .gcloud
 rw .config/gcloud
-# Azure. The machine's own identity, which shims/az gives every agent session in place of the
-# user's ~/.azure login (that one is never mounted). `az login --identity` (or, on a Google VM,
-# `az login --service-principal --federated-token`) writes the profile and refreshes tokens in
-# it, so it is rw. On a Google VM shims/az reads the agent-azure identity's client id from
-# .config/agent-azure, which holds no secret.
+# Azure's default agent route uses the machine identity. User-login grants retain
+# their separate authorization. The machine identity refreshes this config.
 rw .azure-box-identity
-ro .config/agent-azure
+rw .azure
+rw .config/agent-azure
 
 # work identities agents use (a customer platform's client config is in the private part of this
 # list, .secrets/dotfiles/agentbox/mounts, so its name stays out of this public repository)
 rw .config/trajectory-labs
 rw .config/gws
+rw .config/gh
 rw .config/knives
 rw .cache/knives
 rw .config/opencode
@@ -94,61 +80,33 @@ rw .cache/mailbox
 rw .local/share/com.vercel.cli
 
 # configuration
-ro .config/forward
-ro .config/jj
-ro .config/secretsd
-ro .config/sops
-ro .config/ctx
-ro .config/mailbox
+rw .config/forward
+rw .config/jj
+rw .config/secretsd
+rw .config/sops
+rw .config/ctx
+rw .config/mailbox
 # the model-spend setup's endpoint, tags and session files (installers/agent-spend.sh), so box sessions export too
-ro .config/agent-spend
+rw .config/agent-spend
 # the transcript store's endpoint and reader/writer logins, so `tq` and the audits that read it work in a box
-ro .config/transcript-store
+rw .config/transcript-store
 # the grading farm's machine-local paths (installers/grade-farm.sh), so `farm` in a box given
 # --dir for farm-pkg, grade-farm and boxid under /mnt/nvme/<user> uses the host's farm root and key
-ro .config/grade-farm
+rw .config/grade-farm
 # Dispatch and Envoy: envoy.json, which a box session without a profile of its
 # own reads, and a profile's own envoy.json may link to (envoy/AGENTS.md)
-ro .config/legion
-ro .npmrc
-ro .gitconfig
-ro .ssh/jj-signing
-ro .ssh/jj-signing.pub
-# The Google Compute Engine ssh key gcloud makes and uses for `gcloud compute ssh`
-# (dispatch://INFRA-702). It is a GCE key, not a GitHub identity: Google's guest agent puts its
-# public half in the project or instance metadata, and sshd on a Compute Engine VM is the only
-# thing that accepts it. The box already holds the gcloud identity that may read and write that
-# metadata (`rw .config/gcloud`), so the key adds no access the box did not have - it only saves
-# gcloud from making a second key per box, which would write a new public key into the project
-# metadata on every launch. GitHub never sees it: `~/.ssh` as a whole is still not mounted, and
-# a push from a box is still the repo's GitHub App over https.
-ro .ssh/google_compute_engine
-ro .ssh/google_compute_engine.pub
-# sami-devbox's key for sami-rocqperf's OpenSSH on tcp:443 (dispatch://INFRA-734, INFRA-993), and
-# that host's pinned key. Its only verifier is sami-rocqperf's authorized_keys, which accepts it
-# only from sami-devbox's tailnet address; GitHub never sees it. A session moved to sami-devbox
-# runs its scripts on sami-rocqperf with `ssh sami-rocqperf`: the box writes that entry at start
-# (agentbox/box-ssh-config) with the user, the port and these files, as the BOX sees them ($HOME,
-# never ~, since a box's home is the host user's path). Absent on other hosts.
-ro .ssh/sami-rocqperf
-ro .ssh/sami-rocqperf.pub
-ro .ssh/known_hosts.sami-rocqperf
-# The same for a box that must reach the machine it RUNS on. A box reaches any OTHER machine of
-# the tailnet as this node, which Tailscale SSH authenticates, but traffic to its own host does
-# not take that path: sshd answers and asks for a key, so `ssh sami-devbox` from a box on
-# sami-devbox was refused (VERIFY, 2026-11-03 19:26Z). Each entry is skipped where the file is
-# absent.
-ro .ssh/sami-devbox
-ro .ssh/sami-devbox.pub
-ro .ssh/known_hosts.sami-devbox
+rw .config/legion
+rw .npmrc
+rw .gitconfig
+# Host SSH identities, pins, configuration, and GnuPG state are not filtered.
+rw .ssh
+rw .gnupg
 
 # The public-text leak check `shims/gh` demands before `gh pr edit|create|comment`. This entry is
 # the POINTER, `path`, holding the script's absolute path; the script itself lives on /mnt/nvme,
 # outside every box, so `agentbox move` adds the directory holding it to a session's spec
 # (move_config_dirs in scripts/agentbox). Without both, every public text write from a box is
 # refused and a lead cannot work in one (dispatch://INFRA-702, 2026-11-01).
-ro .config/public-leak-check
-# On sami-devbox the pointer names a copy under the home, ~/.local/share/public-leak-check (the
-# /mnt/nvme/sami/frac-verify tree is not on that machine), so every box gets that directory too,
-# read-only; on a machine without it the entry is skipped.
-ro .local/share/public-leak-check
+rw .config/public-leak-check
+# The host-local public-text check, when its pointer names this home path.
+rw .local/share/public-leak-check

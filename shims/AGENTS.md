@@ -201,8 +201,10 @@ before handing the call to the real one.
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
   profile's links, then execs omp through `scripts/agent-session` (below). It sets no
-  Envoy, Dispatch or provider-key variable: the session's plugin reads its `envoy.json`, and keys
-  come from the profile's `models.yml` (`omp/AGENTS.md`). Each session runs in a transient
+  Envoy or Dispatch connection/credential override and no provider key. The plugin reads
+  `envoy.json`, and keys come from the profile's `models.yml` (`omp/AGENTS.md`). AgentBox's
+  inherited `ENVOY_MACHINE_ID` identifies the physical host, not a profile connection.
+  Each session runs in a transient
   systemd user scope with a hard memory cap and swap off: `OMP_MEMORY_MAX=<size>`, by default the
   larger of 24G and MemTotal/20 in whole GiB (dispatch://INFRA-898: the largest of 44 sessions
   measured on 2026-10-31 held 17.8 GiB; dispatch://INFRA-993: 24G on sami-rocqperf, 109G on

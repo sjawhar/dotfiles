@@ -1,18 +1,9 @@
 #!/bin/bash
-# Box startup, as root: bring up the inner dockerd, keep the containers it
-# will run away from the host's metadata forwarder, relay the box's own Envoy
-# address to the host's Envoy forwarder, log the inner docker into ghcr.io as
-# ubuntu, then hand off to the session command as ubuntu. The session command
-# is the container's main process (scripts/agentbox passes shims/omp), so the
-# box lives exactly as long as the session and `--rm` cleans it up; the daemon
-# and the relay die with it.
+# Box startup: start inner Docker and host-service relays, preserve the host's
+# credential routes, then run the session as its user. Box lifetime follows the session.
 set -euo pipefail
 
-# The forwarder addresses are required because what follows depends on them:
-# the launcher always passes both, so a missing one is a launcher bug, not a
-# box that silently starts sandboxes with the instance role's access, or one
-# whose sessions cannot reach Envoy.
-[[ -n "${AGENTBOX_IMDS_FORWARDER:-}" ]] || { echo "agentbox: AGENTBOX_IMDS_FORWARDER is not set" >&2; exit 1; }
+# Required launcher address for the Envoy relay.
 [[ -n "${AGENTBOX_ENVOY_FORWARDER:-}" ]] || { echo "agentbox: AGENTBOX_ENVOY_FORWARDER is not set" >&2; exit 1; }
 [[ -n "${AGENTBOX_USER:-}" ]] || { echo "agentbox: AGENTBOX_USER is not set" >&2; exit 1; }
 
@@ -22,39 +13,50 @@ if [ "$(getent passwd "$AGENTBOX_USER" | cut -d: -f6)" != "$HOME" ]; then
     usermod -d "$HOME" "$AGENTBOX_USER"
 fi
 
-# Give the session user its own home directories, not host mounts. Bind mounts
-# can have the same device number as the box home, so prune their exact paths.
-mount_targets="$(findmnt -rn -o TARGET --raw)"
+# Bind mounts can share the home device. JSON/NUL preserves literal target names.
+ownership_paths="$(mktemp /tmp/agentbox-ownership.XXXXXX)"
+if ! findmnt --json --list --output TARGET | /usr/bin/python3 -c '
+import json, os, sys
+try:
+    targets = [row["target"] for row in json.load(sys.stdin)["filesystems"]]
+    if not targets or any(not isinstance(target, str) or "\0" in target for target in targets):
+        raise ValueError()
+    for target in targets:
+        sys.stdout.buffer.write(os.fsencode(target) + b"\0")
+except (KeyError, TypeError, ValueError, UnicodeError):
+    sys.exit("agentbox: invalid mount target JSON")
+' >"$ownership_paths"; then
+    rm -f "$ownership_paths"
+    echo "agentbox: cannot enumerate host mounts; no ownership changes made" >&2
+    exit 1
+fi
 home_find=("$HOME" -xdev)
-while IFS= read -r mounted; do
-    printf -v mounted '%b' "$mounted"
+while IFS= read -r -d '' mounted; do
     [[ "$mounted" == "$HOME/"* ]] || continue
-    home_find+=(-path "$mounted" -prune -o)
-done <<<"$mount_targets"
+    home_find+=(-samefile "$mounted" -prune -o)
+done <"$ownership_paths"
+if ! find "${home_find[@]}" -type d -print0 >"$ownership_paths"; then
+    rm -f "$ownership_paths"
+    echo "agentbox: cannot enumerate private home directories; no ownership changes made" >&2
+    exit 1
+fi
 while IFS= read -r -d '' dir; do
     chown "$AGENTBOX_USER:$AGENTBOX_USER" "$dir"
-done < <(find "${home_find[@]}" -type d -print0)
+done <"$ownership_paths"
+rm -f "$ownership_paths"
 
 mkdir -p /var/log
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 60); do
-    docker info >/dev/null 2>&1 && break
+    docker --host=unix:///var/run/docker.sock info >/dev/null 2>&1 && break
     sleep 0.5
 done
-if ! docker info >/dev/null 2>&1; then
+if ! docker --host=unix:///var/run/docker.sock info >/dev/null 2>&1; then
     echo "agentbox: inner dockerd did not start within 30s" >&2
     tail -30 /var/log/dockerd.log >&2
     exit 1
 fi
 chmod 666 /var/run/docker.sock
-# DOCKER-USER exists once dockerd runs; containers the box starts must not
-# reach the metadata forwarder, or every sandbox would hold the devbox role.
-iptables -I DOCKER-USER -d "${AGENTBOX_IMDS_FORWARDER%:*}" -p tcp --dport "${AGENTBOX_IMDS_FORWARDER##*:}" -j DROP
-# Nor the metadata address itself: on a Google VM the metadata server answers any
-# NATed container at 169.254.169.254 with the VM's account token, with no hop
-# limit like AWS's IMDSv2 (dispatch://INFRA-993). The box's own processes are not
-# in this chain and keep their relay.
-iptables -I DOCKER-USER -d 169.254.169.254 -j DROP
 
 # Envoy at the address the host's envoy.json names (http://127.0.0.1:<port>),
 # relayed to the host's forwarder at the network gateway, so the one file
@@ -143,11 +145,10 @@ if [ -n "${AGENTBOX_CRED_HELPERS:-}" ] && [ "$AGENTBOX_CRED_HELPERS" != "{}" ]; 
 fi
 
 
-# An ssh config for the other machines a box talks to (agentbox/box-ssh-config): `ssh
-# sami-rocqperf` from a box connected as ubuntu on port 22 and was refused, since the box has the
-# key and the known_hosts file but no entry naming the user, the port and those files (the cost
-# lead's box on sami-devbox, 2026-11-03 15:04Z).
-/usr/local/bin/box-ssh-config "$HOME" "$AGENTBOX_USER" || \
+# A mounted host SSH directory is shared state. Generate defaults only in the box.
+ssh_shared=0
+mountpoint -q "$HOME/.ssh" && ssh_shared=1
+AGENTBOX_SSH_SHARED="$ssh_shared" /usr/local/bin/box-ssh-config "$HOME" "$AGENTBOX_USER" || \
     echo "agentbox: no ssh config written; \`ssh sami-rocqperf\` from this box may be refused" >&2
 
 # The session runs as the mounted directories' owner with the launcher's

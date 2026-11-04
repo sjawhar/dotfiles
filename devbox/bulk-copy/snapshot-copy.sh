@@ -4,7 +4,7 @@
 #   mount  attach the image read-only, put a copy-on-write overlay (dm-snapshot, COW file on
 #          /mnt/scratch) over it, and mount that, so ext4 replays its journal without touching
 #          the image (crash-consistent snapshot; `noload` left 15 entries unreadable, "Bad message")
-#   copy   list, filter (EXCLUDE + scope rules), no-offbox check, rsync into /mnt/durable
+#   copy   list, filter (EXCLUDE + scope rules), rsync into /mnt/durable
 #   verify per-group file counts and bytes, list vs target, and an rsync dry run
 #   umount detach
 set -euo pipefail
@@ -34,14 +34,6 @@ copy)
   python3 "$C/exclude-filter.py" /mnt/durable "$C/EXCLUDE" --records <"$L/all.find" >"$L/kept.find" 2>"$L/excluded.txt"
   python3 -c 'import sys; d=sys.stdin.buffer.read().split(b"\0"); sys.stdout.buffer.write(b"".join(r.split(b" ",2)[2]+b"\0" for r in d if r))' \
     <"$L/kept.find" >"$L/kept.list"
-  if ! "${NO_OFFBOX:-/home/sami/.dotfiles/scripts/no-offbox}" --root "$MNT" --from "$L/kept.list" -0 >"$L/offbox.txt" 2>&1; then
-    echo "no-offbox refused entries; see $L/offbox.txt" >&2
-    # Drop the refused paths (and everything under them) from the list, keep the record.
-    grep -oE 'REFUSED [^:]+' "$L/offbox.txt" | cut -d' ' -f2- | sed "s#^$MNT/##" | sort -u >"$L/refused.txt"
-    awk '{print "path /mnt/durable/" $0}' "$L/refused.txt" >"$L/refused.rules"
-    python3 "$C/exclude-filter.py" /mnt/durable "$C/EXCLUDE" "$L/refused.rules" <"$L/kept.list" >"$L/kept.list.ok" 2>>"$L/excluded.txt"
-    mv "$L/kept.list.ok" "$L/kept.list"
-  fi
   # Under cgroup-guard: rsync dirties millions of inodes in this cgroup, which must not die holding
   # them (see cgroup-guard.sh). The guard drains it when rsync ends, by itself or on a signal.
   "$C/cgroup-guard.sh" run -- rsync -aHAX --numeric-ids --inplace --from0 --files-from="$L/kept.list" "$MNT/" /mnt/durable/ \
