@@ -35,7 +35,6 @@ DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 CUTOVER_DIR="${SAMI_DEVBOX_CUTOVER_DIR:-/mnt/nvme/$(id -un)/cutover}"
 TAILNET=tail12ec1c.ts.net
 ACCOUNT="dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com"
-DEV_BOX="dev-box@theorem-agent-infra.iam.gserviceaccount.com"
 KUBE_CONTEXT=gke_theorem-agent-infra_us-west1_dispatch
 # S3's grade Jobs: namespace grade of grade-us-west1 (installers/gcloud-sdk.sh, KUBE_CLUSTERS).
 GRADE_KUBE_CONTEXT=gke_theorem-agent-infra_us-west1-b_grade-us-west1
@@ -440,24 +439,26 @@ jwt_claim() {
 }
 
 # The model gateway takes a Google ID token for audience model-gateway-gce as a bearer and checks
-# its account against its own list (agent-infra model-gateway/vm/ossv_box_auth.py). A2 asks for
-# dev-box@'s token: on sami-devbox the host's ossv-box-gateway-token timer mints it by
-# impersonation (scripts/ossv-box-gateway-token), and the box reads it through the read-only
-# ossv-box mount.
+# its account against its own list (agent-infra model-gateway/vm/ossv_box_auth.py). A2 mints that
+# token itself, as a session does: scripts/gateway-token asks the metadata server, which in a box
+# is the host's relay. Nothing is cached, so there is no file to find and no timer to be behind
+# (dispatch://INFRA-993/comment/be112388).
 gateway_check() {
-    local f="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ossv-box/gateway-token" token email url code
-    if [[ ! -s "$f" ]]; then
-        fail "model gateway: no ID token at $f (host timer ossv-box-gateway-token)"
+    local token email aud url code
+    token="$("$DOTFILES_DIR/scripts/gateway-token" 2>&1)" || {
+        fail "model gateway: scripts/gateway-token minted nothing: $(tail -1 <<< "$token")"
         return
-    fi
-    token="$(<"$f")"
+    }
     email="$(jwt_claim "$token" email)"
-    [[ "$email" == "$DEV_BOX" ]] && ok "model gateway: ID token's email is $email, audience $(jwt_claim "$token" aud)" || fail "model gateway: ID token's email: want $DEV_BOX, got ${email:-none}"
+    aud="$(jwt_claim "$token" aud)"
+    # This box's own account, which the gateway's list serves as team `box` with no pins. No
+    # impersonation: dev-box@ is for a machine that has no accepted identity of its own.
+    [[ "$email" == "$ACCOUNT" && "$aud" == model-gateway-gce ]] && ok "model gateway: minted an ID token for $email, audience $aud" || fail "model gateway: minted token: want $ACCOUNT for model-gateway-gce, got ${email:-none} for ${aud:-none}"
     # The gateway sessions use: the ossv-gateway provider's baseUrl in omp/models.local.yml.
     url="$(awk '/^  ossv-gateway:/ { p = 1; next } p && /baseUrl:/ { print $2; exit } /^  [^ ]/ { p = 0 }' "$DOTFILES_DIR/omp/models.local.yml" 2>/dev/null)"
     [[ -n "$url" ]] || { fail "model gateway: no ossv-gateway baseUrl in $DOTFILES_DIR/omp/models.local.yml"; return; }
     code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -K <(printf 'header = "Authorization: Bearer %s"\n' "$token") "$url/v1/models" 2>&1)"
-    [[ "$code" == 200 ]] && ok "model gateway: $url/v1/models with the dev-box@ token: 200" || fail "model gateway: $url/v1/models with the dev-box@ token answered $code"
+    [[ "$code" == 200 ]] && ok "model gateway: $url/v1/models with a freshly minted token: 200" || fail "model gateway: $url/v1/models with a freshly minted token answered $code"
     # And a token it cannot verify is refused, so the 200 above was the token's doing.
     code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer x.y.z' "$url/v1/models" 2>&1)"
     [[ "$code" == 401 ]] && ok "model gateway: a forged token answers 401" || fail "model gateway: a forged token answered $code, want 401"
@@ -1035,8 +1036,17 @@ host() {
     dispatch_cli_check "on the host"
     local missing
     mise_check
-    missing="$(yq '.providers.anthropic.baseUrl == .providers["ossv-gateway"].baseUrl and .providers.anthropic.apiKey == "!cat /run/user/1000/ossv-box/gateway-token"' "$HOME/.omp/agent/models.yml" 2>&1)"
-    [[ "$missing" == true ]] && ok "omp models.yml: anthropic/ uses ossv-gateway's baseUrl and the gateway token" || fail "omp models.yml: anthropic/ is not routed through ossv-gateway with the gateway token: $missing"
+    # Both gateway providers sign in with a token minted per call, and no file path is left in the
+    # built models.yml (dispatch://INFRA-993/comment/be112388). The built-in `anthropic` provider
+    # is deliberately NOT given the gateway's baseUrl: every Claude chain ends on `anthropic/...`,
+    # so routing it through the gateway too would leave a down gateway with no Claude at all
+    # (omp/AGENTS.md; the assertion that demanded the opposite stood here until 2026-11-05 and had
+    # been failing since the direct route was restored).
+    local want="!$DOTFILES_DIR/scripts/gateway-token"
+    missing="$(WANT="$want" yq '.providers["ossv-gateway"].apiKey == strenv(WANT) and .providers["ossv-gateway-openai"].apiKey == strenv(WANT)' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" == true ]] && ok "omp models.yml: both gateway providers mint their token per call ($want)" || fail "omp models.yml: a gateway provider does not use $want: $missing"
+    missing="$(yq -r '[.providers[] | (.apiKey // "")] | map(select(test("/ossv-box/|/verified-grader/"))) | length' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" == 0 ]] && ok "omp models.yml: no provider reads a cached gateway credential file" || fail "omp models.yml: $missing provider(s) still read a cached gateway credential file"
     # The openai/ agents and roles go to the gateway's openai group (devbox/sami-devbox-model-routes):
     # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/ models,
     # and omp's merged models.yml declares at least 4 of them.

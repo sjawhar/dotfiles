@@ -103,13 +103,13 @@ SECRET_FILES=(
 # holds.
 EXTRA_INSTALLERS=(
     disk-fill-watch load-swap-watch envoy-role-holder-watch omp-memory-watch session-cpu-record
-    # The box gateway token: sami-rocqperf (Azure) does not need it; a Google VM mints it from its
-    # own attached account.
-    ossv-box-gateway-token
-    # The box gateway key, read through the gateway VM with bin/ossv-vm, as on sami-rocqperf (the
-    # ossv-vm key comes from the secrets broker). omp does not need it (it signs in with the dev-box@
-    # token above); a Claude Code apiKeyHelper does.
-    ossv-box-gateway-key
+    # No gateway credential installer: every gateway provider mints this box's own identity token
+    # per call (scripts/gateway-token), so there is nothing to arm
+    # (dispatch://INFRA-993/comment/be112388). The one exception is the BET-59 verified-grader
+    # stream's key, which the gateway serves to team `verified-grader` alone and so to no identity
+    # caller; its unit runs at boot and never repeats, and it goes when the gateway takes an
+    # identity token for that team.
+    verified-grader-gateway-key
     # What the librarian's test harnesses need on the host beyond mise.toml: the exact omp build
     # their runs are compared at, and Playwright's Chromium (installers/librarian-harness-host.sh).
     librarian-harness-host
@@ -196,24 +196,20 @@ step_secrets() {
     # --relative keeps each path under $HOME; -a keeps the 0600 modes; nothing is deleted there.
     (cd "$HOME" && rsync -a --relative -e "ssh -o BatchMode=yes" "${SECRET_FILES[@]}" "sami@$VM:")
     remote 'ls -l ~/.config/sops/age/keys.txt ~/.config/legion/envoy.json ~/.ssh/jj-signing ~/.dotfiles/secrets.env ~/.dotfiles/omp/models.local.yml && du -sh ~/.dotfiles/.secrets'
-    # sami-rocqperf's overlay reads the box key, which this machine cannot get (EXTRA_INSTALLERS),
-    # and this machine holds no Anthropic login (no person's login, and omp's agent.db is not
-    # copied). So the ossv-gateway provider reads the dev-box@ ID token, which the gateway takes as
-    # team box, and the built-in anthropic provider goes to the same gateway with it, so the agents
-    # and fallback tails that name anthropic/<id> answer too. sami-rocqperf's overlay keeps direct
-    # Anthropic. installers/omp.sh merges the overlay at step tools; yq is not here before that.
+    # This machine's copy of sami-rocqperf's overlay names that machine's credential, so rewrite
+    # the gateway providers to mint this box's own identity token per call: dev-sjawhar@ is a
+    # gateway account of team `box` with no pins (agent-infra model-gateway/vm/ossv_box_accounts.py),
+    # so a Google VM needs no key and no impersonation (dispatch://INFRA-993/comment/be112388).
+    # The built-in `anthropic` provider is left alone on purpose: this machine does hold a direct
+    # Anthropic login (verified 2026-11-03), and every Claude chain ends on `anthropic/...`, so
+    # giving it the gateway's baseUrl would send the whole chain through the gateway and leave a
+    # down gateway with no Claude at all (omp/AGENTS.md). installers/omp.sh merges the overlay at
+    # step tools; yq is not here before that.
     remote 'set -e
         f=~/.dotfiles/omp/models.local.yml
-        sed -i "s|^\(    apiKey: \"!cat /run/user/1000/ossv-box/\)gateway-key\"\$|\1gateway-token\"|" "$f"
-        if ! grep -q "^  anthropic:" "$f"; then
-            [ "$(grep -E "^[^ #]" "$f" | tail -1)" = "providers:" ] || { echo "$f: providers is not its last top-level key"; exit 1; }
-            url=$(awk "/^  ossv-gateway:/ { p = 1; next } p && /baseUrl:/ { print \$2; exit } /^  [^ ]/ { p = 0 }" "$f")
-            [ -n "$url" ] || { echo "$f: no ossv-gateway baseUrl"; exit 1; }
-            printf "%s\n" "  # sami-devbox holds no Anthropic login, so anthropic/<id> (agents, fallback tails) goes through the gateway too." \
-                "  anthropic:" "    baseUrl: $url" "    apiKey: \"!cat /run/user/1000/ossv-box/gateway-token\"" \
-                "    authHeader: true" "    compat:" "      replayUnsignedThinking: false" >> "$f"
-        fi
-        grep -n -e "ossv-box/gateway-token" -e "^  anthropic:" "$f"'
+        sed -i -E "s|^( +)(apiKey: \"!cat /run/user/[0-9]+/ossv-box/gateway-(key\|token)\"\|apiKeyFile: /run/user/[0-9]+/ossv-box/gateway-key)\$|\1apiKey: \"!/home/sami/.dotfiles/scripts/gateway-token\"|" "$f"
+        ! grep -nE "ossv-box/gateway-(key|token)" "$f"
+        grep -n "scripts/gateway-token" "$f"'
     remote "install -d -m 0755 ~/.config/agent-azure
         printf '%s\n' $AGENT_AZURE_CLIENT_ID > ~/.config/agent-azure/client-id
         chmod 0644 ~/.config/agent-azure/client-id

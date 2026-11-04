@@ -1,0 +1,18 @@
+[Unit]
+# The one gateway credential on this box that is still a key. The gateway's identity sign-in maps an
+# account to exactly one LiteLLM team, and dev-sjawhar@ is team `box`, which the `pbc/` model groups
+# refuse (measured 2026-11-04: 403 team_model_access_denied). So the verified-grader stream keeps its
+# virtual key until the gateway serves that team to an identity caller too, and this unit dies with it.
+# It runs at boot and no oftener: the key is a static secret, and the only thing a reboot changes is
+# that tmpfs is empty again. No timer (dispatch://INFRA-993/comment/be112388, Sami 2026-11-04: "The
+# idea that we have a mono gateway credential refresher is just nonsense").
+Description=sami-devbox: the BET-59 verified-grader stream's model-gateway key in tmpfs, put back after a boot
+Documentation=https://dispatch.tail12ec1c.ts.net/issues/BET-59
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.dotfiles/scripts/verified-grader-gateway-key
+
+[Install]
+WantedBy=default.target

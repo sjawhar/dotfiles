@@ -64,8 +64,15 @@ dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-fo
 box-cleanup.timer  max_run=4h        # owner: box-health lead. Every disk cleaner, once a day.
 
 # --- model routes ---
-ossv-box-gateway-key.timer         # owner: OSS Verify gateway lane. The gateway key in models.yml.
-ossv-box-gateway-token.timer       # owner: OSS Verify gateway lane. The gateway identity token.
+# No timer. Every gateway provider mints this machine's own Google identity token when omp asks
+# for it (scripts/gateway-token in the `apiKey: "!…"` of omp/models.local.yml), which is the
+# gateway's whole sign-in (agent-infra model-gateway/vm/ossv_box_auth.py), so there is no
+# credential to keep fresh between calls. ossv-box-gateway-key.timer and
+# ossv-box-gateway-token.timer stood here until 2026-11-04 23:57Z and were removed with their
+# scripts (dispatch://INFRA-993/comment/be112388, Sami: "The idea that we have a mono gateway
+# credential refresher is just nonsense... We're supposed to be using WIF with the model gateway").
+# The one credential left that is a key, the BET-59 verified-grader stream's, has no timer either:
+# omp/verified-grader-gateway-key.service puts it back in tmpfs at boot and never repeats.
 
 # --- lane timers whose unit files are machine-local, not in ~/.dotfiles ---
 # MACH's archive fires 20 min after each run ends and normally takes 5-7 min, but after the

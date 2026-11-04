@@ -2,6 +2,8 @@
 # omp-models-build -- write the models.yml omp reads: omp/models.yml with the machine's gitignored
 # omp/models.local.yml merged over it (omp/AGENTS.md, "models.yml"). installers/omp.sh runs it, and so does
 # every writer of a key file named below. Usage: omp-models-build [OUT], OUT ~/.omp/agent/models.yml by default.
+# No provider uses `apiKeyFile` today: the model-gateway providers mint an identity token per call
+# (scripts/gateway-token), so there is no key file to write into this output.
 #
 # A provider in models.local.yml may give `apiKeyFile: <path>` in place of `apiKey`. The output then holds that
 # file's contents as a literal `apiKey`, so omp gets the key without starting a process. omp starts a Bun
@@ -9,8 +11,8 @@
 # (resolve-config-value.ts). On sami-rocqperf at load 350-450 that start failed in 46 omp processes on 2026-11-02
 # and 2026-11-03 ("The apiKey command for provider ... produced no key"). It failed also when the command was only a
 # shell builtin `read`. Each failure sent the turn to its fallback model.
-# Use `apiKeyFile` only for a key that changes rarely, because a running omp keeps the value it read at start. The
-# file's writer must run this script after each change (scripts/ossv-box-gateway-key does). When the file is missing
+# Use `apiKeyFile` only for a key that changes rarely and is costly to fetch, because a running omp keeps the value
+# it read at start, and its writer must run this script after each change. When the file is missing
 # or empty, the provider gets a `!` command that reads the file, so omp can still get the key after the writer runs.
 # The output holds keys, so it is written mode 0600.
 set -euo pipefail

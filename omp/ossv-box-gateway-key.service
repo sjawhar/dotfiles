@@ -1,7 +1,0 @@
-[Unit]
-Description=sami-rocqperf and sami-devbox: this box's OSS Verify model-gateway key in tmpfs, and on sami-devbox the verified-grader key (dispatch://INFRA-398)
-Documentation=https://dispatch.tail12ec1c.ts.net/issues/INFRA-398
-
-[Service]
-Type=oneshot
-ExecStart=%h/.dotfiles/scripts/ossv-box-gateway-key

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# gateway-token [ACCOUNT] -- print a Google identity token for the OSS Verify model gateway on
+# stdout, minted when it is asked for. Nothing is stored: no file, no timer, no refresher
+# (Sami, 2026-11-04, dispatch://INFRA-993/comment/be112388: "The idea that we have a mono gateway
+# credential refresher is just nonsense... We're supposed to be using WIF with the model gateway").
+#
+# The gateway's whole sign-in is this token (agent-infra model-gateway/vm/ossv_box_auth.py): Google's
+# signature, the audience `model-gateway-gce`, the expiry, and the token's `email` claim against
+# model-gateway/vm/ossv_box_accounts.py, which carries the LiteLLM team the call lands in. So the
+# credential is the machine's own identity, and there is nothing to keep fresh between calls.
+#
+# Who it prints a token for:
+#   - no ACCOUNT, on a Google VM: this VM's own attached account, from its metadata server, which
+#     issues a token of any audience for its own identity and needs no IAM role. sami-devbox runs as
+#     dev-sjawhar@theorem-agent-infra, which ossv_box_accounts.py serves as team `box` with no pins,
+#     so this box needs no impersonation at all.
+#   - ACCOUNT, on a Google VM: that account's token through IAM Credentials generateIdToken, with
+#     this VM's own access token. The caller needs roles/iam.serviceAccountOpenIdTokenCreator on it.
+#   - ACCOUNT, off Google Cloud: the same generateIdToken, with the box's federated access token
+#     from its external_account ADC (the azure/entra pool). sami-rocqperf reaches the gateway this
+#     way as dev-box@theorem-agent-infra, the one account its machine identity may act as.
+# Off Google Cloud with no ACCOUNT there is no identity to print, and it says so.
+#
+# Where it is used: the `apiKey: "!…"` of each gateway provider in a machine's omp
+# models.local.yml. omp runs such a command when a provider is first used, keeps the value in
+# memory, and runs it again on a 401 -- which is exactly the lifecycle of an hour-long token
+# (omp/AGENTS.md). Mint cost measured 2026-11-04: 0.017 s on sami-devbox (metadata), 0.46 s on
+# sami-rocqperf (federation plus generateIdToken), both well inside omp's 10 s `!command` limit.
+#
+# The token is printed and never written anywhere, so a reboot leaves nothing to put back and an
+# agent box needs no credential mount: inside a box the metadata server is the host's relay, which
+# GCE_METADATA_HOST names (agentbox/README.md), and this script reads that variable.
+set -euo pipefail
+
+# The callers are omp's `/bin/sh` and systemd-less shells, neither of which has a login PATH; jq
+# and curl come from the system or mise.
+export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$PATH"
+
+# This gateway's audience and no other service's. A token minted for another audience is a 401.
+audience=model-gateway-gce
+target=${1:-}
+cred=${GOOGLE_APPLICATION_CREDENTIALS:-$HOME/.config/gcloud/application_default_credentials.json}
+# GCE_METADATA_HOST names the metadata server, as it does for Google's own libraries (and in an
+# agent box, the host's relay); tests point it at a stub.
+metadata=${GCE_METADATA_HOST:-metadata.google.internal}
+# scripts/on-google-vm is the one test for a Google VM in this repository, and it is read beside
+# this file rather than under $HOME, so a copy run from a workspace checkout tests with its own.
+on_google_vm="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/on-google-vm"
+
+fail() {
+    echo "gateway-token: $1" >&2
+    exit 1
+}
+
+# bearer prints a curl config line that carries a token, so no token reaches a command line.
+bearer() { printf 'header = "Authorization: Bearer %s"\n' "$1"; }
+
+# gce_get prints a metadata server answer about the account this VM runs as.
+gce_get() {
+    curl -fsS -m 10 -H 'Metadata-Flavor: Google' \
+        "http://$metadata/computeMetadata/v1/instance/service-accounts/default/$1"
+}
+
+# federated_token prints the box's federated access token from an external_account credential.
+federated_token() {
+    local url field token_url sts_audience subject_type subject
+    local -a headers=()
+    url=$(jq -er '.credential_source.url' "$cred") || fail "$cred has no credential_source.url"
+    field=$(jq -er '.credential_source.format.subject_token_field_name' "$cred") || fail "$cred names no subject token field"
+    token_url=$(jq -er '.token_url' "$cred")
+    sts_audience=$(jq -er '.audience' "$cred")
+    subject_type=$(jq -er '.subject_token_type' "$cred")
+    while IFS= read -r h; do headers+=(-H "$h"); done < <(jq -r '.credential_source.headers // {} | to_entries[] | "\(.key): \(.value)"' "$cred")
+    subject=$(curl -fsS -m 10 "${headers[@]}" "$url" | jq -er --arg f "$field" '.[$f]') || fail "no subject token from $url"
+    printf %s "$subject" | curl -fsS -m 20 "$token_url" \
+        --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+        --data-urlencode "audience=$sts_audience" \
+        --data-urlencode 'scope=https://www.googleapis.com/auth/cloud-platform' \
+        --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:access_token' \
+        --data-urlencode "subject_token_type=$subject_type" \
+        --data-urlencode 'subject_token@-' | jq -er '.access_token'
+}
+
+# generate_id_token prints $target's ID token, minted by IAM Credentials with the access token $1.
+generate_id_token() {
+    curl -fsS -m 20 -K <(bearer "$1") -H 'Content-Type: application/json' \
+        -d "{\"audience\":\"$audience\",\"includeEmail\":true}" \
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$target:generateIdToken" |
+        jq -er '.token'
+}
+
+if "$on_google_vm" 2> /dev/null; then
+    own=$(gce_get email) || fail "no service account email from the metadata server at $metadata"
+    if [[ -z $target || $target == "$own" ]]; then
+        # format=full carries the google.compute_engine claims an account whose entry pins a
+        # project or an instance needs; an entry with no pin is served either way.
+        token=$(gce_get "identity?audience=$audience&format=full") || fail "no identity token for $own"
+    else
+        access=$(gce_get token | jq -er '.access_token') || fail "no access token for $own from the metadata server"
+        token=$(generate_id_token "$access") || fail "no identity token for $target as $own"
+    fi
+else
+    [[ -n $target ]] || fail "this machine is not a Google VM, so it has no identity of its own here: name the account to act as"
+    [[ -r $cred ]] || fail "no credential at $cred to act as $target with"
+    [[ $(jq -r '.type' "$cred") == external_account ]] || fail "$cred is not an external_account credential"
+    access=$(federated_token) || fail "no federated access token from $cred"
+    token=$(generate_id_token "$access") || fail "no identity token for $target from $cred"
+fi
+
+token=${token//[$'\r\n']/}
+[[ $token == *.*.* ]] || fail "what was minted is not a token"
+printf %s "$token"

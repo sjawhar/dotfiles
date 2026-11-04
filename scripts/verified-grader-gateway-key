@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # verified-grader-gateway-key -- keep the BET-59 verified-grader stream's model-gateway key in tmpfs, where the
 # `pbc-gateway` provider's `apiKey: "!cat …"` reads it (agent-infra model-gateway/box README.md, "What a BET-59
-# session launches with"). scripts/ossv-box-gateway-key runs it as its second step, so the ossv-box-gateway-key
-# unit renews both keys every 10 minutes; it runs alone too.
+# session launches with"). omp/verified-grader-gateway-key.service runs it once at boot and nothing runs it on a
+# schedule; it runs alone too, which is how a rotated key is picked up.
+#
+# It is the last gateway credential on this box that is a key. Every other provider mints this machine's own
+# identity token per call (scripts/gateway-token), because the gateway's sign-in is that token
+# (agent-infra model-gateway/vm/ossv_box_auth.py). This stream cannot: that check maps an account to exactly one
+# LiteLLM team, dev-sjawhar@ is team `box`, and the `pbc/` groups belong to team `verified-grader` alone
+# (model-gateway/main.go, pbcModels) -- measured 2026-11-04, an identity token on pbc/claude-opus-5-5 answers
+# 403 team_model_access_denied. When the INFRA lead gives an identity caller that team, this script, its unit and
+# its installer all go.
 #
 # The key is consumer `verified-grader` (team verified-grader) of agent-infra's model-gateway/ stack, which mints it
 # and writes it to Secret Manager as theorem-agent-infra's verified-grader-model-gateway-key. This asks the gateway
@@ -12,7 +20,7 @@
 # resume, a restart and an unattended start need nothing typed.
 #
 # The key is written 0600 to $XDG_RUNTIME_DIR/verified-grader/gateway-key, in a 0700 directory. That is tmpfs, so
-# the file is gone after a reboot and the timer puts it back. Every agent box mounts that directory read-only
+# the file is gone after a reboot and the boot unit puts it back. Every agent box mounts that directory read-only
 # (scripts/agentbox), so only the host writes it. A rotated key replaces the file at the next run; omp re-runs
 # `!cat` when the gateway answers 401, so a running session takes the new key with no restart. The file is left
 # untouched when the key is unchanged. The key passes through this process only, and is never printed or logged.
@@ -22,7 +30,7 @@
 #
 # From agent-infra's model-gateway/box/verified-grader-gateway-key (agentvm's copy, sha256 49988455…), which ran
 # from a tmux loop every 600 s. Differences: the PATH line below (a systemd unit's PATH has no gcloud, which ossv-vm
-# calls on an instance-cache miss), and an unchanged key prints one line to the journal.
+# calls on an instance-cache miss), an unchanged key prints one line to the journal, and nothing repeats the run.
 set -uo pipefail
 export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.mise/shims:$PATH"
 root="${OSSV_ROOT:-$HOME/src/oss-verifier}"

@@ -126,7 +126,7 @@ Box half (`agentbox new --dir /mnt/nvme/sami/cutover --dir /mnt/nvme/sami/boxid 
 | Envoy | `envoy ps --json`; tcp `envoy-hub.tail12ec1c.ts.net:4222` | answers; connects |
 | Dispatch | `dispatch read --issue INFRA-993` | `Title: sami-devbox…` |
 | MLflow | `http://mlflow.tail12ec1c.ts.net/health` | `OK` |
-| model gateway | the `email` of `$XDG_RUNTIME_DIR/ossv-box/gateway-token`; `/v1/models` with it | dev-box@; 200 |
+| model gateway | the `email` of `scripts/gateway-token`'s output; `/v1/models` with it | dev-sjawhar@; 200 |
 | openai through the gateway | `omp -p "say ok" --model @slow`, and `--model ossv-gateway/openai/gpt-6-astra:xhigh` | each answers `ok` (a fail prints `Use /login` or an HTTP 4xx) |
 | Azure | `az account show` | user type `servicePrincipal` |
 | GitHub | the same two `git ls-remote` with the box's routing include | a sha for each |
