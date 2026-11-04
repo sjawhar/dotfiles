@@ -3661,11 +3661,17 @@ move_spec_usable() {
         case "$d" in
             --dir)
                 local value="${spec[i]:-}"
-                i=$((i + 2))
-                if [[ -z "$value" ]]; then
+                # A --dir followed by another flag has no path: only it is dropped, and the flag
+                # is read next. LANE-E's job spec held `--dir --dir /mnt/nvme/sami/gate-briefs`
+                # three times (a hand edit cut three paths and left their --dir words, 00:26Z
+                # 2026-11-04); taking the second --dir as the first one's path dropped "--dir" and
+                # then gate-briefs and midrun as bare words, so its box lacked both.
+                if [[ -z "$value" || "$value" == -* ]]; then
                     echo "agentbox: a --dir with no path is left out of this resume" >&2
+                    i=$((i + 1))
                     continue
                 fi
+                i=$((i + 2))
                 if $first; then
                     first=false
                 elif { [[ ! -d "$value" ]] && [[ -z "${MOVE_SPEC_KEEP_GONE:-}" ]]; } || move_dir_too_broad "$value"; then
@@ -3886,11 +3892,17 @@ move_orphans_gate() {
 # and `--self` relaunches the pane into a new box holding this box's paths plus the new ones.
 # AGENTBOX_DIRS (session_env) is what this box was given; the pane is the host's, reached through
 # the relayed tmux server.
+# MOVE_ONLY_DIRS=true: the caller named the WHOLE list, so this box's own --dir paths are not
+# carried. A box cannot otherwise shed a bind it inherited (SQLPAGE's whole /mnt/nvme/sami/wt,
+# 2026-11-04), since every re-box adds to AGENTBOX_DIRS.
+MOVE_ONLY_DIRS=false
 move_self_in_box() {
     local dry="$1" sid cwd pane dirs=() d inner
     shift
     dirs=()
-    [[ -n "${AGENTBOX_DIRS:-}" ]] && IFS=: read -r -a dirs <<<"$AGENTBOX_DIRS"
+    if ! $MOVE_ONLY_DIRS; then
+        [[ -n "${AGENTBOX_DIRS:-}" ]] && IFS=: read -r -a dirs <<<"$AGENTBOX_DIRS"
+    fi
     for d in "$@"; do
         [[ -n "$d" ]] || continue
         dirs+=("$d")
@@ -3915,7 +3927,12 @@ move_self_in_box() {
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
     if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     if [[ "$dry" == true ]]; then return 0; fi
-    inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"
+    # MOVE_SPEC_KEEP_GONE: the paths are the HOST's, and a box sees only what it was given. A
+    # re-box exists to ADD a path, so testing existence in the box's own namespace dropped
+    # exactly the new one ("a box may not be given it": LINUX-1301 and
+    # /mnt/nvme/sami/linuxadapt/deploy-ossvtls1 at 05:05Z, 2026-11-04). The host's launcher
+    # judges each path instead, with --drop-gone-dirs.
+    inner="$(MOVE_SPEC_KEEP_GONE=1 move_pane_command "$sid" "$resume" "${spec[@]}")"
     # The host's tmux server, through the relay every box has. respawn-pane -k kills what the
     # pane runs - the `agentbox new` of THIS box, so this box and this process end with it - and
     # starts the new launcher in its place. tmux has the command before anything dies.
@@ -3959,7 +3976,7 @@ move_self_identify() {
 }
 
 cmd_move_self() {
-    local dry=false a usage="$MOVE_USAGE" in_box=false raw_dirs=()
+    local dry=false a usage="$MOVE_USAGE" in_box=false raw_dirs=() only_dirs=false
     [[ -n "${AGENTBOX_BOX:-}" || -e "$AGENTBOX_IDENTITY_FILE" ]] && in_box=true
     # --dir is the session's own answer to an inference that missed something: a path it works in
     # that no process of it had open when the plan ran. On the host each is checked exactly as
@@ -3971,6 +3988,10 @@ cmd_move_self() {
             --dry-run) dry=true ;;
             --force-floor) MOVE_FORCE_FLOOR=true ;;
             --accept-orphans) MOVE_ACCEPT_ORPHANS=true ;;
+            # In a box the new box gets this box's --dir paths plus what is named here. A session
+            # shedding a bind it inherited (a whole shared root an earlier launch gave it) has no
+            # way to drop one: --only-dirs makes the named paths the WHOLE list.
+            --only-dirs) only_dirs=true ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir /mnt/nvme/$(id -un)/my-lane  ($usage)"
                 if $in_box; then raw_dirs+=("$2"); else add_box_dir "$2"; fi
@@ -3981,8 +4002,15 @@ cmd_move_self() {
         shift
     done
     if $in_box; then
+        if $only_dirs; then
+            (( ${#raw_dirs[@]} )) || die "--only-dirs takes the whole list of paths the new box gets: name at least one --dir"
+            MOVE_ONLY_DIRS=true
+        fi
         move_self_in_box "$dry" "${raw_dirs[@]+"${raw_dirs[@]}"}"
         return $?
+    fi
+    if $only_dirs; then
+        die "--only-dirs is for a session already in a box: it replaces the box's inherited --dir list. On the host the inference decides, and --dir adds to it"
     fi
     # As `move --to` does: one census and one list of the in-box paths, read in this shell so
     # the $(…) subshells below inherit them.
@@ -5243,9 +5271,14 @@ move_to_drop_gone() {
             continue
         fi
         if ! git -C "$tree" rev-parse -q --verify HEAD >/dev/null 2>&1; then
-            say "$tree has no commit to push any more; it is copied as files"
+            say "$tree has no commit to push any more; it is copied as files, in full"
             [[ " ${MOVE_TO_MIRROR[*]-} " == *" $tree "* ]] || MOVE_TO_MIRROR+=("$tree")
             [[ " ${MOVE_TO_MERGE[*]-} " == *" $common "* ]] || MOVE_TO_MERGE+=("$common")
+            # A tree that went through git until now has had NO pass of the copy: every pass
+            # after the first sends only what changed since the pass before it, so without this
+            # the target would get the few files written since the move began and nothing else
+            # (item 49, 2026-11-04). It is sent whole by the next pass.
+            MOVE_TO_DELTA_FULL+=("$tree" "$common")
             continue
         fi
         native+=("$p")
@@ -5271,6 +5304,9 @@ move_to_drop_gone() {
 # re-walked 14 mirrored and 192 merged paths (~49 GB) and had read 5.8 GB in 14 minutes with the
 # session down (18:19-18:37Z, 2026-11-03).
 MOVE_TO_DELTA_DIR=""
+# Paths no pass of the copy has carried yet, which the next delta must send WHOLE: a git-native
+# tree that lost its HEAD and became a plain copy after the first pass.
+MOVE_TO_DELTA_FULL=()
 # move_to_delta_record KIND PATH…: the list of every file of these paths, now, for the next pass.
 move_to_delta_record() {
     local kind="$1"
@@ -5288,12 +5324,19 @@ move_to_delta_record() {
 # gone now (rsync --delete-missing-args removes each of those on the target). Prints the list's
 # path, or nothing when there is nothing to send.
 move_to_delta_files() {
-    local kind="$1" since="$2"
+    local kind="$1" since="$2" p
     local out="$MOVE_TO_DELTA_DIR/$kind.files"
     shift 2
     : >"$out"
     if (( $# )); then
         find -H "$@" \( -newer "$since" -o -cnewer "$since" \) -print 2>/dev/null >>"$out"
+        # Whole, not changed-only: a path this copy has never carried (move_to_drop_gone turned a
+        # git-native tree into a plain one after the first pass).
+        local full whole=()
+        for full in ${MOVE_TO_DELTA_FULL[@]+"${MOVE_TO_DELTA_FULL[@]}"}; do
+            for p in "$@"; do [[ "$full" == "$p" ]] && whole+=("$full") && break; done
+        done
+        (( ${#whole[@]} == 0 )) || find -H "${whole[@]}" \( -type f -o -type l \) -print 2>/dev/null >>"$out"
     fi
     if [[ -s "$MOVE_TO_DELTA_DIR/$kind.list" ]]; then
         comm -23 "$MOVE_TO_DELTA_DIR/$kind.list" "$MOVE_TO_DELTA_DIR/$kind.new" >>"$out"
@@ -5450,7 +5493,14 @@ move_to_copy() {
             move_to_rsync merge "$stats" --info=progress2 -aH --no-group --omit-dir-times --relative --update --stats \
                 --chmod=Du+w --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
                 "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
-            move_to_rsync merge-modes "$stats" -rlptgoH --no-group --omit-dir-times --relative --existing --size-only \
+            # --update, as the merge pass above has it: MERGE paths are shared with other
+            # sessions on the target, and without it this pass is not modes-only. --size-only
+            # calls two files of the same size identical, so it wrote the source's OLDER mtime
+            # over a newer target file, and for a file of a DIFFERENT size it sent the source's
+            # older content over the newer one - the merge pass's --update defeated by the pass
+            # that follows it (job g-01a19e63 rewrote another session's evidence files on
+            # sami-devbox at 02:58-03:02Z and 03:24-03:25Z, 2026-11-04).
+            move_to_rsync merge-modes "$stats" -rlptgoH --no-group --omit-dir-times --relative --existing --size-only --update \
                 --exclude="$MOVE_MARKER" ${excludes[@]+"${excludes[@]}"} -e "${MOVE_TO_SSH[*]}" \
                 "${MOVE_TO_MERGE[@]}" "$MOVE_TO_USER@$target:/" || { rm -f "$stats"; return 1; }
         fi
@@ -6216,7 +6266,7 @@ move_to_is_ready() {
 }
 
 cmd_move_to() {
-    local target="" dry=false clear=false in_box=false raw_dirs=() me new_cwd="" p
+    local target="" dry=false clear=false in_box=false raw_dirs=() me new_cwd="" p only_dirs=false
     [[ -n "${AGENTBOX_BOX:-}" || -e "$AGENTBOX_IDENTITY_FILE" ]] && in_box=true
     while (( $# )); do
         case "$1" in
@@ -6224,6 +6274,9 @@ cmd_move_to() {
             --dry-run) dry=true ;;
             --clear-halt) clear=true ;;
             --accept-orphans) MOVE_ACCEPT_ORPHANS=true ;;
+            # In a box: the named --dir paths are the WHOLE list of the new box, so a bind this
+            # box inherited is dropped (a session cannot shed one otherwise).
+            --only-dirs) only_dirs=true ;;
             --cwd)
                 [[ -d "${2:-}" ]] || die "--cwd takes an existing directory, the one the session resumes in. $MOVE_USAGE"
                 new_cwd="$(readlink -f "$2")"
@@ -6255,8 +6308,15 @@ cmd_move_to() {
     fi
     if $in_box; then
         [[ -z "$new_cwd" && ${#MOVE_TO_LEAVE[@]} -eq 0 ]] || die "--cwd and --leave are for a host session; a boxed session's paths are its box's --dir paths"
+        if $only_dirs; then
+            (( ${#raw_dirs[@]} )) || die "--only-dirs takes the whole list of paths the new box gets: name at least one --dir"
+            MOVE_ONLY_DIRS=true
+        fi
         move_to_in_box "$target" "$dry" ${raw_dirs[@]+"${raw_dirs[@]}"}
         return $?
+    fi
+    if $only_dirs; then
+        die "--only-dirs is for a session already in a box: it replaces the box's inherited --dir list. From a host session the inference decides, and --dir adds to it"
     fi
     move_progress_start
     # Read once, in this shell, what the $(…) subshells below would each read again.
@@ -6398,10 +6458,30 @@ cmd_move_to() {
 # In a box: this session alone (a box cannot read the host's other sessions), with the paths the
 # box was given and its own trees under $SRC, moved by the HOST: `tmux run-shell` on the relayed
 # server starts the relauncher there, which hangs the box up (docker kill -s HUP) before the copy.
+#
+# move_to_box_only_paths: refuse a move whose copy list holds a path that exists only INSIDE this
+# box. A bind of a host path has a device of its own (the host's filesystem); a path in the box's
+# own layer or its disk image shares the device of `/` here, and the other machine would get
+# nothing at that path (SPEC-skills lost /var/tmp/sc-head and sc-ablate, 2026-11-04).
+move_to_box_only_paths() {
+    local root_dev p dev bad=()
+    root_dev="$(stat -c %d / 2>/dev/null)" || return 0
+    [[ -n "$root_dev" ]] || return 0
+    for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
+        [[ -e "$p" ]] || continue
+        dev="$(stat -c %d "$p" 2>/dev/null)" || continue
+        [[ "$dev" == "$root_dev" ]] && bad+=("$p")
+    done
+    (( ${#bad[@]} )) || return 0
+    die "these paths live in THIS BOX only, not on a host path another machine can be given, so a move would lose them: $(printf '%s ' "${bad[@]}"). Nothing was hung up. Copy each one to a path the box has from the host (a --dir of this box, /mnt/nvme/$(id -un)/… or /mnt/durable/$(id -un)/…) and move again"
+}
+
 move_to_in_box() {
     local target="$1" dry="$2" sid cwd pane own resume="" spec=() dirs=() d copy=""
     shift 2
-    [[ -n "${AGENTBOX_DIRS:-}" ]] && IFS=: read -r -a dirs <<<"$AGENTBOX_DIRS"
+    if ! $MOVE_ONLY_DIRS; then
+        [[ -n "${AGENTBOX_DIRS:-}" ]] && IFS=: read -r -a dirs <<<"$AGENTBOX_DIRS"
+    fi
     for d in "$@"; do [[ -n "$d" ]] && dirs+=("$d"); done
     (( ${#dirs[@]} )) || die "this box was started with repositories, whose clones are in its own disk image and not at host paths another machine is given; push its branches and start the session on $target instead"
     sid="${OMP_SESSION_ID:-}"
@@ -6428,6 +6508,12 @@ move_to_in_box() {
     tpaths="$(move_to_transcript_paths "$resume")"
     copy+="$tpaths"$'\n'
     move_to_copy_lists <<<"$copy"
+    # A path this box holds in its OWN layer - not a bind of a host path - dies with the container
+    # at the hang-up and reaches no other machine: /var/tmp and the rest of the box's filesystem
+    # are inside its disk image. SPEC-skills lost /var/tmp/sc-head and sc-ablate that way
+    # (2026-11-04). Each copy path is tested by its device against the box's own root, and one
+    # that is the box's own is named and refused before anything is hung up.
+    move_to_box_only_paths
     # Only what was asked for - this move's --dir paths (the box's own are inferred), the working
     # directory, the transcript - or inferred at its own size (move_to_gate).
     local -a asked=()
@@ -6571,7 +6657,26 @@ cmd_move_go() {
     local sid="${OMP_SESSION_ID:-}" f target
     [[ -n "$sid" ]] || die "no OMP_SESSION_ID here: run \`agentbox move --go\` from the session's own bash tool"
     f="$MOVE_TO_HOLD/$sid"
-    [[ -e "$f" ]] || die "no move of session $sid is waiting for --go (nothing under $MOVE_TO_HOLD); run \`agentbox move --to <machine>\` first"
+    if [[ ! -e "$f" ]]; then
+        # A move of this session may be running and simply not at its hold yet: waiting for a
+        # slot among the moves in flight, cloning, or in its first copy, which is hours for a big
+        # tree. Telling such a session to "run move --to first" sends it to ask for a second move
+        # of itself (item 42, 2026-11-04). Say which it is.
+        local claim="$MOVE_TO_ACTIVE/$sid" started job_target
+        if [[ -e "$claim" ]]; then
+            job_target="$(sed -n 's/^target=//p' "$claim" | head -1)"
+            started="$(sed -n 's/^start=//p' "$claim" | head -1)"
+            die "your move to ${job_target:-the target} is RUNNING (started $(( $(date +%s) - ${started:-$(date +%s)} ))s ago) and has not reached its hold yet: it is waiting for a slot, cloning, or in its first copy. Nothing is hung up and --go is not needed yet; it sends you the notice to run --go when the copy is done. Go on working"
+        fi
+        # Only a job still in the QUEUE: that is one a box wrote for the host to start
+        # (move_to_in_box), and the host removes its link when it starts it. A job file in
+        # $MOVE_TO_JOBS is kept after its move ends, so reading those would call every finished
+        # or refused move "queued".
+        if grep -slF "\"$sid\"" "$MOVE_TO_QUEUE"/*.json >/dev/null 2>&1; then
+            die "a move of session $sid is QUEUED (its job is written, its relauncher has not started it yet). Nothing is hung up and --go is not needed yet; wait for the notice. Ask for no second move"
+        fi
+        die "no move of session $sid is waiting for --go (nothing under $MOVE_TO_HOLD); run \`agentbox move --to <machine>\` first"
+    fi
     target="$(sed -n 's/^target=//p' "$f")"
     local relauncher age
     relauncher="$(sed -n 's/^pid=//p' "$f")"
@@ -7221,10 +7326,14 @@ cmd_move_plan_to() {
 MOVE_USAGE='usage:
   agentbox move --plan [--json]                     every live host session, the box it would get,
                                                     each path that box gets and why, and the disk
-  agentbox move --self [--dry-run] [--force-floor] [--accept-orphans] [--dir PATH]…
+  agentbox move --self [--dry-run] [--force-floor] [--accept-orphans] [--dir PATH]… [--only-dirs]
                                                     run by the session in its own pane: relaunch
                                                     this pane into a box, resuming this session;
-                                                    each --dir adds a path the inference missed
+                                                    each --dir adds a path the inference missed.
+                                                    In a box the new box also gets the --dir
+                                                    paths this box has; --only-dirs makes the named
+                                                    paths the whole list, dropping an inherited
+                                                    bind
   agentbox move <session-id>… | --all [--now] [--dry-run] [--force-floor] [--accept-orphans]
                                                     ask each session over Envoy to move itself
                                                     (--now relaunches its pane from outside)
@@ -7237,7 +7346,7 @@ MOVE_USAGE='usage:
                                                     in its git trees) and the size; --group plans
                                                     the group of another session, --all every
                                                     group; changes nothing
-  agentbox move --to <machine> [--dry-run] [--accept-orphans] [--dir PATH]…
+  agentbox move --to <machine> [--dry-run] [--accept-orphans] [--dir PATH]… [--only-dirs]
                      [--cwd PATH] [--leave PATH]…  (--cwd: resume there; --leave: a tree this
                                                     session no longer works in, so it neither
                                                     copies it nor groups with its users)

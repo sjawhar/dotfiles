@@ -480,6 +480,37 @@ class BoxedSessionTest(NotifyCase):
         self.assertTrue(sent, "80 GiB of a 109 GiB box is past 70% of it")
         self.assertIn("NEAR ITS MEMORY LIMIT", sent[0])
 
+    def test_a_boxed_session_is_told_its_box_s_ceiling_not_that_nothing_caps_it(self) -> None:
+        """Session 01a1935b was told at 04:36Z and 04:46Z on 2026-11-04 that it held 16.80 GiB
+        "with no scope of its own ... only the box's RAM caps it", in a box whose memory.max is
+        24 GiB. The sentence named no ceiling, so the session read it as uncapped; 16.80 GiB is
+        70% of that 24 GiB. The cgroup chain is the one that box's omp really had:
+        /user.slice/user-1000.slice/user-1000-agentbox.slice/docker-<id>.scope/init.scope."""
+        original = WATCH.rss_of
+        self.addCleanup(setattr, WATCH, "rss_of", original)
+        machine = unittest.mock.patch.object(WATCH, "mem_total", return_value=2200 * GIB)
+        machine.start()
+        self.addCleanup(machine.stop)
+        box = ("/user.slice/user-1000.slice/user-1000-agentbox.slice/"
+               "docker-a489244627d27fbb2c5f06d3c08de5adf4c06b1a005c861a78f869025105ecc8.scope")
+        leaf = f"{box}/init.scope"
+        for path, limit in (("/user.slice", "max"), (box, str(24 * GIB)), (leaf, "max")):
+            directory = self.root / path.strip("/")
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "memory.max").write_text(f"{limit}\n")
+        (self.root / leaf.strip("/") / "cgroup.procs").write_text("1\n")
+        self.scopes["box"] = (1, leaf)
+        WATCH.rss_of = lambda pid: int(18 * GIB)
+        for _ in range(4):
+            self.run_pass(after=60)
+        sent = self.to(sid(1))
+        self.assertTrue(sent, "18 GiB of a 24 GiB box is past 70% of it")
+        said = sent[0] + self.assert_short(sent[0])
+        self.assertNotIn("only the box's RAM caps it", said)
+        self.assertNotIn("only the machine's RAM caps it", said)
+        self.assertIn("24.00 GiB", said, "the box's own ceiling is not named")
+        self.assertIn("75%", said, "the share of the box's ceiling is not given")
+
 
 class ReportFileTest(NotifyCase):
     def test_reports_older_than_seven_days_are_pruned_in_the_run(self) -> None:

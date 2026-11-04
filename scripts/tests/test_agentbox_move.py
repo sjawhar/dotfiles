@@ -1155,6 +1155,68 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(bare.returncode, 1)
         self.assertIn("no --dir", bare.stderr)
 
+    def test_only_dirs_drops_the_binds_a_box_inherited(self) -> None:
+        """A re-box adds to the box's own --dir list, so a session could not shed a bind it had
+        been given: SQLPAGE's box carried the whole shared /mnt/nvme/sami/wt into every new box
+        it asked for (2026-11-04). --only-dirs makes the named paths the whole list."""
+        nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
+        env = {
+            "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa",
+            "AGENTBOX_DIRS": f"{self.home}/lane:{self.home}/shared-root",
+            "OMP_SESSION_ID": "01a19700-0000-7000-8000-000000000d09",
+            "PI_SESSION_FILE": str(nested),
+            "TMUX_PANE": "%7",
+        }
+        kept = self.run_bash(f'cmd_move_self --dry-run --only-dirs --dir "{self.home}/lane"', env)
+        self.assertEqual(kept.returncode, 0, kept.stderr)
+        self.assertIn(f"--dir {self.home}/lane -- omp --resume {nested}\n", kept.stdout)
+        self.assertNotIn("shared-root", kept.stdout, "an inherited bind survived --only-dirs")
+        # The same for a move to another machine, from inside a box.
+        self.moving_session()
+        self.target()
+        to_env = {**env, "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
+        moved = self.run_bash(
+            f'move_own_omp() {{ echo 999999901; }}\ncd "{self.lane}"\n'
+            f'cmd_move_to --to devbox --accept-orphans --dry-run --only-dirs --dir "{self.lane}"', to_env)
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertNotIn("shared-root", moved.stdout)
+        # Named with no --dir, and on the host, it is refused rather than guessed at.
+        empty = self.run_bash("cmd_move_self --dry-run --only-dirs", env)
+        self.assertEqual(empty.returncode, 1)
+        self.assertIn("name at least one --dir", empty.stderr)
+        on_host = self.run_bash(f'cmd_move_self --dry-run --only-dirs --dir "{self.lane}"',
+                                {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(on_host.returncode, 1)
+        self.assertIn("already in a box", on_host.stderr)
+
+    def test_a_re_box_keeps_a_host_path_this_box_cannot_see(self) -> None:
+        """A re-box exists to ADD a path, and a box sees only what it was given, so testing each
+        --dir in the box's own namespace dropped exactly the new one: LINUX-1301 lost
+        /mnt/nvme/sami/linuxadapt/deploy-ossvtls1 with "a box may not be given it" at 05:05Z on
+        2026-11-04. The host's launcher judges it instead (--drop-gone-dirs)."""
+        host_only = "/mnt/nvme/sami/tmp/a-path-this-box-does-not-have"
+        self.assertFalse(Path(host_only).exists(), "the fixture needs a path this host lacks")
+        self.target()  # for its tmux stub, which records what the pane is respawned with
+        nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
+            / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
+        env = {
+            "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa",
+            "AGENTBOX_DIRS": f"{self.home}/lane",
+            "OMP_SESSION_ID": "01a19700-0000-7000-8000-000000000d09",
+            "PI_SESSION_FILE": str(nested),
+            "TMUX_PANE": "%7",
+        }
+        run = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\nmove_orphans_gate() {{ return 0; }}\n'
+                            f'cmd_move_self --dir "{host_only}"', env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        respawn = [c for c in self.local_tmux.read_text(encoding="utf-8").splitlines() if "respawn-pane" in c]
+        self.assertEqual(len(respawn), 1, respawn)
+        command = self.pane_command(respawn[0])
+        self.assertIn(f"--dir {host_only}", command, "the new path was dropped by the box's own view")
+        self.assertIn(f"--dir {self.home}/lane", command)
+        self.assertNotIn("a box may not be given it", run.stderr)
+
     # ── notifying other sessions ────────────────────────────────────────────────────────────
     def test_each_named_session_gets_the_notice_with_its_own_launch_line(self) -> None:
         lane = self.root / "lane"
@@ -1620,9 +1682,10 @@ class AgentboxMove(unittest.TestCase):
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn("through git:", run.stdout)
-        # The merge of the first pass, by what it is: a walk (no --files-from) that only updates.
+        # The merge of the first pass, by what it is: a walk (no --files-from) that only updates
+        # and carries data (the modes pass that follows it also has --update, and --size-only).
         [merge] = [l for l in (self.root / "RSYNC").read_text(encoding="utf-8").splitlines()
-                   if "--update" in l and "--files-from" not in l]
+                   if "--update" in l and "--files-from" not in l and "--size-only" not in l]
         self.assertIn(f"{self.lane} {self.src / 'other/.git'} {self.src / 'repo/.git'} sami@devbox:/", merge)
 
     def test_a_tree_moved_through_git_keeps_its_branch_head_and_uncommitted_change(self) -> None:
@@ -1908,6 +1971,47 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual((there / "repro/gr17/evidence.txt").read_text(encoding="utf-8"), "two\n")
         self.assertEqual(oct((there / "repro/gr17").stat().st_mode)[-3:], "555")
         self.assertEqual(oct((there / "repro").stat().st_mode)[-3:], "555")
+
+    def test_a_merge_pass_never_writes_over_a_newer_file_on_the_target(self) -> None:
+        """A MERGE path is shared with other sessions on the target, so the copy carries
+        --update. The modes pass that follows it did not: `--existing --size-only` calls two
+        files of one size identical and wrote the source's older mtime over the newer target
+        file, and for a file of another size it sent the source's older CONTENT. Job g-01a19e63
+        rewrote another session's evidence files on sami-devbox at 02:58-03:02Z and
+        03:24-03:25Z on 2026-11-04."""
+        self.target()
+        write_stub(self.stubs, "rsync", 'exec /usr/bin/rsync "$@"')
+        far = self.remote / "root"
+        far.mkdir()
+        write_stub(self.remote / "bin", "rsync", "\n".join([
+            'args=("$@")',
+            'args[$(( ${#args[@]} - 1 ))]="$STUB_REMOTE/root/"',
+            'exec /usr/bin/rsync "${args[@]}"',
+        ]))
+        shared = self.root / "shared-evidence"
+        shared.mkdir()
+        (shared / "same-size.txt").write_text("old\n", encoding="utf-8")
+        (shared / "other-size.txt").write_text("old\n", encoding="utf-8")
+        old = time.time() - 7200
+        for name in ("same-size.txt", "other-size.txt"):
+            os.utime(shared / name, (old, old))
+        # What the OTHER session has on the target: both files newer, one of the same size and
+        # one of another.
+        there = Path(str(far) + str(shared))
+        there.mkdir(parents=True)
+        (there / "same-size.txt").write_text("new\n", encoding="utf-8")
+        (there / "other-size.txt").write_text("a much longer newer line\n", encoding="utf-8")
+        before = {p.name: (p.read_text(encoding="utf-8"), p.stat().st_mtime) for p in there.iterdir()}
+        run = self.run_bash(f'MOVE_TO_MIRROR=()\nMOVE_TO_MERGE=("{shared}")\nmove_to_copy devbox st1',
+                            {"AGENTBOX_MOVE_RSYNC_TICK": "0"})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        after = {p.name: (p.read_text(encoding="utf-8"), p.stat().st_mtime) for p in there.iterdir()}
+        self.assertEqual(after["other-size.txt"][0], before["other-size.txt"][0],
+                         "the merge wrote older content over a newer file another session owns")
+        self.assertEqual(after["same-size.txt"][0], before["same-size.txt"][0])
+        for name in ("same-size.txt", "other-size.txt"):
+            self.assertAlmostEqual(after[name][1], before[name][1], places=0,
+                                   msg=f"{name}: the modes pass set the source's older mtime")
 
     def test_a_path_gone_since_the_job_is_dropped_before_the_hang_up(self) -> None:
         """A move holds for the session's `agentbox move --go`, and a session at work removes a
@@ -2382,6 +2486,25 @@ class AgentboxMove(unittest.TestCase):
         self.assertNotIn("/stray/one", pane.stdout)
         self.assertIn(f"--dir {self.lane} --dir {keep} -- omp --resume /t.jsonl", pane.stdout)
 
+    def test_a_dir_with_no_path_before_another_flag_never_takes_the_next_path(self) -> None:
+        """LANE-E's job spec held `--dir --dir /mnt/nvme/sami/gate-briefs` three times (a hand
+        edit at 00:26Z on 2026-11-04 cut three paths and left their --dir words). The parser took
+        the second --dir as the first one's path and then dropped gate-briefs and midrun as bare
+        words, so the session's box lacked both. A --dir followed by a flag is dropped alone."""
+        self.moving_session()
+        briefs = self.root / "gate-briefs"
+        midrun = self.root / "midrun"
+        for d in (briefs, midrun):
+            d.mkdir(parents=True)
+        run = self.run_bash(
+            f'move_spec_usable --dir "{self.lane}" --dir --dir "{briefs}" '
+            f'--dir -e K=v --dir --dir "{midrun}"')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.split(), ["--dir", str(self.lane), "--dir", str(briefs),
+                                              "-e", "K=v", "--dir", str(midrun)], run.stderr)
+        self.assertEqual(run.stderr.count("a --dir with no path is left out"), 3, run.stderr)
+        self.assertNotIn("not a flag", run.stderr)
+
     def test_a_rolled_back_session_is_told_it_rolled_back_and_where_it_is(self) -> None:
         """S3 was told "the move is done: this session was resumed in its agent box" at 03:57:58Z
         on 2026-11-04 by a ROLLBACK, which had resumed it on the machine it started on. The
@@ -2416,6 +2539,92 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn("ROLLED\\ BACK", written, written[:2000])
         self.assertIn("oldbox", written)
         self.assertNotIn("the\\ move\\ is\\ done", written)
+
+    def test_a_path_that_lives_only_in_this_box_refuses_the_move(self) -> None:
+        """A box's own layer and its disk image are not host paths: /var/tmp and the rest of the
+        box's filesystem die with the container and reach no other machine. SPEC-skills' move
+        carried /var/tmp/sc-head and sc-ablate and lost both (2026-11-04). The test is the device:
+        a bind of a host path has its own, a box-only path shares the device of `/`."""
+        self.moving_session()
+        own = self.root / "box-only"
+        own.mkdir()
+        run = self.run_bash(f'MOVE_TO_MIRROR=("{own}")\nMOVE_TO_MERGE=()\nmove_to_box_only_paths')
+        same_device = Path("/").stat().st_dev == own.stat().st_dev
+        if same_device:
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("live in THIS BOX only", run.stderr)
+            self.assertIn(str(own), run.stderr)
+            self.assertIn("Nothing was hung up", run.stderr)
+        else:
+            # The fixture root is on another filesystem here, which is the passing case.
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # A path on a device of its own is never refused, whatever the box holds.
+        root_only = self.run_bash('MOVE_TO_MIRROR=(/proc/self)\nMOVE_TO_MERGE=()\nmove_to_box_only_paths')
+        self.assertEqual(root_only.returncode, 0, root_only.stderr)
+
+    def test_a_tree_that_stops_going_through_git_is_copied_whole(self) -> None:
+        """A tree whose HEAD no longer resolves at the hang-up becomes a plain copy, but no pass
+        has carried it: every pass after the first sends only what changed since the one before,
+        so the target would get the few files written since the move began and nothing else
+        (item 49, 2026-11-04)."""
+        self.moving_session()
+        tree = self.root / "late-plain"
+        (tree / "sub").mkdir(parents=True)
+        (tree / "sub" / "old.txt").write_text("written long ago\n", encoding="utf-8")
+        os.utime(tree / "sub" / "old.txt", (1000, 1000))
+        # The stamp is NEWER than every file, so nothing has "changed": the only reason this
+        # tree's files travel is that no pass has carried it.
+        run = self.run_bash(
+            f'say() {{ :; }}\nMOVE_TO_DELTA_DIR="$(mktemp -d)"\nMOVE_TO_DELTA_FULL=("{tree}")\n'
+            f'touch "$MOVE_TO_DELTA_DIR/stamp"\n'
+            f'move_to_delta_record mirror "{tree}"\n'
+            f'move_to_delta_files mirror "$MOVE_TO_DELTA_DIR/stamp" "{tree}" >/dev/null\n'
+            f'cat "$MOVE_TO_DELTA_DIR/mirror.files"')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(str(tree / "sub" / "old.txt"), run.stdout,
+                      "a file older than the stamp still goes, because this tree was never copied")
+        # A tree that is NOT in that list keeps the normal delta: only what changed.
+        other = self.run_bash(
+            f'say() {{ :; }}\nMOVE_TO_DELTA_DIR="$(mktemp -d)"\nMOVE_TO_DELTA_FULL=()\n'
+            f'touch "$MOVE_TO_DELTA_DIR/stamp"\n'
+            f'move_to_delta_record mirror "{tree}"\n'
+            f'move_to_delta_files mirror "$MOVE_TO_DELTA_DIR/stamp" "{tree}" >/dev/null || true\n'
+            f'cat "$MOVE_TO_DELTA_DIR/mirror.files" 2>/dev/null')
+        self.assertNotIn(str(tree / "sub" / "old.txt"), other.stdout)
+
+    def test_go_before_the_hold_says_the_move_is_running_not_that_none_exists(self) -> None:
+        """A move can be running and not at its hold yet: waiting for a flight slot, cloning, or
+        in a first copy that is hours for a big tree. Telling such a session "run move --to
+        first" sends it to ask for a second move of itself (item 42, 2026-11-04)."""
+        self.target()
+        active = self.root / "cache/omp/agentbox/move-to/active"
+        active.mkdir(parents=True, exist_ok=True)
+        (active / self.TO).write_text(
+            f"pid=1\ntarget=devbox\nstart={int(time.time()) - 900}\njob=/x/j.json\n", encoding="utf-8")
+        running = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(running.returncode, 1, running.stdout + running.stderr)
+        self.assertRegex(running.stderr, r"is RUNNING \(started 9\d\ds ago\) and has not reached its hold yet")
+        self.assertIn("--go is not needed yet", running.stderr)
+        self.assertNotIn("run `agentbox move --to", running.stderr)
+        (active / self.TO).unlink()
+        # A job a box left in the QUEUE for the host to start reads as queued, not as "no move".
+        # Only the queue counts: a finished move's job file stays in the jobs directory, and
+        # reading those would call every ended move queued.
+        jobs = self.root / "cache/omp/agentbox/move-to"
+        (jobs / "g-old-and-done.json").write_text(
+            json.dumps({"to": "devbox", "members": [{"sid": self.TO}]}), encoding="utf-8")
+        ended = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertIn("run `agentbox move --to <machine>` first", ended.stderr)
+        (jobs / "queue").mkdir(parents=True, exist_ok=True)
+        (jobs / "queue" / "g-queued.json").write_text(
+            json.dumps({"to": "devbox", "members": [{"sid": self.TO}]}), encoding="utf-8")
+        queued = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertEqual(queued.returncode, 1, queued.stdout + queued.stderr)
+        self.assertIn("is QUEUED", queued.stderr)
+        # With neither, the old message stands.
+        (jobs / "queue" / "g-queued.json").unlink()
+        none = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
+        self.assertIn("run `agentbox move --to <machine>` first", none.stderr)
 
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a

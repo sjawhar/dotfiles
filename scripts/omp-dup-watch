@@ -92,18 +92,39 @@ SESSION_PATH = re.compile(r"/sessions/.*/[0-9T:-]*Z_(?P<sid>[0-9a-f-]{36})\.json
 RESUME_VALUE = re.compile(r"(?:[0-9T:-]*Z_(?P<sid>[0-9a-f-]{36})\.jsonl|(?P<bare>[0-9a-f]{8}(?:[0-9a-f-]*[0-9a-f])?))\Z")
 
 
+def own_session_dir(argv: list[str]) -> str | None:
+    """The `--session-dir` of an omp's own argv, which makes it read and write a sessions store of
+    its own instead of ~/.omp/agent/sessions."""
+    for i, word in enumerate(argv[1:], 1):
+        flag, eq, value = word.partition("=")
+        if flag != "--session-dir":
+            continue
+        return (value if eq else (argv[i + 1] if i + 1 < len(argv) else "")) or None
+    return None
+
+
 def named_session(argv: list[str]) -> str | None:
     """The session an omp's own argv resumes: the argument of a `--resume`/`--restore`/`-r` WORD
     (tmux-resurrect-omp's flags), read from its last path component: a transcript's file name, a
     full id, or the id prefix omp also takes. Never a flag inside another argument: on
     2026-11-03 at 23:15Z two `omp -p` reviewers whose one prompt argument held `git ls-tree -r
-    f1006fe8` read as one session, "f1006fe8", run twice."""
+    f1006fe8` read as one session, "f1006fe8", run twice.
+
+    A COPY of a session is not that session. `scripts/omp-fork` resumes a copy under a store of
+    its own (`--session-dir /tmp/omp-fork-XXXX --resume /tmp/omp-fork-XXXX/<copy>.jsonl`): it
+    writes nothing to the original, registers no second Envoy row, and the live session it was
+    cut from is untouched. Six such consults from one box were reported as six duplicates
+    (03:57:17Z, 2026-11-04). A resume of a path INSIDE the process's own --session-dir, and
+    outside the shared store, names no session here."""
+    session_dir = own_session_dir(argv)
     for i, word in enumerate(argv[1:], 1):
         flag, eq, value = word.partition("=")
         if flag not in ("--resume", "--restore", "-r"):
             continue
         if not eq:
             value = argv[i + 1] if i + 1 < len(argv) else ""
+        if session_dir and value.startswith(session_dir.rstrip("/") + "/") and "/sessions/" not in value:
+            return None
         found = RESUME_VALUE.match(value.rstrip("/").rsplit("/", 1)[-1])
         return (found.group("sid") or found.group("bare")) if found else None
     return None

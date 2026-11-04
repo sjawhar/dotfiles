@@ -56,7 +56,10 @@ leaves the branch alone.
 
 WHERE THEY GO. `/mnt/nvme/<user>/worktrees` on a machine with that disk, else `~/.worktrees`
 (`ws_roots`). Trees already under `~/.worktrees` stay there and keep working: `list`, `rm` and
-every other lookup walk both roots.
+every other lookup walk both roots. In an agent box the root must be a HOST path: the box's
+`$HOME`, its `/tmp` and its own layer die with the container, so a new workspace goes under one
+of the box's `--dir` directories (`AGENTBOX_DIRS`), and with none `new` refuses and names
+AGENT_WORKSPACE_ROOT (`ws_root`).
 """
 
 from __future__ import annotations
@@ -129,6 +132,40 @@ def src_root() -> Path:
     return Path(os.environ.get("AGENT_WORKSPACE_SRC", str(Path.home() / "src")))
 
 
+def in_box() -> bool:
+    """This process runs inside an agent box (`scripts/agentbox`'s own test)."""
+    return bool(os.environ.get("AGENTBOX_BOX")) or Path(
+        os.environ.get("AGENTBOX_IDENTITY_FILE", "/etc/agentbox-identity")).exists()
+
+
+def box_dirs() -> list[Path]:
+    """The host directories this box was given with `--dir` (AGENTBOX_DIRS), the only writable
+    host paths a box is sure to have. A directory that is not itself a git working tree comes
+    first: a workspace root inside a shared checkout is clutter in every session's tree."""
+    named = [Path(d) for d in os.environ.get("AGENTBOX_DIRS", "").split(":") if d]
+    plain = [d for d in named if d.is_dir() and not (d / ".git").exists()]
+    return plain + [d for d in named if d not in plain]
+
+
+def box_private(path: Path) -> bool:
+    """True when PATH dies with the box: under the box's `$HOME` or `/tmp` (both on its own disk
+    image), or on its container layer, which is the device `/` is on. A host bind is a mount of
+    its own: inside a box on 2026-11-04 `/mnt/nvme/sami` was the box's layer (the device of `/`)
+    while the bound `/mnt/nvme/sami/tmp` was the host's xfs. The nearest existing ancestor
+    decides the device, since a root this call is choosing does not exist yet."""
+    probe = path if path.is_absolute() else Path.cwd() / path
+    for own in (Path.home(), Path("/tmp")):
+        if probe == own or own in probe.parents:
+            return True
+    while True:
+        try:
+            return probe.stat().st_dev == Path("/").stat().st_dev
+        except OSError:
+            if probe.parent == probe:
+                return True
+            probe = probe.parent
+
+
 def ws_roots() -> list[Path]:
     """Every root a workspace of this machine may be under, the one `new` writes to first.
 
@@ -142,6 +179,8 @@ def ws_roots() -> list[Path]:
     move` across devices fails with `Invalid cross-device link`, so an old tree is removed and
     made again, never moved. Both roots are therefore walked by every lookup. A machine without
     the big disk has only the one root, and AGENT_WORKSPACE_ROOT overrides the whole list.
+
+    In a box the `--dir` roots are walked too, since that is where a box's own workspaces go.
     """
     override = os.environ.get("AGENT_WORKSPACE_ROOT")
     if override:
@@ -150,6 +189,8 @@ def ws_roots() -> list[Path]:
     big = NVME / pwd.getpwuid(os.getuid()).pw_name
     if big.is_dir() and os.access(big, os.W_OK | os.X_OK):
         roots.append(big / "worktrees")
+    if in_box():
+        roots += [d / "worktrees" for d in box_dirs() if d / "worktrees" not in roots]
     legacy = Path.home() / ".worktrees"
     if legacy not in roots:
         roots.append(legacy)
@@ -157,8 +198,28 @@ def ws_roots() -> list[Path]:
 
 
 def ws_root() -> Path:
-    """Where a new workspace goes."""
-    return ws_roots()[0]
+    """Where a new workspace goes.
+
+    In a box it must be a HOST path. The box's `$HOME`, its `/tmp` and its container layer die
+    with the container, and a box is given only named host directories, so `~/.worktrees` and a
+    `/mnt/nvme/<user>` that is the box's own layer are both private there: a session with 7
+    workspaces under the box home loses all 7 when the box ends (BP, 2026-11-04). The first root
+    that is a host bind is used, and with none the command refuses and says what to set.
+    """
+    roots = ws_roots()
+    if not in_box() or os.environ.get("AGENT_WORKSPACE_ROOT"):
+        return roots[0]
+    for root in roots:
+        if not box_private(root):
+            return root
+    die(
+        "this session is in an agent box and no workspace root here is a host path: "
+        f"{', '.join(str(r) for r in roots)} all live on the box's own disk and would be lost "
+        "when the box ends. Give the box a host directory to work in "
+        "(`agentbox move --self --dir PATH`, or a new box with `--dir PATH`) and point "
+        "AGENT_WORKSPACE_ROOT at a directory under it."
+    )
+    raise AssertionError("die() does not return")
 
 
 def resolve_source(repo: str) -> Path:

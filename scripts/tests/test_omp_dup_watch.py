@@ -422,9 +422,26 @@ class OmpDupWatchTest(unittest.TestCase):
         self.assertEqual(WATCH.named_session([OMP, "-r", parent[:8]]), parent[:8])
         self.assertIsNone(WATCH.named_session([OMP, "-p", f"run git log -r {parent[:8]}"]))
         self.assertIsNone(WATCH.named_session([OMP, "--resume", f"/x/2026Z_{parent}/ArityLane.jsonl"]))
+        # A fork consult (scripts/omp-fork) resumes a COPY under a store of its own: it writes
+        # nothing to the original and registers no second Envoy row, so it is not that session.
+        # Six such consults from one box were reported as six duplicates (03:57:17Z, 2026-11-04).
+        fork = f"/tmp/omp-fork-ab12cd/2026-11-04T03-50-00-000Z_{parent}.jsonl"
+        self.assertIsNone(WATCH.named_session([OMP, "-p", "--mode", "json", "--session-dir",
+                                               "/tmp/omp-fork-ab12cd", "--resume", fork]))
+        self.assertIsNone(WATCH.named_session([OMP, "--session-dir=/tmp/omp-fork-ab12cd",
+                                               f"--resume={fork}"]))
+        # Its own --session-dir does not excuse a resume of the SHARED store's transcript.
+        self.assertEqual(WATCH.named_session([OMP, "--session-dir", "/tmp/omp-fork-ab12cd",
+                                              "--resume", nested]), child)
         self.proc.host_omp(1001, 500, holds=(transcript(parent),))
         self.proc.host_omp(1101, 900, argv=(OMP, "--resume", nested))
         self.assertEqual(self.run_once(), [], "the lane is its own session, not its parent's copy")
+        # And a live session with six fork consults of itself running is not duplicated.
+        for pid in range(1201, 1261, 10):
+            self.proc.host_omp(pid, 900, argv=(OMP, "-p", "--mode", "json", "--session-dir",
+                                                     f"/tmp/omp-fork-{pid}", "--resume",
+                                                     f"/tmp/omp-fork-{pid}/2026Z_{parent}.jsonl"))
+        self.assertEqual(self.run_once(), [], "a fork consult is a copy, not a second omp of the session")
 
     def test_a_process_that_closed_its_transcript_keeps_the_id_it_was_seen_holding(self) -> None:
         """A fresh session has no id on its command line; once seen holding its file, the same

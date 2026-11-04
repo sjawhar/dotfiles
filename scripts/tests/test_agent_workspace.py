@@ -81,6 +81,21 @@ class WorkspaceCase(unittest.TestCase):
         os.environ["AGENT_WORKSPACE_ROOT"] = str(self.wt)
         self.addCleanup(os.environ.pop, "AGENT_WORKSPACE_SRC", None)
         self.addCleanup(os.environ.pop, "AGENT_WORKSPACE_ROOT", None)
+        # The suite itself often runs INSIDE an agent box, whose AGENTBOX_* variables would
+        # otherwise decide where these trees go. Each case says for itself whether it is in a box.
+        box_env = {k: os.environ.get(k) for k in ("AGENTBOX_BOX", "AGENTBOX_DIRS", "AGENTBOX_IDENTITY_FILE")}
+        os.environ.pop("AGENTBOX_BOX", None)
+        os.environ.pop("AGENTBOX_DIRS", None)
+        os.environ["AGENTBOX_IDENTITY_FILE"] = str(self.base / "no-identity-file")
+
+        def restore_box() -> None:
+            for key, value in box_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore_box)
 
     def run_aw(self, *argv: str) -> tuple[int, str]:
         buf = io.StringIO()
@@ -323,6 +338,79 @@ class WorkspaceRootTest(WorkspaceCase):
         self.assertIn("still registered it", out)
         listing = git("worktree", "list", "--porcelain", cwd=self.source).stdout
         self.assertNotIn(str(tree), listing)
+
+
+class BoxWorkspaceRootTest(WorkspaceCase):
+    """In an agent box a new workspace must land on a HOST path.
+
+    A box's `$HOME` and `/tmp` are its own disk image and its `/mnt/nvme/<user>` may be its own
+    container layer; all of it dies with the container, and a box is given only the host
+    directories it was launched with (`AGENTBOX_DIRS`). On 2026-11-04 a session in a box had 7
+    workspaces under `~/.worktrees`, every one of them on the box's private disk.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ.pop("AGENT_WORKSPACE_ROOT", None)
+        self.home = self.base / "home"
+        self.legacy = self.home / ".worktrees"
+        self.legacy.mkdir(parents=True)
+        self.nvme = self.base / "mnt-nvme"  # no big disk in this box
+        self.bind = self.base / "bound-lane"
+        self.bind.mkdir()
+        old = {k: os.environ.get(k) for k in ("HOME", "AGENTBOX_BOX", "AGENTBOX_DIRS")}
+        old_nvme = AW.NVME
+        os.environ["HOME"] = str(self.home)
+        os.environ["AGENTBOX_BOX"] = "agentbox-0123456789ab"
+        os.environ["AGENTBOX_DIRS"] = str(self.bind)
+        AW.NVME = self.nvme
+
+        def restore() -> None:
+            AW.NVME = old_nvme
+            for key, value in old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore)
+
+    def test_a_new_workspace_lands_under_a_bound_dir_not_the_box_s_own_home(self) -> None:
+        self.assertEqual(AW.ws_root(), self.bind / "worktrees")
+        code, out = self.run_aw("new", "proj", "alpha")
+        self.assertEqual(code, 0, out)
+        tree = self.bind / "worktrees" / "proj" / "alpha"
+        self.assertTrue((tree / "file.txt").is_file(), out)
+        self.assertFalse((self.legacy / "proj").exists(), "a box wrote to its own private home")
+
+    def test_a_bound_dir_that_is_not_a_checkout_is_preferred(self) -> None:
+        checkout = self.base / "bound-checkout"
+        (checkout / ".git").mkdir(parents=True)
+        os.environ["AGENTBOX_DIRS"] = f"{checkout}:{self.bind}"
+        self.assertEqual(AW.ws_root(), self.bind / "worktrees")
+
+    def test_a_box_with_no_host_directory_refuses_and_says_what_to_set(self) -> None:
+        os.environ["AGENTBOX_DIRS"] = ""
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            AW.ws_root()
+        self.assertEqual(int(caught.exception.code or 0), 1)
+        self.assertIn("AGENT_WORKSPACE_ROOT", err.getvalue())
+        self.assertIn("agent box", err.getvalue())
+
+    def test_the_override_is_still_obeyed_in_a_box(self) -> None:
+        os.environ["AGENT_WORKSPACE_ROOT"] = str(self.base / "elsewhere")
+        self.assertEqual(AW.ws_root(), self.base / "elsewhere")
+
+    def test_a_tree_already_under_the_box_home_is_still_found(self) -> None:
+        os.environ["AGENT_WORKSPACE_ROOT"] = str(self.legacy)
+        self.run_aw("new", "proj", "alpha")
+        os.environ.pop("AGENT_WORKSPACE_ROOT")
+        self.assertIn(self.legacy, AW.ws_roots())
+        code, listing = self.run_aw("list")
+        self.assertEqual(code, 0, listing)
+        self.assertIn(str(self.legacy / "proj"), listing)
+        self.assertIn("alpha", listing)
 
 
 class AddLockTest(WorkspaceCase):
