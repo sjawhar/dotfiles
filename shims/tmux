@@ -24,18 +24,67 @@ EOF
 
 # Server options precede the first command word. -L/-S name the socket.
 explicit_socket=0
+explicit_path=""
 i=0
 while (( i < $# )); do
     arg="${@:i+1:1}"
     case "$arg" in
-        -L|-S) explicit_socket=1; i=$((i + 2)) ;;
-        -L?*|-S?*) explicit_socket=1; i=$((i + 1)) ;;
+        -S) explicit_socket=1; explicit_path="${@:i+2:1}"; i=$((i + 2)) ;;
+        -L) explicit_socket=1; i=$((i + 2)) ;;
+        -S?*) explicit_socket=1; explicit_path="${arg#-S}"; i=$((i + 1)) ;;
+        -L?*) explicit_socket=1; i=$((i + 1)) ;;
         -c|-f|-T) i=$((i + 2)) ;;
         --) i=$((i + 1)); break ;;
         -*) i=$((i + 1)) ;;
         *) break ;;
     esac
 done
+
+# In an agent box the host's tmux server is reached through a guard, not through its own
+# protocol: scripts/agentbox-tmux-guard answers the box's relay socket, runs the command as the
+# user against the host server, and refuses `kill-server` and the kills aimed at panes the box
+# does not own (agentbox/AGENTS.md, dispatch://INFRA-1192). AGENTBOX_TMUX_GUARD_SOCK is that
+# socket, set by `agentbox new` and by nothing else, so a host shell and a box started before
+# the change take none of this. A call that names another socket or a -L server is a box-local
+# tmux and goes to the real binary below.
+if [[ -n "${AGENTBOX_TMUX_GUARD_SOCK:-}" && -S "${AGENTBOX_TMUX_GUARD_SOCK:-}" ]] \
+    && { (( ! explicit_socket )) || [[ -n "$explicit_path" && "$explicit_path" == "$AGENTBOX_TMUX_GUARD_SOCK" ]]; }; then
+    # Each argument as one base64 line, so a newline inside a `send-keys` argument survives; the
+    # working directory too, since the guard is not in the box's filesystem and a new window
+    # would otherwise start in the guard's own. The answer is the command's stdout, its stderr
+    # and its exit status, each framed the same way.
+    # The -S naming this very socket is dropped: the guard adds the host socket itself, and
+    # refuses any -S or -L it is handed, since those name another server.
+    guard_args=()
+    j=0
+    while (( j < i )); do
+        arg="${@:j+1:1}"
+        case "$arg" in
+            -S) j=$((j + 2)); continue ;;
+            -S?*) j=$((j + 1)); continue ;;
+        esac
+        guard_args+=("$arg")
+        j=$((j + 1))
+    done
+    guard_args+=("${@:i+1}")
+    guard_exit=1
+    while IFS= read -r line; do
+        case "$line" in
+            'O '*) printf '%s' "${line#O }" | base64 -d ;;
+            'E '*) printf '%s' "${line#E }" | base64 -d >&2 ;;
+            'X '*) guard_exit="${line#X }" ;;
+            *) printf '%s\n' "$line" >&2 ;;
+        esac
+    done < <(
+        {
+            for arg in ${guard_args[@]+"${guard_args[@]}"}; do
+                printf 'A %s\n' "$(printf '%s' "$arg" | base64 -w0)"
+            done
+            printf 'CWD %s\nGO\n' "$(printf '%s' "$PWD" | base64 -w0)"
+        } | socat - "UNIX-CONNECT:$AGENTBOX_TMUX_GUARD_SOCK"
+    )
+    exit "$guard_exit"
+fi
 
 # tmux accepts unambiguous command prefixes: kill-ser, kill-serv, ... Scan every
 # remaining word so `\;`-chained invocations are covered too.

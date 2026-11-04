@@ -1011,18 +1011,65 @@ box_tmux_env() {
     printf -- '-e\nTMUX=%s\n' "$TMUX"
     echo "agentbox: this launch is under tmux server $caller, not the host's default (${HOST_TMUX_SOCK:-none found}), which is the only server a box's tmux reaches; this box gets no TMUX_PANE, so it cannot drive or respawn its own pane" >&2
 }
-BOX_TMUX_DIR="$RUN_BASE/tmux"
+# One socket per BOX, not one for the host, and it no longer carries tmux's own protocol: the
+# box's end is answered by scripts/agentbox-tmux-guard, which runs the command with the HOST's
+# tmux client and refuses `kill-server` and any kill aimed at a pane the box does not own
+# (dispatch://INFRA-1192; at 16:53:58Z on 2026-11-04 the host server died and took every pane on
+# this machine with it).
+#
+# WHY NOT A FILTER IN FRONT OF THE SOCKET. tmux's client/server protocol is binary imsg frames
+# whose command type is an `enum msgtype` value that moves between releases, and the client
+# hands the server descriptors over SCM_RIGHTS; a byte filter would have to parse that and
+# follow both ends' versions. The guard speaks one line per argument instead, which also ends
+# the version coupling that stopped a boxed move on 2026-11-03 (the image's tmux 3.4 against
+# this host's 3.8): the client that talks to the server is now always the host's own.
+#
+# THE BOX IS IDENTIFIED BY THE SOCKET IT REACHES, never by anything it says: the socket is 0600
+# under $RUN_BASE/<box>, bind-mounted into that box alone, and the unit's environment carries
+# the box's name and the pane the box was launched from. The box cannot see another box's
+# socket and cannot write this unit.
+#
+# A GUARD, NOT A BOUNDARY. The relayed session bus already gives a box the host's systemd user
+# manager, so a box that means to can start a relay of its own; and `send-keys` into a pane at a
+# shell runs a command as the host user. Boxes are segregation, not isolation (Sami,
+# dispatch://INFRA-702/comment/41bdfb9d). This stops the accident, which is what took the
+# machine down.
+box_tmux_dir() { echo "$RUN_BASE/$1/tmux"; }
+tmux_guard_bin() { echo "${AGENTBOX_TMUX_GUARD_BIN:-$DOTFILES_DIR/scripts/agentbox-tmux-guard}"; }
 ensure_tmux_forwarder() {
+    local box="${1:-}" sock unit guard
+    [[ -n "$box" ]] || return 0
     host_tmux_sock
     [[ -n "$HOST_TMUX_SOCK" ]] || return 0
+    guard="$(tmux_guard_bin)"
+    [[ -x "$guard" ]] || { echo "agentbox: $guard is not executable; this box gets no host tmux" >&2; return 0; }
+    sock="$(box_tmux_dir "$box")/tmux-$BOX_UID/default"
+    unit="agentbox-tmux-$box"
+    mkdir -p -m 700 "$(dirname "$sock")"
     # NEVER fatal. The session bus and the metadata service are what a box cannot work without;
     # the host's tmux is what a LEAD wants, and a box with no relay is still a usable box. Under
     # load this host's `systemd-run` times out on the bus (measured 2026-11-01 at load 300+,
     # "Failed to start transient service unit: Connection timed out"), and a launch must not die
     # of that.
-    ensure_unix_forwarder agentbox-tmux "$BOX_TMUX_DIR/tmux-$BOX_UID/default" "$HOST_TMUX_SOCK" optional \
-        || echo "agentbox: the host tmux relay did not start; this box has no host tmux (journalctl --user -u agentbox-tmux)" >&2
+    #
+    # `nofork` hands the accepted connection to the guard as its own stdin and stdout, so the
+    # guard owns the conversation and nothing relays bytes it has not read.
+    start_unit "$unit" \
+        --setenv=AGENTBOX_GUARD_BOX="$box" \
+        --setenv=AGENTBOX_GUARD_PANE="${TMUX_PANE:-}" \
+        --setenv=AGENTBOX_GUARD_SOCK="$HOST_TMUX_SOCK" \
+        --setenv=AGENTBOX_GUARD_STATE="$RUN_BASE/$box" \
+        --setenv=AGENTBOX_GUARD_TMUX="${AGENTBOX_TMUX_CLIENT:-}" \
+        socat "UNIX-LISTEN:$sock,fork,mode=600,unlink-early" "EXEC:$guard,nofork" || true
+    wait_for test -S "$sock" \
+        || echo "agentbox: the host tmux relay did not start; this box has no host tmux (journalctl --user -u $unit)" >&2
     return 0
+}
+# The relay unit is the box's own, so it goes when the box does; $RUN_BASE/<box> (the guard's
+# state: the panes the box created, its log) is removed by close_box just after this.
+stop_tmux_forwarder() {
+    systemctl --user stop "agentbox-tmux-$1" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "agentbox-tmux-$1" >/dev/null 2>&1 || true
 }
 
 # Legacy SSH pairs need their configured loopback channels relayed into a box's
@@ -1219,7 +1266,10 @@ box_tailnet_hosts() {
     done
 }
 
+# $1 is the box this launch is for, where there is one: its tmux relay is its own. `doctor`'s
+# host check passes none and gets the shared forwarders alone.
 ensure_forwarders() {
+    local box="${1:-}"
     if "$DOTFILES_DIR/scripts/on-google-vm" 2>/dev/null; then
         # Google's metadata server refuses a Host header naming the relay, so a byte relay will
         # not do: scripts/agentbox-gce-metadata-relay rewrites it.
@@ -1236,7 +1286,7 @@ ensure_forwarders() {
     fi
     ensure_tcp_forwarder agentbox-envoy "$ENVOY_PORT" "127.0.0.1:$ENVOY_PORT"
     ensure_unix_forwarder agentbox-bus "$BUS_SOCK" "/run/user/$UID_/bus"
-    ensure_tmux_forwarder
+    ensure_tmux_forwarder "$box"
     ensure_forward_channels || return 1
     ensure_loopback_services
     ensure_tailnet_serve
@@ -1460,8 +1510,8 @@ mount_args() {
     # tmux-<box uid>/default, so a bare `tmux` in the box under TMUX_TMPDIR (session_env) finds
     # it and a relay restarted since the box started is seen at once. A host with no tmux has
     # no relay and the directory is empty, where `tmux` starts a server of the box's own.
-    mkdir -p -m 700 "$BOX_TMUX_DIR/tmux-$BOX_UID"
-    a+=(-v "$BOX_TMUX_DIR:/run/user/$UID_/tmux")
+    mkdir -p -m 700 "$(box_tmux_dir "$box")/tmux-$BOX_UID"
+    a+=(-v "$(box_tmux_dir "$box"):/run/user/$UID_/tmux")
     # The inner dockerd's image store: anonymous, dies with the box.
     a+=(-v /var/lib/docker)
     printf '%s\n' "${a[@]}"
@@ -1479,6 +1529,11 @@ session_env() {
     # NOT set: a box is not inside a pane, and a tool that reads TMUX would address the wrong
     # terminal.
     e+=(-e "TMUX_TMPDIR=/run/user/$UID_/tmux")
+    # That socket is answered by the guard (ensure_tmux_forwarder), not by tmux's own protocol,
+    # so `shims/tmux` must speak to it rather than exec the real binary at it. Only a box gets
+    # this variable, and only a box made after the change, so a host shell and a box started
+    # before it behave exactly as before.
+    e+=(-e "AGENTBOX_TMUX_GUARD_SOCK=/run/user/$UID_/tmux/tmux-$BOX_UID/default")
     e+=(-e "HOME=$HOME" -e USER=ubuntu -e "TERM=${TERM:-xterm-256color}" -e "DOTFILES_DIR=$DOTFILES_DIR")
     e+=(-e "MISE_DATA_DIR=$HOME/.mise")
     local cache="$BOX_CACHE_ROOT/$box"
@@ -1876,6 +1931,7 @@ close_box() {
     done
     # What the session wrote in its box home, before anything is removed.
     box_home_carry "$box" "$sid" >/dev/null || kept=1
+    stop_tmux_forwarder "$box"
     rm -rf "${RUN_BASE:?}/$box"
     # The box's own filesystem takes everything in it (close_box_disk), leaving the mountpoint
     # for the rm below; a box with no disk limit has no image and the rm does all of it. A
@@ -2043,7 +2099,7 @@ cmd_new() {
     tag="$(image_tag)"
     build_image "$tag"
     ensure_network
-    ensure_forwarders
+    ensure_forwarders "$box"
 
     # From here the box has state on disk: whatever fails before or during the
     # session, its directory never outlives the launcher (close_box).
@@ -8311,6 +8367,7 @@ remove_doctor_box() {
     docker rm -f "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
     close_box_cache "$box"
+    stop_tmux_forwarder "$box"
     rm -rf "${RUN_BASE:?}/$box"
     if close_box_disk "$box"; then rm -rf "${BOXES:?}/$box"; fi
 }

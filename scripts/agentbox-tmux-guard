@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""One agent box's end of the host tmux relay: it runs the box's tmux commands as the user, and
+refuses the ones that would end another session.
+
+WHY THIS EXISTS. Every box is given the host's tmux server, so a lead inside a box can drive
+other sessions' panes (dispatch://INFRA-702). That also gave every box `kill-server`. At
+16:53:58Z on 2026-11-04 the host server died and took every pane on sami-devbox with it: the
+chief of staff was down 40 minutes, and the ~120 box relaunches that followed drove the machine
+into a 74-minute kernel stall (dispatch://INFRA-1192).
+
+WHY NOT A FILTER IN FRONT OF THE SOCKET. tmux's client/server protocol is binary imsg frames
+(16-byte header: type, len, flags, peerid, pid; the command's argv packed in the payload of one
+frame whose numeric type comes from a `enum msgtype` that shifts between tmux releases), and the
+client hands the server file descriptors over SCM_RIGHTS. A byte filter would have to parse that
+and track the version of both ends. So the relay no longer carries tmux's protocol at all: this
+program speaks a one-line-per-argument protocol with the box, decides, and runs the HOST's own
+tmux client against the host socket. Version skew between the image's tmux and the host's (3.4
+against 3.8, which broke a boxed move on 2026-11-03) stops mattering for the same reason.
+
+HOW THE CALLER IS IDENTIFIED. By the socket it connected to, nothing it says. `agentbox new`
+gives each box a socket of its own, 0600, under $RUN_BASE/<box>/tmux, bind-mounted into that box
+and no other, served by a transient user unit `agentbox-tmux-<box>` whose environment the
+launcher writes: the box's name, and the pane the box was launched from (TMUX_PANE, which the
+launcher passes only for a launch from the host's default server). A box cannot reach another
+box's socket and cannot change that unit's environment.
+
+WHAT IS REFUSED. `kill-server` always. `kill-session`, `kill-window`, `kill-pane` (and their
+aliases and unambiguous prefixes) when any pane they would destroy is not the box's own pane or
+a pane the box created through this relay. Everything else is passed through unchanged, which is
+the whole point: `send-keys`, `capture-pane`, `list-panes`, `display-message`, `new-window`,
+`respawn-pane` on any pane still work, because a lead steers other sessions with them.
+
+WHAT THIS IS NOT. It is a guard, not a boundary. A box already reaches the host's systemd user
+manager through the relayed session bus, so it can start a socat of its own to the host tmux
+socket; and `send-keys` into any pane sitting at a shell runs a command as the host user. Agent
+boxes are segregation, not isolation (Sami, dispatch://INFRA-702/comment/41bdfb9d). This stops
+the accident and the careless command - the shape that actually took the machine down - and
+nothing claims more.
+"""
+
+from __future__ import annotations
+
+import base64
+import fcntl
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BOX = os.environ.get("AGENTBOX_GUARD_BOX", "")
+PANE = os.environ.get("AGENTBOX_GUARD_PANE", "")
+SOCK = os.environ.get("AGENTBOX_GUARD_SOCK", "")
+STATE = os.environ.get("AGENTBOX_GUARD_STATE", "")
+TMUX_HINT = os.environ.get("AGENTBOX_GUARD_TMUX", "")
+# A box that sends nothing this long is not a client of ours (a real tmux binary that found the
+# socket sends binary imsg frames and no GO line, and must not hold the connection open).
+READ_TIMEOUT = 30.0
+
+# Every kill command, its aliases, and what a target of it names. tmux accepts any unambiguous
+# prefix, so a word is taken as a kill command when it is a prefix of one of these; a word that is
+# a prefix of several (`kill-s`, `k`) counts as all of them, which tmux itself would call
+# ambiguous and refuse anyway.
+KILLS = {
+    "kill-server": "server",
+    "kill-session": "session",
+    "kill-window": "window",
+    "killw": "window",
+    "kill-pane": "pane",
+    "killp": "pane",
+}
+# Commands that cannot create a pane, so a run of them needs no before/after pane census. Anything
+# not listed gets one, including run-shell, if-shell and source-file, which can create panes
+# indirectly. Prefix-matched like the kills.
+NO_NEW_PANE = (
+    "capture-pane", "capturep", "display-message", "display", "displayp", "display-panes",
+    "has-session", "kill-pane", "killp", "kill-server", "kill-session", "kill-window", "killw",
+    "list-buffers", "lsb", "list-clients", "lsc", "list-commands", "lscm", "list-keys", "lsk",
+    "list-panes", "lsp", "list-sessions", "ls", "list-windows", "lsw", "pipe-pane", "pipep",
+    "refresh-client", "refresh", "rename-session", "rename", "rename-window", "renamew",
+    "resize-pane", "resizep", "resize-window", "resizew", "select-pane", "selectp",
+    "select-window", "selectw", "send-keys", "send", "send-prefix", "set-environment", "setenv",
+    "set-option", "set", "set-window-option", "setw", "show-environment", "showenv",
+    "show-messages", "showmsgs", "show-options", "show", "show-window-options", "showw",
+    "swap-pane", "swapp", "swap-window", "swapw", "wait-for", "wait",
+)
+
+
+def log(line: str) -> None:
+    if not STATE:
+        return
+    try:
+        with open(os.path.join(STATE, "tmux-guard.log"), "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {BOX} {line}\n")
+    except OSError:
+        pass
+
+
+def read_request() -> tuple[list[str], str]:
+    """The box's argv and its working directory, or raise ValueError for anything else."""
+    stdin = sys.stdin.buffer
+    args: list[str] = []
+    cwd = ""
+    while True:
+        line = stdin.readline()
+        if not line:
+            raise ValueError("the box closed the connection before GO")
+        line = line.rstrip(b"\r\n")
+        if line == b"GO":
+            return args, cwd
+        head, _, rest = line.partition(b" ")
+        if head == b"A":
+            args.append(base64.b64decode(rest).decode("utf-8", "surrogateescape"))
+        elif head == b"CWD":
+            cwd = base64.b64decode(rest).decode("utf-8", "surrogateescape")
+        else:
+            raise ValueError("not this relay's protocol")
+        if len(args) > 4096:
+            raise ValueError("too many arguments")
+
+
+def respond(out: bytes, err: bytes, code: int) -> None:
+    stdout = sys.stdout.buffer
+    stdout.write(b"O " + base64.b64encode(out) + b"\n")
+    stdout.write(b"E " + base64.b64encode(err) + b"\n")
+    stdout.write(b"X %d\n" % code)
+    stdout.flush()
+
+
+def refuse(message: str) -> None:
+    log("REFUSED " + message.splitlines()[0])
+    respond(b"", message.encode("utf-8") + b"\n", 1)
+    sys.exit(0)
+
+
+def tmux_bin() -> str:
+    """The host tmux client that can talk to the host's server. A client of another version
+    answers `server exited unexpectedly`, so the choice is probed once and cached beside the
+    box's state (the launcher's hint first, then PATH, then the host's mise installs)."""
+    cache = Path(STATE) / "tmux-bin" if STATE else None
+    if cache is not None and cache.is_file():
+        candidate = cache.read_text(encoding="utf-8").strip()
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    home = Path(os.path.expanduser("~"))
+    candidates = [TMUX_HINT] if TMUX_HINT else []
+    for directory in os.environ.get("PATH", "").split(":"):
+        if directory:
+            candidates.append(os.path.join(directory, "tmux"))
+    for root in (home / ".mise/installs", home / ".local/share/mise/installs"):
+        candidates.extend(str(path) for path in sorted(root.glob("*tmux*/*/bin/tmux")))
+    candidates.append("/usr/bin/tmux")
+    for candidate in candidates:
+        if not candidate or not os.access(candidate, os.X_OK):
+            continue
+        # The shim refuses nothing here and execs the real binary, but it is a shell script: skip
+        # it so the cache holds the binary itself.
+        probe = subprocess.run([candidate, "-S", SOCK, "list-sessions"],
+                               capture_output=True, timeout=20, check=False)
+        if probe.returncode == 0:
+            if cache is not None:
+                try:
+                    cache.write_text(candidate + "\n", encoding="utf-8")
+                except OSError:
+                    pass
+            return candidate
+    return "tmux"
+
+
+def tmux(*args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run([TMUX, "-S", SOCK, *args], capture_output=True, check=False)
+
+
+def pane_table() -> list[tuple[str, str, str, str, str]]:
+    """(pane id, window id, session id, session name, window index) for every pane."""
+    done = tmux("list-panes", "-a", "-F",
+                "#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{window_index}")
+    rows = []
+    for line in done.stdout.decode("utf-8", "replace").splitlines():
+        fields = line.split("\t")
+        if len(fields) == 5:
+            rows.append((fields[0], fields[1], fields[2], fields[3], fields[4]))
+    return rows
+
+
+def owned_panes() -> set[str]:
+    owned = {PANE} if PANE else set()
+    if STATE:
+        try:
+            with open(os.path.join(STATE, "owned-panes"), encoding="utf-8") as handle:
+                owned.update(line.strip() for line in handle if line.strip())
+        except OSError:
+            pass
+    return owned
+
+
+def remember_panes(new: set[str]) -> None:
+    if not STATE or not new:
+        return
+    try:
+        with open(os.path.join(STATE, "owned-panes"), "a", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            for pane in sorted(new):
+                handle.write(pane + "\n")
+    except OSError:
+        pass
+
+
+def split_commands(args: list[str]) -> list[list[str]]:
+    """tmux's own argv splitting: a word that is `;` separates two commands, a word ending in an
+    unescaped `;` separates after itself, and `\\;` is a literal semicolon."""
+    commands: list[list[str]] = []
+    current: list[str] = []
+    for arg in args:
+        if arg == ";":
+            commands.append(current)
+            current = []
+        elif arg.endswith(";") and not arg.endswith("\\;"):
+            current.append(arg[:-1])
+            commands.append(current)
+            current = []
+        else:
+            current.append(arg[:-2] + ";" if arg.endswith("\\;") else arg)
+    commands.append(current)
+    return [command for command in commands if command]
+
+
+def kill_kinds(word: str) -> set[str]:
+    return {kind for name, kind in KILLS.items() if name.startswith(word)}
+
+
+def may_create_pane(word: str) -> bool:
+    return not any(name.startswith(word) for name in NO_NEW_PANE)
+
+
+# Server and client options sit before the first command word; these three take a value.
+SERVER_OPTION_WITH_VALUE = ("-c", "-f", "-T")
+
+
+def after_server_options(args: list[str]) -> list[str]:
+    """The command words, having refused an -L or -S that would aim at another tmux server."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return args[index + 1:]
+        if not arg.startswith("-") or arg == "-":
+            return args[index:]
+        if arg[:2] in ("-L", "-S"):
+            refuse(
+                f"agentbox-tmux-guard: refusing `{shlex.join(args)}` from box {BOX}.\n"
+                "  This relay serves one server, the host's default. An -L or -S through it\n"
+                "  would aim at another server, whose panes are not this box's to end.\n"
+                "  Drop the option to use this relay; for a server of the box's own, run the\n"
+                "  real binary: `/usr/bin/tmux -L <name> …`.")
+        index += 2 if arg in SERVER_OPTION_WITH_VALUE else 1
+    return []
+
+
+def kill_target(command: list[str]) -> tuple[str | None, bool]:
+    """The -t value of a kill command (None when it has none) and whether -a was given."""
+    target: str | None = None
+    everything = False
+    index = 1
+    while index < len(command):
+        arg = command[index]
+        if arg == "-t" and index + 1 < len(command):
+            target = command[index + 1]
+            index += 2
+            continue
+        if arg.startswith("-t") and len(arg) > 2:
+            target = arg[2:]
+            index += 1
+            continue
+        if arg.startswith("-") and arg != "-":
+            everything = everything or "a" in arg[1:]
+        index += 1
+    return target, everything
+
+
+def resolve(target: str) -> tuple[str, str, str] | None:
+    """(pane id, window id, session id) the target names, or None when tmux cannot resolve it."""
+    done = tmux("display-message", "-p", "-t", target, "#{pane_id}\t#{window_id}\t#{session_id}")
+    fields = done.stdout.decode("utf-8", "replace").strip().split("\t")
+    if done.returncode != 0 or len(fields) != 3 or not fields[0]:
+        return None
+    return fields[0], fields[1], fields[2]
+
+
+def victims(kind: str, target: str, everything: bool) -> tuple[list[str], str] | None:
+    """Every pane the kill would destroy, and a human description of the target."""
+    spot = resolve(target)
+    if spot is None:
+        return None
+    pane, window, session = spot
+    rows = pane_table()
+    where = next((f"session {row[3]}, window {row[4]}" for row in rows if row[0] == pane), "")
+    if kind == "pane":
+        panes = [row[0] for row in rows if row[1] == window and row[0] != pane] if everything \
+            else [pane]
+    elif kind == "window":
+        panes = [row[0] for row in rows if row[2] == session and row[1] != window] if everything \
+            else [row[0] for row in rows if row[1] == window]
+    else:
+        panes = [row[0] for row in rows if row[2] != session] if everything \
+            else [row[0] for row in rows if row[2] == session]
+    return panes, where
+
+
+def check(args: list[str]) -> list[list[str]]:
+    """Refuse the kills that would end another session; return the commands for everything else."""
+    commands = split_commands(after_server_options(args))
+    if not commands:
+        refuse(f"agentbox-tmux-guard: box {BOX} sent no tmux command.\n"
+               "  This socket is the host's tmux server relayed into the box. It runs commands;\n"
+               "  it cannot attach, because the box has none of the host's terminals.")
+    own = owned_panes()
+    own_text = ", ".join(sorted(own)) if own else "no pane of its own (it was not launched from " \
+        "a pane of the host's default tmux server)"
+    for command in commands:
+        kinds = kill_kinds(command[0])
+        if not kinds:
+            continue
+        if "server" in kinds:
+            refuse(
+                f"agentbox-tmux-guard: refusing `{shlex.join(command)}` from box {BOX}.\n"
+                "  kill-server on the host's tmux server ends EVERY agent pane on this machine.\n"
+                "  That happened at 16:53:58Z on 2026-11-04 and cost 114 minutes"
+                " (dispatch://INFRA-1192).\n"
+                "  A box may kill only its own pane or window"
+                f" (this box owns: {own_text}).\n"
+                "  For a server of your own inside the box: `tmux -L <name> kill-server`.")
+        kind = sorted(kinds)[0]
+        target, everything = kill_target(command)
+        if target is None:
+            refuse(
+                f"agentbox-tmux-guard: refusing `{shlex.join(command)}` from box {BOX}.\n"
+                "  It names no target, so the host's tmux server would pick its own most recent\n"
+                f"  {kind}, which belongs to some other session. Name the target:"
+                f" `-t {sorted(own)[0] if own else '%<your pane>'}`.\n"
+                f"  This box owns: {own_text}.")
+        found = victims(kind, target, everything)
+        if found is None:
+            continue  # tmux will report the bad target itself, in its own words.
+        panes, where = found
+        foreign = [pane for pane in panes if pane not in own]
+        if foreign:
+            refuse(
+                f"agentbox-tmux-guard: refusing `{shlex.join(command)}` from box {BOX}.\n"
+                f"  It would kill {len(panes)} pane(s), {len(foreign)} of them this box does not"
+                f" own: {' '.join(foreign[:12])}"
+                f"{' …' if len(foreign) > 12 else ''}"
+                f"{f' ({where})' if where else ''}.\n"
+                f"  This box owns: {own_text}.\n"
+                "  Steering other sessions' panes is unchanged: send-keys, capture-pane,\n"
+                "  display-message, list-panes, new-window and respawn-pane all still work.")
+    return commands
+
+
+def main() -> int:
+    if not SOCK or not os.path.exists(SOCK):
+        respond(b"", b"agentbox-tmux-guard: this host has no tmux server at "
+                + SOCK.encode() + b"\n", 1)
+        return 0
+    try:
+        sock = socket.socket(fileno=os.dup(0))
+        sock.settimeout(READ_TIMEOUT)
+    except OSError:
+        sock = None
+    try:
+        args, cwd = read_request()
+    except (ValueError, OSError, socket.timeout) as error:
+        sys.stdout.buffer.write(
+            b"agentbox-tmux-guard: this socket is not tmux's protocol (" + str(error).encode()
+            + b"). Run `tmux` from PATH, which is "
+            b"~/.dotfiles/shims/tmux and speaks to this relay.\n")
+        sys.stdout.buffer.flush()
+        return 2
+    finally:
+        if sock is not None:
+            sock.settimeout(None)
+            sock.detach()
+
+    global TMUX
+    TMUX = tmux_bin()
+    commands = check(args)
+
+    census = any(may_create_pane(command[0]) for command in commands)
+    before = {row[0] for row in pane_table()} if census else set()
+    directory = cwd if cwd and os.path.isdir(cwd) else os.path.expanduser("~")
+    done = subprocess.run([TMUX, "-S", SOCK, *args], capture_output=True, check=False,
+                          cwd=directory)
+    if census:
+        remember_panes({row[0] for row in pane_table()} - before)
+    respond(done.stdout, done.stderr, done.returncode)
+    return 0
+
+
+TMUX = "tmux"
+if __name__ == "__main__":
+    sys.exit(main())

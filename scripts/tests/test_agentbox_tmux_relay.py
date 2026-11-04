@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """A box's tmux relay always reaches the host's DEFAULT tmux server.
 
-The relay (`agentbox-tmux`, ensure_tmux_forwarder) is one unit shared by every box on the host.
-On 2026-11-02 one `agentbox new` from a pane of `tmux -L devbox-drill` re-pointed it at that
-server, and from 17:18:45Z to 17:58Z every box's `tmux` reached the drill server instead of the
-`agents` session. So the relay's target is the default server whatever server the launch comes
-from, and only a launch from the default server gives the box its pane (TMUX_PANE): a pane id
-of another server names some other session's pane on the default one.
+The relay (`agentbox-tmux-<box>`, ensure_tmux_forwarder) is one unit per box, and it is pointed
+at the host's default server whatever server the launch comes from. On 2026-11-02, while it was
+still one shared unit, an `agentbox new` from a pane of `tmux -L devbox-drill` re-pointed it at
+that server, and from 17:18:45Z to 17:58Z every box's `tmux` reached the drill server instead
+of the `agents` session. Only a launch from the default server gives the box its pane
+(TMUX_PANE): a pane id of another server names some other session's pane on the default one,
+and that pane is what the guard lets the box kill (test_agentbox_tmux_guard.py).
 
 Technique, as test_agentbox_dirs.py: source `scripts/agentbox` (its source guard runs nothing)
 with real unix sockets standing in for the tmux servers.
@@ -56,12 +57,21 @@ class TmuxRelay(unittest.TestCase):
         return subprocess.run(["bash", "-c", f'source "{AGENTBOX}"\n{script}'], env={**base, **env},
                               capture_output=True, text=True, timeout=60, check=False)
 
-    def relay_target(self, env: dict[str, str]) -> str:
-        """The socket ensure_tmux_forwarder hands the shared unit, with the unit itself stubbed."""
+    def relay_unit(self, env: dict[str, str], box: str = "agentbox-testrelay") -> list[str]:
+        """What ensure_tmux_forwarder would start, with systemd and the socket wait stubbed."""
         result = self.run_bash(
-            'ensure_unix_forwarder() { echo "RELAY $3"; }\nensure_tmux_forwarder', env)
+            f'RUN_BASE="{self.root}/run"\n'
+            'start_unit() { printf "%s\\n" "$@"; }\nwait_for() { :; }\n'
+            f'ensure_tmux_forwarder {box}', env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return result.stdout.strip()
+        return result.stdout.splitlines()
+
+    def relay_target(self, env: dict[str, str]) -> str:
+        """The host tmux server the box's guard is pointed at, as `RELAY <socket>`."""
+        for line in self.relay_unit(env):
+            if line.startswith("--setenv=AGENTBOX_GUARD_SOCK="):
+                return "RELAY " + line.split("=", 2)[2]
+        return ""
 
     def test_a_launch_from_another_server_leaves_the_relay_on_the_default_server(self) -> None:
         self.assertEqual(self.relay_target({"TMUX": f"{self.other},4242,0", "TMUX_PANE": "%0"}),
@@ -95,6 +105,30 @@ class TmuxRelay(unittest.TestCase):
         self.assertEqual(other.returncode, 0, other.stderr)
         self.assertEqual(other.stdout.splitlines(), ["-e", f"TMUX={self.other},4242,0"])
         self.assertIn("this box gets no TMUX_PANE", other.stderr)
+
+    def test_each_box_gets_its_own_socket_its_own_unit_and_the_guard(self) -> None:
+        """The relay is per box, so a kill can be attributed, and it runs the guard, not a byte
+        relay to the tmux socket: one shared relay could say only that `a box` asked
+        (dispatch://INFRA-1192)."""
+        unit = self.relay_unit({"TMUX": f"{self.default},4241,3", "TMUX_PANE": "%47"},
+                               box="agentbox-aaaabbbbcccc")
+        self.assertEqual(unit[0], "agentbox-tmux-agentbox-aaaabbbbcccc")
+        sock = f"{self.root}/run/agentbox-aaaabbbbcccc/tmux/tmux-1000/default"
+        self.assertIn(f"UNIX-LISTEN:{sock},fork,mode=600,unlink-early", unit)
+        self.assertIn(f"EXEC:{DOTFILES / 'scripts' / 'agentbox-tmux-guard'},nofork", unit)
+        self.assertIn("--setenv=AGENTBOX_GUARD_BOX=agentbox-aaaabbbbcccc", unit)
+        self.assertIn("--setenv=AGENTBOX_GUARD_PANE=%47", unit)
+        self.assertIn(f"--setenv=AGENTBOX_GUARD_SOCK={self.default}", unit)
+        self.assertTrue(Path(sock).parent.is_dir(), "the socket's directory is made for socat")
+        other = self.relay_unit({"TMUX": f"{self.default},4241,3", "TMUX_PANE": "%47"},
+                                box="agentbox-ddddeeeeffff")
+        self.assertNotEqual(unit[0], other[0])
+
+    def test_a_box_launched_outside_a_pane_owns_no_pane(self) -> None:
+        """Then every kill is refused, which is the safe end of the inference, not an outage:
+        everything else a lead does still works."""
+        unit = self.relay_unit({})
+        self.assertIn("--setenv=AGENTBOX_GUARD_PANE=", unit)
 
 
     def test_the_tmux_shim_reaches_the_workspace_server_from_a_shell_without_tmux_tmpdir(self) -> None:
