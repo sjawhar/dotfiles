@@ -77,6 +77,13 @@ fi
 
 if [[ ! -f "$CONFIG" ]]; then
     mkdir -p "$(dirname "$CONFIG")"
+    # The BET clone's path comes from this machine's environment, never from this file: the repository is public.
+    if [[ -n "${FARM_BET_REPO:-}" ]]; then
+        bet_line="FARM_BET_REPO=$FARM_BET_REPO"
+    else
+        bet_line="# FARM_BET_REPO=<this host's BET clone>: unset, every farm images push is refused (grade-farm README)"
+        echo "grade-farm: no FARM_BET_REPO in the environment; set it in $CONFIG before a farm images push"
+    fi
     cat >"$CONFIG" <<EOF
 # The grading farm host's own paths (grade-farm/README.md, "The host's own paths").
 # Machine-local: this file is never in a repository. The environment wins over it.
@@ -85,7 +92,7 @@ FARM_DIR=$ROOT
 FARM_BOX_GCLOUD_CONFIG=$BOXID/gcloud-box
 FARM_BOX_KEY=$BOXID/sshkey
 FARM_MIRROR_ROOTS=/mnt/* $HOME
-FARM_BET_REPO=$HOME/src/binary-equivalence-taiga
+$bet_line
 FARM_BLOBS_GCS=gs://tmp-transfer-autoformalization-16125/sami/grade-farm/blobs
 FARM_IMAGES_GCS=gs://tmp-transfer-autoformalization-16125/sami/grade-farm
 FARM_INVENTORY=$NVME/compute-inventory.csv

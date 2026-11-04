@@ -4,7 +4,7 @@ GitHub's search has one secondary rate limit for the whole machine, so every dra
 searching. A day with more than 1,000 merges is split into halves, because search returns at most 1,000 results.
 
     uv run python merged_prs.py --start 2026-10-26 --end 2026-11-02 --out merged_prs.json \
-        --owner theorem-labs --owner-repo theorem-labs/binary-equivalence-taiga \
+        --owner theorem-labs --owner-repo theorem-labs/<any-repo> \
         --user sjawhar --user-repo sjawhar/dotfiles
 
 `--owner-repo` and `--user-repo` give `gh` a repository to route the App token through (`GH_REPO`); any repository

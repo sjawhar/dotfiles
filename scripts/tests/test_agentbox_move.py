@@ -4010,7 +4010,7 @@ class AgentboxMove(unittest.TestCase):
         """S3, 2026-11-03: its --dir of a checkout many sessions work in grew a group whose listing
         ran past 900 s. A tree the session only names is copied (through git when the target has a
         clone); only trees its own live processes work in group it."""
-        shared = self.checkout("taiga")
+        shared = self.checkout("shared-repo")
         self.moving_session()
         self.make_proc(999999970, comm="bash", ppid=1, cwd=shared)
         self.make_proc(999999971, ppid=999999970, cwd=shared, session=self.TO2)
