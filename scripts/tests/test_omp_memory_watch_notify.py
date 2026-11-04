@@ -446,6 +446,41 @@ class NearTest(NotifyCase):
         self.assertEqual(["CLEARED" in text for text in self.to(sid(1))], [True])
 
 
+class BoxedSessionTest(NotifyCase):
+    """A session in an agent box has no scope of its own, but its box has a ceiling."""
+
+    def boxed(self, rss_gib: float, box_gib: int = 109) -> None:
+        """One omp in a box: its own cgroup sets no memory.max; the container's, above it, does."""
+        box = "/system.slice/docker-0123456789ab.scope"
+        leaf = f"{box}/init.scope"
+        for path, limit in ((box, f"{box_gib * GIB}"), (leaf, "max")):
+            directory = self.root / path.strip("/")
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "memory.max").write_text(f"{limit}\n")
+        (self.root / leaf.strip("/") / "cgroup.procs").write_text("1\n")
+        self.scopes["box"] = (1, leaf)
+        WATCH.rss_of = lambda pid: int(rss_gib * GIB)
+
+    def test_a_boxed_session_is_warned_at_its_box_s_ceiling_not_the_flat_level(self) -> None:
+        """XV6 was warned at 19 GiB in a 109 GiB box (01:56Z 2026-11-04): the flat 16.8 GiB level
+        is for a session that only the machine's RAM caps."""
+        original = WATCH.rss_of
+        self.addCleanup(setattr, WATCH, "rss_of", original)
+        machine = unittest.mock.patch.object(WATCH, "mem_total", return_value=2200 * GIB)
+        machine.start()
+        self.addCleanup(machine.stop)
+        self.boxed(19)
+        for _ in range(4):
+            self.run_pass(after=60)
+        self.assertEqual(self.to(sid(1)), [], "19 GiB of a 109 GiB box is not near its limit")
+        self.boxed(80)
+        for _ in range(4):
+            self.run_pass(after=60)
+        sent = self.to(sid(1))
+        self.assertTrue(sent, "80 GiB of a 109 GiB box is past 70% of it")
+        self.assertIn("NEAR ITS MEMORY LIMIT", sent[0])
+
+
 class ReportFileTest(NotifyCase):
     def test_reports_older_than_seven_days_are_pruned_in_the_run(self) -> None:
         reports = self.state.parent / "reports"

@@ -3193,9 +3193,14 @@ def run_once(options: argparse.Namespace) -> int:
                 dict(
                     key=f"{scope}:pid{pid}", scope=scope, cgroup=cgroup, pid=pid, limit=limit,
                     limit_from=limit_from, limited=False, usage=usage, current=usage,
-                    measured="this omp process's own RSS. It has NO memory ceiling of its own: it runs"
-                    f" in the shared login scope {scope}, so nothing caps it and nothing but the"
-                    " machine's RAM stops it",
+                    measured=(
+                        "this omp process's own RSS. It has NO memory ceiling of its own: it runs"
+                        f" in the shared login scope {scope}, so nothing caps it and nothing but the"
+                        " machine's RAM stops it"
+                        if limit >= mem_total()
+                        else "this omp process's own RSS. It has no scope of its own; its ceiling is"
+                        f" the box it runs in ({limit_from})"
+                    ),
                 )
             )
 
@@ -3221,7 +3226,13 @@ def run_once(options: argparse.Namespace) -> int:
                 walls_hit += 1
                 urgent += tell_wall_touch(envoy, options, state, touch, pending_wall, recent_wall, started)
         warn_at = limit * options.fraction
-        if not target["limited"]:
+        # The flat level is for a session that NOTHING caps but the machine's RAM. A session in an
+        # agent box has no scope of its own either, but its box has a ceiling - the container's
+        # memory.max, which effective_limit found up the chain - and since the box default follows
+        # the machine (109 GiB on sami-devbox, dotfiles 1d13c4f8) the flat level warned boxed
+        # sessions at 16.8 GiB of 109 (XV6 at 19 GiB, 01:56Z 2026-11-04). A ceiling under the
+        # machine's RAM is a real one, and the fraction of it stands.
+        if not target["limited"] and limit >= mem_total():
             # Nothing caps this session, so "a fraction of the ceiling" would be a number no
             # session on a 251 GiB box ever reaches alone. The level that matters is the one a
             # capped session is warned at: a single uncapped session past it is as dangerous to

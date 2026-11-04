@@ -1481,11 +1481,10 @@ class AgentboxMove(unittest.TestCase):
         shared = [l for l in walks if l not in (mirror, merge)]
         for line in shared:
             self.assertNotIn("--delete", line, "a shared tree is mirrored without --delete")
-        # What a mirror replaces is kept beside it on the destination's own filesystem: a relative
-        # backup dir, so the kept file is renamed, never copied across filesystems.
-        self.assertIn("--delete --backup --backup-dir=.agentbox-replaced-", mirror)
+        # The backup dir is ABSOLUTE: with --relative and the destination `/`, a relative one is
+        # resolved against `/`, and every mirror failed with rsync code 11 (dotfiles 5d7988d6).
+        self.assertIn(f"--delete --backup --backup-dir={self.cutover}/replaced/", mirror)
         self.assertIn("--exclude=agentbox-moved", mirror)
-        self.assertIn("--exclude=.agentbox-replaced-*", mirror)
         self.assertTrue(mirror.endswith(" sami@devbox:/"), mirror)
         self.assertIn(f" {transcript} ", mirror)
         # The target has a clone of both repositories (the stub's target is this machine), so
@@ -1681,12 +1680,12 @@ class AgentboxMove(unittest.TestCase):
         active = self.root / "cache/omp/agentbox/move-to/active" / self.TO
         # The pass AFTER the hang-up is the one whose backup directory carries the bare stamp;
         # every pass before it has a suffix (-before, -hold, -go). Only that one waits here.
+        # The FIRST copy, before the hang-up: a signal there refuses the move with nothing hung
+        # up, and that is still what a stop must do. (After the hang-up the relauncher no longer
+        # stops; test_a_signal_after_the_hang_up_does_not_stop_the_relauncher covers that.)
         write_stub(self.stubs, "rsync",
-                   'case "$*" in *-before\\ *|*-hold\\ *|*-go\\ *) exit 0 ;; esac\n'
-                   'case "$*" in *--backup-dir=*) ;; *) exit 0 ;; esac\n'
+                   'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
                    f'touch "{self.root}/IN_RSYNC"; sleep 60')
-        # The session writes while the move holds, so the pass after the hang-up has work: a
-        # pass with nothing to send runs no rsync at all.
         changing = self.worktree / "written-during-the-hold.txt"
         self.assertEqual(self.move_to().returncode, 0)
         [job] = self.jobs()
@@ -1699,8 +1698,7 @@ class AgentboxMove(unittest.TestCase):
         # A relauncher this test leaves behind runs on the real host (two of them waited in their
         # hold for an hour on 2026-11-03), so it dies with the test whatever happens here.
         self.addCleanup(self.end_relauncher, proc)
-        # The pass after the hang-up is the fifth rsync of the move, and every pass before it
-        # walks its paths, so on a loaded host this wait is minutes, not seconds.
+        # The first pass of the copy, which on a loaded host is minutes in, not seconds.
         for _ in range(int(self.TIMEOUT * 10)):
             if (self.root / "IN_RSYNC").exists():
                 break
@@ -1710,7 +1708,8 @@ class AgentboxMove(unittest.TestCase):
         proc.send_signal(15)
         proc.wait(timeout=30)
         text = log.read_text(encoding="utf-8")
-        self.assertIn("stopped by signal TERM; state: copying to devbox (the sessions are hung up)", text)
+        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up", text)
+        self.assertNotIn("hung up after", text)
         self.assertFalse(active.exists())
 
     def test_the_other_branches_are_pushed_before_the_hang_up(self) -> None:
@@ -2150,12 +2149,17 @@ class AgentboxMove(unittest.TestCase):
         hold = self.root / "cache/omp/agentbox/move-to/hold"
         hold.mkdir(parents=True, exist_ok=True)
         (hold / self.TO).write_text("target=devbox\ndeadline=99999999999\npid=999999999\n", encoding="utf-8")
+        # The hold's own heartbeat decides, never `kill -0`: a boxed session cannot see the
+        # host's pids (every boxed --go answered "GONE", LANE-E 03:38Z 2026-11-04) and a
+        # SIGSTOPped relauncher passes `kill -0` while it touches nothing.
+        os.utime(hold / self.TO, (time.time() - 600, time.time() - 600))
         gone = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
         self.assertEqual(gone.returncode, 1, gone.stdout + gone.stderr)
-        self.assertIn("the relauncher of this move (pid 999999999) is GONE", gone.stderr)
+        self.assertIn("has not touched its hold for", gone.stderr)
         self.assertIn("agentbox move --to devbox", gone.stderr)
-        # With a live relauncher it goes through, and the hold file is spent.
-        (hold / self.TO).write_text(f"target=devbox\ndeadline=99999999999\npid={os.getpid()}\n", encoding="utf-8")
+        # A hold the relauncher is still touching goes through, and the file is spent. The pid is
+        # one no process has, to show the heartbeat alone decides.
+        (hold / self.TO).write_text("target=devbox\ndeadline=99999999999\npid=999999999\n", encoding="utf-8")
         ok = self.run_bash("cmd_move --go", {"OMP_SESSION_ID": self.TO})
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
         self.assertIn("hangs this session up within seconds", ok.stdout)
@@ -2222,6 +2226,129 @@ class AgentboxMove(unittest.TestCase):
         first = self.run_bash('move_spec_usable --dir /tmp -e X=1')
         self.assertEqual(first.stdout.split(), ["--dir", "/tmp", "-e", "X=1"],
                          "the first --dir is the session's own working directory and is kept")
+
+    def test_an_offloaded_transcript_travels_as_its_target_not_as_the_link(self) -> None:
+        """An offloaded transcript in ~/.omp/agent/sessions is a symlink into /mnt/durable, and a
+        link's own mtime never changes when its target is appended to. The delta passes listed the
+        link, so they carried none of the session's new lines: 29 of 99 sessions moved on
+        2026-11-03/04 landed with a transcript 500-2,000 lines short."""
+        self.moving_session()
+        real = self.root / "durable-store" / "offloaded.jsonl"
+        real.parent.mkdir(exist_ok=True)
+        real.write_text("{}\n", encoding="utf-8")
+        link = self.root / "linked.jsonl"
+        link.symlink_to(real)
+        run = self.run_bash(
+            f'MOVE_TO_DELTA_DIR="$(mktemp -d)"\n'
+            f'move_to_delta_record mirror "{link}"\n'
+            f'cat "$MOVE_TO_DELTA_DIR/mirror.new"\n'
+            f'cp "$MOVE_TO_DELTA_DIR/mirror.new" "$MOVE_TO_DELTA_DIR/mirror.list"\n'
+            f'touch -d "2 seconds ago" "$MOVE_TO_DELTA_DIR/stamp"\n'
+            f'printf more >>"{real}"\n'
+            f'move_to_delta_record mirror "{link}"\n'
+            f'move_to_delta_files mirror "$MOVE_TO_DELTA_DIR/stamp" "{link}" >/dev/null\n'
+            f'cat "$MOVE_TO_DELTA_DIR/mirror.files"')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        # The link is selected because its TARGET changed: `find -H` follows a path named on the
+        # command line, so -newer reads the target's mtime, not the link's own (which never
+        # changes when the target is appended to).
+        self.assertIn(str(link), run.stdout.splitlines()[-1], run.stdout)
+        # And the move lists the real file as a mirror path of its own, so rsync carries bytes.
+        paths = self.run_bash(f'move_to_transcript_paths "{link}"')
+        self.assertIn(f"mirror\t{real}", paths.stdout, paths.stdout)
+
+    def test_nothing_starts_on_the_target_until_each_transcript_matches(self) -> None:
+        """The source omp has exited by the time the final copy runs, so its transcript is final
+        here; a target copy that differs means the session would resume on a short history. It is
+        copied again, and after the last try the move fails with nothing started."""
+        transcript = self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        # The target's sha256 answers for another file, so every try mismatches.
+        # On the TARGET only (the ssh stub repoints AGENTBOX_PROC at the remote fixture), the
+        # digest answers for another file, so every try mismatches.
+        write_stub(self.stubs, "sha256sum",
+                   'if [ "${AGENTBOX_PROC:-}" = "$STUB_REMOTE/proc" ]; then echo "deadbeef  $1"; else exec /usr/bin/sha256sum "$@"; fi')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        run = self.run_bash(f'move_to_run "{job}"',
+                            {"AGENTBOX_MOVE_RSYNC_TICK": "0", "AGENTBOX_MOVE_TRANSCRIPT_TRIES": "2"})
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("is still not the same on devbox", run.stdout)
+        self.assertIn("nothing was started on devbox", run.stdout)
+        self.assertNotIn("started in window", run.stdout)
+        self.assertIn("rolled back", run.stdout)
+
+    def test_the_box_started_on_the_target_never_carries_a_dir_it_refuses(self) -> None:
+        """R3A's forward starts all ended as "not resumed within 300 s": its spec held --dir /tmp,
+        which `agentbox new` refuses, so the launcher on the target refused the whole start. A path
+        merely absent here is NOT dropped: the target decides that against its own disk."""
+        self.moving_session()
+        absent = self.root / "not-here"
+        run = self.run_bash(f'MOVE_SPEC_KEEP_GONE=1 move_spec_usable --dir "{self.lane}" --dir /tmp --dir "{absent}"')
+        self.assertEqual(run.stdout.split(), ["--dir", str(self.lane), "--dir", str(absent)])
+        self.assertIn("--dir /tmp is left out", run.stderr)
+
+    def test_a_signal_after_the_hang_up_does_not_stop_the_relauncher(self) -> None:
+        """Before the hang-up a TERM refuses the move with nothing hung up. After it the sessions
+        run nowhere until the relauncher finishes, so one stopped mid-start left its session down
+        on both machines (03:06:44Z, 2026-11-04). From the hang-up the handler only says so."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        # The start on the target waits, so the TERM lands after the hang-up.
+        log = self.root / "relauncher.log"
+        proc = subprocess.Popen(
+            ["bash", "-c", f'source "{AGENTBOX}"\n'
+             f'orig() {{ :; }}\nmove_to_start() {{ touch "{self.root}/STARTING"; sleep 30; echo "@9"; }}\n'
+             f'move_to_run "{job}"'],
+            env={**self.env, "AGENTBOX_MOVE_RSYNC_TICK": "0"},
+            stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
+        self.addCleanup(self.end_relauncher, proc)
+        for _ in range(int(self.TIMEOUT * 10)):
+            if (self.root / "STARTING").exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue((self.root / "STARTING").exists(), log.read_text(encoding="utf-8"))
+        proc.send_signal(15)
+        proc.wait(timeout=self.TIMEOUT)
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("NOT stopping: the move finishes or rolls the group back", text)
+        self.assertNotIn("The relauncher is gone", text)
+        # It ran to an end that leaves the session somewhere: on the target, or back here. Never
+        # stopped in the middle with the session down on both machines.
+        self.assertTrue("moved:" in text or "rolled back:" in text, text)
+        self.assertNotIn("DOWN:", text)
+
+    def test_a_job_that_lists_only_a_symlink_still_carries_its_target(self) -> None:
+        """A job built by another tool listed the sessions/ symlink and not its target; rsync -a
+        copies a link as a link, so the target's older copy stayed and the session resumed short
+        (29 of 99 sessions, 2026-11-03/04). The relauncher resolves the lists itself."""
+        self.moving_session()
+        real = self.root / "durable-store" / "offloaded.jsonl"
+        real.parent.mkdir(exist_ok=True)
+        real.write_text("{}\n", encoding="utf-8")
+        link = self.root / "sessions-link.jsonl"
+        link.symlink_to(real)
+        inside = self.root / "tree"
+        inside.mkdir()
+        (inside / "file").write_text("x\n", encoding="utf-8")
+        covered = self.root / "tree-link"
+        covered.symlink_to(inside / "file")
+        run = self.run_bash(
+            f'say() {{ echo "$*"; }}\nMOVE_TO_MIRROR=("{link}" "{inside}" "{covered}")\nMOVE_TO_MERGE=()\n'
+            'move_to_add_link_targets\nprintf "%s\\n" "${MOVE_TO_MIRROR[@]}"')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        carried = run.stdout.splitlines()
+        self.assertIn(str(real), carried, "the unlisted target is added")
+        self.assertEqual(carried.count(str(inside / "file")), 0,
+                         "a link whose target a listed tree already covers is not added again")
 
     def test_git_storage_the_target_already_has_is_not_copied(self) -> None:
         """INFRA-1018, 2026-11-03: --leave of ~/src/machcsl-riscv sent its 8.96 GB object store to a
