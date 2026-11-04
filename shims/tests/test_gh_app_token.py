@@ -734,11 +734,20 @@ class CacheOffTheRootDisk(unittest.TestCase):
         gh_app_token.seed_cache_dir(new, old)
         self.assertEqual((new / "covered-1.json").read_text(), "{}", "a published cache was replaced")
 
-    def test_the_cache_is_on_nvme_where_that_disk_is(self):
-        user = os.environ.get("USER", "")
-        expected = Path("/mnt/nvme", user, "gh-app-token") if user and Path("/mnt/nvme", user).is_dir() \
-            else Path.home() / ".cache" / "gh-app-token"
-        self.assertEqual(gh_app_token.default_cache_dir(), expected)
+    def test_the_cache_is_on_nvme_only_when_that_directory_is_writable(self):
+        # Inside an agent box that does not bind /mnt/nvme/<user>, the path exists as an empty
+        # root-owned directory; choosing it failed every push from the box (LINUX-1274, 2026-11-04).
+        from unittest import mock
+        home_cache = Path.home() / ".cache" / "gh-app-token"
+        with mock.patch.dict(os.environ, {"USER": "someone"}), \
+                mock.patch.object(Path, "is_dir", return_value=True):
+            with mock.patch.object(gh_app_token.os, "access", return_value=True):
+                self.assertEqual(gh_app_token.default_cache_dir(), Path("/mnt/nvme/someone/gh-app-token"))
+            with mock.patch.object(gh_app_token.os, "access", return_value=False):
+                self.assertEqual(gh_app_token.default_cache_dir(), home_cache)
+        with mock.patch.dict(os.environ, {"USER": "someone"}), \
+                mock.patch.object(Path, "is_dir", return_value=False):
+            self.assertEqual(gh_app_token.default_cache_dir(), home_cache)
 
     def test_the_answer_comes_while_the_decision_log_cannot_be_written(self):
         home = self.root / "home"

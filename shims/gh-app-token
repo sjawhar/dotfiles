@@ -113,10 +113,15 @@ def default_cache_dir() -> Path:
     """The token cache, covered-owner files and decisions.log: /mnt/nvme/<user>/gh-app-token on a
     machine with that disk, else ~/.cache/gh-app-token. On sami-rocqperf ~/.cache is on the root disk,
     whose ext4 journal ran out of space under load: on 2026-11-03 at 09:50Z 428 helper processes sat
-    writing decisions.log there and every push on the box hung."""
+    writing decisions.log there and every push on the box hung.
+
+    /mnt/nvme/<user> counts only when this process can write it. Inside an agent box that does not bind
+    it, the path exists as an empty root-owned directory, and choosing it failed every push from that box
+    with 'failed to update covered-owner cache' (LINUX-1274, 2026-11-04 12:57Z)."""
     user = os.environ.get("USER") or ""
-    if user and Path("/mnt/nvme", user).is_dir():
-        return Path("/mnt/nvme", user, "gh-app-token")
+    nvme = Path("/mnt/nvme", user)
+    if user and nvme.is_dir() and os.access(nvme, os.W_OK | os.X_OK):
+        return nvme / "gh-app-token"
     return Path.home() / ".cache" / "gh-app-token"
 
 
