@@ -242,35 +242,21 @@ retry:
       - anthropic/claude-opus-4-6
 task:
   maxRecursionDepth: 3
-  # omp's soft per-subagent request budget. The shipped default is 200: crossing it
-  # steers a subagent to wrap up, 1.5x (300) FORCE-STOPS its turn, and a few requests
-  # later it is hard-aborted. Measured cost on this box: five OSS Verify subagents
-  # stopped mid-work on 2026-11-04, one mid-proof, and Enroll19b killed at 305
-  # requests on 2026-10-25 -- 200 x 1.5 = 300 plus the grace window, exactly. Each
-  # stop costs a restart and a context reload, and a proof agent legitimately runs
-  # past 300 requests.
+  # task.softRequestBudget is deliberately ABSENT: the shipped default of 200 stands.
+  # Sami decided it on 2026-10-25 04:55Z, choosing "Keep 200" from options that
+  # included removing it and raising it to 1000, with the words "I do not care about
+  # 30 seconds" and "If you resume a subagent, it just continues"
+  # (dispatch://INFRA-315/ask/4e4326c7-be38-4b54-acc3-bdf525a9e662). The remedy for a
+  # stopped subagent is the PARENT RESUMING IT, which continues with its context --
+  # not a bigger budget.
   #
-  # 5000, not 0, and the authority for that is Sami's own recorded decisions rather
-  # than a standing-rules line. He asked whether a parent is told it can resume a
-  # subagent stopped at 200 (dispatch://INFRA-28/ask/7c8ca516-4bcf-4458-a519-dd17e8f8451d)
-  # and accepted, on dispatch://INFRA-315, either of: the subagent "finishes without a
-  # stop at 200, or the parent resumes it within one minute without a person". A 5000
-  # budget satisfies the first branch for every run this box has ever produced.
-  #
-  # An earlier version of this comment cited OSS Verify's standing rule "Never limit
-  # an agent's conversation". That line carries no link to a decision, and goals-md
-  # says of itself that an instruction without one is someone's reading; the OSS
-  # Verify lead corrected the citation and withdrew their request for 0. Kept here so
-  # nobody restores 0 on the strength of the reading.
-  #
-  # Why not 0 even so: this file is box-wide, so 0 removes the floor for every stream,
-  # including those with no such rule, on a machine running 80k+ model calls since
-  # 23:00Z. 5000 is sixteen times the longest run ever stopped here (305 requests), so
-  # it cannot stop real work, and it still halts a subagent looping without end.
-  #
-  # If a stream needs a literal 0, the narrower lever is task.agentSoftRequestBudget,
-  # whose per-agent entry REPLACES both this value and an agent's lower bundled cap.
-  softRequestBudget: 5000
+  # On 2026-11-04 this key was set to 0 at 09:38Z and to 5000 at 09:40Z, and removed
+  # again at 10:06Z, about half an hour in total. Both values reversed his written
+  # decision. The requesting lead cited a standing-rules line ("Never limit an agent's
+  # conversation") that carries no link to a decision, and then an issue's "Done means"
+  # line that is an agent's spec rather than his words; they found the real decision
+  # themselves and asked for the revert. Recorded here so nobody re-derives 0 or 5000
+  # from the same two sources: ask him instead.
   agentModelOverrides:
     # These types named Opus 5.5 while the roles above ran on Opus 5 (2026-10-29 to 2026-11-01),
     # because a lead measured that a weaker verdict changes the result: reviewer and the
