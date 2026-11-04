@@ -140,6 +140,26 @@ class ForwardInstaller(unittest.TestCase):
                 self.assertEqual(unit.resolve(), DOTFILES / "devbox/pcscd-bridge.service")
                 self.assertTrue((self.home / ".pcscd").is_dir())
 
+    def test_serve_stops_and_clears_a_not_found_bridge_without_disabling_it(self) -> None:
+        install = self.install("serve", PCSC_ACTIVE_UNITS="pcscd-bridge.service not-found failed failed Bridge",
+                               SYSTEMCTL_FAIL="--user disable --now pcscd-bridge.service")
+        self.assertEqual(install.returncode, 0, install.stderr)
+        log = self.systemctl_log.read_text().splitlines()
+        for command in ("--user stop pcscd-bridge.service", "--user reset-failed pcscd-bridge.service"):
+            self.assertLess(log.index(command), log.index("--user enable --now forward-serve"))
+        self.assertNotIn("--user disable --now pcscd-bridge.service", log)
+
+    def test_not_found_bridge_stop_or_reset_failure_prevents_serve(self) -> None:
+        for command in ("--user stop pcscd-bridge.service", "--user reset-failed pcscd-bridge.service"):
+            with self.subTest(command=command):
+                if self.systemctl_log.exists():
+                    self.systemctl_log.unlink()
+                install = self.install("serve", PCSC_ACTIVE_UNITS="pcscd-bridge.service not-found failed failed Bridge",
+                                       SYSTEMCTL_FAIL=command)
+                self.assertNotEqual(install.returncode, 0)
+                self.assertIn("pcscd-bridge", install.stderr)
+                self.assertFalse(any("forward-serve" in line for line in self.systemctl_log.read_text().splitlines()))
+
     def test_serve_does_not_start_if_pcsc_ownership_transition_fails(self) -> None:
         for command in (
             "--user list-unit-files --no-legend --no-pager --type=service",

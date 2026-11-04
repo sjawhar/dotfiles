@@ -157,10 +157,17 @@ if [[ "$role" = serve ]]; then
         || fail "$role" "cannot list pcscd-bridge.service; check systemctl --user before retrying migration step 3."
     bridge_active="$(systemctl --user list-units --all --full --plain --no-legend --no-pager pcscd-bridge.service)" \
         || fail "$role" "cannot list loaded pcscd-bridge.service; check systemctl --user before retrying migration step 3."
-    while read -r unit rest; do
+    while read -r unit state rest; do
         if [[ "$unit" = pcscd-bridge.service ]]; then
-            systemctl --user disable --now "$unit" \
-                || fail "$role" "could not stop and disable pcscd-bridge.service; inspect journalctl --user -u pcscd-bridge.service before retrying migration step 3."
+            if [[ "$state" = not-found ]]; then
+                systemctl --user stop "$unit" \
+                    || fail "$role" "could not stop missing pcscd-bridge.service; inspect its loaded state before retrying."
+                systemctl --user reset-failed "$unit" \
+                    || fail "$role" "could not reset failed pcscd-bridge.service; inspect its loaded state before retrying."
+            else
+                systemctl --user disable --now "$unit" \
+                    || fail "$role" "could not stop and disable pcscd-bridge.service; inspect journalctl --user -u pcscd-bridge.service before retrying migration step 3."
+            fi
             break
         fi
     done <<<"${bridge_files}

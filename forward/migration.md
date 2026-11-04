@@ -63,7 +63,9 @@ coordinate steps 2 and 3 as one migration window.
    `~/.config/forward/config.toml`, not a committed machine-specific file. Before
    starting serve, the installer stops and disables an installed or loaded
    `pcscd-bridge.service`, including an active-but-disabled bridge, so Forward
-   can own `~/.pcscd/pcscd.comm`. The bridge is optional; its unit file is retained when present.
+   can own `~/.pcscd/pcscd.comm`. The bridge is optional; its unit file is retained
+   when present. A loaded `not-found` bridge is stopped and its failed state
+   cleared instead of disabling a unit file that no longer exists.
    A failed ownership transition fails the install without starting serve. Both roles
    use Forward's default ports: URL 12800, callback bridge 12801, preview 12802,
    browser relay 12803, PC/SC 12804, grant feed 12805 and audio 12806. The callback
