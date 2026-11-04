@@ -1216,6 +1216,46 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(f"--dir {self.home}/lane", command)
         self.assertNotIn("a box may not be given it", run.stderr)
 
+    def test_a_box_move_wakes_the_resumed_session_outside_the_discarded_box_cache(self) -> None:
+        """Run the in-box respawn through real tmux, not a stub accepting its arguments.
+        The old box cache is private and removed on close; the host-side waker must still run."""
+        tmux = shutil.which("tmux", path="/usr/bin:/bin")
+        if tmux is None:
+            self.skipTest("tmux is not installed")
+        sid = "01a19700-0000-7000-8000-000000000d10"
+        cache = self.root / "old-box-cache"
+        cache.mkdir()
+        launched = self.root / "LAUNCHED"
+        self.make_proc(999999901, session=sid)
+        self.set_pids(999999901)
+        (self.stubs / "tmux").unlink()
+        write_stub(self.stubs, "agentbox", f'rm -rf "$XDG_CACHE_HOME"; touch "{launched}"')
+        write_stub(self.stubs, "envoy",
+                   f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":99999999999999}}]\'; '
+                   'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi')
+        sock = str(self.root / "tmux.sock")
+        env = {**self.env, "XDG_CACHE_HOME": str(cache), "TMUX": ""}
+        subprocess.run([tmux, "-S", sock, "-f", "/dev/null", "new-session", "-d", "-s", "move", "sleep 600"],
+                       env=env, check=True, capture_output=True, timeout=30)
+        self.addCleanup(subprocess.run, [tmux, "-S", sock, "kill-server"], env=env, capture_output=True, timeout=30)
+        pane = subprocess.check_output([tmux, "-S", sock, "display-message", "-p", "#{pane_id}"],
+                                       env=env, text=True, timeout=30).strip()
+        run = self.run_bash('move_own_omp() { return 1; }\ncmd_move_self --only-dirs --dir "$HOME"', {
+            **env, "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa", "OMP_SESSION_ID": sid,
+            "PI_SESSION_FILE": str(self.session_file(sid)), "TMUX": f"{sock},0,0", "TMUX_PANE": pane,
+            "AGENTBOX_WAKE_WAIT": "5",
+        })
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if launched.exists() and "send" in (self.root / "STUB_ENVOY").read_text():
+                break
+            time.sleep(0.1)
+        self.assertTrue(launched.exists(), "the real tmux respawn did not run the launcher")
+        self.assertFalse(cache.exists(), "the old box cache was not discarded")
+        self.assertIn(f"send\n--source\nenvoy\n{sid}\n", (self.root / "STUB_ENVOY").read_text(),
+                      "the resumed session got no wake after the old box cache disappeared")
+
     # ── notifying other sessions ────────────────────────────────────────────────────────────
     def test_each_named_session_gets_the_notice_with_its_own_launch_line(self) -> None:
         lane = self.root / "lane"

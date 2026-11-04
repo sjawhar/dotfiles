@@ -3865,7 +3865,11 @@ move_pane_command() {
     local -a usable=()
     mapfile -t usable < <(move_spec_usable "$@")
     set -- ${usable[@]+"${usable[@]}"}
-    log="${XDG_CACHE_HOME:-$HOME/.cache}/omp/agentbox/move-$sid.log"
+    # The waker runs on the host after this box closes. XDG_CACHE_HOME belongs to the old box
+    # and close_box removes it; ~/.cache/omp is a shared mount that survives the move. Make its
+    # parent now: a failed shell redirection prevents the waker from starting at all.
+    log="$HOME/.cache/omp/agentbox/move-$sid.log"
+    mkdir -p "$(dirname "$log")" || return 1
     # MOVE_PANE_WAKE_NOTICE: the notice the session gets when it is up again, when the caller has
     # its own (a rollback); else the waker's own "the move is done".
     printf '( setsid %q move --wake %q%s </dev/null >>%q 2>&1 & ); %s' \
