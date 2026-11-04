@@ -72,7 +72,11 @@ ossv-box-gateway-token.timer       # owner: OSS Verify gateway lane. The gateway
 # reset of 2026-11-04 one run took 47 min: the shared request budget of its tracker client
 # sleeps while every lane re-downloads at once. The watch opened RUN NEVER ENDS at 43 min on
 # a run that was working, so its owner set the limit the unit really needs.
-agent-files-archive.timer  owner=01a16553 MACH  max_run=3h   # Archives each ended run.
+# HELD 2026-11-04 23:35Z at its owner's request (MACH, 01a16553): stopped and disabled until
+# PIPE's grading-service client fix merges, because that service's jobs feed now limits how
+# readers page it and how many calls they make at once. MACH restores the line below
+# (uncommented) once its script is checked; nothing else re-arms it.
+# agent-files-archive.timer  owner=01a16553 MACH  max_run=3h   # Archives each ended run.
 linux1263-reader.timer             # owner: the Verified Linux lane (LINUX-1263 runif reader).
 verified-linux-drift-check.timer   # owner: the Verified Linux lead. Its session's liveness.
 
