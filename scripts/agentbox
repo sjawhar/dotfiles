@@ -16,7 +16,7 @@
 #                                       raise or lower this box's limits
 #                                       (defaults below); --drop-gone-dirs,
 #                                       for a resume, leaves out a --dir after
-#                                       the first that no longer exists
+#                                       the first that is no longer a directory
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox grow <box|session-id> SIZE grow a running box's filesystem without restarting it
 #   agentbox ls                         running boxes
@@ -392,6 +392,14 @@ box_dir_private_why() {
 }
 
 # Keep an already mounted --dir as the working directory without a duplicate bind.
+# How "already covered" is decided: $1 is add_box_dir's path AFTER `readlink -f`, so the kernel
+# has resolved every symlink and `..` in it, and it is compared with literal bind destinations the
+# box has at that same path: under the durable disk by move_within, which compares whole
+# components ("$root" or "$root"/..., so /mnt/durable/sami2 is not under /mnt/durable/sami), and
+# equal to $SRC, the dotfiles, an allow-list entry or the realpath of one of $SRC's symlinks.
+# A path that only LOOKS covered - typed under a root but leading out of it through a symlink or
+# `..` - is resolved out of it first and gets a bind of its own, so a wrong answer here costs at
+# most a redundant bind, never a path the box silently lacks.
 box_dir_bound_why() {
     local path="$1" p
     [[ "$path" == "$SRC" ]] && { echo "every box has $SRC"; return 0; }
@@ -1694,12 +1702,23 @@ cmd_new() {
     local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
     # --drop-gone-dirs: this launch RESUMES a session (move_pane_command, omp-memory-watch's
-    # restarter, tmux-resurrect-omp), so its --dir paths were right when they were recorded and a
-    # path removed since then (a lane's finished scratch tree, a per-session TMPDIR an older move
-    # recorded: 01a1798a on 2026-11-02, whose resume stopped at a shell on "is not an existing
-    # directory") is left out with a line on stderr instead of refusing the whole resume. The first
-    # --dir is where the box works, so a resume whose first --dir is gone is still refused. Read
-    # before the loop, since add_box_dir refuses a missing path as each --dir is read.
+    # restarter, tmux-resurrect-omp), so its --dir paths were right when they were recorded, and
+    # the session is already hung up: a refusal here leaves its pane a shell until a person runs
+    # `omp --resume` by hand. So a --dir after the first that is no longer a directory is left out
+    # with a line on stderr naming the path and why, instead of refusing the whole resume: one
+    # removed since (a lane's finished scratch tree, a per-session TMPDIR an older move recorded:
+    # 01a1798a on 2026-11-02, whose resume stopped at a shell on "is not an existing directory"),
+    # and one that is a FILE, or a symlink to one (2026-11-04 10:09:59Z: a re-box named
+    # /mnt/nvme/sami/tmp/ossv172-codex-turns.md, was refused, and its session was dead for 20
+    # minutes). A box cannot be given a file as a --dir in any case, so leaving it out loses nothing
+    # the box could have had. A --dir the box already has through another mount (the durable disk,
+    # $SRC, the allow-list) is no refusal either: add_box_dir binds it no second time and says so.
+    # What stays FATAL is a resume that would be unusable: its first --dir not a directory, since
+    # that is the directory the session works in and a box in any other is not the session's tree
+    # (the first --dir is never dropped); no repo and no --dir at all; and a --dir no box may be
+    # given (/, $HOME, the box's private /tmp, runtime dir or ~/.omp/run), which a recorded spec
+    # never holds (move_spec_usable leaves those out) and so means a broken spec, not a stale one.
+    # Read before the loop, since add_box_dir refuses a non-directory as each --dir is read.
     for a in "$@"; do
         [[ "$a" == -- ]] && break
         [[ "$a" == --drop-gone-dirs ]] && drop_gone=true
@@ -1735,9 +1754,12 @@ cmd_new() {
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir ~/src/bet-grade  ($usage)"
                 dirs_seen=$((dirs_seen + 1))
-                if $drop_gone && [[ ! -e "$2" && ! -L "$2" ]]; then
-                    (( dirs_seen > 1 )) || die "--dir '$2', the first --dir and so the directory this resume works in, no longer exists; nothing was started"
-                    echo "agentbox: --dir '$2' no longer exists; this resume goes on without it" >&2
+                if $drop_gone && [[ ! -d "$2" ]]; then
+                    local not_dir="no longer exists"
+                    [[ -e "$2" ]] && not_dir="is not a directory ($(stat -L -c %F -- "$2" 2>/dev/null || echo 'not a directory'))"
+                    [[ ! -e "$2" && -L "$2" ]] && not_dir="is a symlink to nothing that exists"
+                    (( dirs_seen > 1 )) || die "--dir '$2', the first --dir and so the directory this resume works in, $not_dir; nothing was started"
+                    echo "agentbox: --dir '$2' $not_dir; this resume goes on without it" >&2
                     shift 2
                     continue
                 fi
@@ -3992,13 +4014,16 @@ move_relaunch() {
         echo "$(date -u +%FT%TZ) move $sid: pane $pane is gone; nothing respawned. Resume it by hand: agentbox new ${spec[*]} -- omp --resume $resume"
         return 1
     fi
-    # The launcher leaves out a --dir that is gone by the time it runs (--drop-gone-dirs), since a
-    # respawn can come ten minutes after the spec was read. This log says which, as the pane's own
-    # lines reach nobody.
+    # The launcher leaves out a --dir that is gone, or is not a directory, by the time it runs
+    # (--drop-gone-dirs), since a respawn can come ten minutes after the spec was read. This log
+    # says which, as the pane's own lines reach nobody.
     local i
     for ((i = 0; i + 1 < ${#spec[@]}; i++)); do
-        if [[ "${spec[i]}" == --dir && ! -e "${spec[i+1]}" ]]; then
+        [[ "${spec[i]}" == --dir ]] || continue
+        if [[ ! -e "${spec[i+1]}" ]]; then
             echo "$(date -u +%FT%TZ) move $sid: --dir ${spec[i+1]} no longer exists; the box starts without it"
+        elif [[ ! -d "${spec[i+1]}" ]]; then
+            echo "$(date -u +%FT%TZ) move $sid: --dir ${spec[i+1]} is not a directory; the box starts without it"
         fi
     done
     inner="$(move_pane_command "$sid" "$resume" "${spec[@]}")"

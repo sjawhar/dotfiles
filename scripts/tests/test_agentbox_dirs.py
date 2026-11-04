@@ -451,6 +451,39 @@ class AgentboxDirs(unittest.TestCase):
         self.assertIn(f"--dir '{spec[1]}', the first --dir", result.stderr)
         self.assertFalse(self.run_args.exists(), "no box may start")
 
+    def test_a_resume_goes_on_without_a_file_and_past_a_dir_the_durable_disk_covers(self) -> None:
+        """2026-11-04 10:09:59Z: a re-box's spec named /mnt/durable/sami/nvme-cold/sami/tmp/cvp,
+        which the durable disk's bind already covers, and /mnt/nvme/sami/tmp/ossv172-codex-turns.md,
+        a FILE; `agentbox new` refused the file and the session was dead for 20 minutes. The
+        resume now starts: the covered path is not bound twice and the file is left out, each
+        named with its reason. A plain launch still refuses the file, and a resume whose FIRST
+        --dir is a file is still refused, since that is the directory the session works in."""
+        work = self.root / "nvme" / "lane"
+        work.mkdir(parents=True)
+        covered = self.root / "durable" / "nvme-cold" / "sami" / "tmp" / "cvp"
+        covered.mkdir(parents=True)
+        a_file = self.root / "nvme" / "tmp" / "ossv172-codex-turns.md"
+        a_file.parent.mkdir(parents=True)
+        a_file.write_text("x", encoding="utf-8")
+        spec = ["--dir", str(work), "--dir", str(covered), "--dir", str(a_file)]
+        result = self.launch("--drop-gone-dirs", *spec)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        args = self.run_args.read_text(encoding="utf-8").splitlines()
+        binds = self.binds_of(args)
+        self.assertEqual(self.workdir_of(args), str(work))
+        self.assertIn(f"{work}:{work}", binds)
+        self.assertFalse(any(str(a_file) in bind or str(covered) in bind for bind in binds), binds)
+        self.assertIn(f"--dir '{covered}' is not mounted again: every box has the durable disk", result.stderr)
+        self.assertIn(f"--dir '{a_file}' is not a directory (regular file); this resume goes on without it", result.stderr)
+        self.run_args.unlink()
+        plain = self.launch(*spec)
+        self.assertNotEqual(plain.returncode, 0)
+        self.assertIn(f"--dir '{a_file}' is not an existing directory", plain.stderr)
+        first = self.launch("--drop-gone-dirs", "--dir", str(a_file), "--dir", str(work))
+        self.assertNotEqual(first.returncode, 0)
+        self.assertIn(f"--dir '{a_file}', the first --dir", first.stderr)
+        self.assertFalse(self.run_args.exists(), "no box may start")
+
 
     def test_a_named_checkout_carries_its_borrowed_store_and_gateway_ssh_identity(self) -> None:
         """Storage follows the selected checkout; unrelated workspace roots stay private."""
