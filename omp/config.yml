@@ -275,6 +275,27 @@ task:
     test-analyzer: "@review"
     type-checker: anthropic/claude-opus-5-5
     ux-designer: "@vision"
+    # 2026-11-04 16:25Z — CHORE SUBAGENTS MOVE TO OPUS 5. This carries out Sami's own ruling of
+    # 11-03 (dispatch://INFRA-481/ask/8af1836c): "Opus 5.5 only where the model is the point",
+    # with checks, bookkeeping, producers, routine ports and subagent chores on Opus 5 / 4.8.
+    # It is not a new decision and needed no new ask.
+    #
+    # Why now, measured by the infrastructure lead: the Opus 5.5 org limit (~20M uncached tokens
+    # a minute across both orgs) is saturated — last hour peaked at 48.2M, p50 16.5M, and 429s
+    # have run since 03:05Z. Team `box`, every omp agent on this devbox, is 25.1M of that peak
+    # and 3.5M of the p50, with 15,086 429s today. Opus 5 and 4.8 have 8-9.5M free per org.
+    #
+    # `task` is the default every agent type without its own entry inherits, so this one line
+    # moves the general subagent, scout, sonic and the rest. The entries above keep their models
+    # because a weaker verdict there changes the result.
+    task: anthropic/claude-opus-5
+    scout: anthropic/claude-opus-5
+    sonic: anthropic/claude-opus-5
+    # planner is listed ONLY to hold it where it was. Without this line it would inherit `task`
+    # and silently drop to Opus 5, which is not what the ruling says: a plan is one of the places
+    # the model is the point. Anything else added to this file that must stay on 5.5 needs its
+    # own line for the same reason.
+    planner: anthropic/claude-opus-5-5
   isolation:
     merge: patch
     enabled: true
