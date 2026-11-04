@@ -22,8 +22,10 @@ if [[ $HOST == sami-rocqperf ]]; then
 fi
 DEVBOX_FLOORS="/:$((50 * 1024 ** 3)) /mnt/nvme:$((400 * 1024 ** 3)) /mnt/scratch:$((500 * 1024 ** 3)) /mnt/durable:$((200 * 1024 ** 3))"
 high=0 dhigh=0
-# Disk rule for the durable units (Main, 2026-11-03 03:40Z): freeze when DUR_DEV's await is above
-# 20 ms or its %util above 80 for 2 samples; thaw when both are under for 5 samples. It starts held.
+# Disk rule for the durable units (Main, 2026-11-03 03:40Z; await only since 2026-11-04 01:0xZ):
+# freeze when DUR_DEV's await is above 20 ms for 2 samples; thaw after 2 samples under. It starts
+# held. %util is not used: on this Azure disk the lanes keep it at 80-100% with await at 2-10 ms
+# (119 of 120 samples on 2026-11-03 23:00-01:00Z), so it held the copy all night.
 DUR_DEV=${DUR_DEV:-nvme0n2} dbusy=0 dcalm=0 dheld=1
 # Read-wait rule for the other copy units (Main, 2026-11-03 ~04:40Z): freeze when the read wait
 # of any disk they read (NV_DEVS: md127's members and the root disk) is above 20 ms for 2 samples;
@@ -48,7 +50,7 @@ while :; do
     stats+=" w/s=$(( (cur[2] - prev[2]) / dt )) wMB/s=$(( (cur[3] - prev[3]) * 512 / dt / 1000000 ))"
     stats+=" await=${aw}ms util=${ut}% "
     if [[ $d == "$DUR_DEV" ]]; then
-      if (( aw > 20 || ut > 80 )); then dbusy=$((dbusy + 1)); dcalm=0; else dcalm=$((dcalm + 1)); dbusy=0; fi
+      if (( aw > 20 )); then dbusy=$((dbusy + 1)); dcalm=0; else dcalm=$((dcalm + 1)); dbusy=0; fi
       (( dbusy >= 2 )) && dheld=1
       (( dcalm >= ${DUR_CALM:-2} )) && dheld=0
     fi
