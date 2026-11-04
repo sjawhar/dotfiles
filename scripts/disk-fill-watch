@@ -18,7 +18,8 @@ at 22:09:56Z, 110 minutes before the fill, so the floor said "low" for hours and
 
 What one run does, with `statvfs` and /proc reads only, no model call:
 
-  1. Record free space on every watched mount (`--mount`, default / and /mnt/nvme), one mount
+  1. Record free space on every watched mount (`--mount`, default / and /mnt/nvme, and the
+     local SSD /mnt/scratch where the machine has one, since every box image is there), one mount
      per filesystem: two names of one device are watched once, under the first name. Every run
      appends a sample, whether or not anything is wrong: a silent log cannot be told from a
      dead watch.
@@ -152,9 +153,15 @@ DEFAULT_STATE = (
 #              until 2026-10-31, when the farm raised that floor to 100 GB; the alert floor stays
 #              at 84 GB, and every alert names the farm kinds already waiting (NVME_KIND_FLOORS
 #              below), build-cache among them under 100 GB.
+#   /mnt/scratch  500 GiB, the local SSD. Since dispatch://INFRA-1192 every box's disk image and
+#              build cache is here, which was 448 GiB of /mnt/nvme on 2026-11-04, and
+#              `agentbox new` refuses to create a box with under 500 GiB free on the image's
+#              filesystem. So the floor is that refusal: below it no new box starts, which is
+#              the machine not taking work rather than one lane being short.
 FLOORS = {
     "/": 18 * GIB,
     "/mnt/nvme": 84 * GB,
+    "/mnt/scratch": 500 * GIB,
 }
 
 # The grade farm's per-transfer-kind floors on /mnt/nvme, highest first. These do not alert on
@@ -3000,11 +3007,26 @@ def check_iops(
 
 
 def agentbox_storage_paths() -> tuple[Path, Path]:
+    """Where `scripts/agentbox` puts box images and box caches; its defaults, read the same way.
+
+    Since dispatch://INFRA-1192 both live on the machine's local SSD where it has one, because
+    everything in them dies with the box and /mnt/nvme is paid for and 81% full. This watch
+    measures them, so the two must agree: a stale default here reports 0 bytes of images and
+    nobody hears that the box disk is filling.
+    """
     home = Path.home()
     nvme = Path("/mnt/nvme") / home.name
+    scratch = Path(os.environ.get("AGENTBOX_SCRATCH", "/mnt/scratch")) / home.name
+    if "AGENTBOX_SCRATCH" not in os.environ and not os.path.ismount("/mnt/scratch"):
+        scratch = Path("/nonexistent")
     boxes = Path(os.environ.get("AGENTBOX_BOXES", str(nvme / "agentbox/boxes" if nvme.is_dir() else home / "boxes")))
-    disks = Path(os.environ.get("AGENTBOX_DISKS", str(boxes.parent / "disks")))
-    caches = Path(os.environ.get("AGENTBOX_CACHE_ROOT", str(nvme / "box-cache" if nvme.is_dir() else home / ".cache/box-cache")))
+    if scratch.is_dir():
+        images, cache = scratch / "agentbox/disks", scratch / "box-cache"
+    else:
+        images = boxes.parent / "disks"
+        cache = nvme / "box-cache" if nvme.is_dir() else home / ".cache/box-cache"
+    disks = Path(os.environ.get("AGENTBOX_DISKS", str(images)))
+    caches = Path(os.environ.get("AGENTBOX_CACHE_ROOT", str(cache)))
     return disks, caches
 
 
@@ -3556,7 +3578,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mount",
         action="append",
         default=None,
-        help="a mount point to watch; repeatable (default / and /mnt/nvme)",
+        help="a mount point to watch; repeatable (default / and /mnt/nvme, plus /mnt/scratch where it is mounted)",
     )
     parser.add_argument(
         "--floor",
@@ -3723,7 +3745,12 @@ def main() -> int:
         print(f"# {newest}")
         print(Path(newest).read_text(), end="")
         return 0
-    options.mount = options.mount or ["/", "/mnt/nvme"]
+    # The local SSD joins the watch where the machine has one: since dispatch://INFRA-1192 it
+    # holds every box's disk image and build cache, and an unwatched disk that stops box
+    # creation is exactly the silence this watch exists to end. Named only when it is a real
+    # mount, so a machine without it does not watch a directory of its root disk twice.
+    options.mount = options.mount or (
+        ["/", "/mnt/nvme"] + (["/mnt/scratch"] if os.path.ismount("/mnt/scratch") else []))
     options.tmp_big = int(options.tmp_big)
     options.root_big = int(options.root_big)
     for override in options.floor or []:

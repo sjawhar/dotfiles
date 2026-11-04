@@ -110,8 +110,32 @@ else
     BOXES="${AGENTBOX_BOXES:-$HOME/boxes}"
     CLONE_TEMPLATES="${AGENTBOX_CLONE_TEMPLATES:-${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-clones}"
 fi
+# The machine's LOCAL SSD, where everything a box writes that dies with the box belongs: its
+# disk image and its build cache. On sami-devbox that is /mnt/scratch, 17.6 TiB of md raid0 that
+# came with the machine shape, 21% used on 2026-11-04, against 81% on the 16 TiB persistent disk
+# /mnt/nvme, which is paid for by the gigabyte-month and shared with every lane's work
+# (dispatch://INFRA-1192). WHAT IT COSTS: a local SSD is EMPTY after a machine stop, and a raid0
+# of them is gone if one member fails. Nothing durable may live here. A box's disk image holds
+# only the box's private $HOME, its /tmp and its clones, all three of which already die with the
+# box (agentbox/AGENTS.md), and the box cache holds only build caches; the box TREES, the clone
+# templates and the host's record of a box's home (box_home_carry) stay on /mnt/nvme. The one
+# thing lost that a stop did not already take: the image of a box kept in place because a clone
+# in it held unpushed work (close_box), which a stop would take with the machine's uptime
+# anyway.
+# Only a real mount counts: a /mnt/scratch that is a plain directory of the root disk would put
+# every box image on a 484 GiB filesystem, under the 500 GiB admission floor, and no box would
+# start at all. AGENTBOX_SCRATCH names another root and skips that test; a machine with no such
+# mount keeps /mnt/nvme, so nothing changes anywhere else.
+BOX_SCRATCH=""
+if [[ -n "${AGENTBOX_SCRATCH:-}" ]] || mountpoint -q /mnt/scratch 2>/dev/null; then
+    if mkdir -p "${AGENTBOX_SCRATCH:-/mnt/scratch}/$(id -un)" 2>/dev/null; then
+        BOX_SCRATCH="${AGENTBOX_SCRATCH:-/mnt/scratch}/$(id -un)"
+    fi
+fi
 # Build caches live outside the sparse home image, separately for each box.
-if [[ -d "/mnt/nvme/$(id -un)" ]]; then
+if [[ -n "$BOX_SCRATCH" ]]; then
+    BOX_CACHE_ROOT="${AGENTBOX_CACHE_ROOT:-$BOX_SCRATCH/box-cache}"
+elif [[ -d "/mnt/nvme/$(id -un)" ]]; then
     BOX_CACHE_ROOT="${AGENTBOX_CACHE_ROOT:-/mnt/nvme/$(id -un)/box-cache}"
 else
     BOX_CACHE_ROOT="${AGENTBOX_CACHE_ROOT:-$HOME/.cache/box-cache}"
@@ -182,8 +206,15 @@ esac
 # below the floor ext4 has no room for its own metadata plus a clone.
 BOX_DISK_CAP=512g
 BOX_DISK_MIN=1g
-# The box images, beside the box trees and the clone templates on the same disk.
-BOX_DISKS="${AGENTBOX_DISKS:-$(dirname "$BOXES")/disks}"
+# The box images: on the local SSD where the machine has one (BOX_SCRATCH above), else beside
+# the box trees and the clone templates. The image is loop-mounted at $BOXES/<box>, so it need
+# not share a filesystem with them; a box's clone hardlinks its objects out of a template, and
+# that already crosses into the image's own filesystem.
+if [[ -n "$BOX_SCRATCH" ]]; then
+    BOX_DISKS="${AGENTBOX_DISKS:-$BOX_SCRATCH/agentbox/disks}"
+else
+    BOX_DISKS="${AGENTBOX_DISKS:-$(dirname "$BOXES")/disks}"
+fi
 # EVERY BOX LEAVES A RECORD OF ITS OWN, so a sweep over what a crash left behind can say whose
 # an image is without asking anybody. At 20:05Z on 2026-11-04 this host held 103 box images from
 # before the 18:06Z reboot, 416.2 GiB, each belonging to a session that was alive in a NEW box
@@ -213,7 +244,10 @@ box_record_write() {
     local box="$1" sid="$2" rec
     shift 2
     rec="$(box_record "$box")"
-    mkdir -p "${rec%/*}" 2>/dev/null || { echo "agentbox: could not make ${rec%/*} for $box's record" >&2; return 0; }
+    # Beside the image, so the record exists exactly where images do: the directory is NOT made
+    # here, because `open_box_disk` deliberately leaves it absent for a box with no disk limit
+    # (`--disk 0`), and such a box has no image to orphan.
+    [[ -d "${rec%/*}" ]] || return 0
     # %q keeps the command on one line whatever it holds, and keeps it runnable.
     {
         printf 'box=%s\n' "$box"
@@ -2377,15 +2411,16 @@ cmd_new() {
     trap 'interrupted=1; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true; exec >/dev/null 2>&1' HUP
     trap 'interrupted=1; box_reclaim "$box"; docker kill -s SIGHUP "$box" >/dev/null 2>&1 || true' TERM INT
     # The box's record (box_record_write), beside its image and under the same trap: a launch
-    # that fails from here on takes it away with the image. The session is known already when
-    # this launch resumes one; otherwise box_record_session fills it in once the box's omp says
-    # which session it is. BOX_STARTED_MS is what the predecessor reaper measures registration
-    # against - the box's start, not the reaper's, since a session can register before the
-    # launcher gets its id.
+    # that fails from here on takes it away with the image. After open_box_disk, since the
+    # record lives in the images directory that step makes, and a box with no image gets none.
+    # The session is known already when this launch resumes one; otherwise box_record_session
+    # fills it in once the box's omp says which session it is. box_started_ms is what the
+    # predecessor reaper measures registration against - the box's start, not the reaper's,
+    # since a session can register before the launcher gets its id.
     local box_started_ms
     box_started_ms="$(date +%s%3N)"
-    box_record_write "$box" "${BOX_SEED_SID:-}" "$@"
     open_box_disk "$box"
+    box_record_write "$box" "${BOX_SEED_SID:-}" "$@"
     # Every repo is cloned at once, each in a subshell that ignores the hangup and TERM/INT: the
     # launcher acts on those itself, once every clone has returned, and the clones' git runs detached
     # (see `detached`). A trapped signal ends `wait` early with 128+n while the clone still runs, so a
@@ -2672,8 +2707,8 @@ PROC="${AGENTBOX_PROC:-/proc}"
 # separator is not whitespace, so empty fields survive.
 SEP=$'\x1f'
 
-# What free space a move must leave on the disk the boxes are on: a hard reserve, 20 GiB on
-# /mnt/nvme and 10 GiB on the root disk. Not disk-fill-watch's alert floors (84 GB, 18 GiB): those
+# What free space a move must leave on the disk the box IMAGES go on: a hard reserve, 20 GiB on
+# /mnt/nvme or the local SSD and 10 GiB on the root disk. Not disk-fill-watch's alert floors (84 GB, 18 GiB): those
 # tell a person early, and a move refused at them stopped all 70 ready sessions at 17:32Z on
 # 2026-11-01 while a box claims about 0.3 GiB at launch (its sparse image). This bounds what the
 # moves claim at launch, not what the sessions can later grow into.
@@ -2681,7 +2716,7 @@ move_floor_bytes() {
     local target
     target="$(df --output=target "$1" 2>/dev/null | tail -1 || true)"
     case "$target" in
-        /mnt/nvme) echo 21474836480 ;;
+        /mnt/nvme|/mnt/scratch) echo 21474836480 ;;
         *) echo 10737418240 ;;
     esac
 }
@@ -2722,7 +2757,9 @@ move_image_bytes() {
 MOVE_FORCE_FLOOR=false
 move_check_floor() {
     local image="$1" dir free floor
-    dir="$(dirname "$BOXES")"
+    # Where the IMAGE lands, which since the move to the local SSD is not the box tree's disk.
+    dir="$BOX_DISKS"
+    while [[ ! -d "$dir" ]]; do dir="$(dirname "$dir")"; done
     free="$(move_free_bytes "$dir")"
     floor="$(move_floor_bytes "$dir")"
     if (( free - image < floor )); then
