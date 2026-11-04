@@ -82,6 +82,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -2449,6 +2450,13 @@ def pane_state(
     `budget["scans"]` panes; a pane over the budget keeps what it had, else the id on its
     command line, and is scanned on a later run. A session switched in-app (/new) less than
     SID_REFRESH before its omp was killed is resumed at the session it ran before the switch.
+
+    The flags the session was launched with are read here, from the live process's own argv,
+    because nothing can read them once it is dead: `flags` is a list, or None when they could
+    not be read, with `flags_why` saying why. They are read once per omp process -- an argv does
+    not change -- and are carried forward only while the SAME process (pid and start) runs, so a
+    record never carries another process's flags; a pane whose read failed is read again on a
+    later run, at most `budget["flags"]` reads a run.
     """
     if pane["dead"]:
         return "idle", {}
@@ -2472,8 +2480,9 @@ def pane_state(
             elif not sid:
                 sid = resurrect.named_session(resurrect.cmdline(pid))
         cwd = known.get("cwd") if same and known.get("cwd") else cwd_of(pid)
+        flags, flags_why = kept_flags(known if same else None, lambda: proc_words(pid, "cmdline"), budget)
         return "host", {"pid": pid, "start": start, "sid": sid, "resolved": resolved, "cwd": cwd,
-                        "memory_max": own_scope_memory_max(pid)}
+                        "memory_max": own_scope_memory_max(pid), "flags": flags, "flags_why": flags_why}
     for pid, _name in procs:
         command = resurrect.cmdline(pid)
         launch = resurrect.LAUNCH_SPEC.search(command)
@@ -2481,9 +2490,15 @@ def pane_state(
             box = next(
                 (m.group(1) for p, _n in procs if (m := BOX_NAME_RE.search(resurrect.cmdline(p)))), ""
             )
+            start = starts.get(pid) or pid_start(pid)
+            same = bool(known) and known.get("kind") == "box" and known.get("pid") == pid and known.get("start") == start
+            flags, flags_why = kept_flags(
+                known if same else None, lambda: box_omp_words(proc_words(pid, "cmdline")), budget
+            )
             return "box", {
-                "pid": pid, "start": starts.get(pid) or pid_start(pid), "sid": resurrect.named_session(command),
+                "pid": pid, "start": start, "sid": resurrect.named_session(command),
                 "spec": launch.group("spec"), "box": box, "cwd": cwd_of(pid),
+                "flags": flags, "flags_why": flags_why,
             }
     return "busy", {"comm": procs[0][1]}
 
@@ -2570,14 +2585,134 @@ def gone_note(resume: dict) -> str:
     return "; without " + ", ".join(f"--dir {d}" for d in gone) + (", which is no longer a directory" if len(gone) == 1 else ", which are no longer directories")
 
 
+# ------------------------------------------------------------ the flags a session was launched with
+
+# A resume used to be a bare `omp --resume <id>`, so a session came back on another
+# configuration than it ran on: the lane 01a15237 ran as `omp --profile pbc --model
+# pbc-gateway/pbc/claude-opus-5-5 --resume <jsonl>` and this watch resumed its pane with none of
+# it on 2026-11-04 at 16:52Z. `agentbox move` fixed the same defect in its own respawn
+# (scripts/agentbox move_omp_flags) by reading the omp's own argv; this reads it too.
+#
+# Nothing here lists the flags to keep. Telling a flag's value from a positional word (omp
+# records a positional as a message the person typed) needs each flag's arity, which is
+# `relaunchArgv` in scripts/agentbox-run.ts -- the box runner's restart rule, and the one
+# scripts/agentbox asks through bun. A second copy of that rule would drift, so this asks the
+# same function the same way.
+AGENTBOX_RUN_TS = Path.home() / ".dotfiles/scripts/agentbox-run.ts"
+LAUNCH_FLAGS_JS = """
+const { relaunchArgv } = await import(process.env.AGENTBOX_RUN_TS);
+const words = (await Bun.stdin.text()).split("\\0");
+if (words.at(-1) === "") words.pop();
+// argv[0] is the omp executable; relaunchArgv keeps it first and ends with `--resume <sid>`.
+const kept = relaunchArgv(["omp", ...words.slice(1)], "-").slice(1, -2);
+process.stdout.write(kept.map(w => `${w}\\0`).join(""));
+"""
+# Flag reads a run may make: about 30 ms each (bun 1.4.4, sami-rocqperf, 2026-11-04), and only
+# for a pane whose omp process this watch has not read yet, so a steady box makes none.
+FLAG_READS = 12
+_BUN: str | None = None
+
+
+def bun_path() -> str:
+    """bun's real path, "" when this machine has none. Looked up once a run.
+
+    A mise SHIM is not it: the unit's PATH has `~/.mise/shims` on it, and running the shim
+    INSTALLS the pinned bun when the machine has not got it (measured here on 2026-11-04: 1.38 s
+    and a download, against 18 ms for the installed binary). `mise which` only resolves, as
+    scripts/secret-run does for the same reason.
+    """
+    global _BUN
+    if _BUN is None:
+        found = shutil.which("bun") or ""
+        if not found or f"{os.sep}shims{os.sep}" in found:
+            try:
+                done = subprocess.run(["mise", "which", "bun"], capture_output=True, text=True, timeout=10,
+                                      stdin=subprocess.DEVNULL)
+                resolved = done.stdout.strip() if done.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                resolved = ""
+            found = resolved or (found if f"{os.sep}shims{os.sep}" not in found else "")
+        _BUN = found
+    return _BUN
+
+
+def launch_flags(words: list[str], budget: dict | None = None) -> tuple[list[str] | None, str]:
+    """(the flags `words` was launched with, "") for an omp argv, else (None, why not).
+
+    `words` is a whole argv, argv[0] included. What comes back is every flag except the session
+    source (--resume, --session, --continue, --fork, …; a resume names its own) and the
+    positional words. None is NOT an empty flag list: it means they could not be read, and the
+    caller must say so rather than resume as though the session had none.
+    """
+    if len(words) < 2:
+        return ([], "") if words else (None, "its command line could not be read")
+    bun = bun_path()
+    if not bun:
+        return None, ("no bun on PATH (nor through mise), which reads the launch flags"
+                      " (scripts/agentbox-run.ts relaunchArgv)")
+    if budget is not None:
+        if budget.get("flags", 0) <= 0:
+            return None, "this run's flag reads were spent; the next run reads them"
+        budget["flags"] -= 1
+    try:
+        done = subprocess.run(
+            [bun, "-e", LAUNCH_FLAGS_JS], input="\0".join(words).encode("utf8", "replace"),
+            capture_output=True, timeout=20, env=dict(os.environ, AGENTBOX_RUN_TS=str(AGENTBOX_RUN_TS)),
+        )
+    except (OSError, subprocess.SubprocessError) as failure:
+        return None, f"reading the launch flags with {bun} failed ({failure})"
+    if done.returncode != 0:
+        return None, (f"reading the launch flags with {bun} and scripts/agentbox-run.ts failed"
+                      f" (exit {done.returncode})")
+    kept = done.stdout.decode("utf8", "replace").split("\0")
+    if kept and kept[-1] == "":
+        kept.pop()
+    return kept, ""
+
+
+def box_omp_words(words: list[str]) -> list[str]:
+    """The omp argv of an `agentbox new <spec> -- omp <flags> --resume <id>` launcher line, [] if
+    it has no `--`. The launcher runs on the host, so its own argv holds the flags its box's omp
+    was given; the omp itself runs in the box under another uid and is not in this /proc."""
+    return words[words.index("--") + 1 :] if "--" in words else []
+
+
+def kept_flags(known: dict | None, words, budget: dict | None) -> tuple[list[str] | None, str]:
+    """(the flags of the omp a pane runs, "") or (None, why not), reading its argv at most once.
+
+    `known` is the pane's last record ONLY when the same process still runs there, so flags are
+    carried forward and never belong to a process that has since been replaced. `words` is
+    called only when there is nothing to carry: an argv read costs a /proc read and a bun run.
+    """
+    if known is not None and known.get("flags") is not None:
+        return known["flags"], ""
+    return launch_flags(words(), budget)
+
+
+
+def flags_note(resume: dict) -> str:
+    """The log's words for a resume that carries no launch flags, else ""."""
+    if resume.get("flags") is not None:
+        return ""
+    why = resume.get("flags_why") or "they could not be read"
+    return f"; WITHOUT the flags it was launched with ({why}), so it comes back on omp's defaults"
+
+
 def resume_command(record: dict) -> str:
     """What the lead runs by hand, with the launcher by its absolute path.
+
+    The session comes back with the flags it was launched with (`flags`, read from its own argv
+    while it was alive; launch_flags), since a bare `omp --resume <id>` brings it back on another
+    profile, model or configuration than it ran on. A record whose flags could NOT be read has
+    None there, and the resume carries none rather than a guess -- the log and the report say so
+    (flags_note).
 
     The resume carries no prompt: omp records a positional as a user message, and the `.` this
     used to end with was counted as text the person typed by the transcript store. The session is
     woken instead by one Envoy notice, sent by `agentbox move --wake` once the resumed process has
     registered; it runs in the background beside the launcher and logs to wake-<id>.log."""
     cwd, sid = shlex.quote(record["cwd"]), shlex.quote(record["sid"])
+    flags = "".join(f" {shlex.quote(word)}" for word in (record.get("flags") or []))
     log = shlex.quote(str(Path.home() / ".cache" / "omp" / "agentbox" / f"wake-{record['sid']}.log"))
     wake = (
         f"( setsid {shlex.quote(str(AGENTBOX))} move --wake {sid} {shlex.quote(RESUME_WAKE_NOTICE)}"
@@ -2587,10 +2722,10 @@ def resume_command(record: dict) -> str:
         # --drop-gone-dirs: a --dir removed since the box started is left out, not refused
         # (box_spec_dirs). A spec read from a launcher a move started has it already.
         drop = "" if "--drop-gone-dirs" in record["spec"].split() else "--drop-gone-dirs "
-        return f"{wake}cd {cwd} && {shlex.quote(str(AGENTBOX))} new {drop}{record['spec']} -- omp --resume {sid}"
+        return f"{wake}cd {cwd} && {shlex.quote(str(AGENTBOX))} new {drop}{record['spec']} -- omp{flags} --resume {sid}"
     ceiling = record.get("memory_max")
     env = f"OMP_MEMORY_MAX={int(ceiling)} " if isinstance(ceiling, int) and ceiling > 0 else ""
-    return f"{wake}cd {cwd} && {env}{shlex.quote(str(OMP_SHIM))} --resume {sid}"
+    return f"{wake}cd {cwd} && {env}{shlex.quote(str(OMP_SHIM))}{flags} --resume {sid}"
 
 
 def pane_now(pane_id: str) -> dict | None:
@@ -2807,8 +2942,9 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
     """("", what to resume) when the pane's session should be resumed, else (why it is left, {}).
 
     What to resume is the pane's record, or the box an `agentbox move` that gave up was moving
-    the session to. A reason that starts "wait:" keeps the record for the next run. Cheap tests
-    first."""
+    the session to. The move's log names no launch flags, so a resume into that box carries the
+    ones this watch read from the session's own omp while it ran. A reason that starts "wait:"
+    keeps the record for the next run. Cheap tests first."""
     sid = record.get("sid") or ""
     if not sid:
         return "left: the session it ran could not be read while it was alive", {}
@@ -2818,7 +2954,7 @@ def restart_decision(record: dict, omps: list, restarts: dict, options: argparse
     moved = moved_away(MOVED_INDEX / sid)
     if moved:
         return f"left: {moved}", {}
-    resume = dict(claim["record"]) if claim else record
+    resume = dict(claim["record"], flags=record.get("flags"), flags_why=record.get("flags_why") or "") if claim else record
     if now - float(record.get("seen") or 0) > RESTART_STALE:
         return f"left: last seen running at {iso(record.get('seen'))}, more than {human(RESTART_STALE)} ago", {}
     if not resume.get("cwd") or not os.path.isdir(resume["cwd"]):
@@ -2886,7 +3022,9 @@ def restart_pass(
     """Resume each tmux pane whose omp died without ending its session on purpose.
 
     Each run records, for every pane running omp (on the host or through `agentbox new`), the
-    session it runs, its working directory, its window and, for a box, the launcher's spec. A
+    session it runs, its working directory, its window, the flags its omp was launched with
+    (read from the live process's argv: a dead one has none to read) and, for a box, the
+    launcher's spec. A
     recorded pane that is now idle -- its shell has no child, or tmux marks it dead -- is resumed
     with `tmux respawn-pane -k`, unless: no session was read for it; an `agentbox move` is
     respawning it (who_respawns: the record is kept and read again next run); it was last seen
@@ -2913,7 +3051,7 @@ def restart_pass(
     live = resumed = left = waiting = 0
     box_lookups = 0
     table = process_table()
-    budget = {"scans": SCAN_BUDGET, "deadline": deadline}
+    budget = {"scans": SCAN_BUDGET, "flags": FLAG_READS, "deadline": deadline}
     present = {pane["id"] for pane in panes}
 
     def report(kind: str, head: str, body: str) -> str:
@@ -2951,7 +3089,7 @@ def restart_pass(
         how = f"tmux new-window -n {title} -c {shlex.quote(resume['cwd'])} bash -i -c {shlex.quote(command + '; exec bash -i')}"
         if dry:
             log(f"{name}: DRY RUN, would resume in a new pane of window {window} (else a new window {title}"
-                f" of tmux session {tmux_session}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}: {command}")
+                f" of tmux session {tmux_session}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}{flags_note(resume)}: {command}")
             resumed += 1
             continue
         restarts[resume["sid"]] = now
@@ -2963,7 +3101,7 @@ def restart_pass(
                 "resumed", down_resumed_head(resume["sid"], resume["gave_up"], place),
                 down_resumed_text(resume["sid"], resume["gave_up"], place, command),
             )
-            log(f"{name}: RESUMED in new pane {out} ({where}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}: {command} -> {heard}")
+            log(f"{name}: RESUMED in new pane {out} ({where}): agentbox move gave up ({resume['gave_up']}){gone_note(resume)}{flags_note(resume)}: {command} -> {heard}")
             resumed += 1
         else:
             why = f"agentbox move gave up ({resume['gave_up']}), its pane {pane_id} is gone, and no new pane could be opened: {out}"
@@ -3032,7 +3170,7 @@ def restart_pass(
             continue
         command = resume_command(resume)
         why = f"agentbox move gave up ({resume['gave_up']})" if resume.get("gave_up") else "its omp is gone and the session did not end normally"
-        why += gone_note(resume)
+        why += gone_note(resume) + flags_note(resume)
         if dry:
             log(f"{name}: DRY RUN, would resume: {why}: {command}")
             resumed += 1

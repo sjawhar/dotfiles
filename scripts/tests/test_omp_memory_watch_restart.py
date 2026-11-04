@@ -120,6 +120,45 @@ class RestartPassTest(RestarterCase):
         _pane, _cwd, command = self.respawned[0]
         self.assertTrue(command.endswith(f"&& OMP_MEMORY_MAX=42949672960 {WATCH.OMP_SHIM} --resume {SID}"), command)
 
+    def test_a_resume_carries_the_flags_the_session_was_launched_with(self) -> None:
+        """A bare `omp --resume <id>` brings a session back on another configuration than it ran
+        on: at 16:52Z on 2026-11-04 the lane 01a15237, launched with --profile, --config and a
+        --title of two words, was resumed with none of them."""
+        kind, record = self.host()
+        flags = ["--profile", "pbc", "--config", "/c/omp-bet59.yml", "--title", "two words"]
+        self.run_pass((kind, dict(record, flags=flags)), 1000.0)
+        self.run_pass(("idle", {}), 1030.0)
+        _pane, _cwd, command = self.respawned[0]
+        self.assertTrue(
+            command.endswith(
+                f"&& {WATCH.OMP_SHIM} --profile pbc --config /c/omp-bet59.yml --title 'two words'"
+                f" --resume {SID}"
+            ),
+            command,
+        )
+
+    def test_a_resume_whose_flags_could_not_be_read_carries_none_and_says_so(self) -> None:
+        """A wrong argv is worse than none: an unread record resumes on omp's defaults, loudly."""
+        kind, record = self.host()
+        self.run_pass((kind, dict(record, flags=None, flags_why="no bun on PATH")), 1000.0)
+        self.run_pass(("idle", {}), 1030.0)
+        _pane, _cwd, command = self.respawned[0]
+        self.assertTrue(command.endswith(f"&& {WATCH.OMP_SHIM} --resume {SID}"), command)
+        self.assertTrue(
+            any("WITHOUT the flags it was launched with (no bun on PATH)" in line for line in self.lines),
+            self.lines,
+        )
+
+    def test_a_boxed_session_comes_back_with_its_flags_after_the_double_dash(self) -> None:
+        command = WATCH.resume_command({
+            "kind": "box", "cwd": "/w", "sid": SID, "spec": "--drop-gone-dirs --dir /w",
+            "flags": ["--profile", "pbc", "--title", "two words"],
+        })
+        self.assertTrue(
+            command.endswith(f"new --drop-gone-dirs --dir /w -- omp --profile pbc --title 'two words' --resume {SID}"),
+            command,
+        )
+
     def test_the_respawn_is_the_leads_command(self) -> None:
         calls = []
 
@@ -700,6 +739,80 @@ class PaneStateTest(unittest.TestCase):
         pane = dict(self.PANE, pid=20)
         kind, seen = WATCH.pane_state(pane, self.Resurrect(), None, 1000.0, self.TABLE, {"scans": 0})
         self.assertEqual((kind, seen["spec"], seen["sid"]), ("box", "--dir /w", "x"))
+
+
+class LaunchFlagsTest(unittest.TestCase):
+    """The flags a resume carries: read from the live omp's own argv, by agentbox-run.ts's
+    relaunchArgv, and never carried over from a process that has been replaced."""
+
+    ARGV = [
+        "/h/.dotfiles/shims/omp", "--profile", "pbc", "--config", "/c/omp-bet59.yml",
+        "--title", "two words", "--yolo", "--resume", f"/s/2026-11-04T00-00-00-000Z_{SID}.jsonl",
+        "go on with the work",
+    ]
+
+    def test_the_session_source_and_the_prompt_are_dropped_and_the_rest_kept(self) -> None:
+        """omp records a positional as a message the person typed, and the resume names its own
+        session: everything else is how the session was configured."""
+        if not WATCH.bun_path():
+            self.skipTest("no bun on this machine")
+        flags, why = WATCH.launch_flags(self.ARGV, {"flags": 1})
+        self.assertEqual(why, "")
+        self.assertEqual(
+            flags, ["--profile", "pbc", "--config", "/c/omp-bet59.yml", "--title", "two words", "--yolo"]
+        )
+
+    def test_an_unreadable_argv_is_no_flags_read_rather_than_an_empty_list(self) -> None:
+        flags, why = WATCH.launch_flags([], {"flags": 1})
+        self.assertIsNone(flags)
+        self.assertIn("could not be read", why)
+
+    def test_a_run_over_its_budget_reads_none_and_leaves_the_next_run_to(self) -> None:
+        budget = {"flags": 0}
+        flags, why = WATCH.launch_flags(self.ARGV, budget)
+        self.assertIsNone(flags)
+        self.assertIn("the next run reads them", why)
+
+    def test_flags_are_carried_only_while_the_same_process_runs(self) -> None:
+        reads = []
+
+        def words():
+            reads.append(1)
+            return []
+
+        kept, _why = WATCH.kept_flags({"flags": ["--profile", "pbc"]}, words, {"flags": 1})
+        self.assertEqual((kept, reads), (["--profile", "pbc"], []))
+        # No record for this process (a new pid, or the last read failed): the argv is read again.
+        WATCH.kept_flags(None, words, {"flags": 1})
+        WATCH.kept_flags({"flags": None, "flags_why": "no bun on PATH"}, words, {"flags": 1})
+        self.assertEqual(len(reads), 2)
+
+    def test_a_box_launchers_own_argv_holds_its_boxed_omps_flags(self) -> None:
+        """The omp runs in the box under another uid; the launcher that waits on it is on this
+        host, and its argv after `--` is the omp command the box was given."""
+        launcher = ["bash", "/h/.dotfiles/scripts/agentbox", "new", "--dir", "/w", "--",
+                    "omp", "--profile", "pbc", "--resume", SID]
+        self.assertEqual(WATCH.box_omp_words(launcher), ["omp", "--profile", "pbc", "--resume", SID])
+        self.assertEqual(WATCH.box_omp_words(["bash", "agentbox", "sh", "box"]), [])
+
+    def test_a_mise_shim_is_resolved_to_the_installed_bun(self) -> None:
+        """The unit's PATH has ~/.mise/shims on it, and running that shim INSTALLS bun on a
+        machine without it (1.38 s and a download, measured 2026-11-04); `mise which` resolves."""
+        calls = []
+
+        class Done:
+            returncode = 0
+            stdout = "/h/.mise/installs/bun/1.4.4/bin/bun\n"
+
+        WATCH._BUN = None
+        self.addCleanup(setattr, WATCH, "_BUN", None)
+        original_which, original_run = WATCH.shutil.which, WATCH.subprocess.run
+        WATCH.shutil.which = lambda name: "/h/.mise/shims/bun"
+        WATCH.subprocess.run = lambda argv, **kw: calls.append(argv) or Done()
+        self.addCleanup(setattr, WATCH.subprocess, "run", original_run)
+        self.addCleanup(setattr, WATCH.shutil, "which", original_which)
+        self.assertEqual(WATCH.bun_path(), "/h/.mise/installs/bun/1.4.4/bin/bun")
+        self.assertEqual(calls, [["mise", "which", "bun"]])
 
 
 
