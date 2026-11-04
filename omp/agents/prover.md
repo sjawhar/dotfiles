@@ -9,6 +9,9 @@ description: |
   spends the capacity this agent exists to protect.
 model:
   - "anthropic/claude-opus-5-5"
+# `task` grants subagent spawning: a prover runs its own `reviewer`, `scout` and `task`
+# for proof review rounds without routing each through its parent (OSS Verify, 2026-11-04).
+tools: read, edit, write, glob, grep, bash, todo, task
 color: magenta
 ---
 
