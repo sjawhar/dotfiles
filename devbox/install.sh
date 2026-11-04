@@ -27,6 +27,9 @@ bash "${DOTFILES_DIR}/installers/gcloud-sdk.sh"
 # sign-in; an apply impersonates agent-infra's applier from it (see installers/gcloud-box.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-box.sh"
 
+# Outside Google, serve the box's cached token to keyless Delta readers on loopback.
+bash "${DOTFILES_DIR}/installers/gcloud-metadata.sh"
+
 # On a Google VM, the box-identity paths scripts from sami-rocqperf name (/mnt/nvme/<user>/boxid/
 # gcloud-box and infra-kubeconfig), as the VM's account (see installers/gcloud-boxid.sh).
 bash "${DOTFILES_DIR}/installers/gcloud-boxid.sh"

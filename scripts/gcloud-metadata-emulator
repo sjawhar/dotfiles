@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Serve the box account's cached Google token on loopback, without a key file."""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlsplit
+
+ACCOUNTS = "/computeMetadata/v1/instance/service-accounts/"
+DEFAULT = ACCOUNTS + "default/"
+TOKEN = Path(__file__).resolve().with_name("gcloud-token-fast")
+
+
+class Metadata(BaseHTTPRequestHandler):
+    def reply(self, status: int, data: bytes, content_type="text/plain") -> None:
+        self.send_response(status)
+        self.send_header("Metadata-Flavor", "Google")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:
+        if self.headers.get("Metadata-Flavor") != "Google":
+            self.reply(403, b"Metadata-Flavor: Google is required\n")
+            return
+        path = urlsplit(self.path).path
+        if path == ACCOUNTS:
+            self.reply(200, b"default/\n")
+        elif path == DEFAULT:
+            self.reply(200, b"email\ntoken\n")
+        elif path in (DEFAULT + "token", DEFAULT + "email"):
+            command = [str(TOKEN)] if path.endswith("/token") else ["gcloud", "config", "get-value", "account"]
+            try:
+                value = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+                if not value or value == "(unset)":
+                    raise ValueError("missing credential")
+                if path.endswith("/token"):
+                    # gcloud-token-fast refreshes at 2400 s of a token's 3600 s life.
+                    # This TTL is below the cache's remaining life, including margin.
+                    data = json.dumps({"access_token": value, "expires_in": 600, "token_type": "Bearer"}).encode()
+                    self.reply(200, data, "application/json")
+                else:
+                    self.reply(200, (value + "\n").encode())
+            except (OSError, subprocess.SubprocessError, ValueError):
+                self.reply(503, b"Box credential unavailable\n")
+        else:
+            # In particular, no instance/id: this service does not make a box a Google VM.
+            self.reply(404, b"Not found\n")
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+def server(port: int = 8787) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer(("127.0.0.1", port), Metadata)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=8787)
+    args = parser.parse_args()
+    with server(args.port) as http:
+        http.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

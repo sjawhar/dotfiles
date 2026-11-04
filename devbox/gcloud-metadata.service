@@ -1,0 +1,12 @@
+[Unit]
+Description=Google metadata tokens from the box identity's cached credential
+
+[Service]
+ExecStart=%h/.dotfiles/scripts/gcloud-metadata-emulator
+Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/scripts:%h/.local/bin:%h/.gcloud/google-cloud-sdk/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target
