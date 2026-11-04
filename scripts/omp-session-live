@@ -29,9 +29,16 @@
 # host cannot read its descriptors. When it holds none that can be seen (a transcript not opened
 # yet, a box that does not answer), it may run this one, and it counts.
 #
-# An id names the transcript omp finds in a sessions folder, so for an id or a prefix a path
-# counts, on a command line as in the descriptors, only inside a `sessions/` folder: omp-fork's
-# omp names and holds a copy outside one, and a running fork never blocks a resume of its source.
+# A transcript path names one file, not every file of its session, and a path on a command line
+# counts for a bare id when its file name ends `_<id>.jsonl` -- wherever that file is. It used to
+# have to sit in a folder named `sessions`, which made every session started with a
+# `--session-dir` (or PI_CODING_AGENT_SESSION_DIR) of another name invisible: on 2026-11-04 at
+# 20:00Z, of 103 ids that agent boxes' own `ps` named on sami-devbox, this script called 2 dead --
+# 01a1a682-6912 and -6922, both resumed from `.../RefreezeAM17/session/<stamp>_<id>.jsonl`, both
+# working. Every resume path asks this script first, so their duplicate refusal was off too, and
+# twins were started. What the `sessions` test was really for is omp-fork, whose copy lives in a
+# scratch directory of its own; that is excluded by name instead (`fork_copy`), so a running fork
+# still never blocks a resume of its source.
 #
 # --wait SECONDS: ask again every 2 s until no omp runs the session or SECONDS pass. A relaunch
 # that follows a hang-up (a move, a restart, `respawn-pane -k`) starts while the old omp is still
@@ -76,17 +83,27 @@ writer() {
     [[ "$flags" =~ ^[0-7]+$ ]] && (( (8#$flags & 3) != 0 ))
 }
 
+# fork_copy PATH: true when PATH is a copy omp-fork made, not a transcript of the session.
+# scripts/omp-fork resumes its copy in `tempfile.mkdtemp(prefix="omp-fork-")`, so the scratch
+# directory's name says so. This is what keeps a running fork from blocking a resume of its
+# source by id, now that a path no longer has to be in a folder named `sessions` to count.
+fork_copy() {
+    local dir="${1%/*}"
+    [[ "${dir##*/}" == omp-fork-* ]]
+}
+
 # Who holds the transcript open, for every omp at once: one `find`, not one per process. For a
 # path, which file each holds, by device and inode (one `stat`): the file itself, or another
 # transcript of the session (`other`).
 declare -A holds=() other=()
 if (( ${#pids[@]} )); then
     fds=(); for pid in "${pids[@]}"; do fds+=("$P/$pid/fd"); done
-    pattern="*/sessions/*_${want}*.jsonl"; [[ -n "$file" ]] && pattern="*_${want}.jsonl"
+    pattern="*_${want}*.jsonl"; [[ -n "$file" ]] && pattern="*_${want}.jsonl"
     links=()
     while IFS=$'\t' read -r l t; do
         [[ "$t" =~ _(${uuid})\.jsonl$ && "${BASH_REMATCH[1]}" == "$want"* ]] && writer "$l" || continue
-        if [[ -n "$file" ]]; then links+=("$l"); else l="${l#"$P"/}"; holds[${l%%/*}]="$t"; fi
+        if [[ -n "$file" ]]; then links+=("$l")
+        elif ! fork_copy "$t"; then l="${l#"$P"/}"; holds[${l%%/*}]="$t"; fi
     done < <(find "${fds[@]}" -maxdepth 1 -type l -lname "$pattern" -printf '%p\t%l\n' 2>/dev/null || true)
     if (( ${#links[@]} )); then
         while IFS=$'\t' read -r n l; do
@@ -129,7 +146,9 @@ for pid in ${pids[@]+"${pids[@]}"}; do
             if cwd="$(readlink "$P/$pid/cwd" 2>/dev/null)"; then a="$cwd/$a"; else a="$id"; fi
         fi
         if [[ -z "$file" ]]; then
-            [[ "$a" == "$id" || "$a" == */sessions/* ]] && { how="its command line names $id"; break; }
+            # The file name already carries the id. Where it sits says nothing about whose it is,
+            # except for omp-fork's own scratch copy.
+            { [[ "$a" == "$id" ]] || ! fork_copy "$a"; } && { how="its command line names $id"; break; }
         elif [[ "$a" == "$id" ]]; then byid=1
         elif [[ "$(realpath -m -- "$a")" == "$file" ]]; then how="its command line names $file"; break
         fi

@@ -193,6 +193,32 @@ class OmpSessionLive(unittest.TestCase):
         self.omp(522, ["omp", "--resume", f"./{self.transcript.name}"], cwd=self.transcript.parent)
         self.assertEqual(self.live(SID).stdout, f"521\tits command line names {SID}\n522\tits command line names {SID}\n")
 
+    def test_a_session_dir_not_named_sessions_is_still_found_by_id(self) -> None:
+        """`--session-dir` (and PI_CODING_AGENT_SESSION_DIR) can name any directory, and the id is
+        in the file name either way. Until 2026-11-04 a path counted for a bare id only inside a
+        folder named `sessions`, so a session resumed from `.../RefreezeAM17/session/<stamp>_<id>
+        .jsonl` was reported dead while it worked: 2 of the 103 ids that agent boxes' own `ps`
+        named on sami-devbox at 20:00Z, 01a1a682-6912 and -6922, and every resume path asks this
+        script before it starts an omp."""
+        for n, folder in enumerate(("session", "RefreezeAM17", "s"), start=530):
+            elsewhere = self.root / folder / self.transcript.name
+            elsewhere.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.transcript, elsewhere)
+            self.omp(n, ["omp", "--resume", str(elsewhere)])
+            self.assertIn(f"{n}\tits command line names {SID}", self.live(SID).stdout)
+            self.assertIn(f"{n}\tits command line names {SID}", self.live(SID[:13]).stdout)
+            shutil.rmtree(self.proc / str(n))
+        # The same for an omp that only HOLDS such a file open, named by no argument of its own.
+        held = self.root / "session" / self.transcript.name
+        self.omp(540, ["omp"], holds=held)
+        self.assertIn(f"540\tit holds {held} open", self.live(SID).stdout)
+        shutil.rmtree(self.proc / "540")
+        # And a fork's copy still counts for neither, by id or by prefix.
+        self.omp(541, ["omp", "-p", "--session-dir", str(self.copy.parent), "--resume", str(self.copy)],
+                 holds=self.copy)
+        self.assert_not_live(SID)
+        self.assert_not_live(SID[:13])
+
     def test_the_live_transcript_is_live_by_any_spelling_of_its_path(self) -> None:
         self.omp(500, ["omp", "--resume", str(self.transcript)], holds=self.transcript)
         link = self.root / "link-to-lane"
