@@ -11,7 +11,12 @@ modelRoles:
   task: anthropic/claude-opus-5-5
   vision: google/gemini-3.7-flash:medium
   # The review gates and the oracle advisors run cross-family on GPT-6.1 Sol
-  # through the OSS Verify gateway (team `box`, no per-token OpenAI key), not
+  # through the OSS Verify gateway (team `box`; no OpenAI key sits on the box,
+  # but the gateway's own OpenAI credential IS billed PER TOKEN -- measured
+  # 2026-11-04: one client on sami-devbox took gateway Sol from $14/h at 22Z to
+  # $973/h at 05:55Z, and two OpenAI auto top-ups of about $4k hit the card that
+  # night. An earlier wording here said "no per-token OpenAI key", which read as
+  # "this route is not billed per token" and is false), not
   # the Codex subscription, whose window is spent until 2026-11-04T06:35Z: a
   # gate that answers from Claude is a same-family read wearing a
   # cross-family label. Until 2026-11-03 they ran per-token
@@ -181,7 +186,10 @@ retry:
     # does. `ossv-gateway-openai/*: []` keeps any other model on that provider
     # off the Anthropic `default` chain, and the codex key keeps Codex Sol off
     # `openai-codex/*` below, which ends on Claude. No per-token `openai/` link:
-    # the gateway already bills OpenAI under team `box`'s budget. Measured
+    # the gateway bills OpenAI under team `box`'s budget instead -- which is
+    # still PER TOKEN, not flat-rate (measured 2026-11-04, see the note at the
+    # top of this file). Reaching OpenAI through the gateway changes who is
+    # billed, not how. Measured
     # 2026-11-03 03:42-03:45Z from scratch sessions: the gateway served
     # `openai/gpt-6.1-sol` through a bash tool call; with the gateway
     # unreachable, and on a machine without the provider, the spawn fell to
