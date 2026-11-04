@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# omp-session-dsn -- keep this machine's omp session-store DSN in tmpfs, where every agent box sees
+# it (dispatch://INFRA-1192).
+#
+# omp's Postgres session store reads its connection string from the file `session.sql.dsnFile`
+# names. The database is omp_sessions on agents-postgres, which agent-infra's postgres/ declares
+# (postgres/README.md, "The developer boxes"), and the connection carries no password at all: the
+# Cloud SQL Auth Proxy of cloud-sql-proxy-agents-postgres.service runs with --auto-iam-authn and
+# logs in as this machine's own service account, so the DSN names that account's IAM database user
+# and nothing secret. That is why this file is written rather than fetched from the secrets broker:
+# there is no secret to fetch, and a password DSN for this database was retired on 2026-11-02
+# (postgres/README.md, "The developer boxes").
+#
+# It is written 0600 to $XDG_RUNTIME_DIR/omp-session-sql/dsn, which is tmpfs, so it is gone after a
+# reboot and the timer puts it back; scripts/agentbox binds that directory into every box at the
+# same path, the route the gateway key already takes, and relays the proxy's 127.0.0.1:5432 in on
+# the same address and port, so one DSN serves the host and every box. A directory, not a bare
+# file, so the rename below reaches a box that was started before it.
+set -uo pipefail
+# The unit runs in systemd's non-login environment. shims/gcloud finds the SDK on either machine.
+export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.mise/shims:$PATH"
+d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omp-session-sql"
+f="$d/dsn"
+install -d -m 700 "$d" || exit 1
+
+# The account the proxy signs in as, which is whatever Application Default Credentials resolve to
+# here. On sami-devbox and inside its boxes that is the metadata server, not a file: neither the
+# host nor a box has ~/.config/gcloud/application_default_credentials.json, and a box reaches the
+# host's metadata relay through GCE_METADATA_HOST (installers/gcloud-box.sh, scripts/agentbox).
+# Both read dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com on 2026-11-04. A machine that
+# does have a credential file is read from it first, so a service-account key or an impersonated
+# credential gives the account it signs in as.
+adc=$(systemctl --user show-environment 2> /dev/null | sed -n 's/^GOOGLE_APPLICATION_CREDENTIALS=//p')
+adc=${adc:-$HOME/.config/gcloud/application_default_credentials.json}
+
+# The IAM database user of a service account is its email without ".gserviceaccount.com".
+account=$(python3 - "$adc" << 'EOF' 2> /dev/null
+import json, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+email = d.get("client_email") or ""
+if not email:
+    m = re.search(r"serviceAccounts/([^:/]+):generateAccessToken",
+                  d.get("service_account_impersonation_url", ""))
+    email = m.group(1) if m else ""
+print(email)
+EOF
+)
+if [[ $account != *.gserviceaccount.com ]]; then
+    md="${GCE_METADATA_HOST:-${GCE_METADATA_IP:-metadata.google.internal}}"
+    account=$(timeout 10 curl -fsS -H 'Metadata-Flavor: Google' \
+        "http://$md/computeMetadata/v1/instance/service-accounts/default/email" 2> /dev/null)
+fi
+if [[ $account != *.gserviceaccount.com ]]; then
+    logger -t omp-session-dsn -- "no service account from $adc or the metadata server; no DSN written"
+    echo "omp-session-dsn: no service account from $adc or the metadata server; an IAM database login needs one" >&2
+    exit 1
+fi
+login=${account%.gserviceaccount.com}
+dsn="postgres://${login/@/%40}@127.0.0.1:5432/omp_sessions?sslmode=disable"
+
+# Unchanged: leave the file alone, so a reader never sees a rename it did not need.
+if [[ -s $f && "$(cat "$f")" == "$dsn" ]]; then
+    exit 0
+fi
+umask 077
+printf '%s\n' "$dsn" > "$f.new" || exit 1
+mv -f "$f.new" "$f" || exit 1
+logger -t omp-session-dsn -- "DSN written to $f for $login"

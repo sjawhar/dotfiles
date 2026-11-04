@@ -1,0 +1,25 @@
+[Unit]
+Description=sami-devbox: Cloud SQL Auth Proxy to agents-postgres on 127.0.0.1:5432 (dispatch://INFRA-1192)
+Documentation=https://dispatch.tail12ec1c.ts.net/issues/INFRA-1192
+After=network-online.target
+
+[Service]
+# omp's session store writes its transcripts to the omp_sessions database on agents-postgres, which
+# agent-infra's postgres/ declares. That instance has a public IP and no authorized networks, so a
+# Cloud SQL connector is the only way in (measured 2026-11-04: raw TCP to 136.117.143.83 and to
+# 10.54.0.8 on 5432 and 6432 is refused from this host and from inside an agent box alike), and the
+# connector needs roles/cloudsql.client, which this machine's identity holds.
+#
+# --auto-iam-authn logs every connection in as this machine's service account, from its Application
+# Default Credentials, with roles/cloudsql.instanceUser: the DSN scripts/omp-session-dsn writes
+# names that IAM database user and carries no password, so no secret exists on the machine at all.
+#
+# scripts/agentbox relays this listener into every box at the same address and port
+# (LOOPBACK_SERVICE_PORTS), so the one DSN serves the host and every session in a box.
+ExecStart=%h/.local/bin/cloud-sql-proxy --auto-iam-authn --address 127.0.0.1 --port 5432 theorem-agent-infra:us-west1:agents-postgres
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=default.target

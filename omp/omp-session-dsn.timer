@@ -1,0 +1,12 @@
+[Unit]
+Description=sami-devbox: put the omp session-store DSN back after a reboot, and every 10 minutes
+
+[Timer]
+# At boot, because the DSN lives in tmpfs and a session that starts before it is there writes its
+# transcript nowhere.
+OnBootSec=30s
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

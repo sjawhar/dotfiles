@@ -1,0 +1,7 @@
+[Unit]
+Description=sami-devbox: this machine's omp session-store DSN in tmpfs, where every agent box sees it (dispatch://INFRA-1192)
+Documentation=https://dispatch.tail12ec1c.ts.net/issues/INFRA-1192
+
+[Service]
+Type=oneshot
+ExecStart=%h/.dotfiles/scripts/omp-session-dsn

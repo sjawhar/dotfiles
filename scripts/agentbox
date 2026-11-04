@@ -1430,11 +1430,16 @@ mount_args() {
     # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
-    # Gateway state is shared writable. A named --dir already supplies the same
-    # destination, so avoid a duplicate bind. Directories show atomic key refreshes.
-    mkdir -p -m 700 "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"
+    # Gateway state and the omp session-store DSN are shared writable. The DSN
+    # (scripts/omp-session-dsn, dispatch://INFRA-1192) is the machine's, not the box's: it names
+    # the machine's IAM database user and no password, and the proxy it points at is the host's,
+    # relayed in on the same address (LOOPBACK_SERVICE_PORTS). A named --dir already supplies the
+    # same destination, so avoid a duplicate bind. Directories show atomic refreshes.
+    mkdir -p -m 700 "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader" \
+        "/run/user/$UID_/omp-session-sql"
     local key_dir
-    for key_dir in "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader"; do
+    for key_dir in "/run/user/$UID_/ossv-box" "/run/user/$UID_/verified-grader" \
+        "/run/user/$UID_/omp-session-sql"; do
         box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir")
     done
     # The review App's installation token cache (scripts/post-review). It is the machine's, not
