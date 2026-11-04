@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# az-broker: run one az command as broker-azure, the admin Azure login the secrets broker mints
+# (AZURE_ADMIN, human tier: Sami approves each grant on the broker page, for at most an hour;
+# broker-azure holds Owner on the subscription; dispatch://INFRA-1031). Day-to-day work stays on
+# the box identity (shims/az); this is for admin actions.
+#
+#   az-broker [--reason R] [--] <az args...>
+#
+# The broker releases {"tenant_id","client_id","federated_token","expires_at"}. The wrapper signs
+# in with `az login --service-principal --federated-token @FILE` in a throwaway AZURE_CONFIG_DIR,
+# removed on exit, so no person's login and no box identity dir is read or written. az reads the
+# `@FILE` value from the 0600 file, so the token never enters argv. Exit 75 means the grant is
+# pending approval, 77 that it was denied.
+set -euo pipefail
+
+reason="az-broker admin command"
+if [ "${1:-}" = --reason ]; then
+  reason=$2
+  shift 2
+fi
+[ "${1:-}" = -- ] && shift
+[ $# -gt 0 ] || { echo "usage: az-broker [--reason R] [--] <az args...>" >&2; exit 2; }
+
+if [ "${AZ_BROKER_INNER:-}" != 1 ]; then
+  AZ_BROKER_INNER=1 exec secret-run --reason "$reason" AZURE_ADMIN -- "$0" -- "$@"
+fi
+
+[ -n "${AZURE_ADMIN:-}" ] || { echo "az-broker: the broker released no AZURE_ADMIN login" >&2; exit 1; }
+dir=$(mktemp -d "${TMPDIR:-/tmp}/az-broker.XXXXXX")
+trap 'rm -rf "$dir"' EXIT
+umask 077
+printf '%s' "$AZURE_ADMIN" | jq -er .federated_token >"$dir/token"
+tenant=$(printf '%s' "$AZURE_ADMIN" | jq -er .tenant_id)
+client=$(printf '%s' "$AZURE_ADMIN" | jq -er .client_id)
+unset AZURE_ADMIN AZ_BROKER_INNER
+mkdir "$dir/config"
+export AZURE_CONFIG_DIR="$dir/config"
+az login --service-principal --username "$client" --tenant "$tenant" \
+  --federated-token "@$dir/token" --allow-no-subscriptions --output none
+az "$@"
