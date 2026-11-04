@@ -8,13 +8,48 @@
 # Every repository carries the trailer, public ones included: it is how a commit is
 # traced to its session (session attribution, Legion's Delivery page, scripts/pr-gate,
 # the chief of staff's audit), and upstream PRs are opened from commits that carry it
-# (skill://fork-work). A checkout opts out with `git config omp.sessionTrailer false`.
+# (skill://fork-work). A checkout opts out with `git config omp.sessionTrailer false`,
+# and `true` keeps it on everywhere.
+#
+# The one other exception is a throwaway repository, such as one a test makes with
+# mkdtemp: no remote (`git remote` prints nothing) AND its common directory, resolved
+# through symlinks, under a temporary root by whole path components: $TMPDIR, /tmp,
+# /var/tmp, or /mnt/nvme/<user>/session-tmp (/mnt/scratch/<user>/session-tmp on
+# sami-devbox). Such a commit can never reach a remote, and a test that asserts its
+# own commit message exactly failed in every agent session (oh-my-pi's pi-vcs
+# read_objects_logs_and_refs; librarian ledger L1123). A new repository under ~/src
+# keeps its trailer from its first commit, and a /tmp worktree of a repository with a
+# remote keeps it. Anything this cannot read keeps the trailer: attribution may be
+# absent only where nothing can be attributed.
 set -euo pipefail
 
 git=("$@")
 case "$("${git[@]}" config --type=bool --get omp.sessionTrailer 2>/dev/null || true)" in
     false) echo "off: omp.sessionTrailer is false"; exit 1 ;;
-    true) echo "on: omp.sessionTrailer is true" ;;
-    *) echo "on: omp.sessionTrailer is unset" ;;
+    true) echo "on: omp.sessionTrailer is true"; exit 0 ;;
 esac
+
+if ! remotes="$("${git[@]}" remote 2>/dev/null)"; then
+    echo "on: omp.sessionTrailer is unset and git remote failed"
+    exit 0
+fi
+if [[ -n "$remotes" ]]; then
+    echo "on: omp.sessionTrailer is unset and the repository has a remote"
+    exit 0
+fi
+if ! common="$("${git[@]}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+    ! common="$(realpath -e -- "$common" 2>/dev/null)"; then
+    echo "on: omp.sessionTrailer is unset and the git common directory cannot be read"
+    exit 0
+fi
+user="$(id -un)"
+for root in ${TMPDIR:+"$TMPDIR"} /tmp /var/tmp "/mnt/nvme/$user/session-tmp" "/mnt/scratch/$user/session-tmp"; do
+    real="$(realpath -e -- "$root" 2>/dev/null)" || continue
+    # A root that resolves to / would take in every repository.
+    if [[ "$real" != / && "$common" == "$real"/* ]]; then
+        echo "off: no remote, and the git common directory $common is under the temporary root $root"
+        exit 1
+    fi
+done
+echo "on: omp.sessionTrailer is unset; no remote, but the git common directory $common is under no temporary root"
 exit 0

@@ -32,6 +32,9 @@ class GitCommitTrailerTest(unittest.TestCase):
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         self.git("init", "-q", env=self.plain)
+        # A remote, so scripts/omp-session-trailer does not count this mkdtemp repository as a
+        # throwaway one (test_session_trailer_optout.py covers that rule).
+        self.git("remote", "add", "origin", "https://example.invalid/repo.git", env=self.plain)
         self.git("commit", "-q", "--allow-empty", "-m", "init", env=self.plain)
 
     def tearDown(self):

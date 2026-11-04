@@ -93,7 +93,8 @@ done
 # jj commits get the same trailer from its JJ_CONFIG overlay. A missing or
 # malformed id adds nothing: attribution may be absent, never wrong.
 # scripts/omp-session-trailer says yes everywhere unless the checkout sets
-# `git config omp.sessionTrailer false`.
+# `git config omp.sessionTrailer false`, or the repository is a throwaway one (no
+# remote, and its common directory under a temporary root, such as a test's mkdtemp).
 # - `git commit`: git's own --trailer adds it, so the repository's hooks and
 #   commit signing run exactly as they would without it, and
 #   `ifexists=addIfDifferent` keeps an amend from repeating it.

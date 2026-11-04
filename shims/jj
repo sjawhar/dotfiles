@@ -4,8 +4,9 @@
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
 # still removes it. In an agent session `jj git push --deleted` is also refused,
-# and in a checkout that sets `git config omp.sessionTrailer false` the session's
-# Omp-Session trailer is dropped (both below). Everything else goes straight to
+# and where scripts/omp-session-trailer says no (`git config omp.sessionTrailer
+# false`, or a throwaway repository) the session's Omp-Session trailer is dropped
+# (both below). Everything else goes straight to
 # the real jj.
 set -euo pipefail
 
@@ -122,14 +123,16 @@ fi
 # cannot make conditional on a repository. So the shim asks
 # scripts/omp-session-trailer, as shims/git does, about the repository's backing
 # git repository, and where it says no (`git config omp.sessionTrailer false`
-# there) runs jj with `templates.commit_trailers` empty.
+# there, or a throwaway repository: no remote, and under a temporary root) runs
+# jj with `templates.commit_trailers` empty.
 # That call also takes `immutable_heads()` back to `builtin_immutable_heads()`:
 # session-env.ts's cross-session guard (AGENTC-318) tells a session's own commits
 # by their trailer, so without one every commit the session describes would be
 # immutable to it. The guard is therefore off in those repositories: another
 # session's unpushed commits there can be rewritten without --ignore-immutable.
-# Commands that never write a description skip the check, which costs one
-# `git config` read; any other command, an alias included, pays it.
+# Commands that never write a description skip the check, which costs a
+# `git config` read and, where that sets nothing, a `git remote` and a
+# `git rev-parse`; any other command, an alias included, pays it.
 _pre=()
 trailer_on() {
     local d="" repo target="" a prev=""

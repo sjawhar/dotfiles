@@ -131,8 +131,9 @@ before handing the call to the real one.
   knives: mise's shim is one more process per call, and under load mise hung for minutes
   (2026-11-03). mise's shim runs only when that install is missing
   (`shims/tests/test_gh_mise_pin.py`).
-- **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and in a
-  checkout that sets `git config omp.sessionTrailer false` (the backing git repository's config)
+- **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and where
+  `scripts/omp-session-trailer` says no for the backing git repository (`git config
+  omp.sessionTrailer false` there, or a throwaway repository, as for `git` below)
   runs every command that can write a description with `templates.commit_trailers` empty and
   `immutable_heads()` back at `builtin_immutable_heads()`: the session overlay's cross-session
   guard (AGENTC-318) tells a session's own commits by their trailer, so it is off there, and
@@ -155,7 +156,13 @@ before handing the call to the real one.
   read from where every `-C` leaves git. Any other lock stands, and `scripts/agent-workspace rm`
   releases the same two locks from anywhere. It gives every
   commit an omp session makes its `Omp-Session` trailer, in every repository, public ones
-  included, unless the checkout sets `git config omp.sessionTrailer false`
+  included, unless the checkout sets `git config omp.sessionTrailer false` or is a throwaway
+  repository: no remote (`git remote` prints nothing) and its common directory, resolved
+  through symlinks, under `$TMPDIR`, `/tmp`, `/var/tmp` or `/mnt/{nvme,scratch}/<user>/session-tmp`
+  (`omp.sessionTrailer true` keeps it there too). A test that asserts its own commit message,
+  such as oh-my-pi's pi-vcs `read_objects_logs_and_refs`, failed in every agent session until
+  then (librarian ledger L1123); a new repository under `~/src`, and a temporary worktree of a
+  repository with a remote, keep it. A repository it cannot read keeps it
   (`scripts/omp-session-trailer`, which jj asks too; `omp-session-trailer git` in a repository
   prints its answer). `git commit` gets it from git's own `--trailer`. `git merge`, `pull`,
   `cherry-pick` and `revert` run with `core.hooksPath` at `git-hooks/`: its prepare-commit-msg
