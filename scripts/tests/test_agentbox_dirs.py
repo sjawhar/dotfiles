@@ -43,6 +43,7 @@ exit 0
 # host is.
 NO_HOST = (
     "image_tag() { echo agentbox:test; }; build_image() { :; }; ensure_forwarders() { :; }\n"
+    "check_box_disk_space() { :; };\n"
     f"ensure_network() {{ NETWORK_GATEWAY={GATEWAY} NETWORK_SUBNET=172.31.0.0/16; }}\n"
     "clone_checkout() { mkdir -p \"$2/.git\"; }; close_box() { :; }\n"
 )
@@ -87,6 +88,7 @@ class AgentboxDirs(unittest.TestCase):
             "AGENT_SECRETS_URL": "https://broker.example",
             "STUB_RUN_ARGS": str(self.run_args),
             "AGENTBOX_BOXES": str(self.boxes),
+            "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache"),
             # The limits are tested in scripts/tests/test_agentbox_limits.py; a box here needs no
             # filesystem of its own, which would want root.
             "AGENTBOX_DISK": "0",

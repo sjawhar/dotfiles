@@ -383,6 +383,7 @@ class CmdNew(EnrollFixture):
 
     NO_HOST = (
         "build_image() { :; }; ensure_network() { :; }; ensure_forwarders() { :; }\n"
+        "check_box_disk_space() { :; };\n"
         'mount_args() { mkdir -p "$(box_keydir "$1")"; }\n'
         "session_env() { :; }; clone_checkout() { :; }\n"
         'close_box() { echo "close_box $1" >>"$STUB_CALLS"; }\n'

@@ -18,6 +18,7 @@
 #                                       for a resume, leaves out a --dir after
 #                                       the first that no longer exists
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
+#   agentbox grow <box|session-id> SIZE grow a running box's filesystem without restarting it
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
 #   agentbox rebuild                    build the image now; list boxes on older tags
@@ -99,6 +100,12 @@ else
     BOXES="${AGENTBOX_BOXES:-$HOME/boxes}"
     CLONE_TEMPLATES="${AGENTBOX_CLONE_TEMPLATES:-${XDG_CACHE_HOME:-$HOME/.cache}/agentbox-clones}"
 fi
+# Build caches live outside the sparse home image, separately for each box.
+if [[ -d "/mnt/nvme/$(id -un)" ]]; then
+    BOX_CACHE_ROOT="${AGENTBOX_CACHE_ROOT:-/mnt/nvme/$(id -un)/box-cache}"
+else
+    BOX_CACHE_ROOT="${AGENTBOX_CACHE_ROOT:-$HOME/.cache/box-cache}"
+fi
 # Every repo is a git clone of the box's own (AGENTC-1420, Sami, 2026-10-02: "Let's just switch to
 # Git everywhere"). On the shared jj store of agent-c, 298 workspaces and 135,748 refs/jj/keep refs,
 # every jj command took about 11 s against 0.1 s for git. A repo listed here also gets a sparse
@@ -155,11 +162,12 @@ BOX_PIDS=8192
 # alone, and the space returns to the host when the image is removed at close. The image is
 # sparse, so a limit reserves nothing: N boxes at 32 GiB do not claim 32N GiB, exactly as the
 # memory limit above does not bound the sum.
-# The default is 32 GiB: the largest of the 117 session worktrees on this host's /mnt/nvme held
-# 4.1 GiB on 2026-11-01 (median well under 1 GiB), so 32 GiB is about eight times the largest
-# session measured. `agentbox new --disk SIZE` changes one box, AGENTBOX_DISK does too, and
-# `--disk 0` turns the limit off for a machine with no root for the loop mount.
-BOX_DISK="${AGENTBOX_DISK:-32g}"
+# sami-devbox has room for 128 GiB sparse homes. Other hosts keep the 32 GiB default.
+# An explicit --disk or AGENTBOX_DISK still wins. A sparse limit reserves no host space.
+case "${AGENTBOX_HOST:-$(hostname -s)}" in
+    sami-devbox|sami-devbox.*) BOX_DISK="${AGENTBOX_DISK:-128g}" ;;
+    *) BOX_DISK="${AGENTBOX_DISK:-32g}" ;;
+esac
 # A box above this takes the shared disk rather than its own session's share, so it is refused;
 # below the floor ext4 has no room for its own metadata plus a clone.
 BOX_DISK_CAP=512g
@@ -290,6 +298,43 @@ set_disk_bytes() {
     (( BOX_DISK_BYTES <= cap )) || refuse "$from '$BOX_DISK' is above the $BOX_DISK_CAP limit per box"
 }
 
+# Check the filesystem that will hold the images, not the box's loop filesystem.
+check_box_disk_space() {
+    local path="$BOX_DISKS" free
+    while [[ ! -d "$path" ]]; do path="$(dirname "$path")"; done
+    free="$(df -B1 --output=avail "$path" | awk 'NR == 2 {print $1}')" \
+        || die "cannot read free space for box images at $BOX_DISKS"
+    [[ "$free" =~ ^[0-9]+$ ]] || die "cannot read free space for box images at $BOX_DISKS"
+    (( free >= 500 * 1073741824 )) \
+        || die "box images at $BOX_DISKS have $((free / 1073741824)) GiB free; at least 500 GiB is required to create a box. No box was started."
+}
+
+# Cargo keeps its binaries and configuration in the mounted CARGO_HOME. Only its download
+# stores move. Never share CARGO_TARGET_DIR: concurrent builds would contend on its lock.
+box_cache_mounts() {
+    local cache="$BOX_CACHE_ROOT/$1"
+    mkdir -p "$cache"/{go-build,go-mod,npm,bun,uv,pip,cargo-registry,cargo-git} || return 1
+    box_dir_have "$cache" || printf '%s\n' -v "$cache:$cache"
+    printf '%s\n' -v "$cache/cargo-registry:$HOME/.cargo/registry" \
+        -v "$cache/cargo-git:$HOME/.cargo/git"
+}
+
+# Sami 2026-11-04: agent clutter must be cleaned up. A box's cache goes with its container,
+# and only once docker confirms that container is gone: a live box keeps writing into it.
+close_box_cache() {
+    local box="$1" cache="$BOX_CACHE_ROOT/$1" names
+    [[ -d "$cache" ]] || return 0
+    if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
+        echo "agentbox: cannot confirm $box is removed; its cache $cache is kept" >&2
+        return 0
+    fi
+    if [[ -n "$names" ]]; then
+        echo "agentbox: $box still exists; its cache $cache is kept" >&2
+        return 0
+    fi
+    rm -rf "${cache:?}"
+}
+
 # The box's own filesystem at $BOXES/<box>: a sparse ext4 image loop-mounted there, so every
 # path the box writes through that directory - its clones, its $HOME overlay and its /tmp
 # (mount_args) - shares one limit and nothing it writes can take the host's disk or another
@@ -304,6 +349,7 @@ set_disk_bytes() {
 # rather than at close.
 open_box_disk() {
     local box="$1" img="$BOX_DISKS/$1.img"
+    check_box_disk_space
     mkdir -p "$BOXES/$box"
     (( BOX_DISK_BYTES )) || return 0
     mkdir -p "$BOX_DISKS"
@@ -1005,6 +1051,9 @@ mount_args() {
     done < <(jq -r '[(.credHelpers // {} | .[]), (.credsStore // empty)] | unique | .[]' "$docker_snapshot/config.json" 2>/dev/null)
     a+=(-v "$BOXES/$box/home:$HOME")
     a+=(-v "$BOXES/$box/tmp:/tmp")
+    local cache_mounts
+    cache_mounts="$(box_cache_mounts "$box")" || return 1
+    while IFS= read -r p; do a+=("$p"); done <<<"$cache_mounts"
     [[ "$DOTFILES_DIR" == "$SRC"/* || "$(readlink -f "$DOTFILES_DIR")" == "$(readlink -f "$HOME/.dotfiles")" ]] \
         || a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
     a+=(-v "$HOME/.dotfiles:$HOME/.dotfiles")
@@ -1097,6 +1146,11 @@ session_env() {
     e+=(-e "TMUX_TMPDIR=/run/user/$UID_/tmux")
     e+=(-e "HOME=$HOME" -e USER=ubuntu -e "TERM=${TERM:-xterm-256color}" -e "DOTFILES_DIR=$DOTFILES_DIR")
     e+=(-e "MISE_DATA_DIR=$HOME/.mise")
+    local cache="$BOX_CACHE_ROOT/$box"
+    e+=(-e "AGENTBOX_CACHE=$cache" -e "XDG_CACHE_HOME=$cache")
+    e+=(-e "GOCACHE=$cache/go-build" -e "GOMODCACHE=$cache/go-mod")
+    e+=(-e "npm_config_cache=$cache/npm" -e "BUN_INSTALL_CACHE_DIR=$cache/bun")
+    e+=(-e "UV_CACHE_DIR=$cache/uv" -e "PIP_CACHE_DIR=$cache/pip")
     # $HOME/.dotfiles/bin holds gitignored binaries (mise, a local jj) a
     # checkout under test does not have.
     e+=(-e "PATH=$DOTFILES_DIR/shims:/opt/agentbox/docker-helpers:$DOTFILES_DIR/bin:$HOME/.dotfiles/bin:$DOTFILES_DIR/scripts:$HOME/.mise/shims:$HOME/.local/bin:$HOME/.pulumi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
@@ -1471,6 +1525,7 @@ close_box() {
     # The container is gone: nothing inside can use the key any more, and the broker must not
     # accept it either. Before the rm -rf below, which takes the key dir with it.
     unenroll_box "$box"
+    close_box_cache "$box"
     finish_knives_claims "$sid"
     for repo in "$@"; do
         ws="$BOXES/$box/$repo"
@@ -1627,6 +1682,7 @@ cmd_new() {
         dup="$(printf '%s\n' "${box_repos[@]}" | sort | uniq -d)"
         [[ -z "$dup" ]] || die "repo listed twice: $dup"
     fi
+    check_box_disk_space
     local use_broker=1
     broker_ready || use_broker=0
     local box tag
@@ -1753,6 +1809,35 @@ resolve_box() {
         if [[ "$(box_session_id "$b")" == "$target"* ]]; then printf '%s\n' "$b"; return 0; fi
     done
     return 1
+}
+
+cmd_grow() {
+    (( $# == 2 )) || die "usage: agentbox grow <box|session-id> SIZE"
+    local box img loop mounted old
+    box="$(resolve_box "$1")" || die "no running box matches $1"
+    [[ "$box" =~ ^agentbox-[a-zA-Z0-9-]+$ ]] || die "invalid box name $box"
+    img="$BOX_DISKS/$box.img"
+    [[ -f "$img" && ! -L "$img" ]] || die "$box has no disk image at $img"
+    BOX_DISK="$2"
+    set_disk_bytes "grow size"
+    (( BOX_DISK_BYTES )) || refuse "grow size must be positive"
+    # Keep two grow commands from changing one image at the same time.
+    exec 9<>"$img"
+    flock -x 9
+    old="$(stat -c %s "$img")"
+    (( BOX_DISK_BYTES >= old )) || refuse "cannot shrink $box from $(size_text "$old") to $2"
+    mountpoint -q "$BOXES/$box" || die "$box's disk is not mounted at $BOXES/$box"
+    loop="$(sudo -n losetup -j "$img" --noheadings --output NAME)" \
+        || die "cannot find the loop device for $img"
+    [[ "$loop" =~ ^/dev/loop[0-9]+$ ]] || die "expected one loop device for $img, got '$loop'"
+    mounted="$(findmnt -n -o SOURCE --mountpoint "$BOXES/$box")" \
+        || die "cannot find the mounted device for $box"
+    [[ "$mounted" == "$loop" ]] || die "$BOXES/$box is on $mounted, not $loop"
+    truncate -s "$BOX_DISK_BYTES" "$img" || die "could not extend $img"
+    sudo -n losetup -c "$loop" || die "could not refresh $loop; retry agentbox grow $box $2"
+    sudo -n resize2fs "$loop" || die "could not resize $loop; retry agentbox grow $box $2"
+    exec 9>&-
+    echo "agentbox: $box now has a $(size_text "$BOX_DISK_BYTES") disk; its session was not restarted"
 }
 
 cmd_sh() {
@@ -7618,6 +7703,7 @@ remove_doctor_box() {
     local box="$1"
     docker rm -f "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
+    close_box_cache "$box"
     rm -rf "${RUN_BASE:?}/$box"
     if close_box_disk "$box"; then rm -rf "${BOXES:?}/$box"; fi
 }
@@ -7781,6 +7867,7 @@ cmd_doctor_here() {
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
     sh)      shift; cmd_sh "$@" ;;
+    grow)    shift; cmd_grow "$@" ;;
     ls)      cmd_ls ;;
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;

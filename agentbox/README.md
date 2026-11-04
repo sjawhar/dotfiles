@@ -114,20 +114,39 @@ or prints credential values.
 
 ~/.dotfiles/scripts/agentbox ls                       # running boxes, then box trees kept for unpushed work
 ~/.dotfiles/scripts/agentbox sh <box|session-id>      # a shell in a running box
+~/.dotfiles/scripts/agentbox grow <box|session-id> 256g # grow the home filesystem online, without restarting
 ~/.dotfiles/scripts/agentbox restart <box|session-id> # ask the session to relaunch omp in place at a safe point;
                                                       # add --now to relaunch at once
 ~/.dotfiles/scripts/agentbox move --plan              # which host sessions could move into a box
 ```
 
 `scripts/agentbox` with no argument prints its usage (exit 2); the usage stops part way, so read the comment block at the top of `scripts/agentbox` and `agentbox/AGENTS.md`
-for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`). Default limits are 24 GiB memory, 8 cpus and a
-32 GiB disk.
+for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --here`).
+Memory defaults to one twentieth of host memory, with a 24 GiB minimum. CPU defaults to 8 cores.
+The sparse disk defaults to 128 GiB on sami-devbox and 32 GiB on other hosts.
+Creating an image requires at least 500 GiB free on its host filesystem. Sparse capacity reserves no space.
+`grow` runs on the host. It extends the image, refreshes its loop device, and resizes ext4.
+It accepts sizes up to 512 GiB and refuses to shrink a filesystem.
 
 ## What it assumes about the host
 
 - **Where boxes live.** `<boxes>` is `/mnt/nvme/<user>/agentbox/boxes` when `/mnt/nvme/<user>` exists, else
   `~/boxes`. Each box's disk limit is a sparse ext4 image loop-mounted at `<boxes>/<box>`; it holds the clones,
   the box's `$HOME` and its `/tmp`.
+- **Build caches.** Each box uses `/mnt/nvme/<user>/box-cache/<box>` on hosts with that disk.
+  Other hosts use `~/.cache/box-cache/<box>`. `AGENTBOX_CACHE_ROOT` changes the parent on the launcher.
+  The launcher creates and binds the directory read-write before starting the box,
+  and removes it once docker confirms the box's container is gone.
+  `XDG_CACHE_HOME`, `GOCACHE`, `GOMODCACHE`, `npm_config_cache`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`,
+  and `PIP_CACHE_DIR` point there. Cargo's registry and git downloads use nested mounts from that directory.
+  Cargo binaries and configuration keep their usual home. Project-local `target/` directories stay in place.
+  The launcher does not set a shared `CARGO_TARGET_DIR`.
+- **Disk alerts.** The existing `disk-fill-watch` timer checks each running box's loop filesystem.
+  At 90% used, it alerts the box's session and the SRE, with the largest home directories and `/tmp`.
+  It alerts once per crossing and rearms below 85% used. Failed deliveries are retried on the next timer run.
+  Each reading includes allocated image bytes, box-cache bytes, and their total. Sparse capacity is not counted.
+  Custom `AGENTBOX_DISKS` or `AGENTBOX_CACHE_ROOT` values must also reach the watch to measure those directories.
+  `disk-fill-watch --dry-run --print-alert` prints alerts without sending them.
 - **Mounts.** A box gets `~/src`, `~/.dotfiles`, and the shared home paths in `mounts`, all at their own paths.
   Shared configuration and SSH state are writable. `/mnt/durable/<host-user>` is bound when present;
   other host paths (trees under `/mnt/nvme/<host-user>`) only through a named or inferred `--dir`. The box keeps its own home and `/tmp`.
@@ -145,3 +164,6 @@ for the rest (`move <session-id>… | --all`, `move --to <machine>`, `doctor --h
   See [the access audit](access-audit.md) for the restriction history and authorization.
 - **Sandbox namespaces.** A setuid network-namespace sandbox runs in a box. A sandbox that needs another user
   namespace with its own `/proc` cannot run under this Sysbox version. Such tests report their skips.
+
+Running boxes are not restarted for these changes. Their cache environment and mounts change at their next re-box.
+`agentbox restart` restarts only omp and does not replace the container's environment or mounts.

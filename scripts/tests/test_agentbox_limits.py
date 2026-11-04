@@ -82,6 +82,7 @@ class AgentboxLimits(unittest.TestCase):
         write_stub(stubs, "agent-secrets", "echo none; exit 1")
         write_stub(stubs, "sudo", SUDO_STUB)
         write_stub(stubs, "mkfs.ext4", MKFS_STUB)
+        write_stub(stubs, "df", "printf 'Avail\\n%s\\n' \"${STUB_FREE_BYTES:-1099511627776}\"")
         # Nothing was really mounted, so nothing is a mountpoint.
         write_stub(stubs, "mountpoint", "exit 1")
         write_stub(self.root / "dotfiles" / "scripts", "envoy-nats-seed", "exit 1")
@@ -97,6 +98,8 @@ class AgentboxLimits(unittest.TestCase):
             # does not exist, so each test exercises the host's own behaviour.
             "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
             "AGENTBOX_BOX": "",
+            # Pin the 32 GiB host here. test_agentbox_storage covers both host defaults.
+            "AGENTBOX_HOST": "sami-rocqperf",
             "HOME": str(self.home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "DOTFILES_DIR": str(self.root / "dotfiles"),
@@ -239,6 +242,13 @@ class AgentboxLimits(unittest.TestCase):
         self.assertIn("AGENTBOX_DISK=0", args)
         self.assertFalse(self.disks.exists(), "an image was made for a box with no disk limit")
         self.assertFalse(self.sudo_args.exists(), "sudo was called for a box with no disk limit")
+
+    def test_creation_below_500_gib_is_refused_even_without_a_disk_limit(self) -> None:
+        result = self.launch("--disk", "0", STUB_FREE_BYTES=str(499 * 1024**3))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("500 GiB", result.stderr)
+        self.assertFalse(self.run_args.exists())
+        self.assertFalse(self.disks.exists())
 
     def test_a_disk_value_outside_the_range_is_refused_before_any_box_starts(self) -> None:
         for options, naming in (

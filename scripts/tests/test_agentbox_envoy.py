@@ -46,6 +46,7 @@ exit 0
 
 NO_HOST = (
     'image_tag() { echo agentbox:test; }; build_image() { :; }; ensure_forwarders() { :; }\n'
+    "check_box_disk_space() { :; };\n"
     f'ensure_network() {{ NETWORK_GATEWAY={GATEWAY} NETWORK_SUBNET=172.31.0.0/16; }}\n'
     "mount_args() { :; }; clone_checkout() { :; }; close_box() { :; }\n"
 )
