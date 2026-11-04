@@ -18,7 +18,8 @@
 #
 # A2 asks that a NEW session on the machine runs in an agent box and reaches, from inside the
 # box, Google Cloud as dev-sjawhar@ (also through a gcloud config dir a session brought from an
-# Azure box), the build pool, the grade pool, the secrets broker, Envoy, Dispatch, MLflow,
+# Azure box), the build pool, the grade pool, Artifact Registry through docker's credential
+# helper, the secrets broker, Envoy, Dispatch, MLflow,
 # the model gateway with a dev-box@ token and Azure; and that no person's login file is on any
 # mounted disk. Both halves also clone-check private theorem-labs repositories over https
 # (github_check) and read the transcript store with `tq` (tq_check). The host half also runs
@@ -78,6 +79,20 @@ in_box() {
     [[ "$got" == yes ]] && ok "build pool: kubectl -n builds auth can-i create jobs: yes" || fail "build pool: kubectl -n builds auth can-i create jobs: $got"
     got="$(kubectl --context "$GRADE_KUBE_CONTEXT" -n grade auth can-i create jobs 2>&1)"
     [[ "$got" == yes ]] && ok "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: yes" || fail "grade pool: kubectl --context $GRADE_KUBE_CONTEXT -n grade auth can-i create jobs: $got"
+    # Artifact Registry: docker sends a token to a *-docker.pkg.dev host only when the box's
+    # config names docker-credential-gcloud for it, which agentbox/entrypoint.sh writes only when
+    # the helper is on PATH (installers/gcloud-sdk.sh links it into ~/.local/bin), and the helper
+    # must answer with a token. Without it a pull failed "Unauthenticated" (dispatch://INFRA-993).
+    if ! got="$(command -v docker-credential-gcloud)"; then
+        fail "Artifact Registry: docker-credential-gcloud is not on PATH"
+    elif [[ "$(jq -r '.credHelpers["us-east1-docker.pkg.dev"] // empty' "$HOME/.docker/config.json" 2>/dev/null)" != gcloud ]]; then
+        fail "Artifact Registry: ~/.docker/config.json names no gcloud credHelper for us-east1-docker.pkg.dev"
+    elif out="$(printf %s us-east1-docker.pkg.dev | timeout 60 docker-credential-gcloud get 2>&1)" \
+        && [[ "$(jq -r '.Secret // "" | length' <<<"$out" 2>/dev/null)" -gt 0 ]]; then
+        ok "Artifact Registry: $got get us-east1-docker.pkg.dev returns a token, and docker's config routes that host to it"
+    else
+        fail "Artifact Registry: docker-credential-gcloud get us-east1-docker.pkg.dev: $(tail -1 <<<"$out")"
+    fi
 
     moved_gcloud_config_check
     boxid_check

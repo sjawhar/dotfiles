@@ -41,6 +41,17 @@ KUBE_CLUSTERS=(
 )
 KUBE_DEFAULT_CONTEXT="gke_${KUBE_PROJECT}_us-west1_dispatch"
 
+# The Artifact Registry hosts docker authenticates to through docker-credential-gcloud, which
+# trades gcloud's identity for a token; docker asks a helper only for a host its config names
+# (`credHelpers`), and sends nothing to any other ("Unauthenticated request"). This is
+# sami-rocqperf's list of 2026-11-04; sami-devbox had only us-east1 and us-west1, and an agent
+# box mirrors the host's entries (scripts/agentbox, AGENTBOX_CRED_HELPERS), dispatch://INFRA-993.
+DOCKER_REGISTRIES=(
+    us-central1-docker.pkg.dev
+    us-east1-docker.pkg.dev
+    us-west1-docker.pkg.dev
+)
+
 if [[ -x "$GCLOUD_SDK_BIN" && "$("$GCLOUD_SDK_BIN" version --format='value("Google Cloud SDK")' 2>/dev/null)" == "$GCLOUD_SDK_VERSION" ]]; then
     echo "gcloud-sdk: $GCLOUD_SDK_VERSION already at $GCLOUD_SDK_ROOT"
 else
@@ -65,6 +76,26 @@ fi
 # link is what agentbox/mounts' `.gcloud` entry relies on.
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/gke-gcloud-auth-plugin" "$HOME/.local/bin/gke-gcloud-auth-plugin"
+# The same for docker's credential helper: docker runs docker-credential-gcloud by name, and the
+# agentbox entrypoint names a registry's helper in a box only when it is on the box's PATH. A
+# Google VM's snap gcloud puts one under /snap/bin, which no box can see; without this link a box
+# on sami-devbox printed "docker-credential-gcloud is not on PATH" and its pulls from Artifact
+# Registry failed "Unauthenticated".
+ln -sfn "$GCLOUD_SDK_ROOT/google-cloud-sdk/bin/docker-credential-gcloud" "$HOME/.local/bin/docker-credential-gcloud"
+docker_config="$HOME/.docker/config.json"
+missing=()
+for registry in "${DOCKER_REGISTRIES[@]}"; do
+    if [[ "$(jq -r --arg r "$registry" '.credHelpers[$r] // ""' "$docker_config" 2>/dev/null)" != gcloud ]]; then
+        missing+=("$registry")
+    fi
+done
+if ((${#missing[@]})); then
+    # Adds only these keys to credHelpers and keeps every other entry of the file.
+    "$GCLOUD_SDK_BIN" auth configure-docker "$(IFS=,; echo "${missing[*]}")" --quiet
+    echo "gcloud-sdk: docker credHelpers now route ${missing[*]} to gcloud"
+else
+    echo "gcloud-sdk: docker credHelpers already route ${DOCKER_REGISTRIES[*]} to gcloud"
+fi
 # On a Google VM (sami-devbox, dispatch://INFRA-993) also link the plugin into /usr/local/bin:
 # a system unit or an `env -i` caller has no ~/.local/bin on PATH, and there kubectl failed with
 # "Install gke-gcloud-auth-plugin" (the ossv-job-farm smoke, 2026-11-03 11:35Z). kubectl itself is
