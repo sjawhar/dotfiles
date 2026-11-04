@@ -80,7 +80,12 @@ live)
     # `boxscan ok` is printed only when every running container answered. A container that did
     # not is a `boxerror` line and makes the scan not ok: a box that cannot be asked is not an
     # empty box.
-    if ! boxes="$(docker ps -q 2>/dev/null)"; then
+    # Agent boxes only, by name. A session is boxed by `agentbox new`, which names its container
+    # `agentbox-<id>`; other containers on this host run services and hold no omp. Two of them
+    # carry no `ps` at all (measured 2026-11-04: 50264757a42e and ccbf568c46b0), and counting
+    # those as "could not be asked" would hold every restart for ever for no reason. A box that
+    # IS an agentbox and does not answer still stops the whole run.
+    if ! boxes="$(docker ps --filter name=agentbox- -q 2>/dev/null)"; then
         printf 'boxscan failed docker ps did not answer\n'
     else
         failures=0
