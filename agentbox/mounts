@@ -17,6 +17,8 @@
 rw .omp
 rw .config/omp
 rw .cache/omp
+# Native user skills (the pinned GitHub CLI skill lives here).
+rw .agents
 
 # the pinned tool store and language caches
 rw .mise
