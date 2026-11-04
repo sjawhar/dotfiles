@@ -215,10 +215,13 @@ before handing the call to the real one.
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is
   deliberately not set: it throttles a session into reclaim instead of killing it, which looks
   like a lane that is thinking.
-  Inside an agent box (`/etc/agentbox-identity`) there is no host systemd to accept a scope and
-  none is needed, since the box cgroup is already the ceiling: the shim says that in one line
-  instead of reporting a refusal the agent cannot act on, which was the first line of every
-  boxed launch until dispatch://INFRA-702.
+  Inside an agent box (`AGENTBOX_IDENTITY_FILE`, `/etc/agentbox-identity`) it asks for no scope at
+  all: the box's own cgroup is already this session's ceiling, and the shim says that in one line
+  instead of reporting a refusal the agent cannot act on, which was the first line of every boxed
+  launch until dispatch://INFRA-702. It is now a decision rather than a refusal it accepts, since
+  `shims/systemd-run` makes `--user --scope` work in a box: a probe there would succeed and wrap
+  every boxed session in a second cgroup, sized from the HOST's RAM (a box reads the host's
+  `/proc/meminfo`), above the box's own ceiling and under another cgroup than the box's.
   A named profile whose `agent/models.overlay.yml` exists is a shared profile: the shim links
   all of the default's state into it and rebuilds its `models.yml` as the default's merged with the
   overlay, on every launch, under a 30 s lock; a real entry on both sides stops the launch
@@ -255,6 +258,29 @@ before handing the call to the real one.
 - **`ssh-keygen`** drops `SSH_AUTH_SOCK` for `-Y`, the operations git and jj sign and verify commits
   with: the signing key is a file, and ssh-keygen asks the agent first, so a stuck agent socket
   hung every signed commit. It execs the first `ssh-keygen` past its own PATH entry.
+- **`systemd-run`** makes `--user --scope` work INSIDE an agent box, and changes nothing anywhere
+  else. A box reaches the host's user manager through the session-bus relay, and that manager
+  cannot adopt a process from the box's pid namespace, so every capped run in a box died with
+  `Failed to start transient scope unit: Connection reset by peer` — and the skills and lanes that
+  cap heavy work that way (dispatch://INFRA-602, omp's gate, REARM) ran nothing at all. Sysbox
+  delegates the box's cgroup tree, so in a box the shim makes the cap itself: a child cgroup of
+  the box's own cgroup root, the limits written into its cgroup v2 files, the command's process
+  moved in before it execs, and the cgroup removed however the run ends. `MemoryMax`,
+  `MemoryHigh`, `MemoryMin`, `MemoryLow`, `MemorySwapMax`, `CPUQuota`, `CPUWeight`, `TasksMax` and
+  `IOWeight` become `memory.max`, `memory.high`, `memory.min`, `memory.low`, `memory.swap.max`,
+  `cpu.max`, `cpu.weight`, `pids.max` and `io.weight`, with systemd's own values (`24G`, `512M`,
+  `2GB`, `10%` of this box's RAM, `800%` of one core, `infinity`). The kernel then enforces it as
+  it does a scope's: a run past `MemoryMax` is OOM-killed in its own cgroup, exit 137, and nothing
+  else in the box is touched. A unit property a box has no unit to carry (`OOMPolicy`,
+  `Description`, …) is named on stderr and the run goes on; **a resource limit it cannot apply, or
+  an option it cannot honour, is refused before anything runs**, because a capped run that
+  silently loses its cap is the failure it exists to prevent. The move into the cgroup is made
+  with `sudo` (cgroup v2 asks the mover for write access to the common ancestor's `cgroup.procs`,
+  and the box's root cgroup is root-owned); the command itself still runs as the session user. On
+  the host, and for any call that is not `--user --scope`, it execs the first real `systemd-run`
+  past its own PATH entry. `shims/tests/test_systemd_run_box.py` drives the whole shim against a
+  cgroup tree in a temp dir (`AGENTBOX_CGROUP_ROOT`), and its last two cases run against
+  `/sys/fs/cgroup` where the machine delegates one.
 - **`secrets`** refuses every agent request for a human-tier key
   (exit 77), and names the broker command (`secret-run`) or, in a session the broker does not
   serve, `secret-run --register`, which registers that one command, and the `omp --resume` line

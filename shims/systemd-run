@@ -1,0 +1,273 @@
+#!/bin/bash
+# `systemd-run --user --scope` inside an agent box, where the real one cannot work.
+#
+# A box reaches the HOST's user manager through the session-bus relay, and that manager cannot
+# adopt a process from the box's pid namespace: every capped run in a box died with "Failed to
+# start transient scope unit: Connection reset by peer". Skills and lanes cap their heavy runs
+# with `systemd-run --user --scope -p MemoryMax=… -p CPUQuota=…` (dispatch://INFRA-602, omp's
+# gate, REARM), so in a box none of them ran at all.
+#
+# Sysbox delegates the box's cgroup tree, so the cap is made here instead: a child cgroup of the
+# box's own root with the limits written into it, the command's process moved in, and the cgroup
+# removed when it ends. The kernel enforces it exactly as it does a scope's -- a run past
+# MemoryMax is OOM-killed in its own cgroup and nothing else in the box is touched.
+#
+# Everything else passes through to the real systemd-run: on the host (no box), a call that is
+# not `--user --scope`, and `--help`/`--version`. A limit this cannot apply is refused, loudly
+# and before anything runs: a capped run that silently loses its cap is the failure this exists
+# to prevent.
+set -uo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+self_dir="$(dirname "$self")"
+# Overridable for the tests, which drive the whole shim against a cgroup tree in a temp dir.
+CGROUP_ROOT="${AGENTBOX_CGROUP_ROOT:-/sys/fs/cgroup}"
+IDENTITY_FILE="${AGENTBOX_IDENTITY_FILE:-/etc/agentbox-identity}"
+
+die() { echo "shims/systemd-run: $*" >&2; exit 1; }
+
+# The first systemd-run past this shim's own PATH entry; from the top, skipping this file, when
+# the shim was run by path from outside PATH (shims/AGENTS.md).
+real_systemd_run() {
+    local pass d real="" past_self=false path_dirs
+    IFS=: read -ra path_dirs <<< "${PATH:-}"
+    for pass in after-self from-top; do
+        for d in "${path_dirs[@]}"; do
+            [ -n "$d" ] || continue
+            if [ "$(readlink -f "$d" 2>/dev/null)" = "$self_dir" ]; then
+                past_self=true
+                continue
+            fi
+            [ "$pass" = from-top ] || $past_self || continue
+            if [ -x "$d/systemd-run" ] && [ "$(readlink -f "$d/systemd-run")" != "$self" ]; then
+                real="$d/systemd-run"
+                break 2
+            fi
+        done
+        $past_self && break
+    done
+    printf '%s' "$real"
+}
+
+pass_through() {
+    local real
+    real="$(real_systemd_run)"
+    [ -n "$real" ] || die "no real systemd-run on PATH"
+    exec "$real" "$@"
+}
+
+in_box() { [ -n "${AGENTBOX_BOX:-}" ] || [ -e "$IDENTITY_FILE" ]; }
+
+# A systemd byte value as a number of bytes: 24G, 512M, 1024, 10% (of this box's RAM),
+# infinity. K/M/G/T are 1024-based and KB/MB/GB/TB 1000-based, as systemd.exec documents them.
+bytes_of() {
+    local text="$1" name="$2" number unit total
+    [ "$text" = infinity ] && { printf 'max'; return 0; }
+    [ "$text" = max ] && { printf 'max'; return 0; }
+    if [[ "$text" =~ ^([0-9]+(\.[0-9]+)?)%$ ]]; then
+        total="$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)"
+        awk -v p="${BASH_REMATCH[1]}" -v t="$total" 'BEGIN { printf "%d", t * p / 100 }'
+        return 0
+    fi
+    [[ "$text" =~ ^([0-9]+(\.[0-9]+)?)([KMGTEPkmgtep]?[Bb]?)$ ]] \
+        || die "$name=$text is not a size this understands (bytes, 512M, 24G, 10%, infinity)"
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[3]}"
+    case "$unit" in
+        ""|B|b) awk -v n="$number" 'BEGIN { printf "%d", n }' ;;
+        K|k) awk -v n="$number" 'BEGIN { printf "%d", n * 1024 }' ;;
+        M|m) awk -v n="$number" 'BEGIN { printf "%d", n * 1024 * 1024 }' ;;
+        G|g) awk -v n="$number" 'BEGIN { printf "%d", n * 1024 * 1024 * 1024 }' ;;
+        T|t) awk -v n="$number" 'BEGIN { printf "%d", n * 1024 * 1024 * 1024 * 1024 }' ;;
+        KB|kB|kb) awk -v n="$number" 'BEGIN { printf "%d", n * 1000 }' ;;
+        MB|mB|mb) awk -v n="$number" 'BEGIN { printf "%d", n * 1000 * 1000 }' ;;
+        GB|gB|gb) awk -v n="$number" 'BEGIN { printf "%d", n * 1000 * 1000 * 1000 }' ;;
+        TB|tB|tb) awk -v n="$number" 'BEGIN { printf "%d", n * 1000 * 1000 * 1000 * 1000 }' ;;
+        *) die "$name=$text: unit '$unit' is not one this understands" ;;
+    esac
+}
+
+# CPUQuota as cgroup v2 cpu.max: "50%" is half a core, "800%" is eight, over one 100 ms period.
+cpu_max_of() {
+    local text="$1" percent
+    { [ "$text" = infinity ] || [ "$text" = max ]; } && { printf 'max 100000'; return 0; }
+    [[ "$text" =~ ^([0-9]+(\.[0-9]+)?)%$ ]] || die "CPUQuota=$text is not a percentage (50%, 800%, infinity)"
+    percent="${BASH_REMATCH[1]}"
+    awk -v p="$percent" 'BEGIN { printf "%d 100000", (p * 1000) + 0.5 }'
+}
+
+count_of() {
+    local text="$1" name="$2"
+    { [ "$text" = infinity ] || [ "$text" = max ]; } && { printf 'max'; return 0; }
+    [[ "$text" =~ ^[0-9]+$ ]] || die "$name=$text is not a count"
+    printf '%s' "$text"
+}
+
+in_box || pass_through "$@"
+
+# ── what the caller asked for ───────────────────────────────────────────────────────────────
+want_user=false want_scope=false quiet=false unit="" same_dir=false workdir=""
+declare -a properties=() command=() setenv=()
+args=("$@")
+i=0
+while (( i < ${#args[@]} )); do
+    a="${args[i]}"
+    case "$a" in
+        --help|-h|--version) pass_through "$@" ;;
+        --user) want_user=true ;;
+        --scope) want_scope=true ;;
+        --quiet|-q) quiet=true ;;
+        --wait) : ;;  # a scope always waits
+        --same-dir|-d) same_dir=true ;;
+        --collect|-G) : ;;  # nothing to collect: this scope is a directory removed at the end
+        --unit=*) unit="${a#--unit=}" ;;
+        --unit|-u) i=$((i + 1)); unit="${args[i]:-}" ;;
+        --description=*|--slice=*|--nice=*|--service-type=*) : ;;
+        --description|--slice|--nice|--service-type) i=$((i + 1)) ;;
+        --property=*) properties+=("${a#--property=}") ;;
+        -p) i=$((i + 1)); properties+=("${args[i]:-}") ;;
+        -p*) properties+=("${a#-p}") ;;
+        --setenv=*) setenv+=("${a#--setenv=}") ;;
+        --setenv|-E) i=$((i + 1)); setenv+=("${args[i]:-}") ;;
+        --working-directory=*) workdir="${a#--working-directory=}" ;;
+        --working-directory) i=$((i + 1)); workdir="${args[i]:-}" ;;
+        --) i=$((i + 1)); command=("${args[@]:i}"); break ;;
+        -*) # Not understood here. On the host systemd would honour it, so refuse rather than
+            # run a command under conditions the caller did not ask for.
+            if $want_user && $want_scope; then
+                die "$a is not an option this box's systemd-run understands, and a box has no transient units. Nothing ran. Drop it, or run the command without a scope"
+            fi
+            pass_through "$@" ;;
+        *) command=("${args[@]:i}"); break ;;
+    esac
+    i=$((i + 1))
+done
+
+# Only the capped form is taken over; everything else is the real one's.
+{ $want_user && $want_scope; } || pass_through "$@"
+(( ${#command[@]} )) || die "no command to run"
+
+# ── the limits ──────────────────────────────────────────────────────────────────────────────
+# Each property becomes one cgroup v2 file. A resource limit with no cgroup file here is
+# refused: the caller asked for a cap and would otherwise get none.
+declare -a limit_files=() limit_values=()
+for property in "${properties[@]}"; do
+    name="${property%%=*}"
+    value="${property#*=}"
+    [ "$name" != "$property" ] || die "-p $property is not NAME=VALUE"
+    case "$name" in
+        MemoryMax) limit_files+=("memory.max"); limit_values+=("$(bytes_of "$value" MemoryMax)") ;;
+        MemoryHigh) limit_files+=("memory.high"); limit_values+=("$(bytes_of "$value" MemoryHigh)") ;;
+        MemoryMin) limit_files+=("memory.min"); limit_values+=("$(bytes_of "$value" MemoryMin)") ;;
+        MemoryLow) limit_files+=("memory.low"); limit_values+=("$(bytes_of "$value" MemoryLow)") ;;
+        MemorySwapMax) limit_files+=("memory.swap.max"); limit_values+=("$(bytes_of "$value" MemorySwapMax)") ;;
+        CPUQuota) limit_files+=("cpu.max"); limit_values+=("$(cpu_max_of "$value")") ;;
+        CPUWeight) limit_files+=("cpu.weight"); limit_values+=("$(count_of "$value" CPUWeight)") ;;
+        TasksMax) limit_files+=("pids.max"); limit_values+=("$(count_of "$value" TasksMax)") ;;
+        IOWeight) limit_files+=("io.weight"); limit_values+=("$(count_of "$value" IOWeight)") ;;
+        # Not a resource limit: a scope property this box has no unit to carry. Named, not obeyed.
+        OOMPolicy|KillMode|Delegate|Description|Slice|TimeoutStopSec|SendSIGKILL|SendSIGHUP)
+            $quiet || echo "shims/systemd-run: $name is a unit property and this box has no units; the command runs without it" >&2 ;;
+        Memory*|CPU*|IO*|Tasks*|Limit*|BlockIO*)
+            die "-p $name is a resource limit this box's systemd-run cannot apply, and running without it would give you no cap at all. Nothing ran" ;;
+        *) $quiet || echo "shims/systemd-run: $name is not a property this box can set; the command runs without it" >&2 ;;
+    esac
+done
+
+# ── the cgroup ──────────────────────────────────────────────────────────────────────────────
+# Under the box's OWN cgroup root, which is what the box sees at $CGROUP_ROOT: the root is the
+# one cgroup allowed to hold both processes and children, so a child of it never trips cgroup
+# v2's "no internal processes" rule, whatever else the box runs.
+[ -d "$CGROUP_ROOT" ] || die "no cgroup tree at $CGROUP_ROOT: this box cannot cap a run. Nothing ran"
+name="${unit%.scope}"
+[ -n "$name" ] || name="agentbox-run-$$-${RANDOM}"
+scope="$CGROUP_ROOT/$name.scope"
+[ ! -e "$scope" ] || die "$scope already exists: another run holds that name. Nothing ran"
+
+sudo="sudo -n"
+command -v sudo >/dev/null 2>&1 || sudo=""
+[ -w "$CGROUP_ROOT" ] && sudo=""
+
+# The controllers the limits need, enabled on the root's children. Already on in every box
+# measured; idempotent where it is, and the reason a fresh tree works too.
+needed=""
+for file in ${limit_files[@]+"${limit_files[@]}"}; do
+    case "$file" in
+        memory.*) [[ "$needed" == *+memory* ]] || needed+=" +memory" ;;
+        cpu.*) [[ "$needed" == *+cpu* ]] || needed+=" +cpu" ;;
+        pids.*) [[ "$needed" == *+pids* ]] || needed+=" +pids" ;;
+        io.*) [[ "$needed" == *+io* ]] || needed+=" +io" ;;
+    esac
+done
+if [ -n "$needed" ] && [ -w "$CGROUP_ROOT/cgroup.subtree_control" ]; then
+    printf '%s' "${needed# }" > "$CGROUP_ROOT/cgroup.subtree_control" 2>/dev/null || true
+elif [ -n "$needed" ] && [ -n "$sudo" ]; then
+    $sudo sh -c "printf '%s' '${needed# }' > '$CGROUP_ROOT/cgroup.subtree_control'" 2>/dev/null || true
+fi
+
+if [ -n "$sudo" ]; then
+    $sudo mkdir "$scope" || die "could not make the cgroup $scope (is sudo without a password set up in this box?). Nothing ran"
+    $sudo chown -R "$(id -u):$(id -g)" "$scope" || die "could not take ownership of $scope. Nothing ran"
+else
+    mkdir "$scope" || die "could not make the cgroup $scope. Nothing ran"
+fi
+
+cleanup() {
+    local status=$?
+    [ -d "$scope" ] && { rmdir "$scope" 2>/dev/null || { [ -n "$sudo" ] && $sudo rmdir "$scope" 2>/dev/null; }; }
+    [ -n "${gate_dir:-}" ] && rm -rf "$gate_dir"
+    return $status
+}
+trap cleanup EXIT
+
+for (( k = 0; k < ${#limit_files[@]}; k++ )); do
+    file="$scope/${limit_files[k]}"
+    [ -e "$file" ] || die "this box's cgroup tree has no ${limit_files[k]}, so ${properties[k]} cannot be applied. Nothing ran"
+    printf '%s' "${limit_values[k]}" > "$file" 2>/dev/null \
+        || die "could not write ${limit_values[k]} to ${limit_files[k]}. Nothing ran"
+done
+
+# ── the run ─────────────────────────────────────────────────────────────────────────────────
+# The child is held at a gate until its pid is in the cgroup, then it execs: the command itself
+# therefore starts inside the cap, never a moment outside it. The move is made by root, because
+# cgroup v2 asks the mover for write access to the COMMON ANCESTOR's cgroup.procs too, and the
+# box's root cgroup is root-owned; the command itself still runs as this user, never as root.
+gate_dir="$(mktemp -d)"
+mkfifo "$gate_dir/gate"
+for pair in ${setenv[@]+"${setenv[@]}"}; do export "${pair?}"; done
+[ -z "$workdir" ] || cd "$workdir" || die "no directory $workdir"
+$same_dir || true  # --same-dir is this shell's directory, which the child has already
+
+# fd 3 is the caller's own stdin: bash gives a background command /dev/null where job control
+# is off, and the command must read what the caller piped it (`systemd-run --scope … -- cat`).
+exec 3<&0
+(
+    read -r _ < "$gate_dir/gate"
+    exec 0<&3 3<&-
+    exec "${command[@]}"
+) &
+child=$!
+exec 3<&-
+
+if [ -n "$sudo" ]; then
+    $sudo sh -c "printf '%s' '$child' > '$scope/cgroup.procs'" \
+        || { kill "$child" 2>/dev/null; die "could not move the command into $scope. Nothing ran"; }
+else
+    printf '%s' "$child" > "$scope/cgroup.procs" \
+        || { kill "$child" 2>/dev/null; die "could not move the command into $scope. Nothing ran"; }
+fi
+
+$quiet || echo "Running as a cgroup of this agent box: $scope" >&2
+forward() { kill -"$1" "$child" 2>/dev/null; }
+trap 'forward TERM' TERM
+trap 'forward INT' INT
+trap 'forward HUP' HUP
+
+echo go > "$gate_dir/gate"
+# The reaping shell announces a child the kernel killed ("Killed  ( read -r _ < …"), which says
+# the shim's own plumbing to a caller whose run was OOM-killed. The status carries it instead:
+# 137, exactly as a scope on the host reports it. The command's own stderr is its own fd, taken
+# at the fork, so this hides nothing of the command's.
+{ wait "$child"; } 2>/dev/null
+status=$?
+exit "$status"

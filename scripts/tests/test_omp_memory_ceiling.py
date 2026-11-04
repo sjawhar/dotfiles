@@ -48,12 +48,15 @@ class OmpMemoryCeiling(unittest.TestCase):
         self.calls = root / "systemd-run.calls"
         write_stub(stubs, "systemd-run", f'printf "%s\\n" "$*" >> "{self.calls}"')
         self.meminfo = root / "meminfo"
+        # Every case here is a HOST: a box takes no scope of its own (its own cgroup is the
+        # ceiling), and this suite often runs inside one.
         self.env = {
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(home / ".config"),
             "OMP_MEMINFO": str(self.meminfo),
+            "AGENTBOX_IDENTITY_FILE": str(root / "no-identity-file"),
         }
 
     def ceiling(self, mem_total_kb: int, **extra: str) -> tuple[str, str]:
@@ -90,6 +93,21 @@ class OmpMemoryCeiling(unittest.TestCase):
         value, stderr = self.ceiling(DEVBOX_KB, OMP_MEMORY_MAX="1T")
         self.assertEqual(value, "436G")
         self.assertIn("above the 436G ceiling", stderr)
+
+    def test_a_session_in_a_box_asks_for_no_scope_of_its_own(self) -> None:
+        """The box's own cgroup (`docker run --memory`) is the ceiling. Since shims/systemd-run
+        makes `--user --scope` work inside a box, a probe there would SUCCEED and wrap the
+        session in a second cgroup sized from the HOST's RAM, above the box's own."""
+        marker = Path(self.temp_dir.name) / "agentbox-identity"
+        marker.write_text("box\n", encoding="utf-8")
+        self.meminfo.write_text(f"MemTotal:       {DEVBOX_KB} kB\n", encoding="utf-8")
+        result = subprocess.run([str(SHIM), "--version"], capture_output=True, text=True,
+                                env={**self.env, "AGENTBOX_IDENTITY_FILE": str(marker)},
+                                check=False, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls.exists(), "a boxed session asked systemd for a scope")
+        self.assertIn("the box's own cgroup", result.stderr)
+        self.assertIn("AGENT omp", result.stdout, "the session did not start")
 
 
 if __name__ == "__main__":

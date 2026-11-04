@@ -282,7 +282,16 @@ if [[ -z "${OMP_MEMORY_SCOPE:-}" ]]; then
         fi
     fi
 fi
-if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; then
+# In an agent box no scope is asked for at all. The box's own cgroup, set at `docker run
+# --memory` by scripts/agentbox, already is this session's ceiling and kills it the same way,
+# and since `shims/systemd-run` makes `--user --scope` work inside a box (2026-11-04) a probe
+# there would now SUCCEED and wrap every boxed session in a second cgroup of its own, with the
+# host's RAM deciding its size (a box reads the host's /proc/meminfo) — a ceiling above the
+# box's own, under a different cgroup than the box's, for no gain.
+if [[ -n "${OMP_MEMORY_MAX:-}" ]] && [[ -e "${AGENTBOX_IDENTITY_FILE:-/etc/agentbox-identity}" ]]; then
+    unset OMP_MEMORY_MAX
+    echo "omp: in an agent box; this session's memory ceiling is the box's own cgroup." >&2
+elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; then
     mem_max="$OMP_MEMORY_MAX"
     unset OMP_MEMORY_MAX
     export OMP_MEMORY_SCOPE="$mem_max"
@@ -290,12 +299,12 @@ if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; the
     # times out ("Failed to start transient scope unit: Connection timed out"): 5 of 7 tries did
     # between 05:04 and 05:20Z on 2026-11-02, at load 450-520. A session started then would run
     # with no ceiling and no OOMPolicy, so the probe tries once more after 10 s before falling
-    # back. In an agent box the refusal is the expected answer (below), so there is no retry.
+    # back. A box never reaches here: it took the branch above.
     scope_probe() {
         systemd-run --user --scope -q -p MemoryMax="$mem_max" -p MemorySwapMax=0 -p OOMPolicy=continue -- true \
             >/dev/null 2>&1
     }
-    if scope_probe || { [[ ! -e /etc/agentbox-identity ]] && sleep 10 && scope_probe; }; then
+    if scope_probe || { sleep 10 && scope_probe; }; then
         # A non-interactive shell gives a background job /dev/null as stdin unless the job names
         # its own, and interactive omp then refuses to start ("stdin is not a TTY"). So hand the
         # job the wrapper's own stdin through a spare descriptor. With job control off the job
@@ -323,17 +332,7 @@ if [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; the
         fi
         exit "$omp_status"
     fi
-    # Inside an agent box (the /etc/agentbox-identity marker agentbox/Dockerfile writes) there is
-    # no host systemd to accept a scope and none is needed: the box's own cgroup, set at
-    # `docker run --memory` by scripts/agentbox, already is this session's ceiling and kills it
-    # the same way. So the refusal is the expected path there, and printing it on every launch
-    # put a warning in front of every boxed agent that nothing could act on
-    # (dispatch://INFRA-702).
-    if [[ -e /etc/agentbox-identity ]]; then
-        echo "omp: in an agent box; this session's memory ceiling is the box's own cgroup." >&2
-    else
-        echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2
-    fi
+    echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2
 fi
 
 exec "$DOTFILES_DIR/scripts/agent-session" omp "$@"
