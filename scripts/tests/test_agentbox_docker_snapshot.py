@@ -98,6 +98,18 @@ class DockerSnapshot(unittest.TestCase):
         destinations = [bind.split(":")[1] for bind in self.fixture.binds_of(args) if ":" in bind]
         self.assertEqual(destinations.count(str(self.source)), 1, destinations)
 
+    def test_a_helper_the_box_path_finds_is_used_over_the_launcher_path(self) -> None:
+        directory_tests.write_stub(self.fixture.root / "bin", "jq", 'exec /usr/bin/jq "$@"')
+        (self.source / "config.json").write_text('{"credHelpers":{"registry.example":"boxed"}}')
+        directory_tests.write_stub(self.fixture.home / ".local/bin", "docker-credential-boxed", "exit 0")
+        snap = self.fixture.root / "snap-bin"
+        directory_tests.write_stub(snap, "docker-credential-boxed", "exit 64")
+        self.fixture.env["PATH"] = f"{snap}:{self.fixture.env['PATH']}"
+        binds, _ = self.launch()
+        aliases = Path(next(bind for bind in binds if bind.endswith(":/opt/agentbox/docker-helpers")).split(":")[0])
+        self.assertFalse((aliases / "docker-credential-boxed").exists(), "the box's own PATH already finds it")
+        self.assertFalse(any(bind.startswith(f"{snap}/") for bind in binds), binds)
+
 
 if __name__ == "__main__":
     unittest.main()

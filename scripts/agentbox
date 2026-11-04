@@ -1023,7 +1023,7 @@ mount_args() {
     "$DOTFILES_DIR/scripts/agentbox-docker-snapshot" "$docker_source" "$docker_snapshot" "$docker_links" || return 1
     a+=(-v "$docker_snapshot:$HOME/.docker")
     local docker_target docker_alias docker_helper docker_invocation docker_logical docker_exec
-    local docker_source_real helper_index=0
+    local docker_source_real helper_index=0 docker_box_dir docker_box_has
     docker_source_real="$(readlink -f "$docker_source" 2>/dev/null || true)"
     while IFS= read -r -d '' docker_target && IFS= read -r -d '' docker_alias; do
         a+=(-v "$docker_target:$docker_alias")
@@ -1031,6 +1031,18 @@ mount_args() {
     mkdir -p "$BOXES/$box/docker-helpers"
     a+=(-v "$BOXES/$box/docker-helpers:/opt/agentbox/docker-helpers")
     while IFS= read -r docker_helper; do
+        # A helper the box's own PATH (session_env) already finds needs no wrapper. The launcher's
+        # PATH can differ: a non-login launch on sami-devbox found snap's docker-credential-gcloud
+        # first, which runs only as snap, so gcloud's helper failed in the box (2026-11-04).
+        docker_box_has=false
+        for docker_box_dir in "$DOTFILES_DIR/shims" "$DOTFILES_DIR/bin" "$HOME/.dotfiles/bin" \
+            "$DOTFILES_DIR/scripts" "$HOME/.local/bin" "$HOME/.pulumi/bin"; do
+            docker_invocation="$docker_box_dir/docker-credential-$docker_helper"
+            [[ -x "$docker_invocation" ]] || continue
+            docker_target="$(readlink -f "$docker_invocation")" || continue
+            box_dir_have "$docker_invocation" && box_dir_have "$docker_target" && { docker_box_has=true; break; }
+        done
+        [[ "$docker_box_has" == true ]] && continue
         docker_invocation="$(command -v "docker-credential-$docker_helper" 2>/dev/null)" || continue
         [[ "$docker_invocation" == /* ]] || docker_invocation="$PWD/$docker_invocation"
         docker_target="$(readlink -f "$docker_invocation")" || continue
