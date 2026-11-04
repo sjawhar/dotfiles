@@ -25,7 +25,7 @@ AGENTBOX_RUN_BASE and AGENTBOX_PROC at a fixture tree.
 from __future__ import annotations
 
 import os
-import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -209,6 +209,15 @@ exit 0''')
         self.assertFalse((self.disks / f"{box}.img").exists())
         self.assertFalse((self.disks / f"{box}.info").exists(),
                          "a record left on disk must mean an image left on disk")
+
+    def test_a_box_with_no_image_gets_no_record(self) -> None:
+        """`--disk 0`: `open_box_disk` deliberately leaves the images directory absent, and such
+        a box has no image to orphan, so the record is skipped rather than made — making that
+        directory is what `scripts/tests/test_agentbox_limits.py` fails on."""
+        shutil.rmtree(self.disks)
+        result = self.run_bash('box_record_write agentbox-nodisk000001 "" omp')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.disks.exists(), "a box with no image makes no images directory")
 
     # ── the predecessor ─────────────────────────────────────────────────────────────────────
     def test_a_predecessor_is_removed_once_the_resumed_session_has_registered(self) -> None:
