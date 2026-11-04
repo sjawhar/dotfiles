@@ -7,11 +7,17 @@ Type=oneshot
 # It watches another machine, so it must not compete with this one's own work.
 Nice=15
 IOSchedulingClass=idle
-# A quiet run is one ssh probe (about 1 s) and one liveness call, which is one `omp-session-live`
-# per auto_restart=yes entry on sami-devbox at about 0.75 s each -- some 25 s at 30 entries. A run
-# that restarts a session waits up to 180 s for omp-session-live to see it live. 600 s rides out
-# both and still ends before the next 5-minute start.
-TimeoutStartSec=600
+# One pass per timer tick: `oneshot` plus a timer, the shape every other watch here has. The one
+# rule that shape imposes is that a run must end well inside the timer's period, because systemd
+# starts no second run while one is active and the timer then looks stopped: at 19:46:31Z on
+# 2026-11-04 a run waited 180 s for each of three restarts, stayed `activating` past three
+# periods, and unit-health-watch reported "TIMER STOPPED FIRING". So a run is bounded instead:
+# one ssh probe (about 1 s), one liveness call (one `omp-session-live` per auto_restart=yes entry
+# on sami-devbox, about 0.75 s each, some 35 s at 44 entries), and at most 3 restarts of 45 s
+# each, since a session that is not up by then is looked at again on the next run. That is about
+# 170 s at worst. TimeoutStartSec kills a run that goes past 240 s, so systemd is free again
+# before the next start rather than sitting in `activating`.
+TimeoutStartSec=240
 # `envoy` is a bash script that needs the same tools a shell gives it, and ssh must find its config.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise

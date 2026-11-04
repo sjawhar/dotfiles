@@ -71,14 +71,35 @@ becomes sami-devbox. A message Envoy refuses is written to
 `~/.local/state/devbox-offbox-watch/undelivered/<time>-<kind>.txt` on sami-rocqperf, and the
 journal says so.
 
+## Report-only
+
+It restarts nothing while `DEVBOX_OFFBOX_REPORT_ONLY` is set (the drop-in
+`~/.config/systemd/user/devbox-offbox-watch.service.d/report-only.conf` on sami-rocqperf) or
+`--report-only` is given. Every run then logs what it would have restarted and sends the SRE one
+message naming each session with its tmux, cwd, `--dir` list and resume line. Alerts and refusals
+go out as usual. That is how it runs until a person says automatic restarting is live; removing
+the drop-in and `systemctl --user daemon-reload` is the switch.
+
+## Why a run is short
+
+`Type=oneshot` with a timer, the shape of every other watch in `omp/`. systemd starts no second
+run while one is active, so a run that outlives the 5-minute period makes the timer look stopped:
+at 19:46:31Z on 2026-11-04 one run waited 180 s for each of three restarts, stayed `activating`
+past three periods, and `unit-health-watch` reported "TIMER STOPPED FIRING". So a run is bounded
+instead — one ssh probe, one liveness call (about 0.75 s per `auto_restart=yes` entry), and at
+most 3 restarts that wait 45 s each. A session slower than 45 s is not abandoned: the next run
+sends its `after` message as soon as `omp-session-live` sees it. `TimeoutStartSec=240` kills a run
+that goes long, so systemd is free before the next start.
+
 ## Running it by hand
 
 ```bash
 devbox-offbox-watch --dry-run          # everything it would do; starts nothing, sends nothing
+devbox-offbox-watch --report-only      # restart nothing, report what it would restart
 journalctl --user -u devbox-offbox-watch -n 100
 ```
 
-A dry run takes about a minute and a half: one `omp-session-live` per `auto_restart=yes` entry,
-about 0.75 s each on sami-devbox.
+A dry run takes about half a minute: one `omp-session-live` per `auto_restart=yes` entry, about
+0.75 s each on sami-devbox.
 
 It never kills, signals or stops any process.

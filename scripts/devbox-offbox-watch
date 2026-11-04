@@ -49,6 +49,11 @@ its own -- so an alert about a dead sami-devbox still goes out. When the hub doe
 either, the message is written under `<state dir>/undelivered/` on this machine and the journal
 says so.
 
+`--report-only` (or DEVBOX_OFFBOX_REPORT_ONLY) restarts nothing and sends the SRE one message
+naming every session it would have restarted, with that session's tmux, cwd, --dir list and
+resume line. Alerts and refusals go out as usual. It is how the watch runs before a person has
+told the stream that automatic restarting is live.
+
 It never kills, signals or stops any process.
 
 Exit status: 0 for a run that reached sami-devbox (quiet or not), 1 when it could not.
@@ -86,9 +91,41 @@ RESTARTS_PER_10_MIN = 3
 RESTARTS_PER_HOUR = 10
 FLAP_SECONDS = 1800           # dead again within this of its restart: report, never restart again
 TRAIN_IDLE_SECONDS = 1800
-AWAIT_SECONDS = 180           # how long a restart waits for omp-session-live to say it is live
+# How long a restart waits, in its own run, for omp-session-live to say the session is live. It
+# is short on purpose: a `oneshot` whose run outlives its 5-minute timer leaves the service in
+# `activating` and the timer never fires again -- which is exactly what happened at 19:46:31Z on
+# 2026-11-04, when three restarts waited 180 s each and unit-health-watch reported the timer as
+# stopped. A session that is not up yet is checked again on the next run, and gets its `after`
+# message then.
+AWAIT_SECONDS = 45
 ENTRY_KEYS = ("session", "title", "role", "tmux", "cwd", "resume", "after", "order",
               "auto_restart", "owner_note")
+# The writeback-stall gate is ResumeGuard's, from omp-memory-watch
+# (/mnt/nvme/sami/scratch/eng-ops-infra898/offbox-note.py): its two tests, its threshold, its
+# wording and its hold limit, so the two watches refuse on the same rule. Its `writeback_stall`
+# reads this machine's own /proc; here the same facts come from the probe on sami-devbox, which
+# is why the test takes them as arguments instead of reading them.
+STALL_COMMS = ("umount", "umount2", "fusermount", "fusermount3")
+# How long one session's resume may be held by the gate, counted from the first run that held it.
+# A writeback burst that clears itself lasts seconds; the stall of 2026-11-04 lasted about 85
+# minutes and ended only with a cloud reset. Twenty minutes is far past the first and far short of
+# the second: a box still stalled after it is a person's problem, so at the limit the watch stops
+# holding the session, tells the SRE with the exact resume command, and leaves it to them.
+STALL_HOLD_MAX = 1200.0
+
+
+def stall_reason(blocked: list[str], pressure: float) -> str:
+    """Why sami-devbox's disk is stalled, with the count of blocked processes, else "".
+
+    ResumeGuard's `writeback_stall`, word for word, with the two facts passed in: the commands of
+    the processes sitting in uninterruptible sleep inside an unmount, and /proc/pressure/io's
+    `full avg10` -- the share of the last 10 s in which EVERY runnable task waited on IO.
+    """
+    if not blocked and pressure <= PRESSURE_LIMIT:
+        return ""
+    what = f" ({', '.join(sorted(set(blocked)))})" if blocked else ""
+    return (f"{len(blocked)} process(es) in uninterruptible sleep in an unmount{what},"
+            f" IO pressure full avg10 {pressure:.1f} (the stall mark is {PRESSURE_LIMIT:.0f})")
 
 
 def log(message: str) -> None:
@@ -116,8 +153,13 @@ class Remote:
         self.timeout = timeout
 
     def run(self, script: Path, args: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
+        # ssh joins everything after the host into ONE string and hands it to the remote shell,
+        # so each word has to carry its own quoting. Without it the first entry whose title held
+        # a space and a bracket -- "LINUX-1302 parity owner (specport run record, parity count)",
+        # 2026-11-04 19:46:54Z -- turned into a syntax error on the far side instead of a restart.
+        remote = " ".join(shlex.quote(word) for word in ["bash", "-s", "--", *args])
         command = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.timeout}",
-                   "-o", "StrictHostKeyChecking=accept-new", self.host, "bash", "-s", "--", *args]
+                   "-o", "StrictHostKeyChecking=accept-new", self.host, remote]
         return subprocess.run(command, input=script.read_text(), capture_output=True, text=True,
                               timeout=timeout or (self.timeout + 60))
 
@@ -265,19 +307,14 @@ def once(record: dict, key: str, on: bool) -> bool:
 def check_box(facts: dict[str, str], state: dict, report: Reporter, now: float,
               host: str, sre: str, chief: str) -> tuple[bool, str]:
     """Is sami-devbox in a writeback stall? Alerts when one holds for STALL_ALERT_SECONDS."""
-    evidence = []
-    pressure = facts.get("pressure_io_full_avg10", "unknown")
     try:
-        if float(pressure) > PRESSURE_LIMIT:
-            evidence.append(f"/proc/pressure/io full avg10={pressure}, over {PRESSURE_LIMIT}")
+        pressure = float(facts.get("pressure_io_full_avg10", ""))
     except ValueError:
-        pass
-    stuck = facts.get("writeback_d_count", "0")
-    if stuck.isdigit() and int(stuck) > 0:
-        evidence.append(f"{stuck} process(es) in state D running umount or fusermount3:"
-                        f" {facts.get('writeback_d_procs', '')}")
-    stalled = bool(evidence)
-    detail = "; ".join(evidence)
+        pressure = 0.0
+    blocked = [entry.split(":", 1)[1] for entry in facts.get("writeback_d_procs", "").split(",")
+               if ":" in entry]
+    detail = stall_reason(blocked, pressure)
+    stalled = bool(detail)
     if not stalled:
         if state["stall_alerted"]:
             report.send([sre, chief], "stall-over",
@@ -369,6 +406,12 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     if dry_run:
         log("  --dry-run: nothing was run")
         return
+    # The attempt counts against the limits before it is made, whether or not it works: a resume
+    # line that fails every time is exactly the loop the limits exist to stop.
+    state["restarts"].append({"at": now, "session": session})
+    record = session_state(state, session)
+    record["last_restart"] = now
+    record["last_dirs"] = dir_list(entry["resume"])
     done = remote.run(ACT, ["restart", entry["tmux"], title, entry["cwd"], entry["resume"]],
                       timeout=180)
     if done.returncode != 0:
@@ -382,10 +425,6 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     for line in done.stdout.splitlines():
         if line.startswith("window="):
             window = line[len("window="):]
-    state["restarts"].append({"at": now, "session": session})
-    record = session_state(state, session)
-    record["last_restart"] = now
-    record["last_dirs"] = dir_list(entry["resume"])
 
     waited = remote.run(ACT, ["await", session, str(AWAIT_SECONDS)], timeout=AWAIT_SECONDS + 60)
     came_back = waited.stdout.strip() == "live"
@@ -393,12 +432,16 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     if came_back and after:
         report.send([session], "after-message", after)
         after_said = "its after message was sent"
+        record["pending_after"] = False
     elif after:
-        after_said = "its after message was NOT sent, because omp-session-live has not seen it live yet"
+        after_said = ("its after message is not sent yet; the next run sends it as soon as"
+                      " omp-session-live sees the session live")
+        record["pending_after"] = True
     else:
         after_said = "it has no after message"
     live_said = ("omp-session-live sees it live" if came_back else
-                 f"omp-session-live has NOT seen it live within {AWAIT_SECONDS} s -- look at the window")
+                 f"omp-session-live has not seen it live within {AWAIT_SECONDS} s; the next run"
+                 f" looks again, and reports it as dead-again if it is still not up")
     recent = len([r for r in state["restarts"] if now - r["at"] < 3600])
     report.send(targets, "restart",
                 f"RESTARTED {title} ({session}) on {host} at {utc(now)}. It was dead by"
@@ -483,6 +526,17 @@ def run(args: argparse.Namespace) -> int:
             record["last_seen_live"] = now
             if record.get("blocked"):
                 log(f"{entry['title']} ({session}) is live again; unblocked")
+            # A restart whose session was not up inside its own run leaves the `after` message
+            # here, so it is sent on the first run that finds the session live rather than
+            # holding a run open waiting for it.
+            if record.get("pending_after") and entry.get("after"):
+                log(f"{entry['title']} ({session}) is live; sending the after message it was owed")
+                report.send([session], "after-message", entry["after"])
+                targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
+                report.send(targets, "after-sent",
+                            f"{entry['title']} ({session}) came up after its restart and has now"
+                            f" been sent its after message: {entry['after']}")
+            record["pending_after"] = False
             record["blocked"] = False
             record["blocked_reported"] = False
             record["duplicate_reported"] = False
@@ -497,9 +551,13 @@ def run(args: argparse.Namespace) -> int:
 
     left_for_stall: list[str] = []
     left_for_limit: list[str] = []
+    would_restart: list[str] = []
     for entry in dead:
         session, title = entry["session"], entry["title"]
         record = session_state(state, session)
+        if not stalled:
+            record.pop("stall_hold_since", None)
+            record["stall_handover_reported"] = False
         targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
 
         held = procs.get(session, [])
@@ -534,6 +592,25 @@ def run(args: argparse.Namespace) -> int:
             continue
 
         if stalled:
+            # ResumeGuard's limit: a session is held by the stall gate for at most 20 minutes.
+            # Past that the box is a person's problem, so the hold ends, the SRE gets the exact
+            # resume command, and this watch does not resume it later on its own.
+            record.setdefault("stall_hold_since", now)
+            holding = now - record["stall_hold_since"]
+            if holding >= STALL_HOLD_MAX:
+                record["blocked"] = True
+                record.pop("stall_hold_since", None)
+                if once(record, "stall_handover_reported", True):
+                    report.send(targets, "stall-handover",
+                                f"HELD TOO LONG, now yours: {title} ({session}) has been dead and"
+                                f" held by the writeback-stall gate for {minutes(holding)} min"
+                                f" ({stall_detail}). devbox-offbox-watch stops holding it and"
+                                f" will not resume it on its own. Resume it by hand when"
+                                f" {args.host} is writing again, from {entry['cwd']}, in tmux"
+                                f" {entry['tmux']}: {entry['resume']}."
+                                f" {describe_dirs(entry['resume'])}."
+                                f" Why it matters: {entry.get('owner_note', '(the entry says nothing)')}")
+                continue
             left_for_stall.append(f"{title} ({session})")
             continue
 
@@ -543,7 +620,23 @@ def run(args: argparse.Namespace) -> int:
             left_for_limit.append(f"{title} ({session})")
             continue
 
+        if args.report_only:
+            would_restart.append(f"{title} ({session}), tmux {entry['tmux']}, cwd {entry['cwd']},"
+                                 f" {describe_dirs(entry['resume'])}, resume: {entry['resume']}")
+            log(f"report-only: would restart {title} ({session})")
+            continue
+
         restart(remote, entry, report, state, now, args.host, args.sre, args.dry_run)
+
+    if would_restart:
+        report.send([args.sre], "report-only",
+                    f"REPORT ONLY, nothing was restarted. {len(would_restart)} session(s) of the"
+                    f" registry are dead on {args.host} and devbox-offbox-watch would have brought"
+                    f" each back: " + " | ".join(would_restart)
+                    + f". It is in report-only mode and restarts nothing until that is turned off"
+                      f" (`--report-only`, or DEVBOX_OFFBOX_REPORT_ONLY in"
+                      f" ~/.config/systemd/user/devbox-offbox-watch.service.d/report-only.conf on"
+                      f" sami-rocqperf).")
 
     if once(state, "stall_refusal_reported", bool(left_for_stall)):
         report.send([args.sre], "refuse-stall",
@@ -583,9 +676,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", default=str(STATE_DIR / "state.json"))
     parser.add_argument("--dry-run", action="store_true",
                         help="say what would happen; start nothing and send nothing")
+    parser.add_argument("--report-only", action="store_true",
+                        default=bool(os.environ.get("DEVBOX_OFFBOX_REPORT_ONLY")),
+                        help="restart nothing; send the SRE one message naming what would have"
+                             " been restarted. Alerts and refusals are sent as usual."
+                             " DEVBOX_OFFBOX_REPORT_ONLY sets it too")
     parser.add_argument("--once", action="store_true", help="accepted and ignored; a run is one pass")
     args = parser.parse_args(argv)
-    log(f"devbox-offbox-watch on {socket.gethostname()} at {utc(time.time())}, watching {args.host}")
+    mode = ("report-only, restarting nothing" if args.report_only else
+            "dry run, changing and sending nothing" if args.dry_run else "restarting")
+    log(f"devbox-offbox-watch on {socket.gethostname()} at {utc(time.time())},"
+        f" watching {args.host} ({mode})")
     return run(args)
 
 
