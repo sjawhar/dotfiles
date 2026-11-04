@@ -1128,8 +1128,15 @@ ensure_forward_channels() {
 # 2026-11-02 every route to it from a box failed and two lanes waited on it - the box's own
 # loopback, the box network's gateway, docker0's 172.17.0.1, and the tailnet (`tailscale serve`'s
 # :8449 listener is bound to the tailscale0 device, so a packet from a box bridge never reaches
-# it). AGENTBOX_LOOPBACK_PORTS (space-separated ports) replaces the list.
-read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005}"
+# it). 5432 is the Cloud SQL Auth Proxy to agents-postgres
+# (omp/cloud-sql-proxy-agents-postgres.service): omp's session store writes a session's transcript
+# to the omp_sessions database through it (dispatch://INFRA-1192), and the DSN names 127.0.0.1:5432,
+# so the relay has to put the listener back on that exact address for one DSN to serve the host and
+# every box. The instance takes no raw TCP from here at all - measured 2026-11-04, its public
+# 136.117.143.83 and its private 10.54.0.8 both refuse 5432 and 6432 from the host and from inside a
+# box - so the proxy, and this relay, are the whole route. AGENTBOX_LOOPBACK_PORTS (space-separated
+# ports) replaces the list.
+read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005 5432}"
 LOOPBACK_SERVICES=()
 loopback_services() {
     LOOPBACK_SERVICES=()
@@ -2426,8 +2433,12 @@ move_shared_roots() {
     local nvme="/mnt/nvme/$(id -un)"
     MOVE_SHARED_ROOTS=("$HOME/Code" "$HOME/Code/personal" "$HOME/.worktrees" "$HOME/tmp")
     # session-tmp holds one directory per session (devbox/session-scratch-reap) and tmp one per
-    # `work-dir NAME`, so both are roots and neither is ever a path a box is given.
-    MOVE_SHARED_ROOTS+=("$nvme" "$nvme/tmp" "$nvme/session-tmp" "$nvme/worktrees" "$nvme/scratch")
+    # `work-dir NAME`, so both are roots and neither is ever a path a box is given. `wt` is the
+    # same: the box preamble puts one worktree per session under it (323 GB of every session's
+    # worktrees on 2026-11-03), and without it every path below it collapsed into the root, so a
+    # session that touched one worktree there got all of them (20 of this host's 44 live sessions
+    # on 2026-11-04; PROCS's move at 07:09Z on 2026-11-03 and SQLPAGE's box carried it whole).
+    MOVE_SHARED_ROOTS+=("$nvme" "$nvme/tmp" "$nvme/session-tmp" "$nvme/worktrees" "$nvme/scratch" "$nvme/wt")
 }
 
 # The paths every box already has at their own path: $SRC and the targets of its symlinks, the
@@ -2480,6 +2491,21 @@ move_dir_in_box() {
     move_in_box_paths
     for p in "${MOVE_IN_BOX[@]}"; do
         if move_within "$path" "$p"; then return 0; fi
+    done
+    return 1
+}
+
+# An INFERRED path that is a strict ancestor of a path every box already has (MOVE_IN_BOX) is too
+# broad as well: the box has the part of it the session can use, and the rest is everyone else's.
+# One `ls /mnt/durable` in a session's record made the whole durable disk - other lanes' work and
+# every other user's directory - a --dir of its box (S2, 2026-11-04), because the in-box check
+# tests the other way round and /mnt/durable is not a root move_dir_too_broad looks above. Only
+# the inference asks this: the working directory and a path named with --dir keep their place.
+move_dir_above_box() {
+    local path="$1" p
+    move_in_box_paths
+    for p in "${MOVE_IN_BOX[@]}"; do
+        if [[ "$p" == "$path"/* ]]; then return 0; fi
     done
     return 1
 }
@@ -3081,7 +3107,8 @@ move_keep() {
 #
 # Every candidate but the working directory is resolved to its git tree root or bounded at the
 # first directory below a shared root, must exist, and is dropped when the box has it already
-# ($SRC, the dotfiles, the home allow-list) or when it is too broad.
+# ($SRC, the dotfiles, the home allow-list, the durable directory), when it is too broad, or when
+# it is above a path the box has (move_dir_above_box). A path named with --dir skips these checks.
 #
 # $2 is the session's omp pid (no live inference without it) and $3 its session id (no record and
 # no plan file without it); every argument after those is an explicit --dir. A working directory
@@ -3145,7 +3172,7 @@ move_dirs_why() {
             move_resolve_dir_var "$store"
             bounded="$MOVE_RESOLVED"
             [[ -n "$bounded" && -d "$bounded" ]] || continue
-            if move_dir_in_box "$bounded" || move_dir_too_broad "$bounded" || move_dir_dies_with_omp "$bounded"; then continue; fi
+            if move_dir_in_box "$bounded" || move_dir_too_broad "$bounded" || move_dir_above_box "$bounded" || move_dir_dies_with_omp "$bounded"; then continue; fi
             move_keep "$bounded" "the git object store of $tree, which is outside it"
         done < <(move_git_storage "$tree")
         return 0
@@ -3167,7 +3194,7 @@ move_dirs_why() {
             fi
             path="${resolved[$path]}"
             [[ -n "$path" && -d "$path" ]] || continue
-            if move_dir_in_box "$path" || move_dir_too_broad "$path" || move_dir_dies_with_omp "$path"; then continue; fi
+            if move_dir_in_box "$path" || move_dir_too_broad "$path" || move_dir_above_box "$path" || move_dir_dies_with_omp "$path"; then continue; fi
             move_keep "$path" "$why"
         done
     }
@@ -3290,7 +3317,7 @@ move_short_trees() {
         tree="$MOVE_RESOLVED"
         [[ -n "$tree" && -d "$tree" && -z "${seen[$tree]:-}" ]] || continue
         seen[$tree]=1
-        if move_dir_in_box "$tree" || move_dir_too_broad "$tree" || move_dir_dies_with_omp "$tree"; then continue; fi
+        if move_dir_in_box "$tree" || move_dir_too_broad "$tree" || move_dir_above_box "$tree" || move_dir_dies_with_omp "$tree"; then continue; fi
         MOVE_SHORT_TREES+=("$tree")
         covered=false
         for d in "$@"; do move_within "$tree" "$d" && { covered=true; break; }; done

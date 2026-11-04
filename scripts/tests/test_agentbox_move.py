@@ -393,6 +393,99 @@ class AgentboxMove(unittest.TestCase):
         result = self.run_bash(f'move_dirs_why "{lane}" 425')
         self.assertEqual(result.stdout.splitlines(), [f"{lane}\tits own working directory"], result.stderr)
 
+    def durable_root(self) -> tuple[Path, Path]:
+        """/mnt/durable and /mnt/durable/<user> in the fixture: the user's directory is the one
+        every box binds, and its parent holds other lanes' work and every other user's. Not the
+        default fixture's, whose parent is the whole temporary tree and so already above $HOME."""
+        durable = self.root / "mnt-durable" / "sami"
+        durable.mkdir(parents=True)
+        self.env["AGENTBOX_DURABLE"] = str(durable)
+        # Inside a git working tree (a TMPDIR under a home that is one) every fixture path
+        # resolves to that tree, and these tests would pass on the unchanged script for that alone.
+        enclosing = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                                   capture_output=True, text=True)
+        self.assertNotEqual(enclosing.returncode, 0, f"TMPDIR is inside the git tree {enclosing.stdout.strip()}")
+        return durable.parent, durable
+
+    def test_an_ancestor_of_a_path_every_box_has_is_never_inferred(self) -> None:
+        """S2, 2026-11-04: one `ls /mnt/durable` in its record made the whole durable disk a --dir
+        of its box. The in-box check passes a path ABOVE an in-box one, and /mnt/durable is no root
+        the too-broad check looks above; the box has the part of it the session can use."""
+        root, durable = self.durable_root()
+        (durable / "cache").mkdir()
+        (durable / "cache" / "f.txt").write_text("x\n", encoding="utf-8")
+        (root / "other-user").mkdir()
+        lane = self.home / "lane"
+        lane.mkdir()
+        session = "01a19700-0000-7000-8000-000000000c11"
+        self.transcript(session, [
+            ("bash", {"command": f"ls {root}"}),
+            ("read", {"path": f"{durable}/cache/f.txt"}),
+        ])
+        self.make_proc(472, comm="omp", ppid=1, cwd=lane, session=session)
+        result = self.run_bash(f'move_dirs_why "{lane}" 472 "{session}"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [f"{lane}\tits own working directory"])
+
+    def test_a_session_that_works_under_the_durable_root_still_gets_it(self) -> None:
+        """The rule is the inference's alone: a working directory under the durable root is still
+        the box's first --dir, and a durable root the session names with --dir is still in its
+        spec, since dropping what a person asked for is worse than the hole it closes."""
+        root, _ = self.durable_root()
+        work = root / "other-lane"
+        work.mkdir()
+        transcript = self.home / ".omp/agent/sessions/-lane" / f"2026-11-01T09-00-00-000Z_{self.S2}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("", encoding="utf-8")
+        self.make_proc(1100, comm="bash", ppid=1, cwd=work)
+        self.make_proc(1101, ppid=1100, cwd=work, writes=(transcript,))
+        self.set_pids(1101)
+        self.set_panes({1100: ("%47", "agents:3.1")})
+        env = 'move_own_omp() { echo 1101; }\nmove_image_bytes() { echo 280000000; }\n'
+        inferred = self.run_bash(env + "cmd_move_self --dry-run")
+        self.assertEqual(inferred.returncode, 0, inferred.stderr)
+        self.assertIn(f"  agentbox new --dir {work} -- omp --resume {transcript}\n", inferred.stdout)
+        named = self.run_bash(env + f'cmd_move_self --dry-run --dir "{root}"')
+        self.assertEqual(named.returncode, 0, named.stderr)
+        self.assertIn(f"  agentbox new --dir {work} --dir {root} -- omp --resume {transcript}\n", named.stdout)
+
+    def test_a_session_whose_working_directory_is_a_shared_root_keeps_the_whole_root(self) -> None:
+        """The one session a narrower inference could strand: its cwd IS the root, not a tree
+        under it — the lead whose working directory is /mnt/nvme/<user>/wt itself. The working
+        directory is exempt from every drop (only /, $HOME, the box tree and a per-session TMPDIR
+        are refused), so it stays the box's first --dir whether the root is a shared root or the
+        ancestor of an in-box path, and what it holds open below it collapses into it."""
+        shared = self.home / "tmp"
+        (shared / "a-lane").mkdir(parents=True)
+        self.make_proc(1200, comm="omp", ppid=1, cwd=shared)
+        self.make_proc(1201, comm="bash", ppid=1200, cwd=shared / "a-lane")
+        at_shared_root = self.run_bash(f'move_dirs_why "{shared}" 1200')
+        self.assertEqual(at_shared_root.returncode, 0, at_shared_root.stderr)
+        self.assertEqual(at_shared_root.stdout.splitlines(), [f"{shared}\tits own working directory"])
+        root, durable = self.durable_root()
+        (durable / "lane").mkdir()
+        self.make_proc(1300, comm="omp", ppid=1, cwd=root)
+        above_the_box = self.run_bash(f'move_dirs_why "{root}" 1300')
+        self.assertEqual(above_the_box.returncode, 0, above_the_box.stderr)
+        self.assertEqual(above_the_box.stdout.splitlines(), [f"{root}\tits own working directory"])
+
+    def test_the_host_worktree_root_bounds_a_path_to_one_session_s_worktree(self) -> None:
+        """/mnt/nvme/<user>/wt holds one worktree per session (323 GB of them on 2026-11-03).
+        Without it in the real root list every path below it collapsed into the root, so a session
+        that touched one worktree there got all of them. This is the one test of the unoverridden
+        list, so it names no fixture path: the resolution is string work, not a stat."""
+        # The empty value takes the real list (move_shared_roots reads it only when non-empty);
+        # the fixture otherwise replaces the list with its own, so nothing else tests this one.
+        script = ('wt="/mnt/nvme/$(id -un)/wt"\n'
+                  'r="$(move_resolve_dir "$wt/AgentboxAncestorRule/sub")"\n'
+                  '[[ "$r" == "$wt/AgentboxAncestorRule" ]] && echo bounded-to-one-worktree || echo "bounded to $r"\n'
+                  'move_dir_too_broad "$wt" && echo root-too-broad\n'
+                  'move_dir_too_broad "$wt/AgentboxAncestorRule" || echo worktree-kept\n')
+        result = self.run_bash(script, {"AGENTBOX_MOVE_ROOTS": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ["bounded-to-one-worktree", "root-too-broad", "worktree-kept"])
+
     def test_a_root_many_sessions_share_is_never_mounted_whole(self) -> None:
         """~/Code, ~/.worktrees and /mnt/<user>{,/tmp,/worktrees,/scratch} hold many sessions'
         trees. A box gets the first directory below the deepest such root, never the root."""
