@@ -181,6 +181,37 @@ RUN_TIME_REFRESH = 3600.0
 MESSAGE_LIMIT = 600
 REPORT_KEEP = 7 * 86400.0
 
+# A session nobody will bring back. Since 2026-11-04 nothing on this machine or on
+# sami-rocqperf restarts a crashed agent session: omp-memory-watch, which did it as a side
+# duty, was stopped on Sami's word (17:10:29Z), and devbox-offbox-watch is stopped after its
+# liveness check made four duplicate sessions that night. The SRE chose a gap over an automatic
+# resume ("a gap is the cheaper failure") and asked for this instead: a report, every pass, of
+# each session that WOULD have been restarted and now will not be.
+#
+# THIS NEVER STARTS ANYTHING. It reads and it tells one person.
+#
+# A session is dead when all three hold:
+#   - the restart registry has an entry for it saying auto_restart=yes;
+#   - no process holds its transcript open. `sudo -n fuser` is the test, run on the host, where
+#     it sees the holders inside agent boxes too (proved 2026-11-04 21:52Z on 01a1a292,
+#     01a1a688 and 01a170e0). A fuser that cannot run at all decides nothing: no session is
+#     called dead on a failed test;
+#   - its transcript has not been written for DEAD_SESSION_SILENCE. A live session writes a
+#     line per tool call; fifteen minutes of nothing, with no process holding the file, is a
+#     session that ended rather than one that is thinking.
+# Each newly dead id is said once. An id that comes back -- held again, or written again --
+# clears, so a later death of the same id is said again.
+DEAD_SESSION_SILENCE = 900.0
+DEFAULT_RESTART_REGISTRY = Path("/mnt/durable/sami/restart-registry/sessions")
+# The planned-reboot flag: while this file exists, dead sessions are counted and logged and
+# nobody is told. It sits beside the registry, where whoever runs the window is already
+# working, and it is a file rather than a time window so that forgetting to remove it is
+# visible in every run's log line.
+DEFAULT_REBOOT_WINDOW = Path("/mnt/durable/sami/restart-registry/reboot-window")
+# Who hears it: the SRE session, by id and not by role. The box-health role may itself be one
+# of the sessions that died, and this is the one message that must not go to a dead reader.
+DEAD_SESSION_TARGET = SRE
+
 
 def log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -311,6 +342,167 @@ def tell_box_health(envoy: Envoy, text: str) -> str:
     if envoy.send(SRE, text):
         return SRE
     return ""
+
+
+# ------------------------------------------------------------- sessions nobody will restart
+
+
+def registry_entries(directory: Path) -> list[dict]:
+    """Every `<id>.entry` in the restart registry, as its `key=value` lines.
+
+    A value runs to the end of its line (the `resume` and `after` lines hold spaces and `=`),
+    and a line that is not `key=value` is skipped rather than guessed at. An unreadable entry
+    is skipped with its error, because one bad file must not hide the other 77.
+    """
+    entries = []
+    try:
+        paths = sorted(directory.glob("*.entry"))
+    except OSError as error:
+        log(f"restart registry {directory} cannot be listed: {error}")
+        return entries
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            log(f"restart registry entry {path.name} cannot be read: {error}")
+            continue
+        fields = {"path": str(path), "session": path.stem}
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() and " " not in key.strip():
+                fields.setdefault(key.strip(), value)
+        entries.append(fields)
+    return entries
+
+
+_RESUME_TRANSCRIPT = re.compile(r"--resume\s+(\S+\.jsonl)")
+
+
+def entry_transcript(entry: dict) -> str:
+    """The transcript the entry's resume command would reopen, or ""."""
+    match = _RESUME_TRANSCRIPT.search(entry.get("resume", ""))
+    return match.group(1) if match else ""
+
+
+def transcript_held(path: str) -> bool | None:
+    """Whether a process holds this file open: True, False, or None when the test did not run.
+
+    `sudo -n fuser` on the host, which sees a holder inside an agent box as well as one outside
+    it. fuser exits 0 when a process holds the file, 1 when none does, and anything else (no
+    passwordless sudo, no fuser, a timeout) is not an answer -- None, which keeps the session
+    off the dead list. Saying nothing is the right failure here: the message tells a person a
+    session is gone, and a sudo that stopped working must not announce 78 deaths.
+    """
+    try:
+        done = subprocess.run(
+            ["sudo", "-n", "fuser", path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"fuser could not run on {path}: {error}")
+        return None
+    if done.returncode == 0:
+        return True
+    if done.returncode == 1 and not done.stderr.strip().startswith("sudo:"):
+        return False
+    log(f"fuser said nothing usable about {path}: exit {done.returncode} {done.stderr.strip()}")
+    return None
+
+
+def dead_sessions(directory: Path, now: float, silence: float) -> tuple[list[dict], int]:
+    """(the sessions nobody will restart, how many entries were judged).
+
+    One dict per dead session: its id, title, transcript and last write. Only entries with
+    auto_restart=yes are judged at all, and the cheap test (the file's mtime) runs before the
+    `sudo fuser` call, so a box with 78 live sessions makes a handful of fuser calls, not 78.
+    """
+    found: list[dict] = []
+    judged = 0
+    for entry in registry_entries(directory):
+        if entry.get("auto_restart", "").strip() != "yes":
+            continue
+        transcript = entry_transcript(entry)
+        if not transcript:
+            continue
+        judged += 1
+        try:
+            written = os.path.getmtime(transcript)
+        except OSError:
+            # No transcript at all: the session never wrote one, or it was moved. Not a death
+            # this watch can describe, and not one it invents.
+            continue
+        if now - written < silence:
+            continue
+        if transcript_held(transcript) is not False:
+            continue
+        found.append(
+            {
+                "session": entry.get("session", ""),
+                "title": (entry.get("title", "") or "").strip() or "-",
+                "transcript": transcript,
+                "written": written,
+            }
+        )
+    return found, judged
+
+
+def report_dead_sessions(
+    envoy: Envoy, state: "State", options: argparse.Namespace, now: float
+) -> list[str]:
+    """Say each newly dead session once, to one person. Returns the ids said.
+
+    It starts nothing, and it is the only part of this watch that writes to a session id rather
+    than to the box-health role: the role's own holder may be one of the dead.
+    """
+    directory = Path(options.registry)
+    if not directory.is_dir():
+        return []
+    found, judged = dead_sessions(directory, now, options.dead_silence)
+    known = state.data.setdefault("dead_sessions", {})
+    alive = {item["session"] for item in found}
+    for session in [sid for sid in known if sid not in alive]:
+        known.pop(session)
+    # The planned-reboot window. Its deaths are expected, so they are recorded as seen and
+    # never said, now or when the window ends: a reboot that takes 60 sessions down must not
+    # arrive as 60 messages an hour later. A session that dies after the flag is removed is
+    # new again and is said.
+    quiet = Path(options.reboot_window).exists()
+    said = []
+    for item in found:
+        if item["session"] in known:
+            continue
+        if quiet:
+            known[item["session"]] = now
+            log(f"dead session {item['session']} not said: {options.reboot_window} exists")
+            continue
+        line = (
+            f"SESSION GONE AND NOT RESTARTED on {socket.gethostname()}:"
+            f" {item['session']} ({item['title']}). Its transcript was last written"
+            f" {iso(item['written'])} and no process holds it open. The registry says"
+            f" auto_restart=yes, and nothing restarts sessions on this machine any more"
+            f" (dispatch://INFRA-993), so it stays down until a person resumes it:"
+            f" the command is the `resume=` line of {options.registry}/{item['session']}.entry."
+        )[:MESSAGE_LIMIT]
+        if options.print_alert or options.dry_run:
+            print(line + "\n")
+        if options.dry_run:
+            said.append(item["session"])
+            continue
+        if not envoy.send(DEAD_SESSION_TARGET, line):
+            # Not recorded as said, so the next pass tries again.
+            log(f"NOBODY HEARD IT: session {item['session']} is gone and Envoy refused")
+            continue
+        log(f"told {DEAD_SESSION_TARGET}: session {item['session']} is gone")
+        said.append(item["session"])
+        known[item["session"]] = now
+    log(
+        f"restart registry: {judged} session(s) with auto_restart=yes judged,"
+        f" {len(found)} gone, {len(said)} newly said"
+        + (f"; quiet: {options.reboot_window} exists" if quiet else "")
+    )
+    return said
 
 
 # ------------------------------------------------------------------------------- systemd
@@ -1945,6 +2137,13 @@ def run_once(options: argparse.Namespace) -> int:
             message = fit(f"UNIT HEALTH CLEARED on {host}: ", cleared, tail)
     prune_reports(options)
 
+    # Sessions nobody will restart. Separate from everything above: its own reader, its own
+    # message per id, and its own reader -- one person, not the box-health role. It runs on a
+    # live pass only, since `--at` replays a past hour of the journal and the registry and the
+    # transcripts on disk are of now.
+    if live:
+        report_dead_sessions(envoy, state, options, now)
+
     state.data["last_run"] = now
     state.data["last_summary"] = {
         service: {
@@ -2050,6 +2249,27 @@ def main() -> int:
         type=Path,
         default=DEFAULT_STREAM_JOB_STATE,
         help=f"what scripts/stream-job records per job (default {DEFAULT_STREAM_JOB_STATE})",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        default=DEFAULT_RESTART_REGISTRY,
+        help="the restart registry whose auto_restart=yes sessions are reported when they die"
+        f" and nothing brings them back (default {DEFAULT_RESTART_REGISTRY})",
+    )
+    parser.add_argument(
+        "--dead-silence",
+        type=float,
+        default=DEAD_SESSION_SILENCE,
+        help="seconds without a transcript write, with no process holding it, before a"
+        f" registered session is called gone (default {DEAD_SESSION_SILENCE:.0f})",
+    )
+    parser.add_argument(
+        "--reboot-window",
+        type=Path,
+        default=DEFAULT_REBOOT_WINDOW,
+        help="while this file exists, dead sessions are logged and nobody is told, for a"
+        f" planned reboot (default {DEFAULT_REBOOT_WINDOW})",
     )
     parser.add_argument(
         "--http-timeout",

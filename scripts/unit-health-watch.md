@@ -228,6 +228,45 @@ The same route as every box watch here (`load-swap-watch.md`, "Where alerts go")
 - **The journal's horizon.** A daily unit's two-day window is cut short where the user journal
   starts (about 30 hours back on sami-rocqperf on 2026-11-02).
 
+## Sessions nobody will restart
+
+Since 2026-11-04 nothing on sami-devbox or sami-rocqperf brings a crashed agent session back:
+`omp-memory-watch`, which resumed panes as a side duty, was stopped on Sami's word, and
+`devbox-offbox-watch` is stopped after its liveness check made four duplicate sessions that
+night. The SRE chose the gap over an automatic resume — "a gap is the cheaper failure" — and
+asked for a report in its place. **This never starts anything.**
+
+Every pass, a session is gone when all three hold:
+
+- the restart registry (`--registry`, default
+  `/mnt/durable/sami/restart-registry/sessions/*.entry`) has an entry for it with
+  `auto_restart=yes`;
+- its transcript — the `--resume <path>.jsonl` of the entry's `resume=` line — has not been
+  written for `--dead-silence`, 15 minutes by default. A live session writes a line per tool
+  call;
+- no process holds that transcript open. The test is `sudo -n fuser` **on the host**, which
+  sees a holder inside an agent box as well as one outside it (proved 2026-11-04 21:52Z on
+  01a1a292, 01a1a688 and 01a170e0). The mtime test runs first, so a box with 78 live sessions
+  makes a handful of `fuser` calls, not 78.
+
+Each newly gone id is **one Envoy message to the SRE's session id**, not to the box-health
+role, because the role's own holder may be one of the dead. It names the id, its title, when
+its transcript was last written, and where the resume command is. An id that comes back —
+written again, or held again — clears, so a later death is said again. A `fuser` that cannot
+run (no passwordless sudo, no binary, a timeout) answers nothing and no session is called gone
+on it: a sudo that stopped working must not announce 78 deaths.
+
+**The planned-reboot window.** While `--reboot-window` exists
+(`/mnt/durable/sami/restart-registry/reboot-window` by default), the deaths are counted, logged
+and never said — not during the window and not after it, since a reboot that takes 60 sessions
+down must not arrive as 60 messages an hour later. A session that dies after the file is
+removed is new again. It is a file rather than a time range so that forgetting to remove it
+shows in every run's log line:
+
+```
+restart registry: 11 session(s) with auto_restart=yes judged, 0 gone, 0 newly said
+```
+
 ## Turning it off
 
 `systemctl --user disable --now unit-health-watch.timer`; nothing re-arms it until someone runs
