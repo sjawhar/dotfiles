@@ -292,6 +292,25 @@ def test_scheduler_keeps_fires_crossed_while_running_but_drops_before_start():
     assert not [fire for fire in restarted if fire.at <= while_a_runs]
 
 
+def test_job_added_while_running_fires_only_from_when_the_jobs_file_first_held_it():
+    jobs = [
+        {"name": "A", "at": ["06:30", "06:45"], "dues_from": None},
+        {"name": "B", "at": ["06:31", "06:50"], "dues_from": "INFRA-167"},
+    ]
+    started = datetime(2026, 11, 1, 14, 0, tzinfo=UTC)  # 06:00 PST
+    added = datetime(2026, 11, 1, 14, 55, tzinfo=UTC)
+    old_due = datetime(2026, 11, 1, 14, 40, tzinfo=UTC)
+    new_due = datetime(2026, 11, 1, 15, 0, tzinfo=UTC)
+
+    fires = pilot.fires_since(jobs, "America/Los_Angeles", started, added, {"INFRA-167": [old_due, new_due]}, {},
+                              set(), job_since={"A": started, "B": added})
+    assert [(fire.name, fire.at, fire.kind) for fire in fires] == [
+        ("A", datetime(2026, 11, 1, 14, 30, tzinfo=UTC), "daily"),
+        ("A", datetime(2026, 11, 1, 14, 45, tzinfo=UTC), "daily"),
+        ("B", new_due, "due"),
+    ]
+
+
 def test_scheduled_command_kills_and_reaps_its_process_group_on_timeout(monkeypatch):
     calls = []
 

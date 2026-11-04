@@ -558,11 +558,14 @@ def coalesce_fires(fires: list[Fire]) -> list[Fire]:
 
 def fires_since(jobs: list[dict], timezone: str, started: dt.datetime, now: dt.datetime,
                 dues: dict[str, list[dt.datetime]], fired_dues: dict[str, set[str]],
-                executed_daily: set[tuple[str, str]]) -> list[Fire]:
+                executed_daily: set[tuple[str, str]], *,
+                job_since: dict[str, dt.datetime] | None = None) -> list[Fire]:
     """Every daily and due fire from this scheduler process's start through ten minutes past NOW that has not run,
     recomputed from the latest jobs and records each cycle. DUES holds every due in the records, overdue ones too: a
     due that passed while a job ran still fires, one the owner removed or moved fires no more or at its new time. A
-    restart sets STARTED to its own start, so times missed while the process was down are not replayed."""
+    restart sets STARTED to its own start, so times missed while the process was down are not replayed. A job fires
+    only from the later of the process start and the moment the jobs file first held it (JOB_SINCE, by name), so a
+    job added while the scheduler runs does not replay the times between the start and its addition."""
     started, now = started.astimezone(dt.UTC), now.astimezone(dt.UTC)
     zone = ZoneInfo(timezone)
     horizon = now + dt.timedelta(minutes=10)
@@ -571,19 +574,20 @@ def fires_since(jobs: list[dict], timezone: str, started: dt.datetime, now: dt.d
     out: list[Fire] = []
     for job in jobs:
         name = job["name"]
+        since = max(started, (job_since or {}).get(name, started).astimezone(dt.UTC))
         for offset in range((last_day - first_day).days + 1):
             day = first_day + dt.timedelta(days=offset)
             for at in job.get("at", []):
                 hour, minute = (int(part) for part in at.split(":", 1))
                 scheduled = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=zone).astimezone(dt.UTC)
                 key = (name, utc_text(scheduled))
-                if started <= scheduled <= horizon and key not in executed_daily:
+                if since <= scheduled <= horizon and key not in executed_daily:
                     out.append(Fire(name, scheduled, "daily"))
         source = job.get("dues_from")
         if source:
             for due in dues.get(source, []):
                 key = _due_key(name, due)
-                if started <= due <= horizon and key not in fired_dues.get(source, set()):
+                if since <= due <= horizon and key not in fired_dues.get(source, set()):
                     out.append(Fire(name, due, "due", source, key))
     return out
 
@@ -818,6 +822,7 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
     timeouts: dict[str, int] = {}
     status: dict = {"jobs_file": str(jobs_file), "jobs_file_error": None, "checked_at": None, "jobs": {}}
     current: dict = {}
+    job_since: dict[str, dt.datetime] | None = None  # when the jobs file first held each job, None before the first load
     dirty = False
 
     def job_status(name: str) -> dict:
@@ -913,7 +918,10 @@ def schedule(jobs_file: Path, state: Path, api=None, clock=None, wait=_wait_for_
                 refresh_stream_record(api, state, stream)
                 fired.setdefault(stream, _load_fired(state, {stream})[stream])
             dues = {stream: _load_dues(state, stream, now) for stream in streams}
-            fires = coalesce_fires(fires_since(jobs, timezone, started_at, now, dues, fired, executed_daily))
+            first_seen = started_at if job_since is None else now
+            job_since = {job["name"]: (job_since or {}).get(job["name"], first_seen) for job in jobs}
+            fires = coalesce_fires(fires_since(jobs, timezone, started_at, now, dues, fired, executed_daily,
+                                               job_since=job_since))
             by_name = {job["name"]: job for job in jobs}
             for fire in fires:
                 if fire.at > now or len(running) >= max_jobs:
