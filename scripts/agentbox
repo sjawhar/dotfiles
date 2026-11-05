@@ -4981,7 +4981,17 @@ move_orphans_gate() {
     orphans="$(move_orphans "$1" "$2")"
     [[ -n "$orphans" ]] || return 0
     list="$(move_orphans_list "$orphans")"
-    MOVE_ORPHANS_WHY="these processes of this session die with the hang-up of the move: $list. Start each one detached (\`setsid <command> </dev/null >>log 2>&1 &\`, which outlives the pane) or as an omp background job, or stop it, or move anyway with --accept-orphans, which ends exactly those pids"
+    # `setsid` used to be the answer here and is not one on this omp pin. MEASURED, 2026-11-05:
+    # two stream leads' own relaunchers, detached exactly as the old advice said, were gone
+    # within about 2 s of the omp they had just hung up -- the broker logged "session retired
+    # … why=process exited" at 08:27:27.509Z and 08:29:06.925Z against their last lines at
+    # 08:27:25Z and 08:29:05Z -- while 31 of 31 survived the same step on the previous pin
+    # (sami-rocqperf, 11-01 to 11-03). WHY is not established: the first explanation offered
+    # was omp adopting the child as a subreaper, and the omp lead then read the code and showed
+    # omp sets PR_SET_CHILD_SUBREAPER only for `!command` config resolution, never for the bash
+    # tool. So this comment says what happens and not why. The advice names only what is known
+    # to outlive a hang-up: something that is not a descendant of the session at all.
+    MOVE_ORPHANS_WHY="these processes of this session die with the hang-up of the move: $list. Detaching with \`setsid\` does NOT save them on this omp build: measured 2026-11-05, such a process dies within about 2 s of its omp exiting. What survives is a host service (a \`~/.config/stream-jobs/<name>.job\` file, \`scripts/stream-job.md\`) or a systemd user unit, since neither is a child of any session. Otherwise stop it, or move anyway with --accept-orphans, which ends exactly those pids"
     if $MOVE_ACCEPT_ORPHANS; then
         echo "agentbox: --accept-orphans: the hang-up of the move ends $list" >&2
         return 0

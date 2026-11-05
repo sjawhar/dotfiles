@@ -3739,7 +3739,15 @@ class AgentboxMove(unittest.TestCase):
         self.assertNotIn("runner-ab12", refused.stderr)
         self.assertNotIn("watch.py", refused.stderr)
         self.assertNotIn("watch-child.py", refused.stderr)
-        self.assertIn("Start each one detached (`setsid <command> </dev/null >>log 2>&1 &`", refused.stderr)
+        # The advice must not send the reader back to `setsid`. On this omp build a setsid
+        # child is re-parented to the omp (child subreaper) and dies when its teardown walks
+        # the tree -- which is what a move's hang-up is. Two stream leads' own relaunchers
+        # went that way on 2026-11-05, within ~2 s of the omp they had hung up, while 31 of 31
+        # survived the same step on the previous pin. A message that recommends the failing
+        # move is worse than no message.
+        self.assertIn("Detaching with `setsid` does NOT save them", refused.stderr)
+        self.assertNotIn("which outlives the pane", refused.stderr)
+        self.assertIn("stream-jobs", refused.stderr)
         self.assertNotIn("systemd-run", refused.stderr)
         dry = self.run_bash(env + "cmd_move_self --dry-run")
         self.assertEqual(dry.returncode, 0, dry.stderr)
