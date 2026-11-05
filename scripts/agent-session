@@ -77,8 +77,22 @@ if [[ "${agent##*/}" == omp ]]; then
     # relauncher, a person - and on 2026-11-03 two of them started 51 live sessions a second time.
     # It waits up to 60 s, since a relaunch that follows a hang-up starts while the old omp is
     # still tearing down.
-    if [[ -n "$target" ]] && live="$("$DOTFILES_DIR/scripts/omp-session-live" --wait "${AGENT_SESSION_LIVE_WAIT:-60}" "$target")"; then
-        echo "agent-session: session $target is running already on this machine ($(sed 's/\t/: /' <<<"$live" | paste -sd ';')); one session must not run twice, so it is not resumed. If that omp is stuck, end it by its pid first." >&2
+    # Inside an agent box omp-session-live refuses to answer about the HOST and exits 3, and a
+    # non-zero exit here reads as "no omp runs it": measured 2026-11-05, `omp --resume <id>` run
+    # inside a box whose own omp was running that very session (pid 2433) passed this guard and
+    # started a second copy. A box can answer about ITSELF, which is where an in-box duplicate
+    # is made - an `agentbox restart` relaunch, a move's respawn, a person or an agent at the
+    # box's own shell - so it is asked that way, with its own /proc. A duplicate of this session
+    # in ANOTHER box, or on the host, is refused where such a launch happens: `agentbox new` on
+    # the host asks the host's /proc before it starts a box at all.
+    live_env=()
+    live_where="on this machine"
+    if [[ -e /.dockerenv && -z "${OMP_SESSION_LIVE_PROC:-}" ]]; then
+        live_env=(env OMP_SESSION_LIVE_PROC=/proc)
+        live_where="in this agent box"
+    fi
+    if [[ -n "$target" ]] && live="$(${live_env[@]+"${live_env[@]}"} "$DOTFILES_DIR/scripts/omp-session-live" --wait "${AGENT_SESSION_LIVE_WAIT:-60}" "$target")"; then
+        echo "agent-session: session $target is running already $live_where ($(sed 's/\t/: /' <<<"$live" | paste -sd ';')); one session must not run twice, so it is not resumed. If that omp is stuck, end it by its pid first." >&2
         exit 3
     fi
 fi
