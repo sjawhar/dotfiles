@@ -7,6 +7,8 @@ description: "Use when agents ignore instructions or fail skill evals, even afte
 
 If you asked agents to do X and they didn't, read their actual transcripts before saying X is impossible, lowering the bar, or replacing the approach. A failed run tells you what happened, not why.
 
+Once you are reading transcripts, `references/best-practices.md` collects field-tested techniques and common pitfalls — diagnosing failures, and writing prompts, skills, and evals agents actually follow — drawn from published guides.
+
 ## Find the cause
 
 1. State what the agents were supposed to do and what they did instead. Keep the acceptance criteria unchanged while you investigate; a lower bar hides the failure.
