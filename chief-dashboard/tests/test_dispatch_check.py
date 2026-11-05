@@ -248,6 +248,20 @@ def test_waiting_on_us_an_answer_is_followed_only_by_its_asker_its_thread_or_a_c
         lines = found(check(api, dc.Scope("BET")), "WAITING-ON-US")
         assert bool(lines) == flagged, name
 
+def test_waiting_on_us_an_answered_approval_needs_no_acknowledgement():
+    """Sami, 2026-11-05 23:03Z: an acknowledgement of his approval is noise. An answered approval ask is acted on by the
+    Legion daemon or the architect's next version, so it is never a row, whether he approved or requested changes; an
+    answered question still is."""
+    def approval(selected: str, question: str = "Approve spec.md (version 10) and verification.md (version 9)?") -> dict:
+        return ev("ask.answered", SAMI, 5, id="a1", author={"kind": "session", "id": DEAD}, question=question,
+                  answer={"selected": [selected], "text": "trim it"})
+    cases = {"approved": (approval("Approve"), False), "changes requested": (approval("Request changes"), False),
+             "a question answered Approve": (approval("Approve", question="Do we ship the gate?"), True)}
+    for name, (event, flagged) in cases.items():
+        api = FakeDispatch([issue("BET-1", status="backlog", events=[event])])
+        assert bool(found(check(api, dc.Scope("BET")), "WAITING-ON-US")) == flagged, name
+
+
 
 def test_waiting_on_us_a_comment_is_followed_by_a_session_citation_reply_or_resolution_anywhere():
     ref = "dispatch://INFRA-107/comment/c1"

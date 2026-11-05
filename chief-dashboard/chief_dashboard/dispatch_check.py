@@ -571,6 +571,15 @@ def _followed_here(e: dict, later: list[dict]) -> bool:
             for x in later)
     return any(is_session(x) and re.match(r"(comment|message|ask)\.", x["type"]) for x in later)
 
+def is_approval(p: dict) -> bool:
+    """Whether an ask is a spec-approval request (`dispatch request-approval`): its kind says so, or its question opens
+    "Approve " and its answer is Approve or Request changes."""
+    if p.get("kind") == "approval":
+        return True
+    selected = set((p.get("answer") or {}).get("selected") or [])
+    return (p.get("question") or "").startswith("Approve ") and bool(selected) and selected <= {"Approve", "Request changes"}
+
+
 
 def _sami_waits(events: list[dict], open_ask_ids: set):
     """(index, event) of each of Sami's comments (not on an ask), answers to asks no longer open, and messages."""
@@ -612,6 +621,11 @@ def waiting_on_us(key: str, events: list[dict], open_ask_ids: set, remote: dict,
             rows.append(Wait(key, "comment", node, waited=waited, question=body,
                              text=f"{key} comment{where} by sami {waited} ago, unanswered and unresolved: "
                                   f"{body[:180]} ({server}/issues/{key}/comments/{node})"))
+            continue
+        if e["type"] == "ask.answered" and is_approval(p):
+            # Sami, 2026-11-05 23:03Z on INFRA-1225: an acknowledgement of his approval is "pure noise". An approval
+            # ask he answered (approve or request changes) is acted on by the Legion daemon's phase move or the
+            # architect's next version, never by a write in his thread, so it is no row and no re-drive.
             continue
         if e["type"] == "ask.answered":
             ans = p.get("answer") or {}
