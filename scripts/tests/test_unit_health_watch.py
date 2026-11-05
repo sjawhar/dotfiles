@@ -21,6 +21,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -65,23 +66,13 @@ class FakeEnvoy:
 
 
 def options(state: Path, **overrides) -> argparse.Namespace:
-    values = {
-        "window": 3600.0,
-        "killed_share": 0.25,
-        "min_killed": 2,
-        "clear_factor": 0.5,
-        "stuck_after": 900.0,
-        "state": state,
-        "http_timeout": 8.0,
-        "dry_run": False,
-        "write_state": False,
-        "print_alert": False,
-        "report": False,
-        "json": False,
-        "at": None,
-    }
-    values.update(overrides)
-    return argparse.Namespace(**values)
+    with (
+        unittest.mock.patch.object(sys, "argv", [str(SCRIPT)]),
+        unittest.mock.patch.object(WATCH, "run_once", side_effect=lambda parsed: parsed),
+    ):
+        parsed = WATCH.main()
+    vars(parsed).update(state=state, **overrides)
+    return parsed
 
 
 def record(
@@ -259,6 +250,14 @@ class Harness(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.state = Path(self.tmp.name) / "state.json"
+        self.expected = Path(self.tmp.name) / "expected-timers.txt"
+        self.expected.write_text("", encoding="utf-8")
+        self.input_dirs = {
+            name: Path(self.tmp.name) / name
+            for name in ("stream_jobs", "stream_job_state", "registry", "transcripts")
+        }
+        for directory in self.input_dirs.values():
+            directory.mkdir()
         self.patches = [
             unittest.mock.patch.object(WATCH, "Envoy", FakeEnvoy),
             unittest.mock.patch.object(WATCH, "last_own_line", lambda *a: (None, "")),
@@ -278,6 +277,11 @@ class Harness(unittest.TestCase):
     def run_watch(
         self, units: list[dict], records: list[dict], now: float, **overrides
     ) -> FakeEnvoy:
+        overrides.setdefault("expected", self.expected)
+        for name, directory in self.input_dirs.items():
+            overrides.setdefault(name, directory)
+        overrides.setdefault("reboot_window", Path(self.tmp.name) / "reboot-window")
+
         def read(services, since, until):
             self.journal_reads.append((since, until))
             return [
@@ -361,7 +365,7 @@ class TheIncidentHour(Harness):
             self.assertEqual(envoy.published + envoy.sent, [])
 
     def test_a_new_unit_failing_while_one_is_open_is_said_alone(self) -> None:
-        other = "omp-memory-watch.service"
+        other = "fixture-second-watch.service"
         records = incident_hour()
         self.run_watch([timer_unit()], records, ELEVEN_Z)
         second = []
@@ -372,7 +376,7 @@ class TheIncidentHour(Harness):
         fresh = ELEVEN_Z + 290
         units = [
             timer_unit(last_trigger=fresh),
-            timer_unit(service=other, timer="omp-memory-watch.timer", last_trigger=fresh),
+            timer_unit(service=other, timer="fixture-second-watch.timer", last_trigger=fresh),
         ]
         envoy = self.run_watch(units, records + second, ELEVEN_Z + 300)
         self.assertEqual(len(envoy.published), 1)
@@ -403,7 +407,7 @@ class AHealthyHour(Harness):
         )
         self.assertEqual(len(envoy.published), 1)
         text = envoy.published[0][1]
-        self.assertTrue(text.startswith("UNIT RUNS CLEARED"))
+        self.assertTrue(text.startswith("UNIT HEALTH CLEARED"))
         self.assertIn("NO RUN COMPLETED cleared", text)
         self.assertIn("RUNS KILLED AT THE TIME LIMIT cleared", text)
 
@@ -447,8 +451,8 @@ class TheKillShare(Harness):
         )
         self.assertEqual(found, {})
 
-    def test_omp_memory_watch_on_its_worst_hour_alerts(self) -> None:
-        # 2026-11-01T10Z: 83 runs, 47 completed, 36 killed at its limit.
+    def test_killed_share_above_threshold_alerts(self) -> None:
+        # 83 runs: 47 completed, 36 killed at the time limit.
         found = WATCH.judge(
             timer_unit(),
             self.counts(done=47, killed=36),
@@ -748,7 +752,7 @@ class EveryMessage(Harness):
         for text in sent:
             self.assertLessEqual(len(text), 600, text)
             self.report_of(text)
-        self.assertTrue(sent[1].startswith("UNIT RUNS CLEARED on "))
+        self.assertTrue(sent[1].startswith("UNIT HEALTH CLEARED on "))
         self.assertNotIn("\n", sent[1], "a clear is one line")
         self.assertTrue(sent[2].startswith("UNIT RUNS NOT COMPLETING on "))
         self.assertIn("also lane-4-watch.service TIMER STOPPED FIRING closed", sent[2])
