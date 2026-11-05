@@ -807,6 +807,16 @@ def main(argv: list[str] | None = None) -> int:
 
     credential_mode = args.action == "get"
     request = read_credential_request() if credential_mode else {}
+    if credential_mode and not request:
+        # git always sends at least protocol and host, so an empty request is a person
+        # or agent who ran `get` by hand expecting a token; answering nothing with exit 0
+        # read as a silent success (2026-11-05).
+        print(
+            "gh-app-token: `get` is git's credential-helper action and read no request on stdin;"
+            " to mint a token directly run: gh-app-token <profile> --owner <login> [--repo <name>]",
+            file=sys.stderr,
+        )
+        return 2
     if credential_mode and request.get("host", "").casefold() != "github.com":
         return 0
 
