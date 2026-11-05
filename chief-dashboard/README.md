@@ -7,7 +7,8 @@ ready for him. His decisions stay in his Dispatch Inbox (https://dispatch.tail12
 the page links there and counts, per stream, the open asks that wait on him. The design, element by element, is in
 [DESIGN.md](DESIGN.md).
 
-Live, tailnet only: **https://sami-rocqperf.tail12ec1c.ts.net:8446/**
+Live, tailnet only: **https://sami-devbox.tail12ec1c.ts.net:8446/** (sami-devbox serves it; the sami-rocqperf address
+only forwarded here and goes when that machine is shut down).
 
 ## For stream leads: your row is yours
 
