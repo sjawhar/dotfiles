@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Check the restart registry before a reboot.
+
+Usage: restart-registry-check [--registry DIR] [--known-good DIR]
+
+Reads every <registry>/*.entry and reports, for entries with
+auto_restart=yes:
+
+1. resume-line faults that stop a session coming back: no resume= line, a line that runs no omp, or
+   one whose omp resumes a different session than the entry's own id. `--resume` and `--restore`
+   are both valid (omp --help: --restore resumes, then continues the interrupted turn and subagents),
+   and so are an id, an id prefix, or a transcript path.
+2. drift from a known-good restart: for each session that also has a script in KNOWN_GOOD_DIR
+   (default /mnt/durable/sami/restart-2026-11-04/entries, the 11-04 restart that worked), a lost
+   agentbox, --dir binds the known-good command had and the entry lacks, and a changed cwd.
+   Drift is a question for the owner, not an error: a finished worktree is a fine bind to drop.
+   A bind the session still needs is not: inside a box an unbound path is an EMPTY LOOKALIKE, so
+   the session comes back reading empty directories with no error.
+
+3. after= paths a box cannot see: an absolute path the restart message names that is under no --dir,
+   not ~/src, /mnt/durable/sami, the dotfiles or the home allow-list (~/.dotfiles/agentbox/mounts),
+   for an entry whose resume= makes a box. A box's own /tmp and $HOME files die with the box. A hit
+   is a question for the owner too: a note may name a path to say NOT to use it, or reach it over ssh.
+
+Read-only. Exit 1 when any auto_restart entry has a fault from (1).
+"""
+import argparse
+import getpass
+import os
+import pathlib
+import re
+
+# The machine paths this registry lives at, as devbox-offbox-watch holds its own: a default
+# here, and a flag for a test or another machine. Nothing in this file is one person's path.
+#
+# The durable directory is found on the disk, not built from the current user: inside an agent
+# box the session runs as `ubuntu` while the host's /mnt/durable/<host user> is bound in at its
+# own path, so getpass.getuser() there names a directory that does not exist. Run inside a box
+# on 2026-11-05 that gave /mnt/durable/ubuntu and a reading of 0 entries, which looks exactly
+# like an empty registry.
+HOME = os.path.expanduser('~')
+
+
+def durable_dir():
+    """The one /mnt/durable/<user> that holds a restart registry, else this user's."""
+    here = pathlib.Path('/mnt/durable')
+    holders = sorted(p.parents[1] for p in here.glob('*/restart-registry/sessions')) if here.is_dir() else []
+    if len(holders) == 1:
+        return holders[0]
+    return here / getpass.getuser()
+
+
+DURABLE = durable_dir()
+DEFAULT_REGISTRY = DURABLE / 'restart-registry/sessions'
+DEFAULT_KNOWN_GOOD = DURABLE / 'restart-2026-11-04/entries'
+UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+REG = DEFAULT_REGISTRY
+GOOD = DEFAULT_KNOWN_GOOD
+
+
+def entry(path):
+    kv = {}
+    for line in path.read_text().splitlines():
+        if '=' in line:
+            k, v = line.split('=', 1)
+            kv[k.strip()] = v.strip()
+    kv.setdefault('session', path.stem)
+    return kv
+
+
+def known_good():
+    out = {}
+    if not GOOD.is_dir():
+        return out
+    for f in sorted(GOOD.glob('*.sh')):
+        text = f.read_text()
+        m = re.search(UUID, text)
+        if not m:
+            continue
+        cmd = [l for l in text.splitlines() if 'omp' in l and not l.startswith('#')]
+        cd = [l[3:].strip() for l in text.splitlines() if l.startswith('cd ')]
+        out[m.group(0)] = (f.name, cmd[-1].strip() if cmd else '', cd[0] if cd else '')
+    return out
+
+
+def faults(kv):
+    r, sid = kv.get('resume', ''), kv['session']
+    if not r:
+        return ['no resume= line']
+    if 'omp' not in r:
+        return ['resume= runs no omp']
+    m = re.search(r'omp\b.*?(?:--resume|--restore|-r)[=\s]+(\S+)', r)
+    if not m:
+        return ['omp is not given --resume/--restore with a session']
+    target = m.group(1)
+    if not (sid.startswith(target) or sid in target):
+        return [f'resumes {target[:40]}, not its own id {sid}']
+    misplaced = agentbox_flags_after_separator(r)
+    if misplaced:
+        return [f'{" ".join(misplaced)} comes after the "--", so it reaches omp instead of '
+                f'agentbox; the box exits 2 in about two seconds and leaves an empty window']
+    return []
+
+
+# Flags that only `agentbox new` takes. After the `--` they reach the agent instead, which does
+# not know them, so the launch dies at once and leaves nothing behind: no box, no omp, nothing
+# but one "unknown flag" line in a window nobody is watching. ROCQ (01a13bca) failed exactly
+# that way at 04:24:58Z on 2026-11-05 and was the one session of 76 the reboot did not restore;
+# its entry ended `-- omp --resume <id> --dir /mnt/nvme/sami/handover/rocq-22380-enum`. The
+# check is pure text and the cheapest of the three sections, so it is a FAULT, not a drift.
+AGENTBOX_ONLY_FLAGS = ('--dir', '--memory', '--cpus', '--disk', '--drop-gone-dirs',
+                       '--force-floor', '--no-clone')
+
+
+def agentbox_flags_after_separator(resume):
+    if 'agentbox' not in resume:
+        return []
+    words = resume.split()
+    if '--' not in words:
+        return []
+    after = words[words.index('--') + 1:]
+    return [w for w in after if w.split('=', 1)[0] in AGENTBOX_ONLY_FLAGS]
+
+
+def drift(kv, good):
+    sid = kv['session']
+    if sid not in good:
+        return []
+    _, cmd, cd = good[sid]
+    r, out = kv.get('resume', ''), []
+    if 'agentbox' in cmd and 'agentbox' not in r:
+        out.append('lost its agentbox')
+    if 'agentbox' in cmd and 'agentbox' in r:
+        lost = set(re.findall(r'--dir (\S+)', cmd)) - set(re.findall(r'--dir (\S+)', r))
+        if lost:
+            out.append('binds the known-good command had: ' + ' '.join(sorted(lost)))
+    if cd and kv.get('cwd') and cd != kv['cwd']:
+        out.append(f"cwd {kv['cwd']} (known-good ran from {cd})")
+    return out
+
+
+ALWAYS_IN_A_BOX = [f'{HOME}/src', str(DURABLE), f'{HOME}/.dotfiles']
+# An absolute path under a real root, starting at a word boundary (so `scripts/ci/x`, `gs://b/x` and
+# `dispatch://KEY/x` do not match), and deep enough to name something rather than a root in prose.
+PATH_RE = re.compile(r'(?<![\w:/.-])(?:~|\$HOME|/home|/mnt|/tmp|/theorem-ext4|/theorem-xfs|/var|/opt)/[^\s\'"`),;<>]+')
+MIN_DEPTH = {'home': 3, 'mnt': 4, 'tmp': 2}
+
+
+def home_allow_list():
+    mounts = pathlib.Path(f'{HOME}/.dotfiles/agentbox/mounts')
+    if not mounts.is_file():
+        return []
+    out = []
+    for line in mounts.read_text().splitlines():
+        words = line.split()
+        if len(words) >= 2 and not words[0].startswith('#'):
+            out.append(f'{HOME}/{words[1].rstrip("/")}')
+    return out
+
+
+def unseen_after_paths(kv, allow):
+    """Paths the after= line names that a box made by resume= cannot see (an empty lookalike there)."""
+    r = kv.get('resume', '')
+    if 'agentbox' not in r:
+        return []
+    dirs = [d.replace('$HOME', HOME).replace('~', HOME, 1).rstrip('/') for d in re.findall(r'--dir[=\s]+(\S+)', r)]
+    roots = dirs + ALWAYS_IN_A_BOX + allow
+    out = []
+    for raw in PATH_RE.findall(kv.get('after', '')):
+        p = raw.replace('$HOME', HOME)
+        p = (HOME + p[1:]) if p.startswith('~') else p
+        p = p.rstrip('.:/')
+        parts = p.strip('/').split('/')
+        if len(parts) < MIN_DEPTH.get(parts[0], 3):
+            continue
+        if not any(p == root or p.startswith(root + '/') for root in roots):
+            out.append(p)
+    return sorted(set(out))
+
+
+def main(argv=None):
+    global REG, GOOD
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--registry', type=pathlib.Path, default=DEFAULT_REGISTRY,
+                        help=f'the restart registry (default {DEFAULT_REGISTRY})')
+    parser.add_argument('--known-good', type=pathlib.Path, default=DEFAULT_KNOWN_GOOD,
+                        help=f'scripts of a restart that worked, to compare with (default {DEFAULT_KNOWN_GOOD})')
+    options = parser.parse_args(argv)
+    REG, GOOD = options.registry, options.known_good
+    good = known_good()
+    allow = home_allow_list()
+    entries = [entry(p) for p in sorted(REG.glob('*.entry'))]
+    live = [kv for kv in entries if kv.get('auto_restart', 'yes') == 'yes']
+    bad = [(kv, faults(kv)) for kv in live if faults(kv)]
+    drifted = [(kv, drift(kv, good)) for kv in live if drift(kv, good)]
+    unseen = [(kv, unseen_after_paths(kv, allow)) for kv in live if unseen_after_paths(kv, allow)]
+    untested = [kv for kv in live if kv['session'] not in good]
+    print(f'{len(entries)} entries, {len(live)} with auto_restart=yes; known-good scripts: {len(good)} ({GOOD})')
+    print(f'\nFAULTS (will not come back as written): {len(bad)}')
+    for kv, f in bad:
+        print(f"  {kv.get('title', '?')[:50]} {kv['session']}: {'; '.join(f)}")
+    print(f'\nDRIFT from the known-good restart (ask the owner): {len(drifted)}')
+    for kv, d in drifted:
+        print(f"  {kv.get('title', '?')[:50]} {kv['session']}: {'; '.join(d)}")
+    print(f'\nAFTER-LINE PATHS the box cannot see (no --dir, not ~/src, {DURABLE}, the dotfiles or the '
+          f'home allow-list of {len(allow)}; inside the box each is an empty lookalike): {len(unseen)}')
+    for kv, u in unseen:
+        print(f"  {kv.get('title', '?')[:50]} {kv['session']}: {' '.join(u)}")
+    print(f'\nNo known-good restart to compare with (first test is the reboot): {len(untested)}')
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

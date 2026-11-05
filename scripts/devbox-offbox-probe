@@ -59,8 +59,22 @@ if [[ -n "$train" && -d "$train" ]]; then
         printf 'train_events_mtime=\n'
     fi
     if [[ -r "$train/queue.tsv" ]]; then
-        # Work waiting on the runner: anything not landed, dropped or returned.
-        printf 'train_queue_open=%s\n' "$(awk -F'\t' 'NR > 1 && $7 != "landed" && $7 != "dropped" && $7 != "returned" { n++ } END { print n + 0 }' "$train/queue.tsv")"
+        # Work waiting on the runner. Counted as "not in a terminal state" rather than as the
+        # work states themselves, so a state nobody here has heard of still raises the alert
+        # instead of being silently dropped; the message names every state, so a reader can see
+        # which it was. The train's terminal states are landed, dropped, returned, withdrawn
+        # and superseded; its work states are queued, resolving and testing.
+        #
+        # withdrawn and superseded were missing from this list until 2026-11-05, and 51
+        # withdrawn plus 204 superseded rows made an idle train read as 255 open items: the
+        # 04:38Z and 05:22Z passes both sent MERGE TRAIN STUCK for a train whose runner was
+        # alive, polling and simply out of work. An alert that fires whenever a queue drains
+        # teaches its readers to ignore it, which would cost the dead-runner half of this same
+        # watch its value (the operator, dispatch://LINUX-1276, 2026-11-05T05:22:55Z).
+        printf 'train_queue_open=%s\n' "$(awk -F'\t' '
+            NR > 1 && $7 != "landed" && $7 != "dropped" && $7 != "returned" \
+                  && $7 != "withdrawn" && $7 != "superseded" { n++ }
+            END { print n + 0 }' "$train/queue.tsv")"
         printf 'train_queue_states=%s\n' "$(awk -F'\t' 'NR > 1 { c[$7]++ } END { for (s in c) printf "%s:%s ", s, c[s] }' "$train/queue.tsv")"
     fi
     if [[ -r "$train/runner.lock" ]]; then
