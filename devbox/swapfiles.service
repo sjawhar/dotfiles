@@ -1,0 +1,25 @@
+[Unit]
+Description=Make and enable this box's swapfiles on the local SSD, which is empty after a machine stop
+# dispatch://INFRA-6, 2026-11-05: this box's swap was two files made by hand on /mnt/scratch, with
+# no fstab entry, no unit and nothing in its provisioning. /mnt/scratch is a local SSD array and is
+# EMPTY after a stop, so a reboot brought the box up with no swap -- and it had rebooted at 04:02Z
+# that morning. With 71 agent boxes each allowed 8 GiB of swap and 207 GiB swapped between them, the
+# first memory pressure after a swapless boot is an OOM kill in somebody's box.
+RequiresMountsFor=/mnt/scratch
+# Before any box starts: a box that comes up and takes memory before swap exists is the case this
+# unit exists for.
+Before=docker.service
+ConditionPathIsDirectory=/mnt/scratch
+
+[Service]
+Type=oneshot
+# The files stay enabled for the life of the boot; a second start changes nothing.
+RemainAfterExit=yes
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
+# fallocate on xfs writes real extents, which swapon requires, but 256 GiB twice on a cold boot is
+# not instant.
+TimeoutStartSec=20min
+ExecStart=%h/.dotfiles/devbox/swapfiles
+
+[Install]
+WantedBy=default.target

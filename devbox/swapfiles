@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Make and enable this box's swapfiles, idempotently, at boot.
+#
+# Why this exists (2026-11-05, dispatch://INFRA-6): sami-devbox's swap was two files made BY HAND on
+# /mnt/scratch, with no fstab entry, no unit and nothing in the box's provisioning. /mnt/scratch is a
+# local SSD array, which is EMPTY after a machine stop, so the box would have come back with no swap
+# at all. It rebooted at 04:02Z that morning, so this was not hypothetical.
+#
+# Why no swap is worse than it sounds here: every agent box carries memory.swap.max of 8 GiB, and at
+# 16:12Z that day 71 boxes held 207 GiB of swap between them. With none, the first memory pressure
+# goes straight to an OOM kill in somebody's box, which is the one failure on this machine that costs
+# work rather than slowing it.
+#
+# The size: the per-box allowances sum to 568 GiB (71 x 8), and the single 256 GiB file was
+# oversubscribed 2.2 times. Two files of 256 GiB cover nearly all of it. /mnt/scratch had 13 TB free,
+# so the pair costs under 4% of it.
+#
+# Idempotent by design: a file that exists is not reallocated, a file that already carries a swap
+# signature is not re-mkswap'd, and a file already in `swapon --show` is left alone. Run it twice and
+# the second run changes nothing and says so.
+set -euo pipefail
+
+SWAP_DIR=${SWAP_DIR:-/mnt/scratch}
+SWAP_SIZE=${SWAP_SIZE:-256G}
+SWAP_FILES=${SWAP_FILES:-swapfile swapfile2}
+
+if [[ ! -d $SWAP_DIR ]]; then
+    echo "swapfiles: $SWAP_DIR is not mounted; nothing to do" >&2
+    exit 0
+fi
+
+made=0 enabled=0 already=0
+for name in $SWAP_FILES; do
+    path="$SWAP_DIR/$name"
+
+    if swapon --show=NAME --noheadings | grep -qxF "$path"; then
+        echo "swapfiles: $path is already swap"
+        already=$((already + 1))
+        continue
+    fi
+
+    if [[ ! -e $path ]]; then
+        # fallocate writes real extents on xfs, which swapon requires: a sparse file is refused.
+        sudo -n fallocate -l "$SWAP_SIZE" "$path"
+        sudo -n chmod 600 "$path"
+        made=$((made + 1))
+        echo "swapfiles: made $path ($SWAP_SIZE)"
+    else
+        sudo -n chmod 600 "$path"
+    fi
+
+    # `swaplabel` reads the signature without writing; a file that has one is not re-made, so an
+    # already-formatted file left over from a crash keeps whatever it holds rather than being wiped.
+    if ! sudo -n swaplabel "$path" >/dev/null 2>&1; then
+        sudo -n mkswap "$path" >/dev/null
+        echo "swapfiles: formatted $path"
+    fi
+
+    sudo -n swapon "$path"
+    enabled=$((enabled + 1))
+    echo "swapfiles: enabled $path"
+done
+
+echo "swapfiles: made $made, enabled $enabled, already enabled $already"
+swapon --show
