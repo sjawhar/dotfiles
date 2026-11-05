@@ -221,7 +221,7 @@ step_secrets() {
 }
 
 step_leakcheck() {
-    local files=(public-leak-check.sh README.md must-pass-lines.txt) f stage who out
+    local files=(public-leak-check.sh public_leak_check.py README.md must-pass-lines.txt) prev_files=() f stage who out
     who="sami-devbox-provision ($(id -un)@$(hostname -s))"
     git -C "$AGENT_INFRA" fetch -q origin tag "$LEAK_CHECK_TAG" tag "$LEAK_CHECK_PREV" \
         || die "could not fetch $LEAK_CHECK_TAG and $LEAK_CHECK_PREV into $AGENT_INFRA"
@@ -234,9 +234,12 @@ step_leakcheck() {
     mkdir "$stage/prev"
     for f in "${files[@]}"; do
         git -C "$AGENT_INFRA" show "$LEAK_CHECK_TAG:leak-check/$f" > "$stage/$f"
-        git -C "$AGENT_INFRA" show "$LEAK_CHECK_PREV:leak-check/$f" > "$stage/prev/$f"
+        if [[ "$f" != public_leak_check.py ]] || git -C "$AGENT_INFRA" cat-file -e "$LEAK_CHECK_PREV:leak-check/$f" 2>/dev/null; then
+            git -C "$AGENT_INFRA" show "$LEAK_CHECK_PREV:leak-check/$f" > "$stage/prev/$f"
+            prev_files+=("$f")
+        fi
     done
-    (cd "$stage/prev" && sha256sum "${files[@]}") > "$stage/prev.sha256"
+    (cd "$stage/prev" && sha256sum "${prev_files[@]}") > "$stage/prev.sha256"
     rm -rf "$stage/prev"
     printf '%s\n' "$LEAK_CHECK_HOME_SHA256" > "$stage/tag.sha256"
     # No ruleset protects the tags: the files must be the bytes the tag's announcement gave.
@@ -254,15 +257,18 @@ step_leakcheck() {
     # Copy only over the previous tag, or this one on a second run; a new machine has no files.
     # Each file is written as .<name>.new and moved over the installed one only when all are written.
     out="$(remote 'set -e; s=/tmp/plc-stage; d=$HOME/.local/share/public-leak-check
+        test -x /usr/bin/python3 && /usr/bin/python3 -I -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" ||
+            { echo "this machine needs an executable /usr/bin/python3 of 3.9 or newer; nothing was installed"; exit 1; }
         mkdir -p "$d" "$HOME/.config/public-leak-check"
-        have="$(cd "$d" && sha256sum public-leak-check.sh README.md must-pass-lines.txt 2>/dev/null || true)"
+        have="$(cd "$d" && sha256sum public-leak-check.sh public_leak_check.py README.md must-pass-lines.txt 2>/dev/null || true)"
         if [ -n "$have" ] && [ "$have" != "$(cat "$s/prev.sha256")" ] && [ "$have" != "$(cat "$s/tag.sha256")" ]; then
             echo "$d holds neither the previous tag nor this one, so nothing was copied:"; echo "$have"; exit 1
         fi
         install -m 0555 "$s/public-leak-check.sh" "$d/.public-leak-check.sh.new"
+        install -m 0444 "$s/public_leak_check.py" "$d/.public_leak_check.py.new"
         install -m 0644 "$s/README.md" "$d/.README.md.new"
         install -m 0644 "$s/must-pass-lines.txt" "$d/.must-pass-lines.txt.new"
-        for f in public-leak-check.sh README.md must-pass-lines.txt; do mv -f "$d/.$f.new" "$d/$f"; done
+        for f in public_leak_check.py public-leak-check.sh README.md must-pass-lines.txt; do mv -f "$d/.$f.new" "$d/$f"; done
         printf "%s\n" "$d/public-leak-check.sh" > "$HOME/.config/public-leak-check/path"
         (cd "$d" && sha256sum -c "$s/tag.sha256")
         test -x "$d/public-leak-check.sh"; echo "test -x public-leak-check.sh: exit 0"

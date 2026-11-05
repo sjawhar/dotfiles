@@ -959,7 +959,7 @@ rocqperf_check() {
 
 # The public-text leak check: ~/.local/share/public-leak-check holds the tag of agent-infra's
 # leak-check/ that devbox/leak-check-tag.env names (sami-devbox-provision's step leakcheck installs
-# it), so its three files must have that file's sha256.
+# it), so its launcher, Python module, README and must-pass fixture must have that file's sha256.
 leak_check_host_check() {
     local here d out rc=0
     # shellcheck source=leak-check-tag.env
