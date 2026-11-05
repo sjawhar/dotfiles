@@ -188,6 +188,11 @@ def test_a_suspended_or_held_number_is_neither_behind_nor_met_on_either_page():
     lines = check.report({"issue": "LINUX-31", "numbers": [{**behind, "status": "paused"}, paused, held]}, now)[1]
     warned = [x for x in lines if "does not act on" in x]
     assert len(warned) == 1 and "`status`" in warned[0]
+    # The role the warning recommends must pass the check itself (TOOLS, 2026-11-05: `retired` was refused as a role).
+    retired = {**behind, "role": "retired", "replaced_by": "curl-targets"}
+    errs, lines = check.report({"issue": "OSSV-142", "numbers": [retired]}, now)
+    assert not [x for x in errs if "role must be one of" in x]
+    assert not [x for x in lines if "does not act on" in x]
 
 
 

@@ -18,7 +18,8 @@ from . import model
 from .model import fmt_value, parse_time
 from .plan import due_day, issue_key
 
-ROLES = ("main", "fast", "guard")
+# `retired`: a number kept for its history and no longer judged (the page shows it apart from the main numbers).
+ROLES = ("main", "fast", "guard", "retired")
 VERDICTS = ("running", "kept", "reverted", "inconclusive", "provisional")
 # Known kinds of wait (format 1.2 added "lead"). Any other kind is a warning, never an error, so a lead is not
 # blocked by this checker for a new kind of wait.
@@ -223,7 +224,7 @@ def report(b: dict, now: datetime) -> tuple[list[str], list[str]]:
         if not isinstance(n, dict):
             continue
         for word, use in VERDICT_WORDS.items():
-            if word in n and not (word == "retired" and n.get("role") == "retired"):
+            if word in n and not (word in ("retired", "replaced_by") and n.get("role") == "retired"):
                 lines.append(f"Warning: {n.get('id')!r} carries `{word}`, which the page does not act on: its verdict "
                              f"is unchanged. {use[0].upper()}{use[1:]}.")
     return errors, lines
