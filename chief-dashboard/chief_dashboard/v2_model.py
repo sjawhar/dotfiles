@@ -4,13 +4,13 @@ asks that wait on Sami. Pure: a snapshot (collect.py) and the time now in, a pag
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 
 from . import model, sessions
 from .model import Number, Stream, parse_time, suspended_text
-from .pace import (BEHIND, CANT_TELL, ON_PACE, PACIFIC, Pace, Reading, every_hours, guard, line_at, pace, readings,
-                   target_end)
+from .pace import (BEHIND, CANT_TELL, ON_PACE, PACIFIC, Pace, Reading, every_hours, guard, hours_text, line_at, pace,
+                   readings, target_end)
 from .plan import DayPlan, Item, WeekPlan, day_plan, day_record, fix_time, pacific_day, tally, week_plan
 from .plan_issues import IssueRef, resolve
 
@@ -161,6 +161,22 @@ def example_plan(d: date, now: datetime) -> tuple[list[Item], dict[str, dict]]:
     return items, states
 
 
+def explain_missing(p: Pace, raw: dict, rs: list[Reading], every_h: float, now: datetime) -> Pace:
+    """A number that has readings and a `missing` text, the reason its record could not take a new reading, shows that
+    reason once its newest reading is stale, instead of only a figure and an age. The page showed `missing` only for a
+    number with no readings, so a drained backlog read as a stale age with nothing beside it (TOOLS, 2026-11-05).
+    A fresh reading wins: the reason is only shown while the newest reading is older than twice the cadence, so a
+    `missing` left behind after measuring resumes changes nothing."""
+    why = str(raw.get("missing") or "").strip()
+    if not why or not rs:
+        return p
+    age = (now - rs[-1][0]).total_seconds() / 3600
+    if age <= 2 * every_h:
+        return p
+    stale = f"no reading for {hours_text(age)}"
+    return replace(p, label=CANT_TELL, reason=f"{stale}: {why}")
+
+
 def stream_view(st: Stream, versions: list[dict], states: dict[str, dict], asks: int, now: datetime, example: bool,
                 issues: dict | None = None, agents: dict | None = None, web: str = "") -> StreamView:
     """`issues` is the collector's `plan_issues` and `agents` its live sessions: each plan line's Dispatch issue and
@@ -177,7 +193,8 @@ def stream_view(st: Stream, versions: list[dict], states: dict[str, dict], asks:
             by = t.get("by")
             p = Pace(CANT_TELL, why, None, target_end(by) if by else None, t.get("value"))
         else:
-            p = pace(rs, t.get("value"), t.get("by"), n.better, every_hours(n.raw), now)
+            p = explain_missing(pace(rs, t.get("value"), t.get("by"), n.better, every_hours(n.raw), now), n.raw, rs,
+                                every_hours(n.raw), now)
         expected, gap = line_gap(rs, p, n.better)
         row = KpiRow(n, p, rs, expected=expected, gap=gap)
         kpis.append(row)
@@ -187,7 +204,7 @@ def stream_view(st: Stream, versions: list[dict], states: dict[str, dict], asks:
         if n.role != "guard":
             continue
         rs = readings(n.values)
-        g = GuardRow(n, guard(rs, n.better), rs)
+        g = GuardRow(n, explain_missing(guard(rs, n.better), n.raw, rs, every_hours(n.raw), now), rs)
         owner = by_id.get(str(n.raw.get("guards") or ""))
         (owner.guards if owner else loose).append(g)
 

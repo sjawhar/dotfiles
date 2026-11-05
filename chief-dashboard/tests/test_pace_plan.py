@@ -195,6 +195,24 @@ def test_a_suspended_or_held_number_is_neither_behind_nor_met_on_either_page():
     assert not [x for x in lines if "does not act on" in x]
 
 
+def test_a_stale_number_with_history_shows_its_missing_reason_and_a_fresh_one_does_not():
+    """The page showed `missing` only for a number with no readings, so a drained backlog read as a stale age with no
+    reason beside it (TOOLS' reviewer, 2026-11-05). A fresh reading wins over a leftover `missing`."""
+    from chief_dashboard.v2_model import explain_missing
+
+    old, now = T0, at(0.5)
+    stale = rs((old - timedelta(hours=6), 0.30), (old, 0.31))
+    raw = {"missing": "schema 2 has no checked statements yet"}
+    p = explain_missing(P.pace(stale, 1.0, BY, "higher", 6, now), raw, stale, 6, now)
+    assert p.label == P.CANT_TELL and p.reason.endswith(": schema 2 has no checked statements yet")
+    g = explain_missing(P.guard(stale, "higher"), raw, stale, 6, now)
+    assert g.label == P.CANT_TELL and "schema 2 has no checked statements yet" in g.reason
+    fresh = rs(*stale, (now, 0.32))
+    q = P.pace(fresh, 1.0, BY, "higher", 6, now)
+    assert explain_missing(q, raw, fresh, 6, now) == q and q.label == P.BEHIND
+
+
+
 
 # --- The day's plan ---------------------------------------------------------------------------------------------
 
