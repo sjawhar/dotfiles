@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Say when this machine's SSH authorized keys change, and what changed.
+
+Why: on 2026-11-04 at 02:58Z an agent ran a Google Cloud command that added a login key to
+this box, and nothing told anybody. The deploy now declares the login list, so an added key is
+undone at the next apply (agent-infra #2151, applied 2026-11-05T02:30:23Z) -- but "undone at
+the next apply" is not "noticed", and between applies a key works. This is the noticing half.
+
+It reports a CHANGE, never a key. Each key is recorded as its SHA256 fingerprint, its type and
+its comment, which is what `ssh-keygen -l` prints and what a person needs to recognise a key;
+the key material never reaches the state file, the message or the log. A fingerprint is
+already public information: it is what the server shows and what a client checks.
+
+It alerts nobody the first time it runs: with no state, there is nothing to compare against,
+and treating every key as new on first run is how a watch teaches its reader to ignore it.
+
+Usage: authorized-keys-watch [--file PATH]... [--state FILE] [--to TOPIC] [--print] [--dry-run]
+
+Defaults to the invoking user's ~/.ssh/authorized_keys, and adds root's when it can be read.
+Run from the `authorized-keys-watch` stream job (`~/.config/stream-jobs/`), not a timer of its
+own: this box's timers were folded to about four on 2026-11-04 (dispatch://INFRA-993) and a
+standing job belongs to the box rather than to a session.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+DEFAULT_TOPIC = "notifications.role.lead-box-health"
+STATE = pathlib.Path(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+) / "authorized-keys-watch" / "keys.json"
+
+
+def key_lines(path: pathlib.Path) -> list[str]:
+    try:
+        return [l for l in path.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    except OSError:
+        return []
+
+
+def describe(line: str) -> str | None:
+    """`<fingerprint> <type> <comment>` for one key line, or None when it is not a key.
+
+    ssh-keygen reads the key from a file, so the line goes in on stdin through /dev/stdin.
+    The key material is not passed as an argument: every user can read those.
+    """
+    done = subprocess.run(["ssh-keygen", "-lf", "/dev/stdin"], input=line,
+                          capture_output=True, text=True, timeout=20)
+    if done.returncode != 0:
+        return None
+    parts = done.stdout.split()
+    if len(parts) < 3:
+        return None
+    fingerprint, comment, kind = parts[1], " ".join(parts[2:-1]) or "(no comment)", parts[-1]
+    return f"{fingerprint} {kind} {comment}"
+
+
+def read_keys(paths: list[pathlib.Path]) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for path in paths:
+        described = [d for d in (describe(l) for l in key_lines(path)) if d]
+        if described or path.exists():
+            found[str(path)] = sorted(described)
+    return found
+
+
+def differences(old: dict[str, list[str]], new: dict[str, list[str]]) -> list[str]:
+    out = []
+    for path in sorted(set(old) | set(new)):
+        before, after = set(old.get(path, [])), set(new.get(path, []))
+        for key in sorted(after - before):
+            out.append(f"ADDED to {path}: {key}")
+        for key in sorted(before - after):
+            out.append(f"REMOVED from {path}: {key}")
+    return out
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--file", action="append", dest="files", type=pathlib.Path,
+                        help="an authorized_keys file; repeatable")
+    parser.add_argument("--state", type=pathlib.Path, default=STATE)
+    parser.add_argument("--to", default=DEFAULT_TOPIC, help="Envoy topic the change goes to")
+    parser.add_argument("--print", action="store_true", dest="show",
+                        help="print the message as well as sending it")
+    parser.add_argument("--dry-run", action="store_true", help="send nothing and write no state")
+    # Record the keys as they are now and tell nobody. For a test, which needs a state to
+    # compare its next pass against and must not reach the fleet to get one: writing this
+    # file's own tests without it sent a real alert to the box-health role from a temporary
+    # directory under /tmp/pytest (2026-11-05). Also the honest way to adopt a change somebody
+    # already knows about, without a message saying it just happened.
+    parser.add_argument("--no-send", action="store_true",
+                        help="write the state but send nothing")
+    options = parser.parse_args(argv)
+
+    paths = options.files or []
+    if not paths:
+        paths = [pathlib.Path(os.path.expanduser("~/.ssh/authorized_keys"))]
+        root = pathlib.Path("/root/.ssh/authorized_keys")
+        if os.access(root, os.R_OK):
+            paths.append(root)
+
+    new = read_keys(paths)
+    first_run = not options.state.exists()
+    old = {}
+    if not first_run:
+        try:
+            old = json.loads(options.state.read_text())
+        except (OSError, ValueError):
+            # An unreadable state file is not a change: say so and rewrite it, rather than
+            # reporting every key as added.
+            print("authorized-keys-watch: the state file could not be read; rewriting it and "
+                  "reporting nothing this pass", file=sys.stderr)
+            first_run = True
+
+    changes = [] if first_run else differences(old, new)
+    total = sum(len(v) for v in new.values())
+
+    if first_run:
+        print(f"authorized-keys-watch: first run, {total} key(s) recorded over "
+              f"{len(new)} file(s); nothing to compare against yet")
+    elif not changes:
+        print(f"authorized-keys-watch: unchanged, {total} key(s) over {len(new)} file(s)")
+    else:
+        message = ("SSH AUTHORIZED KEYS CHANGED on this machine. A key here is a permanent way "
+                   "in, and the deploy only undoes an added one at its next apply.\n  "
+                   + "\n  ".join(changes)
+                   + f"\nNow {total} key(s) over {len(new)} file(s). Fingerprints and comments "
+                     "only; no key material is read, stored or sent. If this was an apply or a "
+                     "person, nothing is wrong; if nobody knows who did it, that is the case "
+                     "this watch exists for.")
+        print(message if options.show else
+              f"authorized-keys-watch: {len(changes)} change(s)"
+              + ("" if options.dry_run or options.no_send else f"; told {options.to}"))
+        if not options.dry_run and not options.no_send:
+            done = subprocess.run(["envoy", "notify", "--message-file", "-", options.to],
+                                  input=message, capture_output=True, text=True, timeout=60)
+            if done.returncode != 0:
+                print(f"authorized-keys-watch: could not tell {options.to}: "
+                      f"{done.stderr.strip()[:200]}", file=sys.stderr)
+                return 1
+
+    if not options.dry_run:
+        options.state.parent.mkdir(parents=True, exist_ok=True)
+        options.state.write_text(json.dumps(new, indent=1, sort_keys=True) + "\n")
+        options.state.chmod(0o600)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
