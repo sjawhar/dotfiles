@@ -38,7 +38,10 @@
 # Reading the wrong container -- which this script itself did for 63 minutes -- said 1.43.
 # The column matters more than the number.
 #
-# IT IS SAMPLED, about one point every 93 s. So:
+# IT IS SAMPLED, one point every 60 s -- measured, 575 gaps across five pods, median
+# and mean 60.0 s, longest 120 s where one sample was missed. (I published 93 s earlier
+# on 2026-11-05; that came from dividing a 45-minute WINDOW by a pod's 29 samples when
+# the pod only ran 28 minutes of it, so it measured my window and not the sampler.) So:
 #   - size at peak plus 30%, never at the peak: a spike shorter than the interval is invisible;
 #   - an OOM kill beats this number. If a pod dies at a limit above what this prints, the number
 #     is wrong and the kill is right.

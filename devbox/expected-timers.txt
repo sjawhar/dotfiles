@@ -92,7 +92,13 @@ box-cleanup.timer  max_run=4h        # owner: box-health lead. Cache caps every 
 #   its owner at 09:11Z on 2026-11-05: the hands-off test it served ended at 09:05:02Z and runif
 #   was stopped. Both unit files were removed. If runif runs again its reader comes back as a
 #   stream job, not a hand-written timer, so this line does not come back with it.
-verified-linux-drift-check.timer   # owner: the Verified Linux lead. Its session's liveness.
+# verified-linux-drift-check.timer  owner: the Verified Linux lead (ORCH). Retired by its owner
+#   at 19:42Z on 2026-11-05, with its run-monitor loop, under Sami's ruling that a dev box stops
+#   running shared services: "I've cut the dev-box compute that doesn't serve it ... starting
+#   with the drift checker that's been driving the chain". unit-health-watch reported the timer
+#   missing at 19:41:13Z, which is the check doing its job; this line is why it stops saying so.
+#   If the Verified Linux lead's liveness needs watching again it comes back as a cluster
+#   service, not a timer on this box, so this line does not come back with it.
 
 # --- shipped by Ubuntu's python3-launchpadlib, not by any lane ---
 launchpadlib-cache-clean.timer     # owner: the distribution package. Listed so it is not lost.

@@ -25,7 +25,9 @@
 #    needed more.
 #
 # non-evictable only: anonymous pages plus unreclaimable slab, the memory that gets a pod killed.
-# About one point every 93 s, so a spike shorter than that is invisible in the shape too.
+# One point every 60 s, measured over 575 gaps on five pods (median and mean 60.0 s,
+# longest 120 s where a sample was missed), so a spike shorter than that is invisible
+# in the shape too.
 set -uo pipefail
 
 pod="${1:-}"
