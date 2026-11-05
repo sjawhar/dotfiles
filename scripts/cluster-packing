@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""How full each class of node in a cluster is: the packing half of the build-farm target.
+
+Usage: cluster-packing [--context NAME]... [--json]
+
+For every machine class (a node's GKE machine type, since the build farm's pools are
+auto-provisioned and their names carry no meaning), it prints the nodes in that class, the vCPU
+and memory they hold, what the pods on them ask for, and the share that is asked for -- the
+packing. It reads nodes and pods and writes nothing.
+
+Why it is here rather than in /tmp: this reading is half of the build-farm target in the speed
+log (dispatch://INFRA-6), and the two helper scripts that used to take it lived in /tmp, were
+lost in the 2026-11-04 18:05:53Z reset, and were in no repository. Three ticks in a row then
+reported the measurement as unmeasured with no way to restore it. A number a target depends on
+lives with the code.
+
+A pending pod is counted in demand but sits on no node, so it raises what is asked for without
+raising capacity; it is reported separately, since a class that is full with pods waiting is a
+different thing from one that is full with none.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+
+DEFAULT_CONTEXTS = (
+    "gke_theorem-agent-infra_us-west1_dispatch",
+    "gke_theorem-agent-infra_us-west1-b_grade-us-west1",
+)
+
+
+def cpu(value: str | None) -> float:
+    """A Kubernetes cpu quantity in cores."""
+    if not value:
+        return 0.0
+    return int(value[:-1]) / 1000 if value.endswith("m") else float(value)
+
+
+def mem_gib(value: str | None) -> float:
+    """A Kubernetes memory quantity in GiB."""
+    if not value:
+        return 0.0
+    units = {"Ki": 1 / 1024**2, "Mi": 1 / 1024, "Gi": 1.0, "Ti": 1024.0,
+             "K": 1e3 / 1024**3, "M": 1e6 / 1024**3, "G": 1e9 / 1024**3, "T": 1e12 / 1024**3}
+    for suffix, factor in units.items():
+        if value.endswith(suffix):
+            return float(value[: -len(suffix)]) * factor
+    return float(value) / 1024**3
+
+
+def read(context: str, kind: str) -> dict:
+    done = subprocess.run(["kubectl", "--context", context, "get", kind, "-A", "-o", "json"],
+                          capture_output=True, text=True, timeout=180)
+    if done.returncode != 0:
+        raise RuntimeError(f"{context}: kubectl get {kind} failed: {done.stderr.strip()[:200]}")
+    return json.loads(done.stdout)
+
+
+def measure(context: str) -> dict:
+    nodes = read(context, "nodes")["items"]
+    pods = read(context, "pods")["items"]
+    classes: dict[str, dict] = {}
+    by_node = {}
+    for node in nodes:
+        name = node["metadata"]["name"]
+        klass = node["metadata"]["labels"].get("node.kubernetes.io/instance-type") \
+            or node["metadata"]["labels"].get("beta.kubernetes.io/instance-type", "unknown")
+        by_node[name] = klass
+        row = classes.setdefault(klass, dict(nodes=0, cpu_capacity=0.0, mem_capacity=0.0,
+                                             cpu_requested=0.0, mem_requested=0.0, pods=0))
+        row["nodes"] += 1
+        row["cpu_capacity"] += cpu(node["status"]["capacity"].get("cpu"))
+        row["mem_capacity"] += mem_gib(node["status"]["capacity"].get("memory"))
+    pending = dict(pods=0, cpu_requested=0.0, mem_requested=0.0)
+    for pod in pods:
+        phase = pod["status"].get("phase")
+        if phase not in ("Running", "Pending"):
+            continue
+        asked_cpu = sum(cpu(c.get("resources", {}).get("requests", {}).get("cpu"))
+                        for c in pod["spec"]["containers"])
+        asked_mem = sum(mem_gib(c.get("resources", {}).get("requests", {}).get("memory"))
+                        for c in pod["spec"]["containers"])
+        node = pod["spec"].get("nodeName")
+        if not node or node not in by_node:
+            pending["pods"] += 1
+            pending["cpu_requested"] += asked_cpu
+            pending["mem_requested"] += asked_mem
+            continue
+        row = classes[by_node[node]]
+        row["pods"] += 1
+        row["cpu_requested"] += asked_cpu
+        row["mem_requested"] += asked_mem
+    return {"context": context, "classes": classes, "pending": pending}
+
+
+def share(part: float, whole: float) -> str:
+    return f"{100 * part / whole:5.1f}%" if whole else "    -"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--context", action="append", dest="contexts",
+                        help="a kubectl context; repeatable (default: the farm and the grade cluster)")
+    parser.add_argument("--json", action="store_true", help="print the reading as JSON")
+    options = parser.parse_args(argv)
+    out = []
+    status = 0
+    for context in options.contexts or list(DEFAULT_CONTEXTS):
+        try:
+            out.append(measure(context))
+        except Exception as error:  # a cluster that cannot be read is said, not guessed at
+            print(f"cluster-packing: {error}", file=sys.stderr)
+            status = 1
+    if options.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return status
+    for reading in out:
+        print(f"\n{reading['context']}")
+        print(f"  {'class':<18} {'nodes':>5} {'pods':>5} {'vCPU':>8} {'asked':>8} {'packed':>7}"
+              f" {'GiB':>9} {'asked':>9} {'packed':>7}")
+        rows = sorted(reading["classes"].items(), key=lambda kv: -kv[1]["cpu_capacity"])
+        for klass, row in rows:
+            print(f"  {klass:<18} {row['nodes']:>5} {row['pods']:>5}"
+                  f" {row['cpu_capacity']:>8.0f} {row['cpu_requested']:>8.0f}"
+                  f" {share(row['cpu_requested'], row['cpu_capacity']):>7}"
+                  f" {row['mem_capacity']:>9.0f} {row['mem_requested']:>9.0f}"
+                  f" {share(row['mem_requested'], row['mem_capacity']):>7}")
+        total_cpu = sum(r["cpu_capacity"] for r in reading["classes"].values())
+        asked_cpu = sum(r["cpu_requested"] for r in reading["classes"].values())
+        total_mem = sum(r["mem_capacity"] for r in reading["classes"].values())
+        asked_mem = sum(r["mem_requested"] for r in reading["classes"].values())
+        print(f"  {'ALL':<18} {sum(r['nodes'] for r in reading['classes'].values()):>5}"
+              f" {sum(r['pods'] for r in reading['classes'].values()):>5}"
+              f" {total_cpu:>8.0f} {asked_cpu:>8.0f} {share(asked_cpu, total_cpu):>7}"
+              f" {total_mem:>9.0f} {asked_mem:>9.0f} {share(asked_mem, total_mem):>7}")
+        p = reading["pending"]
+        print(f"  pending (on no node yet): {p['pods']} pod(s), {p['cpu_requested']:.0f} vCPU,"
+              f" {p['mem_requested']:.0f} GiB asked")
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
