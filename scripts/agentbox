@@ -4519,9 +4519,32 @@ move_hand_off() {
     mkdir -p "$(dirname "$log")"
     local before=0
     [[ -f "$log" ]] && before="$(wc -c <"$log")"
-    # This file by its absolute path, not $0: the relauncher outlives a caller that was started
-    # by a relative path from a directory the pane is about to leave.
-    setsid "$(readlink -f "${BASH_SOURCE[0]}")" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
+    # A PRIVATE COPY of this file, not the file itself. The relauncher waits up to 180 s for
+    # omp's teardown, and ~/.dotfiles is production: every publish REPLACES this script on disk
+    # while sessions are using it. Bash reads a script incrementally by byte offset, so a file
+    # swapped under a running one makes it read the new bytes from the old offset and die where
+    # it stands, silently.
+    #
+    # That is what happened on 2026-11-05. FRAC's relauncher started at 08:27:25Z and BASELINE's
+    # at 08:29:05Z, both logged "hung up; waiting for its teardown", and this file was rewritten
+    # at 08:30:17Z by a publish. Both were inside the sleep loop; neither logged another line,
+    # and the loop always logs on exit. Two leads sat at a shell with their omp hung up until a
+    # person respawned their panes. The copy is removed when the relauncher ends.
+    #
+    # By absolute path, not $0: the relauncher outlives a caller that was started by a relative
+    # path from a directory the pane is about to leave.
+    local run_copy
+    run_copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-relaunch-XXXXXX")" || return 1
+    cat "$(readlink -f "${BASH_SOURCE[0]}")" >"$run_copy" && chmod +x "$run_copy" || {
+        rm -f "$run_copy"
+        return 1
+    }
+    # The wrapper RUNS the copy rather than exec-ing it, and removes it on the way out: `exec`
+    # replaces the shell, which discards the trap and leaks the copy (measured).  Its own script
+    # text is an argument to `bash -c`, so the wrapper itself is in memory and a publish cannot
+    # pull it out from under this.
+    setsid bash -c 'c="$1"; shift; trap '"'"'rm -f "$c"'"'"' EXIT; "$@"' _ "$run_copy" \
+        "$run_copy" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
     local child=$!
     # It must be RUNNING before this says so: LANE-C's `move --self` returned 0 twice and nothing
     # ever moved (2026-11-03). The relauncher's first line is its own; waiting for the log to grow
