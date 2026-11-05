@@ -387,5 +387,72 @@ class TheSerialiseAdviceNamesHowManyProcesses(unittest.TestCase):
         self.assertIn("62Gi", text)
 
 
+class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
+    """"Ask for 1.25x" is right for a job that needs more and wrong for one with no ceiling.
+
+    CURL, 2026-11-05: three memory kills in one lane in one morning, three different correct
+    remedies, and the watch advised 1.25-1.3 x for all three. One was a runaway its own base
+    commit already documents -- "two kills at about 101 GB at 8 and at 2 cores... the growth
+    survives at about 4 GB a minute" -- so a 35 GiB limit buys about two minutes and another
+    dead job. The lane had already removed an automatic doubled retry from its tooling for
+    the same reason (#1780): growing a runaway's limit buys a bigger kill.
+
+    The history says which kind it is, from data the watch already reads. A recent run of the
+    same unit and kind that peaked ABOVE the limit THIS run was given proves the peak is not
+    what the job needs -- it is what it was offered.
+    """
+
+    GIB = 1024 ** 3
+
+    def advice(self, **found: object) -> str:
+        return WATCH.memory_advice(found)
+
+    def test_a_recent_peak_above_this_limit_warns_against_sizing_from_this_peak(self) -> None:
+        text = self.advice(largest_process_bytes=26 * self.GIB,
+                           memory_limit_bytes=28 * self.GIB,
+                           memory_peak_bytes=27 * self.GIB,
+                           process_count=1,
+                           recent_memory_peaks=[101 * self.GIB])
+        self.assertIn("RAISE MEMORY", text)
+        self.assertIn("101", text)
+        self.assertIn("is what it was given", text)
+        self.assertIn("growth is bounded", text)
+
+    def test_a_bounded_history_leaves_the_advice_alone(self) -> None:
+        """Every earlier run fitting inside this limit is the ordinary case: size and move on."""
+        text = self.advice(largest_process_bytes=26 * self.GIB,
+                           memory_limit_bytes=28 * self.GIB,
+                           memory_peak_bytes=27 * self.GIB,
+                           process_count=1,
+                           recent_memory_peaks=[12 * self.GIB, 19 * self.GIB])
+        self.assertIn("RAISE MEMORY", text)
+        self.assertNotIn("is what it was given", text)
+
+    def test_no_history_leaves_the_advice_alone(self) -> None:
+        text = self.advice(largest_process_bytes=26 * self.GIB,
+                           memory_limit_bytes=28 * self.GIB,
+                           memory_peak_bytes=27 * self.GIB, process_count=1)
+        self.assertIn("RAISE MEMORY", text)
+        self.assertNotIn("is what it was given", text)
+
+    def test_the_serialise_answer_is_not_overridden_by_it(self) -> None:
+        """Too many processes at once is still too many, whatever an earlier run peaked at."""
+        text = self.advice(largest_process_bytes=4 * self.GIB,
+                           memory_limit_bytes=32 * self.GIB,
+                           memory_peak_bytes=31 * self.GIB, process_count=8,
+                           recent_memory_peaks=[101 * self.GIB])
+        self.assertIn("SERIALISE", text)
+        self.assertNotIn("is what it was given", text)
+
+    def test_it_reaches_the_weaker_cores_path_too(self) -> None:
+        """The one-process-alone branch is exactly where a runaway lands, so it must warn."""
+        text = self.advice(memory_limit_bytes=28 * self.GIB,
+                           memory_peak_bytes=27 * self.GIB,
+                           cpu_last_cores=1.1, cpu_limit_cores=11,
+                           recent_memory_peaks=[101 * self.GIB])
+        self.assertIn("RAISE MEMORY", text)
+        self.assertIn("is what it was given", text)
+
+
 if __name__ == "__main__":
     unittest.main()

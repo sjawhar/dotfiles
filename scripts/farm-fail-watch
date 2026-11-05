@@ -235,6 +235,15 @@ def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
         "store": job.get("store"),
         "recent_disk_peaks": [number(peak.get("disk_peak_bytes"))
                               for peak in (job.get("size") or {}).get("recent_peaks") or []],
+        # The same history for memory. It is what tells a job that needs more memory from one
+        # whose memory is UNBOUNDED: a kind whose earlier run peaked ABOVE the limit this run
+        # was given did not want 1.3 x this run's peak, it wanted everything it was offered.
+        # CURL, 2026-11-05: three memory kills in one lane, three different right answers, and
+        # the watch advised 1.25-1.3 x for all three. One was a runaway documented in its own
+        # base commit -- "two kills at about 101 GB at 8 and at 2 cores... the growth survives
+        # at about 4 GB a minute" -- where a 35 GiB limit buys about two minutes.
+        "recent_memory_peaks": [number(peak.get("memory_peak_bytes"))
+                                for peak in (job.get("size") or {}).get("recent_peaks") or []],
     }
     return found
 
@@ -301,6 +310,19 @@ def memory_advice(found: dict) -> str:
     core_count = found.get("cpu_limit_cores") or found.get("cpu_limit") or found.get("cpu")
     sized = (f"--memory {whole_gib(MARGIN * peak)} (1.3 x the {gib(peak)} peak)"
              if peak is not None else None)
+    # EVERY "raise memory" below assumes the peak is BOUNDED -- that this job wants a
+    # particular amount and was given less. A job whose memory grows without bound takes
+    # whatever it is offered, and 1.3 x the last kill buys minutes. The history says which:
+    # a recent run of the same unit and kind that peaked ABOVE the limit this run was given
+    # proves the peak is not a property of the job's need (CURL, 2026-11-05).
+    unbounded = None
+    recent = [p for p in found.get("recent_memory_peaks") or [] if p]
+    if recent and limit and max(recent) > limit:
+        unbounded = (f" BUT A RECENT RUN OF THIS KIND PEAKED AT {gib(max(recent))}, above this"
+                     f" run's {gib(limit)} limit, so this peak is not what the job needs -- it"
+                     " is what it was given. Sizing from it will be killed again. Measure"
+                     " whether the growth is bounded before buying memory; if it is not, the"
+                     " fix is in the job, not in the limit.")
 
     count = found.get("process_count")
     if largest is not None and limit:
@@ -314,9 +336,10 @@ def memory_advice(found: dict) -> str:
             return (f"SERIALISE: the largest single process held {gib(largest)}, under half the"
                     f" {gib(limit)} limit, so the job ran too many at once and a bigger pod buys"
                     f" nothing.{many} Run the steps one at a time (fewer jobs, -j1).")
-        return (f"RAISE MEMORY to {sized}."
-                if sized else "RAISE MEMORY: no memory peak was recorded, so resubmit once"
-                " with the sampler's record kept and size from that peak at 1.3 x.")
+        return ((f"RAISE MEMORY to {sized}."
+                 if sized else "RAISE MEMORY: no memory peak was recorded, so resubmit once"
+                 " with the sampler's record kept and size from that peak at 1.3 x.")
+                + (unbounded or ""))
 
     weaker = ("no per-process samples in this job's log; from cpu_last_cores"
               f" {cores:.2f} of {float(core_count):.0f} cores at the last sample"
@@ -327,14 +350,14 @@ def memory_advice(found: dict) -> str:
                 " once at the same limit (-j fewer), not a bigger pod. Confirm from the next"
                 " run's per-process samples before buying memory.")
     if weaker and cores <= ALONE_CORES:
-        return (f"RAISE MEMORY to {sized}. {weaker}, this looks like one process alone -- the"
-                " single oversized step, which only a bigger pod fixes."
-                if sized else f"RAISE MEMORY: {weaker}, this looks like one process alone, but"
-                " no memory peak was recorded to size from; resubmit once with the sampler's"
-                " record kept.")
+        return ((f"RAISE MEMORY to {sized}. {weaker}, this looks like one process alone -- the"
+                 " single oversized step, which only a bigger pod fixes."
+                 if sized else f"RAISE MEMORY: {weaker}, this looks like one process alone, but"
+                 " no memory peak was recorded to size from; resubmit once with the sampler's"
+                 " record kept.") + (unbounded or ""))
     if sized is None:
         return ("RAISE MEMORY: no memory peak was recorded, so resubmit once with the"
-                " sampler's record kept and size from that peak at 1.3 x.")
+                " sampler's record kept and size from that peak at 1.3 x." + (unbounded or ""))
     advice = f"RAISE MEMORY to {sized}."
     if weaker:
         advice += (f" {weaker}, which is neither the parallel case nor one process alone, so"
@@ -342,7 +365,7 @@ def memory_advice(found: dict) -> str:
     else:
         advice += (" The largest single process was not recorded and the last sample has no"
                    " cpu_last_cores, so the serialise test could not be applied.")
-    return advice
+    return advice + (unbounded or "")
 
 
 def disk_advice(found: dict) -> str:

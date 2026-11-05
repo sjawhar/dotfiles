@@ -73,6 +73,21 @@ and the kernel's `oom_kill` counter was **0**. The kill was disk.
      56.80 GiB peak — twenty-nine processes of about 2 GiB each — and its own log was ten
      lines with no per-process memory in it.
 
+     **Every "raise memory" assumes the peak is BOUNDED**, and one reading says when it is
+     not: a recent run of the same unit and kind that peaked ABOVE the limit THIS run was
+     given. Then the peak is not what the job needs, it is what it was offered, and sizing
+     at 1.3 x it buys minutes. The message says so and tells the lane to measure whether the
+     growth is bounded before buying memory. The peaks come from `job.json`'s
+     `size.recent_peaks`, which the watch already read for the disk warning. Why (CURL,
+     2026-11-05): one lane had three memory kills in one morning with three different right
+     answers — cap the concurrency of the big files, remove a flag, and fix a file — and the
+     watch advised 1.25-1.3 x for all three. The third was a runaway its own base commit
+     documents, "two kills at about 101 GB at 8 and at 2 cores… the growth survives at about
+     4 GB a minute", so a 35 GiB limit buys about two minutes. The same lane had already
+     removed an automatic doubled retry from its tooling (#1780) because growing a runaway's
+     limit buys a bigger kill. The serialise answer is never overridden by this: too many
+     processes at once is still too many, whatever an earlier run peaked at.
+
      With neither test available, the message says the serialise test could not be applied
      rather than skipping it silently.
    - disk: `--disk` at 1.3 x the measured disk peak, and "do not raise memory: it was not
