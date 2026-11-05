@@ -834,7 +834,24 @@ def mount_evidence(pid: int, device: int, limit: int = FD_SCAN_LIMIT) -> dict:
     `device`; one example path there; what it holds open read-only there when that is all it
     has; and why the open files could not be read, when they could not.
     """
-    found = {"cwd": "", "on_mount": False, "example": "", "read_only": "", "fd_error": ""}
+    found = {
+        "cwd": "",
+        "on_mount": False,
+        # Whether the cwd ITSELF is on the device, which is the only cheap evidence that a
+        # process's write traffic lands here: /proc/<pid>/io counts every filesystem, so a
+        # process placed on this mount by one small open file may be writing all of it
+        # elsewhere. On 2026-11-05T13:45Z a /mnt/durable alert named a `cargo test` as the top
+        # writer on 1.5 GB in 15 s whose only thing on that mount was a 16.0 kB log, its cwd
+        # and its target directory both on /mnt/nvme; three lanes read "these are the ones to
+        # stop" and one nearly stopped a build that was costing this mount nothing.
+        "cwd_on_mount": False,
+        # The bytes of the largest file it holds open here, which is mount-local and so can be
+        # ranked, unlike write traffic.
+        "mount_bytes": 0,
+        "example": "",
+        "read_only": "",
+        "fd_error": "",
+    }
     try:
         found["cwd"] = os.readlink(f"/proc/{pid}/cwd")
     except OSError:
@@ -842,6 +859,7 @@ def mount_evidence(pid: int, device: int, limit: int = FD_SCAN_LIMIT) -> dict:
     try:
         if os.stat(f"/proc/{pid}/cwd").st_dev == device:
             found["on_mount"] = True
+            found["cwd_on_mount"] = True
             found["example"] = f"cwd {found['cwd'] or f'/proc/{pid}/cwd'}"
     except OSError:
         pass
@@ -885,6 +903,7 @@ def mount_evidence(pid: int, device: int, limit: int = FD_SCAN_LIMIT) -> dict:
     # inherited 0-byte handle names the mount but tells that reader nothing.
     if biggest[1] > 0:
         found["example"] = f"{biggest[0]} ({size(biggest[1])})"
+        found["mount_bytes"] = biggest[1]
     elif not found["example"]:
         found["example"] = directory or (f"{biggest[0]} ({size(biggest[1])})" if biggest[0] else "")
     if not found["on_mount"] and readable[1]:
@@ -981,6 +1000,8 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
                 "pane": pane_of(pid),
                 "cwd": evidence["cwd"],
                 "on_mount": evidence["on_mount"],
+                "cwd_on_mount": evidence["cwd_on_mount"],
+                "mount_bytes": evidence["mount_bytes"],
                 "example": evidence["example"],
                 "read_only": evidence["read_only"],
                 "fd_error": evidence["fd_error"],
@@ -1038,12 +1059,35 @@ def writers_text(described: list[dict], denied: int, seconds: float, mount: str,
         f" by the device id of its cwd and of each file or directory it has open, never by its"
         f" command line; a file it holds there read-only does not place it on {mount}.{missing}"
     ]
-    here = [row for row in described if row.get("on_mount")]
+    # Two groups, not one, because the write-traffic figure is not mount-local and the old
+    # single heading turned a weak placement into an instruction. A process whose CWD is on the
+    # device is very likely writing here; a process placed only by a file it holds open here
+    # may be writing every byte somewhere else, and on 2026-11-05 one was: 1.5 GB in 15 s, with
+    # a 16.0 kB log the only thing it had on the mount.
+    here = [row for row in described if row.get("cwd_on_mount")]
+    candidates = [
+        row for row in described if row.get("on_mount") and not row.get("cwd_on_mount")
+    ]
     elsewhere = [row for row in described if not row.get("on_mount")]
     if here:
-        lines.append(f"On {mount} (these are the ones to stop, highest write traffic first):")
+        lines.append(
+            f"On {mount} by their working directory, highest write traffic first (their traffic"
+            f" very likely lands here, though the figure still counts every filesystem):"
+        )
         lines.extend(writer_line(row, seconds, mount) for row in here)
-    else:
+    if candidates:
+        # Ranked by the one quantity that is mount-local: the bytes of the largest file each
+        # holds open here. Their share of this mount's traffic is unknown, so they get no
+        # ordering by write traffic and no instruction.
+        candidates.sort(key=lambda row: row.get("mount_bytes", 0), reverse=True)
+        lines.append(
+            f"Candidates on {mount}, unranked by traffic, whose share of it is UNKNOWN: each is"
+            f" placed only by a file or directory it holds open there, shown with that file's"
+            f" size. Read that size before acting -- a 16 kB log on this mount beside gigabytes"
+            f" written elsewhere is not a writer here:"
+        )
+        lines.extend(writer_line(row, seconds, mount) for row in candidates)
+    if not here and not candidates:
         lines.append(f"No sampled writer has its cwd, or anything open for writing, on {mount}.")
     if elsewhere:
         lines.append(f"Writing elsewhere, not on {mount} -- stopping these frees nothing here:")
@@ -1912,14 +1956,20 @@ def short_command(command: str, limit: int = 44) -> str:
 
 
 def writers_brief(rows: list[dict], mount: str, room: int) -> str:
-    """The top three writers ON this filesystem, as much of each as `room` pays for.
+    """The top three writers whose CWD is ON this filesystem, as much of each as `room` pays for.
 
     The pid, the traffic and the owning session are the whole address of the thing to stop, so
     they go in first, for as many writers as fit; whatever room is left after that buys the
     commands, in order. Everything else about them -- the elsewhere group, the device evidence,
     the panes, the cwds -- is in the report.
+
+    The short message has no room for a qualification, so it carries only the group whose
+    placement is strong: a cwd on the device. A process placed on the mount by one open file
+    may be writing every byte elsewhere, and naming it here, in the one line a reader acts on
+    first, is how a 16.0 kB log turned into "top writer" on 2026-11-05. Those are in the
+    report, under a heading that says their share is unknown.
     """
-    chosen = [row for row in rows if row.get("on_mount")][:3]
+    chosen = [row for row in rows if row.get("cwd_on_mount")][:3]
     if not chosen:
         return ""
     prefix = f"Top writers on {mount}: "
@@ -2428,10 +2478,13 @@ def iops_alert_text(
             " for hours (dispatch://INFRA-586), and nothing here sampled the device, so the"
             " time it spent at the cap could not be measured afterwards.",
             writers,
-            f"DO: act only on the writers listed as on {mount} -- they are placed by the device"
-            " id of their cwd and open files, never by a command line. Stop or finish that"
-            " lane, or move its I/O to a device with headroom; nothing on this box makes a"
-            " throttled disk faster while the work stays on it.",
+            f"DO: act only on the writers listed under '{mount} by their working directory' --"
+            " they are placed by the device id of their cwd, never by a command line. Stop or"
+            " finish that lane, or move its I/O to a device with headroom; nothing on this box"
+            " makes a throttled disk faster while the work stays on it. The candidates below"
+            " them are NOT an action list: each is placed by one open file whose size is shown,"
+            " its write traffic counts every filesystem, and its share of this mount is"
+            " unknown.",
             "This watch only detects. It deletes nothing, kills nothing and moves nothing."
             f" From disk-fill-watch (~/.dotfiles/scripts/disk-fill-watch) on"
             f" {socket.gethostname()}, a systemd --user timer.",
