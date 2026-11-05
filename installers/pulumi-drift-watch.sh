@@ -1,8 +1,8 @@
 #!/bin/bash
 # Arm the daily Pulumi drift report (scripts/pulumi-drift-watch).
 #
-# Standalone installer (like load-swap-watch.sh and omp-memory-watch.sh) — not sourced by
-# install.sh. Run it only on a machine whose gcloud identity (the box identity on sami-rocqperf)
+# Standalone installer — not sourced by install.sh.
+# Run it only on a machine whose gcloud identity (the box identity on sami-rocqperf)
 # can mint a token as agent-infra's applier, infra-applier@, which the previews run as: the watch
 # previews theorem-labs/agent-infra's stacks against the live cloud, and a machine without that
 # would report a failure every day.

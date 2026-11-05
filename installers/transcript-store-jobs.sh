@@ -1,7 +1,7 @@
 #!/bin/bash
 # Arm the transcript store's import and backup timers (omp/transcript-{import,backup}.{service,timer}).
 #
-# Standalone installer (like omp-memory-watch.sh) — not sourced by install.sh. Run it only on the
+# Standalone installer — not sourced by install.sh. Run it only on the
 # machine that holds the store's client and its credentials; today that is sami-rocqperf.
 #
 # Why this exists: both jobs ran as omp background jobs inside one agent session (the librarian's,

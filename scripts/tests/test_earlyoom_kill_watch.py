@@ -267,10 +267,9 @@ class KillWatchTest(unittest.TestCase):
         self.assertIn("other processes of its cgroup", report_of(self, self.sent[0][1]))
 
     def test_svc_scope_description_names_the_owner_while_live(self) -> None:
-        """Step 3: omp-memory-watch moves a session's broker services into run-c<owner>-svc.scope,
-        described `omp session <uuid>`."""
+        """Step 3: a run-c<owner>-svc.scope described `omp session <uuid>` names its owner."""
         unit = "run-c01a14126ae147525-svc.scope"
-        self.descriptions[unit] = f"omp session {EFF} services (moved by omp-memory-watch)"
+        self.descriptions[unit] = f"omp session {EFF} services"
         cmd = "node server.js"
         self.left_behind(50007, cmd, scope=f"/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}")
         self.live[EFF] = "sami-rocqperf"
@@ -342,7 +341,7 @@ class KillWatchTest(unittest.TestCase):
         self.assertEqual([t for t, _ in self.sent], [EFF])
 
     def test_numbered_svc_scope_description_names_the_owner(self) -> None:
-        """omp-memory-watch's later service processes go to run-c<owner>-svc-2.scope."""
+        """A numbered run-c<owner>-svc-2.scope still names the session in its Description."""
         unit = "run-c01a14126ae147525-svc-2.scope"
         self.descriptions[unit] = f"omp session {EFF}"
         self.live[EFF] = "sami-rocqperf"

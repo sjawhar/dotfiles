@@ -1441,10 +1441,8 @@ def normal_exit_at(path: str | Path | None) -> str | None:
     exited that way at 22:46:26Z and 22:46:56Z still holding roles, and this watch alerted and
     escalated on both as if they had stopped. The exit counts when nothing follows it, or when
     every entry after it is dated within EXIT_TAIL_S of it, before or after: omp can flush the
-    turn in flight after the exit marker. On 2026-11-02 session 01a18c23 exited by Ctrl+D at 07:30:34.078Z,
-    its last assistant message landed 2.3 s later, and omp-memory-watch resumed a session its
-    owner had ended. A session resumed after an exit writes minutes past it, and any other end
-    -- a crash, a kill, a hang -- is still an incident.
+    turn in flight after the exit marker. A session resumed after an exit writes minutes
+    past it, and any other end -- a crash, a kill, a hang -- is still an incident.
     """
     if not path:
         return None
@@ -2845,9 +2843,9 @@ def move_in_progress(pane: dict) -> dict | None:
 # `agentbox move --to <machine>` keeps MOVE_TO_ACTIVE/<session id> (`pid=<relauncher>`,
 # `target=`, `start=`) while it moves a session to another machine, and leaves the marker
 # `agentbox-moved` (`from=`, `to=`, `time=`) in the session's directory and as MOVED_INDEX/<id>
-# once it has. The same rule as omp-memory-watch's move_to_claim and moved_away (dotfiles 9312493):
-# a stale active file whose relauncher died holds nothing, and a marker counts only on the machine
-# its `from=` names. Pane %1740 alerted at 05:12:57Z and %1741 at 05:35:37Z on 2026-11-03 while
+# once it has. A stale active file whose relauncher died holds nothing, and a marker counts
+# only on the machine its `from=` names. Pane %1740 alerted at 05:12:57Z and %1741 at 05:35:37Z
+# on 2026-11-03 while
 # such moves of their sessions ran.
 MOVE_TO_ACTIVE = Path.home() / ".cache" / "omp" / "agentbox" / "move-to" / "active"
 MOVED_MARKER = "agentbox-moved"

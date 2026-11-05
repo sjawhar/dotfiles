@@ -55,8 +55,8 @@ old run-c01a13dcae9797264.scope, reached the chief).
      transcript's `Z_<id>` name: a transcript directory names its subagents' parent), or a
      directory `<Name>-<first 8 hex of a session id>` (`/mnt/nvme/sami/tmp/TwoPartStage1-01a14126/`)
      when exactly one live-here session starts so.
-  3. a `run-c<16 hex>-svc[-N].scope` whose Description starts `omp session <uuid>` (omp-memory-watch
-     moves a session's broker services there): that session, when it is live here. In an
+  3. a `run-c<16 hex>-svc[-N].scope` whose Description starts `omp session <uuid>`:
+     that session, when it is live here. In an
      `omp-broker-<16 hex>[-N].scope` step 2 ignores an environment equal to the broker's own (the
      session that started the broker, which a headless browser inherits), and every environment
      when no broker is left there to compare.
@@ -100,8 +100,7 @@ from collections import Counter
 from pathlib import Path
 
 # A session's own notice goes to that session. The box-level rate goes to the box-health lead's
-# Envoy role (dispatch://INFRA-716), and to the SRE session only when nobody holds the role: the
-# pair load-swap-watch, disk-fill-watch and omp-memory-watch use.
+# Envoy role (dispatch://INFRA-716), and to the SRE session only when nobody holds the role.
 BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
 SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 ENVOY = Path(__file__).resolve().parent / "envoy"
@@ -147,7 +146,7 @@ TRANSCRIPT_RE = re.compile(r"/sessions/.*/[0-9T:-]*Z_(" + UUID + r")\.jsonl$")
 # The session id of an omp is the id in the LAST path component of its --resume (or --restore)
 # argument: the transcript file's own name. A lane resumed from a subagent's transcript runs
 # `--resume .../<time>Z_<parent id>/<time>Z_<own id>.jsonl`; the parent id earlier in the path is
-# not its session (2026-11-03 23:07Z: omp-memory-watch named 01a15237 for such a lane).
+# not its session.
 RESUME_ID_RE = re.compile(r"^(?:[0-9T:-]*Z_)?(" + UUID + r")(?:\.jsonl)?$")
 SESSION_TMP_RE = re.compile(r"/session-tmp/(\d+)-[A-Za-z0-9]{8}(?:/|\s|$)")
 # A session id in a path, not one in a transcript's name (`Z_<id>`): a transcript directory
@@ -158,8 +157,8 @@ SESSION_UUID_RE = re.compile(r"(?<![0-9a-f])(?<!Z_)(" + UUID + r")(?![0-9a-f])")
 SESSION_DIR_RE = re.compile(r"/[A-Za-z][\w.]*-(01[0-9a-f]{6})(?=[/\s\"']|$)")
 DOCKER_RE = re.compile(r"/docker-([0-9a-f]{64})\.scope")
 SCOPE_RE = re.compile(r"^(.*?/(?:run-[^/]+|session-[^/]+|tmux-spawn-[^/]+|omp-broker-[^/]+)\.scope)")
-# omp-memory-watch's names. systemd 255 adds no process to a running scope without Delegate=yes,
-# so a scope's later processes go to `<name>-2.scope`, `-3`, ...: one scope, by its base name.
+# systemd 255 adds no process to a running scope without Delegate=yes. Numbered suffixes
+# (`<name>-2.scope`, `-3`, ...) share a base scope name for attribution.
 RUN_C_RE = re.compile(r"^run-c([0-9a-f]{16})(-svc)?(?:-\d+)?\.scope$")
 # omp-broker-<16 hex of sha256(runtime dir)>.scope: omp's shared worker broker, for many sessions.
 BROKER_RE = re.compile(r"^omp-broker-([0-9a-f]{16})(?:-\d+)?\.scope$")

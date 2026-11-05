@@ -29,10 +29,6 @@ idle prompt; no `tool_execution_start` in any of the six transcripts lacked its 
 every one of the six had been written to within the previous 90 seconds. The lanes were being
 served a fraction of a core each, with their working sets in a swapfile with nothing left.
 
-No instrument on the box watched either number. `disk-fill-watch` watches filesystem bytes;
-`omp-memory-watch` watches one session against its own memcg ceiling and says nothing about a
-box carrying a hundred of them. This watch is the missing one.
-
 ## Each condition on its own, in one message
 
 CPU, swap and memory are judged apart: each has its own crossing, grace, alert, new-fact check
@@ -386,7 +382,6 @@ reason the write was refused. Each refusal to start is its own line (`… but io
 - **A crossing that stays bad without getting worse.** It is said once. A reader who wants the
   current state runs `load-swap-watch --consumers`, and every run is in
   `journalctl --user -u load-swap-watch`.
-- **One session's own memory.** `omp-memory-watch` owns that; this watch sees the box.
 - **A lane that is stuck rather than starved.** A worker waiting on a peer, a dead role holder
   or an empty queue looks identical from `/proc`. `envoy-role-holder-watch` covers the holder
   case; the rest is the lane lead's.

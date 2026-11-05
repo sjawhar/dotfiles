@@ -272,8 +272,7 @@ fi
 # 2026-11-04 at 18:20Z, with 30 GiB of the machine still free. A machine without the file keeps
 # the default. A caller's OMP_MEMORY_MAX wins over the file, and `off` there starts that one launch
 # with no scope. A session started with no ceiling exports OMP_MEMORY_SCOPE=off, so an omp it
-# starts takes no default either. Where scripts/omp-memory-watch runs, its adopt pass still puts
-# an uncapped session into a scope at the default.
+# starts takes no default either.
 if [[ -z "${OMP_MEMORY_SCOPE:-}" ]]; then
     memory_max_file="${XDG_CONFIG_HOME:-$HOME/.config}/omp/memory-max"
     if [[ -z "${OMP_MEMORY_MAX:-}" && -r "$memory_max_file" ]]; then

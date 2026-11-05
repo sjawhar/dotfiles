@@ -270,10 +270,8 @@ class OmpSessionLive(unittest.TestCase):
         self.assertIn(f"exec {BOX} sh -c", asked)
         self.assertIn('find "/proc/885/fd"', asked)
 
-    def test_the_two_resumes_of_2026_11_03_are_still_refused(self) -> None:
-        """00:30Z: a second tmux server's restore ran tmux-resurrect-omp's `omp --resume <id>` for
-        a session whose omp was alive. 00:37Z: omp-memory-watch's pane restarter ran
-        `omp --resume <id> .` for an omp that was alive because only a child of it had died."""
+    def test_resuming_a_live_session_is_refused_after_a_child_dies(self) -> None:
+        """A child ending does not make the session's own live omp safe to resume."""
         self.omp(700, ["omp", "--resume", SID], holds=self.transcript)
         self.omp(701, ["bash", "-c", "sleep 1"], comm="bash")
         self.assert_refused(self.resume("--resume", SID), "(700: its command line names")

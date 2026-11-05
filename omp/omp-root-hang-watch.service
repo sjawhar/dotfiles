@@ -11,8 +11,8 @@ IOSchedulingClass=idle
 # A quiet run costs about 0.4 s of CPU and 1-2 s wall on sami-rocqperf at load 215
 # (2026-11-03): python3 start-up, one GET /v1/sessions (0.15 s), one stat. Its 4 failures in 40 h
 # were all kills at the old 120 s limit during box-wide stalls (2026-11-02 18:15Z and 22:16Z,
-# 2026-11-03 00:32Z and 00:37Z), when omp-memory-watch, envoy-role-holder-watch, omp-login-watch
-# and disk-fill-watch timed out in the same minutes and `systemctl --user` itself answered
+# 2026-11-03 00:32Z and 00:37Z), when other box-health watches timed out in the same minutes
+# and `systemctl --user` itself answered
 # "Connection timed out"; the 00:32Z run had used 1.0 s of CPU in its 120 s. 240 s rides out such
 # a stall and still ends before the next 5-minute start; an alert adds one `envoy send` (60 s
 # cap in the script).

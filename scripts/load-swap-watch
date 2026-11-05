@@ -12,11 +12,6 @@ liveness check a person could run said the box was healthy: omp was running in e
 kept being written. The lanes were simply being served a fraction of a core each, with their
 working sets in a swapfile that had no room left.
 
-That failure mode is invisible to the two watches already on these boxes. `disk-fill-watch`
-watches bytes on a filesystem. `omp-memory-watch` watches one session's own memcg against the
-ceiling `shims/omp` gave it, which is a per-session limit and says nothing about a box carrying
-a hundred of them. The box-wide resource that ran out here -- CPU time, and swap -- had no
-instrument at all.
 
 What one run does, from /proc only, with no model call and no subprocess on the quiet path:
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Arm the one-minute omp provider-login watch (scripts/omp-login-watch).
 #
-# Standalone installer (like omp-memory-watch.sh) — not sourced by install.sh. Run it on a
+# Standalone installer — not sourced by install.sh. Run it on a
 # machine that runs omp sessions against the shared credential store: the watch reads THIS
 # machine's ~/.omp/agent/agent.db, its /proc and its transcripts.
 #

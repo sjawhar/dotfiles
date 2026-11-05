@@ -72,7 +72,7 @@ def test_what_counts_as_a_session():
         proc(20, 1, ["-bash"]),
         proc(21, 20, ["omp", "--resume", "01a13c57-d826-7242-80fe-5f0670188b11", "."]),  # argv[0] is a bare omp
         proc(30, 1, [OMP, "__omp_worker_mnemopi_embed_server"]),  # an orphaned helper
-        proc(40, 1, ["python3", "omp-memory-watch"]),
+        proc(40, 1, ["python3", "fixture-non-agent.py"]),
     ]
     # A grouped session lists each pane once per member session: still one pane.
     panes = [pane(10, "rocq"), pane(10, "rocq", tmux="agents"), pane(20, "infra", title="π > 🤖 INFRA: agent infra")]

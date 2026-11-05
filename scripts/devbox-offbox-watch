@@ -122,11 +122,8 @@ AWAIT_SECONDS = 45
 ENTRY_KEYS = ("session", "title", "role", "tmux", "cwd", "resume", "after", "order",
               "auto_restart", "owner_note")
 STREAM_WINDOWS = ("chief", "ossv", "linux", "tasks", "grader", "infra", "rocq", "cicd")
-# The writeback-stall gate is ResumeGuard's, from omp-memory-watch
-# (/mnt/nvme/sami/scratch/eng-ops-infra898/offbox-note.py): its two tests, its threshold, its
-# wording and its hold limit, so the two watches refuse on the same rule. Its `writeback_stall`
-# reads this machine's own /proc; here the same facts come from the probe on sami-devbox, which
-# is why the test takes them as arguments instead of reading them.
+# The writeback-stall gate reads the facts from the probe on sami-devbox, so the test takes
+# them as arguments instead of reading this machine's own /proc.
 STALL_COMMS = ("umount", "umount2", "fusermount", "fusermount3")
 # How long one session's resume may be held by the gate, counted from the first run that held it.
 # A writeback burst that clears itself lasts seconds; the stall of 2026-11-04 lasted about 85

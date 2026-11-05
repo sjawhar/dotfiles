@@ -1,8 +1,8 @@
 #!/bin/bash
 # Arm the 5-minute duplicate-session watch (scripts/omp-dup-watch).
 #
-# Standalone installer (like omp-memory-watch.sh and load-swap-watch.sh) — not sourced by
-# install.sh. Run it on a machine that carries agent sessions: the watch reads THIS machine's
+# Standalone installer — not sourced by install.sh.
+# Run it on a machine that carries agent sessions: the watch reads THIS machine's
 # /proc for every live omp, its own agent boxes through `docker ps`, and Envoy's registrations
 # for this host, so there is nothing to arm on a laptop that only SSHes in.
 #

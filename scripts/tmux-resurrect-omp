@@ -206,10 +206,7 @@ def named_session(command: str) -> str | None:
 
 # A session `agentbox move --to <machine>` took to another machine must never be resumed here:
 # the move leaves `agentbox-moved` in the session's own directory and as
-# ~/.omp/agentbox-moved/<id>, with `from=` the machine it left (scripts/agent-session,
-# scripts/omp-memory-watch read the same marker). omp-memory-watch resumed the omp lead on
-# sami-rocqperf at 23:59:57Z on 2026-11-03 while its move to sami-devbox was in flight; a save
-# file that still holds such a pane would do it again at the next restore.
+# ~/.omp/agentbox-moved/<id>, with `from=` the machine it left.
 MOVED_INDEX = Path.home() / ".omp" / "agentbox-moved"
 
 
@@ -255,9 +252,7 @@ def box_sessions(boxes: list[str] | None = None) -> dict[str, tuple[str | None, 
 
     Every running agentbox when `boxes` is None. An open session file names both; an idle
     session's argv names only the id, and that pane is restorable only when its own launcher
-    line carries the repo (`rewrite`). Each box costs a `docker exec` (29 s for the 19 boxes
-    on sami-rocqperf on 2026-11-02), so omp-memory-watch's pane restarter names the one box
-    whose session it cannot read from the host.
+    line carries the repo (`rewrite`).
     """
     if boxes is None:
         boxes = subprocess.run(

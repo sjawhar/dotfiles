@@ -2284,8 +2284,8 @@ reap_start() {
 cmd_new() {
     local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
-    # --drop-gone-dirs: this launch RESUMES a session (move_pane_command, omp-memory-watch's
-    # restarter, tmux-resurrect-omp), so its --dir paths were right when they were recorded, and
+    # --drop-gone-dirs: this launch RESUMES a session (move_pane_command, tmux-resurrect-omp),
+    # so its --dir paths were right when they were recorded, and
     # the session is already hung up: a refusal here leaves its pane a shell until a person runs
     # `omp --resume` by hand. So a --dir after the first that is no longer a directory is left out
     # with a line on stderr naming the path and why, instead of refusing the whole resume: one
@@ -7831,14 +7831,19 @@ move_to_in_box() {
     if box_tmux="$(move_box_tmux)" && "$box_tmux" run-shell -b -t "$pane" "$run_cmd"; then
         started=true
     else
-        # No tmux client here speaks to the host's server: hand the job to the host's own
-        # relauncher watcher instead, through the cache both share (move --to-run --wait-for-job).
+        # No tmux client here speaks to the host's server: queue the job through the cache
+        # both share for an operator to start on the host (move --to-run --wait-for-job).
         mkdir -p "$MOVE_TO_JOBS/queue" && ln -sf "$job" "$MOVE_TO_JOBS/queue/$(basename "$job")" \
             && started=queued
     fi
     [[ "$started" != false ]] || die "no way to start the relauncher on the host: no tmux client here speaks to its server, and $MOVE_TO_JOBS/queue could not be written; nothing was hung up"
     if [[ "$started" == queued ]]; then
-        echo "agentbox: no tmux client in this box speaks to the host's server, so the job is queued at $MOVE_TO_JOBS/queue for the host's relauncher watcher (agentbox move --run-queue); it starts within a minute." >&2
+        local waiting=0 queued_job
+        for queued_job in "$MOVE_TO_JOBS/queue/"*.json; do
+            [[ -e "$queued_job" ]] || continue
+            waiting=$((waiting + 1))
+        done
+        echo "agentbox: no tmux client in this box speaks to the host's server, so the job is queued at $MOVE_TO_JOBS/queue; $waiting queued move(s) waiting. To start them, run \`agentbox move --run-queue\` on host ${AGENTBOX_HOST:-the host that runs this box}." >&2
     fi
     if (( MOVE_TO_HOLD_WAIT > 0 )); then
         echo "agentbox: the host checks $target, clones and copies, then tells you over Envoy to run \`agentbox move --go\`; only that hangs this box up. Log: $MOVE_TO_JOBS/$group.log. Go on with your work."
@@ -7853,10 +7858,9 @@ move_to_in_box() {
 # both-machines (found running on both; nothing more is done to it, and moves halt).
 #
 # While it runs, $MOVE_TO_JOBS/active/<sid> says so for each member (pid=, target=, start=):
-# written before the hang-up, removed on every exit, so a pane restarter (omp-memory-watch) never
-# resumes a session whose move is in flight - on 2026-11-03 it resumed LINUX-1248 on this host 6 s
-# after the 04:10Z hang-up, since it read only the `move --self` log. A relauncher stopped by a
-# signal says so, with the step it was in, so its log never ends at "copying".
+# written before the hang-up, removed on every exit, so a pane restarter never resumes a
+# session whose move is in flight. A relauncher stopped by a signal says so, with the step
+# it was in, so its log never ends at "copying".
 MOVE_TO_ACTIVE="$MOVE_TO_JOBS/active"
 # One relauncher per session: the lock each holds for its life, and the descriptors that hold them.
 # The target of the relauncher's own job, for the signal handler and the alert helpers, which run
@@ -7868,7 +7872,7 @@ MOVE_TO_COMMITTED=0
 MOVE_TO_LOCKS="$MOVE_TO_JOBS/locks"
 MOVE_TO_LOCK_FDS=()
 # Jobs a BOX queued because no tmux client there speaks to the host's server (move_to_in_box).
-# The host runs them: `agentbox move --run-queue`, which omp-memory-watch calls each pass.
+# Run them manually on the host: `agentbox move --run-queue`.
 MOVE_TO_QUEUE="$MOVE_TO_JOBS/queue"
 move_to_run_queue() {
     local link job group started=0

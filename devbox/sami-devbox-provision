@@ -102,7 +102,7 @@ SECRET_FILES=(
 # its token from the `theorem` gcloud configuration, a person's login that this machine never
 # holds.
 EXTRA_INSTALLERS=(
-    disk-fill-watch load-swap-watch envoy-role-holder-watch omp-memory-watch session-cpu-record
+    disk-fill-watch load-swap-watch envoy-role-holder-watch session-cpu-record
     # No gateway credential installer: every gateway provider mints this box's own identity token
     # per call (scripts/gateway-token), so there is nothing to arm
     # (dispatch://INFRA-993/comment/be112388). The one exception is the BET-59 verified-grader

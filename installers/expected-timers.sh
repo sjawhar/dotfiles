@@ -1,12 +1,9 @@
 #!/bin/bash
 # Arm every timer in devbox/expected-timers.txt: link its units, then `enable --now`.
 #
-# Why this exists: on 2026-11-04 the box stalled from 16:40Z and was reset at 18:05:53Z, and
-# three watches did not come back. omp-memory-watch, omp-root-hang-watch and omp-login-watch
-# each had a linked .service in ~/.config/systemd/user and no linked .timer, so nothing fired
-# and `systemctl --user list-timers` showed nothing. A link is not an armed timer. This
-# installer asks systemd to enable and start each one, which is the step that was missing, and
-# it is idempotent: enabling an enabled timer and starting a running one change nothing.
+# A linked .service is not an armed timer. This installer asks systemd to enable and start
+# each timer in the list. It is idempotent: enabling an enabled timer and starting a running
+# one change nothing.
 #
 # Standalone installer, not sourced by install.sh. Run it on the host (never inside an
 # agentbox, which has its own ~/.config/systemd that the host manager never reads) after a

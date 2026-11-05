@@ -1,8 +1,8 @@
 #!/bin/bash
 # Arm the 2-minute CPU and swap watch (scripts/load-swap-watch).
 #
-# Standalone installer (like disk-fill-watch.sh and omp-memory-watch.sh) — not sourced by
-# install.sh. Run it on a machine that carries agent sessions: the watch reads THIS machine's
+# Standalone installer — not sourced by install.sh.
+# Run it on a machine that carries agent sessions: the watch reads THIS machine's
 # /proc to decide whether its agents are being starved of CPU or its swap is gone, so there is
 # nothing to arm on a laptop that only SSHes in.
 #

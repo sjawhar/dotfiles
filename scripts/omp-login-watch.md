@@ -53,10 +53,8 @@ died the same way on 2026-10-25 at 22:15:38Z, so the condition recurs
 A pass used to list all of `~/.omp/agent/sessions` (1,655 directories on 2026-11-03) to find
 the transcripts written in the window. That walk is the step that killed passes: 13 of 1,819
 passes in the 40 h to 2026-11-03 01:50Z hit `TimeoutStartSec=120`, all in IO storms (10:23-10:37Z
-on 11-02 at io some 87-96 % with 776 tasks blocked; 00:29-00:35Z on 11-03). In 00:27-00:38Z the
-three watches that walk that tree (this one, envoy-role-holder-watch, omp-root-hang-watch) had
-12 runs killed, while omp-memory-watch, which reads the same processes' `/proc` entries and no
-session directory, finished all 21 of its runs in 4-14 s. Killed passes printed nothing; the
+on 11-02 at io some 87-96 % with 776 tasks blocked; 00:29-00:35Z on 11-03).
+Killed passes printed nothing; the
 passes that finished took 6 s at p50, 41 s at p95 and 79 s at p99 with 1.2 s of CPU, so they
 were waiting, not working.
 

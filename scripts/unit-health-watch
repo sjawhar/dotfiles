@@ -36,9 +36,7 @@ What one run does:
      (devbox/expected-timers.txt, `--expected`), and say a name in that list that is missing,
      that is present but not enabled, or that has not fired for more than three of its own
      periods. Steps 1 to 3 are judged from a unit, so a timer that is simply gone is invisible
-     to them: on 2026-11-04 the box was reset at 18:05:53Z and came back without
-     omp-memory-watch, omp-root-hang-watch and omp-login-watch, each a linked .service with no
-     .timer, and nothing said so for 55 minutes.
+     to them.
   5. Read the streams' standing jobs (~/.config/stream-jobs/*.job and what scripts/stream-job
      records for each) and say a job that has not finished within three of its own intervals,
      naming the owner its job file gives.
@@ -181,12 +179,7 @@ RUN_TIME_REFRESH = 3600.0
 MESSAGE_LIMIT = 600
 REPORT_KEEP = 7 * 86400.0
 
-# A session nobody will bring back. Since 2026-11-04 nothing on this machine or on
-# sami-rocqperf restarts a crashed agent session: omp-memory-watch, which did it as a side
-# duty, was stopped on Sami's word (17:10:29Z), and devbox-offbox-watch is stopped after its
-# liveness check made four duplicate sessions that night. The SRE chose a gap over an automatic
-# resume ("a gap is the cheaper failure") and asked for this instead: a report, every pass, of
-# each session that WOULD have been restarted and now will not be.
+# Report each session that is gone and will not be restarted automatically, every pass.
 #
 # THIS NEVER STARTS ANYTHING. It reads and it tells one person.
 #

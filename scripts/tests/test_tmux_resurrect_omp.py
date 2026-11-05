@@ -3,9 +3,7 @@
 
 Two things it must never do: read a session id out of text that is not an argument of the process
 (a prompt holding `git ls-tree -r f1006fe8` named a session that way), and bring back a session
-that moved to another machine (omp-memory-watch resumed the omp lead on sami-rocqperf at
-23:59:57Z on 2026-11-03 while its move to sami-devbox was in flight; a save file holding that pane
-would do the same at the next restore).
+that moved to another machine.
 """
 
 from __future__ import annotations

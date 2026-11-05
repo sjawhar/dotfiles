@@ -345,9 +345,8 @@ function spawnOmp(argv: string[]) {
 
 // OOM bias inside the box (dispatch://INFRA-702). At the box's memory limit the kernel kills
 // the box process with the largest badness: its RSS plus oom_score_adj × limit / 1000. With
-// every adj at 0 that is often omp, and the session dies with its subagents. On the host,
-// scripts/omp-memory-watch raises every process in an omp scope but omp to +500, but it cannot
-// write a box's processes (Sysbox maps their uid: EPERM). So the runner does it here: every
+// every adj at 0 that is often omp, and the session dies with its subagents. The runner
+// raises the other processes from inside the box: every
 // child of the runner but omp (dockerd, the relays) and every child of omp is raised, with the
 // descendants it already has, and anything forked later inherits +500 from its parent. At +500
 // under a 24 GiB limit each raised process scores 12 GiB more, so among them the largest still

@@ -4,8 +4,7 @@ under `set -euo pipefail`, from a script with no `name` variable of its own.
 
 Until 2026-11-02 its first line read `local name="$1" dropin=".../$name.service.d/..."`, and bash
 expands every word of one `local` before it assigns any, so the call stopped with
-`name: unbound variable` in disk-fill-watch.sh, load-swap-watch.sh, omp-memory-watch.sh and
-devbox/install.sh.
+`name: unbound variable` in disk-fill-watch.sh, load-swap-watch.sh and devbox/install.sh.
 """
 
 from __future__ import annotations

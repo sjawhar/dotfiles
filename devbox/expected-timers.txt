@@ -1,11 +1,7 @@
 # The systemd user timers that must be enabled and running on this box.
 #
-# Why this file exists: on 2026-11-04 the box stalled from 16:40Z and was reset at 18:05:53Z.
-# Three watches did not come back: omp-memory-watch, omp-root-hang-watch and omp-login-watch.
-# Their .service files were linked in ~/.config/systemd/user and their .timer files were not,
-# so `systemctl --user list-timers` showed nothing and no watch was missed by anybody. The
-# memory watch was gone from 17:10:15Z to 18:59:11Z. Nothing on the box knew what should be
-# running, so nothing could say what was not.
+# A linked .service with no linked .timer does not fire and is absent from
+# `systemctl --user list-timers`. This list lets the box say which timers are missing.
 #
 # Two things read this file:
 #   - scripts/unit-health-watch, every 5 minutes. It alerts when a timer named here is missing
@@ -49,9 +45,10 @@ omp-login-watch.timer              # owner: box-health lead. Sessions still have
 # transcript-mirror, which lists this host in its hosts.tsv and copies them; that is devbox's
 # importer and always was. Nothing transcript-related belongs on this host until the store is
 # writable from it (dispatch://INFRA-1235).
-# omp-memory-watch.timer was here. Sami, 2026-11-04 17:10:29Z: "I don't know what OMP memory
-# watch is, but yeah, you can stop it." Disabled at 21:26Z and taken out of this list, which is
-# what had re-armed it at 19:44Z. It does not come back in any form without his say.
+# omp-memory-watch.timer  owner: box-health lead. Retired by the SRE on 2026-11-05,
+#   after Sami stopped the watch on 2026-11-04 and the INFRA lead confirmed DELETE at 19:57Z.
+#   An unarmed linked service is unwanted box clutter. Its script, installer and units are
+#   removed with no replacement. This line does not come back.
 omp-root-hang-watch.timer          # owner: box-health lead. A root session hung on a tool call.
 # session-cpu-record.timer was here. It is now the stream job of the same name
 # (~/.config/stream-jobs/session-cpu-record.job, every 5 min); its first run through the runner

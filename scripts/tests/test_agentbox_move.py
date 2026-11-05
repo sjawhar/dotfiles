@@ -2099,9 +2099,8 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(refs, "")
 
     def test_a_move_in_flight_is_marked_active_and_unmarked_on_every_outcome(self) -> None:
-        """omp-memory-watch resumed LINUX-1248 on this host 6 s after the 04:10Z hang-up
-        (2026-11-03), since nothing told it a `move --to` was in flight. The relauncher writes
-        $MOVE_TO_JOBS/active/<sid> before the hang-up and removes it on every exit."""
+        """The relauncher writes $MOVE_TO_JOBS/active/<sid> before the hang-up and removes
+        it on every exit."""
         self.moving_session()
         self.set_pids(999999901)
         self.set_panes({999999900: ("%81", "agents:4.1")})
@@ -4074,17 +4073,20 @@ class AgentboxMove(unittest.TestCase):
     def test_a_box_whose_tmux_cannot_reach_the_host_queues_its_move(self) -> None:
         """A tmux client of another version cannot talk to the host's server (the image's 3.4
         against this host's 3.8), so a boxed move could not start its relauncher (2026-11-03). It
-        takes the first client that the server answers, and queues the job when none does; the
-        host's watch runs `agentbox move --run-queue` each pass."""
+        takes the first client that the server answers, and queues the job when none does.
+        The message names the host command needed to start that queued move."""
         self.moving_session()
         self.target()
         env = {"AGENTBOX_BOX": "agentbox-0123456789ab", "AGENTBOX_DIRS": str(self.lane),
-               "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81"}
+               "OMP_SESSION_ID": self.TO, "TMUX_PANE": "%81", "AGENTBOX_HOST": "fixture-host"}
         # Every tmux here refuses the server, as a client of the wrong version does.
         write_stub(self.stubs, "tmux", 'echo "server exited unexpectedly" >&2; exit 1')
         queued = self.run_bash(f'move_own_omp() {{ echo 999999901; }}\ncd "{self.lane}"\ncmd_move_to --to devbox --accept-orphans', env)
         self.assertEqual(queued.returncode, 0, queued.stdout + queued.stderr)
         self.assertIn("the job is queued at", queued.stderr)
+        self.assertIn("run `agentbox move --run-queue` on host fixture-host", queued.stderr)
+        self.assertIn("1 queued move(s) waiting", queued.stderr)
+        self.assertNotIn("starts within a minute", queued.stderr)
         queue = self.root / "cache/omp/agentbox/move-to/queue"
         [link] = list(queue.glob("*.json"))
         [job] = self.jobs()

@@ -29,7 +29,6 @@ started and 119 completed.
 ```
 service                               every window start  done  kill  fail  run  ...  verdict
 envoy-role-holder-watch.service         30s  60min   118     0   115     2    1  ...  NO RUN COMPLETED; RUNS KILLED AT THE TIME LIMIT
-omp-memory-watch.service                30s  60min   118   113     5     0    0  ...  ok
 ```
 
 (The 118th run started at 10:59:51Z and was killed after the hour closed, so it reads as still
@@ -74,11 +73,8 @@ Each is judged on its own, opens and clears on its own, and is said once.
   18Z, 22 of 113 at 00Z), so "none completed" held only at 06Z and 10Z-12Z on 2026-11-02, while
   the killed share was over 25% in every hour from 2026-11-01 16Z to 2026-11-02 13Z (26% to 98%).
   It also speaks before the hour is gone: at a 30 s period, all-killed crosses 25% of the window
-  after about 15 minutes. The bar comes from the journal on this box, 2026-11-01 09Z to
-  2026-11-02 14Z: `omp-memory-watch` at 43% (36 of 83) and 28% (13 of 47) on its two worst hours
-  and 0-17% on the others; `omp-login-watch` at 13% (7 of 52); `disk-fill-watch` at 23% (3 of
-  13). One run in four killed is a unit whose limit no longer fits the box. It clears at half
-  the bar (`--clear-factor`), so it never flaps on 25%.
+  after about 15 minutes. One run in four killed is a unit whose limit no longer fits the box.
+  It clears at half the bar (`--clear-factor`), so it never flaps on 25%.
 - **TIMER STOPPED FIRING**: an enabled timer that is not active, or an active one that has not
   fired for two periods + its slack + 2 min while its service is not running. For
   `OnUnitInactiveSec` the clock starts when the service last went inactive. A disabled timer that
@@ -117,12 +113,7 @@ Each is judged on its own, opens and clears on its own, and is said once.
 ## The timers that must be there: devbox/expected-timers.txt
 
 The four conditions above are judged from a unit, so a timer that is simply **gone** is
-invisible to all of them. On 2026-11-04 the box stalled from 16:40Z and was reset at
-18:05:53Z, and three watches did not come back: `omp-memory-watch`, `omp-root-hang-watch` and
-`omp-login-watch`, each a linked `.service` in `~/.config/systemd/user` with no linked
-`.timer`. `systemctl --user list-timers` showed nothing, which is exactly what a healthy box
-with no such timer looks like. The memory watch was gone from 17:10:15Z to 18:59:11Z and
-nothing said so.
+invisible to all of them.
 
 So one plain list, `~/.dotfiles/devbox/expected-timers.txt` (`--expected`), holds the timers
 this box must have: one name per line, a `#` comment saying who owns it, and optional
@@ -230,11 +221,8 @@ The same route as every box watch here (`load-swap-watch.md`, "Where alerts go")
 
 ## Sessions nobody will restart
 
-Since 2026-11-04 nothing on sami-devbox or sami-rocqperf brings a crashed agent session back:
-`omp-memory-watch`, which resumed panes as a side duty, was stopped on Sami's word, and
-`devbox-offbox-watch` is stopped after its liveness check made four duplicate sessions that
-night. The SRE chose the gap over an automatic resume — "a gap is the cheaper failure" — and
-asked for a report in its place. **This never starts anything.**
+This reports sessions that are gone and will not be restarted automatically.
+**It never starts anything.**
 
 Every pass, **every** entry in the restart registry is judged — not only the ones that say
 `auto_restart=yes`. CHIEF, 2026-11-04: a `no` means "do not bring me back", not "do not tell

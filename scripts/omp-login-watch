@@ -77,7 +77,7 @@ from pathlib import Path
 # login when many sessions refresh it at once".
 DISPATCH_ISSUE = "INFRA-387"
 # Box health belongs to the box-health lead's Envoy role (dispatch://INFRA-716), and to the SRE
-# session when nobody holds that role -- the same pair omp-memory-watch and disk-fill-watch use.
+# session when nobody holds that role.
 BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
 SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 
@@ -88,7 +88,7 @@ DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 # a DISPATCH_SESSION_ID to act as; the unit gives it all three.
 DISPATCH_CLI = Path.home() / ".dotfiles/omp/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch"
 
-# Where the state file goes, as in omp-memory-watch: the big scratch disk when this user can
+# Where the state file goes: the big scratch disk when this user can
 # write it, else the XDG state directory every machine has.
 _NVME_STATE = Path("/mnt/nvme/sami/tmp/omp-login-watch/state.json")
 DEFAULT_STATE = (
@@ -372,9 +372,6 @@ def omp_sessions(store: Path) -> tuple[dict[str, int], int, int]:
 # of ~/.omp/agent/sessions that found them was the step that killed passes: on sami-rocqperf
 # 13 of 1,819 passes in the 40 h to 2026-11-03 01:50Z hit TimeoutStartSec=120, all in IO storms
 # (10:23-10:37Z on 11-02 at io some 87-96 % with 776 tasks blocked; 00:29-00:35Z on 11-03).
-# In 00:27-00:38Z the three watches that walk that tree (this one, envoy-role-holder-watch,
-# omp-root-hang-watch) had 12 runs killed, while omp-memory-watch, which reads the same omp
-# processes' /proc entries and no session directory, finished all 21 of its runs in 4-14 s.
 # envoy-role-holder-watch measured the same walk at 247 s under load (2ec571e6). The tree held
 # 1,655 directories on 2026-11-03.
 TRANSCRIPT_CACHE = "transcripts.json"

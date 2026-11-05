@@ -1,7 +1,7 @@
 #!/bin/bash
 # Arm the 5-minute disk fill watch (scripts/disk-fill-watch).
 #
-# Standalone installer (like omp-memory-watch.sh) — not sourced by install.sh. Run it on a
+# Standalone installer — not sourced by install.sh. Run it on a
 # machine whose disks agent sessions fill: the watch reads THIS machine's statvfs and /proc to
 # decide whether a filesystem is heading for full, so there is nothing to arm on a laptop that
 # only SSHes in.

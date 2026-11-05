@@ -308,9 +308,9 @@ session itself recorded. A pane at a shell is **not** an incident when:
 3. **an `agentbox move` owns its session**: `~/.cache/omp/agentbox/move-to/active/<session id>`
    exists and its `pid=` is alive (a stale file whose relauncher died holds nothing), or the
    session's `agentbox-moved` marker (in its transcript directory, or
-   `~/.omp/agentbox-moved/<session id>`) names this machine as `from=` — the rule omp-memory-watch
-   applies before it resumes anything. `%1740` and `%1741` alerted at 05:12:57Z and 05:35:37Z
-   while their sessions were being moved to sami-devbox. A move's hang-up writes no
+   `~/.omp/agentbox-moved/<session id>`) names this machine as `from=`. `%1740` and `%1741`
+   alerted at 05:12:57Z and 05:35:37Z while their sessions were being moved to sami-devbox.
+   A move's hang-up writes no
    `session_exit` (01a19e3c-8da0's transcript ends in an aborted turn at 05:32:08Z), so a move
    that fails and leaves the pane down is still caught once its active file goes.
 

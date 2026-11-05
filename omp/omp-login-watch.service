@@ -8,8 +8,8 @@ OnFailure=omp-login-watch-failed.service
 
 [Service]
 Type=oneshot
-# Last in line for CPU and disk, like omp-memory-watch: this box runs at load 100+, and a
-# watch that competes with the sessions it watches is worse than one that answers later.
+# Last in line for CPU and disk: this box runs at load 100+, and a watch that competes with
+# the sessions it watches is worse than one that answers later.
 Nice=15
 IOSchedulingClass=idle
 # One pass is a read-only sqlite read, a /proc read of the omp processes, one Envoy GET and the
