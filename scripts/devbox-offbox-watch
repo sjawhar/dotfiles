@@ -292,16 +292,39 @@ def describe_dirs(resume: str) -> str:
 # Envoy
 
 
-class Reporter:
-    """Envoy, with a file on this machine for what Envoy would not take."""
+# The marker a log monitor matches. Every alert and every refusal prints one of these lines on
+# stdout, whatever becomes of the Envoy message beside it. In the dispatch cluster there is no
+# Envoy client in the pod at all and the pod's state directory dies with the pass, so the log line
+# is the only thing that leaves a finished pod: a log monitor on this marker posts to #fleet-alerts
+# and to the box-health role through the notification path the fleet already has, with no second
+# credential for the job (the INFRA lead's call on agent-infra#2194, 2026-11-05). On
+# sami-rocqperf, where the client does run, it is one more line in the journal.
+ALERT_MARKER = "OFFBOX-ALERT"
 
-    def __init__(self, state_dir: Path, dry_run: bool) -> None:
+
+class Reporter:
+    """Envoy, a structured line in the log for whoever has no Envoy, and a file on this machine for
+    what Envoy would not take."""
+
+    def __init__(self, state_dir: Path, dry_run: bool, host: str = "") -> None:
         self.undelivered = state_dir / "undelivered"
         self.dry_run = dry_run
+        self.host = host
 
     def send(self, targets: list[str], kind: str, text: str) -> None:
         targets = [t for t in dict.fromkeys(targets) if t]
         log(f"[{kind}] -> {', '.join(targets) or 'nobody'}: {text}")
+        now = time.time()
+        log(f"{ALERT_MARKER} " + json.dumps({
+            "at": round(now, 3),
+            "iso": utc(now),
+            "host": self.host,
+            "kind": kind,
+            "targets": targets,
+            "watcher": socket.gethostname(),
+            "dry_run": bool(self.dry_run),
+            "text": text,
+        }, sort_keys=True))
         if self.dry_run:
             return
         failed = []
@@ -587,7 +610,7 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
     now = time.time()
     state_path = Path(args.state)
     state = load_state(state_path)
-    report = Reporter(state_path.parent, args.dry_run)
+    report = Reporter(state_path.parent, args.dry_run, args.host)
     remote = Remote(args.host, args.ssh_timeout, forced=args.forced_command, key=args.ssh_key)
     me = socket.gethostname()
 

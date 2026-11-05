@@ -19,6 +19,28 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 host="${DEVBOX_OFFBOX_HOST:-sami-devbox}"
 install_dir="${DEVBOX_OFFBOX_ACT_DIR:-/mnt/durable/sami/offbox-act}"
 
+# The addresses the key may be used from, for the line this prints. A tailnet node that joins
+# ephemerally has a new address every run, so there is no list to write: the cluster job's sidecar
+# is therefore a persistent node, and `--from <its address>` is read once with
+# `tailscale ip -4 <node name>`. This script never invents one. `--no-from` prints the line
+# without `from=` and says plainly what then bounds the key: the single tailnet grant, `restrict`
+# and the forced command (the INFRA lead's call on agent-infra#2194, 2026-11-05). A `from=` over
+# the whole 100.64.0.0/10 range is not an option -- it restricts nothing beyond "arrived over the
+# tailnet" -- so a placeholder is refused rather than printed.
+from=""
+case "${1-}" in
+    --from) from="${2:?--from takes the addresses the key may be used from}" ;;
+    --no-from | "") ;;
+    *) echo "$name: usage: $name [--from <addresses> | --no-from]" >&2; exit 2 ;;
+esac
+case "$from" in
+    *100.64.0.0/10* | *"<"*)
+        echo "$name: --from $from is not a restriction: give the job's own node address, read once" >&2
+        echo "  with 'tailscale ip -4 <node name>', or --no-from to rest on the tailnet grant." >&2
+        exit 2
+        ;;
+esac
+
 if [ "$(hostname -s)" != "$host" ]; then
     echo "$name: this is $(hostname -s), not $host. The pinned copy belongs ON the watched" >&2
     echo "  machine; the watch itself runs somewhere else (installers/devbox-offbox-watch.sh)." >&2
@@ -49,16 +71,28 @@ chmod 0444 "$install_dir/PINNED"
 
 echo "$name: installed the pinned acting half in $install_dir at $commit"
 echo
+if [ -n "$from" ]; then
+    key_line="restrict,command=\"$install_dir/devbox-offbox-act --forced\",from=\"$from\" ssh-ed25519 <the public key> devbox-offbox-watch@dispatch-cluster"
+else
+    key_line="restrict,command=\"$install_dir/devbox-offbox-act --forced\" ssh-ed25519 <the public key> devbox-offbox-watch@dispatch-cluster"
+fi
 echo "The authorized_keys line for the watch's key, which a PERSON adds to ~/.ssh/authorized_keys"
-echo "on this machine (one line; fill in the job's tailnet addresses and the public key):"
+echo "on this machine (one line; fill in the public key):"
 echo
-echo "restrict,command=\"$install_dir/devbox-offbox-act --forced\",from=\"<the job's tailnet IPs>\" ssh-ed25519 <the public key> devbox-offbox-watch@dispatch-cluster"
+echo "$key_line"
 echo
 echo "What that line allows: probe, live <uuid>..., restart <uuid> and await <uuid>, nothing else."
 echo "  restrict  -- no shell, no port forward, no agent forward, no X11, no tty (sshd refuses"
 echo "               each before the command runs)"
 echo "  command   -- every login runs the pinned copy above, whatever the client asks for"
-echo "  from      -- only the pod's tailnet addresses may use the key at all"
+if [ -n "$from" ]; then
+    echo "  from      -- only $from may use the key at all"
+else
+    echo "  (no from) -- the job's node is the one thing the tailnet policy lets reach this"
+    echo "               machine's TCP 22 (tag:offbox-watch's single grant), and that grant plus"
+    echo "               restrict and the forced command are the whole boundary. --from was not"
+    echo "               given, so no address list is claimed here."
+fi
 echo "A restart takes its resume line from $(
     printf '%s' "${DEVBOX_OFFBOX_REGISTRY:-/mnt/durable/sami/restart-registry/sessions}")/<uuid>.entry"
 echo "on this machine, never from the caller, so the key cannot ask for an arbitrary agentbox new."

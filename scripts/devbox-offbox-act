@@ -76,7 +76,17 @@ restart_markers="${AGENTBOX_RESTART_MARKERS:-$HOME/.cache/omp/agentbox}"
 forced_fresh_seconds=120
 forced_await_seconds=45
 
-uuid_re='^[0-9a-f-]{36}$'
+# A session id, in full: 8-4-4-4-12 hexadecimal. Not `[0-9a-f-]{36}`, which also admits 36 hyphens
+# and is not uuid syntax, however little the rest of the file would do with one.
+uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# The most ids one `live` may carry. The key is read-only, so an unbounded list costs the watched
+# box CPU rather than privilege -- but 3,000 ids ran 34 s wall and 43 s user against the pinned
+# copy with the box scan stubbed out (the INFRA lead's gate of agent-infra#2194, 2026-11-05), and a
+# real pass adds the 116-box scan on top of that. 256 is far above what the watch asks for: the
+# registry held 20-odd entries at its largest, and the watch sends every `auto_restart=yes` entry
+# in one call.
+forced_live_max_ids=256
 
 refuse() {
     printf 'devbox-offbox-act --forced: %s\n' "$1" >&2
@@ -95,6 +105,10 @@ if [[ "${1-}" == --forced ]]; then
         || refuse "only letters, digits, spaces, '_' and '-' are accepted: $original"
     read -r -a words <<<"$original"
     (( ${#words[@]} )) || refuse "no command given, and this key carries no shell"
+    # The count is checked BEFORE any per-id work: matching 3,000 ids against the regex is itself
+    # the cost a cap exists to stop.
+    (( ${#words[@]} - 1 <= forced_live_max_ids )) \
+        || refuse "at most $forced_live_max_ids session ids in one command, not $(( ${#words[@]} - 1 ))"
     for word in "${words[@]:1}"; do
         [[ "$word" =~ $uuid_re ]] || refuse "not a session id: $word"
     done
@@ -359,7 +373,10 @@ restart-entry)
     id="${1:?session id}"
     [[ "$id" =~ $uuid_re ]] || { printf 'error=not a session id: %s\n' "$id" >&2; exit 2; }
     entry="$registry_dir/$id.entry"
-    [[ -f "$entry" ]] || { printf 'error=no registry entry %s\n' "$entry" >&2; exit 1; }
+    # A regular file, and not a symlink: writing one into the registry already needs access past
+    # anything this key has, but reading through it is not a thing the forced command should do.
+    [[ -f "$entry" && ! -L "$entry" ]] \
+        || { printf 'error=no registry entry %s\n' "$entry" >&2; exit 1; }
     entry_session="" entry_title="" entry_cwd="" entry_resume="" entry_tmux=""
     while IFS= read -r line; do
         [[ "$line" == *=* ]] || continue

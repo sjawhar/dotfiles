@@ -120,6 +120,10 @@ def entry(box: dict, name: str, **fields: str) -> Path:
     (f"LIVE {SESSION}", "a verb in capitals"),
     (f"/bin/echo live {SESSION}", "a path in front of the verb"),
     (f"live {SESSION}\nrestart {SESSION}", "a second line"),
+    (f"probe {SESSION}", "probe with a session id, the one argument shape the character class and"
+                        " the id loop both admit"),
+    ("live " + "-" * 36, "36 hyphens, which the old `[0-9a-f-]{36}` called a session id"),
+    (f"live {SESSION[:-1]}0x", "an id with a non-hexadecimal character in its last group"),
 ])
 def test_forced_refuses(box: dict, command: str, because: str) -> None:
     done = forced(box, command)
@@ -137,6 +141,27 @@ def test_forced_takes_no_argument_of_its_own(box: dict) -> None:
                           capture_output=True, text=True, timeout=60)
     assert done.returncode != 0
     assert "takes no argument of its own" in done.stderr
+
+
+def test_live_refuses_more_ids_than_the_cap(box: dict) -> None:
+    """An unbounded list is not privilege, it is the watched box's CPU: 3,000 ids ran 34 s wall
+    against the pinned copy with the box scan stubbed out (agent-infra#2194's gate). The count is
+    refused before any per-id work."""
+    ids = " ".join(f"01a1a7fc-a94f-72f8-9651-{i:012d}" for i in range(257))
+    done = forced(box, f"live {ids}")
+    assert done.returncode != 0
+    assert "at most 256 session ids" in done.stderr, done.stderr
+    assert not box["calls"].exists()
+
+
+def test_live_accepts_the_cap_itself(box: dict) -> None:
+    """The boundary on the other side: 256 ids are accepted, so the cap refuses nothing the watch
+    asks for (the registry's largest was about 20 entries, all in one call)."""
+    ids = [f"01a1a7fc-a94f-72f8-9651-{i:012d}" for i in range(256)]
+    done = forced(box, "live " + " ".join(ids), timeout=300)
+    assert done.returncode == 0, done.stderr
+    assert f"live {ids[0]} 0" in done.stdout
+    assert f"live {ids[-1]} 0" in done.stdout
 
 
 # --- what it accepts, and what a restart reads -------------------------------------------------

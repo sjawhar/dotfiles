@@ -23,9 +23,9 @@ publish behind.
 
 **Under a forced command, from the dispatch cluster.** A pod has no way to ship a script: its key
 in sami-devbox's `~/.ssh/authorized_keys` carries
-`restrict,command="<pinned path>/devbox-offbox-act --forced",from="<the job's tailnet IPs>"`, and
-a forced command gets no stdin of its own. `--forced-command` makes every call a verb instead:
-`probe`, `live <uuid>…`, `restart <uuid>`, `await <uuid>`. The pinned copy on the host parses
+`restrict,command="<pinned path>/devbox-offbox-act --forced"`, and a forced command gets no stdin
+of its own. `--forced-command` makes every call a verb instead: `probe`, `live <uuid>…`,
+`restart <uuid>`, `await <uuid>`, at most 256 ids in one call. The pinned copy on the host parses
 `SSH_ORIGINAL_COMMAND` itself, refuses everything else with one line on stderr, and reads a
 restart's tmux session, window title, cwd and **resume line from that session's own registry
 entry** — never from the caller, so the key cannot ask for an arbitrary `agentbox new`. What the
@@ -34,6 +34,20 @@ forward, an agent forward, X11 and a tty: that is the `restrict`. `installers/de
 installs the pinned copy, records the commit it came from, and prints the `authorized_keys` line;
 it never edits `authorized_keys`, and an update of the copy is a deliberate run of that installer,
 not a publish.
+
+**`from=` is an address or nothing.** `devbox-offbox-act-host.sh --from <address>` puts it in the
+printed line and `--no-from` leaves it out, saying that the tailnet grant, `restrict` and the
+forced command are then the whole boundary. A placeholder and a `from=` over 100.64.0.0/10 are
+both refused: a range that wide restricts nothing beyond "arrived over the tailnet". The address
+exists only because the cluster job's Tailscale sidecar is a **persistent** node — an ephemeral one
+has a new address every pass — and it is read once with `tailscale ip -4 <the node name>`.
+
+**Every message is also a log line.** Each alert and each refusal prints
+`OFFBOX-ALERT <json>` (kind, targets, the watched host, the text) on stdout as well as going to
+Envoy. In the cluster there is no Envoy client in the pod at all and its state directory dies with
+the pass, so that line is the only thing that leaves a finished pod; a log monitor on the marker
+posts to `#fleet-alerts` and to the box-health role, and the job needs no second credential for it
+(agent-infra#2194).
 
 ## Why it exists
 

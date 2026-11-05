@@ -240,3 +240,28 @@ def test_the_stdin_transport_still_ships_the_two_halves() -> None:
     command, stdin = sent[0]
     assert command == f"bash -s -- live 120 {SESSION}"
     assert stdin.startswith("#!/usr/bin/env bash")
+
+
+def test_every_refusal_prints_one_structured_line_for_a_log_monitor(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """In the dispatch cluster there is no Envoy client in the pod and its state directory dies
+    with the pass, so a refusal that is only an Envoy message reaches nobody. Every message is
+    therefore also one `OFFBOX-ALERT <json>` line on stdout, which a log monitor matches and posts
+    to #fleet-alerts and the box-health role (the INFRA lead's call on agent-infra#2194).
+
+    Reporter.send is NOT stubbed here: this is the line itself, not what the refusal decided.
+    """
+    box = FakeBox(probe_text(), live_text(f"live {SESSION} 0", f"restarting {SESSION} 11"))
+    monkeypatch.setattr(watch, "Remote", lambda *a, **k: box)
+    assert watch.main(["--state", str(tmp_path / "state.json"), "--sre", "SRE", "--chief", "CHIEF",
+                       "--dry-run"]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines()
+             if line.startswith(watch.ALERT_MARKER + " ")]
+    assert len(lines) == 1, lines
+    alert = json.loads(lines[0][len(watch.ALERT_MARKER) + 1:])
+    assert alert["kind"] == "refuse-box-restart"
+    assert alert["targets"] == ["SRE"]
+    assert alert["host"] == "sami-devbox"
+    assert SESSION in alert["text"] and "11 s into its relaunch" in alert["text"]
+    assert alert["iso"].endswith("Z") and alert["dry_run"] is True
+    assert box.restarted == []
