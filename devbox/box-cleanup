@@ -1,11 +1,9 @@
 #!/bin/bash
-# box-cleanup: one daily pass over every disk cleaner this box has, one log, two alerts.
+# box-cleanup: frequent guarded cache caps, daily sweeps, one schedule and one log.
 #
-# Until 2026-11-04 the seven cleaners below each had a timer of their own: docker-cap and
-# gocache-cap hourly, nvme-cache-cap hourly, session-scratch-reap every two minutes,
-# tmp-stale-reap hourly, session-tmp-reap and tmp-empty-prune daily. Seven schedules, seven
-# journals, and no one line anywhere saying what the box got back. Sami folded them into one
-# daily job (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b, 2026-11-04 21:02Z).
+# The seven cleaners share one timer; their minimum intervals live beside their commands.
+# Keeping the costly walks daily lets the guarded cache caps run every 15 minutes without
+# adding a schedule (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b).
 #
 # THIS IS ONE SCHEDULE AND ONE LOG, NOT A NEW DELETION POLICY. Each cleaner is run as it stands,
 # unchanged, with its own caps, its own ages and its own refusals. Nothing here decides what to
@@ -14,8 +12,8 @@
 #
 # What one run does:
 #   1. reads the free bytes of every local filesystem;
-#   2. runs each cleaner in turn, re-reading those filesystems after each one, so the log says
-#      what each cleaner gave back;
+#   2. runs each due cleaner in turn, re-reading those filesystems after each one, so the log
+#      says what each cleaner gave back; records deliberate skips with their reason;
 #   3. writes one human line to the journal and one JSON object to the log;
 #   4. alerts the box-health lead over Envoy in two cases, and in no others:
 #        - a filesystem is under its floor AFTER the run (the floors disk-fill-watch alerts at:
@@ -32,9 +30,9 @@
 # what the cleaner deleted: 80 agent sessions write to these disks throughout. A step can
 # therefore read as negative, which the log prints as it is rather than hiding.
 #
-#   box-cleanup                 run every cleaner, log, alert if either rule says so
-#   box-cleanup --dry-run       print the steps and the filesystems, run nothing
-#   box-cleanup --only NAME     run one cleaner (repeatable), still logs
+#   box-cleanup                 run due cleaners, log, alert if either rule says so
+#   box-cleanup --dry-run       print due/skipped steps and the filesystems, run nothing
+#   box-cleanup --only NAME     select one cleaner (repeatable), still respects its interval
 #   box-cleanup --no-alert      run and log, send nothing
 #   box-cleanup --report        print the log's last runs and the state, run nothing
 #
@@ -59,6 +57,8 @@ MESSAGE_LIMIT=600
 # already under their caps and whose sessions all still live frees nothing on a quiet day, and
 # that is not a fault. Three such days in a row is.
 ZERO_DAYS=3
+# Keep the freed-nothing observation daily even for repeated --only cache-cap passes.
+ZERO_INTERVAL=86400
 # Runs in a row one cleaner may fail before it is said. The same three, for the same reason: a
 # single failure is a busy box or a lock held, three is a cleaner that has stopped working.
 STEP_FAIL_RUNS=3
@@ -84,7 +84,7 @@ floor_for() { # floor_for MOUNT TOTAL_BYTES
 # The cleaners, in the order they run. Cheapest and most self-contained first, so a long
 # docker-cap cannot keep the small sweeps from happening at all.
 #
-#   <name>|<paths one of which must exist>|<command>
+#   <name>|<minimum interval in seconds>|<paths one of which must exist>|<command>
 #
 # Each is run exactly as its own timer ran it, with the same environment and the same condition.
 # The paths are that unit's own `ConditionPathIsDirectory`/`ConditionPathExists` lines, which
@@ -95,13 +95,19 @@ floor_for() { # floor_for MOUNT TOTAL_BYTES
 # the budget it stops its walk at.
 user="$(id -un)"
 STEPS=(
-    "tmp-empty-prune|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/tmp-empty-prune"
-    "tmp-stale-reap|/tmp|TMP_REAP_RUN_SECONDS=1680 $here/tmp-stale-reap --apply"
-    "session-scratch-reap|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|$here/session-scratch-reap"
-    "session-tmp-reap|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/session-scratch-reap --tmp"
-    "gocache-cap|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
-    "nvme-cache-cap|/mnt/nvme/$user|$here/nvme-cache-cap"
-    "docker-cap|/var/run/docker.sock|$here/docker-cap"
+    # Walks over many temporary entries: keep the daily empty-directory sweep.
+    "tmp-empty-prune|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/tmp-empty-prune"
+    # A /tmp walk with a 1680-second budget is daily work, not a cheap usage check.
+    "tmp-stale-reap|86400|/tmp|TMP_REAP_RUN_SECONDS=1680 $here/tmp-stale-reap --apply"
+    # Session-directory census and liveness checks keep their daily cadence.
+    "session-scratch-reap|86400|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|$here/session-scratch-reap"
+    # The report-only TMPDIR census took 409-828 seconds: do it once a day.
+    "session-tmp-reap|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/session-scratch-reap --tmp"
+    # Cheap cap checks; their own usage thresholds decide whether trimming is needed.
+    "gocache-cap|0|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
+    "nvme-cache-cap|0|/mnt/nvme/$user|$here/nvme-cache-cap"
+    # Docker checks its filesystem against DOCKER_CAP_HIGH_PCT (default 80%) before acting.
+    "docker-cap|0|/var/run/docker.sock|$here/docker-cap"
 )
 
 usage() {
@@ -239,13 +245,15 @@ json_string() { # minimal JSON escaping for the strings this writes
 }
 
 # The state this job keeps between runs, in one small JSON file:
-#   zero_days        consecutive runs that gained nothing anywhere
-#   alerted_at_days  the zero_days the second alert last went out at, so it says it once
-#   step_fails       per step, how many runs in a row it has failed
-#   step_last_exit   per step, the exit of its last run, for the message
-#   step_alerted     per step, the streak its alert last went out at
-declare -A STEP_FAILS STEP_LAST_EXIT STEP_ALERTED
-zero_days=0 alerted_at=0
+#   zero_days          consecutive eligible daily observations that gained nothing anywhere
+#   zero_checked_at    epoch seconds of the last observation or gain; no faster than daily
+#   alerted_at_days    the zero_days the second alert last went out at, so it says it once
+#   step_fails         per step, how many attempted runs in a row it has failed
+#   step_last_exit     per step, the exit of its last attempted run, for the message
+#   step_alerted       per step, the streak its alert last went out at
+#   step_last_success  per step, epoch seconds when its last successful run finished
+declare -A STEP_FAILS STEP_LAST_EXIT STEP_ALERTED STEP_LAST_SUCCESS
+zero_days=0 alerted_at=0 zero_checked_at=0
 
 load_state() {
     [[ -r "$state_file" ]] || return 0
@@ -254,20 +262,33 @@ load_state() {
         case "$kind" in
             zero_days) zero_days="$name" ;;
             alerted_at) alerted_at="$name" ;;
+            zero_checked_at) zero_checked_at="$name" ;;
             fail) STEP_FAILS["$name"]="$value" ;;
             exit) STEP_LAST_EXIT["$name"]="$value" ;;
             alerted) STEP_ALERTED["$name"]="$value" ;;
+            success) STEP_LAST_SUCCESS["$name"]="$value" ;;
         esac
     done < <(
         python3 - "$state_file" <<'PY' 2>/dev/null
 import json, sys
+from datetime import datetime, timezone
 try:
     data = json.load(open(sys.argv[1]))
 except Exception:
     data = {}
 print("zero_days", int(data.get("zero_days", 0)))
 print("alerted_at", int(data.get("alerted_at_days", 0)))
-for key, prefix in (("step_fails", "fail"), ("step_last_exit", "exit"), ("step_alerted", "alerted")):
+# Older state was written by a daily pass; do not count that observation again today.
+checked_at = data.get("zero_checked_at")
+if checked_at is None:
+    try:
+        checked_at = int(datetime.strptime(data["at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp())
+    except (KeyError, TypeError, ValueError):
+        checked_at = 0
+print("zero_checked_at", int(checked_at))
+for key, prefix in (("step_fails", "fail"), ("step_last_exit", "exit"), ("step_alerted", "alerted"),
+                    ("step_last_success", "success")):
     for name, value in (data.get(key) or {}).items():
         if name and " " not in name:
             print(prefix, name, int(value))
@@ -282,32 +303,36 @@ PY
 write_state() {
     mkdir -p "$(dirname "$state_file")" 2>/dev/null
     local name steps
+    local -A names=()
+    for name in "${!STEP_FAILS[@]}" "${!STEP_LAST_SUCCESS[@]}"; do names["$name"]=1; done
     steps="$(mktemp)" || return 1
-    for name in "${!STEP_FAILS[@]}"; do
-        printf '%s\t%d\t%d\t%d\n' "$name" "${STEP_FAILS[$name]:-0}" \
-            "${STEP_LAST_EXIT[$name]:-0}" "${STEP_ALERTED[$name]:-0}"
+    for name in "${!names[@]}"; do
+        printf '%s\t%d\t%d\t%d\t%d\n' "$name" "${STEP_FAILS[$name]:-0}" \
+            "${STEP_LAST_EXIT[$name]:-0}" "${STEP_ALERTED[$name]:-0}" "${STEP_LAST_SUCCESS[$name]:-0}"
     done >"$steps"
-    python3 -c "$WRITE_STATE_PY" "$state_file" "$(stamp)" "$zero_days" "$alerted_at" "$steps"
+    python3 -c "$WRITE_STATE_PY" "$state_file" "$(stamp)" "$zero_days" "$alerted_at" "$zero_checked_at" "$steps"
     rm -f "$steps"
 }
 
 read -r -d '' WRITE_STATE_PY <<'PY' || true
 import json, sys
-path, at, zero_days, alerted_at, steps = sys.argv[1:6]
-fails, exits, alerted = {}, {}, {}
+path, at, zero_days, alerted_at, zero_checked_at, steps = sys.argv[1:7]
+fails, exits, alerted, successes = {}, {}, {}, {}
 for line in open(steps):
     parts = line.rstrip("\n").split("\t")
-    if len(parts) != 4:
+    if len(parts) != 5:
         continue
-    name, fail, code, said = parts
-    fails[name], exits[name], alerted[name] = int(fail), int(code), int(said)
+    name, fail, code, said, success = parts
+    fails[name], exits[name], alerted[name], successes[name] = int(fail), int(code), int(said), int(success)
 json.dump({
     "at": at,
     "zero_days": int(zero_days),
     "alerted_at_days": int(alerted_at),
+    "zero_checked_at": int(zero_checked_at),
     "step_fails": fails,
     "step_last_exit": exits,
     "step_alerted": alerted,
+    "step_last_success": successes,
 }, open(path, "w"), indent=1, sort_keys=True)
 open(path, "a").write("\n")
 PY
@@ -363,13 +388,36 @@ if ((${#only[@]})) && ((${#run_steps[@]} != ${#only[@]})); then
     exit 2
 fi
 
+# Same decision for a preview and a real run. Missing state means the step is due; failures
+# never postpone a retry, since only a successful completion advances the interval.
+step_skip_reason() { # NAME INTERVAL NEEDS NOW; sets skip_reason
+    local name="$1" interval="$2" needs="$3" now="$4" path present=no last elapsed
+    skip_reason=""
+    for path in $needs; do [[ -e "$path" ]] && present=yes; done
+    if [[ "$present" == no ]]; then
+        skip_reason="none of its paths is on this machine ($needs)"
+        return
+    fi
+    last="${STEP_LAST_SUCCESS[$name]:-0}"
+    elapsed=$((now - last))
+    if ((interval > 0 && last > 0 && elapsed < interval)); then
+        skip_reason="minimum interval ${interval}s not elapsed (${elapsed}s since last success; $((interval - elapsed))s remaining)"
+    fi
+}
+
+load_state
+started="$(stamp)"
+started_epoch="$(date -u +%s)"
+
 if [[ "$dry_run" == yes ]]; then
     echo "box-cleanup --dry-run: nothing is run."
     echo "steps:"
     for entry in "${run_steps[@]}"; do
-        IFS='|' read -r name needs command <<<"$entry"
+        IFS='|' read -r name interval needs command <<<"$entry"
+        step_skip_reason "$name" "$interval" "$needs" "$started_epoch"
         printf '  %-22s %s\n' "$name" "$command"
-        printf '  %-22s runs when one of these exists: %s\n' "" "$needs"
+        printf '  %-22s minimum interval %ss; %s\n' "" "$interval" "${skip_reason:+skipped: $skip_reason}"
+        [[ -n "$skip_reason" ]] || printf '  %-22s due; one of these exists: %s\n' "" "$needs"
     done
     echo "filesystems, and the floor each is judged against after the run:"
     read_free
@@ -383,25 +431,21 @@ if [[ "$dry_run" == yes ]]; then
     exit 0
 fi
 
-load_state
-started="$(stamp)"
-started_epoch="$(date -u +%s)"
 read_free
 
 declare -A BEFORE
-summary=() json_steps=() failed_steps=() failed=0 total_freed=0 total_gained=0
+summary=() json_steps=() failed_steps=() failed=0 total_freed=0 total_gained=0 attempted=0
 for entry in "${run_steps[@]}"; do
-    IFS='|' read -r name needs command <<<"$entry"
+    IFS='|' read -r name interval needs command <<<"$entry"
 
-    # The step's own condition, as its unit's ConditionPath* lines held it: any one path.
-    present=no
-    for path in $needs; do [[ -e "$path" ]] && present=yes; done
-    if [[ "$present" == no ]]; then
-        say "$name: skipped, none of its paths is on this machine ($needs)"
+    step_skip_reason "$name" "$interval" "$needs" "$started_epoch"
+    if [[ -n "$skip_reason" ]]; then
+        say "$name: skipped, $skip_reason"
         summary+=("$name skipped")
-        json_steps+=("{\"step\": \"$name\", \"freed\": 0, \"seconds\": 0, \"exit\": null, \"skipped\": true}")
+        json_steps+=("{\"step\": \"$name\", \"freed\": 0, \"gained\": 0, \"seconds\": 0, \"exit\": null, \"skipped\": true, \"reason\": \"$(json_string "$skip_reason")\"}")
         continue
     fi
+    attempted=$((attempted + 1))
 
     BEFORE=()
     for mount in "${!AVAIL[@]}"; do BEFORE["$mount"]="${AVAIL[$mount]}"; done
@@ -442,6 +486,7 @@ for entry in "${run_steps[@]}"; do
         # The first run that works clears both the streak and the fact that it was said.
         STEP_FAILS["$name"]=0
         STEP_ALERTED["$name"]=0
+        STEP_LAST_SUCCESS["$name"]=$((step_start + step_seconds))
     fi
     say "$name: $(human "$freed")${where:+ (${where})} in ${step_seconds}s, $state_word"
     summary+=("$name $(human "$freed")")
@@ -468,11 +513,18 @@ done
 # the one thing an alert must not do. So the day is counted against the sum of the POSITIVE
 # per-step changes: three days in which not one step coincided with any space coming back.
 # That errs towards silence, so the failing-step rule below carries the sharper signal.
-if ((total_gained <= 0)); then
-    zero_days=$((zero_days + 1))
-else
+# Skipped steps are not evidence of failed cleaning: a pass must attempt work to count, and
+# observations remain at least a day apart. Space coming back on ANY pass clears the streak,
+# even when other steps were skipped. The zero-gain alert only follows a new observation.
+zero_counted=no
+if ((total_gained > 0)); then
     zero_days=0
     alerted_at=0
+    zero_checked_at="$started_epoch"
+elif ((attempted > 0 && started_epoch - zero_checked_at >= ZERO_INTERVAL)); then
+    zero_days=$((zero_days + 1))
+    zero_checked_at="$started_epoch"
+    zero_counted=yes
 fi
 
 # A cleaner that fails every run has stopped working, whatever the disks do. Counted per step,
@@ -487,7 +539,11 @@ for name in "${!STEP_FAILS[@]}"; do
     ((STEP_FAILS[$name] >= STEP_FAIL_RUNS)) || continue
     streak_said+=("$name (${STEP_FAILS[$name]} runs, last exit ${STEP_LAST_EXIT[$name]})")
     said="${STEP_ALERTED[$name]:-0}"
-    ((said == 0 || STEP_FAILS[$name] >= said * 2)) && said_now+=("$name")
+    # A skip preserves the streak but must not send a new failure notice about that step.
+    for failed_name in "${failed_steps[@]}"; do
+        [[ "$failed_name" == "$name" ]] || continue
+        ((said == 0 || STEP_FAILS[$name] >= said * 2)) && said_now+=("$name")
+    done
 done
 
 line="$(join_with ', ' "${summary[@]}")"
@@ -515,16 +571,16 @@ mkdir -p "$(dirname "$log_file")" 2>/dev/null
 
 # What it speaks about, and nothing else.
 if [[ "$no_alert" == no ]] && ((${#low[@]})); then
-    tell "DISK UNDER ITS FLOOR AFTER THE DAILY CLEANUP on $(hostname -s): $(join_with '; ' "${low[@]}"). Every cleaner ran; $(human "$total_gained") came back and it cannot free more, so what holds the disk is live work. Read $log_file, and disk-fill-watch's report for the writers."
+    tell "DISK UNDER ITS FLOOR AFTER THE CLEANUP on $(hostname -s): $(join_with '; ' "${low[@]}"). Due cleaners ran; $(human "$total_gained") came back. Read $log_file for skipped steps, and disk-fill-watch's report for the writers."
 fi
 
 # The cleaning has stopped working. A failing cleaner is named first and on its own: it also
 # makes the run gain nothing, and two messages for one fault is how a channel stops being read.
 if [[ "$no_alert" == no ]] && ((${#said_now[@]})); then
-    if tell "A CLEANER HAS STOPPED WORKING on $(hostname -s): $(join_with '; ' "${streak_said[@]}"). The other steps still run; this one has not finished a run in three days, so whatever it holds under its cap is growing. Read $log_file and journalctl --user -u box-cleanup.service."; then
+    if tell "A CLEANER HAS STOPPED WORKING on $(hostname -s): $(join_with '; ' "${streak_said[@]}"). The other steps still run; this one has failed at least three attempted runs, so whatever it holds under its cap is growing. Read $log_file and journalctl --user -u box-cleanup.service."; then
         for name in "${said_now[@]}"; do STEP_ALERTED["$name"]="${STEP_FAILS[$name]}"; done
     fi
-elif [[ "$no_alert" == no ]] && ((${#streak_said[@]} == 0)) && ((zero_days >= ZERO_DAYS)) &&
+elif [[ "$no_alert" == no && "$zero_counted" == yes ]] && ((${#streak_said[@]} == 0)) && ((zero_days >= ZERO_DAYS)) &&
     ((alerted_at == 0 || zero_days >= alerted_at * 2)); then
     if tell "THE DAILY CLEANUP HAS FREED NOTHING FOR $zero_days RUNS on $(hostname -s): not one byte came back from any of its ${#run_steps[@]} cleaners, and none of them failed. Either the box is genuinely quiet, or the cleaning has stopped working while the disks fill. Read $log_file; run box-cleanup --only <step> by hand to see one."; then
         alerted_at=$zero_days

@@ -61,16 +61,15 @@ stream-job.timer                   # owner: box-health lead. Runs every stream's
 
 # --- the box's own housekeeping (devbox/) ---
 dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
-# box-cleanup replaces the seven cleaner timers that were here (dispatch://INFRA-993/ask/d44b73ba,
-# 2026-11-04 21:02Z: "Fold into about 4"): docker-cap, gocache-cap, nvme-cache-cap,
-# session-scratch-reap, session-tmp-reap, tmp-empty-prune and tmp-stale-reap. Each keeps its own
-# script and its own rules, run as a step with the ConditionPath* its unit had; what changed is
-# that one schedule runs them, one log records what each freed, and one alert speaks when the
-# cleaning stops working. The seven were disabled at 21:48Z, after box-cleanup.service had run
-# all seven under systemd at 21:40:17-21:47:11Z, 0 failed (devbox/box-cleanup.md).
+# One box-cleanup schedule folds docker-cap, gocache-cap, nvme-cache-cap,
+# session-scratch-reap, session-tmp-reap, tmp-empty-prune and tmp-stale-reap together
+# (dispatch://INFRA-993/ask/d44b73ba-3ac6-4307-9dd7-065cb035ec9b). Each keeps its own script,
+# caps, ages, refusals and ConditionPath*. Every 15 minutes the guarded cache caps run;
+# the session and temporary-file sweeps run only when their 86400-second interval is due.
+# One timer and one log still cover all seven (devbox/box-cleanup.md).
 # max_run is its own 4h TimeoutStartSec: seven steps, each killed at 30 min, and session-tmp-reap
 # alone took 409-828 s on 2026-11-04.
-box-cleanup.timer  max_run=4h        # owner: box-health lead. Every disk cleaner, once a day.
+box-cleanup.timer  max_run=4h        # owner: box-health lead. Cache caps every 15 min; costly sweeps daily.
 
 # --- model routes ---
 # No timer. Every gateway provider mints this machine's own Google identity token when omp asks

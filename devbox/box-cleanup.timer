@@ -1,15 +1,14 @@
 [Unit]
-Description=Daily: run every disk cleaner on this box once, log what each freed (box-cleanup.service)
+Description=Every 15 minutes: guarded cache caps and due daily sweeps (box-cleanup.service)
 
 [Timer]
-# One schedule for what used to be seven: docker-cap, gocache-cap and nvme-cache-cap hourly,
-# session-scratch-reap every 2 minutes, tmp-stale-reap hourly, session-tmp-reap and
-# tmp-empty-prune daily (dispatch://INFRA-993/ask/d44b73ba, 2026-11-04). Persistent, so a run
-# missed while the box was down happens when it comes back, which is exactly the morning after
-# a reset, when the disks are fullest.
-OnCalendar=daily
+# One schedule for all seven cleaners. The script gates costly sweeps to once per day;
+# the cheap, self-guarding cache caps must not wait a day while images fill the disk in hours.
+# Fifteen minutes leaves several passes inside a 1 h 37 min fill horizon. Keep the jitter
+# within a minute, and catch a missed pass after downtime without adding another timer.
+OnCalendar=*:0/15
 Persistent=true
-RandomizedDelaySec=1800
+RandomizedDelaySec=60
 
 [Install]
 WantedBy=timers.target
