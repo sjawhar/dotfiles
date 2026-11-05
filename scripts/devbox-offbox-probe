@@ -109,4 +109,19 @@ if [[ -d "$registry" ]]; then
 else
     printf 'registry_present=no\n'
 fi
+
+# --- the health facts the off-box watch's hang and registry checks need -----------------------
+# These cannot come from a new forced-command verb: the key's whole value is that it runs four
+# fixed things, and a verb taking a path or a pattern is a shell with extra steps. So the watch
+# itself carries a read-only --health-probe mode, and this runs the PINNED copy of it. One
+# versioned `session_health=` line, no state written, nothing that can restart anything.
+#
+# The pinned copy is the agent-infra watch, installed beside this file. When it is absent or
+# older than the mode, nothing is printed, and the watch reports health-unavailable and skips
+# the checks that need these facts rather than calling the box healthy. The raw registry entries
+# above are enough for its registry checks on their own, so those keep working either way.
+health="${DEVBOX_OFFBOX_HEALTH_PROBE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/devbox-offbox-watch}"
+if [[ -r "$health" ]]; then
+    python3 "$health" --health-probe --registry "$registry" 2>/dev/null || true
+fi
 exit 0
