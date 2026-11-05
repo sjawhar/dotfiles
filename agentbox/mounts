@@ -112,3 +112,7 @@ rw .gnupg
 rw .config/public-leak-check
 # The host-local public-text check, when its pointer names this home path.
 rw .local/share/public-leak-check
+# The leak check's pre-push hook installer and sweep, per machine, written on the host only by its
+# provisioning (on sami-devbox, devbox/sami-devbox-provision step prepush): read-only, so a box can
+# run the installer but never change it.
+ro .local/share/public-leak-check-hooks

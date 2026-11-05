@@ -1883,9 +1883,26 @@ finish_knives_claims() {
 # adding a 94-file task took 1.4 s. Callers hold the repo's template lock and run this under `||`,
 # where set -e does not apply, so every step checks its own status.
 refresh_template() {
-    local repo="$1" tpl="$CLONE_TEMPLATES/$1" url upstream pats=()
+    local repo="$1" tpl="$CLONE_TEMPLATES/$1" url upstream pats=() src_common installer=""
     if [[ ! -d "$tpl/.git" ]]; then
         url="$(git -C "$SRC/$repo" remote get-url origin)" || return 1
+        # `agentbox new` copies the template's .git/hooks into every box clone, so a NEW template
+        # without the public-text leak-check pre-push hook gives each box a clone that pushes
+        # unchecked. sami-rocqperf's sweep repairs templates within 15 min; sami-devbox has none
+        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589). The installer is the
+        # machine's own copy in ~/.local/share/public-leak-check-hooks, which provisioning installs
+        # on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision); there is
+        # no fallback to another copy (dispatch://BET-706). It is checked before the clone and run
+        # before the template is moved into place, so a launch that cannot install the hook leaves
+        # no hookless template for the next launch to copy.
+        if src_common="$(git -C "$SRC/$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+            && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then
+            installer="$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh"
+            [[ -x "$installer" ]] || {
+                echo "agentbox: no leak-check pre-push hook for the new template $tpl: $installer is missing or not executable; ~/.local/share/public-leak-check-hooks is per machine, installed by provisioning on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision); a box clone of $repo would push unchecked" >&2
+                return 1
+            }
+        fi
         rm -rf "$tpl.partial"
         detached "${APP_GIT[@]}" clone --quiet --filter=blob:none --no-checkout "$url" "$tpl.partial" >&2 || return 1
         git -C "$tpl.partial" config gc.auto 0 && git -C "$tpl.partial" config maintenance.auto false || return 1
@@ -1893,21 +1910,13 @@ refresh_template() {
             read -ra pats <<<"${CLONE_SPARSE[$repo]}"
             "${APP_GIT[@]}" -C "$tpl.partial" sparse-checkout set --no-cone "${pats[@]}" || return 1
         fi
-        mv "$tpl.partial" "$tpl" || return 1
-        # `agentbox new` copies the template's .git/hooks into every box clone, so a NEW template
-        # without the public-text leak-check pre-push hook gives each box a clone that pushes
-        # unchecked. sami-rocqperf's sweep repairs templates within 15 min; sami-devbox has none
-        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589).
-        local src_common installer
-        if src_common="$(git -C "$SRC/$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-            && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then
-            installer="$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh"
-            [[ -x "$installer" ]] || installer="/mnt/nvme/$(id -un)/frac-verify/shared/leak-check/install-prepush-hook.sh"
-            "$installer" "$tpl" || {
+        if [[ -n "$installer" ]]; then
+            "$installer" "$tpl.partial" || {
                 echo "agentbox: no leak-check pre-push hook in the new template $tpl ($installer failed); a box clone of $repo would push unchecked" >&2
                 return 1
             }
         fi
+        mv "$tpl.partial" "$tpl" || return 1
     fi
     detached "${APP_GIT[@]}" -C "$tpl" fetch --quiet --prune origin >&2 || return 1
     upstream="$(git -C "$tpl" symbolic-ref --short refs/remotes/origin/HEAD)" || return 1
@@ -3037,12 +3046,16 @@ move_git_storage() {
 
 # A config file whose CONTENT is a path to something outside the box. The allow-list can carry
 # the config, but not what it points at: `shims/gh` refuses `gh pr edit|create|comment` unless it
-# finds the public-text leak check, whose location is `~/.config/public-leak-check/path`, holding
-# `/mnt/nvme/sami/frac-verify/shared/leak-check/public-leak-check.sh`. The pointer is in
-# `agentbox/mounts` (`rw .config/public-leak-check`); the script is on /mnt/nvme, so a box had
-# the pointer and nothing to follow it to, and every public text write from a box was refused
-# (dispatch://INFRA-702, 2026-11-01). Each file here is read for one absolute path on its first
-# line, and the directory holding that path goes into the spec. Adding another is one line.
+# finds the public-text leak check, whose location is `~/.config/public-leak-check/path`. On
+# sami-devbox it names `~/.local/share/public-leak-check/public-leak-check.sh` (step leakcheck of
+# devbox/sami-devbox-provision writes both), which every box has through the allow-list
+# (`rw .local/share/public-leak-check` beside `rw .config/public-leak-check` in agentbox/mounts),
+# so nothing is added for it. On sami-rocqperf it still names
+# `/mnt/nvme/sami/frac-verify/shared/leak-check/public-leak-check.sh` (2026-11-05), outside every
+# box: a box there had the pointer and nothing to follow it to, and every public text write from
+# it was refused (dispatch://INFRA-702, 2026-11-01). Each file here is read for one absolute path
+# on its first line, and the directory holding that path is a candidate for the spec, which the
+# callers drop when the box has it already. Adding another is one line.
 MOVE_POINTER_FILES=()
 move_pointer_files() {
     if (( ${#MOVE_POINTER_FILES[@]} )); then return 0; fi
@@ -6616,12 +6629,18 @@ move_to_clone_missing() {
         fi
         # A clone made on the target gets the public-text leak-check pre-push hook when the
         # source checkout has one; without it a push from a moved session skips the check
-        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589).
+        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589). The installer is the
+        # target's own copy in ~/.local/share/public-leak-check-hooks, which provisioning installs
+        # on each machine, with no fallback (dispatch://BET-706); it is checked before the clone,
+        # so a target without it gets no clone at all.
         local hook=0 src_common
         if src_common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
             && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then hook=1; fi
         if out="$(move_remote "$target" "set -e
-d=$(printf '%q' "$dir") u=$(printf '%q' "$url") hook=$hook
+d=$(printf '%q' "$dir") u=$(printf '%q' "$url") hook=$hook i=\$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh
+if [ \"\$hook\" = 1 ] && [ ! -x \"\$i\" ]; then
+    echo \"\$i is missing or not executable; ~/.local/share/public-leak-check-hooks is per machine, installed by provisioning on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision)\"; exit 5
+fi
 if [ -e \"\$d\" ]; then
     if [ -d \"\$d\" ] && [ -z \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
         [ -w \"\$d\" ] || sudo -n rmdir \"\$d\" 2>/dev/null || { echo 'the path exists and is an empty directory this user cannot remove'; exit 3; }
@@ -6633,8 +6652,6 @@ fi
 s=\$(date +%s)
 git clone --quiet \"\$u\" \"\$d\" 2>&1 || { echo 'git clone failed'; exit 4; }
 if [ \"\$hook\" = 1 ]; then
-    i=\$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh
-    [ -x \"\$i\" ] || i=/mnt/nvme/\$(id -un)/frac-verify/shared/leak-check/install-prepush-hook.sh
     \"\$i\" \"\$d\" || { echo 'pre-push hook install failed'; exit 5; }
 fi
 echo \"CLONED \$((\$(date +%s) - s))s \$(du -sh \"\$d/.git\" 2>/dev/null | cut -f1)\"" </dev/null 2>&1)"; then
