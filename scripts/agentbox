@@ -5079,13 +5079,30 @@ move_self_in_box() {
 # Record the owner's decision before respawning a pane (as move_self_in_box does), or stopping
 # a headless box through its host. A plain in-box kill cannot signal the root-owned docker-init.
 cmd_finish() {
+    # The help says what finish DOES to the registry, because that is the part a reader has to
+    # weigh and `agentbox finish --help` did not mention it. Two lanes could not confirm it from
+    # the help on 2026-11-05 and a third had to read scripts/agentbox to settle it, after a fleet
+    # prune told sessions to finish anything complete. A session whose work today is done can
+    # still be the thing that runs a dated check next week, and finishing it cancels that
+    # silently: its entry is rewritten with auto_restart=no before anything is ended.
     local usage='agentbox finish [--reason TEXT] [--dry-run]' dry=false reason='all tasks complete'
+    local help="$usage
+
+  Ends this box and the session in it.
+
+  Before anything is ended it rewrites this session's restart-registry entry with
+  auto_restart=no and an owner note, so nothing brings the session back. That includes
+  any DATED work this session was the one to do: a check due next week is cancelled
+  silently by finishing today. A session holding a future obligation must not be finished.
+
+  --reason TEXT  one line, recorded in the entry's owner note (default: all tasks complete)
+  --dry-run      print what would be written to the entry and end nothing"
     local sid="${OMP_SESSION_ID:-}" box="${AGENTBOX_BOX:-}" host="${AGENTBOX_HOST:-}" pane="${TMUX_PANE:-}"
     while (( $# )); do
         case "$1" in
             --reason) [[ -n "${2:-}" ]] || die "--reason takes text ($usage)"; reason="$2"; shift ;;
             --dry-run) dry=true ;;
-            -h|--help) echo "$usage"; return 0 ;;
+            -h|--help) echo "$help"; return 0 ;;
             *) die "$usage" ;;
         esac
         shift
