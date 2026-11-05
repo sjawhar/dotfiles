@@ -19,6 +19,8 @@
 #                                       the first that is no longer a directory
 #   agentbox sh <box|session-id> [cmd…] exec into a running session's box
 #   agentbox grow <box|session-id> SIZE grow a running box's filesystem without restarting it
+#   agentbox finish [--reason TEXT] [--dry-run]
+#                                       box only: disable this session's restart, then end its box
 #   agentbox ls                         running boxes
 #   agentbox doctor                     health checks, host side and box side
 #   agentbox rebuild                    build the image now; list boxes on older tags
@@ -127,7 +129,7 @@ fi
 # start at all. AGENTBOX_SCRATCH names another root and skips that test; a machine with no such
 # mount keeps /mnt/nvme, so nothing changes anywhere else.
 BOX_SCRATCH=""
-if [[ -n "${AGENTBOX_SCRATCH:-}" ]] || mountpoint -q /mnt/scratch 2>/dev/null; then
+if [[ "${1:-}" != finish ]] && { [[ -n "${AGENTBOX_SCRATCH:-}" ]] || mountpoint -q /mnt/scratch 2>/dev/null; }; then
     if mkdir -p "${AGENTBOX_SCRATCH:-/mnt/scratch}/$(id -un)" 2>/dev/null; then
         BOX_SCRATCH="${AGENTBOX_SCRATCH:-/mnt/scratch}/$(id -un)"
     fi
@@ -5054,6 +5056,121 @@ move_self_in_box() {
         || die "could not respawn pane $pane through the host's tmux (is the relay up? \`tmux list-sessions\`); run the line above from a host session"
 }
 
+# Record the owner's decision before respawning a pane (as move_self_in_box does), or stopping
+# a headless box through its host. A plain in-box kill cannot signal the root-owned docker-init.
+cmd_finish() {
+    local usage='agentbox finish [--reason TEXT] [--dry-run]' dry=false reason='all tasks complete'
+    local sid="${OMP_SESSION_ID:-}" box="${AGENTBOX_BOX:-}" host="${AGENTBOX_HOST:-}" pane="${TMUX_PANE:-}"
+    while (( $# )); do
+        case "$1" in
+            --reason) [[ -n "${2:-}" ]] || die "--reason takes text ($usage)"; reason="$2"; shift ;;
+            --dry-run) dry=true ;;
+            -h|--help) echo "$usage"; return 0 ;;
+            *) die "$usage" ;;
+        esac
+        shift
+    done
+    [[ -e "$AGENTBOX_IDENTITY_FILE" ]] || die "finish is a box-only command. On the host, exit the session normally, or run 'docker stop <box>' to end a box."
+    [[ "$sid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+        || die "finish needs this session's full OMP_SESSION_ID; nothing was ended"
+    if [[ -n "${PI_SESSION_FILE:-}" && "${PI_SESSION_FILE##*/}" != *_"$sid".jsonl ]]; then
+        die "a subagent cannot finish its parent's session; tell the session to run '$usage' after its tasks finish. Nothing was ended."
+    fi
+    [[ "$box" =~ ^agentbox-[0-9a-f]{12}$ ]] || die "finish needs this box's AGENTBOX_BOX; nothing was ended"
+    [[ "$reason" != *$'\n'* && "$reason" != *$'\r'* ]] || die "--reason must be one line; nothing was ended"
+    if [[ -z "$pane" ]]; then
+        [[ "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die "a headless finish needs AGENTBOX_HOST; nothing was ended"
+    fi
+    local stamp note entry="" message inner action=() registry_status=3
+    stamp="$(date -u +%FT%TZ)"
+    note="Finished deliberately at $stamp: $reason"
+    [[ -z "$DURABLE_DIR" ]] || entry="$DURABLE_DIR/restart-registry/sessions/$sid.entry"
+    if [[ -n "$entry" ]]; then
+        registry_status=0
+        # Atomic replacement keeps a watcher from seeing a partial entry. Sync and read it back
+        # before ending the box; a failed record must never turn into an automatic restart loop.
+        python3 - "$entry" "$sid" "$note" "$dry" <<'PY' || registry_status=$?
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+entry, sid, note, dry = sys.argv[1:]
+path = pathlib.Path(entry)
+temporary = None
+try:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        sys.exit(3)  # No entry, unlike an unreadable one: nothing could restart this session.
+    with os.fdopen(fd, encoding="utf-8", newline="") as source:
+        mode = os.fstat(source.fileno()).st_mode
+        if not stat.S_ISREG(mode):
+            raise ValueError("the registry entry is not a regular file")
+        lines = source.read().splitlines(keepends=True)
+    if [line.rstrip("\r\n") for line in lines if line.startswith("session=")] != [f"session={sid}"]:
+        raise ValueError("the registry entry does not name this session alone")
+    kept = "".join(line for line in lines if not line.startswith(("auto_restart=", "owner_note=")))
+    if kept and not kept.endswith("\n"):
+        kept += "\n"
+    content = kept + f"auto_restart=no\nowner_note={note}\n"
+    if dry != "true":
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.finish-", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as target:
+            os.fchmod(target.fileno(), stat.S_IMODE(mode))
+            target.write(content)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        with path.open(encoding="utf-8", newline="") as recorded:
+            if recorded.read() != content:
+                raise ValueError("the recorded finish could not be verified")
+except (OSError, ValueError) as error:
+    print(f"agentbox: {error}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    if temporary is not None:
+        os.unlink(temporary)
+PY
+    fi
+    if (( registry_status == 0 )); then
+        if $dry; then echo "agentbox: dry run: would update $entry:"; else echo "agentbox: recorded finish in $entry:"; fi
+        printf '  auto_restart=no\n  owner_note=%s\n' "$note"
+    elif (( registry_status == 3 )); then
+        echo "agentbox: no restart-registry entry for session $sid${entry:+ at $entry}; nothing to restart."
+    else
+        die "could not record finish in $entry; nothing was ended"
+    fi
+    if [[ -n "$pane" ]]; then
+        message="agentbox: session $sid finished deliberately; this pane is a shell again."
+        inner="printf '%s\\n' $(printf '%q' "$message"); exec bash -i"
+        action=(tmux respawn-pane -k -t "$pane" -c "$HOME" bash -c "$inner")
+    else
+        # Verified from inside a throwaway agentbox: stopping itself through host SSH ends it.
+        # The host's docker client outlives the box, unlike a local tool signalling its own omp.
+        action=(ssh -o BatchMode=yes -o ConnectTimeout=20 "$host" docker stop "$box")
+    fi
+    if $dry; then
+        echo "agentbox: dry run: would end box $box with:"
+        printf '  '; printf '%q ' "${action[@]}"; printf '\n'
+        return 0
+    fi
+    if [[ -n "$pane" ]]; then
+        echo "agentbox: ending box $box through pane $pane; this pane will become an interactive shell."
+        "${action[@]}" || die "could not respawn pane $pane through the host's tmux; restart remains disabled. Ask a host session${host:+ on $host} to run: docker stop $box"
+    else
+        echo "agentbox: ending box $box through host SSH to $host."
+        "${action[@]}" || die "could not stop $box through host SSH; restart remains disabled. Ask a host session on $host to run: docker stop $box"
+    fi
+}
+
 # The host session a `move --self` or `move --to` is run from, identified from the command's own
 # process, in MOVE_SELF_PID, _SID, _PANE, _AT, _CWD and _DETAIL; dies with the reason when the
 # caller is not a host session a move can take. $1 is the command, for the refusals.
@@ -8938,6 +9055,7 @@ case "${1:-}" in
     doctor)  shift; case "${1:-}" in --here|--box) cmd_doctor_here ;; "") cmd_doctor ;; *) die "doctor takes --here (this box) or no argument (host)" ;; esac ;;
     rebuild) cmd_rebuild ;;
     restart) shift; cmd_restart "$@" ;;
+    finish)  shift; cmd_finish "$@" ;;
     # Started by `new` itself, detached, once its box names a session (reap_start).
     reap-previous) shift; cmd_reap "$@" ;;
     # Asked by the unenroll waiter (unenroll_box) three minutes after a box closes.
@@ -8945,5 +9063,5 @@ case "${1:-}" in
     move)    shift; cmd_move "$@" ;;
     # The usage block at the top of this file, which every command above is listed in: a
     # command missing from this case would otherwise print its own documentation as the usage.
-    *) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
