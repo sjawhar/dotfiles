@@ -18,18 +18,27 @@ from __future__ import annotations
 import re
 from html import escape as e
 
-from .model import BEHIND, NEEDS_LOOK, NOT_MEASURED, NO_BOARD, SEVERITY
+from .pace import BEHIND, CANT_TELL, ON_PACE
 from .v2_model import KpiRow, PageV2, StreamView, clock
 
 QUESTION = "Which streams are behind, and what is the one thing to do about each?"
 
 
+# The verdict is the front page's own (pace.pace), so the two pages never disagree. It reads a number with no
+# reading newer than twice its cadence as Can't tell. The older model.status projected a line through stale
+# readings and called check-wall "on track" at 4,202 s against a 753 s target (SPEEDCOACH, 2026-11-05 05:39Z).
+RANK = {BEHIND: 0, CANT_TELL: 1, ON_PACE: 2}
+
+
+def _verdict(k: KpiRow | None) -> str:
+    return k.label.label if k else CANT_TELL
+
+
 def _worst(v: StreamView) -> KpiRow | None:
     """The stream's own worst main number, which decides its line and its place on the page."""
-    rows = [k for k in v.kpis if k.num.status]
-    if not rows:
+    if not v.kpis:
         return None
-    return sorted(rows, key=lambda k: SEVERITY.get(k.num.status or "", 9))[0]
+    return sorted(v.kpis, key=lambda k: RANK.get(k.label.label, 1))[0]
 
 
 def _value(k: KpiRow) -> str:
@@ -72,17 +81,17 @@ def _next_thing(v: StreamView) -> str:
 
 def _rows(page: PageV2) -> list[tuple[StreamView, KpiRow | None]]:
     pairs = [(v, _worst(v)) for v in page.streams]
-    return sorted(pairs, key=lambda p: (SEVERITY.get((p[1].num.status or "") if p[1] else "", 9), p[0].st.name))
+    return sorted(pairs, key=lambda p: (RANK.get(_verdict(p[1]), 1), p[0].st.name))
 
 
 def first_screen(page: PageV2) -> str:
     rows = _rows(page)
     # The three counts must add up to the streams on the page: a reader who sums them and comes up short stops
-    # trusting the page. So every stream falls in exactly one, and "needs a look" catches a number with no
-    # target or a target the page cannot read, which is neither behind nor on track.
-    behind = [p for p in rows if p[1] and p[1].num.status == BEHIND]
-    dark = [p for p in rows if (p[1] is None) or (p[1].num.status in NEEDS_LOOK and p[1].num.status != BEHIND)]
-    fine = [p for p in rows if p not in behind and p not in dark]
+    # trusting the page. So every stream falls in exactly one: "needs a look" is a number the page cannot judge
+    # (no target, one reading, or no reading newer than twice its cadence), which is neither behind nor on track.
+    behind = [p for p in rows if _verdict(p[1]) == BEHIND]
+    fine = [p for p in rows if _verdict(p[1]) == ON_PACE]
+    dark = [p for p in rows if p not in behind and p not in fine]
     assert len(behind) + len(dark) + len(fine) == len(rows)
 
     head = (
@@ -96,8 +105,8 @@ def first_screen(page: PageV2) -> str:
 
     items = []
     for v, k in rows:
-        st = k.num.status if k else NO_BOARD
-        cls = "bad" if st == BEHIND else ("dim" if st in (NOT_MEASURED, NO_BOARD) else "ok")
+        st = _verdict(k)
+        cls = "bad" if st == BEHIND else ("ok" if st == ON_PACE else "dim")
         num = f'{e(k.num.short or k.num.name)} <b>{_value(k)}</b>' if k else "no number"
         items.append(
             f'<li class="{cls}"><a href="/#s-{e(v.st.slug)}"><span class="nm">{e(v.st.name)}</span></a>'
