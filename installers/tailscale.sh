@@ -50,6 +50,8 @@ if [[ "$ts_backend" == Running && "$ts_name" == "$ts_host" && -z "$ts_tags" ]]; 
 else
     # --ssh: Tailscale SSH is how the laptop and Sami's other devices log in (the policy's SSH
     # rule for his own devices). --advertise-tags= with no value: the node carries no tag.
+    # Tailscale SSH intercepts tailnet port 22 only (https://tailscale.com/kb/1193/tailscale-ssh).
+    # The off-box watch uses a separate OpenSSH listener on 2222, so its forced key applies.
     ts_up=(tailscale up --hostname="$ts_host" --ssh --advertise-tags=)
     if [[ -n "$ts_tags" ]]; then
         ts_up+=(--force-reauth)

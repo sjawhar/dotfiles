@@ -10,8 +10,9 @@
 # command, and a forced command gets no stdin of its own. So the host holds a copy, this installs
 # it, and an update is a deliberate run of this installer -- never a publish of the dotfiles.
 #
-# It writes two files and prints the authorized_keys line for the key. It NEVER edits
-# authorized_keys: who may log in to this machine is a person's decision, made by hand.
+# It pins the acting scripts and prints the restricted key line. With --public-key FILE it also
+# writes its own authorized_keys, read only by the separate tailnet OpenSSH listener on 2222.
+# It never changes ~/.ssh/authorized_keys, the primary SSH service, or any tailnet setting.
 set -euo pipefail
 
 name=devbox-offbox-act-host
@@ -25,19 +26,33 @@ install_dir="${DEVBOX_OFFBOX_ACT_DIR:-/mnt/durable/sami/offbox-act}"
 # `tailscale ip -4 <node name>`. This script never invents one, and it never prints a `from=` that
 # is not a restriction.
 #
-# Every element of the list is PARSED, in both families, rather than compared against one spelling
-# of one range: on 2026-11-05 a substring check for `100.64.0.0/10` accepted `fd7a:115c:a1e0::/48`
-# (the same tailnet in IPv6), `100.64.0.0/9`, `100.64.0.0/8`, `0.0.0.0/0`, `*` and `TODO`, and
-# printed each as "only <value> may use the key at all" (the INFRA lead's gate of
-# agent-infra#2194). An element must therefore be one address -- a bare address, or a /32 or /128
-# of it -- which is what a node has; a range is refused whatever its size, a name is refused
-# because a name is not an address, and anything unparseable is refused.
+# Every element is PARSED, in both families, rather than compared against one spelling of one
+# range. On 2026-11-05 a substring check for `100.64.0.0/10` accepted `fd7a:115c:a1e0::/48` (the
+# same tailnet in IPv6), `100.64.0.0/9`, `100.64.0.0/8`, `0.0.0.0/0`, `*` and `TODO`, and printed
+# each as "only <value> may use the key at all" (the INFRA lead's gate of agent-infra#2194). A
+# `from=` that admits every node on the tailnet is not a restriction, and a printed line claiming
+# it is, is worse than no line.
+#
+# So an element must be ONE address -- bare, or a /32 or /128 of it -- which is what a node has:
+# a range is refused whatever its size, a name is refused because a name is not an address, and
+# anything unparseable is refused. Loopback is refused too, added with the 2222 listener: the
+# connection arrives through Tailscale's proxy, so a receiver-side loopback address is what the
+# transport looks like, not what the caller is, and pinning to it would admit anything that
+# reaches the listener by that route.
 from=""
-case "${1-}" in
-    --from) from="${2:?--from takes the addresses the key may be used from}" ;;
-    --no-from | "") ;;
-    *) echo "$name: usage: $name [--from <addresses> | --no-from]" >&2; exit 2 ;;
-esac
+public_key=""
+while (( $# )); do
+    case "$1" in
+        --from) from="${2:?--from takes the addresses the key may be used from}"; shift 2 ;;
+        --no-from) from=""; shift ;;
+        --public-key) public_key="${2:?--public-key takes an ed25519 public key file}"; shift 2 ;;
+        *) echo "$name: usage: $name [--from <addresses> | --no-from] [--public-key FILE]" >&2; exit 2 ;;
+    esac
+done
+if [[ -n "$public_key" && -z "$from" ]]; then
+    echo "$name: --public-key requires --from; the listener admits one node only" >&2
+    exit 2
+fi
 if [ -n "$from" ]; then
     # Checked and normalised in one step: sshd's `from=` is a comma-separated list, and a person
     # who passes two addresses with a space between them must not get a line sshd reads as one
@@ -59,6 +74,9 @@ for element in elements:
         continue
     if network.num_addresses != 1:
         bad.append((element, f"a range of {network.num_addresses} addresses, not one node's"))
+    elif not any(network.network_address in allowed for allowed in
+                 (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))):
+        bad.append((element, "not a tailnet node address; a loopback proxy source is not an identity"))
 for element, why in bad:
     print(f"  {element}: {why}", file=sys.stderr)
 if bad:
@@ -75,6 +93,20 @@ EOF
     fi
 fi
 
+key_data="<the public key>"
+if [[ -n "$public_key" ]]; then
+    mapfile -t public_lines < "$public_key"
+    if (( ${#public_lines[@]} != 1 )) || ! ssh-keygen -l -f "$public_key" >/dev/null 2>&1; then
+        echo "$name: --public-key requires one valid ed25519 public key" >&2
+        exit 2
+    fi
+    read -r key_type key_data _ <<<"${public_lines[0]}"
+    if [[ "$key_type" != ssh-ed25519 ]]; then
+        echo "$name: --public-key requires an ed25519 key, not $key_type" >&2
+        exit 2
+    fi
+fi
+
 if [ "$(hostname -s)" != "$host" ]; then
     echo "$name: this is $(hostname -s), not $host. The pinned copy belongs ON the watched" >&2
     echo "  machine; the watch itself runs somewhere else (installers/devbox-offbox-watch.sh)." >&2
@@ -86,7 +118,7 @@ for file in devbox-offbox-act devbox-offbox-probe; do
     [ -r "$here/scripts/$file" ] || { echo "$name: no $here/scripts/$file" >&2; exit 1; }
 done
 
-commit="$(cd "$here" && git log -1 --format=%H -- scripts/devbox-offbox-act scripts/devbox-offbox-probe 2>/dev/null || true)"
+commit="$(cd "$here" && GIT_OPTIONAL_LOCKS=0 git log -1 --format=%H -- scripts/devbox-offbox-act scripts/devbox-offbox-probe 2>/dev/null || true)"
 [ -n "$commit" ] || commit="unknown (not a checkout, or the files have never been committed)"
 
 mkdir -p "$install_dir"
@@ -110,26 +142,32 @@ mv -f "$install_dir/PINNED.new" "$install_dir/PINNED"
 echo "$name: installed the pinned acting half in $install_dir at $commit"
 echo
 if [ -n "$from" ]; then
-    key_line="restrict,command=\"$install_dir/devbox-offbox-act --forced\",from=\"$from\" ssh-ed25519 <the public key> devbox-offbox-watch@dispatch-cluster"
+    key_line="restrict,command=\"$install_dir/devbox-offbox-act --forced\",from=\"$from\" ssh-ed25519 $key_data devbox-offbox-watch@dispatch-cluster"
 else
-    key_line="restrict,command=\"$install_dir/devbox-offbox-act --forced\" ssh-ed25519 <the public key> devbox-offbox-watch@dispatch-cluster"
+    key_line="restrict,command=\"$install_dir/devbox-offbox-act --forced\" ssh-ed25519 $key_data devbox-offbox-watch@dispatch-cluster"
 fi
-echo "The authorized_keys line for the watch's key, which a PERSON adds to ~/.ssh/authorized_keys"
-echo "on this machine (one line; fill in the public key):"
+if [[ -n "$public_key" ]]; then
+    # Replace this installer's own file, never another login's keys. No listener is started here.
+    (umask 077; printf '%s\n' "$key_line" >"$install_dir/authorized_keys.new")
+    chmod 0600 "$install_dir/authorized_keys.new"
+    mv -f "$install_dir/authorized_keys.new" "$install_dir/authorized_keys"
+    echo "Installed $install_dir/authorized_keys for the OpenSSH listener on tailnet port 2222."
+else
+    echo "Restricted key line (use --from <addresses> --public-key FILE to install it):"
+fi
 echo
 echo "$key_line"
 echo
 echo "What that line allows: probe, live <uuid>..., restart <uuid> and await <uuid>, nothing else."
-echo "  restrict  -- no shell, no port forward, no agent forward, no X11, no tty (sshd refuses"
-echo "               each before the command runs)"
-echo "  command   -- every login runs the pinned copy above, whatever the client asks for"
+echo "  restrict  -- no port forward, no agent forward, no X11, no tty (sshd refuses these)"
+echo "  command   -- no shell: every login runs the pinned copy, whatever the client asks for"
 if [ -n "$from" ]; then
     echo "  from      -- only $from may use the key at all"
 else
     echo "  (no from) -- nothing restricts WHERE the key may be used from, so what is left is"
     echo "               restrict, the forced command above, and the fact that nothing but this"
     echo "               job holds this key. The tailnet policy is NOT a second boundary here:"
-    echo "               tag:offbox-watch's grant is the only TAG's route to this machine's 22,"
+    echo "               tag:offbox-watch's grant is the only TAG's route to this machine's 2222,"
     echo "               but every device of this machine's own owner reaches it as well"
     echo "               (autogroup:member -> autogroup:self in the policy)."
 fi
