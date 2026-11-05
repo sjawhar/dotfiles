@@ -24,11 +24,13 @@
 set -uo pipefail
 
 dry=false
+merge=false
 sessions=()
 while (($#)); do
     case "$1" in
         --dry-run) dry=true ;;
-        -*) echo "usage: tmux-group-by-project [--dry-run] [SESSION…]" >&2; exit 2 ;;
+        --merge) merge=true ;;
+        -*) echo "usage: tmux-group-by-project [--dry-run] [--merge] [SESSION…]" >&2; exit 2 ;;
         *) sessions+=("$1") ;;
     esac
     shift
@@ -83,6 +85,108 @@ project_of() {   # $1 = pane_current_path -> the group this window belongs in
     # are in no project tree", where nine one-window groups just say it nine times.
     apply_alias misc
 }
+
+# --merge: one window per project, each pane of that project a pane in it.
+#
+# Sami asked for this on 2026-11-05 at 16:59:58Z (dispatch://INFRA-759), after the rename-and-
+# reorder above had left 55 windows whose only grouping was their order: "please get the devbox
+# agents grouped into tmux windows by their project (their should be eight windows)".
+#
+# Everything addresses panes and windows by their IDS (%N, @N), never by index. With
+# renumber-windows on, which is this configuration's setting, destroying a window renumbers every
+# window above it, so a plan made from indexes is wrong by its second move. Measured here on
+# 2026-11-05 at 17:09Z: a first attempt that joined by index put CURL into misc and LANE-C into
+# ossv before it was stopped. An id survives both the renumbering and the join.
+#
+# Nothing is signalled: join-pane moves a pane and its process between windows. A pane's border
+# already carries `pane_title`, which omp keeps as the agent's name and what it is doing, so the
+# window name is free to be the project and no agent becomes unfindable.
+merge_session() {
+    local s="$1" rows=() row pane path proj target
+    mapfile -t rows < <(tmux list-panes -t "=$s:" -s -F '#{pane_id}|#{pane_current_path}')
+    ((${#rows[@]})) || return 0
+
+    # Which panes belong to which project, before anything moves.
+    local -A panes=()
+    local -a projects=()
+    for row in "${rows[@]}"; do
+        IFS='|' read -r pane path <<<"$row"
+        proj="$(project_of "$path")"
+        [[ -z "${panes[$proj]:-}" ]] && projects+=("$proj")
+        panes[$proj]="${panes[$proj]:-} $pane"
+    done
+
+    echo "$s: ${#projects[@]} projects over ${#rows[@]} panes"
+    for proj in "${projects[@]}"; do
+        set -- ${panes[$proj]}
+        printf '  %-16s %2d panes\n' "$proj" "$#"
+    done
+    $dry && return 0
+
+    # A project's home window must hold that project only. Breaking its first pane out gives a
+    # window that is new and therefore exclusive, which matters when a window already holds two
+    # projects' panes: picking an existing window would hand the same one to both. A pane that
+    # is alone in its window cannot be broken out and does not need to be -- it is already
+    # exclusive -- so either way the home is the window that pane is in afterwards.
+    local -A home=()
+    # A pane cannot be split off a window that has no room for it. A detached session's windows
+    # are `default-size`, 80x24 here, and with a border line per pane that fits about six: the
+    # first run of this merge lost 13 joins to "create pane failed" and said only "could not
+    # move". So each home window is grown to hold its project before anything joins it, which
+    # needs `window-size manual` -- under `latest` tmux puts a detached window straight back to
+    # default-size. The setting is restored at the end, so an attached client governs again and
+    # the windows follow the terminal Sami is actually looking at.
+    local most=0
+    for proj in "${projects[@]}"; do
+        set -- ${panes[$proj]}
+        (($# > most)) && most=$#
+    done
+    local rows=$((most * 5 + 5))
+    ((rows < 24)) && rows=24
+    # A SESSION option: `-t "=$s:"` with the colon is a window target and tmux then sets it
+    # somewhere that does not govern these windows, which left half of them at 80x24 and lost
+    # their joins. Name the session with no colon.
+    tmux set-option -t "$s" window-size manual
+
+    for proj in "${projects[@]}"; do
+        set -- ${panes[$proj]}
+        # -t names the session: without it a detached server breaks the pane out into whichever
+        # session was last active, not this one. On 2026-11-05 at 17:13Z that scattered seven
+        # project windows across two other agents' sessions (car-2829, ad-gt-1606-cross) while
+        # every process stayed alive, and `agents` was left holding one pane.
+        tmux break-pane -d -s "$1" -n "$proj" -t "=$s:" 2>/dev/null
+        home[$proj]="$(tmux display -p -t "$1" '#{window_id}')"
+        shift
+        for pane in "$@"; do
+            [[ "$(tmux display -p -t "$pane" '#{window_id}')" == "${home[$proj]}" ]] && continue
+            # Grow before every join, and re-tile after it. join-pane SPLITS one pane, so
+            # without re-tiling each join halves the same pane and the seventh has nowhere to
+            # go: measured here, every project stopped at 6 panes even in a 250x75 window.
+            # Tiling redistributes the whole window, so the next join splits a full-size pane.
+            tmux resize-window -t "${home[$proj]}" -x 250 -y "$rows" 2>/dev/null
+            tmux join-pane -d -s "$pane" -t "${home[$proj]}" ||
+                echo "  could not move $pane into ${home[$proj]} ($proj)" >&2
+            tmux select-layout -t "${home[$proj]}" tiled >/dev/null 2>&1
+        done
+    done
+
+    for proj in "${projects[@]}"; do
+        tmux rename-window -t "${home[$proj]}" "$proj"
+        tmux select-layout -t "${home[$proj]}" tiled >/dev/null
+    done
+    tmux set -t "=$s:" window-size latest
+    tmux move-window -r -t "=$s:"
+    echo "result:"
+    tmux list-windows -t "=$s:" -F '  #{window_index} #{window_name} panes=#{window_panes}'
+}
+
+if $merge; then
+    for s in "${sessions[@]}"; do
+        tmux has-session -t "=$s:" 2>/dev/null || continue
+        merge_session "$s"
+    done
+    exit 0
+fi
 
 for s in "${sessions[@]}"; do
     tmux has-session -t "=$s:" 2>/dev/null || continue
