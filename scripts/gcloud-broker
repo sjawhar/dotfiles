@@ -11,13 +11,21 @@
 # never through argv. Exit 75 means the grant is pending approval, 77 that it was denied.
 set -euo pipefail
 
+usage="usage: gcloud-broker [--reason R] [--] <command...>"
+# Answered BEFORE anything reaches the broker. Everything below asks a PERSON to approve a
+# human-tier grant, and on 2026-11-05 at 09:35Z a bare `gcloud-broker --help` put a real approval
+# card in Sami's inbox for a question the script could answer itself.
+case "${1:-}" in
+  -h|--help) echo "$usage"; exit 0 ;;
+esac
+
 reason="gcloud-broker admin command"
 if [ "${1:-}" = --reason ]; then
   reason=$2
   shift 2
 fi
 [ "${1:-}" = -- ] && shift
-[ $# -gt 0 ] || { echo "usage: gcloud-broker [--reason R] [--] <command...>" >&2; exit 2; }
+[ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
 
 if [ "${GCLOUD_BROKER_INNER:-}" != 1 ]; then
   GCLOUD_BROKER_INNER=1 exec secret-run --reason "$reason" --ttl 1h --wait "${GCLOUD_BROKER_WAIT:-15m}" GCLOUD_SAMI -- "$0" -- "$@"
