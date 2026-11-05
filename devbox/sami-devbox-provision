@@ -130,7 +130,12 @@ AGENT_AZURE_CLIENT_ID=6133297b-4afa-4f36-ab55-67413835961e
 # appends its TAKEN, INSTALLED and RELEASED lines to the live install record in the shared path,
 # which is also the install lock (agent-infra leak-check/INSTALL.md).
 AGENT_INFRA="${AGENT_INFRA:-$HOME/src/agent-infra}"
-LEAK_CHECK_SHARED="/mnt/nvme/$(id -un)/frac-verify/shared/leak-check"
+# The shared path moved here on 2026-11-05 at 09:31Z, on the BET-64 lead's decision: it was
+# /mnt/nvme/<user>/frac-verify/shared/leak-check on sami-rocqperf, which is being shut down, and
+# an install record on a machine about to be deallocated is worse than one in the wrong place.
+# /mnt/durable/<user> is bound into every agent box at its own path, so the record and the lock
+# are now readable from inside a box; the old path was not, and does not exist on this machine.
+LEAK_CHECK_SHARED="/mnt/durable/$(id -un)/leak-check"
 LEAK_CHECK_RECORD="$LEAK_CHECK_SHARED/.editor-slot/holder"
 # shellcheck source=leak-check-tag.env
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/leak-check-tag.env"
