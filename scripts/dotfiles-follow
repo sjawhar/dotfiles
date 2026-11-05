@@ -549,8 +549,14 @@ SWEEP_SUMMARY_RE = re.compile(r" sweep \[[^\]]*\]: (\d+) checkouts.*, (\d+) inst
 def sweep_hooks(options: argparse.Namespace) -> str:
     """"" when one sweep pass left every public checkout with the pre-push hook, else why.
 
-    Bounded by --sweep-timeout: on timeout the pass's whole process group is killed. A full pass
-    on sami-devbox (148 public checkouts, /mnt/nvme/sami included) took about 20 s on 2026-11-03.
+    Bounded by --sweep-timeout: on timeout the pass's whole process group is killed. The budget
+    has to fit a WHOLE pass, because the sweep walks its roots in a stable order: a pass always
+    killed at the same point never reaches the checkouts after it, so a new public checkout late
+    in that order would never be hooked, and the only sign would be this condition. A full pass
+    took about 20 s over 148 public checkouts on 2026-11-03 and 3 min 25 s over 249 on
+    2026-11-04 at idle priority, which is what the first 120 s default could not fit. 420 s is
+    about twice the measured cost; the unit allows 1170 s in all and its timer waits 10 minutes
+    after each run ends, so a long pass delays nothing.
     """
     script = options.hooks_dir / "sweep-hooks.sh"
     if not script.is_file():
@@ -941,7 +947,7 @@ def main() -> int:
         default=Path.home() / ".local/share/public-leak-check-hooks",
         help="where step prepush put the leak-check tag's sweep-hooks.sh (default ~/.local/share/public-leak-check-hooks)",
     )
-    parser.add_argument("--sweep-timeout", type=float, default=120.0, help="one hook sweep pass, killed after this many seconds (default 120)")
+    parser.add_argument("--sweep-timeout", type=float, default=420.0, help="one hook sweep pass, killed after this many seconds (default 420, about twice a measured full pass)")
     parser.add_argument("--http-timeout", type=float, default=8.0)
     parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
     options = parser.parse_args()
