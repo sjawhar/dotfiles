@@ -423,31 +423,59 @@ def entry_transcript(entry: dict, index: dict[str, str] | None = None) -> str:
     return (index or {}).get(entry.get("session", ""), "")
 
 
-def transcript_held(path: str) -> bool | None:
-    """Whether a process holds this file open: True, False, or None when the test did not run.
+# One scan for every session, not one call each. `fuser` walks every process's descriptors, so it
+# costs the same whether it is asked about one file or a hundred: on 2026-11-05 this box ran 11,205
+# processes in 75 agent boxes and one `sudo -n fuser` took 8.4 s, so the 100-entry registry cost
+# about 840 s against this unit's 180 s limit. The watch was killed on every run from then on
+# (`Result: timeout`, 2 min 57 s of CPU), which is to say the watch that reports silence went
+# silent itself. One pass over /proc/*/fd answers for every path at once and took 0.63 s.
+_HELD: dict[str, set[str]] | None = None
 
-    `sudo -n fuser` on the host, which sees a holder inside an agent box as well as one outside
-    it. fuser exits 0 when a process holds the file, 1 when none does, and anything else (no
-    passwordless sudo, no fuser, a timeout) is not an answer -- None, which keeps the session
-    off the dead list. Saying nothing is the right failure here: the message tells a person a
-    session is gone, and a sudo that stopped working must not announce 78 deaths.
+
+def held_transcripts() -> dict[str, set[str]] | None:
+    """Every transcript held open on this host: {"paths", "names"}, or None when the scan failed.
+
+    Read on the host with sudo, so a holder inside an agent box counts. A box sees the shared
+    `~/.omp/agent/sessions` at the host's own path -- measured 2026-11-05, all 419 held
+    transcripts read `/home/sami/.omp/agent/sessions/...`, boxed sessions included -- so the path
+    matches as a string. The file name is kept as well, because it carries the session id and is
+    unique: a box whose view of the path differs would then read as "held" rather than "gone". A
+    wrong "held" keeps one line out of a message; a wrong "gone" announces a death that did not
+    happen.
+
+    No output means the scan did not work, not that nothing is open: a box with live sessions
+    always holds transcripts. That reads as None, and every session stays off the dead list.
     """
-    try:
-        done = subprocess.run(
-            ["sudo", "-n", "fuser", path],
-            capture_output=True,
-            text=True,
-            timeout=15,
+    global _HELD
+    if _HELD is None:
+        out = run_command(
+            [
+                "sudo",
+                "-n",
+                "sh",
+                "-c",
+                'find /proc/[0-9]*/fd -maxdepth 1 -lname "*.jsonl" -printf "%l\\n" 2>/dev/null',
+            ],
+            timeout=60,
         )
-    except (OSError, subprocess.SubprocessError) as error:
-        log(f"fuser could not run on {path}: {error}")
+        paths = {
+            # A process holding a file that has since been removed reads "<path> (deleted)".
+            line.removesuffix(" (deleted)")
+            for line in (text.strip() for text in out.splitlines())
+            if line.startswith("/")
+        }
+        if not paths:
+            log("no transcript holder found in /proc: the scan did not work, judging nobody gone")
+        _HELD = {"paths": paths, "names": {path.rsplit("/", 1)[-1] for path in paths}}
+    return _HELD if _HELD["paths"] else None
+
+
+def transcript_held(path: str) -> bool | None:
+    """Whether a process holds this file open: True, False, or None when the test did not run."""
+    held = held_transcripts()
+    if held is None:
         return None
-    if done.returncode == 0:
-        return True
-    if done.returncode == 1 and not done.stderr.strip().startswith("sudo:"):
-        return False
-    log(f"fuser said nothing usable about {path}: exit {done.returncode} {done.stderr.strip()}")
-    return None
+    return path in held["paths"] or path.rsplit("/", 1)[-1] in held["names"]
 
 
 def dead_sessions(
