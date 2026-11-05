@@ -1011,9 +1011,38 @@ def describe_writers(rows: list[dict], device: int, seconds: float, top: int) ->
     return described
 
 
+# A daemon every lane shares does its callers' writing. Its own session is whoever happened to
+# start it, so placing its traffic there names a lane by luck. On 2026-11-05 containerd was the
+# top writer on /mnt/nvme at 923 GB/h and the session it carried was the one lane that had a
+# container running, while the writes were another part of that lane pulling images by digest;
+# the attribution was right by accident, and would have been wrong with two lanes on the box.
+# So a daemon is named as a daemon, with the command that reads what it is doing.
+SHARED_DAEMONS = {
+    "containerd": "docker system df, and docker image ls --digests for pulls",
+    "dockerd": "docker system df",
+    "containerd-shim": "docker ps, then the container's own writers",
+    "containerd-shim-runc-v2": "docker ps, then the container's own writers",
+    "buildkitd": "docker builder du",
+}
+
+
+def shared_daemon(command: str) -> str:
+    """The command that says what a shared daemon is writing for, or "" when it is not one."""
+    first = (command or "").split()
+    if not first:
+        return ""
+    return SHARED_DAEMONS.get(os.path.basename(first[0]), "")
+
+
 def writer_line(row: dict, seconds: float, mount: str) -> str:
     """One writer, with the filesystem evidence that decided which group it is in."""
     who = row["session"] or f"no session id; scope {row['scope'] or 'none'}"
+    daemon = shared_daemon(row["command"])
+    if daemon:
+        who = (
+            f"{who} -- but this is a daemon every lane shares, so that session started it and is"
+            f" not necessarily what it writes for; read {daemon}"
+        )
     pane = f", pane {row['pane']}" if row.get("pane") else ""
     where = row["cwd"] or "unreadable"
     if row.get("on_mount"):
