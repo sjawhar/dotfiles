@@ -2,7 +2,7 @@
 """devbox-offbox-watch: watch sami-devbox from off it, and restart what the registry asks.
 
     devbox-offbox-watch [--host HOST] [--registry DIR] [--train DIR] [--remote-proc DIR]
-                        [--sre ID] [--chief ID] [--verified-linux-lead ID]
+                        [--sre TOPIC|ID] [--chief TOPIC|ID] [--verified-linux-lead TOPIC|ID]
                         [--ssh-timeout S] [--state FILE] [--dry-run] [--report-only] [--once]
                         [--forced-command] [--ssh-key PATH] [--shadow-log PATH]
 
@@ -64,10 +64,10 @@ Every restart and every refusal goes over Envoy to the SRE and to the holder of 
 role. A restart line names every `--dir` its resume gave the box: a box with too few of them
 looks healthy and fails hours later at one path (CURL, 2026-11-04).
 
-Envoy does not run on sami-devbox -- its hub is `envoy-hub.tail12ec1c.ts.net`, a tailnet node of
-its own -- so an alert about a dead sami-devbox still goes out. When the hub does not answer
-either, the message is written under `<state dir>/undelivered/` on this machine and the journal
-says so.
+Named recipients default to roles, resolved from Envoy's live session list before a direct send.
+A send succeeds only with a nonempty event_id and that session's notifications.agent topic.
+An unheld role, unavailable hub or unconfirmed receipt is written under
+`<state dir>/undelivered/` and logged. The hub runs off the watched box.
 
 `--report-only` (or DEVBOX_OFFBOX_REPORT_ONLY) restarts nothing and sends the SRE one message
 naming every session it would have restarted, with that session's tmux, cwd, --dir list and
@@ -100,9 +100,9 @@ ACT = HERE / "devbox-offbox-act"
 DEFAULT_HOST = "sami-devbox"
 DEFAULT_REGISTRY = "/mnt/durable/sami/restart-registry/sessions"
 DEFAULT_TRAIN = "/mnt/nvme/sami/tmp/verified-linux/redesign/merge-train"
-DEFAULT_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
-DEFAULT_CHIEF = "01a13dca-e979-7264-af32-f654ef57a6f5"
-DEFAULT_VL_LEAD = "01a15f9c-6bee-7127-b4f1-907ec8d3176d"
+DEFAULT_SRE = "notifications.role.lead-box-health"
+DEFAULT_CHIEF = "notifications.role.chief-of-staff"
+DEFAULT_VL_LEAD = "notifications.role.stream-lead-verified-linux"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "devbox-offbox-watch"
 
 PRESSURE_LIMIT = 5.0          # /proc/pressure/io full avg10 above this is a stall
@@ -311,7 +311,7 @@ class Reporter:
         self.dry_run = dry_run
         self.host = host
 
-    def send(self, targets: list[str], kind: str, text: str) -> None:
+    def send(self, targets: list[str], kind: str, text: str) -> bool:
         targets = [t for t in dict.fromkeys(targets) if t]
         log(f"[{kind}] -> {', '.join(targets) or 'nobody'}: {text}")
         now = time.time()
@@ -326,14 +326,30 @@ class Reporter:
             "text": text,
         }, sort_keys=True))
         if self.dry_run:
-            return
+            return False  # No receipt exists for a dry run.
         failed = []
+        sessions = None
         for target in targets:
             try:
+                recipient = target
+                if target.startswith("notifications.role."):
+                    if sessions is None:
+                        listing = subprocess.run([str(ENVOY), "ps", "--json", "--sub-agents"],
+                                                 capture_output=True, text=True, timeout=60)
+                        if listing.returncode != 0:
+                            raise ValueError(f"session list failed: {listing.stderr.strip()}")
+                        sessions = json.loads(listing.stdout)
+                        if not isinstance(sessions, list):
+                            raise ValueError("session list is not a list")
+                    role = target.removeprefix("notifications.role.")
+                    recipient = next((s["session_id"] for s in sessions
+                                      if role in (s.get("roles") or []) and s.get("session_id")), "")
+                    if not recipient:
+                        raise ValueError(f"role {role} has no live holder")
                 done = subprocess.run([str(ENVOY), "send", "--source", "envoy",
-                                       "--message-file", "-", target],
+                                       "--message-file", "-", recipient],
                                       input=text, capture_output=True, text=True, timeout=60)
-            except (OSError, subprocess.SubprocessError) as error:
+            except (OSError, subprocess.SubprocessError, ValueError) as error:
                 log(f"  send to {target} failed: {error}")
                 failed.append(f"{target}: {error}")
                 continue
@@ -341,8 +357,21 @@ class Reporter:
                 detail = (done.stderr or done.stdout).strip()
                 log(f"  send to {target} failed: exit {done.returncode}: {detail}")
                 failed.append(f"{target}: exit {done.returncode}: {detail}")
+                continue
+            try:
+                answer = json.loads(done.stdout)
+            except ValueError:
+                answer = None
+            if (not isinstance(answer, dict) or not answer.get("event_id")
+                    or answer.get("topic") != f"notifications.agent.{recipient}"):
+                detail = f"unconfirmed receipt for {recipient}: {done.stdout.strip()[:400]}"
+                log(f"  send to {target} failed: {detail}")
+                failed.append(f"{target}: {detail}")
+            else:
+                log(f"  send to {target} confirmed: {answer['event_id']} to {answer['topic']}")
         if failed:
             self.keep(kind, text, failed)
+        return bool(targets) and not failed
 
     def keep(self, kind: str, text: str, failed: list[str]) -> None:
         path = self.undelivered / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{kind}.txt"
@@ -575,9 +604,9 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     came_back = waited.stdout.strip() == "live"
     after = entry.get("after", "")
     if came_back and after:
-        report.send([session], "after-message", after)
-        after_said = "its after message was sent"
-        record["pending_after"] = False
+        confirmed = report.send([session], "after-message", after)
+        after_said = "its after message was sent" if confirmed else "its after message is UNCONFIRMED"
+        record["pending_after"] = not confirmed
     elif after:
         after_said = ("its after message is not sent yet; the next run sends it as soon as"
                       " omp-session-live sees the session live")
@@ -703,12 +732,13 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
             # holding a run open waiting for it.
             if record.get("pending_after") and entry.get("after"):
                 log(f"{entry['title']} ({session}) is live; sending the after message it was owed")
-                report.send([session], "after-message", entry["after"])
-                targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
-                report.send(targets, "after-sent",
-                            f"{entry['title']} ({session}) came up after its restart and has now"
-                            f" been sent its after message: {entry['after']}")
-            record["pending_after"] = False
+                confirmed = report.send([session], "after-message", entry["after"])
+                if confirmed:
+                    targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
+                    report.send(targets, "after-sent",
+                                f"{entry['title']} ({session}) came up after its restart and has now"
+                                f" been sent its after message: {entry['after']}")
+                record["pending_after"] = not confirmed
             record["blocked"] = False
             record["blocked_reported"] = False
             record["duplicate_reported"] = False
@@ -930,9 +960,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--train", default=DEFAULT_TRAIN, help="merge train directory on --host")
     parser.add_argument("--remote-proc", default="/proc",
                         help="procfs the stall test reads on --host; a private tree for the tests")
-    parser.add_argument("--sre", default=os.environ.get("BOX_HEALTH_OWNER") or DEFAULT_SRE)
-    parser.add_argument("--chief", default=DEFAULT_CHIEF, help="chief of staff's session")
-    parser.add_argument("--verified-linux-lead", default=DEFAULT_VL_LEAD)
+    parser.add_argument("--sre", default=os.environ.get("BOX_HEALTH_OWNER") or DEFAULT_SRE,
+                        help="box-health role topic or explicit session id")
+    parser.add_argument("--chief", default=os.environ.get("OFFBOX_CHIEF") or DEFAULT_CHIEF,
+                        help="chief of staff role topic or explicit session id")
+    parser.add_argument("--verified-linux-lead", default=os.environ.get("OFFBOX_VL_LEAD") or DEFAULT_VL_LEAD,
+                        help="Verified Linux lead role topic or explicit session id")
     parser.add_argument("--ssh-timeout", type=int, default=30)
     parser.add_argument("--state", default=str(STATE_DIR / "state.json"))
     parser.add_argument("--dry-run", action="store_true",

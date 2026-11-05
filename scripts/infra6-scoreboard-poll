@@ -30,25 +30,56 @@
 #   infra6-scoreboard-poll            the loop, for a session that holds the job itself
 #   infra6-scoreboard-poll tick       one blocked-hours poll now, for the window that ended at the last tick
 #   infra6-scoreboard-poll daily      the admin-paths and acceptance reads now, printed
+#   infra6-scoreboard-poll --dry-run [tick|cron]  print sends, using temporary state; send nothing
+# INFRA6_ROLE selects the duty (default lead-infra); INFRA6_LEADS overrides the leads file.
 set -uo pipefail
 
-readonly INFRA_SESSION=01a13c57-d826-7242-80fe-5f0670188b11
+readonly INFRA_ROLE=${INFRA6_ROLE:-lead-infra}
+INFRA_SESSION=
 readonly APPLIER=infra-applier@theorem-agent-infra.iam.gserviceaccount.com
 readonly DEPLOY=serviceAccount:deploy@theorem-agent-infra.iam.gserviceaccount.com
 readonly BOX=serviceAccount:dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com
 state=${XDG_STATE_HOME:-$HOME/.local/state}/infra6-scoreboard-poll
+leads_file=${INFRA6_LEADS:-$state/leads.tsv}
+dry_run=false
+default_command=loop
+if [ "${1:-}" = --dry-run ]; then
+	dry_run=true
+	default_command=tick
+	shift
+	state=$(mktemp -d) || exit 1
+	trap 'rm -rf -- "$state"' EXIT
+fi
 mkdir -p "$state"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
-# The replies must reach the INFRA session's inbox, so the sends carry its id as their source
-# whatever session started the job (`envoy send` stamps source_session from OMP_SESSION_ID).
-# The body goes on stdin, with every option before the target: since 2026-11-05 envoy refuses a
-# body given on the command line in an agent session, and a --message-file after the target is
-# message text rather than an option.
-send_as_infra() { OMP_SESSION_ID=$INFRA_SESSION envoy send --message-file - "$1" <"$2" >/dev/null; }
+# The current role holder owns both the wake and the reply inbox. Resolve it with a read-only
+# session-list query, never a role lookup, and refuse to impersonate an unheld duty.
+resolve_infra() {
+	local sessions
+	sessions=$(envoy ps --json --sub-agents) || return 1
+	INFRA_SESSION=$(jq -er --arg role "$INFRA_ROLE" \
+		'[.[] | select((.roles // []) | index($role)) | .session_id | select(. != null and . != "")][0] // empty' <<<"$sessions") || {
+		log "role $INFRA_ROLE has no live holder; sending nothing" >&2
+		return 1
+	}
+}
 
-# The leads asked: "$state/leads.tsv", one "<session id><TAB><lane name>" per line, which the INFRA
+# A zero exit code is not a receipt: require a nonempty event_id for this exact session.
+send_as_infra() {
+	local answer
+	if "$dry_run"; then
+		log "dry-run: would send from $INFRA_ROLE ($INFRA_SESSION) to $1"
+		return 0
+	fi
+	answer=$(OMP_SESSION_ID=$INFRA_SESSION envoy send --message-file - "$1" <"$2") || return 1
+	jq -e --arg topic "notifications.agent.$1" \
+		'type == "object" and (.event_id | type == "string" and length > 0) and .topic == $topic' \
+		<<<"$answer" >/dev/null || { log "unconfirmed receipt for $1" >&2; return 1; }
+}
+
+# The leads asked: "$leads_file", one "<session id><TAB><lane name>" per line, which the INFRA
 # session keeps. It is a list and not every titled session, because a coordinator answers for its
 # workers: asking each worker too would count the same idle hours twice. A lead that is no longer
 # live is skipped, and the wake message names it so the list is mended.
@@ -58,7 +89,7 @@ lanes() {
 	while IFS=$'\t' read -r sid name; do
 		case "$sid" in '' | '#'*) continue ;; esac
 		if grep -qx "$sid" <<<"$live"; then echo "$sid"; else log "lead $name ($sid) is not live" >&2; echo "$name $sid" >>"$state/gone.txt"; fi
-	done <"$state/leads.tsv"
+	done <"$leads_file"
 }
 
 # window_end prints the last tick at or before now (01, 04, ..., 22 UTC), as HH:00.
@@ -71,12 +102,13 @@ window_end() {
 
 poll() {
 	local end start msg n=0 failed=0 sid
+	resolve_infra || return 1
 	: >"$state/gone.txt"
 	end=$(window_end)
 	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
 	msg="$state/poll-message.txt"
 	cat >"$msg" <<EOF
-INFRA-6 blocked-agent-hours poll, window $(date -u +%F) $start to ${end}Z. From the INFRA session (01a13c57), sent by its job infra6-scoreboard-poll.
+INFRA-6 blocked-agent-hours poll, window $(date -u +%F) $start to ${end}Z. From the holder of $INFRA_ROLE ($INFRA_SESSION), sent by its job infra6-scoreboard-poll.
 
 Reply to me with one line for your lane:
 - agents idle x hours idle in that window because of infrastructure (merge path, apply, credential, the box, Dispatch, CI, Envoy, model gateway or login), from your own count. Give one item for each cause.
@@ -90,7 +122,8 @@ EOF
 		if send_as_infra "$sid" "$msg"; then n=$((n + 1)); else failed=$((failed + 1)); log "send to $sid failed"; fi
 	done < <(lanes)
 	printf '%s %s %s %s\n' "$(date -u +%FT%TZ)" "$start-$end" "$n" "$failed" >>"$state/polls.log"
-	log "poll $start-${end}Z sent to $n leads, $failed failed"
+	log "poll $start-${end}Z $(if "$dry_run"; then echo 'would send'; else echo sent; fi) to $n leads, $failed failed"
+	[ "$failed" -eq 0 ]
 }
 
 # admin_paths prints one line per path of dispatch://INFRA-243: OPEN or CLOSED and the evidence.
@@ -155,13 +188,14 @@ daily() {
 
 wake() {
 	local end start msg
+	resolve_infra || return 1
 	end=$(window_end)
 	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
 	msg="$state/wake-message.txt"
 	{
 		echo "infra6-scoreboard-poll: add up the blocked-agent-hours replies for $(date -u +%F) $start-${end}Z (poll sent at ${end%%:*}:29Z; $(tail -1 "$state/polls.log" | cut -d' ' -f3) leads asked). Count each lane's own figure only, name each cause, give n and how it was asked, and do not add two lanes' counts of one cause. Append the reading to dispatch://INFRA-6/artifact/scoreboard-json."
 		if [ -s "$state/gone.txt" ]; then
-			echo "Leads in $state/leads.tsv that are no longer live, not asked; replace or remove each:"
+			echo "Leads in $leads_file that are no longer live, not asked; replace or remove each:"
 			cat "$state/gone.txt"
 		fi
 		if [ "$end" = "10:00" ]; then
@@ -170,7 +204,12 @@ wake() {
 			cat "$state/daily.txt"
 		fi
 	} >"$msg"
-	if send_as_infra "$INFRA_SESSION" "$msg"; then log "woke the INFRA session for $start-${end}Z"; else log "wake send failed"; fi
+	if send_as_infra "$INFRA_SESSION" "$msg"; then
+		log "$(if "$dry_run"; then echo 'would wake'; else echo woke; fi) the INFRA session for $start-${end}Z"
+	else
+		log "wake send failed"
+		return 1
+	fi
 }
 
 # next_at MM: prints the epoch of the next MM past a tick hour (01 04 07 10 13 16 19 22 UTC).
@@ -220,9 +259,12 @@ cron() {
 	wake_mark="wake $(date -u -d "@$wake_at" +%FT%TZ)"
 	if ! mark_seen "$poll_mark"; then
 		if [ $((now - poll_at)) -le "$MARK_GRACE" ]; then
-			poll
-			[ "$(window_end)" = "10:00" ] && daily >"$state/daily.txt" 2>&1
-			echo "$poll_mark" >>"$state/marks.txt"
+			if poll; then
+				[ "$(window_end)" = "10:00" ] && { "$dry_run" || daily >"$state/daily.txt" 2>&1; }
+				echo "$poll_mark" >>"$state/marks.txt"
+			else
+				echo "$poll_mark missed" >>"$state/marks.txt"
+			fi
 		else
 			echo "$poll_mark missed" >>"$state/marks.txt"
 			log "poll of ${poll_mark#poll } missed: $(((now - poll_at) / 60)) min late"
@@ -233,8 +275,8 @@ cron() {
 			echo "$wake_mark missed" >>"$state/marks.txt"
 			log "wake of ${wake_mark#wake } missed: $(((now - wake_at) / 60)) min late"
 		elif mark_done "poll $(date -u -d "@$((wake_at - 1800))" +%FT%TZ)"; then
-			wake
-			echo "$wake_mark" >>"$state/marks.txt"
+			if wake; then echo "$wake_mark" >>"$state/marks.txt";
+			else echo "$wake_mark missed" >>"$state/marks.txt"; fi
 		else
 			echo "$wake_mark missed" >>"$state/marks.txt"
 			log "wake of ${wake_mark#wake } skipped: that tick's poll did not go out"
@@ -260,10 +302,10 @@ loop() {
 	done
 }
 
-case "${1:-loop}" in
+case "${1:-$default_command}" in
 	cron) cron ;;
 	loop) loop ;;
 	tick) poll ;;
 	daily) daily ;;
-	*) echo "usage: infra6-scoreboard-poll [cron|loop|tick|daily]" >&2; exit 2 ;;
+	*) echo "usage: infra6-scoreboard-poll [--dry-run] [cron|loop|tick|daily]" >&2; exit 2 ;;
 esac

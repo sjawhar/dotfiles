@@ -130,10 +130,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The two sessions that own this detector's findings: the chief of staff, who owns the incident
-# class (dispatch://INFRA-602), and the INFRA lead, who owns this detector.
-CHIEF_OF_STAFF = "01a13dca-e979-7264-af32-f654ef57a6f5"
-INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
+# Named duties resolve from GET /v1/sessions only; role lookups can release unseen claims.
+# These overridable sessions are fallbacks when the corresponding role is unheld.
+CHIEF_OF_STAFF = os.environ.get("ROLE_WATCH_CHIEF_SESSION", "01a13dca-e979-7264-af32-f654ef57a6f5")
+INFRA_LEAD = os.environ.get("ROLE_WATCH_INFRA_SESSION", "01a13c57-d826-7242-80fe-5f0670188b11")
+LANE_BOX_OPERATOR = os.environ.get("ROLE_WATCH_OPERATOR_SESSION", "01a14c3d-9d7f-7079-97aa-f810a884c050")
+NAMED_ROLES = {
+    CHIEF_OF_STAFF: os.environ.get("ROLE_WATCH_CHIEF_ROLE", "chief-of-staff"),
+    INFRA_LEAD: os.environ.get("ROLE_WATCH_INFRA_ROLE", "lead-infra"),
+    LANE_BOX_OPERATOR: os.environ.get("ROLE_WATCH_OPERATOR_ROLE", "lane-box-operator"),
+}
 
 # Where the state file goes. /mnt/nvme/sami/tmp is the agent devboxes' scratch on the big disk;
 # an agent box without it keeps the state under ~/.local/state, which every XDG machine has.
@@ -680,6 +686,15 @@ def compose(
 # --------------------------------------------------------------------------- Envoy transport
 
 
+def named_recipient(fallback: str, sessions: list[dict]) -> str:
+    """Resolve a duty without the side effects of GET /v1/roles/<role>."""
+    role = NAMED_ROLES.get(fallback)
+    return next(
+        (s["session_id"] for s in sessions if role in (s.get("roles") or []) and s.get("session_id")),
+        fallback,
+    ) if role else fallback
+
+
 class Envoy:
     """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
 
@@ -738,6 +753,7 @@ class Envoy:
         status, body = self.request("GET", "/v1/sessions")
         if status != 200 or not isinstance(body, list):
             raise RuntimeError(f"GET /v1/sessions: {status} {body}")
+        self.live_sessions = body
         return body
 
     # There is deliberately no role() here, for two reasons, and the first still holds today.
@@ -762,22 +778,27 @@ class Envoy:
         return status, body if isinstance(body, dict) else {"error": str(body)}
 
     def send(self, session_id: str, message: str) -> bool:
+        session_id = named_recipient(session_id, getattr(self, "live_sessions", []))
         status, body = self.request(
             "POST",
             "/v1/messages/send",
             {"target_session": session_id, "message": message, "source": "envoy"},
         )
-        if status != 200:
-            log(f"  send to {session_id} failed: {status} {body}")
-        return status == 200
+        confirmed = (status == 200 and isinstance(body, dict) and bool(body.get("event_id"))
+                     and body.get("topic") == f"notifications.agent.{session_id}")
+        if not confirmed:
+            log(f"  send to {session_id} unconfirmed: {status} {body}")
+        return confirmed
 
     def publish(self, topic: str, message: str) -> bool:
         status, body = self.request(
             "POST", "/v1/messages/publish", {"topic": topic, "message": message, "source": "envoy"}
         )
-        if status != 200:
-            log(f"  publish to {topic} failed: {status} {body}")
-        return status == 200
+        confirmed = (status == 200 and isinstance(body, dict) and bool(body.get("event_id"))
+                     and body.get("topic") == topic)
+        if not confirmed:
+            log(f"  publish to {topic} unconfirmed: {status} {body}")
+        return confirmed
 
 
 # --------------------------------------------------------------------------- host ownership
@@ -2041,7 +2062,8 @@ def recipients(role: str, record: dict, sessions: list[dict], holder: str) -> tu
     the dead session shared -- the sessions whose messages to this role would vanish.
     """
     notes: list[str] = []
-    targets = [(CHIEF_OF_STAFF, "chief of staff"), (INFRA_LEAD, "INFRA lead")]
+    targets = [(named_recipient(CHIEF_OF_STAFF, sessions), "chief of staff"),
+               (named_recipient(INFRA_LEAD, sessions), "INFRA lead")]
     directory = record.get("dir") or ""
     leads = [
         session
@@ -2346,14 +2368,13 @@ def send_clear(
         options, f"role-{role}-{kind}", clear_text(role, incident, holder, cause, now, kind, banner),
         now, *clear_head(role, incident, holder, cause, now, kind),
     )
-    for target in targets:
-        if not options.dry_run:
-            envoy.send(target, text)
+    told = [target for target in targets if options.dry_run or envoy.send(target, text)]
     named = {
         "quiet": "QUIETED ON THE DIRECTORY RULE", "suppressed": "CLOSED BY A SUPPRESSION",
         "exited": "CLOSED, HOLDER EXITED NORMALLY",
     }
-    log(f"{role}: {named.get(kind, 'CLEARED')} ({cause}); told {len(targets)} sessions;"
+    log(f"{role}: {named.get(kind, 'CLEARED')} ({cause});"
+        f" {'would tell' if options.dry_run else 'told'} {len(told)}/{len(targets)} sessions;"
         f" full report {report}")
     if options.print_alert:
         print(text)
@@ -2745,7 +2766,6 @@ def pane_head(incident: dict, now: float) -> list[str]:
 # lead, who holds neither that pane's tmux socket nor the lane. The operator holds both. Measured
 # 2026-10-30: five such alerts in thirteen minutes, all from one sshfs restart pass, none of them
 # actionable by the recipient. The operator asked for them in writing at 08:55:41Z.
-LANE_BOX_OPERATOR = "01a14c3d-9d7f-7079-97aa-f810a884c050"
 LANE_WORKER_DIR_RE = re.compile(r"^/home/sami/work/(?:cold/)?workers/")
 # ossv-worker's own records on a lane box, home-relative so nothing here hard-codes a user:
 #   <home>/work/.ossv-workers/<lane>/lead     the session id that leads that worker
@@ -2896,11 +2916,13 @@ def pane_release(record: dict, session: str | None, transcript: str) -> str:
 
 @bounded_step("the lane's owner records")
 def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
-    targets = [(INFRA_LEAD, "INFRA lead")]
+    infra_lead = named_recipient(INFRA_LEAD, sessions)
+    operator = named_recipient(LANE_BOX_OPERATOR, sessions)
+    targets = [(infra_lead, "INFRA lead")]
     live = {s.get("session_id") for s in sessions}
     leads = [
         s for s in sessions
-        if s.get("session_id") not in {session, INFRA_LEAD}
+        if s.get("session_id") not in {session, infra_lead}
         and (s.get("dir") or "") == directory
         and any(LEAD_ROLE_RE.match(name) for name in s.get("roles") or [])
     ]
@@ -2916,7 +2938,7 @@ def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -
     # claim: the lead it names can itself have been restarted under a new id.
     lane = lane_of(directory or "")
     recorded = worker_record(lane, "lead")
-    if recorded and recorded not in {session, INFRA_LEAD} and UUID_RE.fullmatch(recorded):
+    if recorded and recorded not in {session, infra_lead} and UUID_RE.fullmatch(recorded):
         if recorded in live:
             targets.append((recorded, f"lane lead of {lane}, from ossv-worker's own record"))
             notes.append(
@@ -2929,16 +2951,16 @@ def pane_recipients(directory: str, session: str | None, sessions: list[dict]) -
                 f" ({OSSV_WORKER_STATE / lane / 'lead'}), but that session is not live, so it was"
                 " not told."
             )
-    if LANE_WORKER_DIR_RE.match(directory or "") and LANE_BOX_OPERATOR != session:
+    if LANE_WORKER_DIR_RE.match(directory or "") and operator != session:
         # The operator of the box holds the tmux socket the restart command needs.
-        if LANE_BOX_OPERATOR in live:
-            targets.append((LANE_BOX_OPERATOR, "lane-box operator"))
+        if operator in live:
+            targets.append((operator, "lane-box operator"))
             notes.append(
                 "The lane-box operator was told too: it holds the tmux socket the restart"
                 " command needs."
             )
         else:
-            notes.append(f"The lane-box operator ({LANE_BOX_OPERATOR}) is not live.")
+            notes.append(f"The lane-box operator ({operator}) is not live.")
     return targets, notes
 
 
@@ -2995,11 +3017,11 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
                 f"It opened {iso(incident['opened_at'])} and lasted"
                 f" {human(now - incident['opened_at'])}. No action is needed.",
             )
-            for target in incident.get("told") or [INFRA_LEAD]:
-                if not options.dry_run:
-                    envoy.send(target, text)
+            targets = incident.get("told") or [named_recipient(INFRA_LEAD, sessions)]
+            told = [target for target in targets if options.dry_run or envoy.send(target, text)]
             clears += 1
             log(f"pane {incident['pane_id']} {incident['where']}: CLEARED ({cause});"
+                f" {'would tell' if options.dry_run else 'told'} {len(told)}/{len(targets)} sessions;"
                 f" full report {report}")
             if options.print_alert:
                 print(text)
@@ -3166,16 +3188,19 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             full, now, *pane_head(incident, now),
         )
         incident["alerted_at"] = now
-        incident["told"] = [target for target, _ in targets]
+        incident["told"] = []
         record.update({"alerted_for": session or "-", "alerted_at": now})
         log_change(state, logged, f"alerted:{now}")
         state.commit(options)
         told = []
         for target, why in targets:
             if options.dry_run or envoy.send(target, text):
-                told.append(f"{target} ({why})")
+                told.append(target)
+        incident["told"] = told
+        state.commit(options)
         alerts += 1
-        log(f"pane {pane['pane_id']} {where}: ALERT sent to {len(targets)} sessions"
+        log(f"pane {pane['pane_id']} {where}: ALERT {'would send' if options.dry_run else 'sent'}"
+            f" to {len(told)}/{len(targets)} sessions"
             f" [{', '.join(told)}]; full report {report}")
         if options.print_alert:
             print(text)
@@ -3658,13 +3683,14 @@ def check_roles(
             )
             # On disk before a single message leaves: a resent first alert is worse than a late one.
             incident["alerted_at"] = started
-            incident["told"] = [target for target, _ in targets]
+            incident["told"] = []
             log_change(state, logged, f"alerted:{started}")
             state.commit(options)
             told = []
             for target, why in targets:
                 if options.dry_run or envoy.send(target, text):
                     told.append(target)
+            published = 0
             for topic in topics:
                 headline = short_message(
                     report,
@@ -3674,12 +3700,13 @@ def check_roles(
                     " session; it does NOT establish that it stopped.",
                     required=(incident["hosts_checked"], next_reading(started)),
                 )
-                if not options.dry_run:
-                    envoy.publish(topic, headline)
-            incident["told"] = told or incident["told"]
+                if options.dry_run or envoy.publish(topic, headline):
+                    published += 1
+            incident["told"] = told
+            state.commit(options)
             alerts += 1
-            log(f"{role}: ALERT sent to {len(told)} session(s)"
-                f" [{', '.join(f'{t} ({w})' for t, w in targets)}] and {len(topics)} topic(s);"
+            log(f"{role}: ALERT {'would send' if options.dry_run else 'sent'} to {len(told)}/{len(targets)} session(s)"
+                f" [{', '.join(f'{t} ({w})' for t, w in targets if t in told)}] and {published}/{len(topics)} topic(s);"
                 f" full report {report}")
             if options.print_alert:
                 print(text)
@@ -3715,10 +3742,11 @@ def check_roles(
             incident["escalated_at"] = started
             log_change(state, logged, f"escalated:{started}")
             state.commit(options)
-            if not options.dry_run:
-                envoy.send(CHIEF_OF_STAFF, text)
+            target = named_recipient(CHIEF_OF_STAFF, sessions)
+            confirmed = options.dry_run or envoy.send(target, text)
+            outcome = "would send" if options.dry_run else ("sent" if confirmed else "UNCONFIRMED")
             log(
-                f"{role}: ESCALATED to the chief of staff, a repeat of the incident first seen at"
+                f"{role}: {'ESCALATED' if confirmed else 'ESCALATION UNCONFIRMED'} ({outcome}) to the chief of staff ({target}), a repeat of the incident first seen at"
                 f" {first_seen} and first alerted at {first_alert}; no further repeat;"
                 f" full report {report}"
             )

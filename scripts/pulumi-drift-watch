@@ -69,12 +69,10 @@ LOG = STATE_ROOT / "samples.jsonl"
 # reaches no provider that needs a credential this box does not hold.
 STACKS = [("bootstrap", "prod")]
 
-# Who hears it: the INFRA project's Legion controller, which owns the pending applies
-# (dispatch://INFRA-430 comment c78927c8), by its Envoy role, so the address survives a new
-# controller session. The INFRA lead asked for it too (2026-10-30T02:28Z) but holds no Envoy role
-# (`envoy ps`, 2026-11-03), so its session id is the fallback only, for when nobody holds the role.
+# The controller owns pending applies. The INFRA lead's session is the fallback when the role
+# is unheld; its receipt is checked too, so an expired fallback cannot count as delivery.
 TARGET = "notifications.role.legion-infra-controller"
-FALLBACK = "01a13c57-d826-7242-80fe-5f0670188b11"  # INFRA lead
+FALLBACK = os.environ.get("PULUMI_DRIFT_WATCH_FALLBACK", "01a13c57-d826-7242-80fe-5f0670188b11")
 MESSAGE_LIMIT = 600
 REPORT_DAYS = 7
 
@@ -316,16 +314,39 @@ def forget_sent(directory: str, stack: str) -> None:
 
 
 def send(target: str, text: str) -> bool:
-    """One Envoy message: a session id is a direct send, a topic (a role) a publish."""
+    """Resolve a role, then require a receipt for the exact session addressed."""
     try:
-        r = subprocess.run([str(ENVOY), "send", "--source", "envoy", "--message-file", "-", target],
+        recipient = target
+        if target.startswith("notifications.role."):
+            listing = subprocess.run([str(ENVOY), "ps", "--json", "--sub-agents"],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+            if listing.returncode != 0:
+                raise ValueError(f"session list failed: {listing.stderr.strip()[:400]}")
+            sessions = json.loads(listing.stdout)
+            if not isinstance(sessions, list):
+                raise ValueError("session list is not a list")
+            role = target.removeprefix("notifications.role.")
+            recipient = next((s["session_id"] for s in sessions
+                              if role in (s.get("roles") or []) and s.get("session_id")), "")
+            if not recipient:
+                raise ValueError(f"role {role} has no live holder")
+        r = subprocess.run([str(ENVOY), "send", "--source", "envoy", "--message-file", "-", recipient],
                            input=text, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         print(f"envoy send to {target} failed: {exc}", file=sys.stderr)
         return False
     if r.returncode != 0:
         print(f"envoy send to {target} failed: {r.stdout.strip()[:400]}", file=sys.stderr)
-    return r.returncode == 0
+        return False
+    try:
+        answer = json.loads(r.stdout)
+    except ValueError:
+        answer = None
+    confirmed = (isinstance(answer, dict) and bool(answer.get("event_id"))
+                 and answer.get("topic") == f"notifications.agent.{recipient}")
+    if not confirmed:
+        print(f"envoy send to {target} unconfirmed: {r.stdout.strip()[:400]}", file=sys.stderr)
+    return confirmed
 
 
 def deliver(text: str) -> str:
