@@ -603,7 +603,7 @@ def player(st, rows: list[dict], now: datetime) -> str:
     )
 
 
-CHIEF_SESSION = "01a13dca-e979-7264-af32-f654ef57a6f5"  # the chief of staff's session
+CHIEF_SESSION = model.CHIEF_SESSION  # the chief of staff's session, defined once in model.py
 
 
 def live_link(web: str, session: str, who: str, running: bool, label: str) -> str:

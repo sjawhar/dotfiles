@@ -38,14 +38,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import markdown, render
+from . import markdown, model, render
 from .sources import ENVOY_CONFIG, Dispatch, SourceError, envoy_send
 
 log = logging.getLogger(__name__)
 
 ISSUE = os.environ.get("DASHBOARD_STANDUP_ISSUE", "INFRA-460")
 ROOT = os.environ.get("DASHBOARD_STANDUP_ROOT", "3dd1d2eb-c975-43d1-ac37-cfa77bca1e42")
-CHIEF_SESSION = os.environ.get("DASHBOARD_CHIEF_SESSION", "01a13dca-e979-7264-af32-f654ef57a6f5")
+CHIEF_SESSION = model.CHIEF_SESSION  # defined once in model.py; DASHBOARD_CHIEF_SESSION still overrides it there
 LEADS_FILE = Path(os.environ.get("DASHBOARD_LEADS_FILE", "/mnt/nvme/sami/chief/leads.json"))
 # The page's own address in what the standup room shows. sami-devbox serves the page; sami-rocqperf only forwarded
 # to it, and is being shut down (Sami, 2026-11-05).

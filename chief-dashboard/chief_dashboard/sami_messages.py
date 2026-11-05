@@ -23,9 +23,9 @@ from datetime import UTC, datetime
 
 import yaml
 
-from .model import parse_time
+from .model import CHIEF_SESSION, parse_time
 
-SESSION = "01a13dca-e979-7264-af32-f654ef57a6f5"
+SESSION = CHIEF_SESSION  # defined once in model.py
 TEXT_FIELDS = ("body", "text", "answer", "comment", "reply")
 
 

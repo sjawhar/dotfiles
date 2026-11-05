@@ -11,6 +11,7 @@ what the page shows. The status rules are the brief's:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,14 @@ from . import videos
 from .pace import Bound
 
 SAMI = "sami@theorem.dev"
+# The chief of staff's session, defined ONCE. It was a literal in three modules (standup.py, v2_render.py,
+# sami_messages.py), so a replacement chief meant three edits and a missed one silently posted, linked or read as a
+# session that no longer held the job: the dead-addressee defect the Verified Linux lead found fleet-wide on 2026-11-05
+# (53 sites binding a session id to a name). Senders should address the Envoy ROLE `chief-of-staff` instead of this
+# id (the chief holds it from 2026-11-05 16:5xZ); this constant is only the fallback, and a replacement chief changes
+# it in one place, or sets DASHBOARD_CHIEF_SESSION, without touching code.
+CHIEF_ROLE = "chief-of-staff"
+CHIEF_SESSION = os.environ.get("DASHBOARD_CHIEF_SESSION", "01a13dca-e979-7264-af32-f654ef57a6f5")
 # Sami's own Dispatch projects: an ask waiting on a human on an issue nobody is assigned to there is his to see.
 SAMI_PROJECTS = ("INFRA", "BET", "LINUX", "OSSV")
 HEADLINE_MAX = 160  # characters of the lead's `headline` the glance row shows
