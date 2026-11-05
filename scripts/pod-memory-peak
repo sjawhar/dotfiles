@@ -43,6 +43,14 @@
 #   - an OOM kill beats this number. If a pod dies at a limit above what this prints, the number
 #     is wrong and the kill is right.
 # For a kind whose pods are NOT gVisor, the in-pod memory.peak is a true maximum and is better.
+#
+# UNDER gVISOR THIS READS HIGH, and that is the safe direction. The node accounts the gVisor
+# sandbox's own memory together with the container, so the figure is an UPPER BOUND on what the
+# cgroup was charged rather than the charge itself. Evidence, measured by a lane on 2026-11-05:
+# a container of a Guaranteed pod at 192Gi/192Gi read 193.22 GiB here -- 0.6% ABOVE its own
+# limit -- and no OOM kill exists for it in Cloud Logging over 2026-10-29..11-05 (the same query
+# returns 168 FailedScheduling entries, so it does find what is there). A request set from this
+# is therefore slightly generous, never short, which is what a request should be.
 set -uo pipefail
 
 pod="${1:-}"
@@ -122,4 +130,8 @@ if total:
     else:
         print(f"  suggested request: {total * 1.3 / 2**30:.2f} GiB (peak + 30%), rounded up to"
               " the next size your kind uses")
+    print("  Under gVisor the node counts the sandbox memory with the container, so this peak"
+          " is an UPPER BOUND on what the cgroup was charged. If the pod completed at a limit"
+          " BELOW the suggestion, that run is the better evidence and the suggestion is high:"
+          " one pod read 193.22 GiB and finished inside a 192Gi limit with no kill.")
 '
