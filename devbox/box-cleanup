@@ -106,8 +106,14 @@ STEPS=(
     # Cheap cap checks; their own usage thresholds decide whether trimming is needed.
     "gocache-cap|0|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
     "nvme-cache-cap|0|/mnt/nvme/$user|$here/nvme-cache-cap"
-    # Docker checks its filesystem against DOCKER_CAP_HIGH_PCT (default 80%) before acting.
-    "docker-cap|0|/var/run/docker.sock|$here/docker-cap"
+    # Docker checks its filesystem against DOCKER_CAP_HIGH_PCT (default 80%) before acting, so on
+    # a box UNDER that mark this costs one df. On a box over it, it does the whole job: measured
+    # 2026-11-05 at 439 s, freeing 30.0 GB, with /mnt/nvme at 92%. Every 15 minutes that would be
+    # a 50% duty cycle of pruning on a Docker daemon 74 agent boxes share, and a prune racing a
+    # lane's pull is how four digest pulls died that afternoon. Hourly keeps the fix that matters
+    # -- the 388 GB that accumulated inside ONE daily window is now caught within an hour, 24x
+    # sooner -- at 12% duty instead of 50%.
+    "docker-cap|3600|/var/run/docker.sock|$here/docker-cap"
 )
 
 usage() {
