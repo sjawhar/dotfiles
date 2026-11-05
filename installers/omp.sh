@@ -47,6 +47,7 @@ ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
 # Standing rules (omp/AGENTS.md, rules/). memory-graph.md is linked by installers/ctx-memory.sh.
 mkdir -p "${OMP_AGENT_DIR}/rules"
 ensure_link "${DOTFILES_DIR}/omp/rules/github-api-budget.md" "${OMP_AGENT_DIR}/rules/github-api-budget.md"
+ensure_link "${DOTFILES_DIR}/omp/rules/task-validity.md" "${OMP_AGENT_DIR}/rules/task-validity.md"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub or npm. The pins live in the committed omp/plugins/package.json and
