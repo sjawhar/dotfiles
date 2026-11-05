@@ -35,8 +35,12 @@ Four limits on restarting, all mandatory:
   have made 87 useless resumes on 2026-11-04.
 * At most 3 restarts in 10 minutes and 10 in an hour, across every session. Past that it reports
   and stops; it restarts again once the windows empty on their own.
-* Never a session that has any live process naming it, even one omp-session-live does not count,
-  so it can never make a duplicate. A live box is never restarted or moved.
+* Never a session that any live process RUNS -- its `--resume`/`--session-id` value, or an
+  absolute transcript path on its command line -- even where omp-session-live does not see it,
+  so it can never make a duplicate. A live box is never restarted or moved. A process that only
+  MENTIONS the id does not count: a headless `omp -p` carries its whole prompt in its arguments,
+  and the Verified Linux drift checker's prompt names the lead it reports to, which on
+  2026-11-05 made a dead lead look alive (`scripts/tests/test_devbox_offbox_act_live.py`).
 * A session that dies again within 30 minutes of its restart is reported, not restarted again; it
   stays blocked until it is seen live.
 

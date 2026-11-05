@@ -66,9 +66,16 @@ owner writes and updates its own file. The watch reads it and never writes it.
 * **A writeback stall.** Nothing is restarted while one holds.
 * **3 restarts in 10 minutes, 10 in an hour**, across every session. Past that it reports and
   stops, and starts again on its own once the windows empty.
-* **A live process naming the session**, even one `omp-session-live` does not count (any process
-  whose command line holds both `omp` and the id). It can therefore never make a duplicate, and it
-  never restarts or moves a live box.
+* **A live process that RUNS the session**, even where `omp-session-live` does not see it: an
+  omp process whose `--resume` or `--session-id` is that id, or whose command line names an
+  absolute transcript path of it. It can therefore never make a duplicate, and it never
+  restarts or moves a live box. A process that merely MENTIONS the id is not it. A headless
+  `omp -p` carries its whole prompt in its arguments, and a prompt names other sessions: the
+  Verified Linux drift checker is told to report to its lead, so its command line holds the
+  lead's id for the hour it runs. Under the older rule — any command line holding both `omp`
+  and the id — that made the lead unrestartable while the checker ran, and on 2026-11-05 at
+  04:28Z the post-reboot restart skipped the lead, SPEEDCOACH and PIPE as live while all three
+  were dead. `scripts/tests/test_devbox_offbox_act_live.py` holds both sides.
 * **A session that died again within 30 minutes of its restart.** Reported once, then blocked
   until omp-session-live sees it live.
 
