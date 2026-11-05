@@ -44,7 +44,7 @@ import base64
 import fcntl
 import os
 import shlex
-import socket
+import signal
 import subprocess
 import sys
 import time
@@ -56,8 +56,15 @@ SOCK = os.environ.get("AGENTBOX_GUARD_SOCK", "")
 STATE = os.environ.get("AGENTBOX_GUARD_STATE", "")
 TMUX_HINT = os.environ.get("AGENTBOX_GUARD_TMUX", "")
 # A box that sends nothing this long is not a client of ours (a real tmux binary that found the
-# socket sends binary imsg frames and no GO line, and must not hold the connection open).
-READ_TIMEOUT = 30.0
+# socket sends binary imsg frames and no GO line, and must not hold the connection open). The
+# deadline is SIGALRM and not a socket timeout: `socket.socket(fileno=os.dup(0)).settimeout()`
+# sets O_NONBLOCK on the file DESCRIPTION, which the dup shares with fd 0, so stdin went
+# non-blocking and a request that had not arrived in the instant python reached it read as end
+# of input. Half of the calls from box agentbox-6378059a3ea1 failed that way at 03:01Z on
+# 2026-11-05 ("this socket is not tmux's protocol"), which left `$(tmux new-window -P -F ...)`
+# empty and the next command aimed at an empty target - refused, since an empty target is the
+# server's current pane and that is another session's.
+READ_TIMEOUT = 30
 
 # Every kill command, its aliases, and what a target of it names. tmux accepts any unambiguous
 # prefix, so a word is taken as a kill command when it is a prefix of one of these; a word that is
@@ -149,6 +156,14 @@ def tmux_bin() -> str:
     for directory in os.environ.get("PATH", "").split(":"):
         if directory:
             candidates.append(os.path.join(directory, "tmux"))
+    # The mise SHIM, not only an install path: on sami-devbox tmux 3.8 is reachable at
+    # ~/.mise/shims/tmux and at no */installs/*tmux*/*/bin/tmux, while the unit's PATH is
+    # systemd's, whose /usr/bin/tmux is 3.4. Without this the probe fell through to 3.4, every
+    # command the guard ALLOWED answered "server exited unexpectedly" against this 3.8 server,
+    # and only its refusals worked - measured in box agentbox-6378059a3ea1 at 03:03Z on
+    # 2026-11-05, which is what creating one live box before a fleet-wide reboot is for.
+    candidates.append(str(home / ".mise/shims/tmux"))
+    candidates.append(str(home / ".local/share/mise/shims/tmux"))
     for root in (home / ".mise/installs", home / ".local/share/mise/installs"):
         candidates.extend(str(path) for path in sorted(root.glob("*tmux*/*/bin/tmux")))
     candidates.append("/usr/bin/tmux")
@@ -166,6 +181,8 @@ def tmux_bin() -> str:
                 except OSError:
                     pass
             return candidate
+    # Said in the log rather than left as tmux's own "server exited unexpectedly".
+    log(f"no tmux client could talk to {SOCK}; tried {len(candidates)} candidates")
     return "tmux"
 
 
@@ -364,14 +381,14 @@ def main() -> int:
         respond(b"", b"agentbox-tmux-guard: this host has no tmux server at "
                 + SOCK.encode() + b"\n", 1)
         return 0
-    try:
-        sock = socket.socket(fileno=os.dup(0))
-        sock.settimeout(READ_TIMEOUT)
-    except OSError:
-        sock = None
+    def late(_signum: int, _frame: object) -> None:
+        raise TimeoutError(f"no request in {READ_TIMEOUT}s")
+
+    signal.signal(signal.SIGALRM, late)
+    signal.alarm(READ_TIMEOUT)
     try:
         args, cwd = read_request()
-    except (ValueError, OSError, socket.timeout) as error:
+    except (ValueError, OSError) as error:
         sys.stdout.buffer.write(
             b"agentbox-tmux-guard: this socket is not tmux's protocol (" + str(error).encode()
             + b"). Run `tmux` from PATH, which is "
@@ -379,9 +396,7 @@ def main() -> int:
         sys.stdout.buffer.flush()
         return 2
     finally:
-        if sock is not None:
-            sock.settimeout(None)
-            sock.detach()
+        signal.alarm(0)
 
     global TMUX
     TMUX = tmux_bin()

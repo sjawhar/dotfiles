@@ -49,6 +49,13 @@ done
 # tmux and goes to the real binary below.
 if [[ -n "${AGENTBOX_TMUX_GUARD_SOCK:-}" && -S "${AGENTBOX_TMUX_GUARD_SOCK:-}" ]] \
     && { (( ! explicit_socket )) || [[ -n "$explicit_path" && "$explicit_path" == "$AGENTBOX_TMUX_GUARD_SOCK" ]]; }; then
+    # -t 300, because socat's default is to wait half a second after the request ends and then
+    # close: the guard is a python process that starts cold, and at load 110 on 2026-11-05 about
+    # one call in ten lost its connection that way. The box then saw `this socket is not tmux's
+    # protocol`, and a `$(tmux new-window -P -F '#{pane_id}')` came back EMPTY, so the next
+    # command ran with an empty target - which the guard refused, because an empty target
+    # resolves to the server's current pane and that belonged to another session (%637,
+    # ad-gt-1592-cross, measured in box agentbox-6378059a3ea1 at 03:00:59Z).
     # Each argument as one base64 line, so a newline inside a `send-keys` argument survives; the
     # working directory too, since the guard is not in the box's filesystem and a new window
     # would otherwise start in the guard's own. The answer is the command's stdout, its stderr
@@ -81,7 +88,7 @@ if [[ -n "${AGENTBOX_TMUX_GUARD_SOCK:-}" && -S "${AGENTBOX_TMUX_GUARD_SOCK:-}" ]
                 printf 'A %s\n' "$(printf '%s' "$arg" | base64 -w0)"
             done
             printf 'CWD %s\nGO\n' "$(printf '%s' "$PWD" | base64 -w0)"
-        } | socat - "UNIX-CONNECT:$AGENTBOX_TMUX_GUARD_SOCK"
+        } | socat -t 300 - "UNIX-CONNECT:$AGENTBOX_TMUX_GUARD_SOCK"
     )
     exit "$guard_exit"
 fi
