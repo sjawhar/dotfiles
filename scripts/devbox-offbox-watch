@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""devbox-offbox-watch: watch sami-devbox from sami-rocqperf, and restart what the registry asks.
+"""devbox-offbox-watch: watch sami-devbox from off it, and restart what the registry asks.
 
     devbox-offbox-watch [--host HOST] [--registry DIR] [--train DIR] [--remote-proc DIR]
                         [--sre ID] [--chief ID] [--verified-linux-lead ID]
-                        [--ssh-timeout S] [--state FILE] [--dry-run] [--once]
+                        [--ssh-timeout S] [--state FILE] [--dry-run] [--report-only] [--once]
+                        [--forced-command] [--ssh-key PATH] [--shadow-log PATH]
 
-Every 5 minutes (the `devbox-offbox-watch` user timer on sami-rocqperf). It runs OFF the machine
-it watches, which is the whole point: on 2026-11-04 sami-devbox stalled from about 16:40Z until a
+Every 5 minutes: the `devbox-offbox-watch` user timer on sami-rocqperf, and the CronJob
+`devbox-offbox-watch` in the dispatch cluster that replaces it as that machine is shut down
+(agent-infra `monitoring/offboxwatch.go`, dispatch://INFRA-993). It runs OFF the machine it
+watches, which is the whole point: on 2026-11-04 sami-devbox stalled from about 16:40Z until a
 cloud reset at 18:05:53Z, and every session, every in-session loop and every watcher ON it died
 together while nothing off it noticed (dispatch://INFRA-993/ask/d13b86a5).
+
+Two transports to the watched box. From sami-rocqperf the two remote halves travel over ssh
+stdin, so they can never be a publish behind this file. From the cluster they cannot: the pod's
+key carries `restrict,command="<pinned path>/devbox-offbox-act --forced"`, and a forced command
+gets no stdin, so `--forced-command` sends a verb instead -- `probe`, `live <uuid>…`,
+`restart <uuid>`, `await <uuid>` -- and the pinned acting half on the host reads a restart's
+resume line from that session's registry entry rather than from here.
 
 Three duties.
 
@@ -28,7 +38,7 @@ Three duties.
    hear when the queue holds work and `events.tsv` has not moved for 30 minutes, or when
    `runner.lock` names a pid that is not running.
 
-Four limits on restarting, all mandatory:
+Five limits on restarting, all mandatory:
 
 * Never during a writeback stall on sami-devbox: a process in state D running `umount` or
   `fusermount3`, or `/proc/pressure/io` full avg10 above 5. A restarter without this rule would
@@ -43,6 +53,12 @@ Four limits on restarting, all mandatory:
   2026-11-05 made a dead lead look alive (`scripts/tests/test_devbox_offbox_act_live.py`).
 * A session that dies again within 30 minutes of its restart is reported, not restarted again; it
   stays blocked until it is seen live.
+* Never while that session's box is being relaunched in place. `agentbox restart` hangs omp up
+  and spawns a fresh one in the same container, and in that gap the session is dead by every
+  reading; at 10:10Z on 2026-11-05 a pass read that and asked for a restart of a session being
+  restarted in place, which only `agentbox new`'s duplicate guard stopped. The marker
+  agentbox-run.ts writes is a `restarting` reading of the acting half, and it expires after
+  BOX_RESTART_SECONDS, since a relaunch that died must not make a session unrestartable.
 
 Every restart and every refusal goes over Envoy to the SRE and to the holder of the session's
 role. A restart line names every `--dir` its resume gave the box: a box with too few of them
@@ -149,12 +165,37 @@ def minutes(seconds: float) -> int:
 
 
 class Remote:
-    """The watched machine. Every call ships a script over stdin, so the two halves of this watch
-    are never a published version apart."""
+    """The watched machine, over ssh, in one of two transports.
 
-    def __init__(self, host: str, timeout: int) -> None:
+    **Over stdin** (sami-rocqperf): every call ships its script, so the two halves of this watch
+    are never a published version apart.
+
+    **Under a forced command** (the dispatch cluster, dispatch://INFRA-993): the key in
+    sami-devbox's authorized_keys carries
+    `restrict,command="<pinned path>/devbox-offbox-act --forced"`, and a forced command gets no
+    stdin of its own, so nothing can be shipped. The call is then a word or two --
+    `probe`, `live <uuid>…`, `restart <uuid>`, `await <uuid>` -- which the pinned
+    devbox-offbox-act on the host parses itself and refuses anything else of. The resume line a
+    restart runs comes from that host's registry, never from here, so the key cannot ask for an
+    arbitrary `agentbox new`.
+    """
+
+    def __init__(self, host: str, timeout: int, forced: bool = False, key: str = "") -> None:
         self.host = host
         self.timeout = timeout
+        self.forced = forced
+        self.key = key
+
+    def _ssh(self, remote: str, stdin: str, timeout: int | None) -> subprocess.CompletedProcess:
+        command = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.timeout}",
+                   "-o", "StrictHostKeyChecking=accept-new"]
+        if self.key:
+            # The pod mounts one key and nothing else; IdentitiesOnly keeps ssh from offering any
+            # other identity it may find and being refused for it.
+            command += ["-i", self.key, "-o", "IdentitiesOnly=yes"]
+        command += [self.host, remote]
+        return subprocess.run(command, input=stdin, capture_output=True, text=True,
+                              timeout=timeout or (self.timeout + 60))
 
     def run(self, script: Path, args: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
         # ssh joins everything after the host into ONE string and hands it to the remote shell,
@@ -162,10 +203,36 @@ class Remote:
         # a space and a bracket -- "LINUX-1302 parity owner (specport run record, parity count)",
         # 2026-11-04 19:46:54Z -- turned into a syntax error on the far side instead of a restart.
         remote = " ".join(shlex.quote(word) for word in ["bash", "-s", "--", *args])
-        command = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.timeout}",
-                   "-o", "StrictHostKeyChecking=accept-new", self.host, remote]
-        return subprocess.run(command, input=script.read_text(), capture_output=True, text=True,
-                              timeout=timeout or (self.timeout + 60))
+        return self._ssh(remote, script.read_text(), timeout)
+
+    def ask(self, words: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
+        """One forced-command call. Every word is a verb or a session id; sshd hands the string
+        to devbox-offbox-act --forced, which parses it and never a shell."""
+        return self._ssh(" ".join(words), "", timeout)
+
+    # The four things this watch asks of the box, each in whichever transport it has.
+
+    def ask_probe(self, remote_proc: str, registry: str, train: str,
+                  timeout: int | None = None) -> subprocess.CompletedProcess:
+        if self.forced:
+            return self.ask(["probe"], timeout)
+        return self.run(PROBE, [remote_proc, registry, train], timeout)
+
+    def ask_live(self, ids: list[str], fresh: int, timeout: int | None = None) -> subprocess.CompletedProcess:
+        if self.forced:
+            return self.ask(["live", *ids], timeout)
+        return self.run(ACT, ["live", str(fresh), *ids], timeout)
+
+    def ask_restart(self, entry: dict[str, str], timeout: int | None = None) -> subprocess.CompletedProcess:
+        if self.forced:
+            return self.ask(["restart", entry["session"]], timeout)
+        return self.run(ACT, ["restart", entry["tmux"], entry["title"], entry["cwd"],
+                              entry["resume"]], timeout)
+
+    def ask_await(self, session: str, seconds: int, timeout: int | None = None) -> subprocess.CompletedProcess:
+        if self.forced:
+            return self.ask(["await", session], timeout)
+        return self.run(ACT, ["await", session, str(seconds)], timeout)
 
 
 def parse_probe(text: str) -> tuple[dict[str, str], list[dict[str, str]]]:
@@ -386,12 +453,27 @@ def check_train(facts: dict[str, str], state: dict, report: Reporter, now: float
 # the test that answers for a quiet session.
 FRESH_SECONDS = 120
 
+# How long a box's relaunch marker counts. `agentbox restart` hangs omp up and spawns a fresh one
+# in the same container; in that gap the session is dead by every reading this watch has, and at
+# 10:10Z on 2026-11-05 a pass read exactly that and asked the host to restart a session UTIL was
+# restarting in place -- only `agentbox new`'s own duplicate guard stopped there being two of it.
+# agentbox-run.ts writes the marker before the hang-up and removes it when the new omp registers.
+# The number is 180 s: this machine's own box logs
+# (~/.cache/omp/agentbox/*.log, every restart request and its relaunch) hold 8 relaunches, 0.2 s
+# to 4.1 s from the hang-up to the new omp (median 0.6 s), so 180 s is more than forty times the
+# slowest one and covers the startup after it. It EXPIRES on purpose: a relaunch that died leaves
+# the marker behind, and a session nothing may ever restart again is worse than one restarted
+# twice -- the registration the marker waits for does not always come (on 2026-11-04 several
+# resumed sessions did not register within the waker's 600 s).
+BOX_RESTART_SECONDS = 180
 
-def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict[str, str], str]:
+
+def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict[str, str], dict[str, int], str]:
     """Every reading sami-devbox has about each session, and whether the box scan can be trusted.
 
-    Returns, per id, the reasons it is alive (strongest first) and, separately, the host and box
-    processes that merely name it, plus "" when every agent box answered.
+    Returns, per id, the reasons it is alive (strongest first); separately the host and box
+    processes that merely name it; separately again the age in seconds of a box relaunch in
+    flight for it; and "" when every agent box answered.
 
     The file is the test that works. At 21:26Z on 2026-11-04 session 01a1a7fc was writing its
     transcript and sending Envoy messages while no process on the host and none inside any of the
@@ -399,17 +481,22 @@ def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict
     path through a wrapper. Every command-line test is blind to that, so a session counts as
     alive when something holds its transcript open for writing, or the transcript moved in the
     last FRESH_SECONDS, or any of the three weaker signals fires.
+
+    A `restarting` line is not one of those. A session whose box is mid-relaunch is genuinely
+    dead at that instant, so it is not called alive; it is a refusal with its own message, and
+    the next pass after the relaunch finishes finds it live by the readings above.
     """
     if not ids:
-        return {}, {}, ""
+        return {}, {}, {}, ""
     # One `omp-session-live` per id (about 0.75 s), one `ps` and one descriptor pass on the host,
     # and the box scan: 24 s over 116 containers, measured 2026-11-04.
-    done = remote.run(ACT, ["live", str(FRESH_SECONDS), *ids], timeout=300 + 3 * len(ids))
+    done = remote.ask_live(ids, FRESH_SECONDS, timeout=300 + 3 * len(ids))
     if done.returncode != 0:
         raise RuntimeError(f"liveness check failed: exit {done.returncode}:"
                            f" {(done.stderr or done.stdout).strip()[:400]}")
     alive: dict[str, list[str]] = {}
     named: dict[str, str] = {}
+    restarting: dict[str, int] = {}
     scan = "the box scan printed no verdict"
     for line in done.stdout.splitlines():
         parts = line.split(" ", 3)
@@ -426,9 +513,11 @@ def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict
             named[parts[1]] = f"box {parts[2]}: {parts[3]}"
         elif parts[0] == "live" and len(parts) >= 3 and parts[2] == "1":
             alive.setdefault(parts[1], []).append("omp-session-live says it is live")
+        elif parts[0] == "restarting" and len(parts) >= 3 and parts[2].lstrip("-").isdigit():
+            restarting[parts[1]] = int(parts[2])
         elif parts[0] == "boxscan":
             scan = "" if parts[1] == "ok" else " ".join(parts[1:])
-    return alive, named, scan
+    return alive, named, restarting, scan
 
 
 def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict, now: float,
@@ -446,8 +535,7 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     record = session_state(state, session)
     record["last_restart"] = now
     record["last_dirs"] = dir_list(entry["resume"])
-    done = remote.run(ACT, ["restart", entry["tmux"], title, entry["cwd"], entry["resume"]],
-                      timeout=180)
+    done = remote.ask_restart(entry, timeout=180)
     if done.returncode != 0:
         detail = (done.stderr or done.stdout).strip()[:500]
         report.send(targets, "restart-failed",
@@ -460,7 +548,7 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
         if line.startswith("window="):
             window = line[len("window="):]
 
-    waited = remote.run(ACT, ["await", session, str(AWAIT_SECONDS)], timeout=AWAIT_SECONDS + 60)
+    waited = remote.ask_await(session, AWAIT_SECONDS, timeout=AWAIT_SECONDS + 60)
     came_back = waited.stdout.strip() == "live"
     after = entry.get("after", "")
     if came_back and after:
@@ -487,16 +575,25 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
 
 
 def run(args: argparse.Namespace) -> int:
+    """One pass, and its one line in the shadow log however the pass ended."""
+    shadow: dict = {"at": round(time.time(), 3), "iso": utc(time.time())}
+    try:
+        return run_pass(args, shadow)
+    finally:
+        write_shadow(args, shadow)
+
+
+def run_pass(args: argparse.Namespace, shadow: dict) -> int:
     now = time.time()
     state_path = Path(args.state)
     state = load_state(state_path)
     report = Reporter(state_path.parent, args.dry_run)
-    remote = Remote(args.host, args.ssh_timeout)
+    remote = Remote(args.host, args.ssh_timeout, forced=args.forced_command, key=args.ssh_key)
     me = socket.gethostname()
 
     try:
-        probe = remote.run(PROBE, [args.remote_proc, args.registry, args.train],
-                           timeout=args.ssh_timeout + 60)
+        probe = remote.ask_probe(args.remote_proc, args.registry, args.train,
+                                 timeout=args.ssh_timeout + 60)
         if probe.returncode != 0:
             raise RuntimeError(f"exit {probe.returncode}: {(probe.stderr or probe.stdout).strip()[:300]}")
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
@@ -522,11 +619,13 @@ def run(args: argparse.Namespace) -> int:
     state["ssh_fail_streak"] = 0
     state["ssh_alerted"] = False
 
+    shadow["reached"] = "probed"
     facts, entries = parse_probe(probe.stdout)
     stalled, stall_detail = check_box(facts, state, report, now, args.host, args.sre, args.chief)
     check_train(facts, state, report, now, args.train, args.sre, args.verified_linux_lead)
 
     if facts.get("registry_present") != "yes":
+        shadow["reached"] = "no-registry"
         log(f"no registry at {args.registry} on {args.host}: nothing to watch")
         save_state(state_path, state)
         return 0
@@ -546,7 +645,7 @@ def run(args: argparse.Namespace) -> int:
     watched.sort(key=lambda e: (int(e["order"]) if e.get("order", "").lstrip("-").isdigit() else 999,
                                 e["title"]))
     try:
-        alive, named, scan_failed = liveness(remote, [e["session"] for e in watched])
+        alive, named, restarting, scan_failed = liveness(remote, [e["session"] for e in watched])
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
         log(f"liveness check failed: {error}")
         save_state(state_path, state)
@@ -554,6 +653,15 @@ def run(args: argparse.Namespace) -> int:
     if scan_failed:
         log(f"the agentbox scan could not be trusted ({scan_failed}); nothing is called dead this run")
 
+    shadow.update({
+        "reached": "judged",
+        "watched": [e["session"] for e in watched],
+        "live": sorted(alive),
+        "named": sorted(named),
+        "restarting": dict(sorted(restarting.items())),
+        "stalled": bool(stalled),
+        "scan_failed": scan_failed,
+    })
     dead = []
     for entry in watched:
         session = entry["session"]
@@ -583,6 +691,7 @@ def run(args: argparse.Namespace) -> int:
             record["duplicate_reported"] = False
             continue
         dead.append(entry)
+    shadow["dead"] = sorted(e["session"] for e in dead)
 
     if not dead:
         log("every watched session is live")
@@ -610,6 +719,7 @@ def run(args: argparse.Namespace) -> int:
 
     left_for_stall: list[str] = []
     left_for_limit: list[str] = []
+    left_for_box_restart: list[str] = []
     would_restart: list[str] = []
     for entry in dead:
         session, title = entry["session"], entry["title"]
@@ -618,6 +728,22 @@ def run(args: argparse.Namespace) -> int:
             record.pop("stall_hold_since", None)
             record["stall_handover_reported"] = False
         targets = [args.sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
+
+        # The fifth refusal: this session's box is being relaunched right now. `agentbox restart`
+        # hangs omp up and spawns a fresh one in the same container, and for those seconds the
+        # session is dead by every reading. At 10:10Z on 2026-11-05 a pass read exactly that and
+        # asked the host to restart a session UTIL was restarting in place; only `agentbox new`'s
+        # own duplicate guard stopped there being two of it, and a guard should not be the only
+        # thing between us and a duplicate. The marker expires (BOX_RESTART_SECONDS), so a
+        # relaunch that died cannot make a session unrestartable.
+        age = restarting.get(session)
+        if age is not None and age < BOX_RESTART_SECONDS:
+            left_for_box_restart.append(f"{title} ({session}), {age} s into its relaunch")
+            log(f"{title} ({session}) is mid-relaunch ({age} s): not restarted")
+            continue
+        if age is not None:
+            log(f"{title} ({session}) has a relaunch marker {age} s old, past"
+                f" {BOX_RESTART_SECONDS} s: it is treated as dead")
 
         held = [named[session]] if session in named else []
         if held:
@@ -715,10 +841,63 @@ def run(args: argparse.Namespace) -> int:
                     f" (limit {RESTARTS_PER_HOUR}). devbox-offbox-watch has stopped restarting."
                     f" It starts again by itself once those windows empty, so if this repeats,"
                     f" something is resuming in a loop or the box is broken: look before it does.")
+    if once(state, "box_restart_reported", bool(left_for_box_restart)):
+        report.send([args.sre], "refuse-box-restart",
+                    f"NOT RESTARTED, {len(left_for_box_restart)} dead session(s) on {args.host}:"
+                    f" {'; '.join(left_for_box_restart)}. Each one's box is being relaunched in"
+                    f" place right now (`agentbox restart` hangs omp up and spawns a fresh one in"
+                    f" the same container, and in that gap the session is dead by every reading"
+                    f" this watch has). A restart from here would have made a second copy of a"
+                    f" session that is coming back on its own; at 10:10Z on 2026-11-05 only"
+                    f" `agentbox new`'s own duplicate guard stopped that. The marker expires after"
+                    f" {BOX_RESTART_SECONDS} s, so a relaunch that died leaves the session"
+                    f" restartable. Nothing was killed.")
 
+    shadow["would_restart"] = sorted(e.split("(")[-1].split(")")[0] for e in would_restart)
+    shadow["refused"] = {"stall": sorted(left_for_stall), "limit": sorted(left_for_limit),
+                         "box_restart": sorted(left_for_box_restart)}
     state["restarts"] = [r for r in state["restarts"] if now - r["at"] < 3600]
     save_state(state_path, state)
     return 0
+
+
+def write_shadow(args: argparse.Namespace, facts: dict) -> None:
+    """One JSON line per pass, so this watch can be compared with another one running beside it.
+
+    The cluster watcher runs for a day in report-only mode next to the sami-rocqperf one, and the
+    INFRA lead arms it only after a day in which the two agreed on every pass
+    (dispatch://INFRA-993). `devbox-offbox-shadow-compare` reads two of these files and says, pass
+    by pass, whether they called the same sessions dead and would have restarted the same ones.
+    EVERY pass writes a line, the quiet ones included: a day in which the two watchers saw nothing
+    to do, and agreed on that, is most of the evidence the arming condition asks for.
+
+    `--shadow-log -` writes the line to stdout with the prefix `SHADOW-PASS `, which is how a
+    pod's pass reaches a reader: its log is all there is of a finished pod.
+    """
+    if not args.shadow_log:
+        return
+    record = {
+        "at": 0.0, "iso": "", "watcher": socket.gethostname(), "host": args.host,
+        "mode": ("dry-run" if args.dry_run else "report-only" if args.report_only else "restarting"),
+        "forced_command": bool(args.forced_command),
+        # What the pass reached: `ssh-down` and `no-registry` are passes with no verdict in them,
+        # which the comparison counts as agreeing only with another pass of the same shape.
+        "reached": "ssh-down", "watched": [], "live": [], "dead": [], "named": [],
+        "restarting": {}, "stalled": False, "scan_failed": "", "would_restart": [],
+        "refused": {"stall": [], "limit": [], "box_restart": []},
+    }
+    record.update(facts)
+    line = json.dumps(record, sort_keys=True)
+    if args.shadow_log == "-":
+        log(f"SHADOW-PASS {line}")
+        return
+    path = Path(args.shadow_log)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError as error:
+        log(f"could not write the shadow log {path}: {error}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -741,6 +920,19 @@ def main(argv: list[str] | None = None) -> int:
                              " been restarted. Alerts and refusals are sent as usual."
                              " DEVBOX_OFFBOX_REPORT_ONLY sets it too")
     parser.add_argument("--once", action="store_true", help="accepted and ignored; a run is one pass")
+    parser.add_argument("--forced-command", action="store_true",
+                        default=bool(os.environ.get("DEVBOX_OFFBOX_FORCED_COMMAND")),
+                        help="reach --host through the forced command of a dedicated key: every"
+                             " call is `probe`, `live <uuid>…`, `restart <uuid>` or"
+                             " `await <uuid>`, and no script is shipped over stdin."
+                             " DEVBOX_OFFBOX_FORCED_COMMAND sets it too")
+    parser.add_argument("--ssh-key", default=os.environ.get("DEVBOX_OFFBOX_SSH_KEY", ""),
+                        help="the private key to reach --host with, and only it"
+                             " (IdentitiesOnly); the cluster's pod mounts one")
+    parser.add_argument("--shadow-log", default=os.environ.get("DEVBOX_OFFBOX_SHADOW_LOG", ""),
+                        help="append one JSON line per pass here for"
+                             " devbox-offbox-shadow-compare; `-` writes it to stdout as"
+                             " `SHADOW-PASS <json>`, which is how a pod's pass is read back")
     args = parser.parse_args(argv)
     mode = ("report-only, restarting nothing" if args.report_only else
             "dry run, changing and sending nothing" if args.dry_run else "restarting")

@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""devbox-offbox-shadow-compare: did two devbox-offbox-watch instances agree, pass by pass?
+
+    devbox-offbox-shadow-compare [--pair-window S] [--window HOURS] [--min-passes N]
+                                 [--quiet] A.jsonl B.jsonl
+
+The watch of sami-devbox is moving off sami-rocqperf into a CronJob in the dispatch cluster
+(dispatch://INFRA-993). The cluster one is armed only after it has run for a day beside the
+sami-rocqperf one in report-only mode and agreed with it on every pass, so each writes one JSON
+line per pass (`--shadow-log`) and this reads two of those files and says where they differ.
+
+Each argument is a file of those lines, or `-` for stdin. A pod's lines come out of its log with
+the prefix this tool strips:
+
+    kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n devbox-offbox-watch \\
+        logs --since=25h -l app=devbox-offbox-watch --all-containers --prefix >cluster.log
+    ssh sami-rocqperf cat .local/state/devbox-offbox-watch/shadow.jsonl >rocqperf.jsonl
+    devbox-offbox-shadow-compare cluster.log rocqperf.jsonl
+
+Two passes are the same pass when their times are within --pair-window seconds (150 by default:
+each watch runs every 300 s, so one pairing is unambiguous and a missed run stays unpaired rather
+than borrowing its neighbour's). A pass with no partner is reported, never silently dropped: a
+watch that did not run is not a watch that agreed.
+
+What is compared, for each pair:
+
+  * which sessions each pass called dead,
+  * which it would have restarted,
+  * which it refused, and under which refusal,
+  * whether it found the box stalled, and whether its box scan was trusted.
+
+What is NOT compared: timings, the Envoy messages, and the readings behind a verdict. Two
+watchers reading the same box a few seconds apart legitimately differ on a transcript's age; they
+must not differ on what they would have done.
+
+Exit 0 when every paired pass agreed and at least --min-passes pairs were compared, 1 otherwise,
+so a nightly check can read the exit status alone.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+PREFIX = "SHADOW-PASS "
+# What a disagreement is about. Each is read from both passes and compared as a set.
+COMPARED = ("dead", "would_restart")
+REFUSALS = ("stall", "limit", "box_restart")
+
+
+def load(path: str) -> list[dict]:
+    """Every shadow line in a file, oldest first.
+
+    A line may be the JSON object alone (a `--shadow-log FILE`) or anything at all followed by
+    `SHADOW-PASS {json}` (a pod's log, which carries kubectl's own prefix and the watch's other
+    lines). Anything else is skipped: a log holds far more than these lines.
+    """
+    text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8", errors="replace")
+    passes = []
+    for line in text.splitlines():
+        cut = line.find(PREFIX)
+        if cut >= 0:
+            line = line[cut + len(PREFIX):]
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get("at"), (int, float)):
+            passes.append(record)
+    passes.sort(key=lambda r: r["at"])
+    return passes
+
+
+def pair(left: list[dict], right: list[dict], window: float) -> tuple[list[tuple[dict, dict]], list[dict], list[dict]]:
+    """Each pass of one file against the nearest pass of the other within `window` seconds."""
+    pairs: list[tuple[dict, dict]] = []
+    taken: set[int] = set()
+    lonely_left: list[dict] = []
+    for a in left:
+        best, best_gap = -1, window
+        for i, b in enumerate(right):
+            if i in taken:
+                continue
+            gap = abs(b["at"] - a["at"])
+            if gap <= best_gap:
+                best, best_gap = i, gap
+        if best < 0:
+            lonely_left.append(a)
+            continue
+        taken.add(best)
+        pairs.append((a, right[best]))
+    lonely_right = [b for i, b in enumerate(right) if i not in taken]
+    return pairs, lonely_left, lonely_right
+
+
+def differences(a: dict, b: dict) -> list[str]:
+    """Every way two passes of the same moment disagree about what to do."""
+    out = []
+    if a.get("reached") != b.get("reached"):
+        out.append(f"one reached {a.get('reached')!r} and the other {b.get('reached')!r}")
+    for field in COMPARED:
+        left, right = set(a.get(field) or []), set(b.get(field) or [])
+        if left != right:
+            only_a = ", ".join(sorted(left - right)) or "none"
+            only_b = ", ".join(sorted(right - left)) or "none"
+            out.append(f"{field}: only in A: {only_a}; only in B: {only_b}")
+    for kind in REFUSALS:
+        left = {s.split("(")[-1].split(")")[0] for s in (a.get("refused") or {}).get(kind, [])}
+        right = {s.split("(")[-1].split(")")[0] for s in (b.get("refused") or {}).get(kind, [])}
+        if left != right:
+            out.append(f"refused/{kind}: only in A: {', '.join(sorted(left - right)) or 'none'};"
+                       f" only in B: {', '.join(sorted(right - left)) or 'none'}")
+    if bool(a.get("stalled")) != bool(b.get("stalled")):
+        out.append(f"stalled: A {bool(a.get('stalled'))}, B {bool(b.get('stalled'))}")
+    if bool(a.get("scan_failed")) != bool(b.get("scan_failed")):
+        out.append(f"box scan: A {a.get('scan_failed') or 'trusted'}, B {b.get('scan_failed') or 'trusted'}")
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("a", help="one shadow log (a file, or - for stdin)")
+    parser.add_argument("b", help="the other")
+    parser.add_argument("--pair-window", type=float, default=150.0,
+                        help="how far apart two passes may be and still be the same pass (s)")
+    parser.add_argument("--window", type=float, default=0.0,
+                        help="compare only the last N hours of both files")
+    parser.add_argument("--min-passes", type=int, default=0,
+                        help="exit 1 when fewer than this many pairs were compared; the arming"
+                             " condition is a day of agreement, which at one pass per 5 min is 288")
+    parser.add_argument("--quiet", action="store_true", help="print the summary and disagreements only")
+    args = parser.parse_args(argv)
+
+    left, right = load(args.a), load(args.b)
+    if args.window:
+        newest = max([r["at"] for r in left + right] or [0.0])
+        floor = newest - args.window * 3600
+        left = [r for r in left if r["at"] >= floor]
+        right = [r for r in right if r["at"] >= floor]
+    pairs, lonely_left, lonely_right = pair(left, right, args.pair_window)
+
+    disagreed = 0
+    for a, b in pairs:
+        diffs = differences(a, b)
+        if diffs:
+            disagreed += 1
+            print(f"DISAGREE {a.get('iso')} / {b.get('iso')}: " + "; ".join(diffs))
+        elif not args.quiet:
+            print(f"AGREE    {a.get('iso')} {a.get('reached')}: dead"
+                  f" {len(a.get('dead') or [])}, would restart {len(a.get('would_restart') or [])}")
+    for record in lonely_left:
+        print(f"UNPAIRED A {record.get('iso')} ({record.get('watcher')}): B has no pass within"
+              f" {args.pair_window:.0f} s")
+    for record in lonely_right:
+        print(f"UNPAIRED B {record.get('iso')} ({record.get('watcher')}): A has no pass within"
+              f" {args.pair_window:.0f} s")
+
+    print(f"{len(pairs)} pass(es) compared, {len(pairs) - disagreed} agreed, {disagreed} disagreed,"
+          f" {len(lonely_left)} unpaired in A, {len(lonely_right)} unpaired in B")
+    if disagreed:
+        return 1
+    if args.min_passes and len(pairs) < args.min_passes:
+        print(f"only {len(pairs)} pair(s), fewer than the {args.min_passes} asked for")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

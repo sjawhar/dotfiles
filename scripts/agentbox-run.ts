@@ -54,6 +54,40 @@ function note(message: string, toStderr = false): void {
 	}
 }
 
+// A relaunch in flight, so nothing outside this box restarts the session while its omp is down.
+// `agentbox restart` hangs omp up and spawns a fresh one in the same container; for those seconds
+// the session holds no transcript open, runs no process and registers nowhere, which is exactly
+// what an off-box watcher reads as "dead". At 10:10Z on 2026-11-05 devbox-offbox-watch read that
+// and asked the host to restart a session being restarted in place; only `agentbox new`'s own
+// duplicate guard stopped there being two of it (dispatch://INFRA-993). The marker is written
+// before the hang-up and removed once the new omp has registered on Envoy -- the wake notice
+// already waits for that -- and `devbox-offbox-act live` prints it as a `restarting` reading.
+// The directory is the log's, a mounted path, so the host can read what a box wrote.
+const restartMarkerPath = (sid: string): string =>
+	`${path.dirname(logPath)}/restarting-${sid}`;
+
+function markRestarting(sid: string): void {
+	try {
+		fs.mkdirSync(path.dirname(logPath), { recursive: true });
+		fs.writeFileSync(
+			restartMarkerPath(sid),
+			`session=${sid}\nbox=${box}\nmachine=${machine}\nat=${Math.floor(Date.now() / 1000)}\nrunner=${process.pid}\n`,
+		);
+	} catch (error) {
+		// A marker that cannot be written must not stop a restart the agent asked for: the watcher
+		// still has `agentbox new`'s duplicate guard behind it. Say so in the log and go on.
+		note(`could not write the relaunch marker for ${sid}: ${error}`);
+	}
+}
+
+function clearRestarting(sid: string): void {
+	try {
+		fs.rmSync(restartMarkerPath(sid), { force: true });
+	} catch (error) {
+		note(`could not remove the relaunch marker for ${sid}: ${error}`);
+	}
+}
+
 // Relaunch argument filtering mirrors `flagConsumesValue` and
 // `restartArgv` in omp v18.4.9-sami.20261001-204440,
 // packages/coding-agent/src/cli/flag-tables.ts. It needs the full arity
@@ -177,14 +211,18 @@ export function relaunchArgv(argv: string[], sid: string): string[] {
 const RESTART_WAKE_NOTICE =
 	"agentbox: the restart is done: this session was resumed in the same box on the host's current omp. Go on with the work you were doing before the restart. (An automated notice from agentbox, not a person.)";
 
-// Wake the resumed session over Envoy (scripts/agentbox move_wake), appending to this box's log.
+// Wake the resumed session over Envoy (scripts/agentbox move_wake), appending to this box's log,
+// and remove the relaunch marker once that session has registered -- which is what the waker
+// waits for. A wake that never comes (a resume that does not register) leaves the marker to
+// expire on the reader's side, which devbox-offbox-watch does after 180 s.
 function wakeOverEnvoy(sid: string): void {
 	try {
-		Bun.spawn(["sh", "-c", 'exec agentbox move --wake "$1" "$2" >>"$3" 2>&1', "sh", sid, RESTART_WAKE_NOTICE, logPath], {
+		Bun.spawn(["sh", "-c", 'agentbox move --wake "$1" "$2" >>"$3" 2>&1; rm -f "$4"', "sh", sid, RESTART_WAKE_NOTICE, logPath, restartMarkerPath(sid)], {
 			stdio: ["ignore", "ignore", "ignore"],
 		}).unref();
 	} catch (error) {
 		note(`could not start the Envoy waker for ${sid}: ${error}`);
+		clearRestarting(sid);
 	}
 }
 
@@ -404,6 +442,8 @@ if (import.meta.main) {
 	}, OOM_BIAS_INTERVAL_MS);
 	oomBias.unref();
 	let relaunch: string[] | undefined;
+	// The session a relaunch marker was written for, so the box's own shutdown can remove it.
+	let markedSid: string | undefined;
 	let restarting = false;
 	let shuttingDown = false;
 
@@ -423,6 +463,9 @@ if (import.meta.main) {
 			return;
 		}
 		relaunch = relaunchArgv(launchArgv, sid);
+		// Before the hang-up, never after it: the gap this marker covers starts here.
+		markedSid = sid;
+		markRestarting(sid);
 		note(`restart requested: hanging up omp (pid ${child.pid}) to resume session ${sid}`);
 		child.kill("SIGHUP");
 	});
@@ -432,6 +475,9 @@ if (import.meta.main) {
 			note(`${sig} received: shutting omp down, no relaunch`);
 			relaunch = undefined;
 			child.kill(sig);
+			// The box is going away, so no relaunch follows and a marker from a relaunch that
+			// was already in flight must not outlive it.
+			if (markedSid) clearRestarting(markedSid);
 		});
 	}
 	// Ctrl-C reaches omp itself (same foreground process group); only make sure

@@ -1,18 +1,39 @@
 # devbox-offbox-watch
 
-A watch of sami-devbox that runs on **sami-rocqperf**, never on sami-devbox. Armed by
-`installers/devbox-offbox-watch.sh`, which refuses to arm on the machine it watches.
+A watch of sami-devbox that runs **off sami-devbox**, never on it. Today it runs on
+sami-rocqperf, armed by `installers/devbox-offbox-watch.sh`, which refuses to arm on the machine
+it watches. sami-rocqperf is being shut down, so the same watch is moving into a CronJob in the
+dispatch cluster (agent-infra `monitoring/offboxwatch.go`, dispatch://INFRA-993).
 
-Three files, all in `scripts/`:
+Five files, all in `scripts/`:
 
 | File | Where it runs |
 | --- | --- |
-| `devbox-offbox-watch` | sami-rocqperf. Decides everything; sends every message. |
-| `devbox-offbox-probe` | sami-devbox, shipped over ssh stdin. Read-only: the stall signals, the merge train's state, the registry. |
-| `devbox-offbox-act` | sami-devbox, shipped over ssh stdin. `live`, `restart`, `await`. Kills nothing. |
+| `devbox-offbox-watch` | sami-rocqperf, and the cluster's pod. Decides everything; sends every message. |
+| `devbox-offbox-probe` | sami-devbox. Read-only: the stall signals, the merge train's state, the registry. |
+| `devbox-offbox-act` | sami-devbox. `live`, `restart`, `await`, and `probe` under the forced command. Kills nothing. |
+| `devbox-offbox-shadow-compare` | anywhere. Reads two watchers' pass logs and says where they differ. |
+| `installers/devbox-offbox-act-host.sh` | sami-devbox. Installs the pinned acting half the forced command runs. |
 
-The two remote halves travel over stdin instead of being called from the box's `~/.dotfiles`, so
-the watch can never run against a copy of itself that is a publish behind.
+## The two transports
+
+**Over ssh stdin, from sami-rocqperf.** The remote halves travel on stdin instead of being called
+from the box's `~/.dotfiles`, so the watch can never run against a copy of itself that is a
+publish behind.
+
+**Under a forced command, from the dispatch cluster.** A pod has no way to ship a script: its key
+in sami-devbox's `~/.ssh/authorized_keys` carries
+`restrict,command="<pinned path>/devbox-offbox-act --forced",from="<the job's tailnet IPs>"`, and
+a forced command gets no stdin of its own. `--forced-command` makes every call a verb instead:
+`probe`, `live <uuid>…`, `restart <uuid>`, `await <uuid>`. The pinned copy on the host parses
+`SSH_ORIGINAL_COMMAND` itself, refuses everything else with one line on stderr, and reads a
+restart's tmux session, window title, cwd and **resume line from that session's own registry
+entry** — never from the caller, so the key cannot ask for an arbitrary `agentbox new`. What the
+key cannot do at all, because sshd refuses it before the command runs, is a shell, a port
+forward, an agent forward, X11 and a tty: that is the `restrict`. `installers/devbox-offbox-act-host.sh`
+installs the pinned copy, records the commit it came from, and prints the `authorized_keys` line;
+it never edits `authorized_keys`, and an update of the copy is a deliberate run of that installer,
+not a publish.
 
 ## Why it exists
 
@@ -61,7 +82,7 @@ owner writes and updates its own file. The watch reads it and never writes it.
 5. A dead one is restarted in a new tmux window of its `tmux` session, named for its `title`, from
    its `cwd`; when omp-session-live says it is live, its `after` message is sent.
 
-## The four refusals
+## The five refusals
 
 * **A writeback stall.** Nothing is restarted while one holds.
 * **3 restarts in 10 minutes, 10 in an hour**, across every session. Past that it reports and
@@ -78,6 +99,20 @@ owner writes and updates its own file. The watch reads it and never writes it.
   were dead. `scripts/tests/test_devbox_offbox_act_live.py` holds both sides.
 * **A session that died again within 30 minutes of its restart.** Reported once, then blocked
   until omp-session-live sees it live.
+* **A box whose omp is being relaunched right now.** `agentbox restart` hangs omp up and spawns a
+  fresh one in the same container, and for those seconds the session holds no transcript open,
+  runs no process and registers nowhere — it is dead by every reading this watch has. At 10:10Z on
+  2026-11-05 a pass read exactly that and asked the host to restart a session UTIL was restarting
+  in place; only `agentbox new`'s own duplicate guard stopped there being two of it, and a guard
+  should not be the only thing between us and a duplicate. `scripts/agentbox-run.ts` writes
+  `~/.cache/omp/agentbox/restarting-<session>` before the hang-up and removes it once the new omp
+  registers (a mounted path, so the host reads what the box wrote); `devbox-offbox-act live`
+  prints it as a `restarting <id> <age>` reading, and this watch refuses while the age is under
+  180 s. It **expires**: this machine's box logs hold 8 relaunches, 0.2 s to 4.1 s from the
+  hang-up to the new omp (median 0.6 s), and a registration the marker waits for does not always
+  come, so a relaunch that died must not make a session unrestartable for ever.
+  `scripts/tests/test_devbox_offbox_watch_refusals.py` holds a fresh marker refusing and an
+  expired one not.
 
 Every one of them is an Envoy message, deduped to one per condition, to the SRE and to the holder
 of the session's role. Every restart names the full `--dir` list its resume gave the box: a box
@@ -99,6 +134,25 @@ It restarts nothing while `DEVBOX_OFFBOX_REPORT_ONLY` is set (the drop-in
 message naming each session with its tmux, cwd, `--dir` list and resume line. Alerts and refusals
 go out as usual. That is how it runs until a person says automatic restarting is live; removing
 the drop-in and `systemctl --user daemon-reload` is the switch.
+
+## Shadowing another watcher
+
+`--shadow-log PATH` appends one JSON line per pass: what it watched, what it called live and
+dead, what it would have restarted and what it refused. Every pass writes one, the quiet ones
+included. `--shadow-log -` prints the line as `SHADOW-PASS <json>` instead, which is how a pod's
+pass reaches a reader — a finished pod's log is all there is of it.
+
+That is how the cluster watcher is judged before it is armed: it runs in report-only mode beside
+the sami-rocqperf one for a day, and `devbox-offbox-shadow-compare` pairs the two files pass by
+pass (within 150 s) and prints a line per pair, `AGREE` or `DISAGREE` with the difference, plus a
+summary and an exit status.
+
+```sh
+kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n devbox-offbox-watch \
+    logs --since=25h -l app=devbox-offbox-watch --all-containers --prefix >cluster.log
+ssh sami-rocqperf cat .local/state/devbox-offbox-watch/shadow.jsonl >rocqperf.jsonl
+devbox-offbox-shadow-compare --window 24 --min-passes 288 cluster.log rocqperf.jsonl
+```
 
 ## Why a run is short
 

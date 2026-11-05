@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # devbox-offbox-act <command> [args]
+# devbox-offbox-act --forced                 (the forced command of the cluster watcher's key)
 #
-# The acting half of scripts/devbox-offbox-watch, run ON sami-devbox and shipped over ssh stdin
-# (`ssh sami-devbox bash -s -- <command> …`) so it is never a published version behind the watch.
+# The acting half of scripts/devbox-offbox-watch, run ON sami-devbox. The watcher on
+# sami-rocqperf ships it over ssh stdin (`ssh sami-devbox bash -s -- <command> …`), so there it
+# is never a published version behind the watch. The watcher in the dispatch cluster cannot:
+# its key carries a forced command, and a forced command gets no stdin of its own, so there the
+# host runs a PINNED COPY of this file, installed by installers/devbox-offbox-act-host.sh
+# (dispatch://INFRA-993). Both forms run the same code; `--forced` only decides where the
+# command comes from and how little of it is allowed.
 #
 #   live <freshness-seconds> <session-id>…
-#       Four readings per id, printed as their own lines. The caller decides; nothing here is a
+#       Five readings per id, printed as their own lines. The caller decides; nothing here is a
 #       verdict on its own.
 #
 #         holder <id> host|<container> <pid>   a process holding that session's transcript open
@@ -14,6 +20,9 @@
 #         proc   <id> <pid> <command line>     a host process whose words include `omp` and the id
 #         box    <id> <container> <command>    the same, inside an agent box
 #         live   <id> 0|1                      what `omp-session-live` says
+#         restarting <id> <age seconds>      agentbox-run.ts is relaunching that box's omp
+#                                            right now (its marker's age); the session is dead
+#                                            in that gap and must not be restarted from here
 #
 #       The file is the test that works; argv is a hint. At 21:26Z on 2026-11-04 session
 #       01a1a7fc-a94f-72f8-9651-bd5ecd335709 was writing its transcript and sending Envoy
@@ -25,21 +34,115 @@
 #       `boxscan ok` says every agent box answered.
 #
 #   restart <tmux-session> <window-title> <cwd> <resume command>
+#   restart-entry <session-id>
 #       Open a new window named <window-title> in <tmux-session> (created detached if it does not
 #       exist) and run the resume command there through `bash -lc`, from <cwd>. The window keeps a
 #       login shell afterwards, so a resume that fails leaves its output on screen instead of
-#       closing the window. Prints `window=<tmux id>`.
+#       closing the window. Prints `window=<tmux id>`. `restart-entry` is the same restart with
+#       every one of those four values read from that session's own registry entry on this host,
+#       never from the caller: it is what `restart <uuid>` becomes under the forced command, so
+#       the key cannot ask for an arbitrary `agentbox new`.
 #
 #   await <session-id> <seconds>
 #       Ask omp-session-live every 5 s until the session is live or <seconds> pass. `live` or
 #       `dead`, exit 0 or 1.
 #
 # It never kills, signals or stops anything.
+#
+# Under `--forced` the command is SSH_ORIGINAL_COMMAND, parsed here and not by any shell, and
+# only four forms are accepted: `probe`, `live <uuid>…`, `restart <uuid>` and `await <uuid>`,
+# each uuid matched against ^[0-9a-f-]{36}$. Everything else -- a shell, `agentbox new --dir /`,
+# a second command after a `;`, a path, a flag -- exits nonzero with one line on stderr. The
+# freshness and await windows are this file's own under `--forced`, so they are not the
+# caller's either, and `restart` reads its resume line from the registry. What the key cannot do
+# at all, because sshd refuses it before this file runs, is a shell, a port forward, an agent
+# forward, X11 and a tty: that is the `restrict` in its authorized_keys line.
 set -uo pipefail
 
 export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.dotfiles/scripts:$HOME/.local/bin:$HOME/.mise/shims:/usr/local/bin:/usr/bin:/bin"
 export MISE_DATA_DIR="$HOME/.mise"
 live_test="$HOME/.dotfiles/scripts/omp-session-live"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The registry and the merge train, which the forced command reads instead of taking them from
+# the caller. The environment overrides are for the tests alone; nothing sets them in anger.
+registry_dir="${DEVBOX_OFFBOX_REGISTRY:-/mnt/durable/sami/restart-registry/sessions}"
+train_dir="${DEVBOX_OFFBOX_TRAIN:-/mnt/nvme/sami/tmp/verified-linux/redesign/merge-train}"
+# Where agentbox-run.ts records that it is relaunching a box's omp (`restarting` below). It is a
+# mounted path, so a marker written inside a box is readable here on the host.
+restart_markers="${AGENTBOX_RESTART_MARKERS:-$HOME/.cache/omp/agentbox}"
+# The windows the forced command uses, which match the watcher's own FRESH_SECONDS and
+# AWAIT_SECONDS. A caller that could set them could make every session look fresh.
+forced_fresh_seconds=120
+forced_await_seconds=45
+
+uuid_re='^[0-9a-f-]{36}$'
+
+refuse() {
+    printf 'devbox-offbox-act --forced: %s\n' "$1" >&2
+    exit 2
+}
+
+# The forced command. sshd puts the client's command in SSH_ORIGINAL_COMMAND and runs this file
+# with no argument of its own; nothing here is passed to a shell, so a `;`, a `$(…)`, a newline
+# or a quote is not a thing to escape, it is a thing to refuse.
+if [[ "${1-}" == --forced ]]; then
+    (( $# == 1 )) || refuse "takes no argument of its own; the command is SSH_ORIGINAL_COMMAND"
+    original="${SSH_ORIGINAL_COMMAND-}"
+    [[ -n "$original" ]] || refuse "no command given, and this key carries no shell"
+    [[ "$original" != *$'\n'* ]] || refuse "a command of more than one line is not accepted"
+    [[ "$original" != *[^[:alnum:][:blank:]_-]* ]] \
+        || refuse "only letters, digits, spaces, '_' and '-' are accepted: $original"
+    read -r -a words <<<"$original"
+    (( ${#words[@]} )) || refuse "no command given, and this key carries no shell"
+    for word in "${words[@]:1}"; do
+        [[ "$word" =~ $uuid_re ]] || refuse "not a session id: $word"
+    done
+    case "${words[0]}" in
+    probe)
+        (( ${#words[@]} == 1 )) || refuse "probe takes no argument"
+        exec bash "$here/devbox-offbox-probe" /proc "$registry_dir" "$train_dir"
+        ;;
+    live)
+        (( ${#words[@]} >= 2 )) || refuse "live needs at least one session id"
+        set -- live "$forced_fresh_seconds" "${words[@]:1}"
+        ;;
+    restart)
+        (( ${#words[@]} == 2 )) || refuse "restart takes one session id and nothing else"
+        set -- restart-entry "${words[1]}"
+        ;;
+    await)
+        (( ${#words[@]} == 2 )) || refuse "await takes one session id and nothing else"
+        set -- await "${words[1]}" "$forced_await_seconds"
+        ;;
+    *)
+        refuse "command not accepted: ${words[0]} (only probe, live, restart and await are)"
+        ;;
+    esac
+fi
+
+# Open a new window for a dead session and run its resume command there. Both `restart` (the
+# caller's four values, which is how the sami-rocqperf watcher calls it) and `restart-entry`
+# (the registry's own four, which is what the forced command runs) end here.
+do_restart() {
+    local session="$1" title="$2" cwd="$3" resume="$4" inner window
+    # An entry may write its tmux field as `agents:its-window`. A tmux session name holds no
+    # colon, so everything from the first one is the owner's note about where in that session the
+    # window used to be; the new window is named for the entry's title either way.
+    session="${session%%:*}"
+    [[ -d "$cwd" ]] || { printf 'error=cwd %s does not exist\n' "$cwd" >&2; return 1; }
+    if ! tmux has-session -t "=$session" 2>/dev/null; then
+        tmux new-session -d -s "$session" -c "$cwd" || return 1
+        printf 'created_tmux_session=%s\n' "$session"
+    fi
+    # One argument for tmux, which hands it to `sh -c`. The login shell after the resume keeps
+    # the window and its output when the resume exits. No newline inside the quoted string: bash's
+    # `%q` spells one as $'\n', which the `sh` tmux runs the argument with cannot read.
+    inner="$(printf 'exec bash -lc %q' "$resume; exec bash -l")"
+    window="$(tmux new-window -d -P -F '#{session_name}:#{window_index} #{window_id}' \
+        -t "=$session:" -n "$title" -c "$cwd" "$inner")" || return 1
+    printf 'window=%s\n' "$window"
+}
 
 command="${1:?command}"
 shift
@@ -61,6 +164,26 @@ live)
         done
     done < <(find "$HOME/.omp/agent/sessions" -maxdepth 2 -name '*.jsonl' \
         -newermt "-$fresh_window seconds" -printf '%T@ %p\n' 2>/dev/null || true)
+
+    # 1b. A box whose omp is being relaunched right now. `agentbox restart` hangs omp up and
+    #     spawns a fresh one in the same container, and in that gap the session is dead by every
+    #     test here: no holder, no fresh transcript, no process, and omp-session-live says
+    #     nothing. At 10:10Z on 2026-11-05 a watcher pass read exactly that and asked for a
+    #     restart of a session UTIL was restarting in place; only `agentbox new`'s own duplicate
+    #     guard stopped there being two of it. agentbox-run.ts writes a marker before it hangs omp
+    #     up and removes it once the new omp registers, so this is a READING like the others --
+    #     the caller refuses while it is fresh, and it expires, because a relaunch that died must
+    #     not make a session unrestartable for ever.
+    for id in "$@"; do
+        marker="$restart_markers/restarting-$id"
+        [[ -f "$marker" ]] || continue
+        at=""
+        while IFS= read -r line; do
+            [[ "${line%%=*}" == at ]] && at="${line#*=}"
+        done <"$marker"
+        [[ "$at" =~ ^[0-9]+$ ]] || at="$(stat -c %Y "$marker" 2>/dev/null || echo 0)"
+        printf 'restarting %s %s\n' "$id" "$(( $(date +%s) - at ))"
+    done
 
     # 2. Who holds a transcript of the session open FOR WRITING. omp's session writer keeps its
     #    file open O_WRONLY|O_APPEND for its whole life, and only a writer runs a transcript: an
@@ -228,23 +351,36 @@ function owns_session(line, sid,   n, word, w, arg) {
     fi
     ;;
 restart)
-    session="${1:?tmux session}" title="${2:?window title}" cwd="${3:?cwd}" resume="${4:?resume}"
-    # An entry may write its tmux field as `agents:its-window`. A tmux session name holds no
-    # colon, so everything from the first one is the owner's note about where in that session the
-    # window used to be; the new window is named for the entry's title either way.
-    session="${session%%:*}"
-    [[ -d "$cwd" ]] || { printf 'error=cwd %s does not exist\n' "$cwd" >&2; exit 1; }
-    if ! tmux has-session -t "=$session" 2>/dev/null; then
-        tmux new-session -d -s "$session" -c "$cwd" || exit 1
-        printf 'created_tmux_session=%s\n' "$session"
-    fi
-    # One argument for tmux, which hands it to `sh -c`. The login shell after the resume keeps
-    # the window and its output when the resume exits. No newline inside the quoted string: bash's
-    # `%q` spells one as $'\n', which the `sh` tmux runs the argument with cannot read.
-    inner="$(printf 'exec bash -lc %q' "$resume; exec bash -l")"
-    window="$(tmux new-window -d -P -F '#{session_name}:#{window_index} #{window_id}' \
-        -t "=$session:" -n "$title" -c "$cwd" "$inner")" || exit 1
-    printf 'window=%s\n' "$window"
+    do_restart "${1:?tmux session}" "${2:?window title}" "${3:?cwd}" "${4:?resume}" || exit 1
+    ;;
+restart-entry)
+    # The forced command's restart: every value comes from this host's own registry entry for
+    # that session, so the key can ask for the resume line its owner wrote and nothing else.
+    id="${1:?session id}"
+    [[ "$id" =~ $uuid_re ]] || { printf 'error=not a session id: %s\n' "$id" >&2; exit 2; }
+    entry="$registry_dir/$id.entry"
+    [[ -f "$entry" ]] || { printf 'error=no registry entry %s\n' "$entry" >&2; exit 1; }
+    entry_session="" entry_title="" entry_cwd="" entry_resume="" entry_tmux=""
+    while IFS= read -r line; do
+        [[ "$line" == *=* ]] || continue
+        case "${line%%=*}" in
+        session) entry_session="${line#*=}" ;;
+        title) entry_title="${line#*=}" ;;
+        cwd) entry_cwd="${line#*=}" ;;
+        resume) entry_resume="${line#*=}" ;;
+        tmux) entry_tmux="${line#*=}" ;;
+        esac
+    done <"$entry"
+    # The file is named for a session; an entry naming another one is not acted on, so a file
+    # dropped into the registry cannot borrow a session id it does not hold.
+    [[ "$entry_session" == "$id" ]] \
+        || { printf 'error=%s holds session=%s\n' "$entry" "$entry_session" >&2; exit 1; }
+    for pair in "tmux:$entry_tmux" "title:$entry_title" "cwd:$entry_cwd" "resume:$entry_resume"; do
+        [[ -n "${pair#*:}" ]] || { printf 'error=%s has no %s\n' "$entry" "${pair%%:*}" >&2; exit 1; }
+    done
+    printf 'entry=%s\n' "$entry"
+    printf 'resume=%s\n' "$entry_resume"
+    do_restart "$entry_tmux" "$entry_title" "$entry_cwd" "$entry_resume" || exit 1
     ;;
 await)
     id="${1:?session id}" seconds="${2:-180}"
