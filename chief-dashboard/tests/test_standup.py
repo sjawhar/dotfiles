@@ -72,7 +72,9 @@ def room(tmp_path):
         sent.append((session, message))
         return {"recipient": session}
 
-    r = standup.Room(tmp_path, dispatch=FakeDispatch(), send=send, speech=FakeSpeech())
+    # No session subscribes to the room's Dispatch topic unless a test says so. Without this the Room would read
+    # the live Envoy hub, so the suite's result would depend on who happens to be running on the box.
+    r = standup.Room(tmp_path, dispatch=FakeDispatch(), send=send, speech=FakeSpeech(), sessions=lambda: [])
     r.sent = sent
     return r
 
@@ -137,6 +139,45 @@ def test_a_line_that_no_session_is_listening_for_is_reported_not_delivered(room,
     room._send = lambda session, message, idempotency_key, timeout=20: {"recipient": None}
     got = room.post("Anyone there?")
     assert got["delivered"] == 0 and sorted(got["missed"]) == sorted([LEAD, CHIEF])
+
+
+def test_a_lead_subscribed_to_the_room_is_not_sent_the_line_a_second_time(room, monkeypatch, tmp_path):
+    """Sami, 2026-11-05: "multiple double-responses to messages".
+
+    A lead subscribed to notifications.dispatch.issue.<ISSUE> already receives every line posted to the thread.
+    Sending it again over Envoy gave that lead two prompts for one line, both ending "Answer in the room", and two
+    answers arrived seconds apart. The subscribed lead must still be counted as reached: it heard him.
+    """
+    leads = tmp_path / "leads.json"
+    leads.write_text(json.dumps([LEAD, OTHER_LEAD]))
+    monkeypatch.setattr(standup, "LEADS_FILE", leads)
+    room._post_message = lambda body: {"id": "m9"}
+    room._sessions = lambda: [
+        {"session_id": LEAD, "topics": [f"notifications.dispatch.issue.{standup.ISSUE}.>"]},
+        {"session_id": CHIEF, "topics": [f"notifications.dispatch.issue.{standup.ISSUE}"]},
+        {"session_id": OTHER_LEAD, "topics": ["notifications.dispatch.issue.SOMETHING-ELSE.>"]},
+    ]
+
+    got = room.post("Do the dataset first.")
+
+    assert [s for s, _ in room.sent] == [OTHER_LEAD]  # the two subscribed ones get no second copy
+    assert got["delivered"] == 3 and got["missed"] == []  # and all three are still counted as reached
+
+
+def test_a_hub_that_cannot_be_read_still_sends_to_every_lead(room, monkeypatch, tmp_path):
+    """A lead hearing Sami twice is better than a lead not hearing him, so an unreadable hub does not suppress."""
+    leads = tmp_path / "leads.json"
+    leads.write_text(json.dumps([LEAD, OTHER_LEAD]))
+    monkeypatch.setattr(standup, "LEADS_FILE", leads)
+    room._post_message = lambda body: {"id": "m9"}
+
+    def boom():
+        raise RuntimeError("the hub is not answering")
+
+    room._sessions = boom
+    got = room.post("Do the dataset first.")
+    assert sorted(s for s, _ in room.sent) == sorted([LEAD, OTHER_LEAD, CHIEF])
+    assert got["delivered"] == 3 and got["missed"] == []
 
 
 def test_an_empty_or_over_long_line_is_refused(room):

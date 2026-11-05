@@ -39,7 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import markdown, model, render
-from .sources import ENVOY_CONFIG, Dispatch, SourceError, envoy_send
+from .sources import ENVOY_CONFIG, Dispatch, SourceError, envoy_send, envoy_sessions
 
 log = logging.getLogger(__name__)
 
@@ -275,7 +275,8 @@ class ElevenLabs:
 class Room:
     """The meeting: its lines, their audio, and Sami's way of speaking into it."""
 
-    def __init__(self, state_dir: Path, dispatch=None, send=envoy_send, speech=None) -> None:
+    def __init__(self, state_dir: Path, dispatch=None, send=envoy_send, speech=None,
+                 sessions=envoy_sessions) -> None:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.audio_dir = self.state_dir / "standup-audio"
@@ -285,6 +286,7 @@ class Room:
         self.speech = speech if speech is not None else ElevenLabs(self.state_dir)
         self._dispatch = dispatch
         self._send = send
+        self._sessions = sessions
         self.lock = threading.Lock()
         self.error: str | None = None
         self.read_at: datetime | None = None
@@ -431,8 +433,31 @@ class Room:
             raise SourceError(f"Dispatch could not be reached: {exc}") from exc
         return got.get("message") or got if isinstance(got, dict) else {}
 
+    def _subscribed(self) -> set[str]:
+        """The sessions that already receive this room's lines from Dispatch, by their own subscription.
+
+        A lead subscribed to `notifications.dispatch.issue.<ISSUE>` gets every message posted to the thread. Sending
+        the same words again over Envoy therefore hands that lead TWO prompts for one line of Sami's, and both end
+        "Answer in the room" -- so two answers arrive seconds apart. On 2026-11-05 Sami reported "multiple
+        double-responses to messages"; his 22:06Z line reached this session twice in the same second, once as
+        dispatch-216617 and once as a direct message, and the chief and the infra lead both answered it nine
+        seconds apart. 37 of the 72 sessions on the box were subscribed to a Dispatch issue topic.
+
+        A hub that cannot be read returns nothing, so the fan-out sends to everyone as it did before: a lead hearing
+        Sami twice is better than a lead not hearing him.
+        """
+        want = f"notifications.dispatch.issue.{ISSUE}"
+        try:
+            rows = self._sessions()
+        except Exception as exc:  # recorded, never raised to the reader
+            log.warning("could not read the hub's sessions, so the standup line goes to every lead: %s", exc)
+            return set()
+        return {r.get("session_id") for r in rows
+                if any(t == want or t.startswith(want + ".") for t in (r.get("topics") or []))}
+
     def _fan_out(self, text: str) -> tuple[int, list[str]]:
         sessions = self.leads()
+        heard = self._subscribed()
         message = (
             f"Sami said this in the standup room ({DISPATCH_WEB}/issues/{ISSUE}), sent from his streams dashboard "
             f"({PUBLIC_ORIGIN}/standup):\n\n{text}\n\nThis is Sami's own message; act on it as you would on any "
@@ -450,12 +475,14 @@ class Room:
                 log.warning("the standup line did not reach %s: %s", session, exc)
                 results[session] = False
 
-        threads = [threading.Thread(target=one, args=(s,), name="standup-send", daemon=True) for s in sessions]
+        # A subscribed lead is counted as reached without a second copy: Dispatch already carried the line to it.
+        send_to = [s for s in sessions if s not in heard]
+        threads = [threading.Thread(target=one, args=(s,), name="standup-send", daemon=True) for s in send_to]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=25)
-        missed = [s for s in sessions if not results.get(s)]
+        missed = [s for s in send_to if not results.get(s)]
         return len(sessions) - len(missed), missed
 
     # --------------------------------------------------------------------------------------------- polling

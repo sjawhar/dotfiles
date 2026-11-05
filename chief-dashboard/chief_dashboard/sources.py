@@ -96,3 +96,12 @@ def envoy_send(session_id: str, message: str, idempotency_key: str, timeout: flo
         headers={"Content-Type": "application/json"},
     )
     return json.loads(_open(req, timeout))
+
+
+def envoy_sessions(timeout: float = 20) -> list[dict]:
+    """Every session the hub knows, with its `topics`. Used to tell who already receives a Dispatch issue's
+    messages by subscription, so the standup room does not hand the same line to a lead twice."""
+    hub = _config()["envoy"]["url"].rstrip("/")
+    req = urllib.request.Request(f"{hub}/v1/sessions", method="GET")
+    got = json.loads(_open(req, timeout))
+    return got if isinstance(got, list) else got.get("sessions") or []
