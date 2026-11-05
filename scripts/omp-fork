@@ -18,6 +18,13 @@ registration until its next heartbeat. The config the session reads is copied wi
 `envoy.enabled` set to false; its Dispatch section is kept, so `dispatch` reads still work.
 Telling the fork not to change anything is the prompt's job.
 
+The copy is also given no profile (`OMP_PROFILE=default`). pi-envoy reads a named profile's own
+`$PI_CODING_AGENT_DIR/envoy.json` and ignores ENVOY_CONFIG_FILE entirely; that file is a link to
+the live ~/.config/legion/envoy.json (`shims/omp`), so a fork started from a session under a
+named profile joined the real Envoy under the live session's id. Measured on 2026-11-05: with a
+named profile the copy was in Envoy's session list for its whole run (20:53:16-20:54:10Z), with
+none it was absent (20:33:22-20:34:34Z).
+
 Prints {"text", "model", "fallback", "cost", "tokens", "cut", "fork_session"} on stdout. `fallback` is
 true when an answer came from a model other than the session's own (omp's fallback chain, often
 after a refusal); `fork_session` is the fork's own transcript when --keep DIR saved it, else null.
@@ -134,8 +141,10 @@ def main() -> None:
         cmd = ["omp", "-p", "--mode", "json", "--session-dir", str(scratch), "--resume", str(copy), "--max-time", args.max_time]
         if args.model:
             cmd += ["--model", args.model]
-        proc = subprocess.run(cmd + [prompt], cwd=cwd, env={**os.environ, "ENVOY_CONFIG_FILE": str(scratch / "envoy.json")},
-                              capture_output=True, text=True)
+        env = {**os.environ, "ENVOY_CONFIG_FILE": str(scratch / "envoy.json"), "OMP_PROFILE": "default"}
+        env.pop("PI_PROFILE", None)
+        env.pop("PI_CODING_AGENT_DIR", None)
+        proc = subprocess.run(cmd + [prompt], cwd=cwd, env=env, capture_output=True, text=True)
         text, cost, model, models = "", 0.0, None, set()
         tokens = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         for line in proc.stdout.splitlines():
