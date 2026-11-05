@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# pod-memory-series: one pod's memory over time, with timestamps, so a peak can be placed.
+#
+#   pod-memory-series <pod-name> [START] [END]
+#
+# START and END are RFC3339; they default to the last 6 hours. PROJECT overrides the Google
+# Cloud project (default theorem-agent-infra).
+#
+# `pod-memory-peak` gives the value. This gives the SHAPE, and the shape answers two questions a
+# value cannot.
+#
+# 1. "Was the kill work, or teardown?" On 2026-11-05 a lane argued that an OOM kill landing
+#    straight after "Build completed successfully" was an artifact of teardown rather than a
+#    real need, and that raising the kind 64Gi -> 80Gi would be paying for nothing. Reasonable,
+#    and checkable: the series was a 48-minute monotonic climb -- 0.83 GiB, 0.94, 41.39, … 97.03,
+#    98.31, 99.62, 100.76, 101.78, then the pod gone. A teardown artifact is a flat profile with
+#    one sample at the end. This was work.
+#
+# 2. "Can this number be the container's charge at all?" That same pod had a 64Gi memory limit,
+#    so a reading of 101.78 GiB cannot be what the cgroup was charged -- it would have been
+#    killed at 64. Under gVisor the node accounts the sandbox's memory with the container, and
+#    here that inflated the figure by 59%. Compare any reading against the pod's own limit:
+#      kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].resources.limits.memory}'
+#    A reading at or above the limit means the series is inflated for that pod, NOT that the pod
+#    needed more.
+#
+# non-evictable only: anonymous pages plus unreclaimable slab, the memory that gets a pod killed.
+# About one point every 93 s, so a spike shorter than that is invisible in the shape too.
+set -uo pipefail
+
+pod="${1:-}"
+if [[ -z "$pod" || "$pod" == -h || "$pod" == --help ]]; then
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+fi
+start="${2:-$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)}"
+end="${3:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+project="${PROJECT:-theorem-agent-infra}"
+
+token="$(gcloud auth print-access-token 2>/dev/null)" || true
+if [[ -z "$token" ]]; then
+    echo "pod-memory-series: no Google access token" >&2
+    exit 1
+fi
+
+filter="metric.type=\"kubernetes.io/container/memory/used_bytes\" AND resource.labels.pod_name=\"$pod\" AND metric.labels.memory_type=\"non-evictable\""
+curl -sfG -H "Authorization: Bearer $token" \
+    "https://monitoring.googleapis.com/v3/projects/$project/timeSeries" \
+    --data-urlencode "filter=$filter" \
+    --data-urlencode "interval.startTime=$start" \
+    --data-urlencode "interval.endTime=$end" |
+    POD="$pod" WINDOW="$start .. $end" python3 -c '
+import json, os, sys
+
+try:
+    body = json.load(sys.stdin)
+except ValueError:
+    print("pod-memory-series: the monitoring API returned nothing readable", file=sys.stderr)
+    sys.exit(1)
+series = body.get("timeSeries", [])
+if not series:
+    print(f"no series for {os.environ["POD"]} in {os.environ["WINDOW"]}: the pod ran outside this"
+          " window, its name is wrong, or its points have aged out. It is NOT a pod that used"
+          " no memory.", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{os.environ["POD"]}  {os.environ["WINDOW"]}")
+for s in series:
+    container = s["resource"]["labels"].get("container_name", "?")
+    pts = sorted((p["interval"]["endTime"], int(p["value"]["int64Value"]))
+                 for p in s.get("points", []))
+    if not pts:
+        continue
+    peak = max(v for _, v in pts)
+    first_peak = next(t for t, v in pts if v == peak)
+    span = f"{pts[0][0]} .. {pts[-1][0]}"
+    print(f"  container {container}: {len(pts)} samples over {span}")
+    print(f"    peak {peak / 2 ** 30:.2f} GiB, first reached at {first_peak}")
+    for t, v in pts:
+        bar = "#" * int(40 * v / peak) if peak else ""
+        mark = "  <= PEAK" if v == peak else ""
+        print(f"    {t}  {v / 2 ** 30:8.2f} GiB  {bar}{mark}")
+'

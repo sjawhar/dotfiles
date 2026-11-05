@@ -49,10 +49,17 @@
 # cgroup was charged rather than the charge itself. Two measurements on 2026-11-05, and the gap
 # between them is the point:
 #   - a Guaranteed pod at 192Gi/192Gi read 193.22 GiB here, 0.6% above its limit, no OOM kill;
-#   - a Guaranteed pod at 64Gi/64Gi read 101.78 GiB here, 59% above its limit, and WAS killed.
+#   - a pod with a 64Gi memory limit read 101.78 GiB here, 59% above it, and WAS OOM-killed.
+#     (Burstable, from cpu 5 against a limit of 8; its memory request equals its memory limit,
+#     which is what matters -- a memory limit is a hard cap in every QoS class.)
 # The second one is physics: a cgroup capped at 64 GiB cannot be charged 101.78, so 37.8 GiB of
 # that reading is not the container's. An overstatement of 0.6% is a rounding error; one of 59%
 # would have doubled that kind's request if "peak + 30%" had been applied to it.
+#
+# AND NOTE WHAT THAT POD STILL NEEDS, because the tool cannot give it: the container hit a hard
+# 64Gi during work, so it needs MORE than 64Gi, and this series does not say how much more. The
+# honest next step for a kind in that state is to re-run it at a higher limit and read where it
+# settles -- not to compute a target from a number that is measuring something larger.
 #
 # SO: CHECK THE READING AGAINST THE POD'S OWN LIMIT BEFORE SIZING FROM IT.
 #   kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].resources.limits.memory}'
