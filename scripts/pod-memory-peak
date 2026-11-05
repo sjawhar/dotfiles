@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# pod-memory-peak: the memory a farm pod actually used, read from OUTSIDE the pod.
+#
+#   pod-memory-peak <pod-name> [START] [END]
+#
+# START and END are RFC3339 (2026-11-05T17:00:00Z); they default to the last 6 hours.
+# PROJECT overrides the Google Cloud project (default theorem-agent-infra).
+#
+# Why this exists. A lane sizing a job kind is told to read its pod's own
+# /sys/fs/cgroup/memory.peak. A pod with `runtimeClassName: gvisor` CANNOT: gVisor's sandboxed
+# /sys does not carry the host's cgroup files, and the read fails with FileNotFoundError on
+# memory.peak, memory.max and memory.stat alike (measured 2026-11-05 on a build Job of the farm,
+# dispatch://INFRA-6). Every build Job on that farm uses that runtime class, so for those kinds
+# "its next pod records its own peak" is not an instruction anybody can follow.
+#
+# What was ruled out first, so nobody spends an afternoon on it again:
+#   - the node's cAdvisor (/api/v1/nodes/<node>/proxy/metrics/cadvisor, which serves
+#     container_memory_max_usage_bytes) is Forbidden: these are Autopilot clusters and there is
+#     no node access, so reading the pod's cgroup from the node is out for the same reason;
+#   - `kubectl top pod` works but is a current reading, not a peak;
+#   - the farm's own sampled mem_peak_gib undercounts: it read 3.16 GiB for a pod that was
+#     OOM-killed at a 4 GiB limit, where this reading gives 3.74.
+#
+# What this reads instead: Cloud Monitoring's kubernetes.io/container/memory/used_bytes for the
+# k8s_container, which the NODE measures, outside the sandbox. It exists exactly where the in-pod
+# read does not.
+#
+# SIZE FROM non-evictable, NEVER from the total. non-evictable is anonymous pages plus
+# unreclaimable slab -- the memory that gets a pod killed. evictable is page cache the kernel
+# drops under pressure. Sizing from a figure that counts reclaimable memory is the error that
+# produced four wrong readings in one afternoon (memory.peak, free's "available", a cgroup at
+# "93%", and a farm column), and it always reads high.
+#
+# IT IS SAMPLED, about one point every 93 s. So:
+#   - size at peak plus 30%, never at the peak: a spike shorter than the interval is invisible;
+#   - an OOM kill beats this number. If a pod dies at a limit above what this prints, the number
+#     is wrong and the kill is right.
+# For a kind whose pods are NOT gVisor, the in-pod memory.peak is a true maximum and is better.
+set -uo pipefail
+
+pod="${1:-}"
+if [[ -z "$pod" || "$pod" == -h || "$pod" == --help ]]; then
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+fi
+start="${2:-$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)}"
+end="${3:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+project="${PROJECT:-theorem-agent-infra}"
+
+token="$(gcloud auth print-access-token 2>/dev/null)" || true
+if [[ -z "$token" ]]; then
+    echo "pod-memory-peak: no Google access token; run gcloud auth login or use this box's own identity" >&2
+    exit 1
+fi
+
+filter="metric.type=\"kubernetes.io/container/memory/used_bytes\" AND resource.labels.pod_name=\"$pod\""
+curl -sfG -H "Authorization: Bearer $token" \
+    "https://monitoring.googleapis.com/v3/projects/$project/timeSeries" \
+    --data-urlencode "filter=$filter" \
+    --data-urlencode "interval.startTime=$start" \
+    --data-urlencode "interval.endTime=$end" |
+    POD="$pod" WINDOW="$start .. $end" python3 -c '
+import json, os, sys
+
+try:
+    body = json.load(sys.stdin)
+except ValueError:
+    print("pod-memory-peak: the monitoring API returned nothing readable", file=sys.stderr)
+    sys.exit(1)
+series = body.get("timeSeries", [])
+if not series:
+    # An absent series is not a zero: say which it is.
+    print(f"no series for {os.environ["POD"]} in {os.environ["WINDOW"]}: the pod ran outside this"
+          " window, its name is wrong, or its points have aged out of Cloud Monitoring."
+          " It is NOT a pod that used no memory.", file=sys.stderr)
+    sys.exit(1)
+rows = {}
+for s in series:
+    kind = s["metric"]["labels"].get("memory_type", "unlabelled")
+    vals = [int(p["value"]["int64Value"]) for p in s.get("points", [])]
+    if vals:
+        rows[kind] = vals
+print(f"{os.environ["POD"]}  {os.environ["WINDOW"]}")
+for kind in ("non-evictable", "evictable", "unlabelled"):
+    if kind not in rows:
+        continue
+    vals = rows[kind]
+    mark = "  <- size from this" if kind == "non-evictable" else ""
+    print(f"  {kind:>14}: peak {max(vals) / 2**30:6.2f} GiB   last {vals[0] / 2**30:6.2f} GiB"
+          f"   {len(vals)} samples{mark}")
+peak = max(rows.get("non-evictable", [0]))
+if peak:
+    print(f"  suggested request: {peak * 1.3 / 2**30:.2f} GiB (peak + 30%), rounded up to the"
+          " next size your kind uses")
+'
