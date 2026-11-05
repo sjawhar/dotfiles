@@ -147,14 +147,17 @@ def format_errors(b) -> list[str]:
         start = due_day(week.get("start"))
         if start is None or start.weekday() != 0 or str(week.get("start")) != start.isoformat():
             err.append(f"week.start: {week.get('start')!r} must be the Monday of the Pacific week, as YYYY-MM-DD")
-        for i, it in enumerate(week.get("items") or []):
-            if isinstance(it, dict) and it.get("due") is not None and due_day(it["due"]) is None:
-                err.append(f"week.items[{i}].due: {it['due']!r} must be a Pacific day, as YYYY-MM-DD")
     return err
 
 
 def plan_errors(plan, where: str) -> list[str]:
-    """A plan's items (`today`): each an object with `what`; `issue`, when given, a Dispatch key such as OSSV-150."""
+    """A plan's items (`today` and `week`): each an object with `what`; `issue`, when given, a Dispatch key such as
+    OSSV-150, and `due`, when given, a Pacific day.
+
+    The contract is the reader's (plan.py `_items`): `pr`, `owner`, `issue` and `due` are all optional, so a missing
+    one is not named here. A checker stricter than the reader refuses a whole file the page would have shown: on
+    2026-11-05 a required `due` refused a lead's plan file, and the board then showed the previous day's work with
+    nothing saying why."""
     if plan is None:
         return []
     if not isinstance(plan, dict) or not isinstance(plan.get("items", []), list):
@@ -163,8 +166,13 @@ def plan_errors(plan, where: str) -> list[str]:
     for i, it in enumerate(plan.get("items") or []):
         if not isinstance(it, dict) or not str(it.get("what") or "").strip():
             err.append(f"{where}.items[{i}]: must be an object with what")
-        elif it.get("issue") is not None and issue_key(it["issue"]) is None:
+            continue
+        name = str(it.get("what"))[:50]
+        if it.get("issue") is not None and issue_key(it["issue"]) is None:
             err.append(f"{where}.items[{i}].issue: {it['issue']!r} is not a Dispatch issue key such as OSSV-150")
+        # A `due` the reader cannot parse is read as no due at all, so the item would silently lose its day.
+        if it.get("due") is not None and due_day(it["due"]) is None:
+            err.append(f"{where}.items[{i}].due ({name!r}): {it['due']!r} must be a Pacific day, as YYYY-MM-DD")
     return err
 
 

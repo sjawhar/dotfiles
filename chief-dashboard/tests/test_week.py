@@ -57,9 +57,10 @@ def test_check_holds_week_to_its_contract():
     bad = well_formed(board(week={"start": "2026-10-20", "items": [{"what": "a", "due": "Friday"}, {"pr": "x"}]}))
     errors, lines = check.report(bad, NOW)
     assert errors == [
+        # A malformed `due` is named with its item, for `week` and `today` alike: one rule, in plan_errors.
+        "week.items[0].due ('a'): 'Friday' must be a Pacific day, as YYYY-MM-DD",
         "week.items[1]: must be an object with what",
         "week.start: '2026-10-20' must be the Monday of the Pacific week, as YYYY-MM-DD",
-        "week.items[0].due: 'Friday' must be a Pacific day, as YYYY-MM-DD",
     ]
     assert any("week.items[0]" in ln and "names no Dispatch issue" in ln for ln in lines)
     assert any("no `week` list" in ln for ln in check.report(well_formed(board()), NOW)[1])

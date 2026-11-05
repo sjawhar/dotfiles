@@ -56,6 +56,76 @@ class PlanLine:
     issue: IssueRef | None = None  # the item's Dispatch issue (plan_issues.py), None when it has none
 
 
+NO_PREDICTION = "no prediction registered before the run"
+# The verdict's colour: a verdict that settled something is coloured ok or bad, everything else stays dim, so the
+# page never colours a run that concluded nothing.
+VERDICT_TONE = {"kept": "ok", "reverted": "bad"}
+
+
+@dataclass
+class ExpRow:
+    """One experiment as the front page shows it: the conclusion first, then what changed, the number it moves, the
+    value it started from and whether a prediction was registered before the run."""
+
+    raw: dict
+    verdict: str  # the word the row leads with ("kept", "running", "no verdict yet")
+    tone: str  # "ok", "bad" or "dim"
+    change: str
+    number: str  # the id of the number it moves
+    before: str  # the before-value in words, with its `before_note`; "" when the lead wrote none
+    after: str  # the after-value in words, with its `after_note`; "" when there is none yet
+    prediction: str  # the prediction registered before the run, in words; "" when none was
+    started: datetime | None = None
+    ended: datetime | None = None
+
+    @property
+    def predicted(self) -> bool:
+        return bool(self.prediction)
+
+
+def value_text(value, note) -> str:
+    """A value with the lead's own prose for it beside it: `before` 31 with `before_note` "held pieces" reads
+    "31 held pieces". The note is read because it is plainly the explanation of the value, and nothing in the
+    dashboard showed it before."""
+    if value is None:
+        return ""
+    word = str(note).strip() if isinstance(note, str) else ""
+    text = model.fmt_value(value)
+    return f"{text} {word}" if word else text
+
+
+def prediction_of(x: dict) -> str:
+    """The prediction the lead registered before the run: `predicted` (the value the number should reach) or
+    `predicted_main` (the change in the main number, in words). "" when the experiment carries neither, which the
+    page then says in NO_PREDICTION's words rather than leaving the row looking earned."""
+    p = x.get("predicted")
+    if isinstance(p, int | float) and not isinstance(p, bool):
+        return f"predicted {model.fmt_value(p)}"
+    text = x.get("predicted_main")
+    return f"predicted: {str(text).strip()}" if isinstance(text, str) and text.strip() else ""
+
+
+def exp_rows(st: Stream) -> list[ExpRow]:
+    """The stream's experiments, newest first."""
+    out = []
+    for x in reversed([x for x in (st.board or {}).get("experiments") or [] if isinstance(x, dict)]):
+        verdict = str(x.get("verdict") or "").strip() or "no verdict yet"
+        out.append(
+            ExpRow(
+                raw=x,
+                verdict=verdict,
+                tone=VERDICT_TONE.get(verdict, "dim"),
+                change=str(x.get("change") or "").strip(),
+                number=str(x.get("number") or "").strip(),
+                before=value_text(x.get("before"), x.get("before_note")),
+                after=value_text(x.get("after"), x.get("after_note")),
+                prediction=prediction_of(x),
+                started=parse_time(x.get("started")),
+                ended=parse_time(x.get("ended")),
+            )
+        )
+    return out
+
 @dataclass
 class StreamView:
     st: Stream
@@ -70,6 +140,7 @@ class StreamView:
     example: bool  # the plan shown is example items (?example=1)
     week: WeekPlan | None = None
     week_lines: list[PlanLine] = field(default_factory=list)
+    exps: list[ExpRow] = field(default_factory=list)  # the stream's experiments, newest first
     # The stream's live agent sessions on every machine (sessions.stream_census, the snapshot's `stream_sessions`);
     # None when they were not read or the stream has no window of its own in sessions.WINDOW_STREAMS.
     sessions: int | None = None
@@ -222,7 +293,8 @@ def stream_view(st: Stream, versions: list[dict], states: dict[str, dict], asks:
         ln.issue = resolve(ln.item, states, issues or {}, agents or {}, web)
     merged, planned = tally(plan, states)
     history = [(today - timedelta(days=k), day_record(versions, today - timedelta(days=k), states)) for k in range(1, 8)]
-    return StreamView(st, kpis, loose, plan, lines, merged, planned, history, asks, shown_example, week, week_lines)
+    return StreamView(st, kpis, loose, plan, lines, merged, planned, history, asks, shown_example, week, week_lines,
+                      exp_rows(st))
 
 
 def build(snap: dict, now: datetime, example: bool = False) -> PageV2:

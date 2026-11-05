@@ -14,7 +14,7 @@ from .pace import BEHIND, CANT_TELL, HOLDING, ON_PACE, PACIFIC, WORSE, Bound, Pa
 from .plan_issues import live_url
 from .prs import parse_ref
 from .render import MAX_NOTE, e
-from .v2_model import FAILING, MERGED, GuardRow, KpiRow, PageV2, PlanLine, StreamView, clock
+from .v2_model import (FAILING, MERGED, NO_PREDICTION, ExpRow, GuardRow, KpiRow, PageV2, PlanLine, StreamView, clock)
 
 LABEL_CLASS = {ON_PACE: "ok", HOLDING: "ok", BEHIND: "bad", WORSE: "bad", CANT_TELL: "grey"}
 
@@ -497,6 +497,51 @@ def week_item(line: PlanLine, now: datetime) -> str:
     return plan_item(line, now).replace('<span class="pw">', f'<span class="pw">{tag}', 1)
 
 
+def exp_item(r: ExpRow, now: datetime, web: str = "") -> str:
+    """One experiment, conclusion first: the verdict, what changed, then the number it moves with the value it
+    started from, the prediction registered before the run, and when it ran. An experiment with no prediction says
+    so in those words, in the warning colour: that marking is the lead's own, and a verdict resting on nothing must
+    not read like one that was earned."""
+    meta = []
+    if r.number:
+        move = f"{r.number}: {r.before or 'no before-value'}" + (f" → {r.after}" if r.after else "")
+        meta.append(f'<span class="xn">{e(move)}</span>')
+    elif r.before:
+        meta.append(f'<span class="xn">{e(r.before)}</span>')
+    meta.append(
+        f'<span class="xp">{e(r.prediction)}</span>'
+        if r.predicted
+        else f'<span class="xp nopred">{e(NO_PREDICTION)}</span>'
+    )
+    when = "not started" if r.started is None else f"started {clock(r.started, now)}"
+    if r.ended:
+        when += f" · ended {clock(r.ended, now)}"
+    meta.append(f'<span class="dim">{e(when)}</span>')
+    return (
+        f'<li class="xi">'
+        f'<span class="xv {r.tone}">{e(r.verdict)}</span>'
+        f'<span class="pw">{render.linkify(r.change or "no change described", web)}</span>'
+        f'<span class="pm">{"".join(meta)}</span></li>'
+    )
+
+
+def exps_section(v: StreamView, now: datetime, web: str = "") -> str:
+    """The stream's experiments: what it tried, what it moved, and which runs carry a prediction. The count of
+    unpredicted runs is in the heading, so Sami sees how much of the loop rests on nothing without opening a row."""
+    rows = v.exps
+    if not rows:
+        return ('<div class="plan exps"><div class="sec-h"><span class="sec-t">Experiments</span>'
+                '<span class="pstat bad">None recorded</span></div></div>')
+    unpredicted = sum(1 for r in rows if not r.predicted)
+    stat = (f'<span class="pstat bad">{unpredicted} of {len(rows)} with no prediction</span>'
+            if unpredicted
+            else f'<span class="pstat">{len(rows)} all predicted</span>')
+    return (
+        f'<div class="plan exps"><div class="sec-h"><span class="sec-t">Experiments</span>{stat}</div>'
+        f'<ul class="pl">{"".join(exp_item(r, now, web) for r in rows)}</ul></div>'
+    )
+
+
 # ------------------------------------------------------------------------------------------------- stream
 
 
@@ -688,8 +733,9 @@ def stream_section(v: StreamView, page: PageV2, rows: list[dict], notes: list[di
     studio = f'<div class="studio">{player(st, rows, page.now)}{lead_panel(st, page, notes or [], can_send)}</div>'
     rest = (
         f'<details class="srest" id="rest-{e(st.slug)}">'
-        "<summary>Today's plan, this week's plan, bottleneck, last 7 days</summary>"
-        f"{plan_section(v, page.now)}{week_section(v, page.now)}{footer(v, page)}</details>"
+        "<summary>Today's plan, this week's plan, experiments, bottleneck, last 7 days</summary>"
+        f"{plan_section(v, page.now)}{week_section(v, page.now)}{exps_section(v, page.now, page.web)}"
+        f"{footer(v, page)}</details>"
     )
     return (
         f'<section class="stream" id="s-{e(st.slug)}">'
@@ -996,6 +1042,18 @@ border:1px solid var(--line);color:var(--dim)}
 border:1px solid var(--line);border-radius:4px;color:var(--dim);white-space:nowrap}
 .tag.demo{border-style:dashed;color:var(--ink)}
 .tag.due{margin:0 8px 0 0;color:var(--ink);font-variant-numeric:tabular-nums}
+/* Experiments: the verdict leads the row, so the conclusion is read first; under it the number the experiment
+   moves with the value it started from, and whether a prediction was registered before the run. A row with no
+   prediction is marked in the warning colour and never folded away. */
+.xi{display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);grid-template-areas:"vd what" "meta meta";
+gap:2px 10px;align-items:baseline;padding:7px 0;border-top:1px solid var(--line)}
+.xi:first-child{border-top:0}
+.xv{grid-area:vd;font-weight:600;white-space:nowrap}
+.xv.ok{color:var(--ok)}.xv.bad{color:var(--bad)}.xv.dim{color:var(--dim)}
+.xi .pw{grid-area:what}
+.xi .pm{grid-area:meta}
+.xn{font-variant-numeric:tabular-nums}
+.xp.nopred{color:var(--warn,#a15c00);font-weight:600}
 .hist{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin-top:8px;font-size:var(--fs-meta);
 font-variant-numeric:tabular-nums}
 .hl{margin-right:4px}
