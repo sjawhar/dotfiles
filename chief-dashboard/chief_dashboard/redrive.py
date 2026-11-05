@@ -281,7 +281,7 @@ class Driver:
     def candidates(self, w: Wait, data: dict, project: str) -> list[tuple[str, str, str]]:
         """(session id, name, why it is the executor), in the order the rule gives: the session that opened the ask,
         the issue's claim holder, the lead of the stream the issue belongs to, and last the lead of the project's
-        own stream. A claim a person holds is left out: executors are agent sessions."""
+        own stream when the project has exactly one. A claim a person holds is left out: executors are agent sessions."""
         out: list[tuple[str, str, str]] = []
         live, meta = data["live"], data["meta"]
         name = lambda a: a.get("origin", {}).get("session_title") or live.get(a["id"]) or a["id"][:8]  # noqa: E731
@@ -303,9 +303,15 @@ class Driver:
                 break
             k = (meta.get(k) or {}).get("parent")
         legion = self.legion(w, data, out)
-        for sid, title, key in self.project_leads(data, project):
-            if legion and not title.startswith(LEGION_CONTROLLER):
-                continue  # a parked Legion tree is woken by its controller, not by another stream's lead
+        leads = self.project_leads(data, project)
+        if legion:
+            leads = [x for x in leads if x[1].startswith(LEGION_CONTROLLER)]
+        # The project fallback names an executor only when the project has ONE stream lead. With several it would be
+        # a guess: sorted by key, every unowned INFRA row went to the Rocq speed lead (INFRA-167) ahead of the INFRA
+        # lead (INFRA-203), Sami's "@sre" request on INFRA-759 among them (2026-11-05). Such a row is NO-EXECUTOR and
+        # its owner is asked instead (Sami, 18:05Z: "A script is not a substitute for just fucking asking").
+        if len(leads) == 1:
+            sid, title, key = leads[0]
             add(sid, title, f"you lead {project}'s stream {key} and nothing nearer the issue can take this")
         return out
 
