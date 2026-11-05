@@ -40,11 +40,26 @@ def cpu(value: str | None) -> float:
 
 
 def mem_gib(value: str | None) -> float:
-    """A Kubernetes memory quantity in GiB."""
+    """A Kubernetes memory quantity in GiB.
+
+    Every suffix Kubernetes writes, in the case it writes it. The decimal prefix for 1000 is a
+    LOWER-CASE `k` (`k`, `M`, `G`, `T`, `P`, `E`), and an upper-case `K` is not a Kubernetes
+    suffix at all. The first table had `K` and no `k`, so a node reporting `27374080k` of
+    ephemeral storage fell through to `float("27374080k")` and raised, which took the whole farm
+    half of the 16:00Z tick's node-packing row out: `cluster-packing` exited 1 with
+    `could not convert string to float: '27374080k'` and printed only the grade cluster. It had
+    parsed the same cluster at 14:09Z, so a node that joined inside that window was the first to
+    use the form. Binary suffixes are tried first, so `Ki` never matches as `k` + `i`.
+    """
     if not value:
         return 0.0
     units = {"Ki": 1 / 1024**2, "Mi": 1 / 1024, "Gi": 1.0, "Ti": 1024.0,
-             "K": 1e3 / 1024**3, "M": 1e6 / 1024**3, "G": 1e9 / 1024**3, "T": 1e12 / 1024**3}
+             "Pi": 1024.0**2, "Ei": 1024.0**3,
+             "k": 1e3 / 1024**3, "M": 1e6 / 1024**3, "G": 1e9 / 1024**3, "T": 1e12 / 1024**3,
+             "P": 1e15 / 1024**3, "E": 1e18 / 1024**3,
+             # Not a Kubernetes suffix; kept because other tools emit it and reading it as 1000
+             # is better than raising.
+             "K": 1e3 / 1024**3}
     for suffix, factor in units.items():
         if value.endswith(suffix):
             return float(value[: -len(suffix)]) * factor
