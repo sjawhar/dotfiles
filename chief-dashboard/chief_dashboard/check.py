@@ -220,6 +220,12 @@ def report(b: dict, now: datetime) -> tuple[list[str], list[str]]:
     lines += plan_warnings(b.get("today"), "today") + plan_warnings(b.get("week"), "week")
     if b.get("week") is None:
         lines.append("Warning: no `week` list; the page shows 'No plan' under This week's plan.")
+    for i, x in enumerate(b.get("experiments") or []):
+        if isinstance(x, dict) and not str(x.get("owner") or "").strip():
+            lines.append(
+                f"Warning: experiments[{i}] ({x.get('id')!r}) names no `owner`; an experiment with no owner gets no "
+                "prediction and no before-value. Give a session id or a role."
+            )
     for n in b.get("numbers") or []:
         if not isinstance(n, dict):
             continue
