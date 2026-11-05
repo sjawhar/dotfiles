@@ -118,6 +118,17 @@ PATH="$shims"
 for dir in "${dirs[@]}"; do PATH+=":$dir"; done
 export PATH
 
+# Envoy's machine identity. pi-envoy uses ENVOY_MACHINE_ID, else the kernel's hostname, which on
+# a Google VM is the FQDN. Nothing set it for a session outside an agent box, so an unboxed
+# session registered as `sami-devbox.us-west4-a.c.theorem-agent-infra.internal` while every boxed
+# session on the same machine registered as `sami-devbox` (scripts/agentbox sets it from
+# AGENTBOX_HOST): one machine appeared as two, and anything scoped to a machine -- a broadcast,
+# a role check, a census -- saw one group of them. A box's value, and any a caller chose, stay.
+if [[ -z "${ENVOY_MACHINE_ID:-}" ]]; then
+    envoy_machine="${AGENTBOX_HOST:-$(hostname -s)}"
+    export ENVOY_MACHINE_ID="${envoy_machine%%.*}"
+fi
+
 # A directory a caller chose is kept, unless it is the user's own default, which holds his login.
 user_gh_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
 if [[ -z "${GH_CONFIG_DIR:-}" || "${GH_CONFIG_DIR%/}" == "$user_gh_cfg" ]]; then
