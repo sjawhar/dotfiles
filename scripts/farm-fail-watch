@@ -215,6 +215,14 @@ def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
         # died between two samples, as farm/20261104t210028z-2d717d did (23 s of life).
         "largest_process_bytes": number(
             result.get("largest_process_bytes") or result.get("max_rss_bytes")),
+        # How many processes the sampler saw at the peak. Named in the serialise advice,
+        # because "the largest process held 21 of 48 GiB" invites the reader to look for the
+        # missing 27 GiB somewhere exotic -- files on a memory-backed filesystem, say -- when
+        # the ordinary answer is the other seven workers. On 2026-11-05 the box-health lead
+        # read exactly that gap as files and told a lane so; the pod ran eight workers under
+        # one parent and the measurement inside it showed file and shmem both 0.
+        "process_count": number(
+            result.get("process_count") or result.get("sampled_process_count")),
         # The last sample's cores, the stand-in for the per-process test when the log has
         # no per-process memory in it (CURL, 2026-11-04 21:25Z).
         "cpu_last_cores": number(result.get("cpu_last_cores")),
@@ -294,11 +302,18 @@ def memory_advice(found: dict) -> str:
     sized = (f"--memory {whole_gib(MARGIN * peak)} (1.3 x the {gib(peak)} peak)"
              if peak is not None else None)
 
+    count = found.get("process_count")
     if largest is not None and limit:
         if largest < SERIALISE_SHARE * limit:
+            # Name the count and the arithmetic. A reader given only the largest process looks
+            # for the rest of the limit somewhere else and can reach for an exotic answer;
+            # given "8 processes, the largest 21 GiB", the rest is obviously the other seven.
+            many = (f" The sampler saw {int(count)} processes, so the rest of the"
+                    f" {gib(limit)} is the other {int(count) - 1}, not memory held somewhere"
+                    " the samples do not show." if count and count > 1 else "")
             return (f"SERIALISE: the largest single process held {gib(largest)}, under half the"
                     f" {gib(limit)} limit, so the job ran too many at once and a bigger pod buys"
-                    " nothing. Run the steps one at a time (fewer jobs, -j1).")
+                    f" nothing.{many} Run the steps one at a time (fewer jobs, -j1).")
         return (f"RAISE MEMORY to {sized}."
                 if sized else "RAISE MEMORY: no memory peak was recorded, so resubmit once"
                 " with the sampler's record kept and size from that peak at 1.3 x.")
@@ -484,10 +499,14 @@ def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
 
 
 def send(owner: str, text: str) -> bool:
-    """One Envoy message to the lane that owns the job."""
+    """One Envoy message to the lane that owns the job, its body on stdin.
+
+    `envoy send` refuses a body given as a command-line word in an agent session: the shell
+    expands backticks and $(...) in such a word before envoy sees it.
+    """
     here = os.path.dirname(os.path.abspath(__file__))
-    done = subprocess.run([os.path.join(here, "envoy"), "send", owner, text],
-                          capture_output=True, text=True, timeout=60)
+    done = subprocess.run([os.path.join(here, "envoy"), "send", "--message-file", "-", owner],
+                          input=text, capture_output=True, text=True, timeout=60)
     if done.returncode != 0:
         print(f"farm-fail-watch: envoy send to {owner} failed: {done.stderr.strip()}", file=sys.stderr)
     return done.returncode == 0

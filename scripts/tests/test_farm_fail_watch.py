@@ -341,5 +341,51 @@ class TheUnits(unittest.TestCase):
                          "spirv-tools/spvtools_binary_parser_fuzzer")
 
 
+class TheSerialiseAdviceNamesHowManyProcesses(unittest.TestCase):
+    """A reader given only the largest process looks for the rest of the limit elsewhere.
+
+    On 2026-11-05 two grade pods were OOM-killed at 48 GiB with the killed task holding 22.0
+    and 20.6 GiB. The box-health lead read the ~26 GiB difference as files on a memory-backed
+    filesystem and told the lane so. It was not: each pod ran eight workers under one parent,
+    and the measurement inside the live pods gave memory.stat `file` 0 and `shmem` 0, with the
+    summed process RSS matching `memory.current` within 0.1%. The advice now names the count,
+    so the ordinary explanation is in the message rather than left to the reader.
+    """
+
+    GIB = 1024 ** 3
+
+    def advice(self, **found: object) -> str:
+        return WATCH.memory_advice(found)
+
+    def test_it_names_the_count_and_what_holds_the_rest(self) -> None:
+        text = self.advice(largest_process_bytes=22 * self.GIB,
+                           memory_limit_bytes=48 * self.GIB,
+                           memory_peak_bytes=47 * self.GIB, process_count=8)
+        self.assertIn("SERIALISE", text)
+        self.assertIn("8 processes", text)
+        self.assertIn("the other 7", text)
+
+    def test_without_a_count_it_says_no_more_than_it_knows(self) -> None:
+        text = self.advice(largest_process_bytes=22 * self.GIB,
+                           memory_limit_bytes=48 * self.GIB, memory_peak_bytes=47 * self.GIB)
+        self.assertIn("SERIALISE", text)
+        self.assertNotIn("processes, so the rest", text)
+
+    def test_one_process_adds_no_claim_about_others(self) -> None:
+        """A single sampled process cannot explain a gap, so the sentence stays out."""
+        text = self.advice(largest_process_bytes=22 * self.GIB,
+                           memory_limit_bytes=48 * self.GIB,
+                           memory_peak_bytes=47 * self.GIB, process_count=1)
+        self.assertIn("SERIALISE", text)
+        self.assertNotIn("the other 0", text)
+
+    def test_one_oversized_process_is_still_a_bigger_pod(self) -> None:
+        text = self.advice(largest_process_bytes=44 * self.GIB,
+                           memory_limit_bytes=48 * self.GIB,
+                           memory_peak_bytes=47 * self.GIB, process_count=1)
+        self.assertIn("RAISE MEMORY", text)
+        self.assertIn("62Gi", text)
+
+
 if __name__ == "__main__":
     unittest.main()
