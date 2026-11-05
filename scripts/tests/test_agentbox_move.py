@@ -1971,7 +1971,10 @@ class AgentboxMove(unittest.TestCase):
     def clone_fixture(self) -> tuple[Path, Path, Path]:
         """A checkout with an origin, and a `target` whose paths are the same ones under another
         root: move_remote is replaced in the test shell by one that maps the first root onto the
-        second and runs the script here, since the stub's target machine is this one."""
+        second and runs the script here, since the stub's target machine is this one. gh calls the
+        origin's repository private, so the clone gets no leak-check hook (test_agentbox_leak_hook.py
+        tests that rule) and no GitHub lookup leaves the machine."""
+        write_stub(self.stubs, "gh", "echo private")
         origin = self.root / "origin.git"
         subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
         repo = self.checkout("cloneme")

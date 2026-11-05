@@ -9,23 +9,20 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from test_jj_push_leak_gate import JjPushLeakGateTest, ROCQ, PRIVATE
+import test_jj_push_leak_gate as gate
+from test_jj_push_leak_gate import ROCQ, PRIVATE
 from test_jj_lock_shim import real_jj, run_bounded
 
 
-class DirectPushGateTest(JjPushLeakGateTest):
-    # Do not inherit the git shim's separate regression cases.
+class DirectPushGateTest(gate.JjPushLeakGateTest):
+    # Only the cases below run here; the git shim's own cases, which this class inherits with its fixture, are blanked
+    # after the class, so no test loader runs them through shims/jj (whose refusal is not the git shim's).
     def setUp(self):
         self.jj_binary = "jj"
         super().setUp()
         # The old gate does not see this executable: it must be protected at jj entry.
         self.git("config", "core.hooksPath", "/dev/null")
         self.push_config = ("--config", 'git.executable-path="/usr/bin/git"')
-        config = self.home / ".config" / "gh-agent"
-        config.mkdir(parents=True)
-        (config / "hosts.yml").touch()
-        (config / "config.yml").touch()
-        self.env.update(DOTFILES_DIR=str(Path(__file__).parents[2]), GH_READ_CACHE="0", KNIVES_GH_BYPASS="1", GH_TOKEN="fixture-not-a-secret")
 
     def push(self, *args, cwd=None):
         self.keep_cache_fresh()
@@ -146,7 +143,7 @@ class DirectPushGateTest(JjPushLeakGateTest):
         self.assertEqual((through.returncode, through.stdout, through.stderr), (direct.returncode, direct.stdout, direct.stderr))
 
     def test_unresolved_ssh_target_is_not_treated_as_non_github(self):
-        ssh = self.fake / "ssh"
+        ssh = self.ghdir / "ssh"  # the ssh first on PATH, in place of the base class's SSH_CONFIG one
         ssh.write_text('#!/bin/bash\nexit 1\n')
         ssh.chmod(0o755)
         helper = Path(__file__).parents[2] / "scripts" / "github-repo-visibility"
@@ -241,9 +238,15 @@ class DirectPushGateTest(JjPushLeakGateTest):
             self.assertEqual(self.received(commit), [])
 
 
-# Keep these cases separate from the git shim's regression suite.
-def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(DirectPushGateTest(name) for name in DirectPushGateTest.__dict__ if name.startswith("test_"))
+# The git shim's cases belong to test_jj_push_leak_gate alone. Run through this class, every jj push goes through
+# shims/jj, which refuses at jj's entry, so their assertions on the git shim's own lines fail. A test loader that
+# ignores load_tests (pytest), or a test named on the command line, used to run them here; a name that is not callable
+# is no test to unittest's loader or pytest's. The base class is imported as a module attribute, so it is collected
+# only from its own module.
+for _name in dir(gate.JjPushLeakGateTest):
+    if _name.startswith("test_") and _name not in DirectPushGateTest.__dict__:
+        setattr(DirectPushGateTest, _name, None)
+del _name
 
 
 if __name__ == "__main__":

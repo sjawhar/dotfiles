@@ -61,7 +61,9 @@ the dirty-lock anomaly that stopped the follower after a marketplace install on 
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
    (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
    pre-push hook in each checkout of a public repository under the sweep's roots that lacks one
-   (dispatch://INFRA-993, dispatch://BET-589). The script loops for ever, so its code up to the
+   (dispatch://INFRA-993, dispatch://BET-589). A checkout it could not hook, or one it deferred to
+   a later pass because the pass had spent its GitHub visibility lookups (dispatch://BET-706), is a
+   condition; a deferral clears when a pass defers none. The script loops for ever, so its code up to the
    loop is loaded and `sweep` runs once. The pass is bounded by `--sweep-timeout` (120 s; a full
    pass on sami-devbox, /mnt/nvme/sami included, took 21 s on 2026-11-03), and its whole process
    group is killed past it.

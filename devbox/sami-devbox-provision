@@ -276,9 +276,13 @@ step_leakcheck() {
 
 # The pre-push hook (step prepush). sweep-hooks.sh loops for ever; its code up to that loop
 # (`i=0`) is one pass, `sweep ROOTS...`, run here once with the script's own roots. A box clone
-# (agentbox new) copies its template's hooks, and the templates are under the slow root.
+# (agentbox new) copies its template's hooks, and the templates are under the slow root. The pass
+# is complete only with no FAILED and no DEFERRED checkout: the sweep of dispatch://BET-706 leaves a
+# checkout past its cap on GitHub visibility lookups for a later pass (`DEFERRED <path>`, and
+# `<D> deferred` in the summary), and such a checkout is not known to have the hook. The answers a
+# pass read are kept in the hooks directory, so running the step again reaches the deferred ones.
 step_prepush() {
-    local files=(install-prepush-hook.sh sweep-hooks.sh) f stage out
+    local files=(install-prepush-hook.sh sweep-hooks.sh) f stage out rc=0
     stage="$(mktemp -d)"
     # shellcheck disable=SC2064
     trap "rm -rf '$stage'" RETURN
@@ -301,9 +305,13 @@ step_prepush() {
             here=$d; log=$d/provision-sweep.log
             sweep \"\${fast_roots[@]}\" \"\${slow_roots[@]}\""
         cat "$d/provision-sweep.log"
-        tail -n 1 "$d/provision-sweep.log" | grep -q ", 0 failed$"' 2>&1)" \
-        || { echo "$out"; die "the pre-push hook install on $VM failed"; }
+        last="$(tail -n 1 "$d/provision-sweep.log")"
+        case "$last" in *", 0 failed") ;; *) exit 1 ;; esac
+        if grep -q " DEFERRED " "$d/provision-sweep.log" || [[ "$last" =~ ,\ [1-9][0-9]*\ deferred, ]]; then exit 3; fi' 2>&1)" \
+        || rc=$?
     echo "$out"
+    (( rc != 3 )) || die "the sweep on $VM deferred checkouts to a later pass (its cap on GitHub visibility lookups per pass), so not every checkout of a public repository is known to have the pre-push hook; run step prepush again: the answers this pass read are kept"
+    (( rc == 0 )) || die "the pre-push hook install on $VM failed"
     say "$VM: every checkout of a public repository has the pre-push hook"
 }
 

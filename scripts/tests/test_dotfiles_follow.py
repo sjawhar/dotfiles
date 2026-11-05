@@ -70,6 +70,13 @@ sweep() {
       echo "2026-11-03T00:00:00Z sweep [$*]: 3 checkouts of the four public repos, 1 installed, 0 failed" >> "$log" ;;
     failed) echo "2026-11-03T00:00:00Z FAILED /src/broken" >> "$log"
       echo "2026-11-03T00:00:00Z sweep [$*]: 3 checkouts of the four public repos, 0 installed, 1 failed" >> "$log" ;;
+    # The sweep of dispatch://BET-706: at most 40 GitHub visibility lookups a pass; a checkout past that is
+    # DEFERRED to a later pass and counted in the summary, and is not known to have the hook.
+    complete) echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 0 deferred, 40 installed, 0 failed" >> "$log" ;;
+    deferred) echo "2026-11-03T00:00:00Z INSTALLED /src/one" >> "$log"
+      echo "2026-11-03T00:00:00Z DEFERRED /src/later" >> "$log"
+      echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 1 deferred, 40 installed, 0 failed" >> "$log" ;;
+    deferred_count) echo "2026-11-03T00:00:00Z sweep [$*]: 41 checkouts hooked or public or unreadable, 2 deferred, 39 installed, 0 failed" >> "$log" ;;
     hang) sleep 60 ;;
   esac
 }
@@ -425,6 +432,30 @@ class PrePushHooks(Harness):
         self.assertEqual(len(messages), 1)
         self.assertIn("sweep-hooks.sh is missing", messages[0])
         self.assertIn("--only prepush", messages[0])
+
+    def test_a_pass_with_zero_deferred_is_complete(self) -> None:
+        os.environ["FAKE_SWEEP"] = "complete"
+        self.assertEqual(self.run_follow(), [])
+        self.assertEqual(self.state_data()["last_outcome"], "ok")
+
+    def test_a_deferred_checkout_is_incomplete_coverage_and_clears(self) -> None:
+        # dispatch://BET-706, the sweep review's finding 1: a pass that deferred a checkout reported success.
+        os.environ["FAKE_SWEEP"] = "deferred"
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED", messages[0])
+        self.assertIn("deferred 1", messages[0])
+        self.assertIn("/src/later", messages[0])
+        os.environ["FAKE_SWEEP"] = "complete"
+        cleared = self.run_follow(now=1_000_600.0)
+        self.assertEqual(len(cleared), 1)
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED cleared", cleared[0])
+
+    def test_a_deferred_count_without_its_lines_is_incomplete_coverage(self) -> None:
+        os.environ["FAKE_SWEEP"] = "deferred_count"
+        messages = self.run_follow()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("deferred 2", messages[0])
 
 
 class TargetBytes(Harness):

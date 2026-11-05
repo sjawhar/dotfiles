@@ -189,32 +189,34 @@ before handing the call to the real one.
   else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
   It also gives a `git push` that jj runs the pre-push leak check that a git push from the same
   checkout gets. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once
-  per remote, so no hook runs for it. When the process that ran git is jj and a line of the
-  checkout's `git remote -v` passes the hook sweeper's `git remote -v` test (`sweep-hooks.sh`
-  beside the check: `(theorem-labs/(<names>)|<others>)(\.git)?/?[[:space:]]`, letter case
-  ignored, for the sweeper's six repositories, every `<name>` whose
-  `~/.cache/public-leak-check/theorem-labs_<name>` holds exactly `public`, and its `others`,
-  sjawhar/dotfiles), the shim drops `--no-verify` and adds a last
-  `-c core.hooksPath=jj-push-hooks/`. The sweeper also skips a checkout whose config file names
-  none of these as written; the shim does not, so it can check a push the sweeper left without a
-  hook. Its `pre-push` makes the installed hook's call, `<check> <remote> <url>`, with the URL
+  per remote, so no hook runs for it. When the process that ran git is jj and the checkout is
+  guarded, the shim drops `--no-verify` and adds a last `-c core.hooksPath=jj-push-hooks/`. A
+  checkout is guarded when some URL its `git remote -v` prints (read whole after the tab: a push
+  line without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial
+  clone's filter, which may hold anything, follows that) is a
+  GitHub repository that is public or whose visibility cannot be read, or has a host part that
+  cannot be parsed, as `scripts/github-repo-visibility` reads it: a leading `<transport>::` and
+  `git+` stripped, github.com, www.github.com or ssh.github.com (one trailing dot allowed)
+  directly or through an ssh alias (`ssh -G [-p PORT]` with the URL's user; an alias is unknown
+  when git would run its own ssh command: the checkout's `core.sshCommand`, `GIT_SSH_COMMAND` or
+  `GIT_SSH`), the leak check's fresh cache entry, then gh. A private or internal repository,
+  a local path and another host are not GUARD (dispatch://BET-706). The hook sweep
+  (`sweep-hooks.sh`, beside the check) installs the hook by the same rule with its own reader.
+  `jj-push-hooks/pre-push` makes the installed hook's call, `<check> <remote> <url>`, with the URL
   git is pushing to and the update lines git is about to send; the check, found the way the hook
   finds it, alone decides, for every target. Every other hook name there links to
   `jj-push-hooks/hook`, which takes the shim's `-c` back out of `GIT_CONFIG_PARAMETERS` and runs
   the hook git would have run without it, so the override changes only which pre-push runs.
-  Where the answer depends on the cache and the cache cannot give it, the push is refused unread:
-  the cache counts as absent only when `stat` says it does not exist (ENOENT); a directory on the
-  way, or a symlink's target, that cannot be searched, a cache that cannot be read, or a deciding
-  entry that is empty, unreadable, not a regular file or holds another word refuses. Each refusal
-  line starts with `error: `, and the shim leaves out the one "failed to push some refs" line git
-  writes right after the gate's refusal, so jj shows the commit and the matched text even under
-  `--quiet`; another destination's failure keeps its line. Not seen, as `git push --no-verify` is
-  not: a jj told to run another git (`git.executable-path`) or copied under another name, a
-  checkout of a public repository outside the six that has no cache entry (a machine or box
-  without the cache), and a remote changed between the shim's decision and git reading its
-  config. `tests/test_jj_push_leak_gate.py` is the contract; it runs the sweeper's own code, as
-  it is at that run, on the same checkouts, and fails when the sweeper's `git remote -v` test
-  and the shim's differ.
+  Unknown counts as public: a cache that cannot be reached or read, an entry that is empty or
+  holds another word, gh that fails or gives no answer within 5 s, guards the checkout, and the
+  check then refuses a push to a theorem-labs repository whose visibility it cannot read either.
+  Each refusal line starts with `error: `, and the shim leaves out the one "failed to push some
+  refs" line git writes right after the gate's refusal, so jj shows the commit and the matched
+  text even under `--quiet`; another destination's failure keeps its line. Not seen, as `git push
+  --no-verify` is not: a jj told to run another git (`git.executable-path`) or copied under
+  another name, and a remote changed between the shim's decision and git reading its config.
+  `tests/test_jj_push_leak_gate.py` is the contract; when the sweep is beside the check it runs
+  the sweep's own code on the same checkouts, and fails when its decision and the shim's differ.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named

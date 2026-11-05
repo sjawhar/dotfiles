@@ -1876,6 +1876,141 @@ finish_knives_claims() {
     done < <(jq -r --arg s "$sid" '.. | objects | select(.owner? == $s) | "\(.repo)\t\(.branch)"' "$state")
 }
 
+# urls_guarded SSHCMD URL...: true when some URL is GUARD for the leak check's pre-push hook (dispatch://BET-706,
+# the rule shims/git's jj push gate and the hook sweep use): a GitHub repository that is public or whose visibility
+# cannot be read, or a URL whose host part cannot be parsed. A private or internal repository, a local path and
+# another host are not. A helper that exits other than 0 is unknown, whatever it printed (spec R4). SSHCMD, the
+# deciding checkout's effective core.sshCommand (empty when none), goes to the helper as GIT_SSH_COMMAND, as shims/git
+# gives it: an ssh alias is unknown where git would run an ssh command of its own, which may resolve it otherwise
+# than ssh -G.
+urls_guarded() {
+    local sshcmd="$1" u v
+    shift
+    for u in "$@"; do
+        v="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$DOTFILES_DIR/scripts/github-repo-visibility" "$u" 2>/dev/null)" || v=unknown
+        case "$v" in private | internal | not-github) ;; *) return 0 ;; esac
+    done
+    return 1
+}
+
+# origin_guarded CHECKOUT URL...: urls_guarded with CHECKOUT's effective core.sshCommand. A new template is cloned from
+# its source's origin and has no other remote, so that URL alone decides for it, with the source checkout's ssh
+# command; an existing template and a moved tree are decided by every URL of every remote (remote_urls_guarded).
+origin_guarded() {
+    local co="$1" sshcmd
+    shift
+    sshcmd="$(git -C "$co" config --get core.sshCommand 2>/dev/null)" || sshcmd=""
+    urls_guarded "$sshcmd" "$@"
+}
+
+# has_prepush_hook CHECKOUT: true when the pre-push hook git runs in CHECKOUT is the leak check's wrapper and git can
+# run it (executable: git skips a hook it cannot run, and a box clone copies the template's hook with its mode). The
+# hook is named as the installer names it, the hooks directory (`--git-path hooks`) plus /pre-push: with
+# --path-format=absolute, `--git-path hooks/pre-push` resolves a symlinked pre-push to its target's path.
+has_prepush_hook() {
+    local hooks
+    hooks="$(git -C "$1" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)" || return 1
+    [[ -x "$hooks/pre-push" ]] && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$hooks/pre-push"
+}
+
+# prepush_saved_is_committed TOP REL SAVED: true when SAVED is, as git keeps a file, what the index of the work tree
+# TOP holds at REL: a symlink whose link text is the indexed symlink's, byte for byte (the link is never followed),
+# or a regular file, not a symlink, byte for byte the indexed file. Each read ends with a sentinel `x` inside its
+# command substitution, so trailing newlines in a link's text count (`impl` and `impl<newline>` differ), and a read
+# that fails is never equality. The leak check's installer keeps an existing hook as pre-push.local by renaming it,
+# link or file, so a saved hook that passes is the committed hook as a checkout writes it; any other is someone's, a
+# symlink above all, whose target its owner may change later. Written for the target's bash too, since
+# MOVE_TO_HOOK_SH carries it to a move's target.
+prepush_saved_is_committed() {
+    local entry saved committed
+    entry="$(git -C "$1" ls-files -s -- "$2" 2>/dev/null)" || return 1
+    case "${entry%% *}" in
+        120000)
+            [ -L "$3" ] || return 1
+            saved="$(readlink -n -- "$3" && printf x)" || return 1
+            committed="$(git -C "$1" cat-file blob ":$2" 2>/dev/null && printf x)" || return 1
+            [ "$saved" = "$committed" ]
+            ;;
+        100644 | 100755) [ -f "$3" ] && [ ! -L "$3" ] && git -C "$1" cat-file blob ":$2" 2>/dev/null | cmp -s - "$3" ;;
+        *) return 1 ;;
+    esac
+}
+
+# untrack_prepush_install CHECKOUT: when CHECKOUT's pre-push hook is a file the repository tracks (core.hooksPath
+# inside the work tree, such as `.hooks`) and the installer put the wrapper there, keeping the tracked hook as
+# pre-push.local, puts the tracked hook back, so a forced checkout finds that file as committed and the installer can
+# run again after it (it refuses a directory holding both pre-push and pre-push.local). Only when pre-push.local is
+# the committed hook as git keeps it (prepush_saved_is_committed: a tracked symlink as that same symlink, a tracked
+# file as a regular file with its bytes) is it moved back, a symlink as the link itself: anything else is someone's
+# edit, the only copy of it, which a forced checkout over the tracked file would destroy, so it refuses (1), every
+# file left as it was.
+untrack_prepush_install() {
+    local hook top rel
+    hook="$(git -C "$1" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)/pre-push" || return 0
+    top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 0
+    [[ "$hook" == "$top"/* ]] && [[ -e "${hook}.local" || -L "${hook}.local" ]] && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$hook" || return 0
+    rel="${hook#"$top"/}"
+    git -C "$top" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || return 0
+    if prepush_saved_is_committed "$top" "$rel" "${hook}.local"; then
+        mv -fT -- "${hook}.local" "$hook"
+        return 0
+    fi
+    echo "agentbox: ${hook}.local differs from the committed $rel the leak check's installer saved it from: it is someone's edit, and refreshing the template $1 would overwrite it, so nothing was changed. Move that file somewhere safe (or make it match the committed hook), then launch again." >&2
+    return 1
+}
+
+# prepush_install_preflight CHECKOUT: true when the leak check's installer can run on CHECKOUT without replacing an
+# owner's symlink, else prints why and returns 1, every file left as it is. The installer (agent-infra
+# install-prepush-hook.sh) tests both hook files with `[ -e ]`, which follows a link, so it does not see a dangling
+# one: it renames pre-push over a pre-push.local that is a symlink to nothing, and writes the wrapper over a pre-push
+# that is one. Every installer call in this script runs this first (refresh_template, clone_checkout, and the move's
+# ensure_hook through MOVE_TO_HOOK_SH, which carries it to the target).
+prepush_install_preflight() {
+    local d
+    d="$(git -C "$1" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)" || return 0
+    if [ -L "$d/pre-push" ] && [ ! -e "$d/pre-push" ]; then
+        echo "pre-push hook install: $d/pre-push is a symlink to nothing, which the leak check's installer would replace with its wrapper; resolve by hand"
+        return 1
+    fi
+    if [ -L "$d/pre-push.local" ] && [ ! -e "$d/pre-push.local" ] && [ -e "$d/pre-push" ] \
+        && ! grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$d/pre-push"; then
+        echo "pre-push hook install: $d/pre-push.local is a symlink to nothing, which the leak check's installer would replace with $d/pre-push; resolve by hand"
+        return 1
+    fi
+}
+
+# remote_urls GIT-OPTION...: every URL any remote of the repository those git global options name (-C CHECKOUT,
+# --git-dir=DIR) fetches from or pushes to, once each, with insteadOf and pushInsteadOf applied (`git remote get-url
+# --all` and `--push --all` per remote; `git remote -v` adds a partial clone's filter, ` [blob:none]`, after the URL).
+# A remote's name goes after `--`, since git allows one that begins with `-`. Returns 1 when git cannot list them
+# all, which the callers count as unknown, so GUARD (spec R4). MOVE_TO_URLS_SH carries it to a move's target.
+remote_urls() {
+    local r url names fetch push
+    local -A seen=()
+    names="$(git "$@" remote 2>/dev/null)" || return 1
+    while IFS= read -r r; do
+        [[ -n "$r" ]] || continue
+        fetch="$(git "$@" remote get-url --all -- "$r" 2>/dev/null)" \
+            && push="$(git "$@" remote get-url --push --all -- "$r" 2>/dev/null)" || return 1
+        while IFS= read -r url; do
+            [[ -n "$url" && -z "${seen[$url]:-}" ]] || continue
+            seen[$url]=1
+            printf '%s\n' "$url"
+        done <<<"$fetch"$'\n'"$push"
+    done <<<"$names"
+}
+
+# remote_urls_guarded CHECKOUT: true when some URL of CHECKOUT's remotes (remote_urls) is GUARD (origin_guarded, with
+# CHECKOUT's own core.sshCommand), or when they cannot all be read. For a checkout on this machine whose .git goes
+# whole where it is used: an existing template, which every box clone copies, and a move's source tree.
+remote_urls_guarded() {
+    local listing urls=()
+    listing="$(remote_urls -C "$1")" || return 0
+    [[ -n "$listing" ]] || return 1
+    mapfile -t urls <<<"$listing"
+    origin_guarded "$1" "${urls[@]}"
+}
+
 # The template of one repo, at the remote's current default branch: made on first use as a clone
 # without old file contents (git fetches a file's contents from GitHub the first time something
 # reads them), with the repo's sparse patterns (CLONE_SPARSE) set before the first checkout so the
@@ -1883,28 +2018,42 @@ finish_knives_claims() {
 # maintenance is off: with it on, every on-demand fetch starts a background repack, and adding 1,040
 # small files to a test clone took over 900 s, a repack notice after each file's fetch; with it off,
 # adding a 94-file task took 1.4 s. Callers hold the repo's template lock and run this under `||`,
-# where set -e does not apply, so every step checks its own status.
+# where set -e does not apply, so every step checks its own status. TEMPLATE_HOOK is set to 1 when the
+# template, and so every box clone of it, must have the leak check's pre-push hook, else 0.
+TEMPLATE_HOOK=0
 refresh_template() {
-    local repo="$1" tpl="$CLONE_TEMPLATES/$1" url upstream pats=() src_common installer=""
+    local repo="$1" tpl="$CLONE_TEMPLATES/$1" url="" upstream pats=() installer=""
+    TEMPLATE_HOOK=0
+    # `agentbox new` copies the template's .git/hooks into every box clone, so a template without the
+    # public-text leak-check pre-push hook gives each box a clone that pushes unchecked. A template
+    # whose origin is GUARD (origin_guarded) must have the hook (dispatch://BET-706 R2): a new one,
+    # decided by the URL it is cloned from; an existing one that has the hook, which keeps it and costs
+    # no visibility lookup; an existing one that lacks it, decided by every URL of every remote it
+    # carries (remote_urls_guarded; URLs git cannot list count as GUARD), since the box clone copies its
+    # .git/config. That decision is made before the
+    # forced checkout below and holds whatever the checkout leaves: a hooks path inside the work tree
+    # can hold a tracked hook, which the checkout restores over the wrapper. So the wrapper is
+    # installed and checked after the checkout, where git runs it (a new template also gets it before
+    # it is moved into place, so a failed install leaves no hookless template for the next launch).
+    # The installer is the machine's own copy in ~/.local/share/public-leak-check-hooks, which
+    # provisioning installs on each machine (on sami-devbox, step prepush of
+    # devbox/sami-devbox-provision); there is no fallback to another copy (dispatch://BET-706 R5). It is
+    # checked before the clone.
     if [[ ! -d "$tpl/.git" ]]; then
+        # Its source checkout's core.sshCommand applies.
         url="$(git -C "$SRC/$repo" remote get-url origin)" || return 1
-        # `agentbox new` copies the template's .git/hooks into every box clone, so a NEW template
-        # without the public-text leak-check pre-push hook gives each box a clone that pushes
-        # unchecked. sami-rocqperf's sweep repairs templates within 15 min; sami-devbox has none
-        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589). The installer is the
-        # machine's own copy in ~/.local/share/public-leak-check-hooks, which provisioning installs
-        # on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision); there is
-        # no fallback to another copy (dispatch://BET-706). It is checked before the clone and run
-        # before the template is moved into place, so a launch that cannot install the hook leaves
-        # no hookless template for the next launch to copy.
-        if src_common="$(git -C "$SRC/$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-            && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then
-            installer="$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh"
-            [[ -x "$installer" ]] || {
-                echo "agentbox: no leak-check pre-push hook for the new template $tpl: $installer is missing or not executable; ~/.local/share/public-leak-check-hooks is per machine, installed by provisioning on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision); a box clone of $repo would push unchecked" >&2
-                return 1
-            }
-        fi
+        if origin_guarded "$SRC/$repo" "$url"; then TEMPLATE_HOOK=1; fi
+    elif has_prepush_hook "$tpl" || remote_urls_guarded "$tpl"; then
+        TEMPLATE_HOOK=1
+    fi
+    if ((TEMPLATE_HOOK)); then
+        installer="$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh"
+        [[ -x "$installer" ]] || {
+            echo "agentbox: no leak-check pre-push hook for the template $tpl: $installer is missing or not executable; ~/.local/share/public-leak-check-hooks is per machine, installed by provisioning on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision); a box clone of $repo would push unchecked" >&2
+            return 1
+        }
+    fi
+    if [[ ! -d "$tpl/.git" ]]; then
         rm -rf "$tpl.partial"
         detached "${APP_GIT[@]}" clone --quiet --filter=blob:none --no-checkout "$url" "$tpl.partial" >&2 || return 1
         git -C "$tpl.partial" config gc.auto 0 && git -C "$tpl.partial" config maintenance.auto false || return 1
@@ -1913,16 +2062,24 @@ refresh_template() {
             "${APP_GIT[@]}" -C "$tpl.partial" sparse-checkout set --no-cone "${pats[@]}" || return 1
         fi
         if [[ -n "$installer" ]]; then
-            "$installer" "$tpl.partial" || {
-                echo "agentbox: no leak-check pre-push hook in the new template $tpl ($installer failed); a box clone of $repo would push unchecked" >&2
+            prepush_install_preflight "$tpl.partial" >&2 && "$installer" "$tpl.partial" >&2 || {
+                echo "agentbox: no leak-check pre-push hook in the new template $tpl ($installer failed, or would replace a symlink of yours: see above); a box clone of $repo would push unchecked" >&2
                 return 1
             }
         fi
         mv "$tpl.partial" "$tpl" || return 1
+    elif ((TEMPLATE_HOOK)); then
+        untrack_prepush_install "$tpl" || return 1
     fi
     detached "${APP_GIT[@]}" -C "$tpl" fetch --quiet --prune origin >&2 || return 1
     upstream="$(git -C "$tpl" symbolic-ref --short refs/remotes/origin/HEAD)" || return 1
-    detached "${APP_GIT[@]}" -C "$tpl" checkout --quiet -f -B "${upstream#origin/}" "$upstream" >&2
+    detached "${APP_GIT[@]}" -C "$tpl" checkout --quiet -f -B "${upstream#origin/}" "$upstream" >&2 || return 1
+    if ((TEMPLATE_HOOK)) && ! has_prepush_hook "$tpl"; then
+        prepush_install_preflight "$tpl" >&2 && "$installer" "$tpl" >&2 && has_prepush_hook "$tpl" || {
+            echo "agentbox: no leak-check pre-push hook in the template $tpl ($installer failed, would replace a symlink of yours, or left none where git runs it: see above); a box clone of $repo would push unchecked" >&2
+            return 1
+        }
+    fi
 }
 
 # A template's object store into a box's clone: hard-linked on one filesystem, copied across two.
@@ -1948,22 +2105,35 @@ copy_objects() {
 # rebuilt or deleted. A fresh clone of agent-c took 64-78 s at load 200 (2026-10-02), almost all of
 # it the checkout fetching the kept files' contents; the copy took 1.4 s and its checkout 17.6 s. (A
 # local `git clone` of a clone without old file contents fails: `pack has 1 unresolved delta`.) The
-# lock keeps a launch from copying a template another launch is refreshing.
+# lock keeps a launch from copying a template another launch is refreshing. When the template must have the leak
+# check's pre-push hook (TEMPLATE_HOOK, refresh_template's decision, made before its checkout), so must the clone,
+# checked after the clone's own checkout at the path its git runs the hook from: the wrapper reaches the clone with
+# its .git, unless the effective hooks path is in the work tree (a relative core.hooksPath such as `.hooks`, which
+# the copied config keeps), whose files come from the checkout, a tracked hook among them. The clone is then hooked
+# there, and a launch that cannot do that fails rather than give the box a clone that pushes unchecked
+# (dispatch://BET-706 R2).
 clone_checkout() {
-    local repo="$1" ws="$2" tpl
+    local repo="$1" ws="$2" tpl hook=0 installer="$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh"
     tpl="$CLONE_TEMPLATES/$repo"
     mkdir -p "$CLONE_TEMPLATES" || return 1
     if ! {
         flock 9 \
             && refresh_template "$repo" \
+            && hook=$TEMPLATE_HOOK \
             && mkdir -p "$ws/.git" \
             && tar -C "$tpl/.git" --exclude=./objects --exclude=./index -cf - . | tar -C "$ws/.git" -xf - \
             && copy_objects "$tpl/.git/objects" "$ws/.git/objects"
     } 9>"$CLONE_TEMPLATES/$repo.lock"; then
-        echo "agentbox: could not copy $repo from its template $tpl; remove that directory to have the next launch rebuild it" >&2
+        echo "agentbox: could not copy $repo from its template $tpl; remove that directory to have the next launch rebuild it, once anything of yours in it is saved (see the lines above)" >&2
         return 1
     fi
-    detached git -C "$ws" checkout --quiet -f HEAD >&2
+    detached git -C "$ws" checkout --quiet -f HEAD >&2 || return 1
+    if ((hook)) && ! has_prepush_hook "$ws"; then
+        [[ -x "$installer" ]] && prepush_install_preflight "$ws" >&2 && "$installer" "$ws" >&2 && has_prepush_hook "$ws" || {
+            echo "agentbox: no leak-check pre-push hook where the box clone $ws runs it ($installer missing, failed, or would replace a symlink of yours: see above); a box clone of $repo would push unchecked" >&2
+            return 1
+        }
+    fi
 }
 
 # What a box's clone holds that its remote does not, as one line, empty when nothing: uncommitted
@@ -6795,23 +6965,158 @@ move_to_copy() {
 # other tree keeps the rsync of its storage.
 # MOVE_TO_NATIVE holds "<tree>\t<common dir>" for each tree moved this way.
 MOVE_TO_NATIVE=()
+# MOVE_TO_TREES holds every mirrored git tree of the move, and MOVE_TO_HOOKED, as keys, those that must have the leak
+# check's pre-push hook on the target (dispatch://BET-706 R2). A tree is decided by every URL of every remote it will
+# have on the target, and by its source's too where they differ: the source's (remote_urls_guarded, here) for every
+# tree, since a tree copied with rsync takes its .git with it and a fresh clone has the source's origin; and, where
+# the target has the repository already (made by this move, kept from an earlier attempt of it, or there before),
+# the target repository's own (move_to_target_guarded), since a tree that goes through git keeps the target's .git
+# and its remotes. Those are read and their hosts resolved on the target, in its own ssh configuration.
+# move_to_clone_missing decides that before the hang-up. move_to_git_native_finish, after the last copy, reads every
+# tree's remotes on the target once more, as the move left them, adds any tree they guard, and puts the wrapper where
+# git runs the hook of each tree that must have it, and checks it.
+MOVE_TO_TREES=()
+declare -gA MOVE_TO_HOOKED=()
+# slug_answer_ok ANSWER: true when ANSWER, whole, is one answer `github-repo-visibility --slug` gives: exactly
+# `not-github`, exactly `unknown`, or a canonical owner/name (the helper's own pattern), with no other line or text.
+slug_answer_ok() {
+    [[ "$1" == not-github || "$1" == unknown ]] && return 0
+    [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$ && "$1" != */. && "$1" != */.. ]]
+}
+# file_has_nul FILE: true when FILE holds a NUL byte (or cannot be read). bash drops NUL bytes from a `$(...)` capture
+# without a word, so `not-github`, NUL, newline would read as `not-github`: output that must be judged whole is written
+# to a file first, and one holding a NUL is no answer.
+file_has_nul() {
+    local all kept
+    all=$(wc -c <"$1") && kept=$(tr -d '\000' <"$1" | wc -c) || return 0
+    [ "$all" != "$kept" ]
+}
+# move_to_urls_sh: prints shell for the target defining list_urls GIT-OPTION..., which prints `R<TAB><answer>` for
+# every URL of every remote of the repository those git options name (remote_urls, carried over), the answer being
+# what this script's visibility helper, carried over too and run there, says with --slug: the repository's owner/name
+# when the URL names GitHub, else not-github or unknown. So an ssh alias is resolved by the target's ssh -G, in the
+# target's ssh configuration, and is unknown where that repository's core.sshCommand (or the target's own
+# GIT_SSH_COMMAND or GIT_SSH) is set. The helper's whole output is the answer: written to a file, holding no NUL byte
+# (file_has_nul, carried over), exactly one line, read with a sentinel so trailing newlines count, which
+# slug_answer_ok (carried over) accepts; anything else (a NUL, more lines, more text, no output, an exit other than 0)
+# is `unknown`. list_urls returns other than 0 when git cannot list the URLs.
+move_to_urls_sh() {
+    local helper
+    helper="$(<"$DOTFILES_DIR/scripts/github-repo-visibility")" || return 1
+    declare -f remote_urls slug_answer_ok file_has_nul
+    printf 'helper=%q\n' "$helper"
+    cat <<'EOF'
+list_urls() {
+    local s u url v t
+    s=$(git "$@" config --get core.sshCommand 2>/dev/null) || s=
+    u=$(remote_urls "$@") || return 1
+    [ -n "$u" ] || return 0
+    while IFS= read -r url; do
+        v=unknown
+        if t=$(mktemp); then
+            if GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$s}" bash -c "$helper" github-repo-visibility --slug "$url" </dev/null >"$t" 2>/dev/null \
+                && ! file_has_nul "$t"; then
+                v=$(cat -- "$t" && printf x) || v=
+                case "$v" in *$'\n'x) v=${v%$'\n'x} ;; *) v=unknown ;; esac
+            fi
+            rm -f -- "$t"
+        fi
+        slug_answer_ok "$v" || v=unknown
+        printf 'R\t%s\n' "$v"
+    done <<<"$u"
+}
+EOF
+}
+# move_to_target_guarded TARGET SCRIPT: SCRIPT, shell for the target ending in a list_urls call, has a repository's
+# remote URLs answered there (move_to_urls_sh); true (0) when one names GitHub and its repository is GUARD here
+# (urls_guarded: public or unreadable), when one is unknown there or is no answer slug_answer_ok accepts, when the
+# answers hold a NUL byte (file_has_nul: they are read from a file, never captured whole), or when they cannot be
+# listed (spec R4); 1 when none is; 3 when SCRIPT exits 3 (no such checkout there). Lines without the `R` tag (a login
+# shell's own output) are no answer.
+move_to_target_guarded() {
+    local script out rc=0 line v urls=() t
+    script="$(move_to_urls_sh)" || return 0
+    t="$(mktemp)" || return 0
+    move_remote "$1" "$script
+$2" </dev/null >"$t" 2>/dev/null || rc=$?
+    if ((rc == 3)); then rm -f -- "$t"; return 3; fi
+    if ((rc != 0)) || file_has_nul "$t"; then rm -f -- "$t"; return 0; fi
+    out="$(<"$t")"
+    rm -f -- "$t"
+    while IFS= read -r line; do
+        [[ "$line" == R$'\t'* ]] || continue
+        v="${line#R$'\t'}"
+        slug_answer_ok "$v" || return 0
+        [[ "$v" == not-github ]] && continue
+        [[ "$v" == unknown ]] && return 0
+        urls+=("https://github.com/$v")
+    done <<<"$out"
+    ((${#urls[@]})) || return 1
+    urls_guarded "" "${urls[@]}"
+}
+# MOVE_TO_HOOK_SH: shell for the target defining ensure_hook CHECKOUT, which leaves the leak check's wrapper,
+# executable, where git runs CHECKOUT's pre-push hook, or prints why not and returns 5. The installer is the target's
+# own copy. It keeps an existing hook as pre-push.local and refuses a directory holding both pre-push and
+# pre-push.local. One pair is removed first: in a hooks path inside the work tree, an untracked pre-push.local and the
+# tracked pre-push that are both the committed hook as git keeps it (prepush_saved_is_committed: a symlink as that
+# same link, never followed; a file as a regular file with its bytes), which is what a later copy of the work tree
+# leaves beside the hook the first install kept. The installer then keeps that hook once more, the same file or link
+# as before. Any other pair, an owner's symlink or a hooks directory outside the work tree above all, is someone's,
+# and ensure_hook refuses rather than touch it; so it does, through prepush_install_preflight, before the installer
+# could replace a symlink to nothing.
+MOVE_TO_HOOK_SH="$(declare -f prepush_saved_is_committed prepush_install_preflight)"'
+i=$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh
+hooked() { h=$(git -C "$1" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)/pre-push && [ -x "$h" ] && grep -q PUBLIC-LEAK-CHECK-WRAPPER "$h"; }
+ensure_hook() {
+    hooked "$1" && return 0
+    h=$(git -C "$1" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)/pre-push || { echo "pre-push hook install: git cannot name the hooks path of $1"; return 5; }
+    t=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || t=
+    r=${h#"$t"/}
+    if [ -n "$t" ] && [ "$r" != "$h" ] && { [ -e "$h.local" ] || [ -L "$h.local" ]; } \
+        && git -C "$t" ls-files --error-unmatch -- "$r" >/dev/null 2>&1 \
+        && ! git -C "$t" ls-files --error-unmatch -- "$r.local" >/dev/null 2>&1 \
+        && prepush_saved_is_committed "$t" "$r" "$h" && prepush_saved_is_committed "$t" "$r" "$h.local"; then rm -f "$h.local"; fi
+    prepush_install_preflight "$1" || return 5
+    [ -x "$i" ] || { echo "pre-push hook install: $i is missing or not executable"; return 5; }
+    "$i" "$1" >&2 && hooked "$1" || { echo "pre-push hook install failed: no executable wrapper at $h"; return 5; }
+}'
 # move_to_clone_missing TARGET: for each mirrored git tree whose repository the target lacks,
 # clone it from its origin ON THE TARGET, before the hang-up, so move_to_git_native_plan can push
 # into it and the object store stays out of the downtime (a full clone: the source checkouts are
 # blob:none partial clones, so a clone from this host would lack blobs). Only into a path that is
 # absent or an empty directory there - an empty root-owned one is removed as
-# move_to_dests_writable does. A clone that fails says why and leaves that tree to rsync; it
-# never refuses the move. Each clone's time and the repository's size on the target are logged.
+# move_to_dests_writable does. A clone that fails says why and leaves that tree to rsync. Each
+# clone's time and the repository's size on the target are logged. It also decides, for every mirrored git tree,
+# whether the tree must have the leak check's pre-push hook on the target (MOVE_TO_TREES and MOVE_TO_HOOKED, above). A
+# clone that must have it and cannot get it (the target's installer missing or failing, or no executable wrapper where
+# git runs the hook after it) is removed, and the move is refused (1, with MOVE_TO_WHY): neither that clone nor an rsync
+# copy of the tree would carry the hook. So is a move with any tree that must have it, to a target without the
+# installer.
 # $2 is a function that logs one line.
 move_to_clone_missing() {
-    local target="$1" log="${2:-echo}" w common dir url out
+    local target="$1" log="${2:-echo}" w common dir url out rc hook
+    MOVE_TO_TREES=() MOVE_TO_HOOKED=()
     for w in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
         [[ -d "$w" && -e "$w/.git" ]] || continue
         common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
-        [[ "$common" == */.git ]] || continue
-        dir="${common%/.git}"
-        move_remote "$target" "test -d $(printf '%q' "$common/objects")" </dev/null >/dev/null 2>&1 && continue
+        MOVE_TO_TREES+=("$w")
+        # By the source's remotes, every URL of each: a copied tree takes them with its .git, and a clone made on the
+        # target has the source's origin (dispatch://BET-706 R2), whether or not the source checkout has the hook;
+        # without it a push from a moved session skips the check (DevboxProvision.PrepushParity, dispatch://INFRA-993,
+        # BET-589).
+        if remote_urls_guarded "$w"; then MOVE_TO_HOOKED[$w]=1; fi
         url="$(git -C "$w" remote get-url origin 2>/dev/null)" || url=""
+        if move_remote "$target" "test -d $(printf '%q' "$common/objects")" </dev/null >/dev/null 2>&1; then
+            # The target has this repository: the tree goes through git into it, whoever cloned it (this move, an
+            # earlier attempt of it that failed after its clone, or someone before), and keeps the target's .git, so it
+            # is decided by the target repository's remotes too.
+            if [[ -z "${MOVE_TO_HOOKED[$w]:-}" ]] && move_to_target_guarded "$target" "list_urls --git-dir=$(printf '%q' "$common")"; then
+                MOVE_TO_HOOKED[$w]=1
+            fi
+            continue
+        fi
+        dir="${common%/.git}"
+        [[ "$common" == */.git ]] || continue
         if [[ -z "$url" ]]; then
             "$log" "$dir has no origin on $target and no origin remote here, so $w is copied with rsync"
             continue
@@ -6820,17 +7125,13 @@ move_to_clone_missing() {
             "$log" "the origin of $w is $url, which the target may not be able to clone, so it is copied with rsync"
             continue
         fi
-        # A clone made on the target gets the public-text leak-check pre-push hook when the
-        # source checkout has one; without it a push from a moved session skips the check
-        # (DevboxProvision.PrepushParity, dispatch://INFRA-993, BET-589). The installer is the
-        # target's own copy in ~/.local/share/public-leak-check-hooks, which provisioning installs
-        # on each machine, with no fallback (dispatch://BET-706); it is checked before the clone,
-        # so a target without it gets no clone at all.
-        local hook=0 src_common
-        if src_common="$(git -C "$w" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-            && grep -qs PUBLIC-LEAK-CHECK-WRAPPER "$src_common/hooks/pre-push"; then hook=1; fi
+        # A clone made on the target that must have the hook gets it at once. The installer is the target's own copy in
+        # ~/.local/share/public-leak-check-hooks, which provisioning installs on each machine, with no fallback
+        # (dispatch://BET-706 R5); it is checked before the clone, so a target without it gets no clone at all.
+        hook="${MOVE_TO_HOOKED[$w]:-0}"
         if out="$(move_remote "$target" "set -e
-d=$(printf '%q' "$dir") u=$(printf '%q' "$url") hook=$hook i=\$HOME/.local/share/public-leak-check-hooks/install-prepush-hook.sh
+$MOVE_TO_HOOK_SH
+d=$(printf '%q' "$dir") u=$(printf '%q' "$url") hook=$hook
 if [ \"\$hook\" = 1 ] && [ ! -x \"\$i\" ]; then
     echo \"\$i is missing or not executable; ~/.local/share/public-leak-check-hooks is per machine, installed by provisioning on each machine (on sami-devbox, step prepush of devbox/sami-devbox-provision)\"; exit 5
 fi
@@ -6845,14 +7146,28 @@ fi
 s=\$(date +%s)
 git clone --quiet \"\$u\" \"\$d\" 2>&1 || { echo 'git clone failed'; exit 4; }
 if [ \"\$hook\" = 1 ]; then
-    \"\$i\" \"\$d\" || { echo 'pre-push hook install failed'; exit 5; }
+    ensure_hook \"\$d\" || { rm -rf \"\$d\"; echo 'the clone is removed'; exit 5; }
 fi
 echo \"CLONED \$((\$(date +%s) - s))s \$(du -sh \"\$d/.git\" 2>/dev/null | cut -f1)\"" </dev/null 2>&1)"; then
             "$log" "cloned $url into $dir on $target (${out#CLONED }), so $w goes through git"
         else
+            rc=$?
+            if ((rc == 5)); then
+                MOVE_TO_WHY="the leak check's pre-push hook could not be put in a clone of $url at $dir on $target ($(tr '\n' ' ' <<<"$out")); neither that clone nor a copy of $w would carry it"
+                "$log" "no clone of $url into $dir on $target ($(tr '\n' ' ' <<<"$out")); refusing the move: $w would reach $target without the leak check's pre-push hook"
+                return 1
+            fi
             "$log" "no clone of $url into $dir on $target ($(tr '\n' ' ' <<<"$out")); $w is copied with rsync"
         fi
     done
+    # Every tree that must have the hook gets it after the last copy (move_to_git_native_finish), from the target's
+    # installer: a target without one refuses the move now, before the hang-up, not in the rollback after it.
+    if ((${#MOVE_TO_HOOKED[@]})) && ! out="$(move_remote "$target" "$MOVE_TO_HOOK_SH
+[ -x \"\$i\" ] || { echo \"\$i is missing or not executable\"; exit 5; }" </dev/null 2>&1)"; then
+        MOVE_TO_WHY="the leak check's pre-push hook cannot be put in $(printf '%s ' "${!MOVE_TO_HOOKED[@]}")on $target ($(tr '\n' ' ' <<<"$out"))"
+        "$log" "refusing the move: $MOVE_TO_WHY"
+        return 1
+    fi
     return 0
 }
 
@@ -7051,13 +7366,36 @@ git --git-dir=\"\$c\" update-ref -d \"\$tag\""
     return 0
 }
 
-# After the mirror: each tree's index from its HEAD, its files as the mirror left them.
+# After the mirror: each tree's index from its HEAD, its files as the mirror left them. Then every git tree of the move
+# (MOVE_TO_TREES) whose remotes, read on the target as the move left them, have a GUARD URL (or cannot be listed)
+# joins those decided before the hang-up (MOVE_TO_HOOKED), and each tree that must have the leak check's pre-push hook
+# gets the wrapper where git runs it: the mirror writes the work tree, and a hooks path inside it (a relative
+# core.hooksPath such as `.hooks`) may hold a tracked hook the mirror wrote back over the wrapper; a copied .git
+# carries the source's hooks. A tree git cannot read as a checkout of its own on the target (a tree whose .git the
+# mirror left out, an unborn one) is passed over: no push goes from it. A tree that cannot be hooked fails the move
+# (1, MOVE_TO_WHY), which rolls the group back before any session resumes on the target (dispatch://BET-706 R2).
 move_to_git_native_finish() {
-    local target="$1" n w
+    local target="$1" n w q out own
     for n in ${MOVE_TO_NATIVE[@]+"${MOVE_TO_NATIVE[@]}"}; do
         w="${n%%$'\t'*}"
         move_remote "$target" "git -C $(printf '%q' "$w") reset -q" </dev/null \
             || { MOVE_TO_WHY="git reset of $w on $target failed"; return 1; }
+    done
+    for w in ${MOVE_TO_TREES[@]+"${MOVE_TO_TREES[@]}"}; do
+        q="$(printf '%q' "$w")"
+        # Shell for the target: exits 3 unless the tree is a checkout of its own there.
+        own="t=\$(git -C $q rev-parse --show-toplevel 2>/dev/null) || exit 3
+[ \"\$(cd -P -- \"\$t\" && pwd)\" = \"\$(cd -P -- $q && pwd)\" ] || exit 3"
+        if [[ -z "${MOVE_TO_HOOKED[$w]:-}" ]]; then
+            move_to_target_guarded "$target" "$own
+list_urls -C $q" || continue
+        fi
+        out="$(move_remote "$target" "$MOVE_TO_HOOK_SH
+$own
+ensure_hook $q" </dev/null 2>&1)" && continue
+        (($? == 3)) && continue
+        MOVE_TO_WHY="the leak check's pre-push hook is not where git runs it in $w on $target after the copy ($(tr '\n' ' ' <<<"$out"))"
+        return 1
     done
     return 0
 }
@@ -8240,7 +8578,12 @@ move_to_run() {
     # Another session's transcript in this session's directory is never copied over or deleted.
     move_to_exclude_other_sessions "${sids[@]}"
     MOVE_TO_STATE="cloning on $target, before the hang-up"
-    move_to_clone_missing "$target" say
+    MOVE_TO_WHY=""
+    if ! move_to_clone_missing "$target" say; then
+        say "refused, nothing was hung up: $MOVE_TO_WHY"
+        move_refused "$MOVE_TO_WHY" "${sids[@]}"
+        return 2
+    fi
     move_to_git_native_plan "$target"
     (( ${#MOVE_TO_NATIVE[@]} )) && say "through git: $(printf '%s ' "${MOVE_TO_NATIVE[@]%%$'\t'*}")"
     MOVE_TO_STATE="pushing branches to $target, before the hang-up"

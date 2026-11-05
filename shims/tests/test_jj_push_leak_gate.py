@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """shims/git: a `git push` that jj runs gets the shared public leak check wherever git's pre-push hook would give it.
 
-jj runs git with --no-verify, so no hook runs for a jj push. In a guarded checkout shims/git drops that flag and points
+jj runs git with --no-verify, so no hook runs for a jj push. In a guarded checkout (one with a remote whose GitHub
+repository is public or of unreadable visibility, dispatch://BET-706) shims/git drops that flag and points
 core.hooksPath at shims/jj-push-hooks/, whose pre-push makes the installed hook's call to the check, with git's own URL
 and update lines. The real jj and the real git do every step here, with this shims dir ahead of every other git and jj
 on PATH. Most remotes are reached through a remote helper (`remote.<name>.vcs=sink`, `git-remote-sink` below): git
 keeps the URL as written, hands it to the hook, and the helper connects git to a local bare repository named after that
 URL. The cases that need git's own transports use a real local path, or ssh through a local-only stand-in
-(`SSH_ADAPTER`). GIT_ALLOW_PROTOCOL allows only those, and a fake gh, first on PATH (ahead of shims/gh too), answers
-nothing. So no test can reach GitHub, even when the gate wrongly lets a push through, and each sink shows exactly which
-commit reached which URL. The check is the installed one, found the way the shim and the pre-push hook find it; HOME is
-the test's own, so the visibility cache is the test's.
+(`SSH_ADAPTER`). GIT_ALLOW_PROTOCOL allows only those, and a fake gh, first on PATH (ahead of shims/gh too, which
+scripts/github-repo-visibility runs by path and which hands the call to the first gh on PATH), answers nothing. So no
+test can reach GitHub, even when the gate wrongly lets a push through, and each sink shows exactly which commit reached
+which URL. A fake ssh, also first on PATH, runs the real one with the test's own config (SSH_CONFIG), so `ssh -G`
+resolves the same aliases on every machine. The check is the installed one, found the way the shim and the pre-push
+hook find it; HOME is the test's own, so the visibility cache is the test's.
 """
 import hashlib
 import os
@@ -90,32 +93,53 @@ sink="@SSH@/$(printf '%s:%s' "$host" "$path" | sha1sum | cut -c1-16).git"
 exec @SERVER@ "${prog#git-}" "$sink"
 """.replace("@SERVER@", SERVER_SIDE)
 
-# Answers no gh call, and records each one: the check reads a repository's visibility through gh when its cache has
-# no answer, and no test may send that read to GitHub.
+# Answers no gh call, and records each one: the check, and the gate through scripts/github-repo-visibility, read a
+# repository's visibility through gh when the cache has no fresh answer, and no test may send that read to GitHub.
 FAKE_GH = '#!/bin/bash\nprintf \'%s\\n\' "$*" >> "@GHLOG@"\nexit 1\n'
 
+# ssh for `ssh -G` alias lookups: the real ssh with only the test's config, so the user's and the system's configs
+# play no part. Aliases resolving to github.com: three as the reviewer staged them (lanes/jj-gate-review-xf-2026-11-02.md,
+# B2): a plain one, an upper-case Host (ssh matches it as written), a Match on the user; and two holding # and ?
+# (the revision-2 review's R2-5).
+FAKE_SSH = '#!/bin/bash\nexec "@SSH@" -F "@CFG@" "$@"\n'
+SSH_CONFIG = ('Host alias-xf UPPERALIAS "alias#xf" "alias?xf"\n  HostName github.com\n'
+              "Match host useralias user git\n  HostName github.com\n"
+              # A config that chooses the host by the port git passes (`ssh -p PORT`): github.com only on 2222.
+              'Match host portalias exec "test %p = 2222"\n  HostName github.com\n'
+              # An alias whose HostName is the fully qualified github.com. (one trailing dot).
+              "Host dotalias\n  HostName github.com.\n")
+
 # The leak check's visibility cache as each test starts: the six theorem-labs repositories this box's cache records as
-# public (2026-11-01), one outside the hook sweeper's six that it records as public, a private one, and public
-# repositories of other owners. The check decides every target from these entries; it lower-cases a slug before it
-# reads one. The %72ocq entry is for the gate, whose rule reads the cache by the path as written: the check calls
-# theorem-labs/%72ocq no repository name and refuses a push to it unread (test_other_names_and_url_forms).
+# public (2026-11-01), another public one, a private one, and public repositories of other owners. The check and the
+# gate decide every GitHub target from these entries, each read lower-cased, and from the fake gh when an entry is
+# missing or stale. The %72ocq entry is no repository name for either: the gate guards theorem-labs/%72ocq as
+# unknown, and the check refuses a push to it unread (test_other_names_and_url_forms).
 CACHE = {
     **{f"theorem-labs_{r}": "public" for r in ("rocq", "rocq-linux-process-semantics", "oss-verify", "metarocq", "legion", "oss-verify-proofs")},
     "theorem-labs_cached-public": "public",
     "theorem-labs_%72ocq": "public",
     "theorem-labs_private-fixture": "private",
-    # sjawhar/dotfiles is public and, since its scrub (dispatch://INFRA-974), the sweeper's `others`: checked like any
-    # other public target.
+    # A private repository of another owner: the check scans a push to any owner but theorem-labs as public, so only
+    # the gate's visibility rule leaves a checkout of it alone.
+    "sjawhar_private-fixture": "private",
+    # sjawhar/dotfiles is public since its scrub (dispatch://INFRA-974): checked like any other public target.
     "sjawhar_dotfiles": "public",
     "sjawhar_rocq": "public",
     "sjawhar_legion": "public",
     "rocq-prover_rocq": "public",
 }
 
-# Guarded or not, under CACHE, by the hook sweeper's `git remote -v` rule: a line matching
-# theorem-labs/(<names>)(\.git)?/?[[:space:]], letter case ignored. (want, remote name, URL, how the config holds it:
-# "" as `git remote add` writes it, "quoted" with the URL in double quotes, or "insteadOf" for a URL that
-# url.https://github.com/theorem-labs/.insteadOf=r3: rewrites, as in the revision-3 review's R3-2.)
+# Guarded or not, under CACHE, the fake gh (no answer, so unknown) and SSH_CONFIG, by the rule of dispatch://BET-706
+# (the plan's shared contract): a URL is GUARD when it names GitHub (github.com, www.github.com or ssh.github.com, directly or through
+# an ssh alias) and its repository is public or of unknown visibility, or when its host part cannot be parsed; NO when
+# the repository is private or internal, or the URL is a local path or names another host. A checkout is guarded when
+# any of its URLs is GUARD. (want, remote name, URL, how the config holds it: "" as `git remote add` writes it,
+# "quoted" with the URL in double quotes, "insteadOf" for a URL that url.https://github.com/theorem-labs/.insteadOf=r3:
+# rewrites, as in the revision-3 review's R3-2, "also <URL>" for a second remote, `zzz`, at <URL>, "sshCommand" for
+# a checkout whose core.sshCommand is set, or "partial" for a partial clone's remote (promisor, filter blob:none), whose
+# fetch line git prints as `<URL> (fetch) [blob:none]`.) Each row is judged with neither GIT_SSH_COMMAND nor GIT_SSH set. A comment
+# "was N" or "was Y" marks rows whose answer BET-706 changed from the old rule (a fixed list of names matched in
+# `git remote -v`).
 GUARD_TABLE = [
     ("Y", "origin", "https://github.com/theorem-labs/rocq.git", ""),
     ("Y", "origin", "https://github.com/theorem-labs/rocq", ""),
@@ -124,18 +148,26 @@ GUARD_TABLE = [
     ("Y", "origin", "ssh://git@ssh.github.com:443/theorem-labs/rocq.git", ""),
     ("Y", "origin", "https://x-access-token:not-a-secret@github.com/theorem-labs/rocq.git", ""),
     ("Y", "origin", "https://github.com//theorem-labs/rocq.git", ""),
+    # git's <transport>::<address> form: the transport is stripped, and the address names github.com.
     ("Y", "origin", "https::https://github.com/theorem-labs/rocq", ""),
+    # ssh aliases that SSH_CONFIG resolves to github.com.
     ("Y", "origin", "git@alias-xf:theorem-labs/rocq.git", ""),
     ("Y", "origin", "git@UPPERALIAS:theorem-labs/rocq.git", ""),
-    ("Y", "origin", "useralias:theorem-labs/rocq", ""),
-    # The revision-2 review's R2-5 and R2-2: an alias with # or ?, and a path with a space, read whole.
+    ("Y", "origin", "git@useralias:theorem-labs/rocq", ""),
+    # Was Y: without the user `git` the Match does not apply, and useralias names no GitHub host.
+    ("N", "origin", "useralias:theorem-labs/rocq", ""),
     ("Y", "origin", "git@alias#xf:theorem-labs/rocq.git", ""),
     ("Y", "origin", "git@alias?xf:theorem-labs/rocq.git", ""),
-    ("Y", "origin", "git@corp.example:mirror space/theorem-labs/rocq.git", ""),
-    ("Y", "origin", "/tmp/mirror space/theorem-labs/rocq.git", ""),
-    ("Y", "origin", "https://notgithub.com/theorem-labs/rocq.git", ""),
-    ("Y", "origin", "file:///srv/theorem-labs/rocq.git", ""),
-    ("Y", "origin", "https://example.com/not-theorem-labs/rocq.git", ""),
+    # Was Y, each: a path holding theorem-labs/rocq on a host that is not GitHub, or on none.
+    ("N", "origin", "git@corp.example:mirror space/theorem-labs/rocq.git", ""),
+    ("N", "origin", "/tmp/mirror space/theorem-labs/rocq.git", ""),
+    ("N", "origin", "https://notgithub.com/theorem-labs/rocq.git", ""),
+    ("N", "origin", "file:///srv/theorem-labs/rocq.git", ""),
+    ("N", "origin", "https://example.com/not-theorem-labs/rocq.git", ""),
+    ("N", "origin", "git@unknown-alias:theorem-labs/rocq.git", ""),
+    # The revision-2 review's R2-2, now: a GitHub path with a space is no repository name, so unknown; read only up
+    # to the space it would be the private repository.
+    ("Y", "origin", "git@alias-xf:theorem-labs/private-fixture space.git", ""),
     ("Y", "origin", "git+ssh://git@github.com/theorem-labs/rocq-linux-process-semantics", ""),
     ("Y", "origin", "ssh+git://github.com/theorem-labs/oss-verify.git", ""),
     ("Y", "origin", "git@github.com:theorem-labs/oss-verify-proofs.git", ""),
@@ -143,7 +175,7 @@ GUARD_TABLE = [
     ("Y", "origin", "https://github.com/theorem-labs/metarocq.git", ""),
     ("Y", "origin", "https://github.com/theorem-labs/cached-public.git", ""),
     ("Y", "origin", "https://github.com/theorem-labs/%72ocq.git", ""),
-    # Letter case and a trailing slash (the sweeper's rule since 2026-11-02 04:45Z).
+    # Letter case and a trailing slash.
     ("Y", "origin", "HTTPS://GitHub.COM/Theorem-Labs/Rocq.GIT", ""),
     ("Y", "origin", "Git@GitHub.com:Theorem-Labs/Rocq.git", ""),
     ("Y", "origin", "https://github.com/Theorem-Labs/Cached-Public.git", ""),
@@ -152,26 +184,80 @@ GUARD_TABLE = [
     # The revision-3 review's R3-2: a quoted URL, and one an insteadOf rewrites.
     ("Y", "origin", "https://github.com/theorem-labs/rocq.git", "quoted"),
     ("Y", "origin", "r3:rocq.git", "insteadOf"),
-    ("Y", "theorem-labs/rocq", "https://example.com/elsewhere.git", ""),
+    # Was Y: a remote's name is not its URL, and this URL names another host.
+    ("N", "theorem-labs/rocq", "https://example.com/elsewhere.git", ""),
     ("N", "origin", "https://github.com/theorem-labs/private-fixture.git", ""),
-    ("N", "origin", "https://github.com/theorem-labs/never-cached.git", ""),
-    ("N", "origin", "https://github.com/theorem-labs/oss-verify-proofs-internal.git", ""),
-    ("N", "origin", "https://github.com/theorem-labs/./rocq.git", ""),
-    ("N", "origin", "https://github.com/theorem-labs/x/../rocq.git", ""),
-    ("N", "origin", "https://github.com/theorem-labs///rocq.git", ""),
-    ("N", "origin", "https://github.com/theorem-labs/rocq.git?x=1", ""),
-    ("N", "origin", "https://github.com/theorem-labs/rocq//", ""),
-    ("N", "origin", "https://github.com/theorem-labs/rocq/extra", ""),
-    ("N", "origin", "https://github.com/theorem-labs/.git", ""),
-    ("N", "origin", "https://github.com/sjawhar/rocq", ""),
-    ("N", "origin", "https://github.com/rocq-prover/rocq", ""),
-    # The sweeper's `others`: sjawhar/dotfiles, whatever the host, letter case as for the rest.
+    # Was N, each: a GitHub repository whose visibility the cache does not hold and gh does not answer is unknown.
+    ("Y", "origin", "https://github.com/theorem-labs/never-cached.git", ""),
+    ("Y", "origin", "https://github.com/theorem-labs/oss-verify-proofs-internal.git", ""),
+    ("Y", "origin", "https://github.com/sjawhar/dotfiles-public", ""),
+    # Was N, each: a GitHub path that is no owner/repository name is unknown.
+    ("Y", "origin", "https://github.com/theorem-labs/./rocq.git", ""),
+    ("Y", "origin", "https://github.com/theorem-labs/x/../rocq.git", ""),
+    ("Y", "origin", "https://github.com/theorem-labs///rocq.git", ""),
+    ("Y", "origin", "https://github.com/theorem-labs/rocq.git?x=1", ""),
+    ("Y", "origin", "https://github.com/theorem-labs/rocq//", ""),
+    ("Y", "origin", "https://github.com/theorem-labs/rocq/extra", ""),
+    ("Y", "origin", "https://github.com/theorem-labs/.git", ""),
+    # Was N, each: public repositories of other owners, by their cache entries.
+    ("Y", "origin", "https://github.com/sjawhar/rocq", ""),
+    ("Y", "origin", "https://github.com/rocq-prover/rocq", ""),
     ("Y", "origin", "https://github.com/sjawhar/dotfiles.git", ""),
     ("Y", "origin", "git@github.com:SJawhar/Dotfiles.git", ""),
     ("Y", "origin", "https://github.com/sjawhar/dotfiles/", ""),
-    ("N", "origin", "https://github.com/sjawhar/dotfiles-public", ""),
+    # A host part that cannot be parsed: unknown.
+    ("Y", "origin", "ssh:///theorem-labs/private-fixture.git", ""),
+    ("Y", "origin", "git@:theorem-labs/private-fixture.git", ""),
+    ("Y", "origin", "https://bad host/theorem-labs/private-fixture.git", ""),
+    ("Y", "origin", "https://[github.com/theorem-labs/private-fixture.git", ""),
+    # A host in brackets, which git takes out.
+    ("Y", "origin", "git@[github.com]:theorem-labs/rocq.git", ""),
+    ("Y", "origin", "ssh://git@[alias-xf]:22/theorem-labs/rocq.git", ""),
+    ("N", "origin", "ssh://git@[github.com]:22/theorem-labs/private-fixture.git", ""),
+    ("N", "origin", "https://[::1]/theorem-labs/rocq.git", ""),
+    # A port-matching ssh config: git runs `ssh -p 2222 git@portalias` for the first, plain ssh for the others.
+    ("Y", "origin", "ssh://git@portalias:2222/theorem-labs/rocq.git", ""),
+    ("N", "origin", "ssh://git@portalias/theorem-labs/rocq.git", ""),
+    ("N", "origin", "git@portalias:theorem-labs/rocq.git", ""),
+    # www.github.com is GitHub too (git follows it to github.com; the check's own list, public-leak-check.sh).
+    ("Y", "origin", "https://www.github.com/theorem-labs/rocq.git", ""),
+    ("Y", "origin", "https://WWW.GitHub.com/sjawhar/rocq", ""),
+    ("Y", "origin", "git@www.github.com:theorem-labs/rocq.git", ""),
+    ("N", "origin", "https://www.github.com/theorem-labs/private-fixture.git", ""),
+    # One trailing dot names the same host, in a URL and in what ssh -G answers.
+    ("Y", "origin", "https://github.com./theorem-labs/rocq.git", ""),
+    ("N", "origin", "https://GitHub.COM./theorem-labs/private-fixture.git", ""),
+    ("Y", "origin", "git@dotalias:theorem-labs/rocq.git", ""),
+    # The red team's finding 1: GitHub's ssh endpoint, fully qualified (the old name rule guarded it).
+    ("Y", "origin", "ssh://git@ssh.github.com.:443/theorem-labs/rocq.git", ""),
+    ("N", "origin", "ssh://git@ssh.github.com.:443/theorem-labs/private-fixture.git", ""),
+    # The checkout's core.sshCommand: git runs that command, which may resolve an alias otherwise than a plain
+    # `ssh -G` (its own -F, say), so an alias is unknown there; a literal GitHub host still decides by its repository.
+    ("Y", "origin", "git@corp.example:theorem-labs/rocq.git", "sshCommand"),
+    ("Y", "origin", "git@alias-xf:theorem-labs/private-fixture.git", "sshCommand"),
+    ("N", "origin", "git@github.com:theorem-labs/private-fixture.git", "sshCommand"),
+    ("N", "origin", "git@alias-xf:theorem-labs/private-fixture.git", ""),
     ("N", "origin", "../a.git", ""),
     ("N", "theorem-labs", "origin", ""),
+    # Two remotes: one GUARD URL guards the checkout, whichever remote holds it.
+    ("Y", "origin", "https://github.com/theorem-labs/private-fixture.git", "also https://github.com/sjawhar/rocq"),
+    ("N", "origin", "https://github.com/theorem-labs/private-fixture.git", "also ../b.git"),
+    # A partial clone: git prints its filter after the fetch line's annotation, which is not part of the URL. Was Y
+    # (the filter read as part of the URL made it unknown) for the two private repositories.
+    ("N", "origin", "https://github.com/theorem-labs/private-fixture.git", "partial"),
+    ("N", "origin", "https://github.com/sjawhar/private-fixture.git", "partial"),
+    ("Y", "origin", "https://github.com/theorem-labs/rocq.git", "partial"),
+    ("Y", "origin", "git@alias-xf:theorem-labs/private-fixture space.git", "partial"),
+    ("N", "origin", "git@corp.example:theorem-labs/rocq.git", "partial"),
+    # A filter may hold ` [`, `]` and ` (fetch)` itself (git accepts `sparse:oid=<blob-ish>` naming any path, as
+    # Bet2211RedTeam showed with a real clone): a fetch line's URL ends at its first ` (fetch)`.
+    ("N", "origin", "https://github.com/theorem-labs/private-fixture.git", "partial sparse:oid=HEAD:sparse [x]"),
+    ("N", "origin", "https://github.com/sjawhar/private-fixture.git", "partial sparse:oid=HEAD:a (fetch) [b]"),
+    ("Y", "origin", "https://github.com/theorem-labs/rocq.git", "partial sparse:oid=HEAD:sparse [x]"),
+    # A filter holding a newline (a sparse-pattern path with one; Bet2211XF's real clone): git prints the rest of the
+    # filter on a line of its own, with no tab, which is no remote's line.
+    ("N", "origin", "https://github.com/theorem-labs/private-fixture.git", "partial sparse:oid=HEAD:sparse\n:repo"),
+    ("Y", "origin", "https://github.com/theorem-labs/rocq.git", "partial sparse:oid=HEAD:sparse\n:repo"),
 ]
 
 
@@ -192,15 +278,28 @@ class JjPushLeakGateTest(unittest.TestCase):
         (fake / "git").write_text(RECORD_GIT.replace("@CALLS@", str(self.calls)), encoding="utf-8")
         (fake / "git-remote-sink").write_text(SINK_HELPER.replace("@SINKS@", str(self.sinks)), encoding="utf-8")
         (self.ghdir / "gh").write_text(FAKE_GH.replace("@GHLOG@", str(self.ghlog)), encoding="utf-8")
-        for f in (*fake.iterdir(), self.ghdir / "gh"):
+        real_ssh = shutil.which("ssh")
+        if not real_ssh:
+            raise unittest.SkipTest("no ssh on this machine to resolve ssh aliases with")
+        self.ssh_config = self.tmp / "sshconfig"
+        self.ssh_config.write_text(SSH_CONFIG, encoding="utf-8")
+        (self.ghdir / "ssh").write_text(FAKE_SSH.replace("@SSH@", real_ssh).replace("@CFG@", str(self.ssh_config)), encoding="utf-8")
+        for f in (*fake.iterdir(), self.ghdir / "gh", self.ghdir / "ssh"):
             f.chmod(0o755)
-        # The gate reads the cache where the hook sweeper does, ~/.cache/public-leak-check, and the check where
-        # XDG_CACHE_HOME says: one directory here, as on this box, where XDG_CACHE_HOME is unset.
+        # The gate (scripts/github-repo-visibility) and the check read the cache where XDG_CACHE_HOME says, and the
+        # sweep's old rule read ~/.cache/public-leak-check: one directory here, as on this box.
         self.home = self.tmp / "home"
         self.cache = self.home / ".cache" / "public-leak-check"
         self.cache.mkdir(parents=True)
         for name, word in CACHE.items():
             (self.cache / name).write_text(word, encoding="utf-8")
+        # shims/gh, which scripts/github-repo-visibility runs by path, in an agent session: its agent config directory,
+        # no knives, no read cache and no call log, and a token that is not one, so it hands the call straight to the
+        # fake gh.
+        gh_config = self.home / ".config" / "gh-agent"
+        gh_config.mkdir(parents=True)
+        (gh_config / "hosts.yml").touch()
+        (gh_config / "config.yml").touch()
         cfg = self.tmp / "jj.toml"
         cfg.write_text('[user]\nname = "T"\nemail = "t@example.com"\n[signing]\nbehavior = "drop"\n', encoding="utf-8")
         self.fake = fake
@@ -217,7 +316,13 @@ class JjPushLeakGateTest(unittest.TestCase):
             "GIT_CEILING_DIRECTORIES": str(self.tmp),
             "GIT_ALLOW_PROTOCOL": "sink",
             "GIT_SSH_COMMAND": "false",
+            "DOTFILES_DIR": str(SHIMS.parent),
+            "GH_READ_CACHE": "0",
+            "GH_READ_CACHE_LOG": "0",
+            "KNIVES_GH_BYPASS": "1",
+            "GH_TOKEN": "fixture-not-a-secret",
         }
+        self.assertEqual(shutil.which("ssh", path=self.env["PATH"]), str(self.ghdir / "ssh"), "an ssh other than the fake one comes first")
         self.assertEqual(shutil.which("gh", path=self.env["PATH"]), str(self.ghdir / "gh"), "a gh other than the fake one comes first")
         self.env.pop("DOTFILES_JJ_SHIM", None)
         self.repo = self.tmp / "w"
@@ -288,9 +393,9 @@ class JjPushLeakGateTest(unittest.TestCase):
     def gh_calls(self) -> list[str]:
         return self.ghlog.read_text(encoding="utf-8").splitlines() if self.ghlog.exists() else []
 
-    def assert_refused(self, r: subprocess.CompletedProcess[str], commit: str, url: str = ROCQ):
+    def assert_refused(self, r: subprocess.CompletedProcess[str], commit: str, url: str = ROCQ, gh: bool = False):
         """Refused by the check, with the commit and the matching text in lines jj shows even under --quiet, and
-        nothing of COMMIT received at URL."""
+        nothing of COMMIT received at URL; no visibility read went to gh unless GH says one was due."""
         self.assertNotEqual(r.returncode, 0, r.stderr)
         err = re.sub(r"\x1b\[[0-9;]*m", "", r.stderr)
         self.assertIn("LEAK CHECK: refusing to push", err)
@@ -299,7 +404,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertTrue([ln for ln in shown if commit[:7] in ln], ("the refusal must name the commit", r.stderr))
         self.assertTrue([ln for ln in shown if f"[customer: {self.customer}]" in ln], ("the refusal must name what matched", r.stderr))
         self.assertNotIn(url, self.received(commit))
-        self.assertEqual(self.gh_calls(), [])
+        if not gh:
+            self.assertEqual(self.gh_calls(), [])
 
     def assert_refused_unreadable(self, r: subprocess.CompletedProcess[str], commit: str, url: str, slug: str):
         """Refused by the check because it cannot read the visibility of SLUG, the target at URL; nothing of COMMIT
@@ -483,13 +589,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.received(c), [])
 
     def test_ssh_aliases_are_guarded(self):
-        # The reviewer's three aliases (lanes/jj-gate-review-xf-2026-11-02.md, B2), each the checkout's only remote: a
-        # config file given through GIT_SSH_COMMAND -F, an upper-case Host, a Match on the user. The checkout is guarded
-        # by its path theorem-labs/rocq, as the hook sweeper guards it, whatever ssh would resolve the host to.
-        cfg = self.tmp / "sshconfig"
-        cfg.write_text("Host alias-xf\n  HostName github.com\nHost UPPERALIAS\n  HostName github.com\n"
-                       "Match host useralias user git\n  HostName github.com\n", encoding="utf-8")
-        self.env["GIT_SSH_COMMAND"] = f"false -F {cfg}"
+        # The reviewer's three aliases (lanes/jj-gate-review-xf-2026-11-02.md, B2), each the checkout's only remote:
+        # SSH_CONFIG resolves each to github.com (`ssh -G`, with the URL's user, so the Match on the user applies), and
+        # theorem-labs/rocq there is public, so the checkout is guarded.
         c = self.leak()
         for url in ("git@alias-xf:theorem-labs/rocq.git", "git@UPPERALIAS:theorem-labs/rocq.git", "git@useralias:theorem-labs/rocq.git"):
             self.git("remote", "set-url", "origin", url)
@@ -497,16 +599,8 @@ class JjPushLeakGateTest(unittest.TestCase):
             self.assert_refused(r, c, url)
         self.assertEqual(self.received(c), [])
 
-    def test_guarded_is_the_sweepers_rule(self):
-        # Finding 6 of the revision-2 review, and the revision-3 review's R3-2: the gate's rule is the hook sweeper's
-        # `git remote -v` test, copied. Each GUARD_TABLE row is a real checkout. The gate's own functions judge its
-        # `git remote -v`; when sweep-hooks.sh is beside the check, the sweeper's own code, taken out of that file as it
-        # is at this run, then makes its whole decision for the same checkout: its config-file prefilter, then its
-        # `git remote -v` test. The gate must give the table's answer and the same answer as the sweeper's `git remote
-        # -v` test, so a change to that rule fails here until the gate follows. The prefilter only narrows: the
-        # sweeper must never install a hook where the gate does not check, and where the gate checks a push the
-        # sweeper left without a hook, the check still decides, so the gate refuses there only leaking content.
-        env = {k: v for k, v in self.env.items() if not k.startswith("GIT_CONFIG")} | {"GIT_CONFIG_NOSYSTEM": "1"}
+    def guard_checkouts(self, env: dict[str, str]) -> list[str]:
+        """One real checkout per GUARD_TABLE row, under $TMP/guard."""
         checkouts = []
         for k, (_, name, url, how) in enumerate(GUARD_TABLE):
             co = self.tmp / "guard" / f"{k:02d}"
@@ -519,53 +613,92 @@ class JjPushLeakGateTest(unittest.TestCase):
                 cfg.write_text(text.replace(f"\turl = {url}\n", f'\turl = "{url}"\n'), encoding="utf-8")
             elif how == "insteadOf":
                 subprocess.run(["/usr/bin/git", "-C", str(co), "config", "url.https://github.com/theorem-labs/.insteadOf", "r3:"], env=env, check=True)
+            elif how.startswith("also "):
+                subprocess.run(["/usr/bin/git", "-C", str(co), "remote", "add", "zzz", how.removeprefix("also ")], env=env, check=True)
+            elif how == "sshCommand":
+                subprocess.run(["/usr/bin/git", "-C", str(co), "config", "core.sshCommand", "ssh -F /nonexistent"], env=env, check=True)
+            elif how == "partial" or how.startswith("partial "):
+                self.make_partial(co, name, env, how.removeprefix("partial").strip() or "blob:none")
             checkouts.append(str(co))
+        return checkouts
 
-        def judge(script: str) -> list[str]:
-            r = subprocess.run(["bash", "-c", script, "judge", *checkouts], env=env, capture_output=True, text=True, check=True)
+    def make_partial(self, co: Path, name: str, env: dict[str, str], spec: str = "blob:none") -> None:
+        """Remote NAME of CO configured as a partial clone's with filter SPEC (what `git clone --filter=SPEC` writes), and
+        `git remote -v` printing that filter after its fetch line, as these rows need."""
+        for key, value in (("promisor", "true"), ("partialclonefilter", spec)):
+            subprocess.run(["/usr/bin/git", "-C", str(co), "config", f"remote.{name}.{key}", value], env=env, check=True)
+        listing = subprocess.run(["/usr/bin/git", "-C", str(co), "remote", "-v"], env=env, check=True, capture_output=True, text=True).stdout
+        self.assertIn(f" (fetch) [{spec}]\n", listing, "git prints no partial-clone filter here")
+
+    def test_guarded_is_the_sweepers_rule(self):
+        # dispatch://BET-706, the plan's shared contract: the gate (through scripts/github-repo-visibility) and the hook
+        # sweep (sweep-hooks.sh, in theorem-labs/agent-infra, which cannot call a dotfiles script) each decide by a
+        # checkout's remote URLs and their visibility, with readers of their own. Each GUARD_TABLE row is a real
+        # checkout. The gate's own functions judge its `git remote -v` and must give the table's answer. When
+        # sweep-hooks.sh is beside the check, its own code, loaded as its three callers load it (everything above
+        # `i=0`), with the same cache, fake gh and fake ssh, must give the same answer for every row: its `verdict` on
+        # the checkout's URLs; its config prefilter (`config_may_guard`) must pass every checkout the gate guards, since
+        # it only narrows; and a whole `sweep` over the checkouts must install the hook in exactly the guarded ones, and
+        # defer none. So a change to either reader fails here until the other follows.
+        self.keep_cache_fresh()
+        # Neither GIT_SSH_COMMAND (which setUp sets to block git's ssh transport) nor GIT_SSH: either makes every alias
+        # unknown, and the table's alias rows are about ssh -G. The "sshCommand" rows set the checkout's own.
+        env = {k: v for k, v in self.env.items() if not k.startswith("GIT_CONFIG") and k not in ("GIT_SSH_COMMAND", "GIT_SSH")} \
+            | {"GIT_CONFIG_NOSYSTEM": "1"}
+        checkouts = self.guard_checkouts(env)
+
+        def judge(script: str, *args: str) -> list[str]:
+            r = subprocess.run(["bash", "-c", script, "judge", *args], env=env, capture_output=True, text=True, check=True)
             return r.stdout.split()
 
         want = [w for w, *_ in GUARD_TABLE]
         rows = [f"{name} {url} {how}".strip() for _, name, url, how in GUARD_TABLE]
+        # The gate's functions, cut out of shims/git; under `bash -c` there is no BASH_SOURCE to find the helper by, so
+        # it is named as the shim finds it, beside this shims dir.
         gate = judge(f"eval \"$(awk '/^jj_push_refuse\\(\\)/,/^jj_push_gate\\(\\)/' '{SHIMS / 'git'}' | sed '$d')\"\n"
-                     'for co in "$@"; do if jj_push_guarded "$(/usr/bin/git -C "$co" remote -v)"; then echo Y; else echo N; fi; done\n')
+                     f"jj_gate_visibility='{SHIMS.parent / 'scripts' / 'github-repo-visibility'}'\n"
+                     # As shims/git runs it for a push from CO: its git, and the global options naming the repository.
+                     'for co in "$@"; do _real=/usr/bin/git args=(-C "$co") i=2\n'
+                     '  if jj_push_guarded "$(/usr/bin/git -C "$co" remote -v)"; then echo Y; else echo N; fi; done\n',
+                     *checkouts)
         self.assertEqual(list(zip(gate, rows)), list(zip(want, rows)))
         sweeper = self.check.parent / "sweep-hooks.sh"
         if not sweeper.is_file():
             self.skipTest("no sweep-hooks.sh beside the check to compare with")
         text = sweeper.read_text(encoding="utf-8")
-        parts = {
-            "public_names": re.search(r"^public_names\(\) \{\n.*?^\}$", text, re.M | re.S),
-            "config_of": re.search(r"^config_of\(\) \{\n.*?^\}$", text, re.M | re.S),
-            "repos": re.search(r'^\s*repos=".*"$', text, re.M),
-            "cfgre": re.search(r'^\s*cfgre=".*"$', text, re.M),
-            "the prefilter": re.search(r'^\s*if (\[ -n "\$cfg" \] .*); then continue; fi$', text, re.M),
-            "the remote -v test": re.search(r'^\s*(git -C "\$co" remote -v .*) \|\| continue$', text, re.M),
-        }
-        missing = [k for k, m in parts.items() if not m]
-        self.assertEqual(missing, [], f"{sweeper} no longer holds these parts of the rule the gate copies: read it again")
-        p = {k: m.group(1 if m.re.groups else 0).strip() for k, m in parts.items()}
-        # Every fixed list the sweeper's rule names (a top-level `NAME='…'` it uses: base, others) must be the gate's
-        # JJ_GATE_<NAME>, so a name added to the sweeper's lists fails here even with no table row for it.
-        fixed = dict(re.findall(r"^(\w+)='([^'\n]*)'$", text, re.M))
-        used = {v for v in re.findall(r"\$(\w+)", p["repos"] + p["cfgre"] + p["public_names"]) if v in fixed}
-        shim = (SHIMS / "git").read_text(encoding="utf-8")
-        self.assertEqual({v: fixed[v] for v in used},
-                         {v: (m.group(1) if (m := re.search(rf"^JJ_GATE_{v.upper()}='([^'\n]*)'$", shim, re.M)) else None) for v in used},
-                         "the sweeper's fixed lists are not the gate's")
-        self.assertIn("base", used)
-        own = judge("\n".join(["set -u", *(f"{v}='{fixed[v]}'" for v in sorted(used)), p["public_names"], p["config_of"],
-                               "names=$(public_names)", p["repos"], p["cfgre"],
-                               'for co in "$@"; do',
-                               f'  if {p["the remote -v test"]}; then r=Y; else r=N; fi',
-                               '  cfg=$(config_of "$co/.git" "$co")',
-                               f'  if {p["the prefilter"]}; then s=N; else s=$r; fi',
-                               '  echo "$r$s"',
-                               "done", ""]))
-        self.assertEqual(list(zip([o[0] for o in own], rows)), list(zip(want, rows)), "the gate is not the sweeper's `git remote -v` test")
-        self.assertEqual([row for g, o, row in zip(gate, own, rows) if o[1] == "Y" and g == "N"], [], "the sweeper installs a hook where the gate does not check")
-        more = [row for g, o, row in zip(gate, own, rows) if g == "Y" and o[1] == "N"]
-        print(f"\n  the gate checks, the sweeper installs no hook: {more}")
+        missing = [f for f in ("verdict", "config_may_guard", "config_of", "sweep") if not re.search(rf"(?m)^{f}\(\) \{{", text)]
+        self.assertEqual(missing, [], f"{sweeper} has no such functions: it predates the sweep of dispatch://BET-706; install that one")
+        here = self.tmp / "sweep-here"
+        here.mkdir()
+        installed = self.tmp / "installed"
+        # Records its checkout and writes a pre-push hook with the wrapper's marker where git runs it, which is what
+        # the sweep reads back before it calls a checkout INSTALLED.
+        (here / "install-prepush-hook.sh").write_text(
+            f'#!/bin/bash\nprintf "%s\\n" "$1" >> "{installed}"\n'
+            'hook="$(/usr/bin/git -C "$1" rev-parse --path-format=absolute --git-path hooks/pre-push)" || exit 1\n'
+            'mkdir -p "${hook%/*}" && printf "#!/bin/sh\\n# PUBLIC-LEAK-CHECK-WRAPPER\\n" > "$hook" && chmod +x "$hook"\n',
+            encoding="utf-8")
+        (here / "install-prepush-hook.sh").chmod(0o755)
+        load = f"eval \"$(sed '/^i=0$/,$d' '{sweeper}')\"\nhere='{here}'; log='{here}/log'\n"
+        own = judge(load + 'for co in "$@"; do\n'
+                    # The checkout's URLs as the gate reads them, after the tab (a line with none is no remote's, such
+                    # as the rest of a filter holding a newline): a push line's without its final " (push)", a fetch
+                    # line's up to its first " (fetch)" (a partial clone's filter follows it).
+                    '  mapfile -t urls < <(/usr/bin/git -C "$co" remote -v | sed -E "/\t/!d; s/^[^\t]*\t//; / \\(push\\)$/{s/ \\(push\\)$//;b}; s/ \\(fetch\\).*$//" | sort -u)\n'
+                    # -C names the checkout, so the sweep reads its core.sshCommand, as `sweep` does.
+                    '  v=$(verdict -C "$co" "${urls[@]}")\n'
+                    '  if config_may_guard "$(config_of "$co/.git" "$co")"; then p=P; else p=S; fi\n'
+                    '  case $v in guard) echo "Y$p" ;; no) echo "N$p" ;; *) echo "${v:-empty}$p" ;; esac\n'
+                    'done\n', *checkouts)
+        self.assertEqual(list(zip([o[:-1] for o in own], rows)), list(zip(want, rows)), "the sweep's verdict is not the gate's")
+        self.assertEqual([row for g, o, row in zip(gate, own, rows) if g == "Y" and o[-1] != "P"], [],
+                         "the sweep's config prefilter skips a checkout the gate guards")
+        judge(load + 'sweep "$1"\n', str(self.tmp / "guard"))
+        log = (here / "log").read_text(encoding="utf-8")
+        self.assertNotIn("DEFERRED", log)
+        hooked = set(installed.read_text(encoding="utf-8").split("\n")) - {""} if installed.exists() else set()
+        self.assertEqual(sorted(hooked), sorted(co for co, g in zip(checkouts, gate) if g == "Y"), "the sweep hooks other checkouts than the gate guards")
+        self.assertRegex(log.splitlines()[-1], r" sweep \[[^\]]*\]: (\d+) checkouts.*, (\d+) installed, (\d+) failed$")
 
     # Where: the cases where git's pre-push hook would run the check, and those only.
     def test_the_sjawhar_fork_is_checked(self):
@@ -588,8 +721,8 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def test_a_leak_to_sjawhar_dotfiles_is_refused(self):
         # sjawhar/dotfiles was scrubbed (dispatch://INFRA-974, landed 2026-11-02 05:01Z) and is now a public target like
-        # any other: the sweeper hooks a checkout of it (its `others`), and the gate checks a jj push from one. Revisions
-        # 1 to 3 left every push to it alone, pending Sami's answer (dispatch://BET-214/ask/fd494519).
+        # any other: the sweep hooks a checkout of it, and the gate checks a jj push from one. Revisions 1 to 3 left
+        # every push to it alone, pending Sami's answer (dispatch://BET-214/ask/fd494519).
         self.assertEqual(CACHE["sjawhar_dotfiles"], "public")
         for n, url in enumerate(("https://github.com/sjawhar/dotfiles.git", "git@github.com:sjawhar/dotfiles.git")):
             self.git("remote", "set-url", "origin", url)  # the checkout's only remote
@@ -600,6 +733,123 @@ class JjPushLeakGateTest(unittest.TestCase):
         r = self.jj("git", "push", "-b", "b2")
         self.assert_pushed(r, clean, url)
         self.assertIn("LEAK CHECK: clean", r.stderr)
+
+    def assert_ref_kept(self, url: str, ref: str, sha: str):
+        """The sink of URL holds REF at SHA, as before the refused push."""
+        r = subprocess.run(["/usr/bin/git", "--git-dir", str(self.sink_of(url)), "rev-parse", "--verify", "-q", ref], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), sha, f"{ref} at {url} moved")
+
+    def refused_then_clean(self, url: str, gh: bool = False, at: str | None = None):
+        """URL as the checkout's only remote, whose sink (that of AT, by default URL) holds refs/heads/b1 at a clean
+        commit: a jj push of a leaking commit on top is refused by the check and leaves that ref where it was; a clean
+        one goes out."""
+        at = at or url
+        self.git("remote", "set-url", "origin", url)
+        base = self.commit("base.v", "(* clean *)", "Base", "b1")
+        self.assert_pushed(self.jj("git", "push", "-b", "b1"), base, at)
+        self.assert_ref_kept(at, "refs/heads/b1", base)
+        c = self.leak()
+        r = self.jj("git", "push", "-b", "b1")
+        self.assert_refused(r, c, url, gh=gh)
+        self.assertNotIn(at, self.received(c))
+        self.assert_ref_kept(at, "refs/heads/b1", base)
+        self.ok("bookmark", "set", "--allow-backwards", "b1", "-r", base)
+        self.ok("new", base)
+        clean = self.commit("clean.v", "(* clean *)", "Clean", "b1")
+        r = self.jj("git", "push", "-b", "b1")
+        self.assert_pushed(r, clean, at)
+        self.assertIn("LEAK CHECK: clean", r.stderr)
+        self.assert_ref_kept(at, "refs/heads/b1", clean)
+
+    def test_a_transport_prefixed_url_is_guarded(self):
+        # dispatch://BET-706 A3: git's <transport>::<address> form names the repository at the address, here a public
+        # theorem-labs one; the old helper read the transport as an ssh host and said not-github. GUARD_TABLE holds the
+        # https:: form; pushed for real, https:: would run git's own git-remote-https, which git finds in its exec
+        # path before PATH and which would reach GitHub, so this push names the test's sink helper as the transport.
+        address = "https://github.com/theorem-labs/rocq"
+        self.refused_then_clean(f"sink::{address}", at=address)
+
+    def test_the_visibility_helper_reads_each_url_form(self):
+        # scripts/github-repo-visibility --slug, the parse the gate and shims/jj rely on (the plan's shared contract): a
+        # leading <transport>:: and git+ are stripped; an ssh alias resolves through `ssh -G` with the URL's user; a
+        # host part that cannot be parsed is unknown; a local path, file:// or another host is not-github (shims/jj
+        # skips those, so a local remote must never become unknown there).
+        helper = SHIMS.parent / "scripts" / "github-repo-visibility"
+        cases = {
+            "https::https://github.com/theorem-labs/rocq": "theorem-labs/rocq",
+            "sink::https://github.com/Theorem-Labs/Rocq.git": "theorem-labs/rocq",
+            "ssh::git@github.com:theorem-labs/rocq.git": "theorem-labs/rocq",
+            "git+https://github.com/theorem-labs/rocq": "theorem-labs/rocq",
+            "git+ssh://git@github.com/theorem-labs/rocq": "theorem-labs/rocq",
+            "ssh+git://github.com/theorem-labs/rocq": "theorem-labs/rocq",
+            "ssh://git@ssh.github.com:443/theorem-labs/rocq.git": "theorem-labs/rocq",
+            "git@alias-xf:theorem-labs/rocq.git": "theorem-labs/rocq",
+            "ssh://git@alias-xf/theorem-labs/rocq.git": "theorem-labs/rocq",
+            "git@useralias:theorem-labs/rocq": "theorem-labs/rocq",
+            "useralias:theorem-labs/rocq": "not-github",
+            "upperalias:theorem-labs/rocq": "not-github",
+            "git@-oProxyCommand=x:theorem-labs/rocq": "unknown",
+            "ssh:///theorem-labs/rocq.git": "unknown",
+            "git@:theorem-labs/rocq.git": "unknown",
+            "-oProxyCommand=x@alias-xf:theorem-labs/rocq": "unknown",
+            "https://x-access-token:not-a-secret@github.com/theorem-labs/rocq.git": "theorem-labs/rocq",
+            "ssh://git@[github.com]:22/theorem-labs/rocq": "theorem-labs/rocq",
+            "git@[github.com]:theorem-labs/rocq": "theorem-labs/rocq",
+            "[git@github.com]:theorem-labs/rocq": "theorem-labs/rocq",
+            "ssh://git@[alias-xf]:22/theorem-labs/rocq": "theorem-labs/rocq",
+            "https://bad host/theorem-labs/rocq": "unknown",
+            "https://?/theorem-labs/rocq": "unknown",
+            "https://[github.com/theorem-labs/rocq": "unknown",
+            "https://[::1]/theorem-labs/rocq": "not-github",
+            "ssh://git@portalias:2222/theorem-labs/rocq": "theorem-labs/rocq",
+            "ssh://git@portalias/theorem-labs/rocq": "not-github",
+            "git@portalias:theorem-labs/rocq": "not-github",
+            "https://github.com:abc/theorem-labs/rocq": "unknown",
+            "https://a@b@github.com/theorem-labs/rocq": "unknown",
+            "https://[bad host]/theorem-labs/rocq": "unknown",
+            "https://www.github.com/theorem-labs/rocq": "theorem-labs/rocq",
+            "git@WWW.GitHub.com:Theorem-Labs/Rocq.git": "theorem-labs/rocq",
+            "https://github.com": "unknown",
+            "https://github.com/theorem-labs/rocq space.git": "unknown",
+            "https://notgithub.com/theorem-labs/rocq.git": "not-github",
+            "https://example.com": "not-github",
+            "git@corp.example:theorem-labs/rocq.git": "not-github",
+            "file:///srv/theorem-labs/rocq.git": "not-github",
+            "/srv/theorem-labs/rocq.git": "not-github",
+            "../a.git": "not-github",
+            "./a.git": "not-github",
+            "origin": "not-github",
+            "sink::/srv/theorem-labs/rocq.git": "not-github",
+            "https://github.com./theorem-labs/rocq": "theorem-labs/rocq",
+            "git@WWW.GITHUB.COM.:theorem-labs/rocq": "theorem-labs/rocq",
+            "git@dotalias:theorem-labs/rocq": "theorem-labs/rocq",
+            "https://github.com../theorem-labs/rocq": "not-github",
+        }
+        env = {k: v for k, v in self.env.items() if k not in ("GIT_SSH_COMMAND", "GIT_SSH")}
+        got = {url: subprocess.run([str(helper), "--slug", url], env=env, capture_output=True, text=True).stdout.strip() for url in cases}
+        self.assertEqual(got, cases)
+        # An ssh command of git's own (GIT_SSH_COMMAND, GIT_SSH) may resolve an alias otherwise than ssh -G: unknown.
+        # A literal GitHub host, a non-ssh URL and a local path are decided as before.
+        for var in ("GIT_SSH_COMMAND", "GIT_SSH"):
+            for url, want in (("git@alias-xf:theorem-labs/rocq.git", "unknown"), ("git@corp.example:theorem-labs/rocq.git", "unknown"),
+                              ("git@github.com:theorem-labs/rocq.git", "theorem-labs/rocq"), ("https://notgithub.com/o/r", "not-github"),
+                              ("../a.git", "not-github")):
+                r = subprocess.run([str(helper), "--slug", url], env=env | {var: "ssh -F /nonexistent"}, capture_output=True, text=True)
+                self.assertEqual((var, url, r.stdout.strip()), (var, url, want))
+
+    def test_a_public_fork_outside_any_list_is_guarded(self):
+        # dispatch://BET-706 R1/A3: sjawhar/oh-my-pi was on no list and has no cache entry (the check writes entries
+        # only for theorem-labs); gh says it is public, so the checkout is guarded.
+        (self.ghdir / "gh").write_text(
+            f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{self.ghlog}"\n'
+            '[[ " $* " == *" repos/sjawhar/oh-my-pi "* ]] && { echo public; exit 0; }\nexit 1\n', encoding="utf-8")
+        self.refused_then_clean("https://github.com/sjawhar/oh-my-pi.git", gh=True)
+        self.assertIn("api repos/sjawhar/oh-my-pi --jq .visibility", self.gh_calls())
+
+    def test_a_public_fork_with_no_answer_from_gh_is_guarded(self):
+        # dispatch://BET-706 R4: when the visibility cannot be read, the repository counts as public.
+        self.refused_then_clean("https://github.com/sjawhar/oh-my-pi.git", gh=True)
+        self.assertIn("api repos/sjawhar/oh-my-pi --jq .visibility", self.gh_calls())
 
     def test_every_other_target_of_a_guarded_checkout_is_decided_by_the_check(self):
         # As for a git push from this checkout: a private target passes, a public or non-GitHub one is scanned, one
@@ -625,12 +875,66 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.received(c), [PRIVATE])
         self.assertTrue(self.gh_calls(), "the visibility read went to the fake gh")
 
+    def test_a_fully_qualified_github_ssh_host_is_guarded(self):
+        # The red team's finding 1, over git's own ssh transport (the local-only adapter), the checkout's only remote:
+        # ssh.github.com. is ssh.github.com. A clean commit goes out; a leaking one on top is refused and the far
+        # side's ref stays at the clean one.
+        self.use_ssh()
+        url = "ssh://git@ssh.github.com.:443/theorem-labs/rocq.git"
+        self.git("remote", "set-url", "origin", url)
+        self.git("config", "--unset-all", "remote.origin.vcs")
+        sink = self.ssh_sink("git@ssh.github.com.", "/theorem-labs/rocq.git")
+        base = self.commit("base.v", "(* clean *)", "Base", "b1")
+        r = self.jj("git", "push", "-b", "b1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: clean", r.stderr)
+        ref = lambda: subprocess.run(["/usr/bin/git", "--git-dir", str(sink), "rev-parse", "-q", "--verify", "refs/heads/b1"],
+                                     capture_output=True, text=True).stdout.strip()
+        self.assertEqual(ref(), base)
+        c = self.leak()
+        r = self.jj("git", "push", "-b", "b1")
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertFalse(self.holds(sink, c), f"{c} reached {url}")
+        self.assertEqual(ref(), base)
+
+    def test_a_helper_that_fails_counts_as_unknown(self):
+        # The deep review's finding 3 (spec R4): a helper exit other than 0 is unknown whatever it printed, so the
+        # checkout is guarded. The gate's own jj_push_guarded, with a stand-in helper.
+        helper = self.tmp / "failing-helper"
+        listing = "origin\thttps://github.com/theorem-labs/private-fixture.git (fetch)\n"
+        script = (f"eval \"$(awk '/^jj_push_refuse\\(\\)/,/^jj_push_gate\\(\\)/' '{SHIMS / 'git'}' | sed '$d')\"\n"
+                  f"jj_gate_visibility='{helper}' _real=/usr/bin/git args=(-C '{self.repo}') i=2\n"
+                  'if jj_push_guarded "$1"; then echo Y; else echo N; fi\n')
+        for body, want in (("echo private\nexit 7", "Y"), ("echo not-github\nexit 1", "Y"), ("exit 3", "Y"), ("echo private", "N")):
+            helper.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+            helper.chmod(0o755)
+            r = subprocess.run(["bash", "-c", script, "judge", listing], env=self.env, capture_output=True, text=True, check=True)
+            self.assertEqual((body, r.stdout.strip()), (body, want))
+
+    def test_a_checkouts_own_ssh_command_makes_an_alias_unknown(self):
+        # The checkout's only remote is an alias ssh -G resolves to corp.example, which is not GitHub: unguarded, the
+        # push goes out as jj asked. With core.sshCommand set in the checkout, git would run that command, which may
+        # resolve the alias otherwise, so the alias is unknown and the checkout guarded: the check refuses the leak.
+        self.env.pop("GIT_SSH_COMMAND")  # through git-remote-sink: no ssh runs
+        url = "git@corp.example:theorem-labs/rocq.git"
+        self.git("remote", "set-url", "origin", url)
+        c = self.leak()
+        r = self.jj("git", "push", "-b", "b1")
+        self.assert_pushed(r, c, url)
+        self.assertNotIn("LEAK CHECK", r.stderr)
+        self.git("config", "core.sshCommand", "ssh -F /nonexistent")
+        c = self.leak(path="guard2.v")
+        self.assert_refused(self.jj("git", "push", "-b", "b1"), c, url)
+
     def test_an_unguarded_checkout_is_untouched(self):
-        # No remote names one of the sweeper's six or a theorem-labs repository the cache calls public: the sweeper
-        # installs no hook, nor does the gate check, whatever the targets and the content. git runs exactly as jj
-        # asked: --no-verify, no hooksPath.
+        # Every remote is private or not GitHub, even where its path names theorem-labs/rocq: the sweep installs no
+        # hook, nor does the gate check, whatever the targets and the content. git runs exactly as jj asked:
+        # --no-verify, no hooksPath. Every remote goes through git-remote-sink, so setUp's GIT_SSH_COMMAND, which would
+        # make the corp.example alias unknown, is not needed and is left out.
+        self.env.pop("GIT_SSH_COMMAND")
         self.git("remote", "set-url", "origin", PRIVATE)
-        targets = {"origin": PRIVATE, "legion": "https://github.com/sjawhar/legion.git",
+        targets = {"origin": PRIVATE, "corp": "git@corp.example:theorem-labs/rocq.git",
                    "local": str(self.tmp / "elsewhere" / "rocq.git"), "fake": "https://notgithub.com/sjawhar/rocq.git"}
         for remote, url in targets.items():
             if remote != "origin":
@@ -647,13 +951,40 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertTrue(all("--no-verify" in p and "hooksPath" not in p for p in pushes), pushes)
         self.assertEqual(self.gh_calls(), [])
 
+    def test_a_private_partial_clone_is_untouched(self):
+        # The round-5 reviews: git prints a partial clone's filter after its fetch line (`<url> (fetch) [blob:none]`).
+        # Read as part of the URL it made a private repository unknown, so the gate guarded the checkout and the check,
+        # which scans a push to any owner but theorem-labs as public, refused a leaking push to the private
+        # sjawhar/private-fixture. Every remote here is private and a partial clone's: git runs as jj asked. Then a
+        # public partial-clone remote guards the checkout, and the check refuses the same content to it.
+        self.env.pop("GIT_SSH_COMMAND")  # through git-remote-sink: no ssh runs
+        external = "https://github.com/sjawhar/private-fixture.git"
+        self.git("remote", "set-url", "origin", PRIVATE)
+        self.remote("ext", external)
+        # One filter of each kind: blob:none, and one whose own text holds brackets.
+        self.make_partial(self.repo, "origin", self.env)
+        self.make_partial(self.repo, "ext", self.env, "sparse:oid=HEAD:sparse [x]")
+        c = self.leak()
+        for remote, url in (("origin", PRIVATE), ("ext", external)):
+            self.ok("bookmark", "track", f"b1@{remote}")
+            r = self.jj("git", "push", "--remote", remote, "-b", "b1")
+            self.assert_pushed(r, c, url)
+            self.assertNotIn("LEAK CHECK", r.stderr)
+            self.assertNotIn("git shim", r.stderr)
+        self.remote("pub", ROCQ)
+        self.make_partial(self.repo, "pub", self.env)
+        self.ok("bookmark", "track", "b1@pub")
+        self.assert_refused(self.jj("git", "push", "--remote", "pub", "-b", "b1"), c, ROCQ)
+
     def test_the_cache_decides_and_an_unreadable_one_refuses(self):
-        # Outside the sweeper's six, its rule reads the check's cache at every push: an entry theorem-labs_<repo>
-        # holding exactly `public` guards the checkout; none, `private` or `internal` does not, nor does a mixed-case
-        # file name, which the sweeper's case-sensitive glob skips, so it installs no hook there either. Where the
-        # answer depends on the cache and the cache cannot give it (an entry that is empty, unreadable or holds a word
-        # the check never writes, or a cache directory that cannot be read: the reviewer's B1, cases 1 and 2), the
-        # push is refused unread; an undecided entry of another repository changes nothing.
+        # dispatch://BET-706 R4: the gate reads the check's cache entry for the repository, lower-cased and only while
+        # fresh (600 s for public, 60 s for private or internal), then gh. `private` or `internal` leaves the checkout
+        # alone; `public` guards it, so the check refuses leaking content. Where neither answers (no entry; an entry
+        # that is empty, unreadable or holds a word the check never writes; a mixed-case file name, which the
+        # lower-cased read does not find; a cache directory that cannot be read: the reviewer's B1, cases 1 and 2) the
+        # visibility is unknown, so the checkout is guarded, and the check, which cannot read the visibility either,
+        # refuses the push without scanning it. Before BET-706 the gate passed a checkout with no entry and refused the
+        # others unread itself.
         url = "https://github.com/theorem-labs/newly-public.git"
         self.git("remote", "set-url", "origin", url)
         entry = self.cache / "theorem-labs_newly-public"
@@ -665,43 +996,47 @@ class JjPushLeakGateTest(unittest.TestCase):
             c = self.commit(f"g{n}.v", self.leak_text, f"Leak {n}", "b1")
             return c, self.jj(*(["--quiet"] if quiet else []), "git", "push", "-b", "b1")
 
-        c, r = attempt()
-        self.assert_pushed(r, c, url)  # no entry: not known public, as on a machine without the cache
+        def refused_unreadable(quiet: bool = False):
+            c, r = attempt(quiet)
+            self.assert_refused_unreadable(r, c, url, "theorem-labs/newly-public")
+
+        refused_unreadable()  # no entry, and the fake gh gives no answer
+        self.assertIn("api repos/theorem-labs/newly-public --jq .visibility", self.gh_calls())
         for word in ("private", "internal"):
             entry.write_text(word, encoding="utf-8")
             c, r = attempt()
             self.assert_pushed(r, c, url)
+            self.assertNotIn("LEAK CHECK", r.stderr)
         (self.cache / "theorem-labs_other").write_text("", encoding="utf-8")
         c, r = attempt()
         self.assert_pushed(r, c, url)  # the empty entry is another repository's
         for word in ("public", "public\n"):
             entry.write_text(word, encoding="utf-8")
+            self.ghlog.unlink(missing_ok=True)
             c, r = attempt()
             self.assert_refused(r, c, url)
         entry.unlink()
         (self.cache / "Theorem-Labs_Newly-Public").write_text("public", encoding="utf-8")
-        c, r = attempt()
-        self.assert_pushed(r, c, url)
-        self.assertNotIn("LEAK CHECK", r.stderr)
+        refused_unreadable()
         (self.cache / "Theorem-Labs_Newly-Public").unlink()
         for word in ("", "Unknown"):
             entry.write_text(word, encoding="utf-8")
-            c, r = attempt(quiet=True)
-            self.assert_refused_unread(r, c, f"the public leak check's visibility cache entry {entry} is empty, unreadable")
+            refused_unreadable(quiet=True)
         entry.write_text("public", encoding="utf-8")
         entry.chmod(0)
-        c, r = attempt(quiet=True)
-        self.assert_refused_unread(r, c, f"the public leak check's visibility cache entry {entry} is empty, unreadable")
+        refused_unreadable(quiet=True)
         entry.chmod(0o644)
         self.cache.chmod(0)
-        c, r = attempt(quiet=True)
-        self.cache.chmod(0o755)
-        self.assert_refused_unread(r, c, "cannot read the public leak check's visibility cache")
+        try:
+            refused_unreadable(quiet=True)
+        finally:
+            self.cache.chmod(0o755)
 
-    def test_a_cache_entry_rewritten_during_the_push_refuses(self):
+    def test_a_cache_entry_rewritten_during_the_push_still_guards(self):
         # The reviewer's B1 case 3: the entry goes empty while the gate lists the remotes, as an entry the check is
-        # rewriting in place does, and is written again before git pushes. The sweeper's six need no entry, so this is
-        # a public repository outside them.
+        # rewriting in place does, and is written again before git pushes. The gate reads the empty entry as no answer,
+        # asks gh, which gives none, so the checkout is guarded (dispatch://BET-706 R4), and the check, reading the
+        # rewritten entry, refuses the leaking content.
         url = "https://github.com/theorem-labs/cached-public.git"
         self.git("remote", "set-url", "origin", url)
         entry = self.cache / "theorem-labs_cached-public"
@@ -715,15 +1050,14 @@ class JjPushLeakGateTest(unittest.TestCase):
         (racer / "git").chmod(0o755)
         self.env["PATH"] = self.path_with(f"{SHIMS}{os.pathsep}{racer}")
         c = self.leak()
-        self.assert_refused_unread(self.jj("git", "push", "-b", "b1"), c, "the public leak check's visibility cache entry")
-        self.assertEqual(entry.read_text(encoding="utf-8"), "", "the race did not run as staged")
+        self.assert_refused(self.jj("git", "push", "-b", "b1"), c, url, gh=True)
+        self.assertEqual(self.gh_calls(), ["api repos/theorem-labs/cached-public --jq .visibility"], "the race did not run as staged")
 
     def test_an_unsearchable_parent_of_the_cache_refuses(self):
         # The revision-2 review's R2-1: the cache and its public entry exist, but the directory above them cannot be
-        # searched, so the cache looked absent and the push went out. For theorem-labs/rocq, one of the sweeper's six,
-        # the gate needs no cache: it guards, and the check, which cannot read the visibility either, refuses as git's
-        # installed hook does for the same push. A public repository outside the six needs the cache, so the gate
-        # refuses unread, saying the commits are not the problem.
+        # searched. The gate cannot read the entry, asks gh, which gives no answer, so the checkout is guarded
+        # (dispatch://BET-706 R4), and the check, which cannot read the visibility either, refuses as git's installed
+        # hook does for the same push. Before BET-706 the gate refused a repository outside its fixed list unread.
         self.install_git_hook()
         parent = self.cache.parent
         self.git("remote", "set-url", "origin", "git@github.com:theorem-labs/rocq.git")
@@ -748,9 +1082,8 @@ class JjPushLeakGateTest(unittest.TestCase):
             r = self.jj("--quiet", "git", "push", "-b", "b1")
         finally:
             parent.chmod(0o755)
-        self.assert_refused_unread(r, c, f"cannot reach the public leak check's visibility cache {self.cache}")
-        # A cache that is not there at all is no answer either way: the checkout is not known public, as on a machine
-        # without the cache (a known gap of the sweeper's rule too). The same for a symlink to nothing.
+        self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
+        # A cache that is not there at all, or a symlink to nothing, is no answer either: the same.
         self.cache.rename(self.tmp / "cache-away")
         try:
             r = self.jj("--quiet", "git", "push", "-b", "b1")
@@ -759,8 +1092,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         finally:
             self.cache.unlink(missing_ok=True)
             (self.tmp / "cache-away").rename(self.cache)
-        self.assert_pushed(r, c, url)
-        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
+        self.assert_refused_unreadable(r2, c, url, "theorem-labs/cached-public")
 
     def hidden_push(self, path: Path, remote: str = "origin", commit: str = "") -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
         """As the revision-3 review staged R3-1: PATH moved into $TMP/hidden, a symlink to it left in its place, and
@@ -782,32 +1115,33 @@ class JjPushLeakGateTest(unittest.TestCase):
 
     def test_a_cache_behind_a_symlink_into_an_unsearchable_directory_refuses(self):
         # The revision-3 review's R3-1: `.cache`, `public-leak-check` or the deciding entry is a symlink into a directory
-        # that cannot be searched. The entry exists and says public, but [[ -e ]] read the cache as absent (and [[ -f ]]
-        # skipped the entry), so jj sent the leak while git's installed hook refused it. Now only the kernel's ENOENT
-        # means absent; this failure refuses unread.
+        # that cannot be searched. The entry exists and says public, but cannot be read, so jj once sent the leak while
+        # git's installed hook refused it. Now the gate reads no answer, asks gh, which gives none, and guards the
+        # checkout (dispatch://BET-706 R4); the check, which cannot read the visibility either, refuses the jj push as
+        # git's hook refuses the git one.
         self.install_git_hook()
         url = "https://github.com/theorem-labs/cached-public.git"
         self.git("remote", "set-url", "origin", url)
         c = self.leak()
         entry = self.cache / "theorem-labs_cached-public"
-        for path, why in ((self.home / ".cache", f"cannot reach the public leak check's visibility cache {self.cache}"),
-                          (self.cache, f"cannot reach the public leak check's visibility cache {self.cache}"),
-                          (entry, f"the public leak check's visibility cache entry {entry} is empty, unreadable, not a regular file")):
+        for path in (self.home / ".cache", self.cache, entry):
             g, r = self.hidden_push(path, commit=c)
             self.assertNotEqual(g.returncode, 0, g.stderr)
             self.assertIn("LEAK CHECK: cannot read the visibility of theorem-labs/cached-public", g.stderr)
-            self.assert_refused_unread(r, c, why)
-        # The review's content control: the `.cache` variant with only git@corp.example:theorem-labs/cached-public.git,
-        # over git's ssh transport, a target the check scans without a visibility: git's hook refuses the content.
+            self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
+        # The review's control over git's own ssh transport: the `.cache` variant with only an ssh alias of github.com
+        # as the remote. The gate reads no visibility and guards; the check, which does not resolve ssh aliases, scans
+        # the target as one outside GitHub. Both pushes are refused for the content, and the commit never reaches the
+        # far side.
         self.use_ssh()
-        url = "git@corp.example:theorem-labs/cached-public.git"
+        url = "git@alias-xf:theorem-labs/cached-public.git"
         self.git("remote", "set-url", "origin", url)
         self.git("config", "--unset-all", "remote.origin.vcs")
-        sink = self.ssh_sink("git@corp.example", "theorem-labs/cached-public.git")
+        sink = self.ssh_sink("git@alias-xf", "theorem-labs/cached-public.git")
         g, r = self.hidden_push(self.home / ".cache", commit=c)
         self.assertNotEqual(g.returncode, 0, g.stderr)
         self.assertIn("LEAK CHECK: refusing to push", g.stderr)
-        self.assert_refused_unread(r, c, f"cannot reach the public leak check's visibility cache {self.cache}")
+        self.assert_refused(r, c, url, gh=True)
         self.assertFalse(self.holds(sink, c), f"{c} reached {url}")
         self.assertTrue(sink.is_dir(), "git did not reach the ssh adapter")
 
@@ -891,31 +1225,25 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertFalse(self.holds(sink, c), f"jj sent {c} to {url}")
 
     def test_a_remote_path_with_a_space_is_read_whole(self):
-        # The revision-2 review's R2-2: `git remote -v` keeps a space inside a URL, and the gate read the URL only up to
-        # it, so these checkouts went unguarded while git's installed hook refused. A real local bare repository, then
-        # the same path over ssh (the local-only adapter), each the checkout's only remote.
+        # The revision-2 review's R2-2: `git remote -v` keeps a space inside a URL. Read up to the space, this URL is the
+        # private theorem-labs/private-fixture, which the gate leaves alone; read whole, its path is no repository
+        # name, so its visibility is unknown and the checkout is guarded (dispatch://BET-706 R4). The checkout's only
+        # remote, over git's ssh transport (the local-only adapter).
         self.install_git_hook()
         self.use_ssh()
-        local = self.tmp / "mirror space" / "theorem-labs" / "rocq.git"
-        subprocess.run(["/usr/bin/git", "init", "-q", "--bare", str(local)], check=True)
-        self.assert_same_refusal_over_git_transport(str(local), local)
-        path = "mirror space/theorem-labs/rocq.git"
-        self.assert_same_refusal_over_git_transport(f"git@corp.example:{path}", self.ssh_sink("git@corp.example", path))
-        self.assertTrue(self.ssh_sink("git@corp.example", path).is_dir(), "git did not reach the ssh adapter")
+        path = "theorem-labs/private-fixture space.git"
+        self.assert_same_refusal_over_git_transport(f"git@alias-xf:{path}", self.ssh_sink("git@alias-xf", path))
+        self.assertTrue(self.ssh_sink("git@alias-xf", path).is_dir(), "git did not reach the ssh adapter")
 
     def test_an_ssh_alias_with_a_hash_or_question_mark_is_guarded(self):
-        # The revision-2 review's R2-5: # and ? are ordinary characters of an ssh host alias, and the gate cut the
-        # alias there before it found the path. ssh resolves both aliases (checked below when ssh is here); git hands
-        # the whole alias to ssh, here the local-only adapter.
+        # The revision-2 review's R2-5: # and ? are ordinary characters of an ssh host alias, and the gate once cut the
+        # alias there before it found the path. SSH_CONFIG resolves both aliases to github.com; git hands the whole
+        # alias to ssh, here the local-only adapter.
         self.install_git_hook()
         self.use_ssh()
-        cfg = self.tmp / "sshconfig"
-        cfg.write_text('Host "alias#xf" "alias?xf"\n  HostName github.com\n', encoding="utf-8")
         for alias in ("alias#xf", "alias?xf"):
-            ssh = shutil.which("ssh")
-            if ssh:
-                resolved = subprocess.run([ssh, "-F", str(cfg), "-G", f"git@{alias}"], capture_output=True, text=True)
-                self.assertIn("hostname github.com", resolved.stdout.splitlines(), resolved.stderr)
+            resolved = subprocess.run([str(self.ghdir / "ssh"), "-G", f"git@{alias}"], capture_output=True, text=True)
+            self.assertIn("hostname github.com", resolved.stdout.splitlines(), resolved.stderr)
             self.assert_same_refusal_over_git_transport(f"git@{alias}:theorem-labs/rocq.git", self.ssh_sink(f"git@{alias}", "theorem-labs/rocq.git"))
             self.assertTrue(self.ssh_sink(f"git@{alias}", "theorem-labs/rocq.git").is_dir(), "git did not reach the ssh adapter")
 
@@ -1156,9 +1484,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assert_refused_unread(self.jj("--quiet", "git", "push", "-b", "b1"), c, "the leak gate's hook")
 
     def test_a_visibility_failure_is_not_called_leaked_text(self):
-        # The gate knows the checkout (its match ignores case, as the sweeper's does, and it needs no cache for the
-        # sweeper's six); the check, which reads the cache lower-cased, finds no entry for theorem-labs/rocq, asks the
-        # fake gh, gets nothing, and refuses for that reason alone, naming the repository as the URL writes it.
+        # Neither the gate nor the check finds a cache entry for theorem-labs/rocq, and the fake gh answers neither, so
+        # the gate guards the checkout (dispatch://BET-706 R4) and the check refuses for that reason alone, naming the
+        # repository as the URL writes it.
         url = "https://github.com/Theorem-Labs/ROCQ.git"
         self.git("remote", "set-url", "origin", url)
         (self.cache / "theorem-labs_rocq").unlink()

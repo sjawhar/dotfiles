@@ -181,32 +181,25 @@ fi
 # changed meanwhile does not change where it goes. jj has resolved every way of
 # naming what to push (--bookmark, --named, -r, --change, --all, --tag, aliases,
 # git.push, global options) before it runs git.
-# - Guarded is the rule by which the hook sweeper (sweep-hooks.sh, beside the
-#   shared check) installs the hook, copied from its `git remote -v` test (its
-#   `base`, `others`, `public_names` and `repos`): a line of `git remote -v`
-#   matching (theorem-labs/(<names>)|<others>)(\.git)?/?[[:space:]], letter case
-#   ignored, where <names> are the sweeper's six and the <name> of every file
-#   ~/.cache/public-leak-check/theorem-labs_<name> holding exactly `public`, and
-#   <others> its repositories outside theorem-labs (sjawhar/dotfiles). A line is
-#   matched as git prints it, URL whole, so a space in a path or a # or ? in an
-#   ssh alias changes nothing. The cache is read only when a line names
-#   theorem-labs/ and nothing else matched. The sweeper first skips a checkout
-#   whose config file it reads and finds no such name in; this does not, so it can
-#   check a push the sweeper left without a hook, and refuses there only what the
-#   check refuses (tests/test_jj_push_leak_gate.py runs both rules on the same
-#   checkouts).
-# - Fail closed where the answer depends on the cache and the cache cannot give it:
-#   the cache counts as absent only when the kernel says it does not exist (ENOENT,
-#   which it says only after searching every directory up to the missing name).
-#   Any other failure to reach it (a directory on the way, or a symlink's target,
-#   that cannot be searched), a cache directory that cannot be read, or an entry
-#   that would decide but cannot be read, is not a regular file, is empty or holds
-#   a word the check never writes refuses the push, saying the commits were not read.
-# A plain `git push` is untouched (it runs the checkout's hook), as is every other
-# command. Not seen, as `git push --no-verify` is not: a jj told to run another git
-# (`git.executable-path`) or copied under another name, a checkout of a public
-# repository outside the six that has no cache entry (a machine or agent box without
-# the cache), and a remote changed between this decision and git reading its config.
+# - Guarded is the rule of dispatch://BET-706, which the hook sweep (sweep-hooks.sh, beside the shared check) also
+#   installs the hook by: a checkout is guarded when any URL its `git remote -v` prints is GUARD by
+#   ../scripts/github-repo-visibility: a GitHub repository (github.com, www.github.com or ssh.github.com, directly or through an ssh
+#   alias, after a leading `<transport>::` or `git+`) that is public or whose visibility cannot be read (the leak
+#   check's fresh cache entry, then gh), or a URL whose host part cannot be parsed. A private or internal repository,
+#   a local path and another host are not. A line is read as git prints it, the URL whole after the tab: on a push
+#   line, without its final ` (push)`; on a fetch line, up to its first ` (fetch)`, since a partial clone's filter,
+#   whose text may hold anything, follows it (`<url> (fetch) [sparse:oid=HEAD:a [b]]`). So a space in a path or a # or ? in an ssh
+#   alias changes nothing. When git would run an ssh command of its own (the
+#   checkout's core.sshCommand, or GIT_SSH_COMMAND or GIT_SSH), an ssh alias is unknown, since that command may
+#   resolve it otherwise than ssh -G. The sweep has its own reader of the same rule, in another repository
+#   (tests/test_jj_push_leak_gate.py runs both on the same checkouts).
+# - Unknown counts as public (spec R4): every failure to read a visibility, a cache that cannot be reached, an entry
+#   that is empty or holds another word, gh that fails or does not answer in 5 s, a helper that cannot run, guards the
+#   checkout. The check then decides, and refuses a push to a theorem-labs repository whose visibility it cannot read
+#   either, so that still fails closed against a leak while a clean push goes out.
+# A plain `git push` is untouched (it runs the checkout's hook), as is every other command. Not seen, as `git push
+# --no-verify` is not: a jj told to run another git (`git.executable-path`) or copied under another name, and a remote
+# changed between this decision and git reading its config.
 from_jj() { # true when the process that ran this git is jj, also a jj binary replaced since it started
     local exe
     exe="$(readlink "/proc/$PPID/exe" 2> /dev/null)" || return 1
@@ -218,77 +211,32 @@ jj_push_refuse() {
     exit 1
 }
 JJ_PUSH_UNREAD="Nothing was pushed, and nothing is wrong with your commits: your commits were not read."
-# The sweeper's six public theorem-labs repositories and its public repositories elsewhere, its `base` and `others`.
-JJ_GATE_BASE='rocq-linux-process-semantics|oss-verify|oss-verify-proofs|metarocq|rocq|legion'
-JJ_GATE_OTHERS='sjawhar/dotfiles'
-# jj_gate_match LISTING RE: true when a line of LISTING matches the extended regular expression RE, letter case
-# ignored, as the sweeper's `git remote -v | grep -qiE "$repos"` does.
-jj_gate_match() {
-    local line hit=1
-    shopt -s nocasematch
-    while IFS= read -r line; do
-        if [[ "$line" =~ $2 ]]; then
-            hit=0
-            break
-        fi
-    done <<< "$1"
-    shopt -u nocasematch
-    return "$hit"
-}
-# jj_gate_rule NAMES [OTHERS]: the sweeper's `repos` regular expression for NAMES and OTHERS.
-jj_gate_rule() { printf '(theorem-labs/(%s)%s)(\\.git)?/?[[:space:]]' "$1" "${2:+|$2}"; }
-# jj_gate_kind PATH: what PATH is, symlinks followed: its type as stat names it (`directory`, `regular file`, ...);
-# `absent` when the kernel's own path walk says it does not exist (ENOENT), which it says only after searching every
-# directory up to the missing name, so the parent could be searched; `unknown` on any other failure, such as a
-# directory on the way, or a symlink's target, that cannot be searched. [[ -e ]] cannot tell those apart.
-jj_gate_kind() {
-    local out
-    if out="$(LC_ALL=C stat -L --printf '%F' -- "$1" 2>&1)"; then
-        printf '%s' "$out"
-    elif [[ "$out" == *": No such file or directory" ]]; then
-        printf absent
-    else
-        printf unknown
-    fi
-}
-# jj_push_guarded LISTING: true when the checkout whose `git remote -v` is LISTING is guarded (above), false when it
-# is not; refuses when that depends on a visibility cache it cannot read.
+# The visibility helper, as shims/jj finds it: scripts/ beside this shims dir.
+jj_gate_visibility="${BASH_SOURCE[0]%/*}/../scripts/github-repo-visibility"
+# jj_push_guarded LISTING: true when the checkout whose `git remote -v` is LISTING is guarded (above): some URL in it
+# is GUARD. Each URL is read once, and the first GUARD one decides. The checkout's core.sshCommand goes to the helper
+# as GIT_SSH_COMMAND, which git itself puts ahead of it. A helper that exits other than 0 is unknown, whatever it
+# printed.
 jj_push_guarded() {
-    local out="$1" dir kind f name v ok names="$JJ_GATE_BASE" bad=""
-    local -a undecided=()
-    jj_gate_match "$out" "$(jj_gate_rule "$names" "$JJ_GATE_OTHERS")" && return 0
-    [[ "${out,,}" == *theorem-labs/* ]] || return 1
-    dir="${HOME:-}/.cache/public-leak-check"
-    kind="$(jj_gate_kind "$dir")"
-    [[ "$kind" != absent ]] || return 1
-    [[ "$kind" != unknown ]] ||
-        jj_push_refuse "cannot reach the public leak check's visibility cache $dir: a directory on the way to it, or the target of a symlink on the way, cannot be searched, so whether this jj push needs the check is unknown and it is refused." \
-            "$JJ_PUSH_UNREAD Make every directory on that path searchable, then push again."
-    [[ "$kind" == directory && -r "$dir" && -x "$dir" ]] ||
-        jj_push_refuse "cannot read the public leak check's visibility cache $dir, so whether this jj push needs the check is unknown and it is refused." \
-            "$JJ_PUSH_UNREAD Make that directory readable, then push again."
-    for f in "$dir"/theorem-labs_*; do
-        [[ -e "$f" || -L "$f" ]] || continue # no entry at all: the pattern itself
-        name="${f##*/theorem-labs_}" v="" ok=0
-        if [[ -f "$f" ]]; then
-            if [[ -r "$f" ]] && { IFS= read -r -d '' v || :; } 2> /dev/null < "$f"; then ok=1; fi
-        elif [[ "$(jj_gate_kind "$f")" == absent ]]; then
-            continue # a symlink to nothing: no entry, as for the sweeper
-        fi
-        while [[ "$v" == *$'\n' ]]; do v="${v%$'\n'}"; done # as the sweeper's $(cat) reads it
-        case "$ok:$v" in
-            1:public) names+="|$name" ;;
-            1:private | 1:internal) ;;
-            *) undecided+=("$name") ;;
+    local line url sshcmd v
+    local -A checked=()
+    sshcmd="$("$_real" "${args[@]:0:i}" config --get core.sshCommand 2> /dev/null)" || sshcmd=""
+    while IFS= read -r line; do
+        [[ "$line" == *$'\t'* ]] || continue
+        # A line with no tab is no remote's: the rest of a filter holding a newline. A push line's URL ends at its final
+        # ` (push)`. A fetch line's ends at its first ` (fetch)`: git prints a partial clone's filter after that
+        # annotation (`<url> (fetch) [blob:none]`), and the filter may hold ` [`, `]` or ` (fetch)` itself. The sweep
+        # reads the lines by the same rule.
+        url="${line#*$'\t'}"
+        if [[ "$url" == *" (push)" ]]; then url="${url% (push)}"; else url="${url%% (fetch)*}"; fi
+        [[ -n "$url" && -z "${checked[$url]:-}" ]] || continue
+        checked[$url]=1
+        v="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$jj_gate_visibility" "$url" 2> /dev/null)" || v=unknown
+        case "$v" in
+            private | internal | not-github) ;;
+            *) return 0 ;;
         esac
-    done
-    jj_gate_match "$out" "$(jj_gate_rule "$names" "$JJ_GATE_OTHERS")" && return 0
-    for name in "${undecided[@]}"; do
-        if jj_gate_match "$out" "$(jj_gate_rule "$name")"; then bad+=" $dir/theorem-labs_$name"; fi
-    done
-    [[ -z "$bad" ]] ||
-        jj_push_refuse "the public leak check's visibility cache entry${bad} is empty, unreadable, not a regular file or holds a word the check never writes, so whether this jj push needs the check is unknown and it is refused." \
-            "$JJ_PUSH_UNREAD An empty entry is one the check is rewriting: push again in a moment. Any other needs fixing or removing."
+    done <<< "$1"
     return 1
 }
 # jj_push_gate: in a guarded checkout, runs this push with git's hooks on and a last -c core.hooksPath=jj-push-hooks/,
@@ -310,7 +258,7 @@ jj_push_gate() {
     jj_push_guarded "$out" || return 0
     hooks="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
     [[ -x "$hooks/pre-push" ]] ||
-        jj_push_refuse "the leak gate's hook $hooks/pre-push is missing, so this jj push from a checkout of a public theorem-labs repository is refused." \
+        jj_push_refuse "the leak gate's hook $hooks/pre-push is missing, so this jj push from a checkout of a public or unreadable GitHub repository is refused." \
             "$JJ_PUSH_UNREAD"
     for a in "${args[@]:i+1}"; do
         if ((!seen)); then

@@ -5,29 +5,59 @@ set -euo pipefail
 mode="${1:-}"
 [[ "$mode" != --slug ]] || shift
 url="${1:-}"
-# Only a real GitHub host counts, never a repository-name or path substring.
+# Only a real GitHub host counts, never a repository-name or path substring. git's <transport>::<address>
+# form (a remote helper, e.g. https::https://github.com/...) names the repository at its address.
+[[ ! "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*::(.*)$ ]] || url="${BASH_REMATCH[1]}"
 url="${url#git+}"
-host="" path=""
-if [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^/]+)/(.*)$ ]]; then
-    host="${BASH_REMATCH[1]##*@}" path="${BASH_REMATCH[2]}"
-    host="${host%%:*}"
-elif [[ "$url" =~ ^([^/:]+):(.+)$ ]]; then
-    host="${BASH_REMATCH[1]##*@}" path="${BASH_REMATCH[2]}"
+# The parse is the hook sweep's (agent-infra leak-check/sweep-hooks.sh, _url_parse), so the two decide alike
+# (shims/tests/test_jj_push_leak_gate.py compares them): host is the host with brackets removed, target is
+# [user@]host as git gives it to ssh, port an explicit port of a scheme URL.
+host="" target="" port="" path="" ssh=0
+case "${url,,}" in /* | ./* | ../* | file://*) echo not-github; exit 0 ;; esac
+if [[ "$url" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(/(.*))?$ ]]; then
+    case "${BASH_REMATCH[1],,}" in ssh | ssh+git) ssh=1 ;; esac
+    authority="${BASH_REMATCH[2]}" path="${BASH_REMATCH[4]}"
+    # [user@]host[:port], the host possibly in brackets.
+    [[ "$authority" =~ ^(([^@/]*)@)?(\[([^]]*)\]|[^]:@[]*)(:[0-9]*)?$ ]] || { echo unknown; exit 0; }
+    host="${BASH_REMATCH[4]:-${BASH_REMATCH[3]}}" target="${BASH_REMATCH[1]}${BASH_REMATCH[4]:-${BASH_REMATCH[3]}}"
+    port="${BASH_REMATCH[5]#:}"
+    # Outside ssh, a host that is neither a DNS name nor an address literal cannot be read.
+    if ((!ssh)) && [[ ! "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*)?$ && ! "$host" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+        echo unknown
+        exit 0
+    fi
+elif [[ "$url" =~ ^([^/:[]*(\[[^]]*\])?[^/:]*):(.*)$ ]]; then
+    # scp form, [user@]host:path, where git also accepts [host] and [user@host]; a colon after a slash makes it a
+    # local path. ssh.
+    authority="${BASH_REMATCH[1]}" path="${BASH_REMATCH[3]}" ssh=1
+    [[ ! "$authority" =~ ^\[([^]]*@[^]]*)\]$ ]] || authority="${BASH_REMATCH[1]}"
+    [[ "$authority" =~ ^(([^@]*)@)?(\[([^]]*)\]|[^]@[]*)$ ]] || { echo unknown; exit 0; }
+    host="${BASH_REMATCH[4]:-${BASH_REMATCH[3]}}" target="${BASH_REMATCH[1]}${BASH_REMATCH[4]:-${BASH_REMATCH[3]}}"
+else
+    echo not-github # no host: part, so a local path
+    exit 0
 fi
-case "${host,,}" in
-    github.com | ssh.github.com) ;;
+# A host part that is empty, or that ssh would take for an option, is unknown.
+if [[ -z "$host" || "$host" == -* || "$target" == -* ]]; then echo unknown; exit 0; fi
+# GitHub's hosts, as the leak check lists them (public-leak-check.sh); git follows www.github.com to github.com.
+# One trailing dot (a fully qualified name) is the same host.
+lhost="${host,,}" lhost="${lhost%.}"
+case "$lhost" in
+    github.com | www.github.com | ssh.github.com) ;;
     *)
-        # An SSH host alias can still name GitHub. Never contact the host.
-        if [[ "$url" == ssh://* || ( "$url" != *://* && -n "$host" ) ]]; then
-            resolved="$(timeout -s KILL 1 ssh -G "$host" 2>/dev/null | while read -r key value _; do
-                case "$key" in hostname) printf '%s' "$value" ;; esac
-            done)" || resolved=""
-            [[ -n "$resolved" ]] || { echo unknown; exit 0; }
-            case "${resolved,,}" in github.com | ssh.github.com) ;; *) echo not-github; exit 0 ;; esac
-        else
-            echo not-github
-            exit 0
-        fi ;;
+        ((ssh)) || { echo not-github; exit 0; }
+        # An ssh command of git's own (GIT_SSH_COMMAND, GIT_SSH; shims/git passes a checkout's core.sshCommand as
+        # GIT_SSH_COMMAND) may resolve the alias otherwise than a plain ssh -G (its own -F, say): unknown.
+        [[ -z "${GIT_SSH_COMMAND:-}${GIT_SSH:-}" ]] || { echo unknown; exit 0; }
+        # An SSH host alias can still name GitHub. Never contact the host. ssh -G resolves it as git's ssh would:
+        # `-p PORT` when the URL names one (ssh's config may choose the host by it), the URL's user (a Match on
+        # the user applies), and the alias's letter case as written.
+        resolved="$(timeout -s KILL 1 ssh -G ${port:+-p "$port"} "$target" </dev/null 2>/dev/null | while read -r key value _; do
+            case "$key" in hostname) printf '%s' "$value" ;; esac
+        done)" || resolved=""
+        resolved="${resolved,,}" resolved="${resolved%.}"
+        [[ -n "$resolved" ]] || { echo unknown; exit 0; }
+        case "$resolved" in github.com | www.github.com | ssh.github.com) ;; *) echo not-github; exit 0 ;; esac ;;
 esac
 path="${path#/}" path="${path%/}"
 [[ "${path,,}" != *.git ]] || path="${path:0:${#path}-4}"

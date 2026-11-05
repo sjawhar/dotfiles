@@ -975,9 +975,11 @@ leak_check_host_check() {
 # The leak check's pre-push hook: every checkout under ~/src that pushes to a public repository has
 # it. Which checkouts are public is decided by the sweep's own code (sweep-hooks.sh up to its loop,
 # as sami-devbox-provision's step prepush runs it), with an installer that installs nothing and
-# fails, so each checkout without the hook is one FAILED line and nothing on disk changes.
+# fails, so each checkout without the hook is one FAILED line and nothing on disk changes. A
+# checkout the sweep left for a later pass (`DEFERRED <path>`: its per-pass cap on visibility
+# lookups, dispatch://BET-706) is not known to have the hook, so it fails the line as well.
 prepush_hook_host_check() {
-    local d="$HOME/.local/share/public-leak-check-hooks" t out rc=0 summary missing
+    local d="$HOME/.local/share/public-leak-check-hooks" t out rc=0 summary missing deferred
     # shellcheck source=leak-check-tag.env
     . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/leak-check-tag.env"
     out="$(cd "$d" && sha256sum -c <<<"$LEAK_CHECK_HOOK_SHA256" 2>&1)" || rc=$?
@@ -988,11 +990,18 @@ prepush_hook_host_check() {
         here=$t; log=$t/log; sweep \"\$HOME/src\"" </dev/null >/dev/null 2>&1
     summary="$(grep ' sweep \[' "$t/log" 2>/dev/null | tail -n 1)"
     missing="$(sed -n 's/^[^ ]* FAILED //p' "$t/log" 2>/dev/null | tr '\n' ' ')"
+    deferred="$(sed -n 's/^[^ ]* DEFERRED //p' "$t/log" 2>/dev/null | tr '\n' ' ')"
     rm -rf "$t"
-    if [[ -n "$summary" && -z "$missing" ]]; then
+    # The summary's `<D> deferred` decides too, should a deferred checkout have no line of its own.
+    if [[ -z "$deferred" && "$summary" =~ ,\ ([1-9][0-9]*)\ deferred, ]]; then
+        deferred="${BASH_REMATCH[1]} checkout(s) the summary counts "
+    fi
+    if [[ -n "$summary" && -z "$missing" && -z "$deferred" ]]; then
         ok "pre-push hook: every public checkout under ~/src has it (${summary#* sweep })"
     else
-        fail "pre-push hook: missing in ${missing:-(the sweep pass wrote no summary)}; install: sami-devbox-provision --only prepush"
+        local nosum=""
+        [[ -n "$summary" ]] || nosum=" the sweep pass wrote no summary;"
+        fail "pre-push hook:${missing:+ missing in $missing;}${deferred:+ not verified (the sweep deferred their visibility lookups to a later pass) in $deferred;}$nosum install: sami-devbox-provision --only prepush"
     fi
 }
 

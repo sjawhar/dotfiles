@@ -35,7 +35,8 @@ What one run does:
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs). It installs the pre-push hook in every
      checkout of a public repository under its roots that lacks it; a checkout it cannot hook, a
-     pass that does not end within --sweep-timeout, or a missing sweep is a condition.
+     checkout it deferred to a later pass (its cap on GitHub visibility lookups, dispatch://BET-706),
+     a pass that does not end within --sweep-timeout, or a missing sweep is a condition.
   8. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
      When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
@@ -544,10 +545,17 @@ SWEEP_ONCE = (
     ' && sweep "${fast_roots[@]}" "${slow_roots[@]}"'
 )
 SWEEP_SUMMARY_RE = re.compile(r" sweep \[[^\]]*\]: (\d+) checkouts.*, (\d+) installed, (\d+) failed$")
+# The sweep of dispatch://BET-706 also counts the checkouts it left for a later pass (its cap on GitHub
+# visibility lookups per pass), just before the installed count; an older sweep has no such count.
+SWEEP_DEFERRED_RE = re.compile(r", (\d+) deferred, \d+ installed, \d+ failed$")
 
 
 def sweep_hooks(options: argparse.Namespace) -> str:
     """"" when one sweep pass left every public checkout with the pre-push hook, else why.
+
+    A checkout the pass deferred (`DEFERRED <path>`, counted in the summary) is not known to have
+    the hook, so such a pass is incomplete coverage, reported like a failed one: the next pass,
+    with the visibility answers this one kept, reaches it.
 
     Bounded by --sweep-timeout: on timeout the pass's whole process group is killed. The budget
     has to fit a WHOLE pass, because the sweep walks its roots in a stable order: a pass always
@@ -592,15 +600,27 @@ def sweep_hooks(options: argparse.Namespace) -> str:
     for line in lines:
         if " INSTALLED " in line:
             log(f"hooks: {line}")
-    log(f"hooks: {summary.group(1)} public checkout(s), {summary.group(2)} installed, {summary.group(3)} failed")
+    deferred = [line.split(" DEFERRED ", 1)[1] for line in lines if " DEFERRED " in line]
+    counted = SWEEP_DEFERRED_RE.search(summary.string)
+    n_deferred = max(int(counted.group(1)) if counted else 0, len(deferred))
+    log(f"hooks: {summary.group(1)} public checkout(s), {summary.group(2)} installed, {summary.group(3)} failed,"
+        f" {n_deferred} deferred")
     failed = [line.split(" FAILED ", 1)[1] for line in lines if " FAILED " in line]
+    why = []
     if failed or summary.group(3) != "0":
-        return (
+        why.append(
             f"the hook sweep could not install the leak check's pre-push hook in {summary.group(3)} public checkout(s):\n"
             + "\n".join(f"    {path}" for path in failed[:LIST_LIMIT])
             + f"\n  Install it by hand: {display_path(options.hooks_dir / 'install-prepush-hook.sh')} <checkout>."
         )
-    return ""
+    if n_deferred:
+        why.append(
+            f"the hook sweep deferred {n_deferred} public or unreadable checkout(s) to a later pass (its cap on GitHub"
+            " visibility lookups per pass), so they are not known to have the leak check's pre-push hook yet:\n"
+            + "\n".join(f"    {path}" for path in deferred[:LIST_LIMIT])
+            + "\n  The next pass reaches them; this clears when a pass defers none."
+        )
+    return "\n".join(why)
 
 
 # ------------------------------------------------------------------------------- state
