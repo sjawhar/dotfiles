@@ -18,10 +18,15 @@ evidence that does not separate them.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import importlib.machinery
 import importlib.util
+import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parent.parent / "farm-fail-watch"
 LOADER = importlib.machinery.SourceFileLoader("farm_fail_watch", str(SCRIPT))
@@ -397,9 +402,9 @@ class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
     dead job. The lane had already removed an automatic doubled retry from its tooling for
     the same reason (#1780): growing a runaway's limit buys a bigger kill.
 
-    The history says which kind it is, from data the watch already reads. A recent run of the
-    same unit and kind that peaked ABOVE the limit THIS run was given proves the peak is not
-    what the job needs -- it is what it was offered.
+    History and this run's series are independent checks. A sustained climb must withhold
+    the multiplier even for shell-offload jobs with no size-index history. Series heights
+    include sandbox memory under gVisor, so only their shape and rate may inform advice.
     """
 
     GIB = 1024 ** 3
@@ -452,6 +457,180 @@ class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
                            recent_memory_peaks=[101 * self.GIB])
         self.assertIn("RAISE MEMORY", text)
         self.assertIn("is what it was given", text)
+
+    def series_text(self, values, *, seconds=None, container="job") -> str:
+        start = datetime(2026, 11, 5, 19, 31, tzinfo=timezone.utc)
+        seconds = seconds if seconds is not None else [60 * i for i in range(len(values))]
+        lines = ["test-pod  window", f"  container {container}: {len(values)} samples",
+                 "    peak 999.00 GiB, first reached at an irrelevant summary time"]
+        for second, value in zip(seconds, values):
+            stamp = (start + timedelta(seconds=second)).isoformat().replace("+00:00", "Z")
+            lines.append(f"    {stamp}  {value:.2f} GiB  ####")
+        return "\n".join(lines)
+
+    def with_series(self, text, **overrides):
+        found = dict(memory_limit_bytes=64 * GIB, memory_limit_text="64Gi",
+                     memory_peak_bytes=63 * GIB, largest_process_bytes=60 * GIB,
+                     pod="test-pod", recent_memory_peaks=[])
+        found.update(overrides)
+        with patch.object(WATCH, "run_text", return_value=text):
+            found["memory_shape"] = WATCH.read_memory_shape(found)
+        return found, WATCH.memory_advice(found)
+
+    def test_a_climb_without_history_replaces_the_multiplier_with_time_bought(self) -> None:
+        found, text = self.with_series(self.series_text([2 + 1.8 * i for i in range(13)]))
+        self.assertEqual(found["memory_shape"]["status"], "unbounded")
+        self.assertIn("1.8 GiB a minute", text)
+        self.assertIn("80Gi buys about 9 more minutes", text)
+        self.assertIn("128Gi buys about 36 more minutes", text)
+        self.assertIn("any limit you pick is a date, not a fix", text)
+        self.assertNotIn("--memory", text)
+        self.assertNotIn("1.3 x", text)
+        self.assertNotIn("RAISE MEMORY", text)
+
+    def test_bounded_history_cannot_overrule_this_runs_climb(self) -> None:
+        _, text = self.with_series(self.series_text([2 + i for i in range(13)]),
+                                   recent_memory_peaks=[12 * GIB, 19 * GIB])
+        self.assertIn("no plateau", text)
+        self.assertNotIn("--memory", text)
+
+    def test_a_small_dip_and_one_missed_sample_do_not_hide_the_climb(self) -> None:
+        seconds = [0, 60, 120, 180, 240, 360, 420, 480, 540, 600, 660, 720]
+        values = [2, 3, 4, 3.95, 6, 8, 9, 10, 11, 12, 13, 14]
+        _, text = self.with_series(self.series_text(values, seconds=seconds))
+        self.assertIn("no plateau", text)
+        self.assertNotIn("--memory", text)
+
+    def test_a_plateau_is_checked_and_keeps_sizing_from_the_farm_peak(self) -> None:
+        _, text = self.with_series(self.series_text([2, 4, 6, 8, 10] + [10] * 9))
+        self.assertIn("--memory 82Gi", text)  # 1.3 x the farm's 63 GiB, not the series
+        self.assertIn("Series checked", text)
+        self.assertNotIn("shape unknown", text)
+        self.assertIn("short spike", text)
+
+    def test_a_real_fall_is_not_a_monotonic_climb(self) -> None:
+        _, text = self.with_series(self.series_text([2, 3, 4, 3.8] + list(range(6, 16))))
+        self.assertIn("--memory 82Gi", text)
+        self.assertIn("Series checked", text)
+
+    def test_a_series_above_the_limit_never_becomes_a_size(self) -> None:
+        for values, expected_size in (
+                ([2.38 + 1.8 * i for i in range(63)], None),
+                ([70, 90, 113.52] + [113.52] * 11, "--memory 82Gi")):
+            with self.subTest(values=values[:3]):
+                found, text = self.with_series(self.series_text(values))
+                self.assertEqual(found["memory_peak_bytes"], 63 * GIB)
+                self.assertNotIn("--memory 148Gi", text)  # 1.3 x 113.52 is NOT a size
+                self.assertNotIn("--memory 1299Gi", text)  # nor the helper's peak summary
+                if expected_size:
+                    self.assertIn(expected_size, text)
+                else:
+                    self.assertNotIn("--memory", text)
+
+    def test_without_a_farm_peak_the_series_cannot_supply_one(self) -> None:
+        _, text = self.with_series(self.series_text([113.52] * 13), memory_peak_bytes=None)
+        self.assertIn("no memory peak was recorded", text)
+        self.assertNotIn("--memory", text)
+
+    def test_no_pod_no_points_and_an_api_refusal_all_say_shape_unknown(self) -> None:
+        for series, overrides, reason in (
+                (None, {"pod": None}, "no pod name"),
+                ("test-pod  window\n  container job: 0 samples\n", {}, "no points"),
+                (None, {}, "could not be read")):
+            with self.subTest(reason=reason):
+                _, text = self.with_series(series, **overrides)
+                self.assertIn("shape unknown", text)
+                self.assertIn(reason, text)
+                self.assertNotIn("Series checked", text)
+
+    def test_short_gapped_or_stale_series_are_unknown_not_bounded(self) -> None:
+        cases = [
+            (self.series_text([2, 3, 4]), {}),
+            (self.series_text(list(range(13)), seconds=[180 * i for i in range(13)]), {}),
+            (self.series_text(list(range(13))), {"finished_at": "2026-11-05T20:00:00Z"}),
+        ]
+        for series, overrides in cases:
+            with self.subTest(overrides=overrides, series=series[:60]):
+                _, text = self.with_series(series, **overrides)
+                self.assertIn("shape unknown", text)
+                self.assertNotIn("Series checked", text)
+
+    def test_a_sidecars_climb_is_not_the_jobs_shape(self) -> None:
+        flat = self.series_text([10] * 13)
+        climbing_sidecar = self.series_text(list(range(13)), container="upload")
+        _, text = self.with_series(flat + "\n" + climbing_sidecar)
+        self.assertIn("--memory 82Gi", text)
+        self.assertIn("Series checked", text)
+
+    def test_a_single_shell_container_needs_no_farm_job_container_name(self) -> None:
+        _, text = self.with_series(self.series_text(list(range(13)), container="shell"))
+        self.assertIn("no plateau", text)
+        self.assertNotIn("--memory", text)
+
+    def test_collect_reuses_the_series_helper_for_the_failed_pod(self) -> None:
+        job = job_record(memory="64Gi", disk="60Gi")
+        result = result_record(63 * GIB, GIB, oom_kill=1)
+        result["failed_pods"][0]["job"]["terminated"]["finishedAt"] = "2026-11-05T19:44:00Z"
+        calls = []
+
+        def series_command(args, timeout=90):
+            calls.append(args)
+            self.assertEqual(Path(args[0]).name, "pod-memory-series")
+            self.assertEqual(args[1], result["failed_pods"][0]["name"])
+            self.assertEqual(args[-1], "2026-11-05T19:44:00Z")
+            return self.series_text([2 + i for i in range(13)])
+
+        with patch.object(WATCH, "read_object", side_effect=[job, result]), \
+                patch.object(WATCH, "read_pod", return_value=None), \
+                patch.object(WATCH, "run_text", side_effect=series_command):
+            found, _ = WATCH.collect("farm/test-run", "test-context")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--memory", WATCH.message(found))
+
+    def test_a_live_pods_name_and_start_are_used_without_a_failed_pod_record(self) -> None:
+        live = pod(memory="64Gi", disk="60Gi", name="pi-shjob-test")
+        live["status"]["containerStatuses"][-1]["state"]["terminated"].update(
+            startedAt="2026-11-05T19:31:00Z", finishedAt="2026-11-05T19:44:00Z")
+        found = WATCH.evidence(job_record(memory="64Gi"),
+                               result_record(63 * GIB, GIB, failed_pods=[]), live)
+        self.assertEqual(found["pod"], "pi-shjob-test")
+        with patch.object(WATCH, "run_text", return_value=self.series_text(list(range(13)))) as run:
+            found["memory_shape"] = WATCH.read_memory_shape(found)
+        self.assertEqual(run.call_args.args[0][1:],
+                         ["pi-shjob-test", "2026-11-05T19:31:00Z", "2026-11-05T19:44:00Z"])
+        self.assertNotIn("--memory", WATCH.memory_advice(found))
+
+    def test_the_real_series_helper_handles_a_climb_and_a_refused_api(self) -> None:
+        start = datetime(2026, 11, 5, 19, 31, tzinfo=timezone.utc)
+        body = {"timeSeries": [{
+            "resource": {"labels": {"container_name": "shell"}},
+            "points": [{"interval": {"endTime": (start + timedelta(minutes=i)).isoformat()},
+                        "value": {"int64Value": str(int((2 + 1.8 * i) * GIB))}}
+                       for i in range(13)],
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            tools = Path(directory)
+            (tools / "gcloud").write_text("#!/bin/sh\nprintf 'test-token\\n'\n")
+            (tools / "gcloud").chmod(0o755)
+            for curl_body, climbing in (
+                    ("printf '%s' '" + json.dumps(body) + "'", True),
+                    ("printf '%s' '{\"timeSeries\": []}'", False),
+                    ("exit 22", False)):
+                with self.subTest(climbing=climbing, curl=curl_body[:40]):
+                    (tools / "curl").write_text("#!/bin/sh\n" + curl_body + "\n")
+                    (tools / "curl").chmod(0o755)
+                    found = dict(pod="pi-shjob-test", memory_limit_bytes=64 * GIB,
+                                 memory_peak_bytes=63 * GIB,
+                                 finished_at="2026-11-05T19:43:00Z")
+                    with patch.dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"]):
+                        found["memory_shape"] = WATCH.read_memory_shape(found)
+                    text = WATCH.memory_advice(found)
+                    if climbing:
+                        self.assertIn("1.8 GiB a minute", text)
+                        self.assertNotIn("--memory", text)
+                    else:
+                        self.assertIn("shape unknown", text)
+                        self.assertNotIn("Series checked", text)
 
 
 if __name__ == "__main__":

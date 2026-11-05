@@ -39,6 +39,10 @@ and the kernel's `oom_kill` counter was **0**. The kill was disk.
      peaks, `oom_kill`, and the failed pods. This is the only place the peaks survive the pod.
    - `job.json` under `<bucket>/in/ossv/<run>/`: unit, kind, the sizes asked for, `size.mode`
      and the recent peaks the index sized from.
+   - for a memory kill, `pod-memory-series <pod> <start> <end>`: the node's non-evictable
+     memory series, using the existing helper rather than a separate Monitoring query.
+     The window runs from the job container's start to its end when known; without a
+     start it covers the six hours ending at the kill. Only shape and rate are retained.
 
    The bucket is the one the farm recorded for the run in `<ossv-n6>/job-buckets/<run>`, else
    `$OSSV_RUNS_BUCKET`, else `gs://theorem-ossv-runs`.
@@ -56,8 +60,11 @@ and the kernel's `oom_kill` counter was **0**. The kill was disk.
    | neither, or a peak or bound missing | `NOT DISTINGUISHABLE: killed at exit 137; memory peak X of Y, disk peak Z of W; the kill reason is not distinguishable from these` |
 
 3. **Advise on the named resource only.**
-   - memory: serialise when the largest single process held under half the limit (a bigger
-     pod buys nothing then); otherwise `--memory` at 1.3 x the measured peak.
+   - memory: first check this run's series for sustained growth. If it keeps climbing,
+     withhold the multiplier and every `--memory` figure; explain the rate and how little
+     time extra memory buys instead. Otherwise serialise when the largest single process
+     held under half the limit; the remaining sizing advice uses **only the farm's recorded
+     peak**, at 1.3 x, never a series height.
 
      When the log carries **no per-process samples at all** — a job that dies between two
      samples leaves none — `cpu_last_cores` at the last sample stands in, against the job's
@@ -73,26 +80,44 @@ and the kernel's `oom_kill` counter was **0**. The kill was disk.
      56.80 GiB peak — twenty-nine processes of about 2 GiB each — and its own log was ten
      lines with no per-process memory in it.
 
-     **Every "raise memory" assumes the peak is BOUNDED**, and one reading says when it is
-     not: a recent run of the same unit and kind that peaked ABOVE the limit THIS run was
-     given. Then the peak is not what the job needs, it is what it was offered, and sizing
-     at 1.3 x it buys minutes. The message says so and tells the lane to measure whether the
-     growth is bounded before buying memory. The peaks come from `job.json`'s
-     `size.recent_peaks`, which the watch already read for the disk warning. Why (CURL,
-     2026-11-05): one lane had three memory kills in one morning with three different right
-     answers — cap the concurrency of the big files, remove a flag, and fix a file — and the
-     watch advised 1.25-1.3 x for all three. The third was a runaway its own base commit
-     documents, "two kills at about 101 GB at 8 and at 2 cores… the growth survives at about
-     4 GB a minute", so a 35 GiB limit buys about two minutes. The same lane had already
-     removed an automatic doubled retry from its tooling (#1780) because growing a runaway's
-     limit buys a bigger kill. The serialise answer is never overridden by this: too many
-     processes at once is still too many, whatever an earlier run peaked at.
+     **The series check does not require history**, so it also works for shell-offload jobs
+     absent from the farm's size index. A sustained climb means at least ten minutes of
+     samples, no fall more than **0.10 GiB below the running high**, and at least **0.25 GiB
+     gained in every five-minute window**, ending at the first sample at or after that
+     window's end. Gaps may be at most **125 s**: one missed 60 s sample plus 5 s of jitter.
+     The last sample must also be within 125 s of the recorded kill. Small dips and brief
+     pauses do not hide a climb, but a five-minute plateau, a substantial fall or a single
+     late spike does not qualify. These are conservative evidence thresholds, not proof
+     that a finite trace can never level off.
+
+     A climbing series **replaces** sizing advice, whatever the history or process samples
+     say: "any limit you pick is a date, not a fix." The rate is the first-to-last gain over
+     elapsed minutes. Time bought is **extra limit divided by that rate**, not remaining
+     headroom divided by a series height: at 1.8 GiB/min, 64Gi to 80Gi buys about 9 more
+     minutes and 64Gi to 128Gi about 36. Those are slope-only illustrations, not predictions
+     of when the container will die. Under gVisor the node charges sandbox memory to the
+     container; a series reading can exceed its own limit. **Trust the shape, never the
+     height. Never turn a series reading into a size.**
+
+     With no pod name, no points, an unreadable helper/API, too little coverage, large gaps
+     or stale samples, the advice says **"Memory shape unknown"** and why. Any accompanying
+     farm-peak multiplier is conditional on checking bounded growth before buying memory.
+     An adequately sampled trace that does not meet the climb test says "Series checked";
+     it does not prove bounded growth or rule out a spike shorter than the 60 s sampler.
+     For multi-container pods only the job container is used; a single differently named
+     shell container is also accepted. Ambiguous streams are unknown, never combined.
+
+     The existing historical warning remains independent: a recent run of the same unit
+     and kind peaking above this run's limit warns that the peak is what it was given,
+     not what it needs. It comes from `job.json`'s `size.recent_peaks` and does not override
+     serialising. A checked series never cancels that warning.
 
      With neither test available, the message says the serialise test could not be applied
      rather than skipping it silently.
    - disk: `--disk` at 1.3 x the measured disk peak, and "do not raise memory: it was not
      the bound".
-   - both: both sizes, neither forbidden.
+   - both: disk advice and memory advice independently; a climbing memory series still
+     withholds the memory figure.
    - not distinguishable: no raise at all — resubmit once with the sampler's record kept.
 
 4. **Warn about the farm's sizing where a disk kill meets a measured size.** The farm keys a
@@ -116,14 +141,19 @@ And for the memory kill whose log had no processes in it:
 ```
 FARM JOB KILLED: farm/20261104t204327z-bda302 (curl/fuzz_bufq__build, n6-unit) at 2026-11-04T21:22:12Z, OOMKilled, exit 128.
 MEMORY was at its bound: memory peak 56.80 GiB of its 56Gi (56.00 GiB) limit (101%); disk peak 1.60 GiB of its 60Gi (60.00 GiB) ephemeral-storage request (3%). (the memory peak reached its limit while the disk peak did not reach its request.)
-SERIALISE, probably: no per-process samples in this job's log; from cpu_last_cores 29.34 of 31 cores at the last sample, this looks like the parallel case -- many processes running when the total reached the limit. The answer is fewer at once at the same limit (-j fewer), not a bigger pod. Confirm from the next run's per-process samples before buying memory.
+SERIALISE, probably: no per-process samples in this job's log; from cpu_last_cores 29.34 of 31 cores at the last sample, this looks like the parallel case -- many processes running when the total reached the limit. The answer is fewer at once at the same limit (-j fewer), not a bigger pod. Confirm from the next run's per-process samples before buying memory. Memory shape unknown: series not read; bounded growth has not been checked. Read the series before buying memory.
 ```
 
 ## Tests
 
-`scripts/tests/test_farm_fail_watch.py`, 30 of them: the measured disk kill above (from the
-cluster and the farm's record), a memory kill with both of its per-process arms, the
-cpu_last_cores fallback on the measured curl case (parallel, one process alone, in between,
-and per-process samples winning when they exist), a both-near-their-bound case with the
-closer one named, and an indistinguishable case that advises no raise. Run them with
-`python3 -m unittest scripts.tests.test_farm_fail_watch` from `~/.dotfiles`.
+`scripts/tests/test_farm_fail_watch.py` covers disk, memory, both and indistinguishable
+resource verdicts, the per-process and cores-based serialising advice, and the existing
+history warning. `AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore` also covers history-free
+climbs, small dips and a missed sample, plateaus and substantial falls, unknown shapes,
+gVisor-inflated readings, separate containers, and collection through the existing helper.
+The helper itself is exercised with fake `gcloud`/`curl` commands for a climb, absent points
+and an API refusal; no live cloud access is needed.
+
+Run `python3 -m unittest scripts.tests.test_farm_fail_watch` **from a copy outside the live
+checkout**, with `scripts/farm-fail-watch`, `scripts/pod-memory-series` and the test file in
+their usual relative locations.

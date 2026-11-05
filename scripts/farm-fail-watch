@@ -47,6 +47,7 @@ does not fix it; where it reports a disk kill of a job whose size came from the 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import glob
 import json
 import math
@@ -84,6 +85,17 @@ ALONE_CORES = 1.5
 # The N6 farm's runs bucket, where a run's job.json and result.json live when this machine
 # has no job-buckets record of the run (devbox/sami-devbox-check, N6_BUCKETS).
 RUNS_BUCKET = "gs://theorem-ossv-runs"
+
+# Monitoring samples every 60 s, occasionally 120 s. Allow 5 s of timestamp jitter,
+# 0.10 GiB of drawdown from the running high, and pauses shorter than five minutes.
+# A sustained climb needs ten minutes of coverage and at least 0.25 GiB gained in
+# EVERY five-minute window (ending at the next sample). This rejects a late spike or
+# a five-minute plateau without requiring every rounded reading to rise strictly.
+SERIES_MAX_GAP = 125
+SERIES_MIN_SPAN = 600
+SERIES_WINDOW = 300
+SERIES_DIP_GIB = 0.10
+SERIES_MIN_GAIN_GIB = 0.25
 
 
 def gib(value: float | None) -> str:
@@ -148,7 +160,7 @@ def pod_evidence(pod: dict | None) -> dict:
     """The job container's end and its own bounds, from a pod object. {} for no pod."""
     if not pod:
         return {}
-    found: dict = {}
+    found: dict = {"name": (pod.get("metadata") or {}).get("name")}
     for status in (pod.get("status") or {}).get("containerStatuses") or []:
         if status.get("name") != "job":
             continue
@@ -156,6 +168,7 @@ def pod_evidence(pod: dict | None) -> dict:
         found["reason"] = terminated.get("reason")
         found["exit_code"] = terminated.get("exitCode")
         found["finished_at"] = terminated.get("finishedAt")
+        found["started_at"] = terminated.get("startedAt")
     for container in (pod.get("spec") or {}).get("containers") or []:
         if container.get("name") != "job":
             continue
@@ -200,6 +213,7 @@ def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
         "reason": from_pod.get("reason") or terminated.get("reason"),
         "exit_code": from_pod.get("exit_code", terminated.get("exitCode")),
         "finished_at": from_pod.get("finished_at") or terminated.get("finishedAt") or result.get("finished"),
+        "started_at": from_pod.get("started_at") or terminated.get("startedAt"),
         "pod_reason": from_pod.get("pod_reason") or failed.get("reason"),
         "pod_message": from_pod.get("pod_message") or failed.get("message"),
         "memory_limit_bytes": from_pod.get("memory_limit_bytes", size_bytes(job.get("memory"))),
@@ -235,17 +249,88 @@ def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
         "store": job.get("store"),
         "recent_disk_peaks": [number(peak.get("disk_peak_bytes"))
                               for peak in (job.get("size") or {}).get("recent_peaks") or []],
-        # The same history for memory. It is what tells a job that needs more memory from one
-        # whose memory is UNBOUNDED: a kind whose earlier run peaked ABOVE the limit this run
-        # was given did not want 1.3 x this run's peak, it wanted everything it was offered.
-        # CURL, 2026-11-05: three memory kills in one lane, three different right answers, and
-        # the watch advised 1.25-1.3 x for all three. One was a runaway documented in its own
-        # base commit -- "two kills at about 101 GB at 8 and at 2 cores... the growth survives
-        # at about 4 GB a minute" -- where a 35 GiB limit buys about two minutes.
+        # History is one unbounded-growth warning, not the only check: shell-offload jobs
+        # have none. Their own Monitoring series can still show a sustained climb.
         "recent_memory_peaks": [number(peak.get("memory_peak_bytes"))
                                 for peak in (job.get("size") or {}).get("recent_peaks") or []],
     }
     return found
+
+
+def read_memory_shape(found: dict) -> dict:
+    """Reuse pod-memory-series; keep only shape/rate, NEVER a peak usable for sizing.
+
+    gVisor charges sandbox memory to the container in this node series. Its height may
+    exceed the container limit, so it must not enter the farm's memory_peak_bytes path.
+    A 60 s sampler sees a climb but cannot rule out a short spike.
+    """
+    unknown = {"status": "unknown"}
+    pod = found.get("pod")
+    if not pod:
+        return dict(unknown, reason="no pod name")
+    try:
+        end = datetime.fromisoformat(found["finished_at"].replace("Z", "+00:00")) \
+            if found.get("finished_at") else datetime.now(timezone.utc)
+        start = datetime.fromisoformat(found["started_at"].replace("Z", "+00:00")) \
+            if found.get("started_at") else end - timedelta(hours=6)
+    except ValueError:
+        return dict(unknown, reason="the job's time window could not be read")
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pod-memory-series")
+    text = run_text([helper, pod, start.isoformat().replace("+00:00", "Z"),
+                     end.isoformat().replace("+00:00", "Z")])
+    if not text:
+        return dict(unknown, reason="pod-memory-series could not be read (no points or API access)")
+
+    # Parse timestamped rows, not the helper's peak summary or bars. Never combine
+    # sidecars with the job; shell-offload pods may instead have one differently named
+    # container. Multiple streams for one container are ambiguous, not one trajectory.
+    containers = {}
+    points = None
+    for line in text.splitlines():
+        header = re.match(r"  container ([^:]+):", line)
+        if header:
+            name = header.group(1)
+            if name in containers:
+                return dict(unknown, reason="multiple memory series for one container")
+            points = containers[name] = []
+            continue
+        sample = re.match(r"\s+(\d{4}-\S+)\s+(\d+(?:\.\d+)?) GiB(?:\s|$)", line)
+        if sample and points is not None:
+            try:
+                stamp = datetime.fromisoformat(sample.group(1).replace("Z", "+00:00"))
+                points.append((stamp.timestamp(), float(sample.group(2))))
+            except ValueError:
+                return dict(unknown, reason="a series timestamp could not be read")
+    if "job" in containers:
+        points = containers["job"]
+    elif len(containers) == 1:
+        points = next(iter(containers.values()))
+    else:
+        return dict(unknown, reason="no points for an identifiable job container")
+    if not points:
+        return dict(unknown, reason="no points for the job container")
+    points.sort()
+    span = points[-1][0] - points[0][0]
+    if span < SERIES_MIN_SPAN:
+        return dict(unknown, reason="fewer than ten minutes of series samples")
+    if any(not 0 < right[0] - left[0] <= SERIES_MAX_GAP
+           for left, right in zip(points, points[1:])):
+        return dict(unknown, reason="series gaps exceed the 60 s sampler's one missed sample")
+    if found.get("finished_at") and end.timestamp() - points[-1][0] > SERIES_MAX_GAP:
+        return dict(unknown, reason="the series stops before the kill's last two minutes")
+
+    high = points[0][1]
+    window_end = 0
+    for stamp, value in points:
+        high = max(high, value)
+        if high - value > SERIES_DIP_GIB + 1e-9:
+            return {"status": "checked"}
+        while window_end < len(points) and points[window_end][0] - stamp < SERIES_WINDOW:
+            window_end += 1
+        if window_end < len(points) and points[window_end][1] - value < SERIES_MIN_GAIN_GIB:
+            return {"status": "checked"}
+    return {"status": "unbounded", "minutes": span / 60,
+            "rate_gib_per_minute": (points[-1][1] - points[0][1]) / (span / 60)}
 
 
 # --- the verdict --------------------------------------------------------------------------
@@ -289,11 +374,12 @@ def verdict(found: dict) -> dict:
 
 
 def memory_advice(found: dict) -> str:
-    """The memory case: serialise when the job ran many processes at once, size at 1.3 x the
-    measured peak when one process was alone and simply too big.
+    """A sustained series climb withholds sizing. Otherwise serialise when many processes
+    ran at once, or size at 1.3 x the farm's peak when one process was simply too big.
 
-    The first test is the per-process one: the largest single process under half the limit
-    means no bigger pod helps. The sampler records that only when it saw the processes, and
+    After the shape check, the per-process test is first: the largest process under half
+    the limit means no bigger pod helps. The sampler records that only when it saw the
+    processes, and
     a job that dies between two samples leaves none -- the log of
     farm/20261104t204327z-bda302 (killed at 56Gi, 21:22:12Z) was ten lines with no
     per-process memory in it at all. So when it is missing, `cpu_last_cores` at the last
@@ -308,13 +394,32 @@ def memory_advice(found: dict) -> str:
     largest = found.get("largest_process_bytes")
     cores = found.get("cpu_last_cores")
     core_count = found.get("cpu_limit_cores") or found.get("cpu_limit") or found.get("cpu")
+    shape = found.get("memory_shape") or {"status": "unknown", "reason": "series not read"}
+    if shape["status"] == "unbounded":
+        rate = shape["rate_gib_per_minute"]
+        if limit:
+            current = limit / GIB
+            bought = (f"At that observed slope, raising the {current:g}Gi limit to"
+                      f" {current * 1.25:g}Gi buys about {current * 0.25 / rate:.0f} more"
+                      f" minutes; {current * 2:g}Gi buys about {current / rate:.0f} more minutes.")
+        else:
+            bought = (f"At that observed slope, another 16Gi of limit buys about"
+                      f" {16 / rate:.0f} more minutes.")
+        return (f"Memory growth looks unbounded: a climb of about {rate:.1f} GiB a minute"
+                f" over {shape['minutes']:.0f} minutes with no plateau. {bought}"
+                " In short, any limit you pick is a date, not a fix. Fix the job's growth before"
+                " resubmitting, rather than buying memory. These are slope-only illustrations,"
+                " not container kill-time predictions: gVisor includes sandbox memory in the"
+                " node series. Trust the shape, never the height; do not size from it.")
+    shape_note = (" Series checked: no sustained climb without a plateau; 60 s samples cannot"
+                  " rule out a short spike." if shape["status"] == "checked" else
+                  f" Memory shape unknown: {shape.get('reason', 'series not read')}; bounded"
+                  " growth has not been checked. Read the series before buying memory.")
     sized = (f"--memory {whole_gib(MARGIN * peak)} (1.3 x the {gib(peak)} peak)"
              if peak is not None else None)
-    # EVERY "raise memory" below assumes the peak is BOUNDED -- that this job wants a
-    # particular amount and was given less. A job whose memory grows without bound takes
-    # whatever it is offered, and 1.3 x the last kill buys minutes. The history says which:
-    # a recent run of the same unit and kind that peaked ABOVE the limit this run was given
-    # proves the peak is not a property of the job's need (CURL, 2026-11-05).
+    # Every raise assumes bounded growth. History independently warns when a recent run
+    # of the same unit and kind peaked above this run's limit: this peak may be what the
+    # job was given, not what it needs.
     unbounded = None
     recent = [p for p in found.get("recent_memory_peaks") or [] if p]
     if recent and limit and max(recent) > limit:
@@ -335,11 +440,11 @@ def memory_advice(found: dict) -> str:
                     " the samples do not show." if count and count > 1 else "")
             return (f"SERIALISE: the largest single process held {gib(largest)}, under half the"
                     f" {gib(limit)} limit, so the job ran too many at once and a bigger pod buys"
-                    f" nothing.{many} Run the steps one at a time (fewer jobs, -j1).")
+                    f" nothing.{many} Run the steps one at a time (fewer jobs, -j1)." + shape_note)
         return ((f"RAISE MEMORY to {sized}."
                  if sized else "RAISE MEMORY: no memory peak was recorded, so resubmit once"
                  " with the sampler's record kept and size from that peak at 1.3 x.")
-                + (unbounded or ""))
+                + (unbounded or "") + shape_note)
 
     weaker = ("no per-process samples in this job's log; from cpu_last_cores"
               f" {cores:.2f} of {float(core_count):.0f} cores at the last sample"
@@ -348,16 +453,17 @@ def memory_advice(found: dict) -> str:
         return (f"SERIALISE, probably: {weaker}, this looks like the parallel case -- many"
                 " processes running when the total reached the limit. The answer is fewer at"
                 " once at the same limit (-j fewer), not a bigger pod. Confirm from the next"
-                " run's per-process samples before buying memory.")
+                " run's per-process samples before buying memory." + shape_note)
     if weaker and cores <= ALONE_CORES:
         return ((f"RAISE MEMORY to {sized}. {weaker}, this looks like one process alone -- the"
                  " single oversized step, which only a bigger pod fixes."
                  if sized else f"RAISE MEMORY: {weaker}, this looks like one process alone, but"
                  " no memory peak was recorded to size from; resubmit once with the sampler's"
-                 " record kept.") + (unbounded or ""))
+                 " record kept.") + (unbounded or "") + shape_note)
     if sized is None:
         return ("RAISE MEMORY: no memory peak was recorded, so resubmit once with the"
-                " sampler's record kept and size from that peak at 1.3 x." + (unbounded or ""))
+                " sampler's record kept and size from that peak at 1.3 x."
+                + (unbounded or "") + shape_note)
     advice = f"RAISE MEMORY to {sized}."
     if weaker:
         advice += (f" {weaker}, which is neither the parallel case nor one process alone, so"
@@ -365,7 +471,7 @@ def memory_advice(found: dict) -> str:
     else:
         advice += (" The largest single process was not recorded and the last sample has no"
                    " cpu_last_cores, so the serialise test could not be applied.")
-    return advice + (unbounded or "")
+    return advice + (unbounded or "") + shape_note
 
 
 def disk_advice(found: dict) -> str:
@@ -518,6 +624,8 @@ def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
     found = evidence(job, result, pod)
     if not found.get("pod") and names:
         found["pod"] = names[-1]
+    if verdict(found)["resource"] in ("memory", "both"):
+        found["memory_shape"] = read_memory_shape(found)
     return found, missing
 
 
