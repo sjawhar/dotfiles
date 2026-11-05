@@ -13,7 +13,7 @@ Loopback joined the refusals with the 2222 listener: the connection arrives thro
 proxy, so a loopback source is what the transport looks like on the receiver, not what the caller
 is, and a pin to it would admit anything arriving by that route.
 
-Range, loopback, missing-pin and malformed-key cases must fail before installation.
+Range, loopback, missing-pin, malformed-key and insecure key-ancestor cases fail before installation.
 These tests run outside the live dotfiles checkout. They do not prove SSH transport reachability.
 """
 
@@ -37,8 +37,63 @@ def run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     env["DEVBOX_OFFBOX_HOST"] = subprocess.run(["hostname", "-s"], capture_output=True,
                                                text=True, check=True).stdout.strip()
     env["DEVBOX_OFFBOX_ACT_DIR"] = str(tmp_path / "offbox-act")
+    env["DEVBOX_OFFBOX_AUTHORIZED_KEYS_DIR"] = str(tmp_path / "etc" / "ssh" / "offbox-watch")
     return subprocess.run(["bash", str(INSTALLER), *args], env=env, capture_output=True,
                           text=True, timeout=120)
+
+
+@pytest.fixture
+def listener_fs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Real directory modes and writes, with root ownership and sudo simulated off-host.
+
+    The stat double supplies root ownership and secure ancestors outside the sandbox; modes
+    inside it come from the real filesystem. The sudo double accepts only the key write and
+    rename, so the tests need no root and cannot write the host's /etc/ssh.
+    """
+    listener = tmp_path / "etc" / "ssh" / "offbox-watch"
+    # Each level is given its mode explicitly. `mkdir(parents=True, mode=0o755)` applies the mode
+    # to the LAST component only; every parent it creates takes 0777 & ~umask. On sami-devbox the
+    # umask is 002, so `etc` and `etc/ssh` came out 0775 and the installer refused them -- which
+    # is the installer behaving correctly and the fixture describing a tree it had not built.
+    # The suite passed where it was written, under umask 022, and failed the moment it ran here.
+    listener.mkdir(parents=True, mode=0o755)
+    for ancestor in (*reversed(listener.relative_to(tmp_path).parents), listener.relative_to(tmp_path)):
+        if str(ancestor) != ".":
+            (tmp_path / ancestor).chmod(0o755)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "stat").write_text('''#!/usr/bin/env python3
+import os
+import stat
+import sys
+from pathlib import Path
+assert sys.argv[1:4] == ["-Lc", "%a %u", "--"], sys.argv
+path = Path(sys.argv[4])
+root = Path(os.environ["LISTENER_TEST_ROOT"])
+mode = stat.S_IMODE(path.stat().st_mode) if path == root or root in path.parents else 0o755
+owner = os.environ.get("LISTENER_TEST_OWNER", "0") if path == root or root in path.parents else "0"
+print(f"{mode:o} {owner}")
+''')
+    (tools / "sudo").write_text('''#!/bin/bash
+set -euo pipefail
+[[ $1 == -n ]]
+shift
+case "$1" in
+    true) exit 0 ;;
+    install)
+        [[ "$*" == "install -o root -g root -m 0644 /dev/stdin $DEVBOX_OFFBOX_AUTHORIZED_KEYS_DIR/authorized_keys.new" ]]
+        exec /usr/bin/install -m 0644 "$8" "$9" ;;
+    mv)
+        [[ "$*" == "mv -f $DEVBOX_OFFBOX_AUTHORIZED_KEYS_DIR/authorized_keys.new $DEVBOX_OFFBOX_AUTHORIZED_KEYS_DIR/authorized_keys" ]]
+        exec /usr/bin/mv "${@:2}" ;;
+    *) exit 99 ;;
+esac
+''')
+    for tool in tools.iterdir():
+        tool.chmod(0o755)
+    monkeypatch.setenv("LISTENER_TEST_ROOT", str(tmp_path))
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    return listener
 
 
 @pytest.mark.parametrize("value, because", [
@@ -131,21 +186,65 @@ def test_it_refuses_to_install_on_a_machine_that_is_not_the_watched_one(tmp_path
     assert not (tmp_path / "offbox-act").exists()
 
 
-def test_public_key_is_installed_with_all_restrictions(tmp_path: Path) -> None:
+def test_public_key_is_installed_with_all_restrictions(tmp_path: Path, listener_fs: Path) -> None:
     key = tmp_path / "throwaway"
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
     done = run(tmp_path, "--from", NODE_V4, "--public-key", str(key) + ".pub")
     assert done.returncode == 0, done.stderr
-    installed = tmp_path / "offbox-act" / "authorized_keys"
+    installed = listener_fs / "authorized_keys"
     public = Path(str(key) + ".pub").read_text().split()
     assert installed.read_text() == (
         f'restrict,command="{tmp_path}/offbox-act/devbox-offbox-act --forced",'
         f'from="{NODE_V4}" {public[0]} {public[1]} devbox-offbox-watch@dispatch-cluster\n'
     )
-    assert installed.stat().st_mode & 0o777 == 0o600
+    assert installed.stat().st_mode & 0o777 == 0o644
+    assert not (tmp_path / "offbox-act" / "authorized_keys").exists()
     again = run(tmp_path, "--from", NODE_V4, "--public-key", str(key) + ".pub")
     assert again.returncode == 0, again.stderr
     assert len(installed.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757])
+@pytest.mark.parametrize("ancestor_levels", [0, 2, 3])
+def test_writable_key_ancestor_refuses_before_installation(tmp_path: Path, listener_fs: Path,
+                                                        mode: int, ancestor_levels: int) -> None:
+    key = tmp_path / "throwaway"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    ancestor = listener_fs
+    for _ in range(ancestor_levels):
+        ancestor = ancestor.parent
+    ancestor.chmod(mode)
+    done = run(tmp_path, "--from", NODE_V4, "--public-key", str(key) + ".pub")
+    assert done.returncode != 0, done.stdout
+    assert f"refusing key installation: {ancestor} has mode {mode:04o}" in done.stderr
+    assert "group or other writable; StrictModes would refuse the key" in done.stderr
+    assert not (listener_fs / "authorized_keys").exists()
+    assert not (tmp_path / "offbox-act").exists()
+    assert ancestor.stat().st_mode & 0o777 == mode
+
+
+def test_secure_key_ancestors_allow_installation(tmp_path: Path, listener_fs: Path) -> None:
+    key = tmp_path / "throwaway"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    done = run(tmp_path, "--from", NODE_V4, "--public-key", str(key) + ".pub")
+    assert done.returncode == 0, done.stderr
+    installed = listener_fs / "authorized_keys"
+    assert installed.read_text().startswith('restrict,command="')
+    assert installed.stat().st_mode & 0o777 == 0o644
+    assert (tmp_path / "offbox-act" / "PINNED").exists()
+
+
+def test_non_root_key_ancestor_refuses_before_installation(tmp_path: Path, listener_fs: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    key = tmp_path / "throwaway"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    monkeypatch.setenv("LISTENER_TEST_OWNER", "1000")
+    done = run(tmp_path, "--from", NODE_V4, "--public-key", str(key) + ".pub")
+    assert done.returncode != 0, done.stdout
+    assert f"{listener_fs} has owner uid 1000 and mode 0755" in done.stderr
+    assert "root ownership is required" in done.stderr
+    assert not (listener_fs / "authorized_keys").exists()
+    assert not (tmp_path / "offbox-act").exists()
 
 
 def test_installing_a_key_requires_from(tmp_path: Path) -> None:
