@@ -20,10 +20,14 @@
 #                        the session's Slack tool reads, so the wake message asks the session to
 #                        read them.
 #
-# Run it as the omp job `infra6-scoreboard-poll` (a persistent omp service), not as a systemd
-# unit: the chief of staff's ruling of 2026-11-01, dispatch://INFRA-26/comment/615d0105.
+# Run it as the stream job `infra6-scoreboard-poll` (`~/.config/stream-jobs/`, scripts/stream-job.md):
+# the omp job it used to be died with every session restart, and the last reading before this
+# was the window ending 2026-11-04 13:00Z. The runner passes every 5 minutes and runs `cron`,
+# which fires whichever of the tick's two marks is due. No systemd unit of its own: the chief of
+# staff's ruling of 2026-11-01, dispatch://INFRA-26/comment/615d0105.
 #
-#   infra6-scoreboard-poll            the loop
+#   infra6-scoreboard-poll cron       fire the marks that are due; what the stream job runs
+#   infra6-scoreboard-poll            the loop, for a session that holds the job itself
 #   infra6-scoreboard-poll tick       one blocked-hours poll now, for the window that ended at the last tick
 #   infra6-scoreboard-poll daily      the admin-paths and acceptance reads now, printed
 set -uo pipefail
@@ -39,7 +43,10 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
 # The replies must reach the INFRA session's inbox, so the sends carry its id as their source
 # whatever session started the job (`envoy send` stamps source_session from OMP_SESSION_ID).
-send_as_infra() { OMP_SESSION_ID=$INFRA_SESSION envoy send --message-file "$2" "$1" >/dev/null; }
+# The body goes on stdin, with every option before the target: since 2026-11-05 envoy refuses a
+# body given on the command line in an agent session, and a --message-file after the target is
+# message text rather than an option.
+send_as_infra() { OMP_SESSION_ID=$INFRA_SESSION envoy send --message-file - "$1" <"$2" >/dev/null; }
 
 # The leads asked: "$state/leads.tsv", one "<session id><TAB><lane name>" per line, which the INFRA
 # session keeps. It is a list and not every titled session, because a coordinator answers for its
@@ -178,6 +185,67 @@ next_at() {
 	done
 }
 
+# Under the stream-job runner this script is not a loop: `cron` is run on every 5-minute pass
+# and fires whichever of the tick's two marks is due. A mark is a tick's poll (hh:29) or its
+# wake (hh:59). The runner's pass is on its own clock and not on ours, so a mark is fired by
+# the first pass within MARK_GRACE of it and recorded in marks.txt; a mark older than that is
+# recorded as missed and never fired, since the hours it would ask for are gone with the lanes
+# that were asked. A wake whose own tick's poll never went out is skipped: nothing was asked,
+# so there is nothing to add up.
+readonly MARK_GRACE=1500
+
+# mark_at MM: the epoch of the latest tick hour's MM at or before now.
+mark_at() {
+	local m=$1 now h t best=
+	now=$(date -u +%s)
+	for d in 1 0; do
+		for h in 01 04 07 10 13 16 19 22; do
+			t=$(date -u -d "$(date -u -d "@$now" +%F) $h:$m:00 UTC - $d day" +%s)
+			[ "$t" -le "$now" ] && best=$t
+		done
+	done
+	printf '%s\n' "$best"
+}
+
+# mark_done: the mark fired. mark_seen: it fired or was recorded missed, so it is settled.
+mark_done() { grep -qxF "$1" "$state/marks.txt" 2>/dev/null; }
+mark_seen() { grep -qxE "$1( missed)?" "$state/marks.txt" 2>/dev/null; }
+
+cron() {
+	local now poll_at wake_at poll_mark wake_mark
+	now=$(date -u +%s)
+	poll_at=$(mark_at 29)
+	wake_at=$(mark_at 59)
+	poll_mark="poll $(date -u -d "@$poll_at" +%FT%TZ)"
+	wake_mark="wake $(date -u -d "@$wake_at" +%FT%TZ)"
+	if ! mark_seen "$poll_mark"; then
+		if [ $((now - poll_at)) -le "$MARK_GRACE" ]; then
+			poll
+			[ "$(window_end)" = "10:00" ] && daily >"$state/daily.txt" 2>&1
+			echo "$poll_mark" >>"$state/marks.txt"
+		else
+			echo "$poll_mark missed" >>"$state/marks.txt"
+			log "poll of ${poll_mark#poll } missed: $(((now - poll_at) / 60)) min late"
+		fi
+	fi
+	if ! mark_seen "$wake_mark"; then
+		if [ $((now - wake_at)) -gt "$MARK_GRACE" ]; then
+			echo "$wake_mark missed" >>"$state/marks.txt"
+			log "wake of ${wake_mark#wake } missed: $(((now - wake_at) / 60)) min late"
+		elif mark_done "poll $(date -u -d "@$((wake_at - 1800))" +%FT%TZ)"; then
+			wake
+			echo "$wake_mark" >>"$state/marks.txt"
+		else
+			echo "$wake_mark missed" >>"$state/marks.txt"
+			log "wake of ${wake_mark#wake } skipped: that tick's poll did not go out"
+		fi
+	fi
+	# The file answers one question, "is this mark settled", and two days of marks answer it.
+	if [ -s "$state/marks.txt" ]; then
+		tail -n 32 "$state/marks.txt" >"$state/marks.next" && mv "$state/marks.next" "$state/marks.txt"
+	fi
+}
+
 loop() {
 	local poll_at wake_at
 	log "started; INFRA session $INFRA_SESSION; state $state"
@@ -193,8 +261,9 @@ loop() {
 }
 
 case "${1:-loop}" in
+	cron) cron ;;
 	loop) loop ;;
 	tick) poll ;;
 	daily) daily ;;
-	*) echo "usage: infra6-scoreboard-poll [loop|tick|daily]" >&2; exit 2 ;;
+	*) echo "usage: infra6-scoreboard-poll [cron|loop|tick|daily]" >&2; exit 2 ;;
 esac
