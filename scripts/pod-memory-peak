@@ -31,6 +31,13 @@
 # produced four wrong readings in one afternoon (memory.peak, free's "available", a cgroup at
 # "93%", and a farm column), and it always reads high.
 #
+# One real pod carries BOTH errors, in opposite directions, and is the reason this script names
+# its fields rather than printing a number. On a 3-container build pod on 2026-11-05: the worker
+# peaked at 32.36 GiB non-evictable, the pod total was 33.56, and the right request was 43 GiB.
+# Summing used_bytes whole would have said over 100 GiB, because evictable alone peaked at 44.71.
+# Reading the wrong container -- which this script itself did for 63 minutes -- said 1.43.
+# The column matters more than the number.
+#
 # IT IS SAMPLED, about one point every 93 s. So:
 #   - size at peak plus 30%, never at the peak: a spike shorter than the interval is invisible;
 #   - an OOM kill beats this number. If a pod dies at a limit above what this prints, the number
