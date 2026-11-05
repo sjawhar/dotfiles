@@ -209,7 +209,16 @@ def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
         "unit": unit_name((job.get("labels") or {}).get("ossv-unit")),
         "kind": (job.get("labels") or {}).get("ossv-kind"),
         "pod": from_pod.get("name") or failed.get("name"),
-        "owner": (job.get("omp_session") or {}).get("id") or (job.get("labels") or {}).get("ossv-owner"),
+        # Owner keys, best first. `theorem.dev/omp-session` is the one a submitter should stamp
+        # (INFRA lead, 2026-11-05): the farm's failure notifier routes by it, and the scratch
+        # script behind the unlabelled `pi-shjob-*` Jobs now writes it on the Job and the pod
+        # template. `ossv-owner` stays here because existing Jobs carry it, and it is read LAST
+        # on purpose: in cluster-grants that key also EXEMPTS a Job from build-cpu-burst
+        # admission, so a lane that adds it to get itself attributed changes its own scheduling
+        # as a side effect. Do not advise anyone to add `ossv-owner`; advise the omp-session key.
+        "owner": ((job.get("omp_session") or {}).get("id")
+                  or (job.get("labels") or {}).get("theorem.dev/omp-session")
+                  or (job.get("labels") or {}).get("ossv-owner")),
         "reason": from_pod.get("reason") or terminated.get("reason"),
         "exit_code": from_pod.get("exit_code", terminated.get("exitCode")),
         "finished_at": from_pod.get("finished_at") or terminated.get("finishedAt") or result.get("finished"),
