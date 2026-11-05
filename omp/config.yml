@@ -39,10 +39,10 @@ modelRoles:
   # failing. Undo = revert this commit; the triggers are fallback share over
   # 10%, p95 over 90 s, or any handler timeout.
   review:
-    - ossv-gateway-openai/openai/gpt-6.1-sol-flex:xhigh
-    - ossv-gateway/openai/gpt-6.1-sol-flex:xhigh
-    - ossv-gateway-openai/openai/gpt-6.1-sol:xhigh
-    - ossv-gateway/openai/gpt-6.1-sol:xhigh
+    - model-gateway-openai/openai/gpt-6.1-sol-flex:xhigh
+    - model-gateway/openai/gpt-6.1-sol-flex:xhigh
+    - model-gateway-openai/openai/gpt-6.1-sol:xhigh
+    - model-gateway/openai/gpt-6.1-sol:xhigh
   # The Legion plugin's agents name these two roles: oracle for oracle and
   # plan-gap-analyst, deep for deep-worker. Unmapped, those agents fail with
   # "No model selected". Same models as omp/agents/oracle.md and deep.md (@slow).
@@ -55,10 +55,10 @@ modelRoles:
   # descriptions say, and which a caller who needs a cross-family read answers
   # by dispatching sol by name.
   oracle:
-    - ossv-gateway-openai/openai/gpt-6.1-sol-flex:high
-    - ossv-gateway/openai/gpt-6.1-sol-flex:high
-    - ossv-gateway-openai/openai/gpt-6.1-sol:high
-    - ossv-gateway/openai/gpt-6.1-sol:high
+    - model-gateway-openai/openai/gpt-6.1-sol-flex:high
+    - model-gateway/openai/gpt-6.1-sol-flex:high
+    - model-gateway-openai/openai/gpt-6.1-sol:high
+    - model-gateway/openai/gpt-6.1-sol:high
   deep: openai-codex/gpt-5.6-terra:xhigh
   advisor: anthropic/claude-sonnet-5-5:medium
   # pi-envoy's AskGate asks this role (else `default`) before each Dispatch write.
@@ -180,17 +180,17 @@ retry:
     openai-codex/gpt-6-astra:high:
       - anthropic/claude-opus-5-5:xhigh
     openai-codex/gpt-6-astra:
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
+      - model-gateway-openai/openai/gpt-6.1-sol
+      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     openai/*: []
     openai/gpt-6-astra:
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
+      - model-gateway-openai/openai/gpt-6.1-sol
+      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     openai/gpt-5.6-terra:
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
+      - model-gateway-openai/openai/gpt-6.1-sol
+      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     # The `sol` agent (agents/sol.md), the default cross-family subagent since
     # Sami's preference of 2026-11-02 (dispatch://BET-545). Its model is
@@ -211,26 +211,37 @@ retry:
     # The Flex tier the @review and @oracle chains lead on. Named explicitly so
     # `ossv-gateway-openai/*: []` below does not leave a Flex call without a
     # fallback: the other machine's Flex id first, then the standard tier.
-    ossv-gateway-openai/openai/gpt-6.1-sol-flex:
-      - ossv-gateway/openai/gpt-6.1-sol-flex
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
+    # HDO maxed out with an auto-regulating back-off (Sami, 2026-11-05 08:50Z; chain shape from GATE 14:44Z).
+    # The chain head is the BARE id on purpose: `claude-opus-5-5` hits the gateway's dedicated Opus 5.5 group
+    # with its own HDO/HDO V2 session pin, where `anthropic/claude-opus-5-5` hits the anthropic/* wildcard --
+    # same model, different group, different pinning. Both Fables are served on HDO V2 only and every HDO
+    # team allows anthropic/*. Gateway-qualified on purpose: `anthropic/claude-fable-5-1` is the GATEWAY's
+    # own model id (omp models model-gateway lists it), so a bare two-segment entry would resolve to the
+    # DIRECT anthropic provider, which does not serve Fable at all. All three verified with real
+    # completions at 14:45Z before this landed: 200, 200, 200.
+    model-gateway/claude-opus-5-5:
+      - model-gateway/anthropic/claude-fable-5-1
+      - model-gateway/anthropic/claude-fable-5
+    model-gateway-openai/openai/gpt-6.1-sol-flex:
+      - model-gateway/openai/gpt-6.1-sol-flex
+      - model-gateway-openai/openai/gpt-6.1-sol
+      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
-    ossv-gateway/openai/gpt-6.1-sol-flex:
-      - ossv-gateway-openai/openai/gpt-6.1-sol-flex
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
+    model-gateway/openai/gpt-6.1-sol-flex:
+      - model-gateway-openai/openai/gpt-6.1-sol-flex
+      - model-gateway-openai/openai/gpt-6.1-sol
+      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
-    ossv-gateway-openai/openai/gpt-6.1-sol:
-      - ossv-gateway/openai/gpt-6.1-sol
+    model-gateway-openai/openai/gpt-6.1-sol:
+      - model-gateway/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
-    ossv-gateway-openai/*: []
-    ossv-gateway/openai/gpt-6.1-sol:
-      - ossv-gateway-openai/openai/gpt-6.1-sol
+    model-gateway-openai/*: []
+    model-gateway/openai/gpt-6.1-sol:
+      - model-gateway-openai/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
     openai-codex/gpt-6.1-sol:
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
+      - model-gateway-openai/openai/gpt-6.1-sol
+      - model-gateway/openai/gpt-6.1-sol
     # openai-codex/gpt-5.5 was retired from the catalog; the resolver already
     # matched it to gpt-5.6-terra, which has its own chain below.
     openai-codex/gpt-5.6-sol:
@@ -355,8 +366,8 @@ compaction:
   # the effort suffixes (`:xhigh`, `:high`) the review and oracle roles pin.
   # A per-agent task.agentCompactionThresholdOverrides entry still outranks these.
   modelThresholds:
-    ossv-gateway-openai/openai/gpt-6.1-sol*: "f250000"
-    ossv-gateway/openai/gpt-6.1-sol*: "f250000"
+    model-gateway-openai/openai/gpt-6.1-sol*: "f250000"
+    model-gateway/openai/gpt-6.1-sol*: "f250000"
 advisor:
   enabled: true
 # omp's own interceptor stays on in this shared file: a session that predates the experiments
