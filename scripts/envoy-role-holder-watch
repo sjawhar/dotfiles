@@ -2096,7 +2096,11 @@ def alert_head(role: str, incident: dict, holder: str, now: float, kind: str) ->
         f"ENVOY ROLE HOLDER UNSEEN ({kind}): no source has seen {holder}, the holder of role"
         f" {role}, for {unseen_for}, since {iso(incident.get('opened_at'))}. ESTABLISHED: I"
         " cannot see that session. NOT established: that it stopped.",
-        f"Do: look at its pane, then ask it (`envoy send {holder} \"are you alive?\"`). Do NOT"
+        # The body goes on stdin: `envoy send` refuses one given as a command-line word from an
+        # agent session, since the shell expands backticks and $(...) in it first. Advice a
+        # reader copies has to be advice that runs.
+        f"Do: look at its pane, then ask it"
+        f" (`envoy send --message-file - {holder} <<<'are you alive?'`). Do NOT"
         " read the role claim or delete the session.",
         f"Lane {incident.get('dir') or '-'} on {incident.get('host') or '-'}.",
     ]
@@ -2198,7 +2202,7 @@ def alert_text(
         "Do, in this order, and stop as soon as one answers:",
         f"  1. {look}",
         "  2. Ask the session. Type a question into that pane, or `envoy send"
-        f" {holder} \"are you alive?\"`. A session that answers is alive and this alert is wrong:"
+        f" --message-file - {holder} <<<'are you alive?'`. A session that answers is alive and this alert is wrong:"
         " say so on the incident and nothing else needs doing. That is how the 2026-10-29"
         " 09:20:30Z false alert on bet64-eta-arity was caught, two minutes in.",
         step_three,

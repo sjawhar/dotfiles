@@ -279,7 +279,8 @@ def report_text(session: str, how: str, transcript: Path, mtime: float, now: flo
         "",
         "This watch never signals, stops or restarts a process. To decide: look at the session's tmux pane,"
         f" read the transcript's last lines (`tail -n 5 {transcript}`), or send the session an Envoy message"
-        f" (`envoy send {session} '...'`). A `wait` or `task` call counts only when nothing under"
+        f" (`envoy send --message-file - {session} <<<'...'`; the body goes on stdin, since a"
+        f" command-line body is refused from an agent session). A `wait` or `task` call counts only when nothing under"
         f" {transcript.with_suffix('')} changed in the window either.",
         "One message per stall: the next one needs the transcript to move and then stall again.",
     ]

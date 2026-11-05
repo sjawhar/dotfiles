@@ -505,7 +505,10 @@ The report gives these checks in order. The short message includes the checks th
 
 1. **Look at the pane** this watch last saw the session running in, or the `tmux list-panes`
    command that finds it by title or directory.
-2. **Ask the session** — type into that pane, or `envoy send <holder> "are you alive?"`. A
+2. **Ask the session** — type into that pane, or `envoy send --message-file - <holder> <<<'are
+   you alive?'`. The body goes on stdin, with the option before the target: `envoy send`
+   refuses a command-line body from an agent session, since the shell expands backticks and
+   `$(...)` in it first, and it refuses `--message-file` written after the target. A
    session that answers is alive and the alert is wrong. This is how the 2026-10-29 09:20:30Z
    false alert was caught two minutes in, and it is first because it costs nothing and cannot
    hurt a live lane.

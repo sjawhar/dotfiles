@@ -383,8 +383,16 @@ refuse() { MOVE_SAID=1; echo "agentbox: $*" >&2; exit 2; }
 # inside agent sessions. The body is this script's own text either way; stdin keeps it out of
 # every argv (/proc/<pid>/cmdline is world-readable) and sends its bytes verbatim.
 envoy_send_text() {
+    # Each option here takes a VALUE, and the value does not start with `--`, so it has to be
+    # taken with its flag: collecting flags alone left `envoy` as the session id and the real
+    # session id as the body, so `--source envoy "$sid" "$text"` sent the id to a target called
+    # "envoy" and the text nowhere.
     local -a opts=()
-    while [[ "${1:-}" == --* ]]; do opts+=("$1"); shift; done
+    while [[ "${1:-}" == --* ]]; do
+        [[ $# -ge 2 ]] || die "envoy_send_text: $1 takes a value"
+        opts+=("$1" "$2")
+        shift 2
+    done
     local sid="$1" text="$2"
     envoy send ${opts[@]+"${opts[@]}"} --message-file - "$sid" <<<"$text"
 }
