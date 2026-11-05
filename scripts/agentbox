@@ -9047,6 +9047,42 @@ cmd_doctor_here() {
 # Sourced (scripts/tests/test_agentbox_enroll.py), it defines its functions and runs nothing.
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
+# `agentbox new` RE-EXECS FROM A PRIVATE COPY OF THIS FILE.
+#
+# This script is bash, and bash reads a script incrementally by byte offset: a file replaced
+# under a running one makes it read the new bytes from the old offset and die where it stands,
+# with no error line, no exit line, and -- measured on 2026-11-05 -- EXIT STATUS 0, so no caller
+# can detect it either. `~/.dotfiles` is production and every publish replaces this file while
+# sessions are using it.
+#
+# `new` is the long-running subcommand: it builds or finds the image, creates the box, mounts
+# its filesystem and waits for omp to register. Two things run it in exactly the wrong window.
+# The move's relauncher did, and a publish at 08:30:17Z on 2026-11-05 killed two stream leads'
+# relaunchers mid-wait (move_hand_off now copies this file for that reason). The restart
+# registry does too, through every entry's `resume=` line -- and that path is worse: it runs
+# unattended and in bulk straight after a reboot, which is exactly when publishes cluster,
+# because that is when people are fixing whatever caused the reboot. 75 sessions came back
+# through it at 04:09Z that morning; one publish mid-sweep would have left some at a shell while
+# the watcher's log said they were restarted (LANE-C, 2026-11-05).
+#
+# So the protection lives HERE rather than in each caller: no entry, pane or watcher has to know
+# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY both carries
+# the copy's path for the cleanup and stops a second re-exec. A copy that cannot be made is not
+# fatal: the launch goes on from the live file, as before, since refusing to start a session is
+# worse than the hazard.
+if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
+    _self_copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-self-XXXXXX" 2>/dev/null || true)"
+    if [[ -n "$_self_copy" ]] \
+        && cat "$(readlink -f "${BASH_SOURCE[0]}")" >"$_self_copy" 2>/dev/null \
+        && chmod +x "$_self_copy" 2>/dev/null; then
+        AGENTBOX_SELF_COPY="$_self_copy" exec "$_self_copy" "$@"
+    fi
+    [[ -z "$_self_copy" ]] || rm -f "$_self_copy"
+    echo "agentbox: could not copy itself to run from; continuing from $(readlink -f "${BASH_SOURCE[0]}"), which a dotfiles publish can kill mid-launch" >&2
+fi
+# Running FROM the copy: take it away when this launch ends, whichever way it ends.
+[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || trap 'rm -f "$AGENTBOX_SELF_COPY"' EXIT
+
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
     sh)      shift; cmd_sh "$@" ;;
