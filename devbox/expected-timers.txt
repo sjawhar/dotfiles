@@ -85,7 +85,10 @@ box-cleanup.timer  max_run=4h        # owner: box-health lead. Every disk cleane
 # readers page it and how many calls they make at once. MACH restores the line below
 # (uncommented) once its script is checked; nothing else re-arms it.
 # agent-files-archive.timer  owner=01a16553 MACH  max_run=3h   # Archives each ended run.
-linux1263-reader.timer             # owner: the Verified Linux lane (LINUX-1263 runif reader).
+# linux1263-reader.timer  owner: the Verified Linux lane (LINUX-1263 runif reader). Retired by
+#   its owner at 09:11Z on 2026-11-05: the hands-off test it served ended at 09:05:02Z and runif
+#   was stopped. Both unit files were removed. If runif runs again its reader comes back as a
+#   stream job, not a hand-written timer, so this line does not come back with it.
 verified-linux-drift-check.timer   # owner: the Verified Linux lead. Its session's liveness.
 
 # --- shipped by Ubuntu's python3-launchpadlib, not by any lane ---
