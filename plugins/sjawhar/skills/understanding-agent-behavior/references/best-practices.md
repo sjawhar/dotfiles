@@ -7,7 +7,7 @@ Techniques the field uses once you are already reading transcripts (see SKILL.md
 - Reproduce the failure with the simplest test that still fails before blaming the long context: if a
   single-turn version of the question fails too, the cause is retrieval or knowledge, not the conversation. [S6]
 - Annotate only the **first** failure in a trace and fix that; downstream errors usually cascade from it, and
-  a taxonomy built on symptoms counts the same bug many times. [S6][S8]
+  a taxonomy built on symptoms counts the same bug many times. [S6]
 - Build a transition-failure matrix — rows: last successful state, columns: where the first failure landed —
   to find which hand-off actually breaks, instead of guessing from totals. [S6]
 - Re-run the agent with its exact prompt and tools and watch it step by step ("think like your agent"); this
@@ -42,22 +42,22 @@ Techniques the field uses once you are already reading transcripts (see SKILL.md
   count. At NurtureBoss three categories accounted for >60% of all failures, one of which (date handling)
   went from 33% to 95% once named. [S7]
 - Write the rubric *after* reading traces, not before: reviewers given a rubric first check its boxes and
-  miss everything outside it, and your own criteria drift as you read. [S8]
+  miss everything outside it, and your own criteria drift as you read. [S6]
 - Start with 20–50 cases drawn from real failures, not hundreds: early effect sizes are large enough that a
   prompt change moving 30%→80% is visible on a handful of cases. [S1][S4]
 
 ## Things to avoid
 
 - Don't reach for a different model, framework or architecture as the first response to a failure — only
-  after error analysis says the model is the problem. [S8]
+  after error analysis says the model is the problem. [S6][S7]
 - Don't trust an eval score, up or down, before someone has read transcripts from that run: an unfair
   grader, an ambiguous task or a constrained harness looks exactly like an incapable agent. [S4]
 - Don't celebrate a 100% pass rate: a saturated eval carries no information, and ~70% is usually the more
-  informative suite. Retire it or make it harder. [S8]
+  informative suite. Retire it or make it harder. [S6][S4]
 - Don't add generic metrics (helpfulness, coherence, "hallucination score"); they create a false sense of
-  measurement and fragment attention away from the few failures that matter. [S7][S8]
+  measurement and fragment attention away from the few failures that matter. [S7]
 - Don't answer each new failure by appending another edge case to the prompt: that is the whack-a-mole
-  plateau — fixing one mode surfaces the next while the prompt grows unwieldy. [S7][S2]
+  plateau — fixing one mode surfaces the next while the prompt grows unwieldy. [S8][S2]
 - Don't keep adding tools. The problem is overlap, not count: teams run 15+ distinct tools fine and struggle
   with 10 overlapping ones. If a human engineer can't say which tool applies, the agent can't either. [S10][S2]
 - Don't assume more context means more adherence: recall degrades as the window fills (context rot), so
@@ -73,7 +73,7 @@ Techniques the field uses once you are already reading transcripts (see SKILL.md
   applies. [S1]
 - Don't ignore problems that aren't the model's fault during review (missing feature, broken tool, bad
   data); record them, and defer root-cause until after you have prioritized. Deferring it yields better
-  annotations over more data. [S8]
+  annotations over more data. [S6]
 
 ## Optional: a finer cause taxonomy
 
@@ -94,6 +94,9 @@ Every URL below was opened and read in full or in the sections cited.
 - [S9] Microsoft Research, "Systematic debugging for AI agents: Introducing the AgentRx framework" — https://www.microsoft.com/en-us/research/blog/systematic-debugging-for-ai-agents-introducing-the-agentrx-framework/
 - [S10] OpenAI, "A practical guide to building agents" (PDF) — https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf
 
-Note on [S6] and [S8]: the FAQ and the 2024 evals post are by the same author and overlap; bullets tagged to
-each cite the page where I read that specific claim. [S6] carries the multi-turn debugging, transition-matrix
-and criteria-drift material; [S8] carries the model-selection, saturation and generic-metrics material.
+Note on the Hamel sources [S6], [S7], [S8]: all by Hamel Husain and overlapping heavily, so a claim often
+appears in more than one; each bullet is tagged with the page where that claim is actually stated. [S6] (the
+2026 FAQ) carries the multi-turn debugging, the transition-failure matrix, first-failure annotation, the
+rubric-after/criteria-drift point, model-selection-last, the ~70% pass-rate point, and recording problems that
+are not the model's fault. [S7] (the field guide) carries bottom-up error analysis, the NurtureBoss figures,
+and generic-metrics-as-vanity. [S8] (the 2024 post) carries the whack-a-mole plateau.
