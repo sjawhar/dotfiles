@@ -248,6 +248,20 @@ RUN_BUDGET = 90.0
 # inside one period makes a 30-minute deadline false.
 URGENT_HORIZON = 1800.0
 
+# How long a warning a mount's RATE rule buys, where the default two hours is not enough for
+# what that mount costs when it lands. The default was set on sami-rocqperf, where a full
+# /mnt/nvme cost one lane its work. On sami-devbox the same filesystem holds every agent box's
+# home, every lane's tree and the clone templates, so it takes 75 sessions out at once and the
+# recovery is a reboot (the 2026-11-04 outage). Two hours is enough to find a writer and not
+# enough to find its OWNER, get an answer and have the space given back; four is. Measured on
+# 2026-11-05: at 287.5 GB/h with 1,695 GiB free the disk read 6 h 19 min to full and the rule
+# was correctly quiet, which left the hunt to start only because a person happened to look.
+# The urgent mark (30 min) and the floors are unchanged; this moves only how early the
+# deadline rule speaks.
+HORIZONS = {
+    "/mnt/nvme": 4 * 3600.0,
+}
+
 # Mounts whose block device has a PROVISIONED IOPS limit, and that limit. /mnt/durable on
 # sami-rocqperf is an Azure P50 premium SSD data disk, whose tier allows 7,500 completed
 # operations a second however fast the hardware under it is. A device held there queues every
@@ -1793,9 +1807,10 @@ def verdict(
     # going anywhere. At a NEW LOW for the hour the downstrokes are no longer cancelling out.
     at_new_low = low is None or free <= low + options.low_slack * GIB
     below_floor = free < floor
+    horizon = HORIZONS.get(mount, options.horizon)
     rate_candidate = (
         time_to_full is not None
-        and time_to_full < options.horizon
+        and time_to_full < horizon
         and df_window >= options.min_span
         and at_new_low
     )
@@ -1815,7 +1830,7 @@ def verdict(
     if fast:
         reasons.append(
             f"{number_word(confirmations)} scheduled {short_time(options.confirmation_spacing)} samples"
-            f" in a row, each under the {short_time(options.horizon)} horizon; the current df"
+            f" in a row, each under the {short_time(horizon)} horizon; the current df"
             f" free-space fill rate is {gb(df_rate * 3600)}/h over the last {human_time(df_window)},"
             f" leaving {human_time(time_to_full)} to full at a new low for that window"
         )
@@ -1823,6 +1838,7 @@ def verdict(
         "mount": mount,
         "free": free,
         "total": total,
+        "horizon": horizon,
         "floor": floor,
         "configured_floor": configured,
         "floor_held": floor_held,
@@ -1852,7 +1868,8 @@ def clears(state_now: dict, options: argparse.Namespace) -> bool:
     """Hysteresis: a crossing clears well clear of what opened it, never on the threshold."""
     if state_now["free"] < state_now["floor"] * options.clear_factor:
         return False
-    if state_now["time_to_full"] is not None and state_now["time_to_full"] < options.horizon * 2:
+    horizon = state_now.get("horizon") or options.horizon
+    if state_now["time_to_full"] is not None and state_now["time_to_full"] < horizon * 2:
         return False
     return True
 
@@ -3339,7 +3356,7 @@ def run_once(options: argparse.Namespace) -> int:
             # Which of the two first-alert rules sent it, for the alert to say out loud.
             incident["first_rule"] = "urgent" if urgent_first else "grace"
             kind = "first alert"
-            why = first_alert_why(now, incident, options.horizon)
+            why = first_alert_why(now, incident, now.get("horizon") or options.horizon)
         else:
             incident["escalated_at"] = started
             incident["escalations"] = int(incident.get("escalations") or 0) + 1
