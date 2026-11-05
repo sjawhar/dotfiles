@@ -71,8 +71,9 @@ box-cleanup.timer  max_run=4h        # owner: box-health lead. Every disk cleane
 # ossv-box-gateway-token.timer stood here until 2026-11-04 23:57Z and were removed with their
 # scripts (dispatch://INFRA-993/comment/be112388, Sami: "The idea that we have a mono gateway
 # credential refresher is just nonsense... We're supposed to be using WIF with the model gateway").
-# The one credential left that is a key, the BET-59 verified-grader stream's, has no timer either:
-# omp/verified-grader-gateway-key.service puts it back in tmpfs at boot and never repeats.
+# The verified-grader stream's key, the last stored gateway credential, went the same way at
+# 2026-11-05 02:1xZ: its provider now mints a Google identity token per call for dev-pbc@ (team
+# verified-grader, agent-infra#2142), so there is no key file, no boot unit and nothing to re-arm.
 
 # --- lane timers whose unit files are machine-local, not in ~/.dotfiles ---
 # MACH's archive fires 20 min after each run ends and normally takes 5-7 min, but after the

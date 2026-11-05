@@ -109,7 +109,6 @@ EXTRA_INSTALLERS=(
     # stream's key, which the gateway serves to team `verified-grader` alone and so to no identity
     # caller; its unit runs at boot and never repeats, and it goes when the gateway takes an
     # identity token for that team.
-    verified-grader-gateway-key
     # What the librarian's test harnesses need on the host beyond mise.toml: the exact omp build
     # their runs are compared at, and Playwright's Chromium (installers/librarian-harness-host.sh).
     librarian-harness-host
