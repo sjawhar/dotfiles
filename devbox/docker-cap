@@ -145,6 +145,33 @@ images_reclaimable() {
     [[ -n "$r" ]] || return 1
     to_bytes "$r"
 }
+
+# An image's CreatedAt is when it was BUILT, not when this host pulled it: `docker images` prints
+# 2026-02-13 for a pgvector pulled today, and epoch 0 for ubuntu:26.04. So no age floor protects a
+# pull in flight -- an image built in April is eligible the second its digest lands, however
+# recently the pull began. On 2026-11-05 a lane ran `docker image prune -af` by hand while its own
+# audit was pulling by digest, and four of those pulls died with containerd missing-lease and
+# missing-extraction-path errors (dispatch://INFRA-6). That was the blunt form, which also takes
+# tagged images and which this script never does; but an image pulled BY DIGEST carries no tag, so
+# it is untagged from the moment it lands and this script's own pass could race one the same way.
+# Hence: no image pass at all while a pull is running.
+#
+# `docker pull` only, deliberately. `docker run` pulls an image it does not have, so matching it
+# looks more careful -- and makes this check useless here: every agent box IS a long-lived
+# `docker run`, 74 of them on this host, so the guard would be true forever and nothing would ever
+# be pruned. Tested before this line was written. The hole that leaves is a `docker run` pulling
+# a missing image, which is seconds to minutes, against the certainty of a cap that never acts.
+# A pull issued straight to the daemon's API by some other tool is invisible here too.
+pull_in_flight() {
+    pgrep -f '^(/[^ ]*/)?docker( .*)? pull( |$)' >/dev/null 2>&1
+}
+if pull_in_flight; then
+    echo "a docker pull is in flight: skipping every image pass this run, since an image pulled by digest is untagged the moment it lands and pruning one mid-pull breaks it"
+    echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
+    after="$(free_bytes)"
+    echo "docker-cap: free space on $root went from $((before / 1000000000)) GB to $((after / 1000000000)) GB; now $(used_pct)% used"
+    exit 0
+fi
 images_cap_bytes="$(to_bytes "$images_cap")"
 if ! reclaimable="$(images_reclaimable)"; then
     echo "untagged images: cannot read the reclaimable image total; running the 24 h pass only: $(docker image prune --force --filter until=24h | tail -1)"
