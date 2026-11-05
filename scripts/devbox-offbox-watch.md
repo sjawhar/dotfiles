@@ -35,12 +35,20 @@ installs the pinned copy, records the commit it came from, and prints the `autho
 it never edits `authorized_keys`, and an update of the copy is a deliberate run of that installer,
 not a publish.
 
-**`from=` is an address or nothing.** `devbox-offbox-act-host.sh --from <address>` puts it in the
-printed line and `--no-from` leaves it out, saying that the tailnet grant, `restrict` and the
-forced command are then the whole boundary. A placeholder and a `from=` over 100.64.0.0/10 are
-both refused: a range that wide restricts nothing beyond "arrived over the tailnet". The address
-exists only because the cluster job's Tailscale sidecar is a **persistent** node — an ephemeral one
-has a new address every pass — and it is read once with `tailscale ip -4 <the node name>`.
+**`from=` is one node's addresses or nothing.** `devbox-offbox-act-host.sh --from <addresses>`
+puts them in the printed line, normalised to the comma-separated list sshd reads; `--no-from`
+leaves `from=` out and says what is then left — `restrict`, the forced command, and that nothing
+but this job holds the key. The tailnet is **not** a second boundary in that case:
+`tag:offbox-watch`'s grant is the only *tag's* route to the box's 22, but every device of the
+box's own owner reaches it as well (`autogroup:member` → `autogroup:self` in the policy).
+Every element of a `--from` is parsed, in both families, and must be a single address — a bare
+address or its `/32` or `/128`. A range is refused however it is spelled, the tailnet's own
+`100.64.0.0/10` and `fd7a:115c:a1e0::/48` included, as are `0.0.0.0/0`, a pattern, a host name and
+a placeholder: the first gate compared one spelling of one range and accepted every other way of
+writing the same thing (agent-infra#2194, 2026-11-05;
+`scripts/tests/test_devbox_offbox_act_host_installer.py`). One address exists to name at all only
+because the cluster job's Tailscale sidecar is a **persistent** node — an ephemeral one has a new
+address every pass — and it is read once with `tailscale ip -4 <the node name>`.
 
 **Every message is also a log line.** Each alert and each refusal prints
 `OFFBOX-ALERT <json>` (kind, targets, the watched host, the text) on stdout as well as going to
