@@ -9,7 +9,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
-from . import model, render, rounds, sessions
+from . import model, render, rounds
 from .pace import BEHIND, CANT_TELL, HOLDING, ON_PACE, PACIFIC, WORSE, Bound, Pace, line_at
 from .plan_issues import live_url
 from .prs import parse_ref
@@ -345,55 +345,9 @@ def stream_sessions(v: StreamView) -> str:
     where = ", ".join(v.windows)
     if v.sessions is None:
         return f'<span class="sess dim">sessions in {e(where)} not measured</span>'
-    return (f'<a class="sess" href="#sessions" title="Live agent sessions of the stream on every machine: in tmux '
+    return (f'<span class="sess" title="Live agent sessions of the stream on every machine: in tmux '
             f'window {e(where)} here, moved from it, or seen there by an earlier read and still listed by Envoy">'
-            f'{v.sessions} session{"s" if v.sessions != 1 else ""} of {e(where)}</a>')
-
-
-def session_label(s: dict) -> str:
-    box = ' <span class="dim">(agent box)</span>' if s.get("box") else ""
-    return f"{e(sessions.label(s))}{box}"
-
-
-def sessions_fact(page: PageV2) -> str:
-    """The header's Sessions: every live agent session on this machine, and how many run outside a stream's window."""
-    c = page.census
-    if c is None:
-        return ('<div class="fact sess"><span class="fl">Agent sessions</span>'
-                '<span class="fv dim">not measured</span></div>')
-    out = sessions.ungrouped_count(c)
-    return (
-        f'<div class="fact sess"><span class="fl">Agent sessions</span><a class="fv" href="#sessions">'
-        f'<span class="n">{c["total"]}</span> live <span class="n {"bad" if out else "ok"}">{out}</span> '
-        "outside a stream window ›</a></div>"
-    )
-
-
-def sessions_strip(page: PageV2) -> str:
-    """Live agent sessions by tmux window, then each session outside the stream windows with its window's name: a
-    stream whose lanes run outside its window shows here (Sami, 2026-11-02: no cap, a visible count)."""
-    c = page.census
-    if c is None:
-        return ('<section class="sessions small dim" id="sessions">Agent sessions were not measured at the last '
-                "read.</section>")
-    by_window = " · ".join(
-        f'{e(w)} <b>{len(ss)}</b>{"" if sessions.WINDOW_STREAMS.get(w) else " (no stream row)"}'
-        for w, ss in c["windows"].items())
-    rows = []
-    for pl in c["ungrouped"]:
-        where = sessions.place_words(pl)
-        names = "; ".join(session_label(s) for s in pl["sessions"])
-        rows.append(f'<li><b>{e(where)}</b> <span class="bv">{len(pl["sessions"])}</span> '
-                    f'<span class="small">{names}</span></li>')
-    out = sessions.ungrouped_count(c)
-    listing = (f'<p class="small"><b class="bad">Outside the stream windows ({out}):</b></p><ul>{"".join(rows)}</ul>'
-               if rows else '<p class="small ok">Every session runs in a stream window.</p>')
-    idle = (f'<p class="small dim">Windows with no agent: {e(", ".join(c["idle_windows"]))}</p>'
-            if c["idle_windows"] else "")
-    return (
-        f'<section class="sessions{" out" if out else ""}" id="sessions"><h2 class="fl">Live agent sessions '
-        f'({c["total"]})</h2><p class="small">By window: {by_window}</p>{listing}{idle}</section>'
-    )
+            f'{v.sessions} session{"s" if v.sessions != 1 else ""} of {e(where)}</span>')
 
 
 # ------------------------------------------------------------------------------------------------- plan
@@ -767,7 +721,7 @@ def top_line(page: PageV2) -> str:
         f'<span class="n grey">{k[CANT_TELL]}</span> can\'t tell</span></div>'
         f'<div class="fact"><span class="fl">Merged today</span><span class="fv"><span class="n">{page.merged}</span> of '
         f"{page.planned} planned</span></div>"
-        f"{decisions_fact(page)}{sessions_fact(page)}"
+        f"{decisions_fact(page)}"
         "</div></header>"
     )
 
@@ -847,7 +801,7 @@ def body(page: PageV2, videos: dict, notice=None, notice_error=False, chief: str
         "reading is the gap.</p>"
         f"{streams}</div>"
     )
-    return f"{top_line(page)}{note}{err_box}{chief}{behind_strip(page)}{sessions_strip(page)}{loop}{block}"
+    return f"{top_line(page)}{note}{err_box}{chief}{behind_strip(page)}{loop}{block}"
 
 
 CSS = """
@@ -880,16 +834,16 @@ padding:10px 14px;color:var(--ink)}
 .fv .n{font-size:var(--fs-num);font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;margin-right:3px}
 .fact.kpi .fv .n:not(:first-child){margin-left:10px}
 .fact a.fv{color:var(--blue)}.fact a.fv .n{color:var(--ink)}
-.fact.sess .fv{white-space:normal}.fact a.fv .n.bad{color:var(--bad)}.fact a.fv .n.ok{color:var(--ok)}
+.fact a.fv .n.bad{color:var(--bad)}.fact a.fv .n.ok{color:var(--ok)}
 .errors{background:var(--badbg);color:var(--bad);padding:8px 12px;border-radius:8px;margin:0 0 12px}
 .errors ul{margin:4px 0 0 18px;padding:0}
 .notice{background:var(--okbg);color:var(--ok);padding:8px 12px;border-radius:8px;margin:0 0 12px}
 .notice.bad-bg{background:var(--badbg);color:var(--bad)}
-/* the strips under the header: chief of staff, behind its line, live agent sessions, learning loop */
-.chief,.behind,.sessions,.loop{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--grey);
+/* the strips under the header: chief of staff, behind its line, learning loop */
+.chief,.behind,.loop{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--grey);
 border-radius:10px;padding:9px 14px;margin:0 0 12px}
 .chief{border-left-color:var(--blue);display:flex;flex-direction:column;gap:8px}
-.chief h2,.behind h2,.sessions h2{margin:0 0 4px}
+.chief h2,.behind h2{margin:0 0 4px}
 .cp-talk,.notep{display:flex;flex-direction:column;gap:8px;min-width:0}
 .cp-live{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
 .cp-asks h3{margin:0 0 4px}
@@ -903,10 +857,7 @@ border-radius:6px;max-width:100%}
 .behind{border-left-color:var(--bad)}
 .behind.none{border-left-color:var(--ok);color:var(--dim)}
 .behind ul{margin:0;padding:0;list-style:none;display:grid;gap:3px}
-.behind .bv,.sessions .bv{font-weight:600;font-variant-numeric:tabular-nums;margin-left:4px}
-.sessions.out{border-left-color:var(--bad)}
-.sessions p{margin:2px 0}
-.sessions ul{margin:0;padding:0;list-style:none;display:grid;gap:3px}
+.behind .bv{font-weight:600;font-variant-numeric:tabular-nums;margin-left:4px}
 .loop>summary{color:var(--ink)}
 .loop>summary .fl{margin-right:6px}
 .loop p{margin:4px 0}
@@ -926,7 +877,7 @@ border-bottom:1px solid var(--line)}
 a.asks{font-weight:600}
 a.blink{font-weight:600}
 .asks.none{color:var(--dim)}
-.sess{font-size:var(--fs-meta)}a.sess{font-weight:600}
+.sess{font-size:var(--fs-meta)}
 .hm{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .marks{display:inline-flex;gap:3px;flex-wrap:wrap}
 .mk{display:inline-block;flex:none;width:11px;height:11px;border-radius:50%;border:1.6px solid var(--grey);

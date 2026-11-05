@@ -25,6 +25,17 @@ SCOREBOARD_SLUG = "scoreboard-json"
 # which `sessions.stream_census` reads and extends.
 PILOT_STATE = Path(os.environ.get("DASHBOARD_PILOT_STATE", "/mnt/nvme/sami/chief/streams"))
 
+# This is Sami's page, so it shows the streams that are his. A stream is discovered by the label `stream` on an
+# open issue in any project, which means any session in the company can put a stream on his page by labelling its
+# own issue: on 2026-11-04 a colleague's Lean eval issue appeared here as a stream with no lead, and he asked why.
+# The issue's assignee is the test, because a stream issue of his already carries it.
+OWNER = os.environ.get("DASHBOARD_STREAM_OWNER", "sami@theorem.dev")
+
+
+def _is_samis(issue: dict) -> bool:
+    return not OWNER or issue.get("assignee") == OWNER
+
+
 
 class VersionCache:
     """Scoreboard versions are immutable, so each (issue, version) is downloaded once."""
@@ -122,6 +133,7 @@ def collect(
                 "claim": (i.get("claim") or {}).get("actor"),
             }
             for i in api.stream_issues()
+            if _is_samis(i)
         ]
     except SourceError as e:
         errors.append(f"stream issues (label 'stream'): {e}")

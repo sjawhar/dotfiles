@@ -139,7 +139,7 @@ def test_the_recording_keeps_no_prompt_path_or_environment(tmp_path):
     assert argv == {10: ["-bash"], 11: ["docker", "run", "--name", "agentbox-1"], 12: [OMP, "-p", "--model"]}
 
 
-def test_each_stream_row_carries_its_count_and_the_strip_names_the_windows_outside(tmp_path):
+def test_each_stream_row_carries_its_count(tmp_path):
     census, _ = recorded()
     snap = snapshot()
     snap["sessions"] = census
@@ -153,14 +153,7 @@ def test_each_stream_row_carries_its_count_and_the_strip_names_the_windows_outsi
     assert (v.sessions, v.windows) == (14, ["tasks"])
     head = v2_render.stream_section(v, page, [])
     head = head[head.index('<div class="sh-right">'):head.index("</div></div>")]
-    assert '<a class="sess" href="#sessions"' in head and ">14 sessions of tasks</a>" in head
-    top = v2_render.top_line(page)
-    assert '<span class="n">76</span> live <span class="n bad">18</span> outside a stream window' in top
-    strip = v2_render.sessions_strip(page)
-    assert "Live agent sessions (76)" in strip and "tasks <b>13</b>" in strip and "cicd <b>1</b> (no stream row)" in strip
-    assert "<b>window ossv-lanes</b> <span class=\"bv\">13</span>" in strip
-    assert "<b>tmux session gate-1423-cross</b>" in strip and "Windows with no agent: w-h-rw-sta-4" in strip
-    assert 'id="sessions"' in v2_render.body(page, {})
+    assert '<span class="sess"' in head and ">14 sessions of tasks</span>" in head
 
 
 def test_a_stream_without_a_window_and_an_unmeasured_read_say_so():
@@ -168,6 +161,5 @@ def test_a_stream_without_a_window_and_an_unmeasured_read_say_so():
     page = v2_model.build(snap, NOW)
     v = next(x for x in page.streams if x.st.issue == "BET-83")
     assert v.sessions is None and "sessions in tasks not measured" in v2_render.stream_section(v, page, [])
-    assert "not measured" in v2_render.sessions_strip(page) and "not measured" in v2_render.top_line(page)
     v.windows = []
     assert "no tmux window of its own" in v2_render.stream_sessions(v)

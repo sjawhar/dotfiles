@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from . import model, render, rounds, standup, v2_model, v2_render, videos
+from . import model, render, rounds, standup, v2_model, v2_render, v3_render, videos
 from .collect import VersionCache, collect
 from .prs import PrCache
 from .sources import Dispatch, envoy_send
@@ -32,7 +32,14 @@ from .videos import VideoStore
 
 log = logging.getLogger(__name__)
 
-PUBLIC_ORIGIN = os.environ.get("DASHBOARD_PUBLIC_ORIGIN", "https://sami-rocqperf.tail12ec1c.ts.net:8446")
+# Every name the page answers under. sami-devbox serves it; sami-rocqperf publishes the same page by forwarding
+# to that one, so a browser's Origin is whichever name Sami opened. Checking one name alone refused every note he
+# sent from the other, and the proxy rewrites Host to "localhost", so the name cannot be read off the request.
+PUBLIC_ORIGINS = tuple(x.strip() for x in os.environ.get(
+    "DASHBOARD_PUBLIC_ORIGINS",
+    "https://sami-devbox.tail12ec1c.ts.net:8446,https://sami-rocqperf.tail12ec1c.ts.net:8446",
+).split(",") if x.strip())
+PUBLIC_ORIGIN = PUBLIC_ORIGINS[0]  # the page's own links and the text it sends with a note
 LOGINS = tuple(x for x in os.environ.get("DASHBOARD_LOGINS", "sami@theorem.dev").split(",") if x)
 REFRESH_SECONDS = int(os.environ.get("DASHBOARD_REFRESH_SECONDS", "120"))
 STATE_DIR = Path(os.environ.get("DASHBOARD_STATE_DIR", Path.home() / ".local" / "state" / "chief-dashboard"))
@@ -544,6 +551,14 @@ def make_handler(dash: Dashboard, proxy_uid: int = 0):
             if m := re.fullmatch(r"/standup/audio/([0-9a-f]{32})\.mp3", url.path):
                 self._standup_audio(m.group(1))
                 return
+            if url.path == "/first":
+                # The first screen: one question, answered at a glance (v3_render's docstring). Drawn for Sami to
+                # look at before it replaces the front page, since a page he rejects costs a week.
+                with dash.lock:
+                    snap = dict(dash.snapshot)
+                page = v2_model.build(snap, now_utc())
+                self._send(200, v3_render.page_html(v3_render.first_screen(page)))
+                return
             # The new layout is the front page; /v2 stays as its old address. The previous page lives at /v1.
             if url.path in ("/", "/v2"):
                 refusal, _login = self._who()
@@ -608,8 +623,9 @@ def make_handler(dash: Dashboard, proxy_uid: int = 0):
                 return
             wants_json = "application/json" in (self.headers.get("Accept") or "")
             refusal, login = self._who()
-            if refusal is None and self.headers.get("Origin") != PUBLIC_ORIGIN:
-                refusal = f"the request's Origin {self.headers.get('Origin')!r} is not this page ({PUBLIC_ORIGIN})"
+            if refusal is None and self.headers.get("Origin") not in PUBLIC_ORIGINS:
+                refusal = (f"the request's Origin {self.headers.get('Origin')!r} is not this page "
+                           f"({' or '.join(PUBLIC_ORIGINS)})")
             if refusal:
                 if wants_json:
                     self._send(403, json.dumps({"ok": False, "message": f"refused: {refusal}"}), "application/json")
