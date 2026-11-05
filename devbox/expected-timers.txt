@@ -40,6 +40,15 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 envoy-role-holder-watch.timer      # owner: box-health lead. Envoy role holders still alive.
 omp-dup-watch.timer                # owner: box-health lead. One omp per session id.
 omp-login-watch.timer              # owner: box-health lead. Sessions still have a provider login.
+# transcript-import.timer and transcript-lag-watch.timer were added here on 2026-11-05 and taken
+# out the same afternoon. sami-devbox has NO write path to the transcript store: 10.0.0.20:8123 is
+# the store VM's address inside Azure (200 from sami-rocqperf, TCP timeout from here), and the
+# store's tailnet HTTPS door ignores credentials entirely -- a deliberately wrong password still
+# answers as the read-only `ts_team` -- so an importer here exits 403 "Not enough privileges"
+# however it is configured. devbox's sessions reach the store through rocqperf's
+# transcript-mirror, which lists this host in its hosts.tsv and copies them; that is devbox's
+# importer and always was. Nothing transcript-related belongs on this host until the store is
+# writable from it (dispatch://INFRA-1235).
 # omp-memory-watch.timer was here. Sami, 2026-11-04 17:10:29Z: "I don't know what OMP memory
 # watch is, but yeah, you can stop it." Disabled at 21:26Z and taken out of this list, which is
 # what had re-armed it at 19:44Z. It does not come back in any form without his say.
