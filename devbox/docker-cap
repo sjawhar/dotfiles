@@ -10,7 +10,10 @@
 #     (default 48h 24h 12h 6h). It stops at the first threshold that brings the cache under the
 #     cap, and never removes a record used inside the last threshold, so a build running now
 #     keeps its cache;
-#   - untagged (dangling) images created more than 24 h ago: no tag names them;
+#   - untagged images, while the reclaimable image total is over DOCKER_CAP_IMAGES (default
+#     100GB), by the same ladder: each age in DOCKER_CAP_IMAGE_AGES (default 24h 12h 6h 2h) in
+#     turn, stopping at the first that brings the total under the cap. With the total already
+#     under it, only the 24 h pass runs, as it always did;
 #   - anonymous volumes that no container, running or stopped, uses. Docker 23 and later prune
 #     only anonymous volumes, so named volumes stay.
 # It never removes a tagged image or a container. A tagged image can be an eval image that takes
@@ -38,12 +41,28 @@
 # 50GB is 50,000,000,000 bytes. Docker's --max-used-space flag reads the same string as binary
 # (50GB = 53.7e9), so the last pass gives BuildKit a slightly larger cap than the age passes use.
 #
-# DOCKER_CAP_HIGH_PCT, DOCKER_CAP_BUILD_CACHE and DOCKER_CAP_CACHE_AGES override the defaults.
+# Why images need the ladder and not just the 24 h pass: an image pulled BY DIGEST carries a
+# RepoDigest and no tag, so it is untagged and the pass is allowed to take it -- but only once it
+# is a day old. On 2026-11-05 a lane pulled twelve images by digest to read each one's engine
+# commit and Rocq pin, and by 16:30Z Docker held 388.4 GB of images, 332.2 GB of it reclaimable,
+# while /mnt/nvme fell 727.7 GB/h with 1 h 37 min to full. Its build cache was 4 KB. Every age
+# pass over the cache freed nothing because there was nothing there, and the single 24 h image
+# pass freed 502 bytes because the pulls were hours old. A cap that bounds the thing that was 4 KB
+# and not the thing that was 388 GB is a cap in name only.
+#
+# Why untagged only, still: a tagged image can be an eval image that takes hours to rebuild, and
+# an image pulled by digest is re-pullable from the registry it came from. Shortening the age does
+# not widen what may go; it only stops a day-long floor from outliving the disk.
+#
+# DOCKER_CAP_HIGH_PCT, DOCKER_CAP_BUILD_CACHE, DOCKER_CAP_CACHE_AGES, DOCKER_CAP_IMAGES and
+# DOCKER_CAP_IMAGE_AGES override the defaults.
 set -euo pipefail
 
 high="${DOCKER_CAP_HIGH_PCT:-80}"
 cache_cap="${DOCKER_CAP_BUILD_CACHE:-50GB}"
 cache_ages="${DOCKER_CAP_CACHE_AGES:-48h 24h 12h 6h}"
+images_cap="${DOCKER_CAP_IMAGES:-100GB}"
+image_ages="${DOCKER_CAP_IMAGE_AGES:-24h 12h 6h 2h}"
 
 # Docker prints sizes in SI units ("65.1GB"), so 1 GB is 1000^3 bytes here.
 to_bytes() {
@@ -118,7 +137,31 @@ if ((cache > cap_bytes)); then
 fi
 echo "build cache is now $((cache / 1000000000)) GB, cap $cache_cap$left"
 
-echo "untagged images older than 24 h: $(docker image prune --force --filter until=24h | tail -1)"
+# `docker system df` prints the Images row as "TOTAL ACTIVE SIZE RECLAIMABLE", the last as
+# "332.2GB (85%)"; take the size and drop the share.
+images_reclaimable() {
+    local r
+    r="$(docker system df | awk '$1 == "Images" { print $(NF-1) }')"
+    [[ -n "$r" ]] || return 1
+    to_bytes "$r"
+}
+images_cap_bytes="$(to_bytes "$images_cap")"
+if ! reclaimable="$(images_reclaimable)"; then
+    echo "untagged images: cannot read the reclaimable image total; running the 24 h pass only: $(docker image prune --force --filter until=24h | tail -1)"
+elif ((reclaimable <= images_cap_bytes)); then
+    echo "reclaimable images are $((reclaimable / 1000000000)) GB, at or under $images_cap: untagged images older than 24 h: $(docker image prune --force --filter until=24h | tail -1)"
+else
+    for age in $image_ages; do
+        if ((reclaimable <= images_cap_bytes)); then
+            break
+        fi
+        echo "reclaimable images are $((reclaimable / 1000000000)) GB, over $images_cap: untagged images older than $age: $(docker image prune --force --filter "until=$age" | tail -1)"
+        reclaimable="$(images_reclaimable)" || break
+    done
+    # What is left is held by a running container, or is younger than the shortest age. Both are
+    # in use by somebody; the next hourly run takes whatever has aged past it since.
+    echo "reclaimable images are now $((reclaimable / 1000000000)) GB, cap $images_cap"
+fi
 echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
 after="$(free_bytes)"
 # Other writers share this filesystem, so the change in free space is not only these prunes.
