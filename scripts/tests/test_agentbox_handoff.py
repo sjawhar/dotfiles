@@ -43,12 +43,22 @@ REWRITTEN = "#!/bin/bash\necho REWRITTEN BY A PUBLISH\n"
 def launch_line() -> str:
     """The hand-off's own `setsid` line, from the script, with the log redirect removed."""
     text = AGENTBOX.read_text()
-    match = re.search(r"^    setsid bash -c .*?\n(?:.*?\n)*?.*?&$", text, re.MULTILINE)
+    match = re.search(r"^    setsid --fork bash -c .*?\n(?:.*?\n)*?.*?&$", text, re.MULTILINE)
     assert match, "the hand-off's setsid line is no longer findable in scripts/agentbox"
     line = match.group(0)
     assert "exec" not in line, (
         "the relauncher must RUN its private copy, not exec it: exec replaces the shell and "
         "discards the trap that removes the copy"
+    )
+    # `--fork` is the whole reason this relauncher outlives the hang-up it performs. Measured
+    # 2026-11-05 over 32 observations on two omp builds: omp's teardown SIGTERMs what is
+    # reachable from it BY PARENT LINK, and plain `setsid` changes session and process group
+    # but not the parent, so the relauncher is killed 86 ms to 2.2 s after it hangs its omp up
+    # -- before that omp has even exited. 19 of 26 plain-setsid arms died; 4 of 4 `--fork` arms
+    # lived. That is how FRAC and BASELINE were stranded at 08:27:25Z and 08:29:05Z.
+    assert "setsid --fork" in line, (
+        "the relauncher must be started with `setsid --fork`: plain setsid leaves its parent "
+        "the dying omp, and omp's hang-up teardown kills it mid-wait"
     )
     return line.replace("</dev/null >>\"$log\" 2>&1", "</dev/null >\"$out\" 2>&1")
 

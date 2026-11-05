@@ -4543,9 +4543,19 @@ move_hand_off() {
     }
     # The wrapper RUNS the copy rather than exec-ing it, and removes it on the way out: `exec`
     # replaces the shell, which discards the trap and leaks the copy (measured).  Its own script
-    # text is an argument to `bash -c`, so the wrapper itself is in memory and a publish cannot
-    # pull it out from under this.
-    setsid bash -c 'c="$1"; shift; trap '"'"'rm -f "$c"'"'"' EXIT; "$@"' _ "$run_copy" \
+    # text is an argument to `bash -c`, so the wrapper itself is in memory.
+    #
+    # `--fork` IS WHAT MAKES THE RELAUNCHER SURVIVE THE HANG-UP IT PERFORMS, and without it this
+    # strands the session it is moving. Measured 2026-11-05 over 32 observations on two omp
+    # builds: omp's hang-up teardown SIGTERMs what is still reachable from it BY PARENT LINK,
+    # and `setsid` alone changes session and process group but NOT the parent -- so a plain
+    # setsid child is killed 86 ms to 2.2 s after the hang-up and, in every case, BEFORE the omp
+    # itself exits (fastest: 94 ms). `setsid --fork` makes the child's ppid 1 before it runs
+    # anything, and was never once touched, 4 of 4, on both builds. That is how FRAC and
+    # BASELINE were stranded at 08:27:25Z and 08:29:05Z: each relauncher hung its omp up and was
+    # dead ~2 s later, three minutes before the publish I first blamed. The sibling `move --to`
+    # path already used --fork for a different symptom of the same thing (line ~7785).
+    setsid --fork bash -c 'c="$1"; shift; trap '"'"'rm -f "$c"'"'"' EXIT; "$@"' _ "$run_copy" \
         "$run_copy" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
     local child=$!
     # It must be RUNNING before this says so: LANE-C's `move --self` returned 0 twice and nothing
@@ -4981,17 +4991,17 @@ move_orphans_gate() {
     orphans="$(move_orphans "$1" "$2")"
     [[ -n "$orphans" ]] || return 0
     list="$(move_orphans_list "$orphans")"
-    # `setsid` used to be the answer here and is not one on this omp pin. MEASURED, 2026-11-05:
-    # two stream leads' own relaunchers, detached exactly as the old advice said, were gone
-    # within about 2 s of the omp they had just hung up -- the broker logged "session retired
-    # … why=process exited" at 08:27:27.509Z and 08:29:06.925Z against their last lines at
-    # 08:27:25Z and 08:29:05Z -- while 31 of 31 survived the same step on the previous pin
-    # (sami-rocqperf, 11-01 to 11-03). WHY is not established: the first explanation offered
-    # was omp adopting the child as a subreaper, and the omp lead then read the code and showed
-    # omp sets PR_SET_CHILD_SUBREAPER only for `!command` config resolution, never for the bash
-    # tool. So this comment says what happens and not why. The advice names only what is known
-    # to outlive a hang-up: something that is not a descendant of the session at all.
-    MOVE_ORPHANS_WHY="these processes of this session die with the hang-up of the move: $list. Detaching with \`setsid\` does NOT save them on this omp build: measured 2026-11-05, such a process dies within about 2 s of its omp exiting. What survives is a host service (a \`~/.config/stream-jobs/<name>.job\` file, \`scripts/stream-job.md\`) or a systemd user unit, since neither is a child of any session. Otherwise stop it, or move anyway with --accept-orphans, which ends exactly those pids"
+    # WHY, settled by measurement on 2026-11-05 (32 observations, two omp builds): omp's
+    # hang-up teardown SIGTERMs what is still reachable from it BY PARENT LINK. `setsid` alone
+    # changes session and process group but NOT the parent, so a plain setsid child is killed
+    # 86 ms to 2.2 s after the hang-up, before the omp itself exits. `setsid --fork` sets the
+    # child's ppid to 1 before it runs anything and was never touched, 4 of 4. It is a RACE
+    # rather than a certainty -- 19 of 26 plain-setsid arms died -- and it is NOT specific to
+    # one omp build: both builds killed at the same rate. Earlier explanations (a dotfiles
+    # publish; omp adopting the child as a subreaper) were each disproved, the second by the
+    # omp lead reading the code and then by this experiment, in which no probe's ppid ever
+    # became an omp's pid.
+    MOVE_ORPHANS_WHY="these processes of this session die with the hang-up of the move: $list. Plain \`setsid\` does NOT save them: omp's teardown signals what is reachable from it by parent link, and setsid changes session and process group but not the parent, so such a child is killed within about 2 s of the hang-up (measured 2026-11-05, 19 of 26). \`setsid --fork\` does save it, by making its parent init before it runs. What is safest is not a descendant of the session at all: a host service (a \`~/.config/stream-jobs/<name>.job\` file, \`scripts/stream-job.md\`) or a systemd user unit. Otherwise stop it, or move anyway with --accept-orphans, which ends exactly those pids"
     if $MOVE_ACCEPT_ORPHANS; then
         echo "agentbox: --accept-orphans: the hang-up of the move ends $list" >&2
         return 0
@@ -6361,7 +6371,17 @@ move_to_rsync() {
     # pass says where it is, in the move log and to each session that waits for it.
     if (( MOVE_TO_RSYNC_TICK > 0 )); then
         (
-            while sleep "$MOVE_TO_RSYNC_TICK"; do
+            # The sleep is a CHILD of this subshell, and `kill "$tick_pid"` below reaches the
+            # subshell only: measured 2026-11-05, that left seven orphaned `sleep 300` with
+            # ppid 1, each holding the inherited stdout pipe open, so a caller reading that
+            # pipe waited out the whole tick. In test_agentbox_move.py the 15 tests that do
+            # not set AGENTBOX_MOVE_RSYNC_TICK each paid 302 s for it -- 4,530 s of the
+            # suite's 4,929 s, which is why nobody ran the suite. So the subshell kills its
+            # own sleep on the way out.
+            trap 'kill "${sleep_pid:-0}" 2>/dev/null; exit 0' TERM INT
+            while :; do
+                sleep "$MOVE_TO_RSYNC_TICK" & sleep_pid=$!
+                wait "$sleep_pid" || break
                 line="rsync $kind: ${label:-copying} for $((SECONDS - start))s: $(move_to_rsync_progress "$stats")"
                 say "$line"
                 for sid in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do
