@@ -85,15 +85,10 @@ box-cleanup.timer  max_run=4h        # owner: box-health lead. Every disk cleane
 # verified-grader, agent-infra#2142), so there is no key file, no boot unit and nothing to re-arm.
 
 # --- lane timers whose unit files are machine-local, not in ~/.dotfiles ---
-# MACH's archive fires 20 min after each run ends and normally takes 5-7 min, but after the
-# reset of 2026-11-04 one run took 47 min: the shared request budget of its tracker client
-# sleeps while every lane re-downloads at once. The watch opened RUN NEVER ENDS at 43 min on
-# a run that was working, so its owner set the limit the unit really needs.
-# HELD 2026-11-04 23:35Z at its owner's request (MACH, 01a16553): stopped and disabled until
-# PIPE's grading-service client fix merges, because that service's jobs feed now limits how
-# readers page it and how many calls they make at once. MACH restores the line below
-# (uncommented) once its script is checked; nothing else re-arms it.
-# agent-files-archive.timer  owner=01a16553 MACH  max_run=3h   # Archives each ended run.
+# agent-files-archive.timer  owner: MACH (01a16553). Retired by its owner at 17:49Z on
+#   2026-11-05: both unit files were removed and its script was already gone. Its job moved:
+#   machcsl attempts keep their final files through the launch's output_directory and the
+#   platform's output download (#2864), and Harbor trials keep their own outputs. This line does not come back.
 # linux1263-reader.timer  owner: the Verified Linux lane (LINUX-1263 runif reader). Retired by
 #   its owner at 09:11Z on 2026-11-05: the hands-off test it served ended at 09:05:02Z and runif
 #   was stopped. Both unit files were removed. If runif runs again its reader comes back as a
