@@ -47,13 +47,98 @@ def leak_check() -> Path:
     raise unittest.SkipTest("no public-leak-check.sh on this machine")
 
 
+# The customer canary as each kind of check holds it: the shell check (leak-check-v2..v4) as a self-test line
+# `customer|graded on <name>, ...`; the Python check (public_leak_check.py, beside the public-leak-check.sh launcher
+# since the rewrite) as the text of its `customer-platform` canary generator, `b"graded on <name>, ...`. Neither has
+# a mode that prints its canaries (v8's main() knows check-public-text, --commits, --tree, gh-guard and REMOTE URL).
+CANARY_FORMS = (re.compile(r"^customer\|graded on ([A-Za-z]+),", re.M),
+                re.compile(r"""["']customer-platform["'],\s*b["']graded on ([A-Za-z]+), """))
+
+
 def customer_name(check: Path) -> str:
-    """The customer's name, read from the check's own self-test canary (`customer|graded on <name>, ...`). This file
-    lands in a public repository, so it never names the customer; the leaking text is built from this at run time."""
-    m = re.search(r"^customer\|graded on ([A-Za-z]+),", check.read_text(encoding="utf-8"), re.M)
+    """The customer's name, read from the installed check's own self-test canary: in public_leak_check.py beside the
+    launcher (resolved through links, as the launcher finds it) when that file is there, else in the check itself.
+    This file lands in a public repository, so it never names the customer; the leaking text is built from this at
+    run time."""
+    py = check.resolve().parent / "public_leak_check.py"
+    source = py if py.is_file() else check
+    text = source.read_text(encoding="utf-8")
+    for form in CANARY_FORMS:
+        m = form.search(text)
+        if m:
+            return m.group(1)
+    raise AssertionError(f"{source} has no customer canary (`customer|graded on <name>,` or the `customer-platform` "
+                         "generator's `b\"graded on <name>, `) to build the leaking text from")
+
+
+def repo_slug(url: str) -> str | None:
+    """The repository path of a remote URL with a host, lower-cased, with `<transport>::`, `git+`, a user, a port, the
+    slashes around it and a final `.git` taken off: `owner/repo`, or the whole path when it is no `owner/repo` name
+    (`theorem-labs/x/../rocq` stays as written, as the check reads it: no repository name). None for a local path or a
+    URL with no host part. Only for telling which repository a gh read names; scripts/github-repo-visibility decides
+    what is GitHub."""
+    u = url.split("::", 1)[-1]
+    u = u[4:] if u.startswith("git+") else u
+    m = re.match(r"^(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^@/]+@)?(\[[^]]*\]|[^/:\[\]]+)(?::\d*)?[:/](.+)$", u)
+    if not m or u.startswith(("/", "./", "../", "file:")):
+        return None
+    return re.sub(r"\.git$", "", m.group(2).strip("/"), flags=re.I).lower()
+
+
+# leak-check-v8's public_leak_check.py (the sha256 devbox/leak-check-tag.env pins for it). Two of the gate's tests fail
+# against it and pass against v4: v8 regressions, reported to ROCQ 2026-11-05 22:3xZ, to be fixed in the check, not
+# here. Against v8 they are expected failures, so a v8 that passes them is an unexpected success and fails the run;
+# against any other check they run, and must pass, in full.
+V8_CHECK_SHA256 = "4a39983e891646e715abea1784af71c42101e8fb4f7d3f28745ab6552088b2bc"
+
+
+def installed_check_is_v8() -> bool:
+    try:
+        check = leak_check()
+    except unittest.SkipTest:
+        return False
+    py = check.resolve().parent / "public_leak_check.py"
+    return py.is_file() and hashlib.sha256(py.read_bytes()).hexdigest() == V8_CHECK_SHA256
+
+
+def v8_regression(test):
+    """Marks TEST an expected failure when the check this run uses is leak-check-v8 (v8 regression, reported to ROCQ
+    2026-11-05 22:3xZ); leaves it as it is for every other check."""
+    return unittest.expectedFailure(test) if installed_check_is_v8() else test
+
+
+# The hooks dispatcher of dispatch://BET-706 R6, from a leak-check tag: `install-global-hooks.sh <dir>` builds
+# <dir>/global/ (one entry per git hook name, each running the dispatcher) from the global-hooks/ beside it, and writes
+# <dir>/global.gitconfig, which sets core.hooksPath to it, last. The dotfiles' .gitconfig includes that file.
+GLOBAL_HOOKS = Path(".local/share/public-leak-check-hooks")
+DOTFILES_GITCONFIG = SHIMS.parent / ".gitconfig"
+
+
+def global_hooks_source() -> Path:
+    """The directory holding the tag's install-global-hooks.sh and global-hooks/ (and install-prepush-hook.sh): the one
+    LEAK_CHECK_HOOKS_SOURCE names (a checkout's leak-check/), else the one devbox/sami-devbox-provision installs them in."""
+    for c in (os.environ.get("LEAK_CHECK_HOOKS_SOURCE"), Path.home() / GLOBAL_HOOKS):
+        if c and (Path(c) / "install-global-hooks.sh").is_file() and (Path(c) / "global-hooks" / "dispatch").is_file():
+            return Path(c)
+    raise unittest.SkipTest("no install-global-hooks.sh with its global-hooks/ on this machine (set LEAK_CHECK_HOOKS_SOURCE)")
+
+
+def install_global_hooks(where: Path, env: dict[str, str]) -> Path:
+    """The dispatcher installed in WHERE by the tag's own installer, as provisioning runs it; returns its global.gitconfig."""
+    where.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([str(global_hooks_source() / "install-global-hooks.sh"), str(where)], env=env, capture_output=True, text=True, check=False)
+    if r.returncode != 0 or not (where / "global.gitconfig").is_file():
+        raise AssertionError(f"install-global-hooks.sh {where}: exit {r.returncode}\n{r.stdout}{r.stderr}")
+    return where / "global.gitconfig"
+
+
+def dotfiles_include() -> str:
+    """The `[include]` stanza of the dotfiles' .gitconfig that names the dispatcher's global.gitconfig, as written."""
+    m = re.search(r"^\[include\]\n[ \t]+path = ~/\.local/share/public-leak-check-hooks/global\.gitconfig\n",
+                  DOTFILES_GITCONFIG.read_text(encoding="utf-8"), re.M)
     if not m:
-        raise AssertionError(f"{check} has no `customer|graded on <name>,` self-test canary to build the leaking text from")
-    return m.group(1)
+        raise AssertionError(f"{DOTFILES_GITCONFIG} has no [include] of ~/{GLOBAL_HOOKS}/global.gitconfig")
+    return m.group(0)
 
 
 # Every git call is recorded, then goes to /usr/bin/git unchanged.
@@ -95,7 +180,10 @@ exec @SERVER@ "${prog#git-}" "$sink"
 
 # Answers no gh call, and records each one: the check, and the gate through scripts/github-repo-visibility, read a
 # repository's visibility through gh when the cache has no fresh answer, and no test may send that read to GitHub.
-FAKE_GH = '#!/bin/bash\nprintf \'%s\\n\' "$*" >> "@GHLOG@"\nexit 1\n'
+# Each line is the call's arguments, then (after \x1e) the arguments of the process that ran it, \x1f-separated, so a
+# read can be traced to the check run for one push and the URL it was given (gh_calls() returns the arguments alone).
+FAKE_GH = ('#!/bin/bash\nprintf \'%s\\036%s\\n\' "$*" "$(tr \'\\000\' \'\\037\' < /proc/$PPID/cmdline 2> /dev/null)" >> "@GHLOG@"\n'
+           'exit 1\n')
 
 # ssh for `ssh -G` alias lookups: the real ssh with only the test's config, so the user's and the system's configs
 # play no part. Aliases resolving to github.com: three as the reviewer staged them (lanes/jj-gate-review-xf-2026-11-02.md,
@@ -391,11 +479,42 @@ class JjPushLeakGateTest(unittest.TestCase):
                       if subprocess.run(["/usr/bin/git", "--git-dir", sink, "cat-file", "-e", commit], capture_output=True).returncode == 0)
 
     def gh_calls(self) -> list[str]:
-        return self.ghlog.read_text(encoding="utf-8").splitlines() if self.ghlog.exists() else []
+        return [ln.split("\x1e", 1)[0] for ln in self.gh_log()]
+
+    def gh_log(self) -> list[str]:
+        # split("\n"), not splitlines(): splitlines() also breaks at the \x1e this log puts between call and caller.
+        return [ln for ln in self.ghlog.read_text(encoding="utf-8").split("\n") if ln] if self.ghlog.exists() else []
+
+    def unexpected_gh_calls(self) -> list[str]:
+        """Every gh call so far but one kind: the check's own read of the visibility of ANOTHER remote of this
+        checkout, made while it checked a push to a destination that read does not name. The check counts what another
+        public remote already holds as not new to the destination. v4 assumed every non-theorem-labs GitHub repository
+        was public; v8 reads it (fresh, past the cache, for theorem-labs remotes too, and widens nothing when the read
+        fails), so v8 scans more (ROCQ, 2026-11-05 22:29Z; v4 public-leak-check.sh:370-376, scope_of). A read of the
+        destination itself, which its fresh cache entry must answer, every read the gate makes
+        (scripts/github-repo-visibility's `api repos/...`), a call no check run made, and any other call stay
+        unexpected."""
+        # Each URL as the gate reads `git remote -v`: a push line without its final ` (push)`, a fetch line up to its
+        # first ` (fetch)` (a partial clone's filter follows it).
+        urls = [u[: -len(" (push)")] if u.endswith(" (push)") else u.split(" (fetch)", 1)[0]
+                for u in (ln.split("\t", 1)[1] for ln in self.git("remote", "-v").splitlines() if "\t" in ln)]
+        remotes = {repo_slug(u) for u in urls} - {None}
+        out = []
+        for ln in self.gh_log():
+            call, _, parent = ln.partition("\x1e")
+            argv = parent.rstrip("\x1f").split("\x1f") if parent else []
+            m = re.fullmatch(r"api --hostname github\.com repos/(\S+) --jq \.visibility", call)
+            # The check run's own arguments end with the URL it was given: `<check> <remote> <url>`.
+            by_check = len(argv) >= 2 and any(a.endswith(("/public_leak_check.py", "/public-leak-check.sh")) for a in argv)
+            if m and by_check and m.group(1).lower() in remotes and m.group(1).lower() != repo_slug(argv[-1]):
+                continue
+            out.append(call)
+        return out
 
     def assert_refused(self, r: subprocess.CompletedProcess[str], commit: str, url: str = ROCQ, gh: bool = False):
         """Refused by the check, with the commit and the matching text in lines jj shows even under --quiet, and
-        nothing of COMMIT received at URL; no visibility read went to gh unless GH says one was due."""
+        nothing of COMMIT received at URL; unless GH says a read was due, gh got no call but the check's reads of the
+        checkout's other remotes (unexpected_gh_calls), and no read of the destination, whose cache entry is fresh."""
         self.assertNotEqual(r.returncode, 0, r.stderr)
         err = re.sub(r"\x1b\[[0-9;]*m", "", r.stderr)
         self.assertIn("LEAK CHECK: refusing to push", err)
@@ -405,7 +524,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertTrue([ln for ln in shown if f"[customer: {self.customer}]" in ln], ("the refusal must name what matched", r.stderr))
         self.assertNotIn(url, self.received(commit))
         if not gh:
-            self.assertEqual(self.gh_calls(), [])
+            self.assertEqual(self.unexpected_gh_calls(), [])
 
     def assert_refused_unreadable(self, r: subprocess.CompletedProcess[str], commit: str, url: str, slug: str):
         """Refused by the check because it cannot read the visibility of SLUG, the target at URL; nothing of COMMIT
@@ -473,6 +592,23 @@ class JjPushLeakGateTest(unittest.TestCase):
         """A plain `git push` through shims/git, which leaves it to the checkout's own hook."""
         self.keep_cache_fresh()
         return subprocess.run(["git", "push", remote, f"{commit}:refs/heads/{ref}"], cwd=self.repo, env=self.env, capture_output=True, text=True)
+
+    def test_only_the_checks_reads_of_other_remotes_are_allowed(self):
+        # What assert_refused lets through, on a hand-written gh log: only the check's read of another remote of this
+        # checkout during a push to a destination it does not name.
+        self.remote("other", PRIVATE)
+        check = "/usr/bin/python3\x1f-I\x1f/x/public_leak_check.py\x1forigin\x1f"
+        read = "api --hostname github.com repos/{} --jq .visibility"
+        lines = {
+            "allowed: another remote": (read.format("theorem-labs/private-fixture"), check + ROCQ),
+            "the destination itself": (read.format("theorem-labs/rocq"), check + ROCQ),
+            "the destination, mixed case": (read.format("Theorem-Labs/Rocq"), check + ROCQ),
+            "a repository no remote names": (read.format("theorem-labs/elsewhere"), check + ROCQ),
+            "the gate's read": ("api repos/theorem-labs/private-fixture --jq .visibility", check + ROCQ),
+            "not made by a check": (read.format("theorem-labs/private-fixture"), "bash\x1f/x/shims/gh\x1fapi"),
+        }
+        self.ghlog.write_text("".join(f"{call}\x1e{parent}\n" for call, parent in lines.values()), encoding="utf-8")
+        self.assertEqual(self.unexpected_gh_calls(), [call for k, (call, _) in lines.items() if not k.startswith("allowed")])
 
     # Every way of naming what to push: jj resolves them all before it runs git.
     def test_bookmark_content(self):
@@ -912,6 +1048,9 @@ class JjPushLeakGateTest(unittest.TestCase):
             r = subprocess.run(["bash", "-c", script, "judge", listing], env=self.env, capture_output=True, text=True, check=True)
             self.assertEqual((body, r.stdout.strip()), (body, want))
 
+    # v8 regression, reported to ROCQ 2026-11-05 22:3xZ: leak-check-v8 calls this leak clean. Expected to fail
+    # against v8 only (v8_regression); unchanged, and run in full, against every other check.
+    @v8_regression
     def test_a_checkouts_own_ssh_command_makes_an_alias_unknown(self):
         # The checkout's only remote is an alias ssh -G resolves to corp.example, which is not GitHub: unguarded, the
         # push goes out as jj asked. With core.sshCommand set in the checkout, git would run that command, which may
@@ -925,7 +1064,16 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertNotIn("LEAK CHECK", r.stderr)
         self.git("config", "core.sshCommand", "ssh -F /nonexistent")
         c = self.leak(path="guard2.v")
-        self.assert_refused(self.jj("git", "push", "-b", "b1"), c, url)
+        # Spec R4: a target whose visibility cannot be read is refused before anything is scanned, so the check may
+        # refuse this target unread (as assert_refused_unreadable expects) or refuse the leaked content. Either way it
+        # must refuse, and nothing may reach the receiver.
+        r = self.jj("git", "push", "-b", "b1")
+        if "LEAK CHECK: cannot read the visibility of " in r.stderr:
+            self.assertNotEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}", r.stderr)
+            self.assertNotIn(url, self.received(c))
+        else:
+            self.assert_refused(r, c, url)
 
     def test_an_unguarded_checkout_is_untouched(self):
         # Every remote is private or not GitHub, even where its path names theorem-labs/rocq: the sweep installs no
@@ -976,6 +1124,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.ok("bookmark", "track", "b1@pub")
         self.assert_refused(self.jj("git", "push", "--remote", "pub", "-b", "b1"), c, ROCQ)
 
+    # v8 regression, reported to ROCQ 2026-11-05 22:3xZ: leak-check-v8 calls the leak clean while the cache says
+    # `public`. Expected to fail against v8 only (v8_regression); unchanged, and run in full, against every other check.
+    @v8_regression
     def test_the_cache_decides_and_an_unreadable_one_refuses(self):
         # dispatch://BET-706 R4: the gate reads the check's cache entry for the repository, lower-cased and only while
         # fresh (600 s for public, 60 s for private or internal), then gh. `private` or `internal` leaves the checkout
@@ -1409,6 +1560,297 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertNotIn("LEAK CHECK", r.stderr)
         self.assertEqual(self.received(c), [ROCQ])
 
+    # A plain `git push` from a repository that sets its own core.hooksPath (dispatch://BET-706 R6, plan Slice 3): such
+    # a repository's hooks directory overrides the global dispatcher, and no sweep may have put the leak-check wrapper
+    # in it (a fresh clone of a project using husky or the pre-commit framework). In an agent session shims/git runs the
+    # check first, through jj-push-hooks/pre-push, which then runs the repository's own pre-push.
+    def count_checks(self) -> Path:
+        """PUBLIC_LEAK_CHECK becomes a script that records each call, then runs the installed check; returns its log."""
+        log = self.tmp / "check-calls.log"
+        w = self.tmp / "counting-check"
+        w.write_text(f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{log}"\nexec bash "{self.check}" "$@"\n', encoding="utf-8")
+        w.chmod(0o755)
+        self.env["PUBLIC_LEAK_CHECK"] = str(w)
+        return log
+
+    @staticmethod
+    def lines(path: Path) -> list[str]:
+        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    def recording_hook(self, hook: Path, label: str, status: int = 0, text: str = "") -> tuple[Path, Path, Path]:
+        """An executable HOOK that records each call's arguments, its stdin byte for byte, and the two variables the
+        gate could leak into it, under <tmp>/logs/LABEL.*, then exits STATUS. TEXT goes into its body (a marker)."""
+        logs = self.tmp / "logs"
+        logs.mkdir(exist_ok=True)
+        calls, stdin, env = logs / f"{label}.calls", logs / f"{label}.stdin", logs / f"{label}.env"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text(f'#!/bin/bash\n# {text}\nprintf \'%s\\n\' "$*" >> "{calls}"\ncat >> "{stdin}"\n'
+                        f'printf \'%s|%s\\n\' "${{GIT_CONFIG_PARAMETERS-}}" "${{GIT_SHIM_OWN_HOOKS-unset}}" >> "{env}"\nexit {status}\n',
+                        encoding="utf-8")
+        hook.chmod(0o755)
+        return calls, stdin, env
+
+    def leak_and_clean(self) -> tuple[str, str]:
+        """A leaking commit on b1 and a clean one beside it (not its child, which the check would scan with it), both
+        made before a test sets up any hook, so no jj snapshot takes a hook file into a commit."""
+        leaky = self.leak()
+        self.ok("new", self.init)
+        return leaky, self.commit("clean.v", "(* clean *)", "Clean", "b2")
+
+    def assert_plain_refused(self, r: subprocess.CompletedProcess[str], commit: str, url: str = ROCQ):
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertIn(f"error: git shim: the public leak check refused this push to {url}", r.stderr)
+        self.assertNotIn(url, self.received(commit))
+
+    def assert_own_hooks_path_is_checked_first(self, own: Path, commits: tuple[str, str]):
+        """With the repository's own hooks directory OWN set up, a leak (the first of COMMITS) is refused with one
+        check and the repository's pre-push not run; the clean one is pushed after one more check, and the repository's
+        pre-push runs once, with git's arguments, git's stdin byte for byte, and none of the gate's configuration or
+        variables."""
+        leaky, clean = commits
+        calls, stdin, env = self.recording_hook(own / "pre-push", "own")
+        checks = self.count_checks()
+        self.assert_plain_refused(self.git_push("origin", leaky, "x"), leaky)
+        self.assertEqual(len(self.lines(checks)), 1, self.lines(checks))
+        self.assertEqual(self.lines(calls), [], "the repository's own pre-push ran for a refused push")
+        r = self.git_push("origin", clean, "y")
+        self.assert_pushed(r, clean)
+        self.assertIn("LEAK CHECK: clean", r.stderr)
+        self.assertEqual(self.lines(checks), [f"origin {ROCQ}"] * 2)
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+        self.assertRegex(stdin.read_bytes(), rb"\A\S+ " + clean.encode() + rb" refs/heads/y 0{40}\n\Z")
+        self.assertEqual(self.lines(env), ["|unset"], "the repository's pre-push saw the gate's -c or its variable")
+
+    def test_a_plain_git_push_with_its_own_absolute_hooks_path_is_checked_first(self):
+        commits = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        self.assert_own_hooks_path_is_checked_first(own, commits)
+
+    def test_a_plain_git_push_with_a_husky_hooks_path_is_checked_first(self):
+        # husky 9 sets `core.hooksPath=.husky/_`, relative: git takes it from the top of the work tree.
+        commits = self.leak_and_clean()
+        self.git("config", "core.hooksPath", ".husky/_")
+        self.assert_own_hooks_path_is_checked_first(self.repo / ".husky" / "_", commits)
+
+    def test_a_plain_git_push_with_a_home_relative_hooks_path_is_checked_first(self):
+        commits = self.leak_and_clean()
+        self.git("config", "core.hooksPath", "~/project-hooks")
+        self.assert_own_hooks_path_is_checked_first(self.home / "project-hooks", commits)
+
+    def test_a_plain_git_push_with_a_worktree_hooks_path_is_checked_first(self):
+        commits = self.leak_and_clean()
+        self.git("config", "extensions.worktreeConfig", "true")
+        self.git("config", "--worktree", "core.hooksPath", str(self.tmp / "wt-hooks"))
+        self.assert_own_hooks_path_is_checked_first(self.tmp / "wt-hooks", commits)
+
+    def test_a_plain_git_push_refused_by_its_own_hook_after_the_check_is_refused(self):
+        _, clean = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        calls, _, _ = self.recording_hook(own / "pre-push", "own", status=7)
+        r = self.git_push("origin", clean, "y")
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: clean", r.stderr)
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+        self.assertEqual(self.received(clean), [])
+
+    def test_a_plain_git_push_to_a_hooks_path_holding_the_wrapper_is_left_to_it(self):
+        # The sweep's wrapper (marker PUBLIC-LEAK-CHECK-WRAPPER) runs the check itself; the shim adds no second one.
+        leaky, _ = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        calls, _, _ = self.recording_hook(own / "pre-push", "wrapper", text="PUBLIC-LEAK-CHECK-WRAPPER stand-in")
+        checks = self.count_checks()
+        r = self.git_push("origin", leaky, "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+
+    def test_a_plain_git_push_with_no_verify_is_the_users_choice(self):
+        leaky, _ = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        calls, _, _ = self.recording_hook(own / "pre-push", "own")
+        checks = self.count_checks()
+        self.keep_cache_fresh()
+        r = subprocess.run(["git", "push", "--no-verify", "origin", f"{leaky}:refs/heads/x"], cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.lines(checks), self.lines(calls)), ([], []))
+
+    def test_a_plain_git_push_from_an_unguarded_checkout_with_its_own_hooks_path_is_untouched(self):
+        self.git("remote", "set-url", "origin", PRIVATE)
+        leaky, _ = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        calls, _, env = self.recording_hook(own / "pre-push", "own")
+        checks = self.count_checks()
+        r = self.git_push("origin", leaky, "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertEqual(self.lines(calls), [f"origin {PRIVATE}"])
+        self.assertEqual(self.lines(env), ["|unset"])
+
+    # With the global dispatcher (dispatch://BET-706 R6) installed in HOME as provisioning installs it and HOME's git
+    # config holding the dotfiles' include line, each push is checked once: by the dispatcher where the repository sets
+    # no hooks path of its own, by the shim's gate where it does.
+    def use_global_dispatcher(self) -> Path:
+        self.env.pop("GIT_CONFIG_GLOBAL", None)
+        install_global_hooks(self.home / GLOBAL_HOOKS, self.env)
+        (self.home / ".gitconfig").write_text(dotfiles_include(), encoding="utf-8")
+        self.assertEqual(self.git("config", "--global", "--includes", "--type=path", "--get", "core.hooksPath"),
+                         str(self.home / GLOBAL_HOOKS / "global"))
+        return self.home / GLOBAL_HOOKS / "global"
+
+    def plain_push(self, cwd: Path, commit: str, ref: str, shim: bool = True) -> subprocess.CompletedProcess[str]:
+        """`git push origin COMMIT:refs/heads/REF` in CWD, through shims/git, or through /usr/bin/git with no shim on PATH."""
+        self.keep_cache_fresh()
+        env = self.env if shim else {**self.env, "PATH": os.pathsep.join(p for p in self.env["PATH"].split(os.pathsep) if p != str(SHIMS))}
+        return subprocess.run(["git" if shim else "/usr/bin/git", "push", "origin", f"{commit}:refs/heads/{ref}"],
+                              cwd=cwd, env=env, capture_output=True, text=True)
+
+    def test_with_the_global_dispatcher_a_fresh_clone_is_checked_once(self):
+        # A fresh clone of a public repository: no sweep has hooked it, it has no hooks path, its own plain pre-push
+        # runs after the check. Through shims/git and through /usr/bin/git with no shim on PATH alike.
+        leaky, clean = self.leak_and_clean()
+        clone = self.tmp / "clone"
+        subprocess.run(["/usr/bin/git", "clone", "-q", str(self.repo), str(clone)], env={**self.env, "GIT_ALLOW_PROTOCOL": "file"}, check=True, capture_output=True)
+        for k, v in (("remote.origin.url", ROCQ), ("remote.origin.vcs", "sink")):
+            subprocess.run(["/usr/bin/git", "config", k, v], cwd=clone, env=self.env, check=True)
+        calls, _, _ = self.recording_hook(clone / ".git" / "hooks" / "pre-push", "own")
+        self.use_global_dispatcher()
+        checks = self.count_checks()
+        for n, shim in enumerate((True, False)):
+            r = self.plain_push(clone, leaky, f"x{n}", shim)
+            self.assertNotEqual(r.returncode, 0, r.stderr)
+            self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+            self.assertNotIn(ROCQ, self.received(leaky))
+            self.assertEqual(len(self.lines(checks)), 2 * n + 1, (shim, self.lines(checks)))
+            self.assertEqual(len(self.lines(calls)), n, ("the clone's own pre-push ran for a refused push", shim))
+            r = self.plain_push(clone, clean, f"y{n}", shim)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(self.lines(checks)), 2 * n + 2, (shim, self.lines(checks)))
+            self.assertEqual(len(self.lines(calls)), n + 1, shim)
+        self.assertIn(ROCQ, self.received(clean))
+
+    def test_with_the_global_dispatcher_a_checkout_holding_the_wrapper_is_checked_once(self):
+        # The sweep's wrapper, with the checkout's earlier hook kept as pre-push.local: the dispatcher runs the check,
+        # then pre-push.local, and not the wrapper, so the check runs once and the local hook once.
+        installer = global_hooks_source() / "install-prepush-hook.sh"
+        if not installer.is_file():
+            self.skipTest(f"no install-prepush-hook.sh beside {installer.parent}/install-global-hooks.sh")
+        leaky, clean = self.leak_and_clean()
+        hooks = self.repo / ".git" / "hooks"
+        calls, stdin, _ = self.recording_hook(hooks / "pre-push", "local")
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+        subprocess.run([str(installer), str(self.repo)], cwd=self.tmp, env=self.env, check=True, capture_output=True)
+        self.assertIn("PUBLIC-LEAK-CHECK-WRAPPER", (hooks / "pre-push").read_text(encoding="utf-8"))
+        self.assertTrue(os.access(hooks / "pre-push.local", os.X_OK))
+        self.use_global_dispatcher()
+        checks = self.count_checks()
+        r = self.git_push("origin", leaky, "x")
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertEqual((len(self.lines(checks)), self.lines(calls)), (1, []))
+        r = self.git_push("origin", clean, "y")
+        self.assert_pushed(r, clean)
+        self.assertEqual(len(self.lines(checks)), 2, self.lines(checks))
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+        self.assertRegex(stdin.read_bytes(), rb"\A\S+ " + clean.encode() + rb" refs/heads/y 0{40}\n\Z")
+
+    def test_with_the_global_dispatcher_a_husky_hooks_path_is_checked_once(self):
+        # The repository's own hooks path wins over the global one, so the dispatcher plays no part; the shim's gate
+        # checks once.
+        commits = self.leak_and_clean()
+        self.git("config", "core.hooksPath", ".husky/_")
+        self.use_global_dispatcher()
+        self.assert_own_hooks_path_is_checked_first(self.repo / ".husky" / "_", commits)
+
+    # Round 4 (cross-family review lanes/leakgate/slice3-xf-dotfiles.md): two own-hooks-path states in which neither
+    # the dispatcher nor the shim ran the check. Both with the global dispatcher installed, as on sami-devbox.
+    def installed_wrapper_in(self, hooks: Path) -> tuple[Path, Path]:
+        """The real install-prepush-hook.sh run on this checkout, its earlier hook in HOOKS kept as pre-push.local;
+        returns that hook's call log and the wrapper."""
+        installer = global_hooks_source() / "install-prepush-hook.sh"
+        if not installer.is_file():
+            self.skipTest(f"no install-prepush-hook.sh beside {installer.parent}/install-global-hooks.sh")
+        calls, _, _ = self.recording_hook(hooks / "pre-push", "local")
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp / "config")
+        subprocess.run([str(installer), str(self.repo)], cwd=self.tmp, env=self.env, check=True, capture_output=True)
+        self.assertIn("PUBLIC-LEAK-CHECK-WRAPPER", (hooks / "pre-push").read_text(encoding="utf-8"))
+        self.assertTrue(os.access(hooks / "pre-push.local", os.X_OK))
+        return calls, hooks / "pre-push"
+
+    def assert_checked_once_each(self, leaky: str, clean: str, cwd: Path | None = None, shim: bool = True) -> Path:
+        """A leak refused after one check and nothing of it at the receiver, then a clean commit sent after one more."""
+        checks = self.count_checks()
+        checks.unlink(missing_ok=True)
+        r = self.plain_push(cwd or self.repo, leaky, "x", shim)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertNotIn(ROCQ, self.received(leaky))
+        self.assertEqual(len(self.lines(checks)), 1, self.lines(checks))
+        r = self.plain_push(cwd or self.repo, clean, "y", shim)
+        self.assert_pushed(r, clean)
+        self.assertEqual(len(self.lines(checks)), 2, self.lines(checks))
+        return checks
+
+    def test_a_non_executable_wrapper_in_its_own_hooks_path_is_checked_by_the_shim(self):
+        # git ignores a hook that is not executable ("hook was ignored because it's not set as executable"), so a
+        # wrapper with its execute bits off checks nothing; the shim must not count it as present. pre-push.local does
+        # not run either, as git would not run it without the wrapper.
+        leaky, clean = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        calls, wrapper = self.installed_wrapper_in(own)
+        self.use_global_dispatcher()
+        wrapper.chmod(0o644)
+        self.assert_checked_once_each(leaky, clean)
+        self.assertEqual(self.lines(calls), [])
+
+    def test_an_executable_wrapper_in_its_own_hooks_path_still_checks_alone(self):
+        # The control: the same real wrapper, executable, runs the check once and then pre-push.local; the shim adds
+        # nothing.
+        leaky, clean = self.leak_and_clean()
+        own = self.tmp / "own-hooks"
+        self.git("config", "core.hooksPath", str(own))
+        calls, _ = self.installed_wrapper_in(own)
+        self.use_global_dispatcher()
+        self.assert_checked_once_each(leaky, clean)
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+
+    def test_with_the_global_dispatcher_a_non_executable_wrapper_is_checked_once(self):
+        # The dispatcher's half of the same shape, in a checkout with no hooks path of its own: it runs the check, and
+        # skips the wrapper only when it is executable (as git would run it), so a non-executable one changes nothing
+        # but that neither it nor pre-push.local runs. Through shims/git and through /usr/bin/git alike.
+        leaky, clean = self.leak_and_clean()
+        calls, wrapper = self.installed_wrapper_in(self.repo / ".git" / "hooks")
+        self.use_global_dispatcher()
+        wrapper.chmod(0o644)
+        for shim in (True, False):
+            self.assert_checked_once_each(leaky, clean, shim=shim)
+            subprocess.run(["/usr/bin/git", "--git-dir", str(self.sink_of(ROCQ)), "update-ref", "-d", "refs/heads/y"], check=True)
+        self.assertEqual(self.lines(calls), [])
+
+    def assert_empty_hooks_path_is_checked(self, *scope: str):
+        # git 2.43 with core.hooksPath set to "" in the repository's own config: the value overrides the global
+        # dispatcher, and git looks for each hook at /<name> (`git rev-parse --git-path hooks/pre-push` prints
+        # /pre-push), so in practice no hook runs. The shim treats that directory, `/`, as any own hooks path without
+        # the wrapper, and runs the check.
+        leaky, clean = self.leak_and_clean()
+        self.git("config", *scope, "core.hooksPath", "")
+        self.use_global_dispatcher()
+        self.assertEqual(self.git("rev-parse", "--git-path", "hooks/pre-push"), "/pre-push")
+        self.assert_checked_once_each(leaky, clean)
+
+    def test_an_empty_local_hooks_path_is_checked_by_the_shim(self):
+        self.assert_empty_hooks_path_is_checked("--local")
+
+    def test_an_empty_worktree_hooks_path_is_checked_by_the_shim(self):
+        self.git("config", "extensions.worktreeConfig", "true")
+        self.assert_empty_hooks_path_is_checked("--worktree")
+
     def test_other_commands_are_untouched(self):
         self.leak()
         (self.repo / "untracked.txt").write_text("u\n", encoding="utf-8")
@@ -1505,6 +1947,72 @@ class JjPushLeakGateTest(unittest.TestCase):
         r = run_bounded([str(copy / "jj"), "--config", f"git.executable-path={w}", "git", "push", "-b", "b1"], self.repo, self.env)
         self.assertFalse((copy / "jj").exists(), "the wrapper did not delete the running jj")
         self.assert_refused(r, c)
+
+
+class GlobalHooksIncludeTest(unittest.TestCase):
+    """The dotfiles' .gitconfig, as a machine's global config, turns the dispatcher on where the install wrote
+    global.gitconfig, and changes nothing where it did not: git ignores an include whose file is missing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
+                    "HOME": str(self.home), "GIT_CONFIG_GLOBAL": str(DOTFILES_GITCONFIG), "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["/usr/bin/git", "init", "-q", str(self.tmp / "repo")], env=self.env, check=True)
+
+    def hooks_path(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["/usr/bin/git", "config", "--show-origin", "--type=path", "--get", "core.hooksPath"],
+                              cwd=self.tmp / "repo", env=self.env, capture_output=True, text=True)
+
+    def test_the_include_turns_the_dispatcher_on_only_where_it_is_installed(self):
+        r = self.hooks_path()
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (1, "", ""), "a machine without the install must be unchanged")
+        self.assertEqual(subprocess.run(["/usr/bin/git", "status", "--porcelain"], cwd=self.tmp / "repo", env=self.env).returncode, 0)
+        gc = self.home / GLOBAL_HOOKS / "global.gitconfig"
+        gc.parent.mkdir(parents=True)
+        gc.write_text(f"[core]\n\thooksPath = ~/{GLOBAL_HOOKS}/global\n", encoding="utf-8")
+        r = self.hooks_path()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, f"file:{gc}\t{self.home / GLOBAL_HOOKS / 'global'}\n")
+
+
+class CustomerCanaryTest(unittest.TestCase):
+    """customer_name reads the canary where each kind of installed check keeps it. The name here is made up."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def write(self, name: str, text: str) -> Path:
+        p = self.tmp / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_the_shell_check_keeps_it_in_a_self_test_line(self):
+        check = self.write("public-leak-check.sh", "#!/bin/bash\nSELFTEST='\ncustomer|graded on Examplecorp, v1\n'\n")
+        self.assertEqual(customer_name(check), "Examplecorp")
+
+    def test_the_python_check_keeps_it_in_its_canary_generator_beside_the_launcher(self):
+        check = self.write("v8/public-leak-check.sh", '#!/usr/bin/env bash\nCHECK=$(dirname "$SELF")/public_leak_check.py\n')
+        self.write("v8/public_leak_check.py", '    (1, (0,), "customer-platform", b"graded on Examplecorp, problem version " + draw(12)),\n')
+        self.assertEqual(customer_name(check), "Examplecorp")
+
+    def test_a_launcher_reached_through_a_link_reads_the_python_check_beside_its_target(self):
+        self.write("v8/public-leak-check.sh", "#!/usr/bin/env bash\n")
+        self.write("v8/public_leak_check.py", '(1, (0,), "customer-platform", b"graded on Examplecorp, problem version "),\n')
+        (self.tmp / "bin").mkdir()
+        (self.tmp / "bin" / "public-leak-check.sh").symlink_to(self.tmp / "v8" / "public-leak-check.sh")
+        self.assertEqual(customer_name(self.tmp / "bin" / "public-leak-check.sh"), "Examplecorp")
+
+    def test_a_check_with_no_canary_names_the_file_it_read(self):
+        check = self.write("v8/public-leak-check.sh", "#!/usr/bin/env bash\n")
+        py = self.write("v8/public_leak_check.py", "CANARIES = []\n")
+        with self.assertRaisesRegex(AssertionError, re.escape(str(py))):
+            customer_name(check)
+
 
 
 if __name__ == "__main__":

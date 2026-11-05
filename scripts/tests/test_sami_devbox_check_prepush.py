@@ -13,6 +13,7 @@ The stand-in's `sweep` writes the lines FAKE_SWEEP names and the summary line, i
 
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -97,6 +98,105 @@ class PrepushHookLine(unittest.TestCase):
         self.assertRegex(out, r"(?m)^FAIL pre-push hook: .*not verified")
         self.assertNotIn("ok   pre-push hook", out)
         self.assertIn("fails=1", out)
+
+    def test_a_placeholder_sha256_is_not_the_tags_files(self) -> None:
+        # `sha256sum -c` alone passes the lines it can read and only warns about a TBD-<file> placeholder.
+        env = self.root / "devbox" / "leak-check-tag.env"
+        env.write_text(env.read_text(encoding="utf-8").replace("sweep-hooks.sh'", "sweep-hooks.sh\nTBD-install-global-hooks.sh  install-global-hooks.sh'"),
+                       encoding="utf-8")
+        out = self.judge("")
+        self.assertRegex(out, r"(?m)^FAIL pre-push hook: .* is not leak-check-vtest's hook files")
+        self.assertIn("fails=1", out)
+
+
+# The R6 global hooks dispatcher (global_hooks_host_check): the hooks directory's global/ holds, executable and
+# byte-identical, every entry of the global-hooks/ provisioning installed from the tag and nothing else, global.gitconfig
+# is there, and the user's git config includes it, so git's hooks directory is global/.
+GLOBAL_ENTRIES = {
+    "dispatch": "#!/bin/sh\nexit 0\n",
+    "pre-push": '#!/bin/sh\nexec "$(dirname "$0")/dispatch" pre-push "$@"\n',
+    "commit-msg": '#!/bin/sh\nexec "$(dirname "$0")/dispatch" commit-msg "$@"\n',
+}
+
+
+class GlobalHooksLine(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.hooks = self.home / ".local/share/public-leak-check-hooks"
+        for d in ("global-hooks", "global"):
+            (self.hooks / d).mkdir(parents=True)
+            for name, body in GLOBAL_ENTRIES.items():
+                (self.hooks / d / name).write_text(body, encoding="utf-8")
+                (self.hooks / d / name).chmod(0o755)
+        (self.hooks / "global.gitconfig").write_text("[core]\n\thooksPath = ~/.local/share/public-leak-check-hooks/global\n", encoding="utf-8")
+        (self.home / ".gitconfig").write_text(
+            re.search(r"(?m)^\[include\]\n[ \t]+path = ~/\.local/share/public-leak-check-hooks/global\.gitconfig\n",
+                      (DOTFILES / ".gitconfig").read_text(encoding="utf-8")).group(0), encoding="utf-8")
+        devbox = self.root / "devbox"
+        devbox.mkdir()
+        (devbox / "leak-check-tag.env").write_text("LEAK_CHECK_TAG=leak-check-vtest\n", encoding="utf-8")
+        text = SCRIPT.read_text(encoding="utf-8")
+        (devbox / "lib.sh").write_text(text[:text.index('case "${1:-}" in\n')], encoding="utf-8")
+        self.lib = devbox / "lib.sh"
+
+    def judge(self) -> str:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+        r = subprocess.run(["bash", "-c", f'source "{self.lib}"; global_hooks_host_check; echo "fails=$fails"'],
+                           capture_output=True, text=True, timeout=60, check=False,
+                           env={**env, "HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def assert_fails(self, pattern: str) -> None:
+        out = self.judge()
+        self.assertRegex(out, rf"(?m)^FAIL global hooks: {pattern}")
+        self.assertNotIn("ok   global hooks", out)
+        self.assertIn("fails=1", out)
+
+    def test_a_complete_install_passes(self) -> None:
+        out = self.judge()
+        self.assertRegex(out, r"(?m)^ok   global hooks: git runs .*/global/ for every repository without a hooks path of its own \(3 entries\)")
+        self.assertIn("fails=0", out)
+
+    def test_a_missing_global_gitconfig_fails(self) -> None:
+        (self.hooks / "global.gitconfig").unlink()
+        self.assert_fails(r".*global\.gitconfig is missing")
+
+    def test_a_missing_entry_fails(self) -> None:
+        (self.hooks / "global" / "commit-msg").unlink()
+        self.assert_fails(r".*incomplete.* commit-msg")
+
+    def test_an_entry_that_is_not_executable_fails(self) -> None:
+        (self.hooks / "global" / "pre-push").chmod(0o644)
+        self.assert_fails(r".*incomplete.* pre-push")
+
+    def test_an_entry_that_differs_from_the_tags_fails(self) -> None:
+        (self.hooks / "global" / "dispatch").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        self.assert_fails(r".*incomplete.* dispatch")
+
+    def test_an_entry_the_tag_does_not_have_fails(self) -> None:
+        # An entry the tag's global-hooks/ does not have (a stray file, or one an older tag had): git would run it.
+        (self.hooks / "global" / "pre-push.old").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (self.hooks / "global" / "pre-push.old").chmod(0o755)
+        self.assert_fails(r".*pre-push\.old \(not the tag's\)")
+
+    def test_a_missing_global_directory_fails(self) -> None:
+        for name in GLOBAL_ENTRIES:
+            (self.hooks / "global" / name).unlink()
+        (self.hooks / "global").rmdir()
+        self.assert_fails(r".*incomplete")
+
+    def test_no_tag_entries_fails(self) -> None:
+        for name in GLOBAL_ENTRIES:
+            (self.hooks / "global-hooks" / name).unlink()
+        self.assert_fails(r".*global-hooks/ .*no entries")
+
+    def test_an_install_the_git_config_does_not_include_fails(self) -> None:
+        (self.home / ".gitconfig").write_text("[user]\n\tname = T\n", encoding="utf-8")
+        self.assert_fails(r".*not switched on")
 
 
 if __name__ == "__main__":

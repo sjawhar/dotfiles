@@ -4,8 +4,8 @@
 # lock of ours and no further, give every commit an omp session makes with
 # `git commit`, `merge`, `pull`, `cherry-pick` or `revert` its Omp-Session trailer, and
 # run the shared public leak check on every `git push` jj runs where the pre-push hook
-# would, and keep a pruning `git fetch` from deleting the destination of a short-named
-# refspec.
+# would and on a `git push` from a repository with a hooks path of its own, and keep a
+# pruning `git fetch` from deleting the destination of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -197,9 +197,18 @@ fi
 #   that is empty or holds another word, gh that fails or does not answer in 5 s, a helper that cannot run, guards the
 #   checkout. The check then decides, and refuses a push to a theorem-labs repository whose visibility it cannot read
 #   either, so that still fails closed against a leak while a clean push goes out.
-# A plain `git push` is untouched (it runs the checkout's hook), as is every other command. Not seen, as `git push
-# --no-verify` is not: a jj told to run another git (`git.executable-path`) or copied under another name, and a remote
-# changed between this decision and git reading its config.
+# A plain `git push` runs the checkout's own pre-push hook, or the leak check's global hooks dispatcher
+# (~/.local/share/public-leak-check-hooks/global, dispatch://BET-706 R6) where the repository sets no hooks path of
+# its own. A repository that sets core.hooksPath in its own config (local or worktree, an empty value included: husky,
+# the pre-commit framework, a project's own directory) overrides that dispatcher, and a fresh clone of one has no
+# leak-check wrapper there. For such a push from a guarded checkout, with no --no-verify and no executable wrapper as
+# that directory's pre-push (marker PUBLIC-LEAK-CHECK-WRAPPER; git ignores a hook that is not executable), the shim
+# adds a last -c core.hooksPath=jj-push-hooks/ as for jj, and names the repository's own directory in
+# GIT_SHIM_OWN_HOOKS: the gate's pre-push runs the check, then that directory's
+# pre-push with the same arguments and stdin; every other hook is the one git would have run. Every other plain push
+# is untouched. Not seen, as `git push --no-verify` is not: a jj told to run another git (`git.executable-path`) or
+# copied under another name, a hooks path set on the command line or in the environment, and a remote changed
+# between this decision and git reading its config.
 from_jj() { # true when the process that ran this git is jj, also a jj binary replaced since it started
     local exe
     exe="$(readlink "/proc/$PPID/exe" 2> /dev/null)" || return 1
@@ -272,8 +281,48 @@ jj_push_gate() {
                   gate && /^error: failed to push some refs to /{ gate = 0; next }
                   { gate = 0; print; fflush() }' >&2)
 }
+# own_hooks_push_gate: the plain `git push` of a repository with a hooks path of its own (above), else returns.
+own_hooks_push_gate() {
+    local a verify=1 out scope own base hooks
+    for a in "${args[@]:i+1}"; do
+        case "$a" in
+            --) break ;;
+            --no-verify) verify=0 ;;
+            --verify) verify=1 ;;
+        esac
+    done
+    ((verify)) || return 0
+    # The value git will use and where it is set: only one from the repository's own config is this case. An empty
+    # value counts too: it still overrides the global dispatcher, and git 2.43 then looks for each hook at /<name>
+    # (`git rev-parse --git-path hooks/pre-push` prints /pre-push), so its directory is /.
+    out="$("$_real" "${args[@]:0:i}" config --show-scope --type=path --get core.hooksPath 2> /dev/null)" || return 0
+    scope="${out%%$'\t'*}" own="${out#*$'\t'}"
+    [[ "$scope" == local || "$scope" == worktree ]] || return 0
+    [[ -n "$own" ]] || own=/
+    # git runs a hook from the top of the work tree (from the git directory in a bare repository), and takes a
+    # relative hooks path from there.
+    if [[ "$own" != /* ]]; then
+        base="$("$_real" "${args[@]:0:i}" rev-parse --show-toplevel 2> /dev/null)" ||
+            base="$("$_real" "${args[@]:0:i}" rev-parse --absolute-git-dir 2> /dev/null)" || return 0
+        own="$base/$own"
+    fi
+    # The wrapper checks only when git runs it, and git ignores a hook that is not executable.
+    if [[ -x "$own/pre-push" ]] && grep -qs PUBLIC-LEAK-CHECK-WRAPPER -- "$own/pre-push"; then return 0; fi
+    ! [[ -x "$HOME/.local/share/public-leak-check-hooks/global/pre-push" && "$own" -ef "$HOME/.local/share/public-leak-check-hooks/global" ]] || return 0
+    out="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)" ||
+        jj_push_refuse "cannot list this repository's remotes, so whether this push needs the public leak check is unknown and it is refused." \
+            "$JJ_PUSH_UNREAD"
+    jj_push_guarded "$out" || return 0
+    hooks="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
+    [[ -x "$hooks/pre-push" ]] ||
+        jj_push_refuse "the leak gate's hook $hooks/pre-push is missing, so this push from a checkout of a public or unreadable GitHub repository is refused." \
+            "$JJ_PUSH_UNREAD"
+    export GIT_SHIM_OWN_HOOKS="$own"
+    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$hooks" "${args[@]:i}"
+}
 if [[ "${args[i]}" == push ]]; then
-    if from_jj; then jj_push_gate; fi
+    unset GIT_SHIM_OWN_HOOKS
+    if from_jj; then jj_push_gate; else own_hooks_push_gate; fi
     exec "$_real" "$@"
 fi
 

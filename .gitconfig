@@ -97,3 +97,11 @@
 	postBuffer = 524288000
 	lowSpeedLimit = 0
 	lowSpeedTime = 999999
+# The shared public leak check on every push (dispatch://BET-706 R6): this file, written last by
+# the leak check's install-global-hooks.sh (devbox/sami-devbox-provision, step prepush), sets
+# core.hooksPath to its global hooks dispatcher. That runs the check on a pre-push to any URL with
+# a host, then the repository's own hook of every name. A repository's own core.hooksPath still
+# wins (shims/git checks an agent session's push from one). git ignores a missing include, so a
+# machine without the install is unchanged; `install-global-hooks.sh --remove` turns it off.
+[include]
+	path = ~/.local/share/public-leak-check-hooks/global.gitconfig

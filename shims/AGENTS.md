@@ -215,8 +215,25 @@ before handing the call to the real one.
   text even under `--quiet`; another destination's failure keeps its line. Not seen, as `git push
   --no-verify` is not: a jj told to run another git (`git.executable-path`) or copied under
   another name, and a remote changed between the shim's decision and git reading its config.
+  A plain `git push` gets the check from the checkout's own pre-push hook, or from the leak
+  check's global hooks dispatcher (`~/.local/share/public-leak-check-hooks/global`, which
+  `.gitconfig` includes where step prepush of `devbox/sami-devbox-provision` installed it;
+  dispatch://BET-706 R6) when the repository sets no hooks path of its own. A repository that sets
+  `core.hooksPath` in its own config (local or worktree: husky, the pre-commit framework; an empty
+  value too, which git 2.43 reads as `/`, so no hook runs) overrides the dispatcher, and a fresh
+  clone of one has no leak-check wrapper there. So for a plain push in an agent session from a
+  guarded checkout whose own hooks path is set, whose `pre-push` there is not an executable wrapper
+  (marker `PUBLIC-LEAK-CHECK-WRAPPER`; git ignores a hook that is not executable, so a wrapper with
+  its execute bits off checks nothing), and which is not the dispatcher's directory, with no
+  `--no-verify`, the shim adds the same last `-c
+  core.hooksPath=jj-push-hooks/` and names that directory in `GIT_SHIM_OWN_HOOKS`; the gate's
+  `pre-push` then runs the check, and after a clean check that directory's `pre-push` with the same
+  arguments and stdin, without the shim's `-c` or the variable. Every other plain push is untouched,
+  so each push is checked once: by the wrapper, the dispatcher or the gate.
   `tests/test_jj_push_leak_gate.py` is the contract; when the sweep is beside the check it runs
   the sweep's own code on the same checkouts, and fails when its decision and the shim's differ.
+  Its dispatcher cases run the tag's `install-global-hooks.sh` from `LEAK_CHECK_HOOKS_SOURCE`, else
+  from `~/.local/share/public-leak-check-hooks`, and are skipped without one.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named

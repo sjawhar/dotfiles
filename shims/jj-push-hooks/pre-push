@@ -1,38 +1,63 @@
 #!/bin/bash
-# jj-push-gate: the pre-push hook of a `git push` that jj runs in a checkout the hook sweeper guards.
+# jj-push-gate: the pre-push hook of a `git push` that jj runs in a checkout the hook sweeper guards, or of a plain
+# `git push` from a guarded repository whose own core.hooksPath holds no leak-check wrapper (dispatch://BET-706 R6).
 # jj runs git with --no-verify, so the checkout's own pre-push hook, which runs the shared public leak check, never
-# runs for a jj push. shims/git drops that flag for such a push and points core.hooksPath here (shims/AGENTS.md).
+# runs for a jj push; a repository's own hooks path overrides the global hooks dispatcher. shims/git drops jj's flag
+# and points core.hooksPath here (shims/AGENTS.md).
 # This makes the call the hook that install-prepush-hook.sh installs makes: the shared check, found the same way
 # ($PUBLIC_LEAK_CHECK, PATH, then ${XDG_CONFIG_HOME:-~/.config}/public-leak-check/path), run as `<check> <remote>
 # <url>` with git's own update lines on stdin. So the URL is the one git is pushing to, and the updates are the ones
 # it is about to send: an up-to-date ref is not among them. The check alone decides, for every target, sjawhar/dotfiles
 # included since its scrub (dispatch://INFRA-974). The differences:
-# - the checkout's own pre-push (pre-push.local included) does not run, as it did not before this gate;
+# - for a jj push, the checkout's own pre-push (pre-push.local included) does not run, as it did not before this gate;
+#   for a plain push, shims/git names the repository's own hooks directory in GIT_SHIM_OWN_HOOKS, and its pre-push
+#   runs after a clean check with the same arguments and stdin, without the shim's -c or that variable, exactly as
+#   git would have run it;
 # - every line of a refusal starts with `error: `, the only git output jj still shows under --quiet, so the lines
 #   naming the commit and the text that matched always reach the person who pushed.
 # Every other hook name in this directory is a link to ./hook, which runs the hook git would have run without the gate.
 set -uo pipefail
+own="${GIT_SHIM_OWN_HOOKS-}"
+unset GIT_SHIM_OWN_HOOKS
+what="jj push"
+[[ -z "$own" ]] || what="push"
 refuse() {
     printf 'error: git shim: %s\n' "$@" >&2
     exit 1
 }
 url="${2:-}"
-in="$(cat)" || refuse "cannot read the updates git gave the pre-push hook, so this jj push to $url is refused." \
+in="$(cat)" || refuse "cannot read the updates git gave the pre-push hook, so this $what to $url is refused." \
     "Nothing was pushed, and nothing is wrong with your commits: your commits were not read."
 chk="${PUBLIC_LEAK_CHECK:-}"
 [[ -n "$chk" ]] || chk="$(command -v public-leak-check.sh 2> /dev/null || true)"
 pointer="${XDG_CONFIG_HOME:-$HOME/.config}/public-leak-check/path"
 if [[ -z "$chk" && -s "$pointer" ]]; then IFS= read -r chk < "$pointer" || true; fi
-[[ -n "$chk" && -x "$chk" ]] || refuse "this machine has no public leak check, so this jj push to $url is refused. Nothing was pushed." \
+[[ -n "$chk" && -x "$chk" ]] || refuse "this machine has no public leak check, so this $what to $url is refused. Nothing was pushed." \
     "Nothing is wrong with your commits: the check never ran. Point at it with PUBLIC_LEAK_CHECK, put public-leak-check.sh on PATH," \
     "or write its path in $pointer, then push again."
 crc=0
 out="$(bash "$chk" "$@" 2>&1 <<< "$in")" || crc=$?
 if ((crc == 0)); then
     [[ -z "$out" ]] || printf '%s\n' "$out" >&2
-    exit 0
+    [[ -n "$own" && -x "$own/pre-push" ]] || exit 0
+    # The shim's entry comes back out of GIT_CONFIG_PARAMETERS, as ./hook takes it out (the last one equal to it).
+    mine="${0%/*}"
+    mine="${mine//\'/\'\\\'\'}"
+    mine=" 'core.hooksPath'='${mine//!/\'\\!\'}' "
+    p=" ${GIT_CONFIG_PARAMETERS-} "
+    if [[ "$p" == *"$mine"* ]]; then
+        before="${p%"$mine"*}"
+        p="$before ${p:${#before}+${#mine}}"
+        p="${p# }"
+        p="${p% }"
+        if [[ -n "$p" ]]; then export GIT_CONFIG_PARAMETERS="$p"; else unset GIT_CONFIG_PARAMETERS; fi
+    fi
+    # git's update lines each end in a newline, the last one included, which $(cat) took off and <<< puts back;
+    # no update line at all is empty stdin.
+    if [[ -n "$in" ]]; then exec "$own/pre-push" "$@" <<< "$in"; fi
+    exec "$own/pre-push" "$@" < /dev/null
 fi
 while IFS= read -r line; do printf 'error: %s\n' "$line"; done <<< "$out" >&2
-((crc != 3)) || refuse "the public leak check refused this jj push to $url: the lines above name the commit and the text that matched, or say why the check could not read the target. Nothing was pushed."
-refuse "the public leak check could not finish (exit $crc), so this jj push to $url is refused. Nothing was pushed." \
+((crc != 3)) || refuse "the public leak check refused this $what to $url: the lines above name the commit and the text that matched, or say why the check could not read the target. Nothing was pushed."
+refuse "the public leak check could not finish (exit $crc), so this $what to $url is refused. Nothing was pushed." \
     "Nothing is wrong with your commits: the check never passed or refused them. The check: $chk"

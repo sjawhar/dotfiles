@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_jj_push_leak_gate import install_global_hooks
+
 SHIMS = Path(__file__).parents[1]
 AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
 SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
@@ -194,6 +196,57 @@ class GitCommitTrailerTest(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "-m", "m", env=self.plain)
         self.git("merge", "-q", "--no-edit", "side", env=self.agent)
         self.assertEqual(self.trailers(), [])
+
+    # With the leak check's global hooks dispatcher configured (dispatch://BET-706 R6), git's hooks directory is the
+    # dispatcher's, which runs the repository's own hook of each name from its common hooks directory.
+    def use_global_dispatcher(self) -> None:
+        gc = install_global_hooks(self.tmp / "public-leak-check-hooks", self.plain)
+        with open(self.plain["GIT_CONFIG_GLOBAL"], "a", encoding="utf-8") as f:
+            f.write(f"[include]\n\tpath = {gc}\n")
+        self.assertEqual(self.git("config", "--type=path", "--get", "core.hooksPath", env=self.plain).strip(),
+                         str(self.tmp / "public-leak-check-hooks" / "global"))
+
+    def logging_hooks(self, *names: str) -> None:
+        for name in names:
+            hook = self.repo / ".git" / "hooks" / name
+            hook.write_text(f'#!/bin/sh\necho "$*" >> "$(git rev-parse --git-dir)/{name}-ran"\n'
+                            + ('git interpret-trailers --in-place --trailer "Hook: yes" "$1"\n' if name == "commit-msg" else ""))
+            hook.chmod(0o755)
+
+    def ran(self, name: str) -> list[str]:
+        log = self.repo / ".git" / f"{name}-ran"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def test_with_the_global_dispatcher_a_merge_carries_one_trailer_and_each_hook_runs_once(self):
+        # git-hooks/hook takes the shim's -c out and runs the hook git would have run: now the dispatcher's, which runs
+        # the repository's own. So shim hook, dispatcher, own hook, each once; and one trailer.
+        self.use_global_dispatcher()
+        self.branch_with_commit("side", "side work", self.plain)
+        (self.repo / "m").write_text("m")
+        self.git("add", "m", env=self.plain)
+        self.git("commit", "-q", "-m", "m", env=self.plain)
+        self.logging_hooks("prepare-commit-msg", "commit-msg", "post-merge")
+        self.git("merge", "-q", "--no-edit", "side", env=self.agent)
+        self.assertEqual(self.trailers(), [SESSION])
+        self.assertEqual([ln.split()[1] for ln in self.ran("prepare-commit-msg")], ["merge"])
+        self.assertEqual(len(self.ran("commit-msg")), 1, self.ran("commit-msg"))
+        self.assertEqual(len(self.ran("post-merge")), 1, self.ran("post-merge"))
+        self.assertEqual(self.git("log", "-1", "--format=%B", env=self.plain).count("Hook: yes"), 1)
+        self.assertEqual(self.git("log", "-1", "--format=%G?", env=self.plain).strip(), "G")
+
+    def test_with_the_global_dispatcher_plain_git_runs_each_repository_hook_once(self):
+        # /usr/bin/git with no shim on PATH: pre-commit, commit-msg and post-checkout each fire once, through the
+        # dispatcher, as they would with no hooks path at all.
+        self.use_global_dispatcher()
+        self.logging_hooks("pre-commit", "commit-msg", "post-checkout")
+        env = {**self.plain, "PATH": os.pathsep.join(p for p in self.plain["PATH"].split(os.pathsep) if p != str(SHIMS))}
+        for argv in (["commit", "-q", "--allow-empty", "-m", "work"], ["checkout", "-q", "-b", "other"]):
+            r = subprocess.run(["/usr/bin/git", *argv], cwd=self.repo, env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.ran("pre-commit")), 1, self.ran("pre-commit"))
+        self.assertEqual(len(self.ran("commit-msg")), 1, self.ran("commit-msg"))
+        self.assertEqual(len(self.ran("post-checkout")), 1, self.ran("post-checkout"))
+        self.assertEqual(self.git("log", "-1", "--format=%B", env=self.plain).count("Hook: yes"), 1)
 
 
 if __name__ == "__main__":

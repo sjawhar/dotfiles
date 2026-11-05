@@ -982,7 +982,7 @@ prepush_hook_host_check() {
     local d="$HOME/.local/share/public-leak-check-hooks" t out rc=0 summary missing deferred
     # shellcheck source=leak-check-tag.env
     . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/leak-check-tag.env"
-    out="$(cd "$d" && sha256sum -c <<<"$LEAK_CHECK_HOOK_SHA256" 2>&1)" || rc=$?
+    out="$(cd "$d" && sha256sum --strict -c <<<"$LEAK_CHECK_HOOK_SHA256" 2>&1)" || rc=$?
     (( rc == 0 )) || { fail "pre-push hook: $d is not $LEAK_CHECK_TAG's hook files (sha256sum -c exit $rc): $(tr '\n' ' ' <<<"$out")install them: sami-devbox-provision --only prepush"; return; }
     t="$(mktemp -d)"
     printf '#!/bin/sh\nexit 1\n' > "$t/install-prepush-hook.sh" && chmod +x "$t/install-prepush-hook.sh"
@@ -1003,6 +1003,43 @@ prepush_hook_host_check() {
         [[ -n "$summary" ]] || nosum=" the sweep pass wrote no summary;"
         fail "pre-push hook:${missing:+ missing in $missing;}${deferred:+ not verified (the sweep deferred their visibility lookups to a later pass) in $deferred;}$nosum install: sami-devbox-provision --only prepush"
     fi
+}
+
+# The global hooks dispatcher of dispatch://BET-706 R6, which step prepush installs: global/ holds every
+# entry of the tag's global-hooks/ (whose sha256 prepush_hook_host_check compares), executable and byte
+# for byte, and nothing else; global.gitconfig, which install-global-hooks.sh writes last, is there; and
+# git's global config includes it (.gitconfig's [include]), so git's hooks directory is global/. A
+# global.gitconfig over an incomplete global/ is the worst case: git looks for every hook there, so a
+# name global/ lacks runs no repository's own hook of that name anywhere.
+global_hooks_host_check() {
+    local d="$HOME/.local/share/public-leak-check-hooks" f name n=0 wrong="" got
+    [[ -f "$d/global.gitconfig" ]] || {
+        fail "global hooks: $d/global.gitconfig is missing, so git runs no leak check on a push from a checkout without the pre-push hook; install: sami-devbox-provision --only prepush"
+        return
+    }
+    for f in "$d"/global-hooks/*; do
+        [[ -f "$f" ]] || continue
+        name="${f##*/}" n=$((n + 1))
+        { [[ -x "$d/global/$name" ]] && cmp -s "$f" "$d/global/$name"; } || wrong+="$name "
+    done
+    ((n > 0)) || {
+        fail "global hooks: $d/global-hooks/ has no entries, so whether $d/global/ is complete is unknown; install: sami-devbox-provision --only prepush"
+        return
+    }
+    for f in "$d"/global/*; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        [[ -f "$d/global-hooks/${f##*/}" ]] || wrong+="${f##*/} (not the tag's) "
+    done
+    [[ -z "$wrong" ]] || {
+        fail "global hooks: $d/global.gitconfig is there but $d/global/ is incomplete or not the tag's: ${wrong}; git runs no repository's own hook of a missing name. Install: sami-devbox-provision --only prepush, or turn it off: $d/install-global-hooks.sh --remove $d"
+        return
+    }
+    got="$(git config --global --includes --type=path --get core.hooksPath 2>/dev/null)" || got=""
+    [[ "$got" == "$d/global" ]] || {
+        fail "global hooks: installed in $d but not switched on: git's global core.hooksPath is '$got', not $d/global (the [include] in ~/.dotfiles/.gitconfig)"
+        return
+    }
+    ok "global hooks: git runs $d/global/ for every repository without a hooks path of its own ($n entries)"
 }
 
 # kubectl as a non-interactive ssh command gets it, through the kubeconfig the ossv-job-farm uses.
@@ -1075,6 +1112,7 @@ host() {
     rocqperf_check
     leak_check_host_check
     prepush_hook_host_check
+    global_hooks_host_check
     ossv_tree_host_check
     n6_check "on the host"
     echo "-- agentbox doctor (host and a throwaway box), for the record; A2 is decided by the lines above and the box half"
