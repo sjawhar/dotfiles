@@ -49,6 +49,17 @@ wait_for=0
 if [[ "${1:-}" == --wait ]]; then wait_for="${2:-0}"; shift 2; fi
 target="${1:-}"
 [[ -n "$target" ]] || { echo "usage: omp-session-live [--wait SECONDS] <session id | id prefix | transcript path>" >&2; exit 2; }
+# Inside an agent box this script can see only the box's own processes, so "no omp runs that
+# session" is a thing it cannot know, and saying it would be a failed read wearing the shape of
+# a clean answer. Exit 3, distinct from 1, and say what to run instead. At 13:47Z on 2026-11-05
+# a fleet broadcast gated on this script, run from a box, judged all 99 registered sessions dead
+# and sent nothing while reporting "delivered to 0 live sessions"; the same loop on the host
+# reached 71. OMP_SESSION_LIVE_PROC means a caller supplies its own /proc (the tests), which is
+# an answer about that tree and not about the host, so the guard stands aside for it.
+if [[ -z "${OMP_SESSION_LIVE_PROC:-}" && -e /.dockerenv ]]; then
+    echo "omp-session-live: this is an agent box (/.dockerenv), which sees only its own processes, so whether an omp on the host runs $target cannot be answered here. Ask the host: ssh ${AGENTBOX_HOST:-<host>} omp-session-live $target" >&2
+    exit 3
+fi
 if (( wait_for > 0 )); then
     deadline=$((SECONDS + wait_for))
     while out="$("$0" "$target")"; do
