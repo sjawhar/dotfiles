@@ -198,9 +198,18 @@ for s in "${sessions[@]}"; do
     for r in "${rows[@]}"; do
         IFS='|' read -r idx name path title <<<"$r"
         base="${name#*·}"          # idempotent: strip the prefix an earlier run wrote
-        plan+=("$(project_of "$path")|$idx|$base")
+        proj="$(project_of "$path")"
+        # A window --merge made is named for its project and nothing else. Without this, the
+        # rename below would make it `infra·infra` on the next scheduled run, and again and
+        # again. A bare name that already IS its project is settled: leave it.
+        [[ "$base" == "$proj" ]] && base=""
+        plan+=("$proj|$idx|$base")
     done
     mapfile -t ordered < <(printf '%s\n' "${plan[@]}" | sort -t'|' -k1,1 -k3,3)
+
+    # The name a settled window carries: "<project>·<its own name>", or just the project for a
+    # window --merge made, which has no name of its own beyond it.
+    want_name() { [[ -n "$2" ]] && echo "$1·$2" || echo "$1"; }
 
     settled=true
     want=1
@@ -208,7 +217,7 @@ for s in "${sessions[@]}"; do
         IFS='|' read -r proj idx base <<<"$row"
         [[ "$idx" == "$want" ]] || { settled=false; break; }
         tmux display -p -t "=$s:$idx" '#{window_name}' 2>/dev/null \
-            | grep -qxF "$proj·$base" || { settled=false; break; }
+            | grep -qxF "$(want_name "$proj" "$base")" || { settled=false; break; }
         want=$((want + 1))
     done
     $settled && continue
@@ -218,8 +227,8 @@ for s in "${sessions[@]}"; do
     park=1000
     for row in "${ordered[@]}"; do
         IFS='|' read -r proj idx base <<<"$row"
-        $dry && { printf '  %-16s %3s -> %s·%s\n' "$proj" "$idx" "$proj" "$base"; continue; }
-        tmux rename-window -t "=$s:$idx" "$proj·$base"
+        $dry && { printf '  %-16s %3s -> %s\n' "$proj" "$idx" "$(want_name "$proj" "$base")"; continue; }
+        tmux rename-window -t "=$s:$idx" "$(want_name "$proj" "$base")"
         tmux move-window -d -s "=$s:$idx" -t "=$s:$park" 2>/dev/null
         park=$((park + 1))
     done
