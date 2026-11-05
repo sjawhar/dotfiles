@@ -27,13 +27,20 @@ in sami-devbox's `~/.ssh/authorized_keys` carries
 of its own. `--forced-command` makes every call a verb instead: `probe`, `live <uuid>…`,
 `restart <uuid>`, `await <uuid>`, at most 256 ids in one call. The pinned copy on the host parses
 `SSH_ORIGINAL_COMMAND` itself, refuses everything else with one line on stderr, and reads a
-restart's tmux session, window title, cwd and **resume line from that session's own registry
+restart's tmux stream target, title, cwd and **resume line from that session's own registry
 entry** — never from the caller, so the key cannot ask for an arbitrary `agentbox new`. What the
 key cannot do at all, because sshd refuses it before the command runs, is a shell, a port
 forward, an agent forward, X11 and a tty: that is the `restrict`. `installers/devbox-offbox-act-host.sh`
 installs the pinned copy, records the commit it came from, and prints the `authorized_keys` line;
 it never edits `authorized_keys`, and an update of the copy is a deliberate run of that installer,
 not a publish.
+
+Update the host's pinned acting half first. The forced-command protocol is still `restart
+<uuid>`, so an older watcher can use the new actor, which reads `tmux` from the registry itself.
+For the stdin transport, update both adjacent scripts together: the restart's second argument
+is now a stream, not a title. A new watcher with an older actor would still create loose
+windows. A new actor with an older caller treats an unrecognised title as `chief`.
+Editing these files arms no watcher and does not update the host's pinned copy.
 
 **`from=` is one node's addresses or nothing.** `devbox-offbox-act-host.sh --from <addresses>`
 puts them in the printed line, normalised to the comma-separated list sshd reads; `--no-from`
@@ -71,6 +78,11 @@ machine; that is the only thing this script does differently from its siblings i
 `key=value` lines. Its own `README.md` has the format, a worked example, and the rule that each
 owner writes and updates its own file. The watch reads it and never writes it.
 
+The owner sets `tmux=agents:<stream>`, where the stream is `chief`, `ossv`, `linux`, `tasks`,
+`grader`, `infra`, `rocq` or `cicd`. A bare `tmux=agents`, `tmux=dev` or any `dev:<suffix>` uses
+`agents:chief`. An unrecognised stream suffix is reported and also uses `chief`; placement is
+never inferred from a title or directory. There is no separate window key or placement map.
+
 ## What it does each run
 
 1. One ssh probe. Two failures in a row alert the SRE and the chief of staff.
@@ -101,8 +113,11 @@ owner writes and updates its own file. The watch reads it and never writes it.
 
    A session with no reading at all is a candidate, not a verdict, and only when every agent box
    answered. One box that will not answer makes the whole run restart nothing.
-5. A dead one is restarted in a new tmux window of its `tmux` session, named for its `title`, from
-   its `cwd`; when omp-session-live says it is live, its `after` message is sent.
+5. A dead one is restarted in a detached pane of its existing tmux stream window, from its
+   `cwd`, and the window is tiled. If the named window is missing, the pane goes to `chief`.
+   No session or window is created, renamed or reordered. If `chief` is missing too, the restart
+   fails with a report: rebuild the layout before retrying. When omp-session-live says it is
+   live, its `after` message is sent.
 
 ## The five refusals
 
@@ -153,7 +168,8 @@ journal says so.
 It restarts nothing while `DEVBOX_OFFBOX_REPORT_ONLY` is set (the drop-in
 `~/.config/systemd/user/devbox-offbox-watch.service.d/report-only.conf` on sami-rocqperf) or
 `--report-only` is given. Every run then logs what it would have restarted and sends the SRE one
-message naming each session with its tmux, cwd, `--dir` list and resume line. Alerts and refusals
+message naming each session with its tmux stream target, cwd, `--dir` list and resume line. The
+target uses `chief` if absent on the server. Alerts and refusals
 go out as usual. That is how it runs until a person says automatic restarting is live; removing
 the drop-in and `systemctl --user daemon-reload` is the switch.
 

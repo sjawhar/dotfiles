@@ -52,11 +52,10 @@ def box(tmp_path: Path) -> dict:
     markers = tmp_path / "markers"
     markers.mkdir()
     calls = tmp_path / "tmux-calls"
-    # Every tmux call is recorded and nothing is run. `has-session` answers "no session", so the
-    # restart path also creates one, which is the real sequence.
+    # Record tmux requests without starting processes; the stream window already exists.
     _executable(shims / "tmux", f"#!/bin/sh\nprintf '%s\\n' \"$*\" >>{calls}\n"
-                                "case \"$1\" in has-session) exit 1 ;; "
-                                "new-window) echo 'agents:7 @7' ;; esac\nexit 0\n")
+                                "case \"$1\" in list-windows) echo '@7' ;; "
+                                "split-window) echo 'agents:chief @7 %7' ;; esac\nexit 0\n")
     _executable(shims / "docker", "#!/bin/sh\nexit 0\n")
     _executable(scripts / "omp-session-live", "#!/bin/sh\nexit 1\n")
     env = dict(os.environ)

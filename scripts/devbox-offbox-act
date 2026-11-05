@@ -33,15 +33,14 @@
 #       and a session with no reading at all is not "dead", it is a candidate -- and only when
 #       `boxscan ok` says every agent box answered.
 #
-#   restart <tmux-session> <window-title> <cwd> <resume command>
+#   restart <tmux-session> <stream-window> <cwd> <resume command>
 #   restart-entry <session-id>
-#       Open a new window named <window-title> in <tmux-session> (created detached if it does not
-#       exist) and run the resume command there through `bash -lc`, from <cwd>. The window keeps a
-#       login shell afterwards, so a resume that fails leaves its output on screen instead of
-#       closing the window. Prints `window=<tmux id>`. `restart-entry` is the same restart with
-#       every one of those four values read from that session's own registry entry on this host,
-#       never from the caller: it is what `restart <uuid>` becomes under the forced command, so
-#       the key cannot ask for an arbitrary `agentbox new`.
+#       Split a detached pane in the stream window and tile it. If that window is absent, use
+#       chief. A missing chief is an error: this command never creates a session or window.
+#       Run through `bash -lc`, from <cwd>, then keep a login shell so failed resume output stays
+#       visible. Prints `window=<target> <id>` and `pane=<id>`. `restart-entry` reads tmux placement
+#       and the resume from the host's own registry, never from the caller, so the forced key
+#       cannot ask for an arbitrary `agentbox new`.
 #
 #   await <session-id> <seconds>
 #       Ask omp-session-live every 5 s until the session is live or <seconds> pass. `live` or
@@ -135,27 +134,41 @@ if [[ "${1-}" == --forced ]]; then
     esac
 fi
 
-# Open a new window for a dead session and run its resume command there. Both `restart` (the
-# caller's four values, which is how the sami-rocqperf watcher calls it) and `restart-entry`
-# (the registry's own four, which is what the forced command runs) end here.
+# Both transports split an existing stream window. No path/title inference, window creation,
+# renaming or reordering: entries without a usable stream go to the existing chief window.
 do_restart() {
-    local session="$1" title="$2" cwd="$3" resume="$4" inner window
-    # An entry may write its tmux field as `agents:its-window`. A tmux session name holds no
-    # colon, so everything from the first one is the owner's note about where in that session the
-    # window used to be; the new window is named for the entry's title either way.
-    session="${session%%:*}"
+    local session="${1%%:*}" stream="${2:-chief}" cwd="$3" resume="$4"
+    local inner location target window pane format='#{session_name}:#{window_name} #{window_id} #{pane_id}'
+    if [[ "$session" == dev ]]; then session=agents; stream=chief; fi
+    case "$stream" in
+        chief|ossv|linux|tasks|grader|infra|rocq|cicd) ;;
+        *) printf 'refused_window=%s\n' "$stream"
+           printf 'refused window=%s; using chief\n' "$stream" >&2
+           stream=chief ;;
+    esac
     [[ -d "$cwd" ]] || { printf 'error=cwd %s does not exist\n' "$cwd" >&2; return 1; }
-    if ! tmux has-session -t "=$session" 2>/dev/null; then
-        tmux new-session -d -s "$session" -c "$cwd" || return 1
-        printf 'created_tmux_session=%s\n' "$session"
+    window="$(tmux list-windows -t "=$session" -f "#{==:#{window_name},$stream}" \
+        -F '#{window_id}' 2>/dev/null)" || window=""
+    if [[ -z "$window" && "$stream" != chief ]]; then
+        printf 'fallback=%s:%s missing; using %s:chief\n' "$session" "$stream" "$session"
+        stream=chief
+        window="$(tmux list-windows -t "=$session" -f '#{==:#{window_name},chief}' \
+            -F '#{window_id}' 2>/dev/null)" || window=""
     fi
-    # One argument for tmux, which hands it to `sh -c`. The login shell after the resume keeps
-    # the window and its output when the resume exits. No newline inside the quoted string: bash's
-    # `%q` spells one as $'\n', which the `sh` tmux runs the argument with cannot read.
+    [[ -n "$window" ]] || {
+        printf 'error=no existing %s:chief window; rebuild the layout before restarting; nothing created\n' "$session" >&2
+        return 1
+    }
+    # One argument for tmux's `sh -c`. Keep a login shell after the resume exits, preserving its
+    # output. No newline in this string: `sh` cannot read bash's %q spelling of one as $'\n'.
     inner="$(printf 'exec bash -lc %q' "$resume; exec bash -l")"
-    window="$(tmux new-window -d -P -F '#{session_name}:#{window_index} #{window_id}' \
-        -t "=$session:" -n "$title" -c "$cwd" "$inner")" || return 1
-    printf 'window=%s\n' "$window"
+    location="$(tmux split-window -d -P -F "$format" -t "$window" -c "$cwd" "$inner")" || return 1
+    read -r target window pane <<<"$location"
+    printf 'window=%s %s\n' "$target" "$window"
+    printf 'pane=%s\n' "$pane"
+    # Once spawned, a layout failure is not a failed restart: the pane is already running.
+    tmux select-layout -t "$window" tiled >/dev/null \
+        || printf 'layout_warning=could not tile %s\n' "$target"
 }
 
 command="${1:?command}"
@@ -365,7 +378,7 @@ function owns_session(line, sid,   n, word, w, arg) {
     fi
     ;;
 restart)
-    do_restart "${1:?tmux session}" "${2:?window title}" "${3:?cwd}" "${4:?resume}" || exit 1
+    do_restart "${1:?tmux session}" "${2:-chief}" "${3:?cwd}" "${4:?resume}" || exit 1
     ;;
 restart-entry)
     # The forced command's restart: every value comes from this host's own registry entry for
@@ -397,7 +410,9 @@ restart-entry)
     done
     printf 'entry=%s\n' "$entry"
     printf 'resume=%s\n' "$entry_resume"
-    do_restart "$entry_tmux" "$entry_title" "$entry_cwd" "$entry_resume" || exit 1
+    entry_stream=chief
+    [[ "$entry_tmux" == *:* ]] && entry_stream="${entry_tmux#*:}"
+    do_restart "$entry_tmux" "$entry_stream" "$entry_cwd" "$entry_resume" || exit 1
     ;;
 await)
     id="${1:?session id}" seconds="${2:-180}"

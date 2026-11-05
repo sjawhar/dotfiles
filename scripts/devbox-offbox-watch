@@ -27,9 +27,10 @@ Three duties.
    (`/mnt/durable/sami/restart-registry/README.md`). For each entry with `auto_restart=yes` the
    watch asks `omp-session-live <id>` ON sami-devbox -- the only liveness test there is here,
    never an lsof on a transcript path, which on 11-03/04 reported a working lead dead and
-   "restored" it four times. A dead one is resumed in a new tmux window of its `tmux` session,
-   named for its `title`, from its `cwd`; when omp-session-live says it is live, its `after`
-   message is sent.
+   "restored" it four times. A dead one is resumed in a detached pane of the existing window
+   named by `tmux=agents:<stream>`, from its `cwd`, then the window is tiled. Unplaced entries,
+   legacy `dev` entries and missing stream windows use `agents:chief`; no session or window is
+   created. When omp-session-live says it is live, its `after` message is sent.
 
 2. The box itself. No ssh answer within --ssh-timeout on two runs in a row, or a writeback stall
    that holds for 10 minutes, alerts the SRE and the chief of staff.
@@ -70,7 +71,7 @@ An unheld role, unavailable hub or unconfirmed receipt is written under
 `<state dir>/undelivered/` and logged. The hub runs off the watched box.
 
 `--report-only` (or DEVBOX_OFFBOX_REPORT_ONLY) restarts nothing and sends the SRE one message
-naming every session it would have restarted, with that session's tmux, cwd, --dir list and
+naming every session it would have restarted, with its tmux stream target, cwd, --dir list and
 resume line. Alerts and refusals go out as usual. It is how the watch runs before a person has
 told the stream that automatic restarting is live.
 
@@ -120,6 +121,7 @@ TRAIN_IDLE_SECONDS = 1800
 AWAIT_SECONDS = 45
 ENTRY_KEYS = ("session", "title", "role", "tmux", "cwd", "resume", "after", "order",
               "auto_restart", "owner_note")
+STREAM_WINDOWS = ("chief", "ossv", "linux", "tasks", "grader", "infra", "rocq", "cicd")
 # The writeback-stall gate is ResumeGuard's, from omp-memory-watch
 # (/mnt/nvme/sami/scratch/eng-ops-infra898/offbox-note.py): its two tests, its threshold, its
 # wording and its hold limit, so the two watches refuse on the same rule. Its `writeback_stall`
@@ -226,8 +228,8 @@ class Remote:
     def ask_restart(self, entry: dict[str, str], timeout: int | None = None) -> subprocess.CompletedProcess:
         if self.forced:
             return self.ask(["restart", entry["session"]], timeout)
-        return self.run(ACT, ["restart", entry["tmux"], entry["title"], entry["cwd"],
-                              entry["resume"]], timeout)
+        tmux, window, _ = placement(entry)
+        return self.run(ACT, ["restart", tmux, window, entry["cwd"], entry["resume"]], timeout)
 
     def ask_await(self, session: str, seconds: int, timeout: int | None = None) -> subprocess.CompletedProcess:
         if self.forced:
@@ -270,6 +272,15 @@ def usable(entry: dict[str, str]) -> str:
     if entry["_file"] != f"{entry['session']}.entry":
         return f"the file is named {entry['_file']} but holds session={entry['session']}"
     return ""
+
+
+def placement(entry: dict[str, str]) -> tuple[str, str, str]:
+    """Read only tmux=session:stream; unplaced and legacy dev entries use chief."""
+    tmux, _, window = entry["tmux"].partition(":")
+    if tmux == "dev":
+        return "agents", "chief", ""
+    invalid = window if window and window not in STREAM_WINDOWS else ""
+    return tmux, "chief" if invalid or not window else window, invalid
 
 
 def dir_list(resume: str) -> list[str]:
@@ -577,7 +588,8 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     session, title = entry["session"], entry["title"]
     targets = [sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
     dirs = describe_dirs(entry["resume"])
-    log(f"restarting {title} ({session}) in tmux {entry['tmux']}, cwd {entry['cwd']}: {dirs}")
+    tmux, stream, _ = placement(entry)
+    log(f"restarting {title} ({session}) in tmux {tmux}:{stream}, cwd {entry['cwd']}: {dirs}")
     if dry_run:
         log("  --dry-run: nothing was run")
         return
@@ -591,14 +603,16 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     if done.returncode != 0:
         detail = (done.stderr or done.stdout).strip()[:500]
         report.send(targets, "restart-failed",
-                    f"RESTART FAILED for {title} ({session}) on {host}: the tmux window could not"
-                    f" be opened: {detail}. Resume line: {entry['resume']}. {dirs}."
+                    f"RESTART FAILED for {title} ({session}) on {host}: the tmux pane could not"
+                    f" be opened in {tmux}:{stream}: {detail}. Resume line: {entry['resume']}. {dirs}."
                     f" Nothing is running for this session; it needs a person.")
         return
-    window = ""
+    window = pane = ""
     for line in done.stdout.splitlines():
         if line.startswith("window="):
             window = line[len("window="):]
+        elif line.startswith("pane="):
+            pane = line[len("pane="):]
 
     waited = remote.ask_await(session, AWAIT_SECONDS, timeout=AWAIT_SECONDS + 60)
     came_back = waited.stdout.strip() == "live"
@@ -619,8 +633,8 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     recent = len([r for r in state["restarts"] if now - r["at"] < 3600])
     report.send(targets, "restart",
                 f"RESTARTED {title} ({session}) on {host} at {utc(now)}. It was dead by"
-                f" omp-session-live, and no process on the box named it. New tmux window"
-                f" {window or '(unnamed)'} in tmux session {entry['tmux']}, cwd {entry['cwd']}."
+                f" omp-session-live, and no process on the box named it. New tmux pane"
+                f" {pane or '(not reported)'} in {window or f'{tmux}:{stream}'}, cwd {entry['cwd']}."
                 f" {dirs}. Resume line run: {entry['resume']}. Now: {live_said}, and {after_said}."
                 f" Restarts in the last hour: {recent} of {RESTARTS_PER_HOUR}."
                 f" Why it matters: {entry.get('owner_note', '(the entry says nothing)')}")
@@ -858,8 +872,18 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
             left_for_limit.append(f"{title} ({session})")
             continue
 
+        tmux, stream, invalid = placement(entry)
+        if invalid and record.get("refused_window") != invalid:
+            report.send(targets, "refuse-window",
+                        f"REFUSED WINDOW for {title} ({session}): tmux={entry['tmux']} does not name"
+                        f" one of {', '.join(STREAM_WINDOWS)}. Its restart uses {tmux}:chief instead;"
+                        f" no window with the refused name is created. Correct the registry entry.")
+            record["refused_window"] = invalid
+        elif not invalid:
+            record.pop("refused_window", None)
+
         if args.report_only:
-            would_restart.append(f"{title} ({session}), tmux {entry['tmux']}, cwd {entry['cwd']},"
+            would_restart.append(f"{title} ({session}), tmux {tmux}:{stream}, cwd {entry['cwd']},"
                                  f" {describe_dirs(entry['resume'])}, resume: {entry['resume']}")
             log(f"report-only: would restart {title} ({session})")
             continue

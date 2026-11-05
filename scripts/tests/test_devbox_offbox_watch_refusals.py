@@ -94,7 +94,7 @@ class FakeBox:
     def ask_restart(self, entry, timeout=None):
         self.asks.append(["restart", entry["session"]])
         self.restarted.append(entry["session"])
-        return self._done("window=agents:7 @7\n")
+        return self._done("window=agents:chief @7\npane=%7\n")
 
     def ask_await(self, session, seconds, timeout=None):
         self.asks.append(["await", session])
@@ -193,6 +193,25 @@ def test_report_only_restarts_nothing_and_names_what_it_would_have(harness) -> N
     assert box.restarted == []
     message = [text for kind, text in sent if kind == "report-only"]
     assert len(message) == 1 and RESUME in message[0], sent
+
+
+def test_report_only_names_the_resolved_stream_and_all_box_dirs(harness) -> None:
+    probe = probe_text().replace("tmux=agents", "tmux=agents:rocq")
+    box, sent, _ = harness(live_text(f"live {SESSION} 0"), probe=probe, extra=["--report-only"])
+    assert box.restarted == []
+    message = [text for kind, text in sent if kind == "report-only"]
+    assert len(message) == 1
+    assert "tmux agents:rocq" in message[0] and "/srv/work" in message[0] and RESUME in message[0]
+
+
+def test_invalid_stream_reports_a_refusal_but_still_restarts_in_chief(harness) -> None:
+    probe = probe_text().replace("tmux=agents", "tmux=agents:not-a-stream")
+    box, sent, _ = harness(live_text(f"live {SESSION} 0"), probe=probe)
+    assert box.restarted == [SESSION]
+    refused = [text for kind, text in sent if kind == "refuse-window"]
+    assert len(refused) == 1 and "not-a-stream" in refused[0] and "chief" in refused[0]
+    restarted = [text for kind, text in sent if kind == "restart"]
+    assert len(restarted) == 1 and "agents:chief" in restarted[0]
 
 
 def test_every_pass_writes_one_shadow_line(harness, tmp_path: Path) -> None:
