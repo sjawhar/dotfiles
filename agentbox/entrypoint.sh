@@ -45,6 +45,60 @@ while IFS= read -r -d '' dir; do
 done <"$ownership_paths"
 rm -f "$ownership_paths"
 
+# Every --dir the launcher named must really be the HOST's directory in here.
+#
+# Why this is checked at all: inside a box an unbound path is NOT an error. The directory
+# exists, it is writable, it is empty, and it is the box's own disk, so a session works in it
+# for hours and loses everything in it when the box ends. Five sessions reported exactly that
+# on 2026-11-05 (dispatch://INFRA-1192/artifact/frictions-md, friction f1), each having
+# "checked" the path by listing it -- a negative that could not have returned a positive.
+#
+# The test: `findmnt -T PATH` names the mount the path lives on. A bound --dir answers with
+# itself, or with a bound parent (a --dir under /mnt/durable/<user> answers that, since the
+# launcher does not bind it a second time); an unbound path answers with the container's own
+# root. Measured in agentbox-998b80ebbc2a on 2026-11-05: all 16 of its --dir paths answered xfs
+# at their own path or a parent, while a path that was never bound answered "/ overlay".
+#
+# The first --dir is the directory the session works in, so an unbound one is always fatal: a
+# box in any other directory is not that session's box. For the rest the rule follows the
+# launcher's own: fatal on a fresh launch, and on a resume (AGENTBOX_DROP_GONE_DIRS, set by
+# `agentbox new --drop-gone-dirs`) said loudly and left out, because a refusal there leaves a
+# live session's pane at a shell until a person runs omp by hand.
+if [[ -n "${AGENTBOX_DIRS:-}" ]]; then
+    unbound_fatal=() unbound_warn=() dir_index=0
+    while IFS= read -r box_dir; do
+        [[ -n "$box_dir" ]] || continue
+        dir_index=$((dir_index + 1))
+        on="$(findmnt -T "$box_dir" -n -o TARGET 2>/dev/null)" || on=""
+        # An empty answer means the path is not there at all (measured: findmnt prints nothing
+        # for a path that does not exist, and "/" for one on the container's own root). That is
+        # not the silent case this guards: a path that is absent fails loudly at the session's
+        # first use, where an unbound one reads as an empty directory for hours. So it is left
+        # alone, and this check never refuses on a reading it could not take.
+        [[ -n "$on" && "$on" == "/" ]] || continue
+        if (( dir_index == 1 )) || [[ -z "${AGENTBOX_DROP_GONE_DIRS:-}" ]]; then
+            unbound_fatal+=("$box_dir")
+        else
+            unbound_warn+=("$box_dir")
+        fi
+    done < <(printf '%s\n' "${AGENTBOX_DIRS//:/$'\n'}")
+    for box_dir in ${unbound_warn[@]+"${unbound_warn[@]}"}; do
+        echo "agentbox: --dir '$box_dir' is NOT bound into this box: it is this box's own empty" \
+             "disk at that path, and anything written there dies with the box. This resume goes" \
+             "on without it." >&2
+    done
+    if (( ${#unbound_fatal[@]} )); then
+        {
+            echo "agentbox: these --dir paths are NOT bound into this box. Each one exists here," \
+                 "is writable and is EMPTY, because it is the box's own disk and not the host's" \
+                 "directory, so a session working in one loses everything it writes:"
+            printf '  %s\n' "${unbound_fatal[@]}"
+            echo "Nothing was started. Check each on the host with: findmnt -T <path>"
+        } >&2
+        exit 1
+    fi
+fi
+
 mkdir -p /var/log
 dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 &
 for _ in $(seq 1 60); do

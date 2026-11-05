@@ -377,6 +377,18 @@ die() { MOVE_SAID=1; echo "agentbox: $*" >&2; exit 1; }
 # "your value is out of range" from "this host cannot start a box".
 refuse() { MOVE_SAID=1; echo "agentbox: $*" >&2; exit 2; }
 
+# envoy_send_text [--source envoy] <session id> <text>: one Envoy message, its body on stdin.
+# `envoy send` refuses a body given as a command-line word in an agent session, because the
+# shell expands backticks and $(...) in such a word before envoy sees it, and agentbox runs
+# inside agent sessions. The body is this script's own text either way; stdin keeps it out of
+# every argv (/proc/<pid>/cmdline is world-readable) and sends its bytes verbatim.
+envoy_send_text() {
+    local -a opts=()
+    while [[ "${1:-}" == --* ]]; do opts+=("$1"); shift; done
+    local sid="$1" text="$2"
+    envoy send ${opts[@]+"${opts[@]}"} --message-file - "$sid" <<<"$text"
+}
+
 # A docker size (b/k/m/g, 1024-based; no suffix means bytes) in bytes; non-zero on anything else.
 size_bytes() {
     local value="${1,,}"
@@ -504,6 +516,10 @@ open_box_disk() {
 # AGENTBOX_DIRS. A path is taken as the caller typed it after readlink -f, so a symlink reaches
 # the box as the directory it names, the way $SRC's symlinked checkouts already do.
 BOX_DIRS=()
+# True when this launch is a resume that may leave out a --dir gone from the host
+# (--drop-gone-dirs). session_env passes it to the box, where the entrypoint's bind check uses
+# it to decide whether an unbound --dir after the first refuses the launch or is only said.
+BOX_DROP_GONE_DIRS=false
 # What mount_args actually BINDS for them, which is not the same list: a named directory the box
 # already has at that path is not bound a second time (docker refuses two mounts at one
 # destination), and the git object store of a named tree is bound although nobody named it.
@@ -1671,8 +1687,14 @@ session_env() {
     e+=(-e "XDG_RUNTIME_DIR=/run/user/$UID_")
     e+=(-e "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus/bus")
     # What this box was given with --dir, so a session inside it can move again into a new box
-    # holding these plus whatever else it has since found it needs (move_self_in_box).
+    # holding these plus whatever else it has since found it needs (move_self_in_box). The
+    # entrypoint also checks each one is really bound in here, since an unbound path is an empty
+    # lookalike and never an error (agentbox/entrypoint.sh).
     (( ${#BOX_DIRS[@]} )) && e+=(-e "AGENTBOX_DIRS=$(IFS=:; echo "${BOX_DIRS[*]}")")
+    # This launch is a RESUME that already dropped --dir paths gone from the host, so the
+    # entrypoint says an unbound one after the first and starts anyway, rather than leaving a
+    # live session's pane at a shell. The first --dir is fatal there either way.
+    [[ "${BOX_DROP_GONE_DIRS:-}" != true ]] || e+=(-e "AGENTBOX_DROP_GONE_DIRS=1")
     # The host's tmux server through its relay, so `tmux new-window`, `send-keys` and
     # `capture-pane` in a box act on the host's panes, which is what a lead does. TMUX itself is
     # NOT set: a box is not inside a pane, and a tool that reads TMUX would address the wrong
@@ -2265,6 +2287,10 @@ cmd_new() {
         [[ "$a" == -- ]] && break
         [[ "$a" == --drop-gone-dirs ]] && drop_gone=true
     done
+    # session_env passes this to the box as AGENTBOX_DROP_GONE_DIRS, so the entrypoint's bind
+    # check knows this launch is a resume and says an unbound --dir after the first instead of
+    # refusing it.
+    BOX_DROP_GONE_DIRS=$drop_gone
     # Where each limit came from, so a refusal names what the caller actually set.
     local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS" disk_from="AGENTBOX_DISK"
     [[ -n "${AGENTBOX_MEMORY:-}" ]] || mem_from="the default memory limit"
@@ -2677,7 +2703,7 @@ cmd_restart() {
         fi
         sid="$(box_session_id "$box")"
         [[ -n "$sid" ]] || { echo "agentbox: $box: omp holds no session file open right now; retry, or use --now" >&2; continue; }
-        envoy send "$sid" "$RESTART_NOTICE" >/dev/null || die "envoy send to $sid failed"
+        envoy_send_text "$sid" "$RESTART_NOTICE" >/dev/null || die "envoy send to $sid failed"
         echo "agentbox: $box (session $sid) notified; it restarts when it reaches a safe point"
     done
 }
@@ -4630,7 +4656,7 @@ move_wake() {
     since="$(date +%s%3N)"
     while (( waited < MOVE_WAKE_TOTAL )); do
         if box_registered "$sid" "$since" \
-            && envoy send --source envoy "$sid" "$notice" >/dev/null; then
+            && envoy_send_text --source envoy "$sid" "$notice" >/dev/null; then
             echo "$(date -u +%FT%TZ) move $sid: the resumed session registered on Envoy; wake notice sent"
             return 0
         fi
@@ -5220,7 +5246,7 @@ cmd_move_notify() {
             echo "agentbox: would notify $sid (pane $pane, $at): $notice"
             continue
         fi
-        envoy send "$sid" "$notice" >/dev/null || die "envoy send to $sid failed"
+        envoy_send_text "$sid" "$notice" >/dev/null || die "envoy send to $sid failed"
         echo "agentbox: $sid (pane $pane, $at) notified; it moves when it reaches a safe point"
     done
 }
@@ -5449,8 +5475,8 @@ move_to_stop_services() {
     (( found )) || say "$sid: no service or scope of this session is left running here"
     if (( ${#left[@]} )); then
         local text="agentbox: session $sid moved to $target, and these background services stay on $me: ${left[*]}. They run twice until a person ends them. (An automated notice from agentbox.)"
-        envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true
-        envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
+        envoy_send_text --source envoy "$sid" "$text" >/dev/null 2>&1 || true
+        envoy notify --message-file - notifications.role.lead-box-health <<<"$text" >/dev/null 2>&1 || true
     fi
     return 0
 }
@@ -6168,7 +6194,7 @@ move_to_rsync() {
                 line="rsync $kind: ${label:-copying} for $((SECONDS - start))s: $(move_to_rsync_progress "$stats")"
                 say "$line"
                 for sid in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do
-                    envoy send --source envoy "$sid" "agentbox: your move goes on. $line (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+                    envoy_send_text --source envoy "$sid" "agentbox: your move goes on. $line (An automated notice from agentbox.)" >/dev/null 2>&1 || true
                 done
             done
         ) &
@@ -7471,7 +7497,7 @@ cmd_move_to() {
             notice="${notice//%GROUP%/${MOVE_TO_GROUP[*]}}"
             notice="${notice//%PID%/$m}"
             if $dry; then echo "agentbox: would ask $s to run \`agentbox move --to $target\` at its safe point"; continue; fi
-            envoy send "$s" "$notice" >/dev/null || echo "agentbox: envoy send to $s failed" >&2
+            envoy_send_text "$s" "$notice" >/dev/null || echo "agentbox: envoy send to $s failed" >&2
         done
         echo "agentbox: this session is ready; the group moves when ${waiting[*]} run(s) \`agentbox move --to $target\` too (each was asked over Envoy). Go on with your work until then; the last of them hangs this session up."
         return 0
@@ -7663,7 +7689,7 @@ move_to_hold() {
     deadline=$((SECONDS + MOVE_TO_HOLD_WAIT))
     for s in "$@"; do
         printf 'target=%s\ndeadline=%s\npid=%s\n' "$target" "$(( $(date +%s) + MOVE_TO_HOLD_WAIT ))" "$BASHPID" >"$MOVE_TO_HOLD/$s"
-        envoy send --source envoy "$s" "agentbox: your move to $target is ready to hang you up (checks, clones and the first copy are done). Go on working; \`agentbox move --go\` is the ONLY moment this move stops you, and nothing stops until you run it. Run it at your next safe point within $((MOVE_TO_HOLD_WAIT / 60)) min; it hangs this session up and resumes it on $target. If you do not, the move is refused with nothing hung up, and the copy stays on $target for the next try. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+        envoy_send_text --source envoy "$s" "agentbox: your move to $target is ready to hang you up (checks, clones and the first copy are done). Go on working; \`agentbox move --go\` is the ONLY moment this move stops you, and nothing stops until you run it. Run it at your next safe point within $((MOVE_TO_HOLD_WAIT / 60)) min; it hangs this session up and resumes it on $target. If you do not, the move is refused with nothing hung up, and the copy stays on $target for the next try. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
     done
     say "holding before the hang-up: waiting up to $((MOVE_TO_HOLD_WAIT / 60)) min for \`agentbox move --go\` from $*"
     while :; do
@@ -7821,10 +7847,10 @@ move_to_run() {
         local sid="$1" why="$2" text lead
         text="agentbox: the move of session $sid to $target FAILED and the session is DOWN on $me: $why (An automated notice from agentbox.)"
         say "$sid: DOWN: $why"
-        envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true
-        envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
+        envoy_send_text --source envoy "$sid" "$text" >/dev/null 2>&1 || true
+        envoy notify --message-file - notifications.role.lead-box-health <<<"$text" >/dev/null 2>&1 || true
         lead="$(jq -r '.lead // empty' "$job" 2>/dev/null || true)"
-        [[ -z "$lead" ]] || envoy send --source envoy "$lead" "$text" >/dev/null 2>&1 || true
+        [[ -z "$lead" ]] || envoy_send_text --source envoy "$lead" "$text" >/dev/null 2>&1 || true
     }
 
     # A move that stops BEFORE the hang-up: every session goes on here, so none is DOWN, but the
@@ -7834,10 +7860,10 @@ move_to_run() {
         local why="$1" text lead sid
         shift
         text="agentbox: the move to $target did NOT start and these sessions were not hung up ($*): $why (An automated notice from agentbox.)"
-        for sid in "$@"; do envoy send --source envoy "$sid" "$text" >/dev/null 2>&1 || true; done
-        envoy publish --source envoy notifications.role.lead-box-health "$text" >/dev/null 2>&1 || true
+        for sid in "$@"; do envoy_send_text --source envoy "$sid" "$text" >/dev/null 2>&1 || true; done
+        envoy notify --message-file - notifications.role.lead-box-health <<<"$text" >/dev/null 2>&1 || true
         lead="$(jq -r '.lead // empty' "$job" 2>/dev/null || true)"
-        [[ -z "$lead" ]] || envoy send --source envoy "$lead" "$text" >/dev/null 2>&1 || true
+        [[ -z "$lead" ]] || envoy_send_text --source envoy "$lead" "$text" >/dev/null 2>&1 || true
     }
 
     # Each member back in a box on this machine, in its own pane, or in a window of its own when
@@ -7952,7 +7978,7 @@ move_to_run() {
             [[ -e "$MOVE_TO_HOLD/$s2" ]] || continue
             rm -f "$MOVE_TO_HOLD/$s2"
             held=1
-            envoy send --source envoy "$s2" "agentbox: the move to ${MOVE_TO_TARGET:-the target} was STOPPED while it waited for your \`agentbox move --go\`. The hold is withdrawn: do NOT run --go, nothing will hang you up, and this session stays here. Ask for the move again when you want it. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
+            envoy_send_text --source envoy "$s2" "agentbox: the move to ${MOVE_TO_TARGET:-the target} was STOPPED while it waited for your \`agentbox move --go\`. The hold is withdrawn: do NOT run --go, nothing will hang you up, and this session stays here. Ask for the move again when you want it. (An automated notice from agentbox.)" >/dev/null 2>&1 || true
         done
         (( held == 0 )) || say "the hold was withdrawn and every member told (stopped by signal $1)"
         # To stderr: a signal can come while stdout is redirected (an rsync's --stats file).
