@@ -23,6 +23,17 @@ VERDICTS = ("running", "kept", "reverted", "inconclusive", "provisional")
 # Known kinds of wait (format 1.2 added "lead"). Any other kind is a warning, never an error, so a lead is not
 # blocked by this checker for a new kind of wait.
 WAITS = ("person", "lead", "merge", "compute", "other")
+# Fields whose name reads as if it changes a number's verdict, which the page does NOT act on. A field the page
+# ignores silently is worse than one it refuses: it looks accepted (Verified Linux's `suspended`, 2026-11-05, read
+# "format OK" while the page went on calling the paused targets behind). The page acts on `suspended`, `held` and
+# role `retired`; a lead who writes one of these instead is told which of those to use. Only these words: a warning
+# on every field it does not read would fire on `note` and `validation` on most boards and be ignored.
+VERDICT_WORDS = {
+    "status": "to pause a target use `suspended` with `suspended_reason`; to distrust readings use `held`",
+    "paused": "use `suspended` (a date) with `suspended_reason`",
+    "replaced_by": "to retire this number set its role to `retired`",
+    "retired": "a number is retired by its role: set role to `retired`",
+}
 
 
 def _num(x) -> bool:
@@ -208,6 +219,13 @@ def report(b: dict, now: datetime) -> tuple[list[str], list[str]]:
     lines += plan_warnings(b.get("today"), "today") + plan_warnings(b.get("week"), "week")
     if b.get("week") is None:
         lines.append("Warning: no `week` list; the page shows 'No plan' under This week's plan.")
+    for n in b.get("numbers") or []:
+        if not isinstance(n, dict):
+            continue
+        for word, use in VERDICT_WORDS.items():
+            if word in n and not (word == "retired" and n.get("role") == "retired"):
+                lines.append(f"Warning: {n.get('id')!r} carries `{word}`, which the page does not act on: its verdict "
+                             f"is unchanged. {use[0].upper()}{use[1:]}.")
     return errors, lines
 
 

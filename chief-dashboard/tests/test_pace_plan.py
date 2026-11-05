@@ -167,6 +167,29 @@ def test_check_accepts_null_value_only_with_a_numeric_lower_bound():
     assert errs({"value": None, "lower_bound": "0.8"}) != []
 
 
+def test_a_suspended_or_held_number_is_neither_behind_nor_met_on_either_page():
+    """Verified Linux's `suspended` targets read 'behind' on the page on 2026-11-05 while the field passed the check
+    as 'format OK'. A paused target, or readings the lead holds, must not be judged; the reason is shown instead."""
+    from chief_dashboard import check, model
+
+    now = at(0.5)
+    iso = lambda t: t.isoformat().replace("+00:00", "Z")  # noqa: E731
+    behind = {"id": "x", "name": "Share", "role": "main", "unit": "share", "better": "higher",
+              "target": {"value": 1.0, "by": BY}, "values": [{"at": iso(T0), "value": 0.4}, {"at": iso(now), "value": 0.43}]}
+    assert model.number_view(behind, now).status == model.BEHIND
+    paused = {**behind, "suspended": "2026-11-04", "suspended_reason": "stream speedrun-only"}
+    held = {**behind, "held": {"since": "2026-10-31T16:55:00Z", "why": "source diverges"}}
+    for raw, words in ((paused, "target suspended since 2026-11-04: stream speedrun-only"),
+                       (held, "readings held since 2026-10-31: source diverges")):
+        assert model.number_view(raw, now).status == model.SUSPENDED
+        assert model.suspended_text(raw) == words
+    assert model.suspended_text(behind) is None
+    # The check names a verdict-sounding field the page ignores, and stays quiet on the ones it acts on.
+    lines = check.report({"issue": "LINUX-31", "numbers": [{**behind, "status": "paused"}, paused, held]}, now)[1]
+    warned = [x for x in lines if "does not act on" in x]
+    assert len(warned) == 1 and "`status`" in warned[0]
+
+
 
 # --- The day's plan ---------------------------------------------------------------------------------------------
 

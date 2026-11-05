@@ -36,9 +36,34 @@ MET, ON_TRACK, BEHIND, BASELINE, NOT_MEASURED, NO_TARGET, NO_BOARD = (
     "no scoreboard",
 )
 BAD_TARGET = "target not better than start"
+# A target paused by a decision (the number's `suspended` date and `suspended_reason`): neither behind nor met. The
+# chief suspended Verified Linux's three 11-07 targets on 2026-11-05 while that stream is speedrun-only by Sami's
+# 11-04 decision, and until this status the page went on reading the paused targets as behind.
+SUSPENDED = "target suspended"
 # Worst first: the order a stream's main numbers are summarised in and streams are sorted by.
-SEVERITY = {BEHIND: 0, NO_BOARD: 1, NOT_MEASURED: 1, NO_TARGET: 2, BAD_TARGET: 2, BASELINE: 3, ON_TRACK: 4, MET: 5}
+SEVERITY = {BEHIND: 0, NO_BOARD: 1, NOT_MEASURED: 1, NO_TARGET: 2, BAD_TARGET: 2, BASELINE: 3, SUSPENDED: 3,
+            ON_TRACK: 4, MET: 5}
 NEEDS_LOOK = {BEHIND, NO_BOARD, NOT_MEASURED, NO_TARGET, BAD_TARGET}
+
+
+def suspended_text(num: dict) -> str | None:
+    """Why the page must not judge this number, or None when it may. Two declarations stop it: `suspended` (the
+    target is paused by a decision: a date, with `suspended_reason`) and `held` (the lead does not trust the readings:
+    {since, why}; task making held five numbers on 2026-10-31 when their source diverged from `bet-tasks deliver`).
+    Both read the same on every page: not behind, not met, with the reason beside it."""
+    s = num.get("suspended")
+    if s:
+        since = s.strip() if isinstance(s, str) else ""
+        why = str(num.get("suspended_reason") or "").strip()
+        head = f"target suspended since {since}" if since else "target suspended"
+        return f"{head}: {why}" if why else head
+    h = num.get("held")
+    if h:
+        since = str(h.get("since") or "")[:10] if isinstance(h, dict) else ""
+        why = str(h.get("why") or "").strip() if isinstance(h, dict) else str(h).strip()
+        head = f"readings held since {since}" if since else "readings held"
+        return f"{head}: {why}" if why else head
+    return None
 
 
 def first_reading(values: list[dict]) -> float | None:
@@ -148,7 +173,9 @@ def number_view(num: dict, now: datetime) -> Number:
     tvalue = target.get("value") if target else None
     status = projection = None
     if num.get("role") == "main":
-        if not isinstance(tvalue, int | float) or target_at is None:
+        if suspended_text(num):
+            status = SUSPENDED
+        elif not isinstance(tvalue, int | float) or target_at is None:
             status = NOT_MEASURED if latest is None else NO_TARGET
         elif latest is None:
             status = NOT_MEASURED

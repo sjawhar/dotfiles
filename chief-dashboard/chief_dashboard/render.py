@@ -21,6 +21,7 @@ STATUS_CLASS = {
     model.NO_TARGET: "notarget",
     model.BAD_TARGET: "notarget",
     model.BASELINE: "baseline",
+    model.SUSPENDED: "notarget",
     model.ON_TRACK: "ontrack",
     model.MET: "met",
 }
@@ -105,6 +106,8 @@ def latest_text(n: Number, now: datetime) -> str:
 
 
 def projection_text(n: Number) -> str:
+    if n.status == model.SUSPENDED:
+        return model.suspended_text(n.raw) or "target suspended"
     if n.status == model.MET:
         return "target met"
     if n.status == model.BASELINE:

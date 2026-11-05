@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from . import model, sessions
-from .model import Number, Stream, parse_time
-from .pace import BEHIND, CANT_TELL, ON_PACE, PACIFIC, Pace, Reading, every_hours, guard, line_at, pace, readings
+from .model import Number, Stream, parse_time, suspended_text
+from .pace import (BEHIND, CANT_TELL, ON_PACE, PACIFIC, Pace, Reading, every_hours, guard, line_at, pace, readings,
+                   target_end)
 from .plan import DayPlan, Item, WeekPlan, day_plan, day_record, fix_time, pacific_day, tally, week_plan
 from .plan_issues import IssueRef, resolve
 
@@ -170,7 +171,13 @@ def stream_view(st: Stream, versions: list[dict], states: dict[str, dict], asks:
     for n in st.mains:
         t = n.target or {}
         rs = readings(n.values)
-        p = pace(rs, t.get("value"), t.get("by"), n.better, every_hours(n.raw), now)
+        if why := suspended_text(n.raw):
+            # A paused target is neither behind nor on pace (model.SUSPENDED). The target and its date stay, so the
+            # row shows a target exists; the reason line says it is paused and by whose decision.
+            by = t.get("by")
+            p = Pace(CANT_TELL, why, None, target_end(by) if by else None, t.get("value"))
+        else:
+            p = pace(rs, t.get("value"), t.get("by"), n.better, every_hours(n.raw), now)
         expected, gap = line_gap(rs, p, n.better)
         row = KpiRow(n, p, rs, expected=expected, gap=gap)
         kpis.append(row)
