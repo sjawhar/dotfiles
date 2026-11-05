@@ -122,6 +122,19 @@ def agentbox_flags_after_separator(resume):
     return [w for w in after if w.split('=', 1)[0] in AGENTBOX_ONLY_FLAGS]
 
 
+def covered_by(path, binds):
+    """True when `path` is inside one of `binds`, so a box sees it at its own name anyway.
+
+    A box mounts a --dir at its own absolute path, so binding a parent shows every child under
+    it. Replacing twelve sibling binds with their one parent is a tidier entry, not a loss, and
+    on 2026-11-05 three lanes had to prove that to me one `findmnt -T` at a time (the INFRA
+    deploy lane's twelve under /theorem-ext4/sami, PROCS's worktree under /mnt/nvme/sami/wt,
+    TASKCOACH's under /mnt/durable/sami). Comparing path lists literally made each look lost.
+    """
+    p = pathlib.PurePosixPath(path)
+    return any(p != b and p.is_relative_to(b) for b in (pathlib.PurePosixPath(x) for x in binds))
+
+
 def drift(kv, good):
     sid = kv['session']
     if sid not in good:
@@ -131,7 +144,9 @@ def drift(kv, good):
     if 'agentbox' in cmd and 'agentbox' not in r:
         out.append('lost its agentbox')
     if 'agentbox' in cmd and 'agentbox' in r:
-        lost = set(re.findall(r'--dir (\S+)', cmd)) - set(re.findall(r'--dir (\S+)', r))
+        now = set(re.findall(r'--dir (\S+)', r))
+        lost = {d for d in set(re.findall(r'--dir (\S+)', cmd)) - now
+                if not covered_by(d, now | set(ALWAYS_IN_A_BOX))}
         if lost:
             out.append('binds the known-good command had: ' + ' '.join(sorted(lost)))
     if cd and kv.get('cwd') and cd != kv['cwd']:
