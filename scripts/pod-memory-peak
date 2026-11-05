@@ -44,13 +44,23 @@
 #     is wrong and the kill is right.
 # For a kind whose pods are NOT gVisor, the in-pod memory.peak is a true maximum and is better.
 #
-# UNDER gVISOR THIS READS HIGH, and that is the safe direction. The node accounts the gVisor
+# UNDER gVISOR THIS READS HIGH, AND THE OVERSTATEMENT CAN BE LARGE. The node accounts the gVisor
 # sandbox's own memory together with the container, so the figure is an UPPER BOUND on what the
-# cgroup was charged rather than the charge itself. Evidence, measured by a lane on 2026-11-05:
-# a container of a Guaranteed pod at 192Gi/192Gi read 193.22 GiB here -- 0.6% ABOVE its own
-# limit -- and no OOM kill exists for it in Cloud Logging over 2026-10-29..11-05 (the same query
-# returns 168 FailedScheduling entries, so it does find what is there). A request set from this
-# is therefore slightly generous, never short, which is what a request should be.
+# cgroup was charged rather than the charge itself. Two measurements on 2026-11-05, and the gap
+# between them is the point:
+#   - a Guaranteed pod at 192Gi/192Gi read 193.22 GiB here, 0.6% above its limit, no OOM kill;
+#   - a Guaranteed pod at 64Gi/64Gi read 101.78 GiB here, 59% above its limit, and WAS killed.
+# The second one is physics: a cgroup capped at 64 GiB cannot be charged 101.78, so 37.8 GiB of
+# that reading is not the container's. An overstatement of 0.6% is a rounding error; one of 59%
+# would have doubled that kind's request if "peak + 30%" had been applied to it.
+#
+# SO: CHECK THE READING AGAINST THE POD'S OWN LIMIT BEFORE SIZING FROM IT.
+#   kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].resources.limits.memory}'
+# A reading at or above the limit does not mean the pod needed more. It means the series is
+# inflated for that pod and cannot size it; the limit, and whether the pod completed inside it,
+# is the better evidence. This tool is reliable for finding a kind that over-asks by a WIDE
+# margin -- a 32 GiB ask against a 1 GiB reading is not 59% of anything -- and unreliable for
+# trimming the last few per cent off a pod that already runs near its limit.
 set -uo pipefail
 
 pod="${1:-}"
@@ -130,8 +140,13 @@ if total:
     else:
         print(f"  suggested request: {total * 1.3 / 2**30:.2f} GiB (peak + 30%), rounded up to"
               " the next size your kind uses")
+    print("  CHECK THIS AGAINST THE POD LIMIT before sizing from it:"
+          " kubectl get pod <pod> -n <ns>"
+          " -o jsonpath=\x27{.spec.containers[*].resources.limits.memory}\x27")
     print("  Under gVisor the node counts the sandbox memory with the container, so this peak"
-          " is an UPPER BOUND on what the cgroup was charged. If the pod completed at a limit"
-          " BELOW the suggestion, that run is the better evidence and the suggestion is high:"
-          " one pod read 193.22 GiB and finished inside a 192Gi limit with no kill.")
+          " is an UPPER BOUND on the cgroup charge, and the overstatement can be large: one pod"
+          " at 192Gi read 193.22 (0.6% over), another at 64Gi read 101.78 (59% over) and was"
+          " killed. A reading AT OR ABOVE the limit means the series is inflated for that pod,"
+          " NOT that the pod needed more. Good for finding a wide over-ask; not for trimming a"
+          " pod that already runs near its limit.")
 '
