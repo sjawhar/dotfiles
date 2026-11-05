@@ -39,6 +39,14 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 AGENTBOX = DOTFILES / "scripts" / "agentbox"
 
+# agentbox sends every Envoy body on stdin (`envoy send --message-file -`), since `envoy send`
+# refuses a body given as a command-line word in an agent session. The stub records the argv and,
+# when the call reads stdin, the body after it, so a test reads both from one file.
+ENVOY_RECORD = (
+    'printf "%s\\n" "$@" >>"$STUB_ENVOY"; '
+    'if [[ " $* " == *" --message-file - "* ]]; then cat >>"$STUB_ENVOY"; fi'
+)
+
 
 def bun_dirs() -> list[str]:
     """The directory of the bun this suite runs with, as a move finds bun on the host. Never a
@@ -84,7 +92,7 @@ class AgentboxMove(unittest.TestCase):
         write_stub(self.stubs, "pgrep", 'cat "$STUB_PGREP" 2>/dev/null; exit 0')
         write_stub(self.stubs, "tmux", 'cat "$STUB_TMUX" 2>/dev/null; exit 0')
         write_stub(self.stubs, "docker", 'cat "$STUB_DOCKER" 2>/dev/null; exit 0')
-        write_stub(self.stubs, "envoy", 'printf "%s\\n" "$@" >>"$STUB_ENVOY"; exit 0')
+        write_stub(self.stubs, "envoy", f'{ENVOY_RECORD}; exit 0')
         for name in ("STUB_PGREP", "STUB_TMUX", "STUB_DOCKER", "STUB_ENVOY"):
             (self.root / name).write_text("", encoding="utf-8")
         self.env = {
@@ -1499,7 +1507,7 @@ class AgentboxMove(unittest.TestCase):
         write_stub(self.stubs, "agentbox", f'rm -rf "$XDG_CACHE_HOME"; touch "{launched}"')
         write_stub(self.stubs, "envoy",
                    f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":99999999999999}}]\'; '
-                   'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi')
+                   f'else {ENVOY_RECORD}; fi')
         sock = str(self.root / "tmux.sock")
         env = {**self.env, "XDG_CACHE_HOME": str(cache), "TMUX": ""}
         subprocess.run([tmux, "-S", sock, "-f", "/dev/null", "new-session", "-d", "-s", "move", "sleep 600"],
@@ -1520,7 +1528,7 @@ class AgentboxMove(unittest.TestCase):
             time.sleep(0.1)
         self.assertTrue(launched.exists(), "the real tmux respawn did not run the launcher")
         self.assertFalse(cache.exists(), "the old box cache was not discarded")
-        self.assertIn(f"send\n--source\nenvoy\n{sid}\n", (self.root / "STUB_ENVOY").read_text(),
+        self.assertIn(f"send\n--source\nenvoy\n--message-file\n-\n{sid}\n", (self.root / "STUB_ENVOY").read_text(),
                       "the resumed session got no wake after the old box cache disappeared")
 
     # ── notifying other sessions ────────────────────────────────────────────────────────────
@@ -1628,7 +1636,7 @@ class AgentboxMove(unittest.TestCase):
             self.stubs,
             "envoy",
             f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":99999999999999}}]\'; '
-            'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
+            f'else {ENVOY_RECORD}; fi; exit 0',
         )
         write_stub(self.stubs, "sleep", "exit 0")
         # The notice goes only when an omp of this session runs on THIS machine: a registration
@@ -1642,8 +1650,8 @@ class AgentboxMove(unittest.TestCase):
         result = self.run_bash(f"MOVE_WAKE_WAIT=10\nMOVE_WAKE_TOTAL=10\nmove_wake {sid}")
         self.assertEqual(result.returncode, 0, result.stderr)
         sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(sent[:4], ["send", "--source", "envoy", sid])
-        self.assertIn("not a person", sent[4])
+        self.assertEqual(sent[:6], ["send", "--source", "envoy", "--message-file", "-", sid])
+        self.assertIn("not a person", sent[6])
 
     def test_the_waker_never_notifies_the_old_registration(self) -> None:
         # An Envoy row last updated before the waker started is the old process's; a notice to it
@@ -1653,7 +1661,7 @@ class AgentboxMove(unittest.TestCase):
             self.stubs,
             "envoy",
             f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":1}}]\'; '
-            'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
+            f'else {ENVOY_RECORD}; fi; exit 0',
         )
         write_stub(self.stubs, "sleep", "exit 0")
         result = self.run_bash(f"MOVE_WAKE_WAIT=10\nMOVE_WAKE_TOTAL=10\nmove_wake {sid}")
@@ -1672,7 +1680,7 @@ class AgentboxMove(unittest.TestCase):
             self.stubs,
             "envoy",
             f'if [[ "$1" == ps ]]; then echo \'[{{"session_id":"{sid}","updated_at":1}}]\'; '
-            'else printf "%s\\n" "$@" >>"$STUB_ENVOY"; fi; exit 0',
+            f'else {ENVOY_RECORD}; fi; exit 0',
         )
         write_stub(self.stubs, "sleep", 'printf "%s\\n" "$1" >>"$STUB_SLEEPS"; exit 0')
         sleeps = self.root / "sleeps"

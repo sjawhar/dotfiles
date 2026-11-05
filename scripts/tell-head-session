@@ -64,8 +64,10 @@ def main() -> None:
         if session == os.environ.get("OMP_SESSION_ID"):
             say("the head is this session's own commit, nobody told")
             return
+        # stdin, not an argv word: `envoy send` refuses a command-line body in an agent session.
         sent = subprocess.run(
-            ["envoy", "send", session, text], capture_output=True, text=True, timeout=60
+            ["envoy", "send", "--message-file", "-", session],
+            input=text, capture_output=True, text=True, timeout=60,
         )
         if sent.returncode == 0:
             say(f"told {session}")

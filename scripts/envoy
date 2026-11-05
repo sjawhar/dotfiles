@@ -42,19 +42,26 @@
 # nothing, so a caller needs no probe for it.
 #
 # The message body of `send`, `notify` and `broadcast` comes either from the
-# command line, as it always has, or from `--message-file <path>` — `-` for
-# stdin, the spelling dispatch uses for its own --<field>-file flags. Give both
-# and the command refuses, naming the two inputs, since silently preferring one
-# is how an operator sends the wrong text. A body on an argv is readable by
-# every process on the box through /proc/<pid>/cmdline, lands in shell history,
-# and passes the shell's quoting rules first: on 2026-11-01 a command name in
-# backticks inside a double-quoted argument was run by the shell and its output
-# substituted into the message before envoy saw it. A --message-file body is
-# never a shell word and never an argv: its bytes reach the listener exactly as
-# they are, newlines, backticks, `$(…)` and a trailing newline included (jq
-# --rawfile reads the file; a shell variable would drop every trailing newline
-# and any NUL). An empty one is refused — a pipeline that produced nothing is a
-# mistake, not a message.
+# command line or from `--message-file <path>` — `-` for stdin, the spelling
+# dispatch uses for its own --<field>-file flags. Give both and the command
+# refuses, naming the two inputs, since silently preferring one is how an
+# operator sends the wrong text. A body on an argv is readable by every process
+# on the box through /proc/<pid>/cmdline, lands in shell history, and passes the
+# shell's quoting rules first: on 2026-11-01 a command name in backticks inside
+# a double-quoted argument was run by the shell and its output substituted into
+# the message before envoy saw it, and on 2026-11-05 the same shape ran
+# `omp --resume <another session>` from inside a chief's session. So an AGENT
+# SESSION may not give a body on the command line at all: when one of the
+# harness markers below is set, `send`, `notify` and `broadcast` refuse a
+# command-line body, exit 2, and say to use --message-file (a path, or - with
+# the body on stdin). A person at a terminal, with no marker in the
+# environment, keeps the positional form. A script that runs inside a session
+# passes its body on stdin: `envoy send --message-file - <target> <<'EOF'`.
+# A --message-file body is never a shell word and never an argv: its bytes
+# reach the listener exactly as they are, newlines, backticks, `$(…)` and a
+# trailing newline included (jq --rawfile reads the file; a shell variable would
+# drop every trailing newline and any NUL). An empty one is refused — a
+# pipeline that produced nothing is a mistake, not a message.
 #
 # `envoy --help` (also -h, help) prints the usage and exits 0; an unknown or
 # missing command prints it to stderr and exits 2.
@@ -411,6 +418,34 @@ flag_after_target() {
     return 0
 }
 
+# agent_marker prints the name of the first agent-harness session marker this
+# environment holds, and fails when there is none. OMP exports OMP_SESSION_ID
+# (and OMPCODE) into every command of its bash tool; Claude Code exports
+# CLAUDE_CODE_SESSION_ID (and CLAUDECODE). These are the same markers the
+# sender's source=agent stamp is derived from, so "an agent typed this" has one
+# definition in this script.
+agent_marker() {
+    local name
+    for name in OMP_SESSION_ID CLAUDE_CODE_SESSION_ID OMPCODE CLAUDECODE; do
+        if [ -n "${!name:-}" ]; then printf '%s' "$name"; return 0; fi
+    done
+    return 1
+}
+
+# inline_body_refused WHERE refuses a command-line message body in an agent
+# session, and allows it for a person at a terminal. The body an agent types
+# goes through the shell's quoting rules before envoy sees it: on 2026-11-05 a
+# backquoted command inside such a message ran `omp --resume <another session>`
+# in the sending session. The rule "remember to use --message-file" kept being
+# broken, so the command enforces it; a person at a terminal, whose environment
+# holds no harness marker, is unaffected.
+inline_body_refused() {
+    local where="$1" marker
+    marker="$(agent_marker)" || return 1
+    echo "envoy: $where refuses a message given on the command line in an agent session ($marker is set): the shell expands backticks and \$(...) in it before envoy sees it. Send the body with \`$where --message-file <path> <target>\`, or \`--message-file -\` with the body on stdin (a heredoc)." >&2
+    return 0
+}
+
 _envoy_send() {
     local asserted_source="" message_file=""
     # Options may come in any order, and parsing stops at the first word that is
@@ -434,8 +469,8 @@ _envoy_send() {
         esac
     done
     if [ $# -lt 1 ] || { [ -z "$message_file" ] && [ $# -lt 2 ]; }; then
-        echo "Usage: envoy send [--source envoy] <target> <message>" >&2
-        echo "       envoy send [--source envoy] --message-file <path> <target>" >&2
+        echo "Usage: envoy send [--source envoy] --message-file <path> <target>" >&2
+        echo "       envoy send [--source envoy] <target> <message>   (refused in an agent session)" >&2
         echo "  target: session ID (UUID) for direct send, or topic for publish" >&2
         echo "  --message-file: the message's bytes, from a path or - for stdin" >&2
         return 1
@@ -447,6 +482,7 @@ _envoy_send() {
         resolve_message_file "$message_file"
     else
         flag_after_target "envoy send" "$@" || return 2
+        ! inline_body_refused "envoy send" || return 2
         message="$*"
     fi
 
@@ -525,6 +561,7 @@ _envoy_broadcast() {
         resolve_message_file "$message_file"
         pre=(--message-file "$MESSAGE_FILE")
     else
+        ! inline_body_refused "envoy broadcast" || return 2
         message="$*"
         post=("$message")
     fi
@@ -602,6 +639,9 @@ _envoy_notify() {
         echo "       envoy notify --message-file <path> <topic>" >&2
         return 1
     fi
+    if [ ${#opts[@]} -eq 0 ]; then
+        ! inline_body_refused "envoy notify" || return 2
+    fi
     _envoy_send --source envoy "${opts[@]}" "$@"
 }
 
@@ -618,11 +658,16 @@ Commands:
   config-path                             print the envoy.json envoy reads
   help, -h, --help                        print this usage
 
-send, notify and broadcast take the message either as <msg> on the command line
-or as --message-file <path> (- is stdin), whose bytes are sent exactly as they
-are — newlines, backticks and $(...) are text, not shell. Giving both is
-refused. Prefer --message-file for anything long or quoted: an argv is readable
-by every process on the box and goes through the shell's quoting rules first.
+send, notify and broadcast take the message either as --message-file <path>
+(- is stdin), whose bytes are sent exactly as they are — newlines, backticks
+and $(...) are text, not shell — or as <msg> on the command line. Giving both
+is refused. IN AN AGENT SESSION the command-line form is refused outright
+(exit 2): an argv is readable by every process on the box and the shell
+expands backticks and $(...) in it before envoy sees it. From a script or an
+agent, send the body on stdin:
+  envoy send --message-file - <target> <<'EOF2'
+  ...text...
+  EOF2
 EOF
 }
 

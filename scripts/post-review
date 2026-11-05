@@ -269,8 +269,11 @@ def notify_author(token: str, slug: str, pr: str, head: str, event: str, stamp: 
             "`Omp-Session:` trailer. If the verdict asks for changes, the head moves and the "
             "next verdict names the new head."
         )
+        # The body goes on stdin: `envoy send` refuses one given as a command-line word in an
+        # agent session, where the shell expands backticks and $(...) in it before envoy sees it.
         sent = subprocess.run(
-            ["envoy", "send", session, text], capture_output=True, text=True, timeout=60
+            ["envoy", "send", "--message-file", "-", session],
+            input=text, capture_output=True, text=True, timeout=60,
         )
         if sent.returncode == 0:
             print(f"post-review: told {session}")

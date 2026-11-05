@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/envoy send and notify: who the message says it is from.
+"""scripts/envoy send and notify: who the message says it is from, and how the body is given.
 
 With no flag the sender is derived from the environment: an agent harness's session marker
 stamps source=agent and that session's id as source_session. A leading `--source envoy` stamps
@@ -7,6 +7,11 @@ source=envoy and never a source_session, whatever the environment holds, so an a
 does not show as the session that happened to run it (the inbox renders the sender as
 `source_session ?? source`). envoy is the only value a caller may assert. `notify` is that send,
 for the timers that post such notices.
+
+A session marker in the environment also decides how the body may be given: an agent session
+must pass it through --message-file (a path, or - for stdin), never as a command-line word,
+because the shell expands backticks and $(...) in that word before envoy sees it. A person at a
+terminal, with no marker, keeps the positional form.
 
 Technique: stub `curl` first on PATH; it records its argv NUL-separated and answers as the
 listener would, so each test reads back the URL and the JSON body the script posted.
@@ -63,9 +68,12 @@ class EnvoySend(unittest.TestCase):
     def send(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         return self.envoy("send", *args, **extra)
 
-    def envoy(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    def envoy(
+        self, *args: str, stdin: str | None = None, **extra: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(ENVOY), *args],
+            input=stdin,
             capture_output=True,
             text=True,
             env={**self.env, **extra},
@@ -89,7 +97,10 @@ class EnvoySend(unittest.TestCase):
     def test_source_envoy_drops_an_inherited_session_id(self) -> None:
         for marker in ("OMP_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
             with self.subTest(marker=marker):
-                result = self.send("--source", "envoy", TOPIC, "daily notice", **{marker: "x"})
+                result = self.send(
+                    "--source", "envoy", "--message-file", "-", TOPIC,
+                    stdin="daily notice", **{marker: "x"},
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 _, body = self.posted()
                 self.assertEqual(body["source"], "envoy")
@@ -102,19 +113,63 @@ class EnvoySend(unittest.TestCase):
         self.assertFalse(self.curl_log.exists(), "nothing may be posted")
 
     def test_without_the_flag_an_agent_session_sends_as_itself(self) -> None:
-        result = self.send(TOPIC, "hello", OMP_SESSION_ID="x")
+        result = self.send("--message-file", "-", TOPIC, stdin="hello", OMP_SESSION_ID="x")
         self.assertEqual(result.returncode, 0, result.stderr)
         url, body = self.posted()
         self.assertEqual(url, f"{ENVOY_URL}/v1/messages/publish")
+        self.assertEqual(body["message"], "hello")
         self.assertEqual(body["source"], "agent")
         self.assertEqual(body["source_session"], "x")
 
     def test_notify_publishes_as_envoy_whatever_session_runs_it(self) -> None:
-        result = self.envoy("notify", TOPIC, "daily notice", OMP_SESSION_ID="x")
+        result = self.envoy(
+            "notify", "--message-file", "-", TOPIC, stdin="daily notice", OMP_SESSION_ID="x"
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         url, body = self.posted()
         self.assertEqual(url, f"{ENVOY_URL}/v1/messages/publish")
         self.assertEqual(body, {"topic": TOPIC, "message": "daily notice", "source": "envoy"})
+
+    # The body an agent types is a shell word first: on 2026-11-05 a backquoted command inside
+    # one ran `omp --resume <another session>` in the sending session before envoy saw the text.
+    def test_an_agent_session_may_not_give_the_body_on_the_command_line(self) -> None:
+        for marker in ("OMP_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "OMPCODE", "CLAUDECODE"):
+            for args in (
+                ("send", TOPIC, "hello"),
+                ("send", "--source", "envoy", TOPIC, "hello"),
+                ("notify", TOPIC, "hello"),
+                ("broadcast", "hello"),
+            ):
+                with self.subTest(marker=marker, args=args):
+                    result = self.envoy(*args, **{marker: "x"})
+                    self.assertEqual(result.returncode, 2, result.stdout)
+                    lines = result.stderr.strip().splitlines()
+                    self.assertEqual(len(lines), 1, result.stderr)
+                    self.assertIn(f"({marker} is set)", lines[0])
+                    self.assertIn("--message-file", lines[0])
+                    self.assertFalse(self.curl_log.exists(), "nothing may be posted")
+
+    def test_a_person_at_a_terminal_keeps_the_command_line_body(self) -> None:
+        result = self.send(TOPIC, "hello")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, body = self.posted()
+        self.assertEqual(body, {"topic": TOPIC, "message": "hello", "source": "human"})
+
+    def test_an_agent_session_sends_a_file_body_verbatim(self) -> None:
+        body_file = Path(self.temp_dir.name) / "message.txt"
+        text = "line one\n`hostname` and $(id) are text\n"
+        body_file.write_text(text, encoding="utf-8")
+        for source in (["--message-file", str(body_file)], ["--message-file", "-"]):
+            with self.subTest(source=source[1]):
+                self.curl_log.unlink(missing_ok=True)
+                result = self.send(
+                    *source, TOPIC,
+                    stdin=text if source[1] == "-" else None,
+                    OMP_SESSION_ID="x",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                _, posted = self.posted()
+                self.assertEqual(posted["message"], text)
 
     def test_notify_needs_a_topic_and_a_message(self) -> None:
         for args in ((TOPIC,), (TOPIC, "a", "b")):
