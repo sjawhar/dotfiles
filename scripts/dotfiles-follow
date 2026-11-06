@@ -565,11 +565,13 @@ def sweep_hooks(options: argparse.Namespace) -> str:
     2026-11-04 at idle priority, which is what the first 120 s default could not fit. On
     2026-11-06 the sweep's own `find` alone took 434.7 s over 24,884 `.git` entries at load 191
     with a cold directory cache (a warm pass right after it took 146.4 s), and passes were killed
-    at the 420 s cap at 07:42:43Z and 08:02:43Z. 870 s is about twice that cold walk, and still
-    fires when the population grows again. It is temporary: once the sweep bounds a pass by the
-    checkouts that can reach GitHub (dispatch://BET-706), it goes back to twice that measured
-    pass. The unit allows 1170 s in all and its timer waits 10 minutes after each run ends, so a
-    long pass delays nothing.
+    at the 420 s cap at 07:42:43Z and 08:02:43Z. A raised 870 s cap was tried from 08:27Z and a
+    pass was still killed at it at 10:50:16Z, while its `find` sat in uninterruptible IO wait
+    beside 31 other processes in a stall that wedged six sessions' shells (the SRE, 11:48Z). A
+    longer cap gave the walk more time on a stalled disk and finished nothing more, so the cap
+    is 420 s again until the sweep's walk is cheaper (dispatch://BET-706); then it becomes twice
+    that measured pass. The unit allows 1170 s in all and its timer waits 10 minutes after each
+    run ends, so a long pass delays nothing.
     """
     script = options.hooks_dir / "sweep-hooks.sh"
     if not script.is_file():
@@ -972,7 +974,7 @@ def main() -> int:
         default=Path.home() / ".local/share/public-leak-check-hooks",
         help="where step prepush put the leak-check tag's sweep-hooks.sh (default ~/.local/share/public-leak-check-hooks)",
     )
-    parser.add_argument("--sweep-timeout", type=float, default=870.0, help="one hook sweep pass, killed after this many seconds (default 870, about twice a measured cold full walk)")
+    parser.add_argument("--sweep-timeout", type=float, default=420.0, help="one hook sweep pass, killed after this many seconds (default 420; a longer cap only lengthened passes stuck on a stalled disk)")
     parser.add_argument("--http-timeout", type=float, default=8.0)
     parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
     options = parser.parse_args()
