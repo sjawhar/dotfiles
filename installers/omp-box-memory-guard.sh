@@ -167,21 +167,46 @@ fi
 # single plain-ssh session scope on sami-devbox held 684 GiB and earlyoom answered with ~500
 # SIGTERMs across the fleet. logind's session-<N>.scope has no limit of its own, so give every
 # one of them a MemoryHigh/MemoryMax through the prefix drop-in directory session-.scope.d/.
+#
+# `systemctl daemon-reload` applies the drop-in to the scopes that are ALREADY RUNNING, not
+# only to the next login: measured on sami-devbox 2026-11-06T20:14Z, session-10548.scope,
+# started long before the file existed, showed MemoryMax=256G straight after the reload. So
+# installing this on a box where a live session is already over the ceiling -- exactly the
+# situation the guard exists for -- would hard-cap that session at install time and have the
+# kernel OOM-kill the work inside it. Refuse instead, name the session, and write nothing: a
+# person then looks at what is holding the memory, and a re-run installs once it is below.
+session_cap_over=
+if [ "$mem_total_kb" -ge "$SESSION_DROPIN_MIN_KB" ]; then
+    session_cap=$(awk -F= '/^MemoryMax=/ {print $2}' "${DOTFILES_DIR}/devbox/session-scope-memory-guard.conf")
+    session_cap_bytes=$(numfmt --from=iec "$session_cap")
+    while read -r scope; do
+        [ -n "$scope" ] || continue
+        current=$(systemctl show "$scope" -p MemoryCurrent --value 2>/dev/null || true)
+        [[ "$current" =~ ^[0-9]+$ ]] || continue # [not set], infinity, or a scope that just ended
+        if [ "$current" -gt "$session_cap_bytes" ]; then
+            session_cap_over="${session_cap_over}  ${scope}: $((current / 1073741824)) GiB"$'\n'
+        fi
+    done < <(systemctl list-units --type=scope --all --plain --no-legend 'session-*.scope' 2>/dev/null | awk '{print $1}')
+fi
 if [ "$mem_total_kb" -lt "$SESSION_DROPIN_MIN_KB" ]; then
     echo "omp-box-memory-guard: $((mem_total_kb / 1048576)) GiB of RAM; no session-scope cap here"
+elif [ -n "$session_cap_over" ]; then
+    echo "omp-box-memory-guard: NOT installing ${SESSION_DROPIN}." >&2
+    echo "  A live login session is already over the ${session_cap} ceiling, and daemon-reload would" >&2
+    echo "  apply it to that running scope at once, OOM-killing the work inside it:" >&2
+    printf '%s' "$session_cap_over" >&2
+    echo "  Find what is holding the memory there, get it under ${session_cap}, then re-run this." >&2
 elif ! sudo diff -q "${DOTFILES_DIR}/devbox/session-scope-memory-guard.conf" "$SESSION_DROPIN" >/dev/null 2>&1; then
     echo "Installing ${SESSION_DROPIN}..."
     sudo mkdir -p "$(dirname "$SESSION_DROPIN")"
     sudo install -m 0644 "${DOTFILES_DIR}/devbox/session-scope-memory-guard.conf" "$SESSION_DROPIN"
     sudo systemctl daemon-reload
 fi
-# Unlike a slice, a transient scope that is already running does not pick the drop-in up on
-# daemon-reload; sessions that log in after this point get it. Report, never fail on, what the
-# session this installer runs in has.
-if [ "$mem_total_kb" -ge "$SESSION_DROPIN_MIN_KB" ]; then
+# Report, never fail on, what the session this installer runs in has.
+if [ "$mem_total_kb" -ge "$SESSION_DROPIN_MIN_KB" ] && [ -z "$session_cap_over" ]; then
     session_scope=$(awk -F/ '/^0::/ {for (i = 1; i <= NF; i++) if ($i ~ /^session-[0-9]+\.scope$/) print $i}' /proc/self/cgroup)
     if [ -n "$session_scope" ]; then
-        echo "$session_scope: MemoryMax=$(systemctl show "$session_scope" -p MemoryMax --value 2>/dev/null || echo unknown) (older sessions keep their old limit until they log in again)"
+        echo "$session_scope: MemoryMax=$(systemctl show "$session_scope" -p MemoryMax --value 2>/dev/null || echo unknown) (every live session scope takes this at the daemon-reload above, not at its next login)"
     fi
 fi
 
