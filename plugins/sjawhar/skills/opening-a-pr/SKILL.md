@@ -28,6 +28,7 @@ Steps 2/4/6 (including their references): use a fresh agent that did not write t
     - One line of work gets one PR. A defect you hit while doing it is part of it: fix it in this PR instead of asking whether to.
     - Before every push, run the fast local checks outside your agent shell's environment. Push only when they pass, and cite the output lines.
     - A PR without current, observed `## Verification` evidence is not merge-ready: current means at this head, observed means you ran it.
+    - **Sami's standard contributor sentence, which goes in every upstream PR, is exactly:** `My agent found this while analyzing our fleet's transcripts.` Upstream `CONTRIBUTING.md` wants a sentence from the contributor in their own words; this is his, and it needs no ask. Never write an incident narrative in his first person instead: on 2026-11-06 a lane wrote "a script of mine read a tool result from an eval cell…", which described work he does not do, and he answered "nobody cares about your stupid fucking incident report" (dispatch://INFRA-161/ask/19eac66f). Why the change is worth making belongs in the body's own sections, not in his sentence.
 
 ## After the PR exists
 
