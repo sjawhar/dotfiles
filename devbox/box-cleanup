@@ -542,23 +542,25 @@ for mount in $(mounts_sorted); do
     fi
 done
 
-# "Freed nothing" is judged on what came BACK, not on the net change. The first run of this job
-# on sami-devbox (2026-11-04 21:20-21:34Z) ended at -51.2 GB net while every cleaner worked
-# perfectly: eighty sessions write to these disks throughout, and the biggest single figure was
-# -48.8 GB on /mnt/nvme during a step that deletes nothing at all (session-tmp-reap reports).
-# A net-change rule would therefore have called a healthy box dead within three days, which is
-# the one thing an alert must not do. So the day is counted against the sum of the POSITIVE
-# per-step changes: three days in which not one step coincided with any space coming back.
-# That errs towards silence, so the failing-step rule below carries the sharper signal.
-# Skipped steps are not evidence of failed cleaning: a pass must attempt work to count, and
-# observations remain at least a day apart. Space coming back on ANY pass clears the streak,
-# even when other steps were skipped. The zero-gain alert only follows a new observation.
+# "Freed nothing" is judged on what the CLEANERS SAY they removed, never on what the disks did.
+# It used to be judged on the sum of the positive per-step df deltas, which is the same shared
+# mount every other lane writes to: on a busy box some step always coincides with space coming
+# back, so the streak reset on every run and this alert could never fire. It was written that
+# way because a NET df change was worse still -- the first run here (2026-11-04 21:20-21:34Z)
+# ended at -51.2 GB while every cleaner worked -- but both readings measure the box, not the
+# cleaners. Now that each cleaner reports `reclaimed-bytes`, the right figure is its own.
+#
+# A run where NOTHING reported is not evidence either way, so it does not count: that is a
+# gap in the cleaners' instrumentation, not a day the cleaning failed, and counting it would
+# alert about the wrong thing. Skipped steps are not evidence: a pass must attempt work.
+# Observations stay at least a day apart, and the first run that reclaims anything clears the
+# streak. That errs towards silence, so the failing-step rule below carries the sharper signal.
 zero_counted=no
-if ((total_gained > 0)); then
+if ((total_freed > 0)); then
     zero_days=0
     alerted_at=0
     zero_checked_at="$started_epoch"
-elif ((attempted > 0 && started_epoch - zero_checked_at >= ZERO_INTERVAL)); then
+elif ((attempted > 0 && attempted > ${#unmeasured[@]} && started_epoch - zero_checked_at >= ZERO_INTERVAL)); then
     zero_days=$((zero_days + 1))
     zero_checked_at="$started_epoch"
     zero_counted=yes
