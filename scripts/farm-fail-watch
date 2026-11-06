@@ -481,13 +481,16 @@ def sampled_peak_advice(found: dict) -> str:
     near = (" It read {} against a {} limit, {:.0%} of it.".format(
         gib(peak), gib(limit), peak / limit) if peak and limit else "")
     return ("DO NOT SIZE FROM THIS PEAK: it is a SAMPLED figure, not the kernel's."
-            f"{near} On the gVisor build class the sandbox's cgroup has no memory.peak, and on"
-            " identical work the kernel peak has been measured at 1.5 to 3.5 times the sampled"
-            " one (CI/CD lead, 2026-11-06, openssl__client). So 1.3x of this number is a size"
-            " built on a figure wrong by an unknown factor, most likely too small. Run the same"
-            " target once on a class that records memory_peak_kind: kernel (build-nosandbox)"
-            " and size at 1.3x that. If the result still says sampled, the run did not do its"
-            " job and its number is not to be quoted.")
+            f"{near} On the gVisor build class the sandbox's cgroup has no memory.peak, and the"
+            " sampled figure is not the quantity the kernel enforces: on 2026-11-06 the OSS"
+            " Verify curl lane recorded four runs whose sampled peak sat 1.03 to 1.09 times"
+            " ABOVE their own memory limits, two of them never killed and with no oom event at"
+            " all. A cgroup cannot be exceeded without the kernel acting, and it did not act."
+            " On identical work the kernel peak has also been measured at 1.5 to 3.5 times the"
+            " sampled one (CI/CD lead, same day, openssl__client). Run the same target once on a"
+            " class that records memory_peak_kind: kernel (build-nosandbox) and size at 1.3x"
+            " that. If the result still says sampled, the run did not do its job and its number"
+            " is not to be quoted.")
 
 
 def memory_advice(found: dict) -> str:
