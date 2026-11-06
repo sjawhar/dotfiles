@@ -102,8 +102,13 @@ STEPS=(
     "tmp-stale-reap|86400|/tmp|TMP_REAP_RUN_SECONDS=1680 $here/tmp-stale-reap --apply"
     # Session-directory census and liveness checks keep their daily cadence.
     "session-scratch-reap|86400|/mnt/nvme/$user/session-tmp /mnt/scratch/$user/session-tmp|$here/session-scratch-reap"
-    # The report-only TMPDIR census took 409-828 seconds: do it once a day.
-    "session-tmp-reap|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|$here/session-scratch-reap --tmp"
+    # The report-only TMPDIR census took 409-828 seconds when that comment was written; on
+    # 2026-11-06 it ran past the 30-minute step timeout on every pass, so box-cleanup exited 1
+    # daily and unit-health-watch alarmed on a unit whose cleaners had all worked. Its own walk
+    # budget defaults to 7200s, longer than the step it runs inside. Give it one that fits, as
+    # tmp-stale-reap does: the script keeps every entry whose walk it could not finish, so a cut
+    # walk reports less and removes nothing extra, while a SIGKILL at 30m reports nothing.
+    "session-tmp-reap|86400|/mnt/nvme/$user/tmp /mnt/scratch/$user/tmp|TMP_REAP_WALK_SECONDS=1500 $here/session-scratch-reap --tmp"
     # Cheap cap checks; their own usage thresholds decide whether trimming is needed.
     "gocache-cap|0|/mnt/nvme/$user/gocache /mnt/scratch/$user/gocache|$here/gocache-cap"
     "nvme-cache-cap|0|/mnt/nvme/$user|$here/nvme-cache-cap"
