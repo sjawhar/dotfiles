@@ -1,7 +1,7 @@
 ---
 alwaysApply: true
 ---
-# A kernel or grader bug does not void a task
+# A kernel or grader bug, a leak or an exploit does not void a task
 
 The fleet's most-repeated own-goal: a lane finds a Rocq kernel or grader defect, reasons "a score from this cannot be trusted," and takes one step too far — to "this task does not count" — then withdraws the task, resets the dose counter, or refuses the launch. The score needs re-judging on a fixed image; the task does not. (dispatch://INFRA-1239 traced eight instances of exactly this step, re-derived from scratch each time because the rule lived only in places a session had to already be looking.)
 
@@ -11,5 +11,7 @@ Sami's standing rulings, in his own words:
 - 2026-11-04, standup (dispatch://INFRA-460): "Not if you hold the top-level statements fixed." A grader may compile the agent's own tree while holding the top-level statements fixed; rebuilding pristine text is one safeguard against a weakened statement, not the requirement.
 - 2026-11-01, standup (dispatch://INFRA-460): "stop building guards against agents doing their jobs." A reflexive guard that refuses legitimate work — a blanket launch refusal, a reset-to-zero on every change — is the own-goal, not a fix.
 - 2026-11-05, standup (dispatch://INFRA-460): "if you find a bug in the software that is used in your task, it doesn't mean that you throw out the task. You just file the to-do to fix the bug before shipping. Shipping here doesn't mean before running it on the platform. It means before the contract ends, before final delivery of the entire milestone." The general form: a bug in ANY tool your task depends on (not only Rocq) means file a to-do and fix it before final milestone delivery — not discard the task.
+- 2026-11-06, standup (dispatch://INFRA-460/message/0941e9d8-47ac-414c-aa3e-2d838cd8e001): "Finding a proof leak / copying cheat Means that you need to improve the deduplication, which we should all be sharing across all of our repos and workflows. And remeasure calibration doesn't mean you abandon things entirely." "Finding a bug in the [grader] that can be fixed and regraded means that you don't have to throw out your tasks. You just need to regrade them. Finding an exploit that there's no evidence of an agent ever having taken means that you patched the exploit. It does not mean that you threw out all of your difficulty calibration or any other information you've gathered." The one shared deduplication and cut framework is dispatch://BET-750.
+- Same message, on proof work (not tasks): "Copying is heavily encouraged in doing actual proof work on OSS Verify. OSS Verify should always have the entire corpus available to the proof workers, so that they can minimize the amount of novel from-scratch proof machinery they have to build." Copying is a cheat only inside a task an agent is graded on.
 
-Before you write "void", "withdrawn", "does not count", "regrade from zero" or "reset the counter" after a kernel or grader bug: fix the bug in the image and re-judge the scores on it. That invalidates a task only when the task itself is wrong.
+Before you write "void", "withdrawn", "does not count", "regrade from zero", "reset the counter" or "recalibrate from scratch" after a kernel or grader bug, a leak or an exploit: fix the bug or patch the exploit, improve the deduplication for a leak, and re-judge the scores you have. Keep the calibration you gathered. A task is invalid only when the task itself is wrong.
