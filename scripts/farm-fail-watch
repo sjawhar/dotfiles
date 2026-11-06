@@ -382,6 +382,43 @@ def verdict(found: dict) -> dict:
         else "a peak or a bound is missing, so the two cannot be compared"))
 
 
+def read_retry_of(bucket: str, parent_id: str) -> dict | None:
+    """The limit and peak of the run this one is an OOM retry of, as facts and nothing more.
+
+    A retry at a higher limit gives a second point on the same work. Whether the two points
+    mean a job with a fixed appetite that was underestimated, or one that grows until it is
+    stopped, is what the two numbers are FOR -- this reads them and draws no conclusion. The
+    OSS Verify curl lane raised the distinction on 2026-11-06 with one pair (32Gi then 40Gi,
+    peaks 33.28 and 41.36 GiB) and retracted its own reading of a single point when the
+    second arrived; one pair is not enough to decide anything in code.
+    """
+    parent = parent_id.split("/", 1)[1] if "/" in parent_id else parent_id
+    job = read_object(bucket, f"in/ossv/{parent}/job.json")
+    result = read_object(bucket, f"out/ossv/{parent}/result.json")
+    if job is None and result is None:
+        return None
+    return {"run": parent_id,
+            "limit_text": (job or {}).get("memory"),
+            "limit_bytes": size_bytes((job or {}).get("memory")),
+            "peak_bytes": number((result or {}).get("memory_peak_bytes"))}
+
+
+def retry_line(found: dict) -> str | None:
+    """Both points on one line, with no reading of them attached."""
+    of = found.get("retry_of")
+    if not of:
+        return None
+    before = (f"{of['run']} was given {bound_text(of.get('limit_text'), of.get('limit_bytes'))}"
+              f" and peaked at {gib(of.get('peak_bytes'))}")
+    now = (f"this run was given {bound_text(found.get('memory_limit_text'), found.get('memory_limit_bytes'))}"
+           f" and peaked at {gib(found.get('memory_peak_bytes'))}")
+    return (f"THIS IS THE SECOND KILL OF THE SAME WORK: {before}; {now}."
+            " Two points on one job say more than one does, and they are left here unread:"
+            " a peak that lands at about the same figure both times is a fixed appetite that"
+            " was underestimated, and a peak that follows the limit upward is something that"
+            " grows until it is stopped, which more memory does not fix.")
+
+
 # How many lines of the end of job.log are searched for a proof-script error, and the most
 # that is quoted back. Measured on the OSS Verify curl lane's three runs of 2026-11-06
 # (CURL, 02:33Z): a clean run of the tree held no `Error:` line at all in 28,060 lines;
@@ -592,6 +629,9 @@ def message(found: dict, call: dict | None = None) -> str:
             f" ({found.get('unit')}, {found.get('kind')})"
             f" at {found.get('finished_at')}, {found.get('reason')}, exit {found.get('exit_code')}.")
     lines = [head, owner_line(found)]
+    second_kill = retry_line(found)
+    if second_kill:
+        lines.append(second_kill)
 
     if call["resource"] == "memory":
         lines.append(f"MEMORY was at its bound: {memory}; {disk}. ({call['why']}.)")
@@ -708,6 +748,9 @@ def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
         # lines, and a disk kill's cause is never a proof-script error.
         if bucket:
             found["script_error"] = read_script_error(bucket, run)
+            parent = (job or {}).get("oom_retry_of")
+            if parent:
+                found["retry_of"] = read_retry_of(bucket, parent)
     return found, missing
 
 

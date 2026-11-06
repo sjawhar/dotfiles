@@ -720,5 +720,46 @@ class AKillWhoseLogEndsInAnErrorIsNotToldToBuyMemory(unittest.TestCase):
         self.assertNotIn("DO NOT RAISE MEMORY YET", WATCH.memory_advice(found))
 
 
+class ASecondKillShowsBothPointsAndReadsNeither(unittest.TestCase):
+    """A retry at a higher limit is a second measurement of the same work.
+
+    Whether two peaks mean a fixed appetite underestimated twice or something that grows
+    until stopped is exactly what the pair is for, and one pair is not enough to decide it
+    in code: the curl lane read a single point as a heavy file on 2026-11-06 and retracted
+    it when the second point arrived. So the notice shows both and concludes nothing.
+    """
+
+    def test_both_limits_and_both_peaks_appear(self) -> None:
+        found = {"memory_limit_text": "40960Mi", "memory_limit_bytes": 40 * GIB,
+                 "memory_peak_bytes": int(41.36 * GIB),
+                 "retry_of": {"run": "farm/1af893", "limit_text": "32Gi",
+                              "limit_bytes": 32 * GIB, "peak_bytes": int(33.28 * GIB)}}
+        line = WATCH.retry_line(found)
+        for part in ("farm/1af893", "32Gi", "33.28 GiB", "40.00 GiB", "41.36 GiB"):
+            self.assertIn(part, line)
+
+    def test_it_draws_no_conclusion(self) -> None:
+        found = {"memory_limit_bytes": 40 * GIB, "memory_peak_bytes": 41 * GIB,
+                 "retry_of": {"run": "farm/x", "limit_bytes": 32 * GIB, "peak_bytes": 33 * GIB}}
+        line = WATCH.retry_line(found)
+        self.assertIn("left here unread", line)
+        for verdict in ("RAISE MEMORY", "SERIALISE", "unbounded"):
+            self.assertNotIn(verdict, line)
+
+    def test_a_first_kill_carries_no_such_line(self) -> None:
+        self.assertIsNone(WATCH.retry_line({"memory_peak_bytes": GIB}))
+
+    def test_a_parent_whose_records_are_gone_is_not_invented(self) -> None:
+        with patch.object(WATCH, "read_object", return_value=None):
+            self.assertIsNone(WATCH.read_retry_of("gs://b", "farm/gone"))
+
+    def test_a_parent_with_a_job_but_no_result_shows_the_limit_and_an_unknown_peak(self) -> None:
+        with patch.object(WATCH, "read_object", side_effect=[{"memory": "32Gi"}, None]):
+            of = WATCH.read_retry_of("gs://b", "farm/half")
+        self.assertEqual(of["limit_bytes"], 32 * GIB)
+        self.assertIsNone(of["peak_bytes"])
+        self.assertIn("unknown", WATCH.retry_line({"retry_of": of, "memory_peak_bytes": GIB}))
+
+
 if __name__ == "__main__":
     unittest.main()
