@@ -12,6 +12,7 @@ DISABLED_LAPTOP_MONITORS="${FIXTURES}/disabled-laptop.monitors"
 HYBRID_MONITORS="${FIXTURES}/hybrid.monitors"
 DESK_DELL_LEFT_MONITORS="${FIXTURES}/desk-dell-left.monitors"
 OFFICE_WQHD_TWINS_MONITORS="${FIXTURES}/office-wqhd-twins.monitors"
+HOME_BENQ_MONITORS="${FIXTURES}/home-benq.monitors"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
@@ -257,6 +258,21 @@ grep -Fq '(modifiers: [Alt], key: "9", description: Some("WS9 — DP-4 (1)")): W
     || fail 'office workspace 9 must resolve to the right U3225QE by serial'
 grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${office_output}" \
     || fail 'office workspace 11 must fall through to the laptop'
+
+# Home desk: LG ULTRAWIDE, BenQ left portrait by serial, Samsung right portrait. No top
+# screen, so 4-6 and the bottom row fall to the laptop.
+home_output="${TMPDIR}/home-benq-custom"
+"${GENERATOR}" --check --monitors "${HOME_BENQ_MONITORS}" > "${home_output}"
+grep -Fq '(modifiers: [Alt], key: "3", description: Some("WS3 — ULTRAWIDE (3)")): WorkspaceOnOutput("ULTRAWIDE", 3),' "${home_output}" \
+    || fail 'home workspace 3 must resolve to the LG ULTRAWIDE'
+grep -Fq '(modifiers: [Alt], key: "4", description: Some("WS4 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${home_output}" \
+    || fail 'home workspace 4 must fall through to the laptop'
+grep -Fq '(modifiers: [Alt], key: "8", description: Some("WS8 — DP-15 (2)")): WorkspaceOnOutput("DP-15", 2),' "${home_output}" \
+    || fail 'home workspace 8 must resolve to the BenQ by serial'
+grep -Fq '(modifiers: [Alt], key: "0", description: Some("WS10 — U32J59x (2)")): WorkspaceOnOutput("U32J59x", 2),' "${home_output}" \
+    || fail 'home workspace 10 must resolve to the right Samsung portrait'
+grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — eDP-1 (4)")): WorkspaceOnOutput("eDP-1", 4),' "${home_output}" \
+    || fail 'home workspace 11 must continue the laptop local sequence'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
 "${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"
