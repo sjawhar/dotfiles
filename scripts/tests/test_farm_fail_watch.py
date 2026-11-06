@@ -761,5 +761,43 @@ class ASecondKillShowsBothPointsAndReadsNeither(unittest.TestCase):
         self.assertIn("unknown", WATCH.retry_line({"retry_of": of, "memory_peak_bytes": GIB}))
 
 
+class ASampledPeakIsNotASizeToBuyFrom(unittest.TestCase):
+    """On the gVisor build class the farm records memory_peak_kind: sampled.
+
+    On identical work the kernel peak has been measured at 1.5 to 3.5 times the sampled one
+    (CI/CD lead, 2026-11-06), so 1.3x a sampled peak is a size built on a number wrong by an
+    unknown factor. The watch recommended exactly that until this guard.
+    """
+
+    def found(self, kind: str) -> dict:
+        return {"memory_peak_bytes": 33 * GIB, "memory_limit_bytes": 32 * GIB,
+                "memory_peak_kind": kind, "cpu_last_cores": 1.0, "cpu_limit_cores": 8}
+
+    def test_a_sampled_peak_withholds_the_size(self) -> None:
+        advice = WATCH.memory_advice(self.found("sampled"))
+        self.assertIn("DO NOT SIZE FROM THIS PEAK", advice)
+        self.assertNotIn("RAISE MEMORY to", advice)
+        self.assertIn("1.5 to 3.5", advice)
+
+    def test_a_kernel_peak_is_sized_from_as_before(self) -> None:
+        self.assertNotIn("DO NOT SIZE FROM THIS PEAK", WATCH.memory_advice(self.found("kernel")))
+
+    def test_an_unrecorded_kind_is_sized_from_rather_than_refused(self) -> None:
+        """Only `sampled` is refused: an older run with no kind recorded is not gVisor evidence."""
+        self.assertNotIn("DO NOT SIZE FROM THIS PEAK", WATCH.memory_advice(self.found(None)))
+
+    def test_it_claims_no_mechanism_the_evidence_withdrew(self) -> None:
+        """"The sampled value tracks the limit" was offered and withdrawn the same hour, because
+        one run read 29.13 GiB against a non-binding 112Gi limit. The advice must not assert it."""
+        advice = WATCH.memory_advice(self.found("sampled"))
+        for claim in ("tracks the limit", "climbs toward the limit", "grows until"):
+            self.assertNotIn(claim, advice)
+
+    def test_a_script_error_still_takes_precedence(self) -> None:
+        found = self.found("sampled")
+        found["script_error"] = "Error:\nSyntax error."
+        self.assertIn("DO NOT RAISE MEMORY YET", WATCH.memory_advice(found))
+
+
 if __name__ == "__main__":
     unittest.main()

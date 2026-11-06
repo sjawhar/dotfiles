@@ -453,12 +453,41 @@ def script_error_advice(found: dict) -> str:
     """What to do about a kill whose log ends in an error: fix the error, do not buy memory."""
     return ("DO NOT RAISE MEMORY YET: this job's log ends in an error, so the kill may be a"
             " consequence of the error rather than of the size. A Rocq run that fails in a large"
-            " context has been measured at roughly twice the memory of the same run that"
-            " compiles (OSS Verify curl lane, 2026-11-06: 4.84 GiB clean against 10.96 and 10.72"
-            " GiB broken, same unit, same tree, same limit), so a limit that fits the working"
-            " proof will OOM-kill the broken one. Fix the error, build it locally, and only"
-            " re-measure the size if it still does not fit. The last lines of the log:\n"
-            + str(found.get("script_error")))
+            " context has been measured using about twice the memory of the same run that"
+            " compiles (OSS Verify curl lane, 2026-11-06: 4.84 GiB against 10.96 and 10.72 GiB,"
+            " same unit, same tree, same limit -- though all three are SAMPLED figures, see"
+            " below, and the two larger ones ended in exit 143, a cancel, not an OOM kill)."
+            " Fix the error, build it locally, and only re-measure the size if it still does not"
+            " fit. The last lines of the log:\n" + str(found.get("script_error")))
+
+
+def sampled_peak_advice(found: dict) -> str:
+    """A gVisor peak is not a size to buy from, and the reason is deliberately narrow.
+
+    On the gVisor `build` class the sandbox's cgroup has no `memory.peak`, so the farm records
+    `memory_peak_kind: sampled`. What is MEASURED about that figure (CI/CD lead, 2026-11-06,
+    openssl__client, identical work): the kernel peak runs 1.5 to 3.5x the sampled one. A size
+    taken as 1.3x a sampled peak therefore rests on a number that is wrong by an unknown factor
+    inside a 3.5x band, and most likely too small.
+
+    What is NOT claimed here: that the sampled value tracks the limit. That explanation was
+    offered and then withdrawn by its own author the same hour, because farm/20261106t022815z
+    read 29.13 GiB against a non-binding 112Gi limit. Two readings still fit the evidence --
+    a genuinely heavy target, or an instrument effect that bites only near the ceiling -- and
+    this advice does not choose between them. It only refuses to size from the figure.
+    """
+    peak = found.get("memory_peak_bytes")
+    limit = found.get("memory_limit_bytes")
+    near = (" It read {} against a {} limit, {:.0%} of it.".format(
+        gib(peak), gib(limit), peak / limit) if peak and limit else "")
+    return ("DO NOT SIZE FROM THIS PEAK: it is a SAMPLED figure, not the kernel's."
+            f"{near} On the gVisor build class the sandbox's cgroup has no memory.peak, and on"
+            " identical work the kernel peak has been measured at 1.5 to 3.5 times the sampled"
+            " one (CI/CD lead, 2026-11-06, openssl__client). So 1.3x of this number is a size"
+            " built on a figure wrong by an unknown factor, most likely too small. Run the same"
+            " target once on a class that records memory_peak_kind: kernel (build-nosandbox)"
+            " and size at 1.3x that. If the result still says sampled, the run did not do its"
+            " job and its number is not to be quoted.")
 
 
 def memory_advice(found: dict) -> str:
@@ -479,6 +508,8 @@ def memory_advice(found: dict) -> str:
     """
     if found.get("script_error"):
         return script_error_advice(found)
+    if found.get("memory_peak_kind") == "sampled":
+        return sampled_peak_advice(found)
     peak = found.get("memory_peak_bytes")
     limit = found.get("memory_limit_bytes")
     largest = found.get("largest_process_bytes")
