@@ -764,9 +764,11 @@ class ASecondKillShowsBothPointsAndReadsNeither(unittest.TestCase):
 class ASampledPeakIsNotASizeToBuyFrom(unittest.TestCase):
     """On the gVisor build class the farm records memory_peak_kind: sampled.
 
-    On identical work the kernel peak has been measured at 1.5 to 3.5 times the sampled one
-    (CI/CD lead, 2026-11-06), so 1.3x a sampled peak is a size built on a number wrong by an
-    unknown factor. The watch recommended exactly that until this guard.
+    What is established: the sampled figure is not the quantity the kernel enforces, because
+    runs on 2026-11-06 read above their own cgroup limits while never being killed. What is
+    NOT established is how far off it is -- an earlier 1.5-to-3.5x range was retracted by the
+    lane that produced it, and the one target measured both ways agreed within 2%. So the
+    advice refuses the number and names the route to a real one, and claims no factor.
     """
 
     def found(self, kind: str) -> dict:
@@ -777,7 +779,13 @@ class ASampledPeakIsNotASizeToBuyFrom(unittest.TestCase):
         advice = WATCH.memory_advice(self.found("sampled"))
         self.assertIn("DO NOT SIZE FROM THIS PEAK", advice)
         self.assertNotIn("RAISE MEMORY to", advice)
-        self.assertIn("1.5 to 3.5", advice)
+        self.assertIn("memory_peak_kind: kernel", advice)
+
+    def test_it_claims_no_correction_factor(self) -> None:
+        """A factor would be used as one. None is established, so none may be stated."""
+        advice = WATCH.memory_advice(self.found("sampled"))
+        self.assertIn("CORRECTION FACTOR EXISTS", advice)
+        self.assertIn("retracted", advice)
 
     def test_a_kernel_peak_is_sized_from_as_before(self) -> None:
         self.assertNotIn("DO NOT SIZE FROM THIS PEAK", WATCH.memory_advice(self.found("kernel")))

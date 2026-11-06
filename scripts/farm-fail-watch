@@ -480,14 +480,17 @@ def sampled_peak_advice(found: dict) -> str:
     limit = found.get("memory_limit_bytes")
     near = (" It read {} against a {} limit, {:.0%} of it.".format(
         gib(peak), gib(limit), peak / limit) if peak and limit else "")
-    return ("DO NOT SIZE FROM THIS PEAK: it is a SAMPLED figure, not the kernel's."
-            f"{near} On the gVisor build class the sandbox's cgroup has no memory.peak, and the"
-            " sampled figure is not the quantity the kernel enforces: on 2026-11-06 the OSS"
-            " Verify curl lane recorded four runs whose sampled peak sat 1.03 to 1.09 times"
-            " ABOVE their own memory limits, two of them never killed and with no oom event at"
-            " all. A cgroup cannot be exceeded without the kernel acting, and it did not act."
-            " On identical work the kernel peak has also been measured at 1.5 to 3.5 times the"
-            " sampled one (CI/CD lead, same day, openssl__client). Run the same target once on a"
+    return ("DO NOT SIZE FROM THIS PEAK WITHOUT CHECKING IT: it is a SAMPLED figure, not the"
+            f" kernel's.{near} On the gVisor build class the sandbox's cgroup has no"
+            " memory.peak, and the sampled figure is not the quantity the kernel enforces: on"
+            " 2026-11-06 the OSS Verify curl lane recorded runs whose sampled peak sat above"
+            " their own memory limits while the kernel never acted -- 11.76 GB against a 10Gi"
+            " cgroup on a job that was not killed, with no oom event at all. A cgroup cannot be"
+            " exceeded without the kernel acting. HOW FAR OFF IT IS IS NOT KNOWN AND NO"
+            " CORRECTION FACTOR EXISTS: the one target measured both ways on the same day agreed"
+            " closely (29.13 GiB sampled against 29.66 GiB kernel), and an earlier 1.5-to-3.5x"
+            " range was retracted by the lane that produced it. So this figure may be right or"
+            " may be unrelated to what the kernel would charge. Run the same target once on a"
             " class that records memory_peak_kind: kernel (build-nosandbox) and size at 1.3x"
             " that. If the result still says sampled, the run did not do its job and its number"
             " is not to be quoted.")
