@@ -877,5 +877,60 @@ class AKilledPodWhoseJobIsGoneIsStillNamed(unittest.TestCase):
         self.assertIsNone(found.get("pod_from"))
 
 
+
+class AKillInsideANestedContainerGetsNoShare(unittest.TestCase):
+    """A share is only meaningful against the limit of the thing that ran out.
+
+    2026-11-06: Harbor runs its agent and its verifier each in a nested container capped at
+    32 GiB inside a 96 GiB pod. Two `lean` tasks were killed at 20.42 and 20.3 GiB. Against the
+    POD those are 21% and the watch said "serialise -- too many at once"; against the container
+    that actually ran out they are 64% and the answer is a bigger limit, which is what the owner
+    did. The failures record carries the nested container's id but an EMPTY `resources`, so the
+    old code silently judged the kill against whatever limit it could find.
+
+    A missing denominator must produce no verdict, not a confident wrong one.
+    """
+
+    RUN = "rr-trial-rr-b46-10m-a03"
+    POD = "rr-trial-rr-b46-10m-a03-28sw2-wrvn4"
+
+    def record(self, *rows: dict) -> str:
+        handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        self.addCleanup(os.unlink, handle.name)
+        with handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        return handle.name
+
+    def row(self, resources):
+        return {"at": "2026-11-06T11:16:11Z", "kind": "kernel-oom", "pod": self.POD,
+                "container": "64e9dd50a8b0c9de81bdd932ce6f80fd2ad07aa19b53de2ed6146088a13cf082",
+                "ns": "grade", "task": "lean", "killedRssKb": 21301792,
+                "reason": "OOMKilled", "resources": resources}
+
+    def test_no_recorded_limit_means_no_largest_process_and_so_no_serialise_verdict(self) -> None:
+        path = self.record(self.row({}))
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures=path)
+        self.assertIsNone(found.get("largest_process_bytes"))
+        self.assertEqual(found.get("killed_rss_bytes"), 21301792 * 1024)
+        self.assertEqual(found.get("killed_task"), "lean")
+
+    def test_the_advice_names_the_size_and_says_why_it_judges_nothing(self) -> None:
+        path = self.record(self.row({}))
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures=path)
+        found["memory_limit_bytes"] = 96 * GIB
+        found["memory_limit_text"] = "96Gi"
+        found["memory_peak_bytes"] = 95 * GIB
+        advice = WATCH.memory_advice(found)
+        self.assertIn("20.31 GiB", advice)
+        self.assertNotIn("SERIALISE", advice)
+
+    def test_a_recorded_limit_is_still_used_as_the_denominator(self) -> None:
+        path = self.record(self.row({"limits": {"memory": "32Gi"}}))
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures=path)
+        self.assertEqual(found.get("largest_process_bytes"), 21301792 * 1024)
+        self.assertEqual(found.get("killed_limit_bytes"), 32 * GIB)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -227,7 +227,23 @@ def failures_evidence(run: str | None, path: str | None = None) -> dict:
                 found["pod"] = pod
                 found["pod_from"] = "failures record"
                 killed = number(row.get("killedRssKb"))
-                if killed:
+                if not killed:
+                    continue
+                found["killed_rss_bytes"] = int(killed) * 1024
+                found["killed_task"] = row.get("task")
+                found["killed_container"] = row.get("container")
+                # The denominator must be the limit of the thing that ran out. Harbor runs its
+                # agent and its verifier each in a NESTED container capped at 32 GiB inside a
+                # 96 GiB pod: two `lean` kills at 20.4 GiB were 64% of the container and 21% of
+                # the pod, and this code judged them against the pod and answered "serialise --
+                # too many at once" when the right answer was a bigger limit (BET-628,
+                # 2026-11-06). The record carries the nested container's id and an EMPTY
+                # `resources`, so where it records no limit of its own, no share is computed and
+                # no verdict is reached: a missing denominator must produce no answer rather than
+                # a confident wrong one.
+                limit = size_bytes(((row.get("resources") or {}).get("limits") or {}).get("memory"))
+                if limit:
+                    found["killed_limit_bytes"] = limit
                     found["largest_process_bytes"] = int(killed) * 1024
     except OSError:
         return {}
@@ -647,6 +663,16 @@ def _memory_sizing(found: dict) -> str:
     if weaker:
         advice += (f" {weaker}, which is neither the parallel case nor one process alone, so"
                    " the serialise test is unsettled; keep the next run's per-process samples.")
+    elif found.get("killed_rss_bytes"):
+        # The record named the killed task but not the limit of the container it died in --
+        # a nested container, typically. Say the size and stop: a share against the pod's
+        # limit is the wrong fraction and produced the wrong instruction once already.
+        advice += (f" The kernel killed {found.get('killed_task') or 'a task'} at"
+                   f" {gib(found['killed_rss_bytes'])}, but the record does not carry the memory"
+                   " limit of the container it died in, so NO serialise-or-raise verdict is"
+                   " reached here: that share must be taken against the container that ran out,"
+                   " which for a nested container is not this pod's limit. Read that"
+                   " container's own memory.max.")
     else:
         advice += (" The largest single process was not recorded and the last sample has no"
                    " cpu_last_cores, so the serialise test could not be applied.")
