@@ -40,7 +40,11 @@ readonly APPLIER=infra-applier@theorem-agent-infra.iam.gserviceaccount.com
 readonly DEPLOY=serviceAccount:deploy@theorem-agent-infra.iam.gserviceaccount.com
 readonly BOX=serviceAccount:dev-sjawhar@theorem-agent-infra.iam.gserviceaccount.com
 state=${XDG_STATE_HOME:-$HOME/.local/state}/infra6-scoreboard-poll
-leads_file=${INFRA6_LEADS:-$state/leads.tsv}
+# The leads list lives on the durable mount, which is in every agent box, rather than under the
+# host's XDG state, which is not: the holder of lead-infra runs in a box, could not edit the list
+# at all, and its removals of two departed lanes silently did nothing for days (2026-11-06). The
+# state directory keeps everything else, which only this job on this host reads or writes.
+leads_file=${INFRA6_LEADS:-/mnt/durable/sami/infra6/leads.tsv}
 dry_run=false
 default_command=loop
 if [ "${1:-}" = --dry-run ]; then
@@ -83,6 +87,19 @@ send_as_infra() {
 # session keeps. It is a list and not every titled session, because a coordinator answers for its
 # workers: asking each worker too would count the same idle hours twice. A lead that is no longer
 # live is skipped, and the wake message names it so the list is mended.
+# check_leads refuses a poll that would ask nobody. It is called by poll(), NOT by lanes():
+# lanes runs in a process substitution (`done < <(lanes)`), so an exit there ends the subshell
+# and the caller carries on and reports "sent to 0 leads" — the very outcome being prevented.
+# Without this the window reads zero blocked hours, which is indistinguishable from a good day,
+# so a broken poll looks healthy for as long as nobody notices (the INFRA lead, 2026-11-06).
+check_leads() {
+	[ -r "$leads_file" ] || { log "the leads file $leads_file is missing or unreadable; asking nobody" >&2; return 1; }
+	local lanes_in
+	lanes_in=$(grep -cE '^[^#[:space:]]' "$leads_file" || true)
+	[ "${lanes_in:-0}" -gt 0 ] || { log "the leads file $leads_file names no lane; asking nobody" >&2; return 1; }
+	return 0
+}
+
 lanes() {
 	local live
 	live=$(envoy ps --json | jq -r '.[].session_id')
@@ -111,6 +128,7 @@ window_day() {
 poll() {
 	local end start msg n=0 failed=0 sid
 	resolve_infra || return 1
+	check_leads || return 1
 	: >"$state/gone.txt"
 	end=$(window_end)
 	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
@@ -131,6 +149,13 @@ EOF
 	done < <(lanes)
 	printf '%s %s %s %s\n' "$(date -u +%FT%TZ)" "$start-$end" "$n" "$failed" >>"$state/polls.log"
 	log "poll $start-${end}Z $(if "$dry_run"; then echo 'would send'; else echo sent; fi) to $n leads, $failed failed"
+	# A poll that reached nobody is a failure, not a quiet window: the list may have been read
+	# before it was written, or every lead gone at once. check_leads cannot see this, because it
+	# runs before the liveness filter.
+	if [ "$n" -eq 0 ]; then
+		log "poll $start-${end}Z reached no lead at all; the window has no reading" >&2
+		return 1
+	fi
 	[ "$failed" -eq 0 ]
 }
 
