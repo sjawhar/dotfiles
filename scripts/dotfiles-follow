@@ -562,9 +562,14 @@ def sweep_hooks(options: argparse.Namespace) -> str:
     killed at the same point never reaches the checkouts after it, so a new public checkout late
     in that order would never be hooked, and the only sign would be this condition. A full pass
     took about 20 s over 148 public checkouts on 2026-11-03 and 3 min 25 s over 249 on
-    2026-11-04 at idle priority, which is what the first 120 s default could not fit. 420 s is
-    about twice the measured cost; the unit allows 1170 s in all and its timer waits 10 minutes
-    after each run ends, so a long pass delays nothing.
+    2026-11-04 at idle priority, which is what the first 120 s default could not fit. On
+    2026-11-06 the sweep's own `find` alone took 434.7 s over 24,884 `.git` entries at load 191
+    with a cold directory cache (a warm pass right after it took 146.4 s), and passes were killed
+    at the 420 s cap at 07:42:43Z and 08:02:43Z. 870 s is about twice that cold walk, and still
+    fires when the population grows again. It is temporary: once the sweep bounds a pass by the
+    checkouts that can reach GitHub (dispatch://BET-706), it goes back to twice that measured
+    pass. The unit allows 1170 s in all and its timer waits 10 minutes after each run ends, so a
+    long pass delays nothing.
     """
     script = options.hooks_dir / "sweep-hooks.sh"
     if not script.is_file():
@@ -967,7 +972,7 @@ def main() -> int:
         default=Path.home() / ".local/share/public-leak-check-hooks",
         help="where step prepush put the leak-check tag's sweep-hooks.sh (default ~/.local/share/public-leak-check-hooks)",
     )
-    parser.add_argument("--sweep-timeout", type=float, default=420.0, help="one hook sweep pass, killed after this many seconds (default 420, about twice a measured full pass)")
+    parser.add_argument("--sweep-timeout", type=float, default=870.0, help="one hook sweep pass, killed after this many seconds (default 870, about twice a measured cold full walk)")
     parser.add_argument("--http-timeout", type=float, default=8.0)
     parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
     options = parser.parse_args()
