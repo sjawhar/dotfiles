@@ -483,7 +483,19 @@ close_box_cache() {
         echo "agentbox: $box still exists; its cache $cache is kept" >&2
         return 0
     fi
+    # A Go module cache is mode 0444 by design, and `rm -rf` cannot delete a read-only file in
+    # a read-only directory: it fails per entry and the tree stays. Measured 2026-11-06: twelve
+    # boxes that no longer exist had left 13,851 MiB behind here, and every exiting box's pane
+    # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. Make the tree
+    # writable first, then remove, then CHECK -- `rm -rf` reports failure per file but the
+    # caller never sees which, and a teardown that half-worked must not read as success
+    # (ORCH and TAIL, dispatch://INFRA-586).
+    chmod -R u+w "${cache:?}" 2> /dev/null || true
     rm -rf "${cache:?}"
+    if [[ -d "$cache" ]]; then
+        echo "agentbox: $box's cache $cache did not go; it is left for the box-health owner" >&2
+        return 0
+    fi
 }
 
 # The box's own filesystem at $BOXES/<box>: a sparse ext4 image loop-mounted there, so every
