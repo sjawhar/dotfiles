@@ -573,8 +573,12 @@ class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
         result["failed_pods"][0]["job"]["terminated"]["finishedAt"] = "2026-11-05T19:44:00Z"
         calls = []
 
-        def series_command(args, timeout=90):
+        def commands(args, timeout=90):
             calls.append(args)
+            if args[0] == "gcloud":  # the job.log read, which collect makes for a memory kill
+                self.assertEqual(args[1:3], ["storage", "cat"])
+                self.assertTrue(args[3].endswith("/out/ossv/test-run/job.log"))
+                return "all good\n"
             self.assertEqual(Path(args[0]).name, "pod-memory-series")
             self.assertEqual(args[1], result["failed_pods"][0]["name"])
             self.assertEqual(args[-1], "2026-11-05T19:44:00Z")
@@ -582,9 +586,10 @@ class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
 
         with patch.object(WATCH, "read_object", side_effect=[job, result]), \
                 patch.object(WATCH, "read_pod", return_value=None), \
-                patch.object(WATCH, "run_text", side_effect=series_command):
+                patch.object(WATCH, "run_text", side_effect=commands):
             found, _ = WATCH.collect("farm/test-run", "test-context")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual([Path(args[0]).name for args in calls], ["pod-memory-series", "gcloud"])
+        self.assertIsNone(found["script_error"])
         self.assertNotIn("--memory", WATCH.message(found))
 
     def test_a_live_pods_name_and_start_are_used_without_a_failed_pod_record(self) -> None:
@@ -666,6 +671,53 @@ class TheOwnerLineNamesALaneAndThenTheAgent(unittest.TestCase):
                  "memory_limit_bytes": 32 * GIB, "disk_peak_bytes": GIB,
                  "disk_request_bytes": 50 * GIB}
         self.assertEqual(WATCH.message(found).splitlines()[1], WATCH.owner_line(found))
+
+
+class AKillWhoseLogEndsInAnErrorIsNotToldToBuyMemory(unittest.TestCase):
+    """A Rocq run that fails in a large context costs about twice the memory of one that
+
+    compiles, so a limit sized for the working proof OOM-kills the broken one and it arrives
+    here as a memory kill. The curl lane measured it on 2026-11-06: 4.84 GiB clean against
+    10.96 and 10.72 GiB broken, same unit, same tree, same limit. Advising more memory there
+    buys memory for a bug and spends another farm slot.
+    """
+
+    def read(self, text: str) -> str | None:
+        with patch.object(WATCH, "run_text", return_value=text):
+            return WATCH.read_script_error("gs://b", "run")
+
+    def test_an_error_in_the_last_lines_is_found_and_quoted(self) -> None:
+        log = "\n".join(["compiling"] * 500 + ["Error:", "Syntax error: expected after [tactic]."])
+        self.assertEqual(self.read(log), "Error:\nSyntax error: expected after [tactic].")
+
+    def test_a_clean_log_yields_nothing(self) -> None:
+        self.assertIsNone(self.read("\n".join(["compiling"] * 500 + ["vo 242"])))
+
+    def test_an_error_further_back_than_forty_lines_is_still_found(self) -> None:
+        """One of the two measured kills had its error 50 lines from the end, which is why
+        the window is 200 and not the 40 first proposed."""
+        log = "\n".join(["start", "Error: In environment"] + ["context line"] * 49)
+        self.assertIsNotNone(self.read(log))
+
+    def test_an_error_older_than_the_window_is_not_claimed(self) -> None:
+        log = "\n".join(["Error: long ago"] + ["compiling"] * WATCH.LOG_TAIL_LINES)
+        self.assertIsNone(self.read(log))
+
+    def test_an_unreadable_log_yields_nothing_rather_than_an_exception(self) -> None:
+        self.assertIsNone(self.read(""))
+
+    def test_the_advice_withholds_the_raise_and_shows_the_error(self) -> None:
+        found = {"memory_peak_bytes": 11 * GIB, "memory_limit_bytes": 10 * GIB,
+                 "script_error": "Error:\nSyntax error."}
+        advice = WATCH.memory_advice(found)
+        self.assertIn("DO NOT RAISE MEMORY YET", advice)
+        self.assertNotIn("RAISE MEMORY to", advice)
+        self.assertIn("Syntax error.", advice)
+
+    def test_without_an_error_the_sizing_advice_is_unchanged(self) -> None:
+        found = {"memory_peak_bytes": 11 * GIB, "memory_limit_bytes": 10 * GIB,
+                 "script_error": None, "cpu_last_cores": 1.0, "cpu_limit_cores": 8}
+        self.assertNotIn("DO NOT RAISE MEMORY YET", WATCH.memory_advice(found))
 
 
 if __name__ == "__main__":

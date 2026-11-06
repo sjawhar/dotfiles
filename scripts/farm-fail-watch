@@ -382,6 +382,48 @@ def verdict(found: dict) -> dict:
         else "a peak or a bound is missing, so the two cannot be compared"))
 
 
+# How many lines of the end of job.log are searched for a proof-script error, and the most
+# that is quoted back. Measured on the OSS Verify curl lane's three runs of 2026-11-06
+# (CURL, 02:33Z): a clean run of the tree held no `Error:` line at all in 28,060 lines;
+# the two that died at the same 10Gi limit carried one 2 and 50 lines from the end. 40 was
+# the window the lane first proposed and it misses the second of those, so 200 is used.
+LOG_TAIL_LINES = 200
+LOG_ERROR_QUOTE = 6
+
+
+def read_script_error(bucket: str, run: str) -> str | None:
+    """The error a Rocq run ended on, from the end of its job.log, or None.
+
+    Why a killed job is asked this at all: a run that hits a syntax or elaboration error in a
+    large context does not fail cheaply. The curl lane measured the same unit, the same tree
+    and the same limit at 4.84 GiB when it compiled and 10.96 and 10.72 GiB when it did not --
+    roughly double -- so at a limit sized for the clean run the broken one is OOM-killed, and
+    it arrives here as a memory kill whose real cause is sitting in the last few lines of its
+    own log. Advising more memory for that buys memory for a bug and costs another farm slot.
+    """
+    text = run_text(["gcloud", "storage", "cat", f"{bucket}/out/ossv/{run}/job.log"])
+    if not text:
+        return None
+    tail = text.splitlines()[-LOG_TAIL_LINES:]
+    for index, line in enumerate(tail):
+        if line.startswith("Error:") or line.startswith("Error "):
+            quoted = [part for part in tail[index:index + LOG_ERROR_QUOTE] if part.strip()]
+            return "\n".join(quoted)
+    return None
+
+
+def script_error_advice(found: dict) -> str:
+    """What to do about a kill whose log ends in an error: fix the error, do not buy memory."""
+    return ("DO NOT RAISE MEMORY YET: this job's log ends in an error, so the kill may be a"
+            " consequence of the error rather than of the size. A Rocq run that fails in a large"
+            " context has been measured at roughly twice the memory of the same run that"
+            " compiles (OSS Verify curl lane, 2026-11-06: 4.84 GiB clean against 10.96 and 10.72"
+            " GiB broken, same unit, same tree, same limit), so a limit that fits the working"
+            " proof will OOM-kill the broken one. Fix the error, build it locally, and only"
+            " re-measure the size if it still does not fit. The last lines of the log:\n"
+            + str(found.get("script_error")))
+
+
 def memory_advice(found: dict) -> str:
     """A sustained series climb withholds sizing. Otherwise serialise when many processes
     ran at once, or size at 1.3 x the farm's peak when one process was simply too big.
@@ -398,6 +440,8 @@ def memory_advice(found: dict) -> str:
     alone -- the single oversized step, and only then is a bigger pod right. That is weaker
     evidence than the per-process samples, and the wording says so.
     """
+    if found.get("script_error"):
+        return script_error_advice(found)
     peak = found.get("memory_peak_bytes")
     limit = found.get("memory_limit_bytes")
     largest = found.get("largest_process_bytes")
@@ -660,6 +704,10 @@ def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
         found["pod"] = names[-1]
     if verdict(found)["resource"] in ("memory", "both"):
         found["memory_shape"] = read_memory_shape(found)
+        # Only for a memory kill, and only after the shape: the log is tens of thousands of
+        # lines, and a disk kill's cause is never a proof-script error.
+        if bucket:
+            found["script_error"] = read_script_error(bucket, run)
     return found, missing
 
 
