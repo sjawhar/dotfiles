@@ -243,6 +243,9 @@ def target_value(k: KpiRow, now: datetime) -> str:
     parts = [f"by {by:%b %-d}"] if by else []
     if p.met:
         parts.append("met")
+    elif n.raw.get("suspended"):
+        # A paused target has no pace: a per-day need and a days-left count would read as a live deadline.
+        parts.append("suspended")
     else:
         if p.needed_per_day is not None:
             parts.append(per_day(p, n.unit))

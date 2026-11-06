@@ -98,3 +98,15 @@ def test_row_shows_the_verdict_the_gap_and_folds_holding_guards():
     assert "Escapes per task" in outside  # the guard that got worse is shown in full, outside the fold
     assert "Tokens per usable task" in folded and "Tokens per usable task" not in outside
     assert re.search(r"<summary>1 guard: 1 can.{1,6}t tell</summary>", folded)
+
+
+def test_a_suspended_target_shows_no_per_day_need_or_days_left():
+    # Verified Linux's three 11-07 targets, suspended on 2026-11-05, still printed "+N per day · 2 d left" on the
+    # page: a paused target read as a live deadline.
+    b = behind_board()
+    b["numbers"][0].update({"suspended": "2026-10-29", "suspended_reason": "stream speedrun-only"})
+    page = v2_model.build(snapshot([b]), NOW)
+    card = v2_render.kpi_row(next(v for v in page.streams if v.st.issue == "BET-83").kpis[0], NOW)
+    assert re.search(r'class="fig-k">Target</span><span class="fig-v"><span class="pre">≥</span><span class="n">4</span>'
+                     r'</span><span class="fig-q">by Oct 31 · suspended<', card)
+    assert "d left" not in card and "per day" not in card
