@@ -9,10 +9,10 @@ description: |
   is open, and never Anthropic -- so a refusal means no non-Anthropic model
   was reachable, and the caller should run a Claude reader and label that read same-family.
 model:
-  - "ossv-gateway-openai/openai/gpt-6.1-sol-flex:high"
-  - "ossv-gateway/openai/gpt-6.1-sol-flex:high"
-  - "ossv-gateway-openai/openai/gpt-6.1-sol:high"
-  - "ossv-gateway/openai/gpt-6.1-sol:high"
+  - "model-gateway-openai/openai/gpt-6.1-sol-flex:high"
+  - "model-gateway/openai/gpt-6.1-sol-flex:high"
+  - "model-gateway-openai/openai/gpt-6.1-sol:high"
+  - "model-gateway/openai/gpt-6.1-sol:high"
 tools: read, glob, grep, bash, todo
 color: cyan
 ---

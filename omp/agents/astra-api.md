@@ -8,8 +8,8 @@ description: |
   Astra and never to Anthropic: a refusal means no Sol route was reachable.
   Full tool access; finishes the task it is handed and reports with evidence.
 model:
-  - "ossv-gateway-openai/openai/gpt-6.1-sol:xhigh"
-  - "ossv-gateway/openai/gpt-6.1-sol:xhigh"
+  - "model-gateway-openai/openai/gpt-6.1-sol:xhigh"
+  - "model-gateway/openai/gpt-6.1-sol:xhigh"
 color: green
 ---
 

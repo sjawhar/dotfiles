@@ -239,41 +239,19 @@ retry:
     model-gateway/openai/gpt-6.1-sol:
       - model-gateway-openai/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
-    # TRANSITIONAL (2026-11-05 23:3xZ): the ossv-gateway* provider aliases are still declared in
-    # models.local.yml and still serve live arms, but the 14:55Z rename moved every chain key here to
-    # model-gateway*, the `*: []` guard included. A session served on an alias then matched NO key and
-    # NO guard and resolved `default` -- which is Claude. Measured by the ShellPortAudit lane on #18131
-    # round 7: 73 turns on ossv-gateway-openai/openai/gpt-6.1-sol, 8 on ossv-gateway/openai/gpt-6.1-sol,
-    # then 64 on ossv-gateway/claude-opus-5-5, and the Anthropic model wrote the verdict. A `sol` verdict
-    # was a Claude verdict. These mirrors are deleted WITH the aliases, never before them.
-    ossv-gateway-openai/openai/gpt-6.1-sol:
-      - model-gateway-openai/openai/gpt-6.1-sol
-      - model-gateway/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
-      - openai-codex/gpt-6.1-sol
-    ossv-gateway/openai/gpt-6.1-sol:
-      - model-gateway/openai/gpt-6.1-sol
-      - model-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - openai-codex/gpt-6.1-sol
-    ossv-gateway-openai/openai/gpt-6.1-sol-flex:
-      - model-gateway-openai/openai/gpt-6.1-sol-flex
-      - model-gateway/openai/gpt-6.1-sol-flex
-      - ossv-gateway/openai/gpt-6.1-sol-flex
-      - model-gateway-openai/openai/gpt-6.1-sol
-      - ossv-gateway-openai/openai/gpt-6.1-sol
-      - openai-codex/gpt-6.1-sol
-    ossv-gateway/openai/gpt-6.1-sol-flex:
-      - model-gateway/openai/gpt-6.1-sol-flex
-      - model-gateway-openai/openai/gpt-6.1-sol-flex
-      - ossv-gateway-openai/openai/gpt-6.1-sol-flex
-      - model-gateway/openai/gpt-6.1-sol
-      - ossv-gateway/openai/gpt-6.1-sol
-      - openai-codex/gpt-6.1-sol
-    # Mirrors model-gateway-openai/*: [] -- this provider serves only OpenAI ids, so anything else on it
-    # refuses instead of answering from Claude. NOT added for ossv-gateway/*: that provider also declares
-    # the Anthropic models, which legitimately use the default chain.
-    ossv-gateway-openai/*: []
+    # 2026-11-06 23:4xZ: the `ossv-gateway*` aliases and their mirror chains are GONE, with the
+    # provider aliases in each machine's models.local.yml, in one cutover (Sami, INFRA-481:
+    # the gateway is Theorem's, not OSS Verify's, and is not to carry that name anywhere).
+    #
+    # They existed because the 14:55Z rename on 11-05 moved every chain key here to
+    # model-gateway* while the aliases still served live arms: a session on an alias matched NO
+    # key and NO guard, resolved `default` -- which is Claude -- and 64 turns of #18131 round 7
+    # were written by Anthropic under a Sol verdict. The lesson is kept as the rule below, not
+    # as a second set of names: NO chain key may resolve to `default`, and the cutover check is
+    # that every id named by an agent or a chain resolves to a declared provider.
+    # Mirrors model-gateway-openai/*: [] -- this provider serves only OpenAI ids, so anything
+    # else on it refuses instead of answering from Claude.
+    model-gateway-openai/*: []
     openai-codex/gpt-6.1-sol:
       - model-gateway-openai/openai/gpt-6.1-sol
       - model-gateway/openai/gpt-6.1-sol

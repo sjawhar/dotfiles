@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# The check that makes the gateway cutover safe, and the count that says when it is finished.
+#
+# Why it exists: on 2026-11-05 at 14:55Z the chain keys were renamed to model-gateway* while the
+# ossv-gateway* provider aliases still served live arms. A session on an alias matched NO chain
+# key and NO guard, fell through to `default` -- which is Claude -- and 64 turns of #18131
+# round 7 were written by Anthropic wearing a Sol verdict. Nothing failed; the answer was just
+# from the wrong family. So the cutover is not "read it carefully", it is these two readings.
+#
+#   gateway-cutover-check.sh          both sections
+#   gateway-cutover-check.sh --count  only the live-session count
+set -u
+models=${MODELS:-$HOME/.omp/agent/models.yml}
+dotfiles=${DOTFILES:-$HOME/.dotfiles}
+
+count_sessions() {
+    echo "== live sessions still pointing at the old gateway host =="
+    local n=0 p
+    for p in $(pgrep -x omp 2>/dev/null); do
+        # A session's provider set comes from the models file its profile resolved at launch;
+        # the surest live witness is the host it actually talks to, so read its open sockets'
+        # peer names via its own environment and config rather than trusting the repo.
+        # A box's omp runs as another uid, so its environ is unreadable here; the redirection
+        # fails before tr does, which 2>/dev/null on the pipe cannot catch. Skip, do not spew.
+        [[ -r "/proc/$p/environ" ]] || continue
+        if tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -q 'ossv-model-gateway'; then
+            n=$((n + 1)); echo "  pid $p (environment names ossv-model-gateway)"
+        fi
+    done
+    local inflight
+    inflight=$(grep -rl 'ossv-model-gateway' "$HOME/.omp/agent/models.yml" \
+        "$HOME"/.omp/profiles/*/agent/models.yml 2>/dev/null | wc -l)
+    echo "  model files still naming ossv-model-gateway: $inflight"
+    echo "  sessions whose environment names it: $n"
+    echo "  FINISHED when both are 0"
+}
+
+[[ "${1:-}" == --count ]] && { count_sessions; exit 0; }
+
+echo "== 1. every model id an agent, a ROLE or a chain names resolves to a declared provider =="
+python3 - "$models" "$dotfiles" <<'PY'
+import glob, os, re, sys, yaml
+
+models_path, dotfiles = sys.argv[1], sys.argv[2]
+
+# A provider id, then a model path, then an optional :effort. Anything else is prose.
+ID = re.compile(r"[a-z0-9][a-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._/-]*(:[a-z]+)?|[a-z0-9][a-z0-9-]*/\*")
+# Not providers: omp's own fallback sentinel, and the wildcard guards.
+SENTINELS = {"default"}
+
+# Providers come from EVERY models file a session can resolve, not only the default profile's:
+# a role may name a provider declared in a profile overlay (pbc-gateway lives in
+# ~/.omp/profiles/pbc/agent/models.overlay.yml), and omp declares some itself (anthropic,
+# openai-codex, opencode-zen). Reading one file reported 20 providers as missing that exist.
+providers = set()
+for path in [models_path] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(models_path)), "profiles/*/agent/models*.yml"))):
+    try:
+        providers |= set((yaml.safe_load(open(path)) or {}).get("providers") or {})
+    except Exception:
+        pass
+providers |= {"anthropic", "openai-codex", "opencode-zen", "openai", "vertex", "google"}
+
+cfg = yaml.safe_load(open(os.path.join(dotfiles, "omp/config.yml"))) or {}
+
+chains = (cfg.get("retry") or {}).get("fallbackChains") or {}
+named = set()
+for key, chain in chains.items():
+    named.add(key)
+    for step in chain or []:
+        named.add(step)
+
+# The machine-local role routes. These are gitignored and in no commit, which is exactly why
+# they were missed twice: on 2026-11-05 the long-context threshold stopped applying because
+# roles here still named the old ids, and the aliases were nearly dropped out from under 93
+# live routes on 2026-11-06. A check that reads only committed files cannot see them.
+for local in ("omp/config.local.yml",) + tuple(
+        os.path.join("omp", f) for f in sorted(os.listdir(os.path.join(dotfiles, "omp")))
+        if f.startswith("config.") and f.endswith(".local.yml")):
+    path = os.path.join(dotfiles, local)
+    if not os.path.exists(path):
+        continue
+    try:
+        doc = yaml.safe_load(open(path)) or {}
+    except Exception as err:
+        print("  COULD NOT READ %s: %s" % (local, err))
+        continue
+    # A model id, strictly. Without this the walk picks up prose that happens to hold a slash:
+    # the first run flagged "This allocates ~1KB per request x 10K requests/sec" as a provider.
+    def walk(node):
+        if isinstance(node, str):
+            if ID.fullmatch(node):
+                named.add(node)
+        elif isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(doc)
+agents = os.path.join(dotfiles, "omp/agents")
+for name in sorted(os.listdir(agents)):
+    if not name.endswith(".md"):
+        continue
+    for line in open(os.path.join(agents, name)):
+        m = re.match(r'\s+-\s+"([^"]+)"', line)
+        if m and ID.fullmatch(m.group(1)):
+            named.add(m.group(1))
+
+bad = []
+for ident in sorted(named):
+    # A bare word is a role name or an omp sentinel, not a provider-qualified model id.
+    if ident in SENTINELS or "/" not in ident:
+        continue
+    prov = ident.split("/", 1)[0]
+    if prov and prov not in providers:
+        bad.append((ident, prov))
+
+print("  providers declared, over every models file: %d" % len(providers))
+print("  ids named by chains, roles and agents: %d" % len(named))
+if bad:
+    for ident, prov in bad:
+        print("  UNRESOLVED %-55s provider %r is declared nowhere" % (ident, prov))
+else:
+    print("  every named id resolves to a declared provider")
+
+stale = sorted(i for i in named if "ossv-gateway" in i)
+print("  ids still naming ossv-gateway: %d%s" % (len(stale), " -> " + ", ".join(stale[:4]) if stale else ""))
+raise SystemExit(1 if bad or stale else 0)
+PY
+rc=$?
+
+echo
+count_sessions
+exit "$rc"
