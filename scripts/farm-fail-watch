@@ -828,6 +828,39 @@ def read_pod(namespace: str, pod: str, context: str) -> dict | None:
         return None
 
 
+def collect_pod(ref: str, context: str) -> tuple[dict, list[str]]:
+    """The evidence for a pod named directly: "<namespace>/<pod>", or "<pod>" in builds-ossv.
+
+    A lane outside OSS Verify has a pod name and no run id. The failure notice tells the owner
+    to run this tool on the pod "for the shape", and before this it could not be done: the job
+    argument is a farm run, and a pod name found no bucket and answered `unknown` with no
+    evidence (NEWSRC, builds-bet, 2026-11-06).
+
+    There is no farm record to read, so there is no peak and no sizing advice -- those come
+    from result.json, which only OSS Verify runs write. What this path gives is what the pod
+    itself knows (its limits, its kill) and the memory SHAPE from the series, which is the
+    thing the notice actually promises. The shape is read whenever the kernel killed the
+    container, rather than when `verdict` says "memory": without a peak the verdict cannot say
+    anything, and refusing to look at the series because of that would deny the shape to
+    exactly the lane this path exists for.
+    """
+    namespace, _, name = ref.rpartition("/")
+    namespace = namespace or "builds-ossv"
+    missing: list[str] = []
+    pod = read_pod(namespace, name, context)
+    if pod is None:
+        missing.append(f"the pod {namespace}/{name} (not in the cluster)")
+    found = evidence(None, None, pod)
+    found.setdefault("namespace", namespace)
+    found["pod_found"] = pod is not None
+    if not found.get("pod"):
+        found["pod"] = name
+    killed = found.get("reason") == "OOMKilled" or bool(found.get("oom_kill"))
+    if killed or verdict(found)["resource"] in ("memory", "both"):
+        found["memory_shape"] = read_memory_shape(found)
+    return found, missing
+
+
 def collect(run_id: str, context: str) -> tuple[dict, list[str]]:
     """The evidence for a job id ("farm/<run>" or "<run>"), and what could not be read."""
     run = run_id.split("/", 1)[1] if "/" in run_id else run_id
@@ -886,7 +919,7 @@ def send(owner: str, text: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Say what killed a farm job, and what its lane should do about it.")
-    parser.add_argument("job", help="the job id, farm/<run> or <run>")
+    parser.add_argument("job", nargs="?", help="the job id, farm/<run> or <run>")
     parser.add_argument("--context", default="gke_theorem-agent-infra_us-west1_dispatch",
                         help="the kubectl context the farm's namespace is in")
     parser.add_argument("--send", action="store_true",
@@ -894,11 +927,38 @@ def main(argv: list[str] | None = None) -> int:
                              " (without it, the message is printed and nobody is told)")
     parser.add_argument("--to", help="send to this session id instead of the job's owner")
     parser.add_argument("--json", action="store_true", help="print the evidence and the verdict")
+    parser.add_argument("--pod", metavar="NAMESPACE/POD",
+                        help="read a pod directly instead of a farm run, for a lane outside OSS"
+                             " Verify that has a pod name and no run id; the namespace defaults"
+                             " to builds-ossv. There is no farm record on this path, so the"
+                             " answer carries the pod's own limits and the memory shape, and no"
+                             " peak or sizing advice")
     options = parser.parse_args(argv)
+    if bool(options.job) == bool(options.pod):
+        parser.error("give exactly one of the job id or --pod NAMESPACE/POD")
 
-    found, missing = collect(options.job, options.context)
+    found, missing = (collect_pod(options.pod, options.context) if options.pod
+                      else collect(options.job, options.context))
     call = verdict(found)
-    text = message(found, call)
+    if options.pod and not found.get("pod_found"):
+        text = (f"{options.pod}: not in the cluster, so there is nothing to read. A pod that"
+                " has been deleted keeps its kill only in the farm's record, which exists for"
+                " OSS Verify runs; for another namespace the evidence is gone with the pod."
+                "\nCatch the next one while it is still there, or keep the kill yourself: the"
+                " kernel's own line in the node's journal survives the pod.")
+    elif options.pod and not found.get("reason") and found.get("exit_code") is None:
+        # A pod still running, or one that ended without being killed, has no kill to explain.
+        # message() would render its killed-job sentence with None in every slot, which reads
+        # like a failed read rather than an absent failure.
+        text = (f"{options.pod}: no kill to explain — the container reports no termination"
+                f" reason and no exit code"
+                + (", and it is still running." if not found.get("finished_at")
+                   else f", and it finished at {found['finished_at']}.")
+                + "\nIf you expected a kill here, the pod you want is a previous one: a"
+                " restarted container's kill lives in its last state, and a deleted pod's"
+                " lives only in the farm's record.")
+    else:
+        text = message(found, call)
     if missing:
         text += "\nCould not be read: " + "; ".join(missing) + "."
     if options.json:

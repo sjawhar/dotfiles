@@ -932,5 +932,49 @@ class AKillInsideANestedContainerGetsNoShare(unittest.TestCase):
         self.assertEqual(found.get("killed_limit_bytes"), 32 * GIB)
 
 
+class APodNamedDirectly(unittest.TestCase):
+    """`--pod NAMESPACE/POD`, for a lane outside OSS Verify that has a pod name and no run id.
+
+    The failure notice tells the owner to run this tool on the pod "for the shape". Before this
+    the only argument was a farm run, so a pod name found no bucket and the answer was `unknown`
+    with no evidence -- the instruction could not be followed at all (NEWSRC, builds-bet,
+    2026-11-06). There is no farm record on this path, so there is no peak and no sizing advice.
+    """
+
+    def main(self, argv: list[str], found_pod: dict | None) -> str:
+        import contextlib
+        import io
+        out = io.StringIO()
+        with patch.object(WATCH, "read_pod", return_value=found_pod), \
+                patch.object(WATCH, "run_text", return_value=""), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(WATCH.main(argv), 0)
+        return out.getvalue()
+
+    def test_a_pod_the_cluster_does_not_have_says_so_and_does_not_claim_it_is_running(self) -> None:
+        text = self.main(["--pod", "builds-bet/gone"], None)
+        self.assertIn("not in the cluster", text)
+        self.assertNotIn("still running", text)
+
+    def test_a_pod_with_no_kill_says_there_is_nothing_to_explain(self) -> None:
+        # Not "FARM JOB KILLED: None (None, None) at None": a template filled with None reads
+        # as a failed read rather than an absent failure, which is the opposite of the truth.
+        live = {"metadata": {"name": "live"},
+                "status": {"containerStatuses": [{"name": "job", "state": {"running": {}}}]}}
+        text = self.main(["--pod", "builds-bet/live"], live)
+        self.assertIn("no kill to explain", text)
+        self.assertNotIn("None", text)
+
+    def test_the_namespace_defaults_to_the_farms_own(self) -> None:
+        with patch.object(WATCH, "read_pod", return_value=None) as read_pod:
+            WATCH.collect_pod("just-a-pod", "test-context")
+        self.assertEqual(read_pod.call_args.args[:2], ("builds-ossv", "just-a-pod"))
+
+    def test_a_run_id_and_a_pod_together_are_refused(self) -> None:
+        for argv in (["farm/run", "--pod", "ns/pod"], []):
+            with self.assertRaises(SystemExit):
+                WATCH.main(argv)
+
+
 if __name__ == "__main__":
     unittest.main()
