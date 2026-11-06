@@ -207,6 +207,111 @@ class CacheDirectory(unittest.TestCase):
                 shared.chmod(0o700)
 
 
+# A broker stand-in whose approval never comes: it honours the `--wait` it was given, prints the
+# two lines agent-secrets prints around that wait, and exits 75, leaving the request pending.
+PENDING_STUB = """#!/bin/bash
+echo x >> "$STUB_CALLS"
+wait=30m
+while (( $# )); do
+  if [[ "$1" == --wait ]]; then wait="$2"; shift 2; else shift; fi
+done
+echo "agent-secrets: request req-abc123 to the broker is waiting for approval; waiting up to $wait" >&2
+sleep "${wait%s}"
+echo "agent-secrets: request req-abc123 is still waiting for approval; nothing was run." >&2
+exit 75
+"""
+
+
+class PendingGrant(unittest.TestCase):
+    """A grant nobody has approved yet gives the caller its command back, bounded.
+
+    On 2026-11-06 four reviewers each sat 37 to 53 minutes in the broker's 30-minute default
+    wait, and their blocked children helped wedge a session's shell (dispatch://INFRA-515). No
+    path through installation_token may now outlast POST_REVIEW_GRANT_WAIT.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.bin = root / "bin"
+        self.bin.mkdir()
+        self.calls = root / "calls"
+        self.calls.write_text("")
+        self.runtime = root / "run"
+        self.runtime.mkdir()
+        self.cache = self.runtime / "post-review"
+        self.env = {
+            **os.environ,
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "XDG_RUNTIME_DIR": str(self.runtime),
+            "POST_REVIEW_CACHE_DIR": str(self.cache),
+            "STUB_CALLS": str(self.calls),
+        }
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def install(self, stub: str) -> None:
+        path = self.bin / "secret-run"
+        path.write_text(stub)
+        path.chmod(0o755)
+
+    def caller(self, grant_wait: int, ask_wait: int = 120, stub_wait: float = 0) -> subprocess.Popen:
+        env = {**self.env, "STUB_WAIT": str(stub_wait),
+               "POST_REVIEW_ASK_WAIT_SECONDS": str(ask_wait),
+               "POST_REVIEW_GRANT_WAIT": str(grant_wait)}
+        return subprocess.Popen([sys.executable, "-c", CALLER], env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+
+    def broker_calls(self) -> int:
+        return len(self.calls.read_text().splitlines())
+
+    def test_a_pending_grant_exits_tempfail_within_the_bound_and_names_the_request(self):
+        self.install(PENDING_STUB)
+        started = time.monotonic()
+        caller = self.caller(grant_wait=3)
+        out, err = caller.communicate(timeout=60)
+        took = time.monotonic() - started
+        self.assertEqual(caller.returncode, 75, err)
+        self.assertEqual(out.strip(), "")
+        self.assertIn(
+            "post-review: the LEGION_REVIEW_APP grant for acme/widgets is waiting for approval"
+            " (request req-abc123); nothing was posted; run the same command again after it is"
+            " approved",
+            err,
+        )
+        # What is left of the bound reached the broker as its own --wait, whole seconds of it, so
+        # nothing waited the 30-minute default.
+        self.assertRegex(err, r"waiting up to [1-3]s")
+        self.assertLess(took, 20)
+
+    def test_a_granted_request_posts_as_before(self):
+        self.install(STUB)
+        caller = self.caller(grant_wait=90, stub_wait=1)
+        out, err = caller.communicate(timeout=60)
+        self.assertEqual(caller.returncode, 0, err)
+        self.assertTrue(out.strip().startswith("ghs_"), out)
+        self.assertEqual(self.broker_calls(), 1)
+
+    def test_the_wait_on_another_sessions_request_is_bounded_by_the_grant_wait(self):
+        """A caller whose whole budget goes on another session's `.asking` exits 75, asking nobody."""
+        self.install(PENDING_STUB)
+        stuck = self.caller(grant_wait=60)
+        time.sleep(1)
+        started = time.monotonic()
+        second = self.caller(grant_wait=3, ask_wait=60)
+        out, err = second.communicate(timeout=60)
+        took = time.monotonic() - started
+        stuck.kill()
+        stuck.communicate()
+        self.assertEqual(second.returncode, 75, err)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("is waiting for approval; nothing was posted", err)
+        self.assertNotIn("asking as well", err)
+        self.assertLess(took, 20)
+        self.assertEqual(self.broker_calls(), 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()

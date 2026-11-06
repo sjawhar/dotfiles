@@ -18,6 +18,16 @@ LEGION_REVIEW_APP (dispatch://INFRA-1031), so this script never holds the App's 
 asks secret-run for that secret narrowed to the one repository it reviews, and the broker hands
 it a one-hour installation token. Each new grant waits for Sami's approval in Dispatch.
 
+That wait is bounded. This holds a caller for POST_REVIEW_GRANT_WAIT seconds (default 90) at
+most — the broker's own `--wait`, plus whatever it spent waiting on another session's request —
+and then exits 75 (EX_TEMPFAIL) having posted nothing, naming the request the approval card
+belongs to. The card stays open and the verdict file is untouched, so the same command run again
+after the approval posts the verdict; the broker joins an identical repeat request from the same
+session to the one already pending (`coalesced`), so a retry asks nobody a second time. Before
+this, the broker's 30-minute default held every caller: on 2026-11-06 four reviewers each sat 37
+to 53 minutes in that wait and their blocked children helped wedge a session's shell
+(dispatch://INFRA-515).
+
 Every verdict ends with a `Reviewed by model: <id>` line, so a reader can tell a cross-family
 review from a same-family one. The id is `--model` when given; otherwise every model that answered
 in the omp session running this command, read from its transcript (PI_SESSION_FILE, which omp sets
@@ -43,6 +53,7 @@ import fcntl
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -113,6 +124,12 @@ def cached_token(path: pathlib.Path) -> str | None:
 # enough that a request nobody approves does not hold anyone else's post. The variable is for tests.
 ASK_WAIT_SECONDS = int(os.environ.get("POST_REVIEW_ASK_WAIT_SECONDS", "120"))
 
+# The whole budget for getting a token: the wait on another session's request and this session's
+# own wait for the broker, together. Past it the command exits EX_TEMPFAIL with nothing posted,
+# rather than holding its caller — and its caller's children — for the broker's 30-minute default.
+GRANT_WAIT_SECONDS = int(os.environ.get("POST_REVIEW_GRANT_WAIT", "90"))
+EX_TEMPFAIL = 75  # sysexits.h, and the exit agent-secrets itself uses for "still waiting"
+
 # Runs under secret-run, so only after the grant: the broker's wait for a human is over before it
 # starts. The broker put its release in the environment under TOKEN_SECRET:
 # {"installations": {"<owner>": {"installation_id": N, "token": "ghs_...", "expires_at": "..."}}}.
@@ -146,6 +163,37 @@ MINT_SCRIPT = (
 )
 
 
+def pending_grant(owner: str, repo: str, request_id: str | None, broker: str = "") -> None:
+    """Give the caller its command back: the grant is still waiting, and nothing was posted.
+
+    The approval card stays open, and the verdict body file was only read, so the same command
+    run again after the approval posts the same verdict. A repeat of this request from this
+    session joins the card already pending rather than opening a second one.
+
+    The broker's own lines come first when there are any: they name whom the request waits on and
+    the page where that person decides it, which is what a caller needs to get it approved.
+    """
+    if broker.strip():
+        print(broker.strip(), file=sys.stderr)
+    named = f" (request {request_id})" if request_id else ""
+    print(
+        f"post-review: the {TOKEN_SECRET} grant for {owner}/{repo} is waiting for approval{named};"
+        " nothing was posted; run the same command again after it is approved",
+        file=sys.stderr,
+    )
+    raise SystemExit(EX_TEMPFAIL)
+
+
+def pending_request_id(stderr: str) -> str | None:
+    """The id of the request agent-secrets left pending, from the lines it printed.
+
+    Both the line it prints before the wait and the one it prints when the wait runs out name it:
+    "agent-secrets: request <id> to <store> is (still) waiting for approval".
+    """
+    found = re.search(r"\brequest (\S+) to .* waiting for approval", stderr)
+    return found.group(1) if found else None
+
+
 def installation_token(owner: str, repo: str) -> str:
     """Mint an installation token for the review App, through the broker, or reuse a live one.
 
@@ -156,13 +204,19 @@ def installation_token(owner: str, repo: str) -> str:
     broker's wait for the human: on 2026-11-02 at 19:31Z one request waiting for an approval held
     the per-repo lock for more than nine minutes and stopped every other session's post. The
     cache lock covers only the token POST and the cache write, inside MINT_SCRIPT.
+
+    Neither wait outlives GRANT_WAIT_SECONDS counted from here: the wait on another session's
+    request ends at that deadline too, and this session's own request carries what is left of it
+    as secret-run's `--wait`. At the deadline the command exits EX_TEMPFAIL rather than holding
+    its caller for an approval that has not come (dispatch://INFRA-515).
     """
     path = cache_path(owner, repo)
     held = cached_token(path)
     if held:
         return held
+    budget = time.monotonic() + GRANT_WAIT_SECONDS
     asking = open(path.with_suffix(".asking"), "w")
-    deadline = time.monotonic() + ASK_WAIT_SECONDS
+    deadline = min(time.monotonic() + ASK_WAIT_SECONDS, budget)
     while True:
         try:
             fcntl.flock(asking, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -172,6 +226,9 @@ def installation_token(owner: str, repo: str) -> str:
             if held:
                 asking.close()
                 return held
+            if time.monotonic() >= budget:
+                asking.close()
+                pending_grant(owner, repo, None)
             if time.monotonic() >= deadline:
                 print(
                     f"post-review: another session's request for {TOKEN_SECRET} has waited more than"
@@ -184,12 +241,15 @@ def installation_token(owner: str, repo: str) -> str:
     if held:
         asking.close()
         return held
+    left = max(1, int(budget - time.monotonic()))
     run = subprocess.run(
         [
             "secret-run",
             "--register",
             "--reason",
             f"post-review {owner}/{repo}",
+            "--wait",
+            f"{left}s",
             "--github-owner",
             owner,
             "--github-repo",
@@ -208,6 +268,8 @@ def installation_token(owner: str, repo: str) -> str:
         text=True,
     )
     asking.close()
+    if run.returncode == EX_TEMPFAIL:
+        pending_grant(owner, repo, pending_request_id(run.stderr), run.stderr)
     if run.returncode != 0:
         die(f"could not mint a review App token:\n{run.stderr.strip()}", 1)
     printed = run.stdout.strip().splitlines()[-1] if run.stdout.strip() else ""
