@@ -403,6 +403,13 @@ compaction:
   modelThresholds:
     model-gateway-openai/openai/gpt-6.1-sol*: "f250000"
     model-gateway/openai/gpt-6.1-sol*: "f250000"
+    # TRANSITIONAL (2026-11-06): the 14:54Z provider rename moved these keys to model-gateway*, but
+    # machine-local config.local.yml files are gitignored and still route roles to the ossv-gateway*
+    # ids, so no threshold matched them and the long-context bound stopped applying. Measured in the
+    # gateway log: calls over 272K tokens were near zero until 11-05 14:00Z, then 1,000-1,700 an hour.
+    # Deleted WITH the aliases, never before them -- the same ordering mistake as the fallback chains.
+    ossv-gateway/openai/gpt-6.1-sol*: "f250000"
+    ossv-gateway-openai/openai/gpt-6.1-sol*: "f250000"
 advisor:
   enabled: true
 # omp's own interceptor stays on in this shared file: a session that predates the experiments
