@@ -761,31 +761,37 @@ class ASecondKillShowsBothPointsAndReadsNeither(unittest.TestCase):
         self.assertIn("unknown", WATCH.retry_line({"retry_of": of, "memory_peak_bytes": GIB}))
 
 
-class ASampledPeakIsNotASizeToBuyFrom(unittest.TestCase):
-    """On the gVisor build class the farm records memory_peak_kind: sampled.
+class ASampledPeakIsLabelledNotRefused(unittest.TestCase):
+    """A gVisor sampled peak is named, and the sizing is left in place.
 
-    What is established: the sampled figure is not the quantity the kernel enforces, because
-    runs on 2026-11-06 read above their own cgroup limits while never being killed. What is
-    NOT established is how far off it is -- an earlier 1.5-to-3.5x range was retracted by the
-    lane that produced it, and the one target measured both ways agreed within 2%. So the
-    advice refuses the number and names the route to a real one, and claims no factor.
+    Two claims against the sampled figure were made on 2026-11-06 and both were retracted by
+    the lanes that made them: a 1.5-to-3.5x gap against the kernel's peak, and "a sampled peak
+    exceeded its cgroup while the kernel never acted" -- the kernel had acted, in a third
+    record neither lane had read. The two pairs measured both ways agree within 1-2%, so
+    refusing to size would withhold advice from most gVisor kills on a claim that does not
+    hold. This watch refused for 45 minutes; these tests pin the reversal.
     """
 
     def found(self, kind: str) -> dict:
         return {"memory_peak_bytes": 33 * GIB, "memory_limit_bytes": 32 * GIB,
                 "memory_peak_kind": kind, "cpu_last_cores": 1.0, "cpu_limit_cores": 8}
 
-    def test_a_sampled_peak_withholds_the_size(self) -> None:
+    def test_a_sampled_peak_is_labelled_and_still_sized(self) -> None:
         advice = WATCH.memory_advice(self.found("sampled"))
-        self.assertIn("DO NOT SIZE FROM THIS PEAK", advice)
-        self.assertNotIn("RAISE MEMORY to", advice)
-        self.assertIn("memory_peak_kind: kernel", advice)
+        self.assertIn("SAMPLED figure", advice)
+        self.assertIn("RAISE MEMORY to", advice)
 
-    def test_it_claims_no_correction_factor(self) -> None:
-        """A factor would be used as one. None is established, so none may be stated."""
+    def test_the_label_names_the_retractions_rather_than_a_factor(self) -> None:
+        """A factor in a notice gets used as one, and none is established."""
         advice = WATCH.memory_advice(self.found("sampled"))
-        self.assertIn("CORRECTION FACTOR EXISTS", advice)
-        self.assertIn("retracted", advice)
+        self.assertIn("RETRACTED", advice)
+        self.assertIn("none is established", advice)
+
+    def test_a_kernel_peak_carries_no_label(self) -> None:
+        self.assertNotIn("SAMPLED figure", WATCH.memory_advice(self.found("kernel")))
+
+    def test_an_unrecorded_kind_carries_no_label(self) -> None:
+        self.assertNotIn("SAMPLED figure", WATCH.memory_advice(self.found(None)))
 
     def test_a_kernel_peak_is_sized_from_as_before(self) -> None:
         self.assertNotIn("DO NOT SIZE FROM THIS PEAK", WATCH.memory_advice(self.found("kernel")))

@@ -462,41 +462,42 @@ def script_error_advice(found: dict) -> str:
 
 
 def sampled_peak_advice(found: dict) -> str:
-    """A gVisor peak is not a size to buy from, and the reason is deliberately narrow.
+    """Label a gVisor sampled peak, and no longer refuse to size from it.
 
     On the gVisor `build` class the sandbox's cgroup has no `memory.peak`, so the farm records
-    `memory_peak_kind: sampled`. What is MEASURED about that figure (CI/CD lead, 2026-11-06,
-    openssl__client, identical work): the kernel peak runs 1.5 to 3.5x the sampled one. A size
-    taken as 1.3x a sampled peak therefore rests on a number that is wrong by an unknown factor
-    inside a 3.5x band, and most likely too small.
+    `memory_peak_kind: sampled`. Two claims were made about that figure on 2026-11-06 and both
+    were retracted by the lanes that made them: a 1.5-to-3.5x gap against the kernel's peak, and
+    "a sampled peak exceeded its cgroup while the kernel never acted" -- the kernel had acted,
+    in a third record (the nodes' failures.jsonl) that neither lane had read.
 
-    What is NOT claimed here: that the sampled value tracks the limit. That explanation was
-    offered and then withdrawn by its own author the same hour, because farm/20261106t022815z
-    read 29.13 GiB against a non-binding 112Gi limit. Two readings still fit the evidence --
-    a genuinely heavy target, or an instrument effect that bites only near the ceiling -- and
-    this advice does not choose between them. It only refuses to size from the figure.
+    What the measurements actually show: two pairs of the same work measured both ways agree
+    closely -- 29.13 GiB sampled against 29.66 kernel, and 11.76 and 11.52 against 11.88 and
+    11.89. So there is no evidence for refusing to size from a sampled peak, and refusing would
+    withhold the advice from most gVisor kills on a claim that does not hold. The notice says
+    what kind of figure it is and leaves the sizing in place; six paired probes are in flight
+    to settle whether the agreement holds in general.
     """
-    peak = found.get("memory_peak_bytes")
-    limit = found.get("memory_limit_bytes")
-    near = (" It read {} against a {} limit, {:.0%} of it.".format(
-        gib(peak), gib(limit), peak / limit) if peak and limit else "")
-    return ("DO NOT SIZE FROM THIS PEAK WITHOUT CHECKING IT: it is a SAMPLED figure, not the"
-            f" kernel's.{near} On the gVisor build class the sandbox's cgroup has no"
-            " memory.peak, and the sampled figure is not the quantity the kernel enforces: on"
-            " 2026-11-06 the OSS Verify curl lane recorded runs whose sampled peak sat above"
-            " their own memory limits while the kernel never acted -- 11.76 GB against a 10Gi"
-            " cgroup on a job that was not killed, with no oom event at all. A cgroup cannot be"
-            " exceeded without the kernel acting. HOW FAR OFF IT IS IS NOT KNOWN AND NO"
-            " CORRECTION FACTOR EXISTS: the one target measured both ways on the same day agreed"
-            " closely (29.13 GiB sampled against 29.66 GiB kernel), and an earlier 1.5-to-3.5x"
-            " range was retracted by the lane that produced it. So this figure may be right or"
-            " may be unrelated to what the kernel would charge. Run the same target once on a"
-            " class that records memory_peak_kind: kernel (build-nosandbox) and size at 1.3x"
-            " that. If the result still says sampled, the run did not do its job and its number"
-            " is not to be quoted.")
+    return ("This job's peak is a SAMPLED figure (gVisor build class), not the kernel's"
+            " memory.peak. Two pairs of identical work measured both ways agreed within about"
+            " 1-2% (29.13 GiB sampled against 29.66 kernel; 11.76 and 11.52 against 11.88 and"
+            " 11.89), so the size below is used as normal. Earlier claims of a 1.5-to-3.5x gap,"
+            " and that a sampled peak can exceed a cgroup the kernel never enforced, were both"
+            " RETRACTED by the lanes that made them on 2026-11-06. If this size proves wrong,"
+            " re-measure on a class that records memory_peak_kind: kernel rather than applying"
+            " any correction factor: none is established.")
 
 
 def memory_advice(found: dict) -> str:
+    """The sizing advice, with the sampled-peak label in front of it when one applies."""
+    if found.get("script_error"):
+        return script_error_advice(found)
+    advice = _memory_sizing(found)
+    if found.get("memory_peak_kind") == "sampled":
+        return sampled_peak_advice(found) + "\n" + advice
+    return advice
+
+
+def _memory_sizing(found: dict) -> str:
     """A sustained series climb withholds sizing. Otherwise serialise when many processes
     ran at once, or size at 1.3 x the farm's peak when one process was simply too big.
 
@@ -512,10 +513,6 @@ def memory_advice(found: dict) -> str:
     alone -- the single oversized step, and only then is a bigger pod right. That is weaker
     evidence than the per-process samples, and the wording says so.
     """
-    if found.get("script_error"):
-        return script_error_advice(found)
-    if found.get("memory_peak_kind") == "sampled":
-        return sampled_peak_advice(found)
     peak = found.get("memory_peak_bytes")
     limit = found.get("memory_limit_bytes")
     largest = found.get("largest_process_bytes")
