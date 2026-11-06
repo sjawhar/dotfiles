@@ -1552,14 +1552,6 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(self.received(clean), [ROCQ])
         self.assertEqual(self.received(leaky), [])
 
-    def test_a_plain_git_push_is_left_to_the_hook(self):
-        c = self.leak()
-        r = subprocess.run(["git", "push", "origin", f"{c}:refs/heads/x"], cwd=self.repo, env=self.env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("git shim:", r.stderr)
-        self.assertNotIn("LEAK CHECK", r.stderr)
-        self.assertEqual(self.received(c), [ROCQ])
-
     # A plain `git push` from a repository that sets its own core.hooksPath (dispatch://BET-706 R6, plan Slice 3): such
     # a repository's hooks directory overrides the global dispatcher, and no sweep may have put the leak-check wrapper
     # in it (a fresh clone of a project using husky or the pre-commit framework). In an agent session shims/git runs the
@@ -1850,6 +1842,99 @@ class JjPushLeakGateTest(unittest.TestCase):
     def test_an_empty_worktree_hooks_path_is_checked_by_the_shim(self):
         self.git("config", "extensions.worktreeConfig", "true")
         self.assert_empty_hooks_path_is_checked("--worktree")
+
+    # Round 6 (SRE, 2026-11-06 00:23Z): an agent box made before the dispatcher has its ~/.gitconfig bound to a deleted
+    # file and no ~/.local/share/public-leak-check-hooks, so neither the include nor the dispatcher reaches it; it sees
+    # only ~/.dotfiles/shims and the installed check. The shim then checks every agent-session plain push whose
+    # effective hooks directory has no executable wrapper or dispatcher entry. No global include here unless a test
+    # installs one: the test's HOME has no .gitconfig.
+    def fresh_clone(self) -> tuple[Path, Path]:
+        """A clone of the test repository whose only remote is ROCQ (through the sink), with an own pre-push in its
+        common hooks directory that records its calls; returns the clone and that log."""
+        clone = self.tmp / "clone"
+        subprocess.run(["/usr/bin/git", "clone", "-q", str(self.repo), str(clone)], env={**self.env, "GIT_ALLOW_PROTOCOL": "file"},
+                       check=True, capture_output=True)
+        for k, v in (("remote.origin.url", ROCQ), ("remote.origin.vcs", "sink")):
+            subprocess.run(["/usr/bin/git", "config", k, v], cwd=clone, env=self.env, check=True)
+        calls, _, _ = self.recording_hook(clone / ".git" / "hooks" / "pre-push", "own")
+        return clone, calls
+
+    def test_a_fresh_clone_without_the_dispatcher_is_checked_by_the_shim(self):
+        # (a) No hook of the leak check anywhere and no global include: one check per push, the leak refused with
+        # nothing at the receiver, the clean commit sent, and the clone's own pre-push run once, after the clean check.
+        leaky, clean = self.leak_and_clean()
+        clone, calls = self.fresh_clone()
+        self.assertNotEqual(subprocess.run(["/usr/bin/git", "config", "--get", "core.hooksPath"], cwd=clone, env=self.env).returncode, 0)
+        self.assert_checked_once_each(leaky, clean, cwd=clone)
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+
+    def test_a_checkout_with_no_hook_at_all_is_checked_by_the_shim(self):
+        # (a) The test checkout itself: no hook, no hooks path. Before round 6 the shim left this push to git, which ran
+        # nothing (the reversed test_a_plain_git_push_is_left_to_the_hook).
+        leaky, clean = self.leak_and_clean()
+        self.assert_checked_once_each(leaky, clean)
+
+    def test_with_the_global_dispatcher_the_shim_adds_no_check(self):
+        # (b) The same fresh clone with the dispatcher installed and included: the dispatcher checks, once per push;
+        # the shim sees the dispatcher's entry and adds nothing. The own pre-push runs once, after the clean check.
+        leaky, clean = self.leak_and_clean()
+        clone, calls = self.fresh_clone()
+        self.use_global_dispatcher()
+        self.assert_checked_once_each(leaky, clean, cwd=clone)
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+
+    def test_without_the_dispatcher_an_executable_wrapper_checks_alone(self):
+        # (c) The real wrapper in the common hooks directory, no dispatcher: the wrapper checks once, then its
+        # pre-push.local; the shim adds nothing.
+        leaky, clean = self.leak_and_clean()
+        calls, _ = self.installed_wrapper_in(self.repo / ".git" / "hooks")
+        self.assert_checked_once_each(leaky, clean)
+        self.assertEqual(self.lines(calls), [f"origin {ROCQ}"])
+
+    def test_without_the_dispatcher_a_non_executable_wrapper_is_checked_by_the_shim(self):
+        # git ignores the wrapper with its execute bits off, so the shim checks; pre-push.local does not run, as git
+        # would not run it without the wrapper.
+        leaky, clean = self.leak_and_clean()
+        calls, wrapper = self.installed_wrapper_in(self.repo / ".git" / "hooks")
+        wrapper.chmod(0o644)
+        self.assert_checked_once_each(leaky, clean)
+        self.assertEqual(self.lines(calls), [])
+
+    def test_a_fresh_clone_of_an_unguarded_repository_is_untouched(self):
+        # (d) The clone's only remote is private: the shim adds nothing, git pushes and runs the own pre-push, which
+        # sees none of the gate's configuration or variables.
+        self.git("remote", "set-url", "origin", PRIVATE)
+        leaky, _ = self.leak_and_clean()
+        clone, calls = self.fresh_clone()
+        subprocess.run(["/usr/bin/git", "config", "remote.origin.url", PRIVATE], cwd=clone, env=self.env, check=True)
+        checks = self.count_checks()
+        r = subprocess.run(["git", "push", "origin", f"{leaky}:refs/heads/x"], cwd=clone, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("git shim:", r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertEqual(self.lines(calls), [f"origin {PRIVATE}"])
+        self.assertEqual(self.lines(self.tmp / "logs" / "own.env"), ["|unset"])
+
+    def test_no_verify_on_a_fresh_clone_is_the_users_choice(self):
+        # (e) --no-verify: no check and no hook, as git does with that flag.
+        leaky, _ = self.leak_and_clean()
+        clone, calls = self.fresh_clone()
+        checks = self.count_checks()
+        self.keep_cache_fresh()
+        r = subprocess.run(["git", "push", "--no-verify", "origin", f"{leaky}:refs/heads/x"], cwd=clone, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.lines(checks), self.lines(calls)), ([], []))
+        self.assertIn(ROCQ, self.received(leaky))
+
+    def test_a_hooks_path_on_the_command_line_is_the_callers_choice(self):
+        # A caller's own `git -c core.hooksPath=...` is left as it is (scope `command`), as before.
+        leaky, _ = self.leak_and_clean()
+        checks = self.count_checks()
+        self.keep_cache_fresh()
+        r = subprocess.run(["git", "-c", f"core.hooksPath={self.tmp / 'none'}", "push", "origin", f"{leaky}:refs/heads/x"],
+                           cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lines(checks), [])
 
     def test_other_commands_are_untouched(self):
         self.leak()
