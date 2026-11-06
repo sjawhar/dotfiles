@@ -1381,6 +1381,65 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
         self.assertEqual(result.stdout, "REAL-GCLOUD-RAN\n")
         self.assertIn("gcloud shim: gcloud-drop-azure-credential: cannot change", result.stderr)
 
+    def record_greps(self) -> Path:
+        """A grep that notes its arguments and is then the real grep, ahead of the shim on PATH."""
+        log = Path(self.tmp.name) / "grep.log"
+        stub_dir = Path(self.tmp.name) / "grep-stub"
+        stub_dir.mkdir()
+        write_stub(stub_dir, "grep", f'printf "%s\\n" "$*" >>"{log}"\nexec /usr/bin/grep "$@"')
+        self.env["PATH"] = f"{stub_dir}:{self.env['PATH']}"
+        return log
+
+    def store_reads(self, log: Path) -> list[str]:
+        if not log.exists():
+            return []
+        return [line for line in log.read_text().splitlines() if "credentials.db" in line]
+
+    def set_azure_entry(self, present: bool) -> None:
+        db = sqlite3.connect(self.config / "credentials.db", isolation_level=None)
+        try:
+            if present:
+                db.execute("INSERT INTO credentials VALUES (?, ?)", (self.ACCOUNT, json.dumps(self.AZURE)))
+            else:
+                db.execute("DELETE FROM credentials WHERE account_id = ?", (self.ACCOUNT,))
+            db.execute("VACUUM")
+        finally:
+            db.close()
+
+    def test_an_unchanged_store_is_never_read_again(self) -> None:
+        """The grep opened the credential store before every gcloud call, which the CWS rule
+        theorem_gcloud_credential_read reported 109 times in a week (2026-10-30..11-06). A store
+        whose mtime, size and inode are the ones the last check saw is not opened at all."""
+        log = self.record_greps()
+        first = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
+        self.assertEqual((first.returncode, first.stdout), (0, "REAL-GCLOUD-RAN\n"), first.stderr)
+        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+        for run in range(3):
+            with self.subTest(run=run):
+                again = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
+                self.assertEqual((again.returncode, again.stdout), (0, "REAL-GCLOUD-RAN\n"), again.stderr)
+        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+
+    def test_a_changed_store_is_read_again_and_its_azure_entry_still_goes(self) -> None:
+        """What the marker remembers is one store's bytes. A store that changed after a check that
+        found no Azure entry is checked again, and the entry it gained is removed as before."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        self.set_azure_entry(False)
+        log = self.record_greps()
+        clean = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+
+        self.set_azure_entry(True)
+        changed = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        self.assertEqual(changed.stdout, "REAL-GCLOUD-RAN\n")
+        self.assertEqual(len(self.store_reads(log)), 2, self.store_reads(log))
+        self.assertIn(f"gcloud shim: removed the stored external_account credential of {self.ACCOUNT} (an Azure one)",
+                      changed.stderr)
+        self.assertEqual(self.rows("credentials.db", "credentials"), {"aws@x.iam.gserviceaccount.com", self.PERSON})
+
 
 class GcloudStorageParallelism(unittest.TestCase):
     """`gcloud storage` sizes its worker pool from the core count: 16 processes of 4 threads on a

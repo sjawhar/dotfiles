@@ -430,8 +430,16 @@ before handing the call to the real one.
   sami-rocqperf brought along: LINUX-1248, 2026-11-03) loses that entry before the call runs,
   through `scripts/gcloud-drop-azure-credential`, and gcloud then takes the VM account's token
   from the metadata server; the shim reports the removal on stderr. Off Google nothing changes,
-  and an Azure box pays no metadata lookup for it (`shims/tests/test_gcloud_shim_routing.py`,
-  `GcloudAzureCredentialOnGoogleVm`).
+  and an Azure box pays no metadata lookup for it. The store is opened only when it is not the
+  one the last check saw: its mtime, size and inode, which `stat` reads without opening it, are
+  kept in a marker under `$XDG_RUNTIME_DIR` (else `~/.cache`) per config dir, together with that
+  check's verdict, and an unchanged store reuses the verdict. The grep ran before every gcloud
+  call before, which the Datadog CWS rule `theorem_gcloud_credential_read` reported as a
+  credential-file read 109 times between 2026-10-30 and 2026-11-06, all of them this shim
+  (theorem-labs/agent-infra#2328 proposed excepting the rule instead; an `exec -a ""` caller can
+  hide an extra grep argument from argv parsing, so the exception was dropped and the reads
+  were). A store that changed, or one with no readable marker, is checked exactly as before
+  (`shims/tests/test_gcloud_shim_routing.py`, `GcloudAzureCredentialOnGoogleVm`).
   In an agent session the shim refuses, on every route, each call that writes or removes the
   well-known file: `auth application-default login|revoke`, and an `auth login` with
   `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,

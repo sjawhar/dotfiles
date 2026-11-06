@@ -819,9 +819,39 @@ route_get_credentials_kubeconfig() {
 # says it is one. On an Azure box the second check stops it, so no call there waits for the
 # metadata lookup. The removal's report goes to stderr; a failed removal is reported and the call
 # runs anyway, and gcloud then says what is wrong.
+#
+# The grep opens the credential store, which the Datadog CWS rule
+# theorem_gcloud_credential_read reports as a credential file read by another process: between
+# 2026-10-30 and 2026-11-06 it fired 109 times, all of them this grep, since it ran before every
+# gcloud call on the box. So the grep's verdict is remembered per config dir, keyed by the store's
+# identity and mtime (nanoseconds), size and inode, which `stat` reads from the inode without
+# opening the file. An unchanged store reuses the remembered verdict and nothing reads the file;
+# any difference, and a store with no marker, runs exactly what ran before and records the new
+# verdict. The marker lives in $XDG_RUNTIME_DIR, else ~/.cache: outside the config dir, which is
+# copied between machines and scanned as a credential store. A marker that cannot be read or
+# written only costs the grep, as before.
 AZURE_IMDS_TOKEN_PATH=/metadata/identity/oauth2/token
+
+# The marker file for a config dir's credential store, or nothing when there is nowhere to keep
+# one. The name is the dir's digest, so two dirs never share a marker and no path is leaked.
+azure_check_marker() {
+    local dir="$1" base digest
+    if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" ]]; then
+        base="${XDG_RUNTIME_DIR}/gcloud-shim"
+    elif resolve_user_home; then
+        base="${GCLOUD_USER_HOME}/.cache/gcloud-shim"
+    else
+        return 1
+    fi
+    digest="$(printf '%s' "$dir" | sha256sum 2>/dev/null)" || return 1
+    digest="${digest%% *}"
+    [[ -n "$digest" ]] || return 1
+    mkdir -p -m 700 "$base" 2>/dev/null || return 1
+    printf '%s/azure-check.%s\n' "$base" "$digest"
+}
+
 drop_azure_credential_on_google_vm() {
-    local dir dmi="" bin
+    local dir dmi="" bin store stamp marker remembered verdict
     if [[ -n "${CLOUDSDK_CONFIG:-}" ]]; then
         dir="$CLOUDSDK_CONFIG"
     elif resolve_user_home; then
@@ -829,8 +859,31 @@ drop_azure_credential_on_google_vm() {
     else
         return 0
     fi
-    [[ -f "$dir/credentials.db" ]] || return 0
-    grep -qaF "$AZURE_IMDS_TOKEN_PATH" "$dir/credentials.db" 2>/dev/null || return 0
+    store="$dir/credentials.db"
+    [[ -f "$store" ]] || return 0
+    stamp="$(stat -c '%y %s %i' -- "$store" 2>/dev/null)" || stamp=""
+    marker="$(azure_check_marker "$dir")" || marker=""
+    if [[ -n "$stamp" && -n "$marker" && -r "$marker" ]]; then
+        remembered="$(<"$marker")"
+        if [[ "$remembered" == "absent|$stamp" ]]; then
+            return 0
+        elif [[ "$remembered" == "present|$stamp" ]]; then
+            verdict=present
+        fi
+    fi
+    if [[ -z "${verdict:-}" ]]; then
+        if grep -qaF "$AZURE_IMDS_TOKEN_PATH" "$store" 2>/dev/null; then
+            verdict=present
+        else
+            verdict=absent
+        fi
+        if [[ -n "$stamp" && -n "$marker" ]]; then
+            printf '%s|%s\n' "$verdict" "$stamp" >"$marker.$$" 2>/dev/null &&
+                mv -f "$marker.$$" "$marker" 2>/dev/null ||
+                rm -f "$marker.$$" 2>/dev/null
+        fi
+    fi
+    [[ "$verdict" == present ]] || return 0
     if [[ -z "${GCE_METADATA_HOST:-}" ]]; then
         [[ -r /sys/class/dmi/id/product_name ]] && dmi="$(</sys/class/dmi/id/product_name)"
         [[ "$dmi" == "Google Compute Engine" ]] || return 0
