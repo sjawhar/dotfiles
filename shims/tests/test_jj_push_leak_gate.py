@@ -586,7 +586,14 @@ class JjPushLeakGateTest(unittest.TestCase):
         received there, and no leaked text named."""
         self.assertNotEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"error: LEAK CHECK: cannot read the visibility of {slug}", r.stderr)
-        self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}", r.stderr)
+        # The gate's own refusal line, the last one and the one a reader keeps, has to say WHY rather than point at
+        # the lines above it: the check prints one advisory line per unused reviewed row (37 of them on 2026-11-06),
+        # so a reader who takes the end of the output sees the advice and not the cause. That day it sent six agents
+        # to the allow-list for about an hour while the first line said gh could not read the repository.
+        shim = [ln for ln in r.stderr.splitlines() if ln.startswith("error: git shim: the public leak check refused")]
+        self.assertTrue(shim, r.stderr)
+        self.assertIn(f"refused this jj push to {url}", shim[0])
+        self.assertIn(f"cannot read the visibility of {slug}", shim[0])
         self.assertNotIn("Take out", r.stderr)
         self.assertNotIn(url, self.received(commit))
 

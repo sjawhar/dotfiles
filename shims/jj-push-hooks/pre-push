@@ -14,7 +14,8 @@
 #   runs after a clean check with the same arguments and stdin, without the shim's -c or that variable, exactly as
 #   git would have run it;
 # - every line of a refusal starts with `error: `, the only git output jj still shows under --quiet, so the lines
-#   naming the commit and the text that matched always reach the person who pushed.
+#   naming the commit and the text that matched always reach the person who pushed, and the gate's own last line
+#   repeats the check's decisive line rather than pointing at the ones above it (see the reason block below).
 # Every other hook name in this directory is a link to ./hook, which runs the hook git would have run without the gate.
 set -uo pipefail
 own="${GIT_SHIM_OWN_HOOKS-}"
@@ -58,6 +59,26 @@ if ((crc == 0)); then
     exec "$own/pre-push" "$@" < /dev/null
 fi
 while IFS= read -r line; do printf 'error: %s\n' "$line"; done <<< "$out" >&2
-((crc != 3)) || refuse "the public leak check refused this $what to $url: the lines above name the commit and the text that matched, or say why the check could not read the target. Nothing was pushed."
+# The check's own decisive line, lifted into the refusal. Its output can be dozens of advisory
+# lines -- one `reviewed row unused in this push` per unused row -- with the line that actually
+# decided it first. A reader who takes the end of the output, with `tail` or by reading the
+# refusal itself, sees only the advice. On 2026-11-06 that cost six agents about an hour and four
+# discarded theories: the first line said `cannot read the visibility of <repo>` because `gh` was
+# not on PATH, and the 37 lines after it sent every reader to the allow-list. The refusal is the
+# one line every reader sees, so it carries the reason rather than pointing above itself.
+reason=
+while IFS= read -r line; do
+    case "$line" in
+        *"reviewed row unused"*) continue ;;
+        "LEAK CHECK: "*) reason="${line#LEAK CHECK: }"; break ;;
+    esac
+done <<< "$out"
+if [[ -n "$reason" ]]; then
+    # Not every line of the check ends in a full stop, and this one runs into the sentence after it.
+    case "$reason" in *[.!?]) ;; *) reason="$reason." ;; esac
+else
+    reason="the lines above name the commit and the text that matched, or say why the check could not read the target."
+fi
+((crc != 3)) || refuse "the public leak check refused this $what to $url: $reason Nothing was pushed."
 refuse "the public leak check could not finish (exit $crc), so this $what to $url is refused. Nothing was pushed." \
     "Nothing is wrong with your commits: the check never passed or refused them. The check: $chk"
