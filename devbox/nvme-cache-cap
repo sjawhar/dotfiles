@@ -54,6 +54,18 @@ size_of() {
     printf '%s\n' "${out%%$'\t'*}"
 }
 
+# What this pass actually removed, summed over the caches it touched. Each figure is one
+# directory's own before-and-after, never a df delta around the run: the disks here are shared
+# with seventy lanes, so a df delta measures them, not this. A dry run reclaims nothing.
+RECLAIMED=0
+took() { # took DIR BYTES_BEFORE
+    local now=0 d
+    [[ -e "$1" ]] && now="$(size_of "$1" 2>/dev/null || echo 0)"
+    d=$(($2 - now))
+    ((d > 0)) && RECLAIMED=$((RECLAIMED + d))
+    return 0
+}
+
 report() { # report NAME DIR SIZE CAP
     echo "nvme-cache-cap: $1 $2 is $3 bytes, cap $4"
 }
@@ -80,6 +92,7 @@ if [[ -d "$uv_dir" && ("$uv_dir" == "$root"/* || "$uv_dir" == "$scratch"/*) ]]; 
         else
             echo "nvme-cache-cap: uv $uv_dir was $size bytes, over the cap of $uv_cap; pruned; now $after bytes"
         fi
+        took "$uv_dir" "$size"
     fi
 fi
 
@@ -104,6 +117,7 @@ if [[ -d "$cargo_dir" && "$cargo_dir" == "$root"/* ]]; then
         else
             rm -rf -- "${targets[@]}"
             echo "nvme-cache-cap: cargo $cargo_dir was $size bytes, over the cap of $cargo_cap; removed ${targets[*]}; now $(size_of "$cargo_dir") bytes"
+            took "$cargo_dir" "$size"
         fi
     fi
 fi
@@ -123,6 +137,7 @@ if [[ -d "$modcache_dir" && "$modcache_dir" == "$root"/* ]]; then
         # go clean reads the module in its working directory; / has none.
         (cd / && GOMODCACHE="$modcache_dir" go clean -modcache)
         echo "nvme-cache-cap: gomodcache $modcache_dir was $size bytes, over the cap of $modcache_cap; cleaned; now $(size_of "$modcache_dir") bytes"
+        took "$modcache_dir" "$size"
     fi
 fi
 
@@ -145,6 +160,7 @@ cap_cache() { # cap_cache NAME VAR DIR CAP [CLEANER...]
         else
             rm -rf -- "$dir"
             echo "nvme-cache-cap: $name $dir was $size bytes, over the cap of $cap, and has no cleaner of its own; removed the directory"
+            took "$dir" "$size"
         fi
     elif [[ -n "$dry" ]]; then
         echo "nvme-cache-cap: $name $dir is $size bytes, over the cap of $cap; would run $var=$dir $*"
@@ -154,6 +170,7 @@ cap_cache() { # cap_cache NAME VAR DIR CAP [CLEANER...]
     else
         env "$var=$dir" "$@" >/dev/null
         echo "nvme-cache-cap: $name $dir was $size bytes, over the cap of $cap; ran $*; now $(size_of "$dir" 2>/dev/null || echo 0) bytes"
+        took "$dir" "$size"
     fi
 }
 
@@ -173,5 +190,7 @@ cap_cache puppeteer PUPPETEER_CACHE_DIR "${PUPPETEER_CACHE_DIR:-$root/cache/pupp
 cap_cache pip PIP_CACHE_DIR "${PIP_CACHE_DIR:-$scratch/cache/pip}" "$pip_cap" pip cache purge
 # `bun pm cache rm` removes the install cache directory, bunx packages included.
 cap_cache bun BUN_INSTALL_CACHE_DIR "${BUN_INSTALL_CACHE_DIR:-$root/cache/bun}" "$bun_cap" bun pm cache rm
+
+echo "nvme-cache-cap: reclaimed-bytes: $RECLAIMED"
 
 exit "$status"

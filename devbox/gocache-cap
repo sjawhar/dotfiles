@@ -26,6 +26,7 @@ cap="${GOCACHE_CAP_BYTES:-50000000000}"
 
 if [[ ! -d "$dir" ]]; then
     echo "gocache-cap: $dir is absent; nothing to cap"
+    echo "gocache-cap: reclaimed-bytes: 0"
     exit 0
 fi
 
@@ -50,6 +51,7 @@ size_of() {
 size="$(size_of "$dir")"
 if ((size <= trim_at)); then
     echo "gocache-cap: $dir is $size bytes, at or under the trim size of $trim_at"
+    echo "gocache-cap: reclaimed-bytes: 0"
     exit 0
 fi
 
@@ -72,6 +74,7 @@ done
 trimmed="$(size_of "$dir")"
 if ((trimmed <= cap)); then
     echo "gocache-cap: $dir was $size bytes, over the trim size of $trim_at; deleted entries unused for $trim_age min; now $trimmed bytes"
+    echo "gocache-cap: reclaimed-bytes: $((size - trimmed))"
     exit 0
 fi
 
@@ -80,4 +83,9 @@ cd /
 for cache in "${caches[@]}"; do
     GOCACHE="$cache" go clean -cache
 done
-echo "gocache-cap: $dir was $size bytes, $trimmed after the trim, over the cap of $cap; cleaned ${caches[*]}; now $(size_of "$dir") bytes"
+final="$(size_of "$dir")"
+echo "gocache-cap: $dir was $size bytes, $trimmed after the trim, over the cap of $cap; cleaned ${caches[*]}; now $final bytes"
+# What a caller may count as reclaimed, for box-cleanup: this cache's own before-and-after, not
+# a df delta taken around the run. `du -sb` is apparent size, so this is bytes of file content
+# removed from this directory, which is the honest thing a cache cleaner can say about itself.
+echo "gocache-cap: reclaimed-bytes: $((size - final))"
