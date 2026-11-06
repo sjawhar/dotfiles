@@ -510,6 +510,31 @@ def store_warning(found: dict) -> str | None:
             " sizing is fixed (the CI/CD lead's, bin/ossv-job-farm).")
 
 
+def owner_line(found: dict) -> str:
+    """Who this notice is for, and why that is a lane rather than an agent.
+
+    `theorem.dev/omp-session` and `ossv-owner` both carry the SESSION id, and every agent of a
+    session shares it, so the owner names a lane and not the agent that submitted the job. On
+    2026-11-06 the OSS Verify curl lane had to broadcast to five live agents to find whose
+    `farm/20261106t020425z-1af893` was, and the first to answer ruled itself out by its KIND
+    (`n6-unit` against the job's `rocq-kit`), which was on the job all along. So the notice says
+    it: the kind and the unit are what tell the agents of a lane apart.
+    """
+    owner, kind, unit = found.get("owner"), found.get("kind"), found.get("unit")
+    if kind or unit:
+        which = (f" This job is the agent running ossv-kind={kind or 'unlabelled'}, unit"
+                 f" {unit or 'unlabelled'}: an agent on another kind or unit rules itself out"
+                 f" from this line alone, without asking anyone.")
+    else:
+        which = (" The job carries neither ossv-kind nor ossv-unit, so nothing here tells one"
+                 " agent from another; whoever submitted it has to answer.")
+    if not owner:
+        return ("OWNER NOT LABELLED: the job carries no theorem.dev/omp-session, so this notice"
+                " could not be routed to a lane at all." + which)
+    return (f"OWNER {owner} IS A SESSION, NOT AN AGENT -- every agent of that session shares the"
+            f" label, so this names a lane.{which}")
+
+
 def message(found: dict, call: dict | None = None) -> str:
     """The whole message as the lane receives it."""
     call = call or verdict(found)
@@ -522,7 +547,7 @@ def message(found: dict, call: dict | None = None) -> str:
     head = (f"FARM JOB KILLED: {found.get('run')}"
             f" ({found.get('unit')}, {found.get('kind')})"
             f" at {found.get('finished_at')}, {found.get('reason')}, exit {found.get('exit_code')}.")
-    lines = [head]
+    lines = [head, owner_line(found)]
 
     if call["resource"] == "memory":
         lines.append(f"MEMORY was at its bound: {memory}; {disk}. ({call['why']}.)")

@@ -633,5 +633,40 @@ class AJobWhoseMemoryIsUnboundedIsNotToldToBuyMore(unittest.TestCase):
                         self.assertNotIn("Series checked", text)
 
 
+class TheOwnerLineNamesALaneAndThenTheAgent(unittest.TestCase):
+    """The owner label is a session id, so it routes to a lane of several agents.
+
+    On 2026-11-06 the curl lane got a notice labelled with its session and had to broadcast to
+    five live agents to find whose job it was; the kind on the job already ruled four of them
+    out. The line has to say both things, or a correct notice still costs a round.
+    """
+
+    def test_it_says_the_owner_is_a_session_and_gives_the_agent_its_kind(self) -> None:
+        line = WATCH.owner_line({"owner": "01a19324", "kind": "rocq-kit", "unit": "curl__fuzz_bufq"})
+        self.assertIn("01a19324", line)
+        self.assertIn("SESSION, NOT AN AGENT", line)
+        self.assertIn("ossv-kind=rocq-kit", line)
+        self.assertIn("curl__fuzz_bufq", line)
+
+    def test_without_a_kind_or_unit_it_claims_no_way_to_tell_the_agents_apart(self) -> None:
+        line = WATCH.owner_line({"owner": "01a19324"})
+        self.assertIn("SESSION, NOT AN AGENT", line)
+        self.assertIn("nothing here tells one agent from another", line)
+        self.assertNotIn("rules itself out", line)
+
+    def test_an_unlabelled_job_is_not_called_a_session(self) -> None:
+        line = WATCH.owner_line({"kind": "rocq-kit", "unit": "curl__fuzz_bufq"})
+        self.assertIn("OWNER NOT LABELLED", line)
+        self.assertNotIn("IS A SESSION", line)
+
+    def test_the_whole_notice_carries_it_under_the_headline(self) -> None:
+        found = {"run": "farm/1af893", "unit": "curl__fuzz_bufq", "kind": "rocq-kit",
+                 "owner": "01a19324", "reason": "OOMKilled", "exit_code": 137,
+                 "finished_at": "2026-11-06T02:04:25Z", "memory_peak_bytes": 33 * GIB,
+                 "memory_limit_bytes": 32 * GIB, "disk_peak_bytes": GIB,
+                 "disk_request_bytes": 50 * GIB}
+        self.assertEqual(WATCH.message(found).splitlines()[1], WATCH.owner_line(found))
+
+
 if __name__ == "__main__":
     unittest.main()
