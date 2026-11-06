@@ -438,6 +438,12 @@ class MarketplacePlugins(Harness):
         installed["plugins"]["dev-infra@verification-skills"][0]["version"] = "1.0.0"
         self.installed_path.write_text(json.dumps(installed))
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text(self.lock_v1)
+        # This run is FOLLOW.main() in a child, on the real clock and the real --slow-sweep-interval:
+        # a slow-root pass ended just now, so it is not overdue and the run does not leave its tools
+        # step to the next run (dotfiles-follow.md step 7).
+        data = self.state_data()
+        data["slow_sweep_at"] = time.time()
+        self.state.write_text(json.dumps(data))
         mise = self.home.parent / "bin/mise"
         original_mise = mise.read_text()
         marker = self.home.parent / "mise-recovery.pid"
@@ -477,6 +483,10 @@ class MarketplacePlugins(Harness):
                     pass
             mise.write_text(original_mise)
 
+        # Back on the harness's clock (now = 1_000_600), where that real time is in the future.
+        data = self.state_data()
+        data["slow_sweep_at"] = 999_000.0
+        self.state.write_text(json.dumps(data))
         checkpoint = self.state_data().get("tools_ok_head")
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
         self.assertEqual(self.version("dev-infra"), "2.0.0")

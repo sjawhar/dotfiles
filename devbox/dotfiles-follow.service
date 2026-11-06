@@ -12,8 +12,14 @@ IOSchedulingClass=idle
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
 Environment=MISE_TRUSTED_CONFIG_PATHS=%h/.dotfiles
-# Its steps' own limits add up to under 20 min (fetch 120 s, merge 120 s, mise install 600 s,
-# the pin check 180 s, one hook sweep pass 120 s), so a run is killed here only when one of them
-# hangs past its own. Under two periods, so unit-health-watch never reads a run as one that never ends.
+# dotfiles-follow takes this limit as its --run-limit (default 1170, keep the two equal) and keeps a
+# monotonic deadline from its start: 1170 s less 60 s for the state write and up to three alerts
+# (scripts/dotfiles-follow.md step 7). Its hook sweep pass never runs past that deadline: a
+# slow-root pass (1000 s) starts only when the time left holds all of it, a fast-root pass is cut to
+# the time left (at most 420 s), and none starts with under 30 s left. The steps before the sweep
+# have only their own limits (fetch 120 s, merge 120 s, and when the tools step runs, mise install
+# 600 s, Bun 600 s, marketplace 300 s, the pin check 180 s), which together can pass 1170 s: a run
+# whose tools steps all run to their limits is killed here, before its sweep. Under two of the
+# timer's 10-minute periods, so unit-health-watch never reads a run as one that never ends.
 TimeoutStartSec=1170
 ExecStart=%h/.dotfiles/scripts/dotfiles-follow

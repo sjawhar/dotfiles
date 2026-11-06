@@ -33,10 +33,18 @@ What one run does:
      Lock entries without an installed marketplace record are skipped; install.sh bootstraps them.
   7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
-     devbox/sami-devbox-provision's step prepush installs). It installs the pre-push hook in every
-     checkout of a public repository under its roots that lacks it; a checkout it cannot hook, a
-     checkout it deferred to a later pass (its cap on GitHub visibility lookups, dispatch://BET-706),
-     a pass that does not end within --sweep-timeout, or a missing sweep is a condition.
+     devbox/sami-devbox-provision's step prepush installs) over its fast roots, under
+     --sweep-timeout; at most once per --slow-sweep-interval, and not in a run whose tools step
+     ran, a pass over its fast and slow roots together instead, under --slow-sweep-timeout. Every
+     pass ends before the run's deadline (--run-limit less the time kept for the state and
+     alerts): a slow-root pass starts only with its whole budget left, a fast-root pass is cut to
+     the time left, and none runs with under 30 s left. A slow-root pass overdue by twice its
+     interval is made before the tools step, which that run leaves to the next, at most once per
+     interval (slow_sweep_priority_at, written before the pass starts). It installs the
+     pre-push hook in every checkout of a public repository under those roots that lacks it; a
+     checkout it cannot hook, a checkout it deferred to a later pass (its cap on GitHub visibility
+     lookups, dispatch://BET-706), a pass that does not end within its timeout, a pass that could
+     not run for lack of time, or a missing sweep is a condition.
   8. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
      When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
@@ -55,6 +63,7 @@ import argparse
 import fcntl
 import getpass
 import json
+import math
 import os
 import re
 import signal
@@ -539,57 +548,145 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
 # ------------------------------------------------------------------------------- pre-push hooks
 
 # One pass of sweep-hooks.sh: the script loops for ever, so its code up to the loop (`i=0`) is
-# loaded and `sweep` runs once over the script's own roots, with its log in a temp file.
-SWEEP_ONCE = (
-    'eval "$(sed "/^i=0\\$/,\\$d" "$1")" && here=$2 && log=$3'
-    ' && sweep "${fast_roots[@]}" "${slow_roots[@]}"'
-)
+# loaded and `sweep` runs once over the script's own fast roots, or its fast and slow roots, with
+# its log in a temp file.
+SWEEP_ONCE = 'eval "$(sed "/^i=0\\$/,\\$d" "$1")" && here=$2 && log=$3 && sweep '
+SWEEP_ROOTS = {"fast": '"${fast_roots[@]}"', "slow": '"${fast_roots[@]}" "${slow_roots[@]}"'}
+SWEEP_KIND = {"fast": "fast-root pass (fast_roots only)", "slow": "slow-root pass (fast_roots and slow_roots)"}
 SWEEP_SUMMARY_RE = re.compile(r" sweep \[[^\]]*\]: (\d+) checkouts.*, (\d+) installed, (\d+) failed$")
 # The sweep of dispatch://BET-706 also counts the checkouts it left for a later pass (its cap on GitHub
 # visibility lookups per pass), just before the installed count; an older sweep has no such count.
 SWEEP_DEFERRED_RE = re.compile(r", (\d+) deferred, \d+ installed, \d+ failed$")
 
 
-def sweep_hooks(options: argparse.Namespace) -> str:
-    """"" when one sweep pass left every public checkout with the pre-push hook, else why.
+# The end of a run's time that is kept for what comes after the sweep: the state write and the
+# alerts. A run sends at most three messages (new, escalated, cleared), and each goes to the
+# box-health role and, only when that publish fails, to the SRE session (tell_box_health), each
+# request bounded by --http-timeout: 3 x 2 x 8 s = 48 s by default. STATE_RESERVE is the state
+# write (a temp file, two fsyncs and a rename, with no timeout of their own) and the interpreter's
+# start before the run's clock starts.
+STATE_RESERVE = 12.0
+# A fast-root pass with less time than this left is not started (and reported as not run).
+MIN_SWEEP_SECONDS = 30.0
+
+
+def monotonic() -> float:
+    """The run's clock (its own name, so the tests can move it without touching subprocess's)."""
+    return time.monotonic()
+
+
+def alert_reserve(options: argparse.Namespace) -> float:
+    """Seconds kept at the end of the run for the state write and the alerts (STATE_RESERVE)."""
+    return 3 * 2 * options.http_timeout + STATE_RESERVE
+
+
+def epoch_age(value: object, now: float) -> float | None:
+    """Seconds since VALUE, an epoch the state file holds, or None when it is no such time: missing,
+    not a number (a bool included), negative, later than now (a clock set back since it was
+    written), or NaN or infinite (Python's JSON reads and writes both). The bounds come first: an
+    integer too large for a float (JSON allows 10**400) compares exactly, where math.isfinite would
+    raise OverflowError, and NaN fails no comparison, so isfinite runs on floats only, last."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > now:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return now - value
+
+
+def slow_sweep_age(data: dict, now: float) -> float | None:
+    """Seconds since the last slow-root pass ended with its summary line (slow_sweep_at), or None."""
+    return epoch_age(data.get("slow_sweep_at"), now)
+
+
+def slow_sweep_due(options: argparse.Namespace, data: dict, now: float) -> bool:
+    """True when no slow-root pass has ended with its summary line in the last --slow-sweep-interval."""
+    age = slow_sweep_age(data, now)
+    return age is None or age >= options.slow_sweep_interval
+
+
+def slow_sweep_overdue(options: argparse.Namespace, data: dict, now: float) -> bool:
+    """True when no slow-root pass has ended with its summary line in twice --slow-sweep-interval,
+    or ever."""
+    age = slow_sweep_age(data, now)
+    return age is None or age >= 2 * options.slow_sweep_interval
+
+
+def slow_sweep_takes_priority(options: argparse.Namespace, data: dict, now: float) -> bool:
+    """True when this run leaves its tools step to the next run to make a slow-root pass: one is
+    overdue, and no run has done so in the last --slow-sweep-interval (slow_sweep_priority_at,
+    validated as slow_sweep_at is). The second rule keeps a slow-root pass that never completes
+    (killed, broken, without its summary line, its script missing) from taking every run's tools
+    step: slow_sweep_at, written only on completion, would stay overdue for ever."""
+    if not slow_sweep_overdue(options, data, now):
+        return False
+    age = epoch_age(data.get("slow_sweep_priority_at"), now)
+    return age is None or age >= options.slow_sweep_interval
+
+
+def sweep_hooks(options: argparse.Namespace, kind: str, timeout: float) -> tuple[str, bool]:
+    """("" when one sweep pass left every public checkout with the pre-push hook, else why; whether
+    the pass ended with its summary line).
 
     A checkout the pass deferred (`DEFERRED <path>`, counted in the summary) is not known to have
     the hook, so such a pass is incomplete coverage, reported like a failed one: the next pass,
     with the visibility answers this one kept, reaches it.
 
-    Bounded by --sweep-timeout: on timeout the pass's whole process group is killed. The budget
-    has to fit a WHOLE pass, because the sweep walks its roots in a stable order: a pass always
-    killed at the same point never reaches the checkouts after it, so a new public checkout late
-    in that order would never be hooked, and the only sign would be this condition. A full pass
-    took about 20 s over 148 public checkouts on 2026-11-03 and 3 min 25 s over 249 on
-    2026-11-04 at idle priority, which is what the first 120 s default could not fit. On
-    2026-11-06 the sweep's own `find` alone took 434.7 s over 24,884 `.git` entries at load 191
-    with a cold directory cache (a warm pass right after it took 146.4 s), and passes were killed
-    at the 420 s cap at 07:42:43Z and 08:02:43Z. A raised 870 s cap was tried from 08:27Z and a
-    pass was still killed at it at 10:50:16Z, while its `find` sat in uninterruptible IO wait
-    beside 31 other processes in a stall that wedged six sessions' shells (the SRE, 11:48Z). A
-    longer cap gave the walk more time on a stalled disk and finished nothing more, so the cap
-    is 420 s again until the sweep's walk is cheaper (dispatch://BET-706); then it becomes twice
-    that measured pass. The unit allows 1170 s in all and its timer waits 10 minutes after each
-    run ends, so a long pass delays nothing.
+    KIND "fast" sweeps the script's fast_roots; "slow" sweeps its fast_roots and slow_roots
+    together. The pass is bounded by TIMEOUT, and on it the pass's whole process group is killed.
+    run_once chooses both. A budget has to fit a WHOLE pass, because the sweep walks its roots in a
+    stable order: a pass always killed at the same point never reaches the checkouts after it, so a
+    new public checkout late in that order would never be hooked, and the only sign would be this
+    condition. A full pass took about 20 s over 148 public checkouts on 2026-11-03 and 3 min 25 s
+    over 249 on 2026-11-04 at idle priority, which is what the first 120 s default could not fit.
+
+    Why the slow roots are swept at most once an hour (--slow-sweep-interval): on sami-devbox
+    /mnt/nvme/sami and /mnt/durable/sami hold about 20,000 checkouts and millions of directories,
+    and every run walked them. On 2026-11-06 the old sweep's cold walk of all roots took 434.7 s at
+    load 191 (24,884 `.git` entries; a warm pass right after it took 146.4 s). Passes were killed at
+    the 420 s cap (07:42:43Z, 08:02:43Z) and at a raised 870 s cap (10:50:16Z), and at 11:48Z the
+    walk's `find` sat in uninterruptible IO wait beside 31 other processes in a disk stall that
+    wedged six sessions' shells (the SRE). A longer cap on every run gave the walk more time on a
+    stalled disk and finished nothing more. The timer starts a run 10 minutes after the previous
+    one STARTED (OnUnitActiveSec=10min), and at once after a run longer than that: from 10:35Z to
+    12:02Z each run took 14 min 32 s and the next began the second it ended, so the walk of all
+    roots ran almost without a break. So every run sweeps the fast roots, where sessions'
+    checkouts are made, under --sweep-timeout (420 s), and a run at most once per
+    --slow-sweep-interval (3600 s) sweeps both kinds of root under --slow-sweep-timeout (1000 s).
+    The time is recorded only when a slow pass ends with its summary line, so a killed one is tried
+    again on the next run.
+
+    How each pass fits the unit's TimeoutStartSec=1170 (--run-limit): run_once keeps a monotonic
+    deadline, its start plus --run-limit less alert_reserve (60 s by default), and no pass runs
+    past it. A slow-root pass starts only when the time left holds its whole --slow-sweep-timeout,
+    so it is never a shortened walk; otherwise the run makes a fast-root pass, bounded by the
+    smaller of --sweep-timeout and the time left, or none, reported, when under MIN_SWEEP_SECONDS
+    are left. A run that ran the tools step makes no slow-root pass. A slow-root pass that is
+    overdue (none in twice the interval, or ever) is made before the tools step, which that run
+    leaves to the next, so failing or frequent tools runs cannot keep the slow roots unswept; and a
+    run does that at most once per interval (slow_sweep_takes_priority), so a slow-root pass that
+    never completes cannot keep the tools step from running either.
     """
+    label = SWEEP_KIND[kind]
     script = options.hooks_dir / "sweep-hooks.sh"
     if not script.is_file():
         return (
-            f"{display_path(script)} is missing, so no checkout's pre-push hook was checked or installed."
+            f"{display_path(script)} is missing, so no checkout's pre-push hook was checked or installed"
+            f" (this run's {label})."
             " Install it from sami-rocqperf: devbox/sami-devbox-provision --only prepush."
-        )
+        ), False
     with tempfile.TemporaryDirectory(prefix="dotfiles-follow-sweep-") as tmp:
         sweep_log = Path(tmp) / "sweep.log"
-        argv = ["nice", "-n", "19", "ionice", "-c", "3", "bash", "-c", SWEEP_ONCE, "_",
+        argv = ["nice", "-n", "19", "ionice", "-c", "3", "bash", "-c", SWEEP_ONCE + SWEEP_ROOTS[kind], "_",
                 str(script), str(options.hooks_dir), str(sweep_log)]
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, start_new_session=True)
         except OSError as error:
-            return f"the hook sweep could not start: {error}"
+            return f"the hook sweep's {label} could not start: {error}", False
         try:
-            out, _ = proc.communicate(timeout=options.sweep_timeout)
+            out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(proc.pid, 9)
@@ -597,37 +694,38 @@ def sweep_hooks(options: argparse.Namespace) -> str:
                 pass
             proc.communicate()
             return (
-                f"one pass of {display_path(script)} did not end in {options.sweep_timeout:.0f}s and was killed,"
+                f"one {label} of {display_path(script)} did not end in {timeout:.0f}s and was killed,"
                 " so some checkouts may lack the pre-push hook."
-            )
+            ), False
         lines = sweep_log.read_text().splitlines() if sweep_log.exists() else []
     summary = next((m for m in map(SWEEP_SUMMARY_RE.search, reversed(lines)) if m), None)
     if proc.returncode != 0 or summary is None:
-        return f"one pass of {display_path(script)} exited {proc.returncode} without its summary line:\n{tail((out or '') + chr(10).join(lines))}"
+        return (f"one {label} of {display_path(script)} exited {proc.returncode} without its summary line:\n"
+                f"{tail((out or '') + chr(10).join(lines))}"), False
     for line in lines:
         if " INSTALLED " in line:
             log(f"hooks: {line}")
     deferred = [line.split(" DEFERRED ", 1)[1] for line in lines if " DEFERRED " in line]
     counted = SWEEP_DEFERRED_RE.search(summary.string)
     n_deferred = max(int(counted.group(1)) if counted else 0, len(deferred))
-    log(f"hooks: {summary.group(1)} public checkout(s), {summary.group(2)} installed, {summary.group(3)} failed,"
+    log(f"hooks ({kind}): {summary.group(1)} public checkout(s), {summary.group(2)} installed, {summary.group(3)} failed,"
         f" {n_deferred} deferred")
     failed = [line.split(" FAILED ", 1)[1] for line in lines if " FAILED " in line]
     why = []
     if failed or summary.group(3) != "0":
         why.append(
-            f"the hook sweep could not install the leak check's pre-push hook in {summary.group(3)} public checkout(s):\n"
+            f"the hook sweep's {label} could not install the leak check's pre-push hook in {summary.group(3)} public checkout(s):\n"
             + "\n".join(f"    {path}" for path in failed[:LIST_LIMIT])
             + f"\n  Install it by hand: {display_path(options.hooks_dir / 'install-prepush-hook.sh')} <checkout>."
         )
     if n_deferred:
         why.append(
-            f"the hook sweep deferred {n_deferred} public or unreadable checkout(s) to a later pass (its cap on GitHub"
+            f"the hook sweep's {label} deferred {n_deferred} public or unreadable checkout(s) to a later pass (its cap on GitHub"
             " visibility lookups per pass), so they are not known to have the leak check's pre-push hook yet:\n"
             + "\n".join(f"    {path}" for path in deferred[:LIST_LIMIT])
             + "\n  The next pass reaches them; this clears when a pass defers none."
         )
-    return "\n".join(why)
+    return "\n".join(why), True
 
 
 # ------------------------------------------------------------------------------- state
@@ -636,14 +734,20 @@ def sweep_hooks(options: argparse.Namespace) -> str:
 class State:
     """The one file this tool owns: its open conditions and its last run.
 
-    Opened under an exclusive, non-blocking flock for the whole run, so a hand run and the timer
-    never both act on the checkout; the loser skips its period.
+    The run holds an exclusive, non-blocking flock on a separate, stable lock file (<state>.lock)
+    for its whole length, so a hand run and the timer never both act on the checkout; the loser
+    skips its period. The state itself is replaced whole on each commit: written to a temporary
+    file in the same directory, flushed and fsynced, renamed over the state path (os.replace), and
+    the directory fsynced. So a reader, or a run killed mid-write, sees the complete old state or
+    the complete new one, never a part. The lock is not on the state file because that file's
+    inode changes at every commit: a second run would lock the new inode while the first still
+    held the old one.
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = open(path, "a+")  # noqa: SIM115 -- held open for the run's flock
+        self.handle = open(path.with_name(path.name + ".lock"), "a")  # noqa: SIM115 -- held open for the run's flock
         try:
             fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.locked = True
@@ -651,18 +755,30 @@ class State:
             self.locked = False
             self.data = {}
             return
-        self.handle.seek(0)
         try:
-            self.data = json.loads(self.handle.read() or "{}")
-        except ValueError:
+            self.data = json.loads(path.read_text() or "{}")
+        except (OSError, ValueError):
             self.data = {}
 
     def commit(self) -> None:
-        self.handle.seek(0)
-        self.handle.truncate()
-        json.dump(self.data, self.handle, indent=1, sort_keys=True)
-        self.handle.flush()
-        os.fsync(self.handle.fileno())
+        fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(self.data, handle, indent=1, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def close(self) -> None:
         try:
@@ -675,9 +791,10 @@ class State:
 
 
 def assess_and_follow(
-    repo: Path, options: argparse.Namespace, state: State
+    repo: Path, options: argparse.Namespace, state: State, deadline: float
 ) -> tuple[dict[str, str], set[str], dict]:
-    """Do the run's work. Returns ({kind: why} found now, kinds judged this run, facts)."""
+    """Do the run's work, with DEADLINE (monotonic) the end of the run's time before its reserve.
+    Returns ({kind: why} found now, kinds judged this run, facts)."""
     data = state.data
     found: dict[str, str] = {}
     judged: set[str] = {"fetch", "dirty", "not-ff"}
@@ -824,20 +941,51 @@ def assess_and_follow(
                 log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
                 head = facts["head"]
 
-    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
+    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD. A
+    # run on which a slow-root pass takes priority (slow_sweep_takes_priority: overdue, and no run
+    # has left its tools for one in the last interval), and the time left still holds that whole
+    # pass, leaves the tools step to the next run and makes the slow-root pass instead
+    # (sweep_hooks): otherwise a tools step that fails, or runs after every fast-forward, would keep
+    # the slow roots unswept for as long as it does. That run's time is on disk before the pass
+    # starts, so a pass that never completes, even one whose whole run is killed, takes at most one
+    # run's tools step per interval.
     if head == target and "dirty" not in found and (
         facts["fast_forwarded"] or data.get("tools_ok_head") != head
     ):
-        judged.add("tools")
-        why = install_tools(repo, options)
-        if why:
-            found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
+        now = time.time()
+        if slow_sweep_takes_priority(options, data, now) and deadline - monotonic() >= options.slow_sweep_timeout:
+            facts["tools_deferred"] = True
+            data["slow_sweep_priority_at"] = now
+            state.commit()
+            log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
         else:
-            data["tools_ok_head"] = head
+            judged.add("tools")
+            why = install_tools(repo, options)
+            if why:
+                found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
+            else:
+                data["tools_ok_head"] = head
     return found, judged, facts
 
 
+def choose_sweep(options: argparse.Namespace, data: dict, judged: set[str], now: float,
+                 deadline: float) -> tuple[str, float]:
+    """(the kind of hook sweep pass this run makes, its budget in seconds; 0 for none).
+
+    A slow-root pass when one is due, no tools step ran this run, and the time left before DEADLINE
+    holds its whole --slow-sweep-timeout: never a shortened walk of the slow roots. Otherwise a
+    fast-root pass bounded by the smaller of --sweep-timeout and the time left, or none when the
+    time left is under MIN_SWEEP_SECONDS."""
+    left = deadline - monotonic()
+    if "tools" not in judged and slow_sweep_due(options, data, now) and left >= options.slow_sweep_timeout:
+        return "slow", options.slow_sweep_timeout
+    return "fast", min(options.sweep_timeout, left) if left >= MIN_SWEEP_SECONDS else 0.0
+
+
 def run_once(options: argparse.Namespace) -> int:
+    # The run's deadline: systemd kills the unit at --run-limit (TimeoutStartSec) after its start;
+    # the last alert_reserve seconds of that are kept for the state write and the alerts.
+    deadline = monotonic() + options.run_limit - alert_reserve(options)
     now = time.time()
     repo = options.repo
     envoy = Envoy(timeout=options.http_timeout)
@@ -847,9 +995,23 @@ def run_once(options: argparse.Namespace) -> int:
         return 0
     data = state.data
     incidents: dict = data.setdefault("incidents", {})
-    found, judged, facts = assess_and_follow(repo, options, state)
-    judged.add("hooks")
-    why = sweep_hooks(options)
+    found, judged, facts = assess_and_follow(repo, options, state, deadline)
+    sweep_kind, budget = choose_sweep(options, data, judged, now, deadline)
+    if budget:
+        why, completed = sweep_hooks(options, sweep_kind, budget)
+    else:
+        why, completed = (
+            f"no hook sweep pass ran: this run had {max(0.0, deadline - monotonic()):.0f}s left before its"
+            f" {options.run_limit:.0f}s limit, less {alert_reserve(options):.0f}s kept for the state and alerts,"
+            f" under the {MIN_SWEEP_SECONDS:.0f}s a fast-root pass (fast_roots only) needs. The next run sweeps."
+        ), False
+    if sweep_kind == "slow" and completed:
+        data["slow_sweep_at"] = time.time()
+    hooks_incident = incidents.get("hooks")
+    # A fast-root pass does not reach the slow roots, so it cannot clear a condition a slow-root
+    # pass found; the next slow-root pass judges it.
+    if sweep_kind == "slow" or not hooks_incident or hooks_incident.get("pass") != "slow":
+        judged.add("hooks")
     if why:
         found["hooks"] = why
 
@@ -874,6 +1036,8 @@ def run_once(options: argparse.Namespace) -> int:
                 f" (opened {iso(incident['opened_at'])})."
             )
             incidents.pop(kind)
+    if "hooks" in found:
+        incidents["hooks"]["pass"] = "slow" if sweep_kind == "slow" or (hooks_incident or {}).get("pass") == "slow" else "fast"
 
     host = socket.gethostname().split(".")[0]
     display = display_path(repo)
@@ -974,7 +1138,10 @@ def main() -> int:
         default=Path.home() / ".local/share/public-leak-check-hooks",
         help="where step prepush put the leak-check tag's sweep-hooks.sh (default ~/.local/share/public-leak-check-hooks)",
     )
-    parser.add_argument("--sweep-timeout", type=float, default=420.0, help="one hook sweep pass, killed after this many seconds (default 420; a longer cap only lengthened passes stuck on a stalled disk)")
+    parser.add_argument("--sweep-timeout", type=float, default=420.0, help="one fast-root hook sweep pass, killed after this many seconds (default 420; a longer cap only lengthened passes stuck on a stalled disk)")
+    parser.add_argument("--slow-sweep-interval", type=float, default=3600.0, help="sweep the slow roots too at most once per this many seconds, counted from the last slow-root pass that ended with its summary line (default 3600)")
+    parser.add_argument("--slow-sweep-timeout", type=float, default=1000.0, help="one hook sweep pass over the fast and slow roots, killed after this many seconds; started only when the run has this long left before its deadline (default 1000)")
+    parser.add_argument("--run-limit", type=float, default=1170.0, help="seconds the whole run may take, the unit's TimeoutStartSec; no hook sweep pass runs past it less the time kept for the state and alerts (default 1170)")
     parser.add_argument("--http-timeout", type=float, default=8.0)
     parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
     options = parser.parse_args()
