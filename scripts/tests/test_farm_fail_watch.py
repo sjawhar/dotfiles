@@ -230,7 +230,7 @@ class TheCoresFallbackWhenTheLogHasNoProcesses(unittest.TestCase):
         _, _, text = self.curl()
         self.assertIn("SERIALISE, probably", text)
         self.assertIn("no per-process samples in this job's log", text)
-        self.assertIn("cpu_last_cores 29.34 of 31 cores", text)
+        self.assertIn("cpu_peak 29.82 of 31 cores", text)
         self.assertIn("fewer at once at the same limit", text)
         self.assertNotIn("--memory", text)
 
@@ -242,13 +242,26 @@ class TheCoresFallbackWhenTheLogHasNoProcesses(unittest.TestCase):
         self.assertIn("Confirm from the next run's per-process samples", text)
 
     def test_one_process_alone_is_the_case_a_bigger_pod_fixes(self) -> None:
-        _, _, text = self.curl(cpu_last_cores=1.02)
+        _, _, text = self.curl(cpu_peak=1.02, cpu_last_cores=1.02)
         self.assertIn("RAISE MEMORY to --memory 74Gi", text)   # 1.3 x 56.8 GiB
         self.assertIn("this looks like one process alone", text)
         self.assertNotIn("SERIALISE", text)
 
+    def test_a_job_that_ran_wide_and_wound_down_is_width_not_one_process(self) -> None:
+        """CURL, 2026-11-06: both of that day's kills read `cores peak 4.00 of 4` with
+        `cpu_last_cores 1.00`, and the last sample called them "one process alone -- only a
+        bigger pod fixes it". The fix is `-j fewer`; CURL repeated the wrong conclusion to
+        their lane and retracted it fifteen minutes later. The peak is the reading that
+        answers "were many processes running when the total reached the limit?"."""
+        _, _, text = self.curl(cpu_peak=4.0, cpu_last_cores=1.0, cpu_limit_cores=4.0)
+        self.assertIn("SERIALISE, probably", text)
+        self.assertIn("cpu_peak 4.00 of 4 cores", text)
+        self.assertIn("fewer at once at the same limit", text)
+        self.assertNotIn("one process alone", text)
+        self.assertNotIn("--memory", text)
+
     def test_cores_in_between_settle_nothing_and_say_so(self) -> None:
-        _, _, text = self.curl(cpu_last_cores=12.0)
+        _, _, text = self.curl(cpu_peak=12.0, cpu_last_cores=12.0)
         self.assertIn("neither the parallel case nor one process alone", text)
         self.assertIn("serialise test is unsettled", text)
 

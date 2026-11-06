@@ -74,7 +74,8 @@ MARGIN = 1.3
 # once, and serialising is the fix, not memory.
 SERIALISE_SHARE = 0.5
 # The memory case's fallback when the sampler recorded no per-process memory (CURL,
-# 2026-11-04 21:25Z). `cpu_last_cores` at the last sample before the kill, against the job's
+# 2026-11-04 21:25Z). The job's CPU peak -- not the last sample, which reads 1.00 for a job
+# that ran wide and wound down before the kill -- against the job's
 # core count: at or above this share of it, many processes were running when the total
 # reached the limit -- the parallel case. farm/20261104t204327z-bda302 read 29.336 of 31.0
 # cores (95%) with a 56.8 GiB peak at its 56Gi limit: 29 processes of about 2 GiB each.
@@ -577,17 +578,28 @@ def _memory_sizing(found: dict) -> str:
     processes, and
     a job that dies between two samples leaves none -- the log of
     farm/20261104t204327z-bda302 (killed at 56Gi, 21:22:12Z) was ten lines with no
-    per-process memory in it at all. So when it is missing, `cpu_last_cores` at the last
-    sample stands in (CURL, 2026-11-04 21:25Z): near the job's core count, many processes
-    were running when the total reached the limit -- the parallel case, whose answer is
-    fewer at once at the same limit; near 1, the others had finished and one process was
+    per-process memory in it at all. So when it is missing, the job's CPU PEAK stands in
+    (CURL, 2026-11-04 21:25Z; corrected from the last sample to the peak 2026-11-06): near the
+    job's core count, many processes were running when the total reached the limit -- the
+    parallel case, whose answer is fewer at once at the same limit; near 1, one process was
     alone -- the single oversized step, and only then is a bigger pod right. That is weaker
     evidence than the per-process samples, and the wording says so.
     """
     peak = found.get("memory_peak_bytes")
     limit = found.get("memory_limit_bytes")
     largest = found.get("largest_process_bytes")
-    cores = found.get("cpu_last_cores")
+    # The serialise test reads the CPU PEAK, not the last sample. `cpu_last_cores` is one
+    # reading taken at the end, so a job that ran four workers and wound down to one before the
+    # kill reads 1.00 and was called "one process alone -- only a bigger pod fixes it", when the
+    # truth is width and the fix is `-j fewer`. CURL hit this on both of their 2026-11-06 kills
+    # (95bd3f and 5de4a4, each `cores peak 4.00 of 4` against `cpu_last_cores 1.00`), repeated
+    # the wrong conclusion to their lane and had to retract it fifteen minutes later. The peak
+    # is the only one of the two that answers "were many processes running when the total
+    # reached the limit?", which is the question the test is asking.
+    cores = found.get("cpu_peak")
+    cores_from = "cpu_peak"
+    if cores is None:
+        cores, cores_from = found.get("cpu_last_cores"), "cpu_last_cores at the last sample"
     core_count = found.get("cpu_limit_cores") or found.get("cpu_limit") or found.get("cpu")
     shape = found.get("memory_shape") or {"status": "unknown", "reason": "series not read"}
     if shape["status"] == "unbounded":
@@ -641,8 +653,8 @@ def _memory_sizing(found: dict) -> str:
                  " with the sampler's record kept and size from that peak at 1.3 x.")
                 + (unbounded or "") + shape_note)
 
-    weaker = ("no per-process samples in this job's log; from cpu_last_cores"
-              f" {cores:.2f} of {float(core_count):.0f} cores at the last sample"
+    weaker = (f"no per-process samples in this job's log; from {cores_from}"
+              f" {cores:.2f} of {float(core_count):.0f} cores"
               if cores is not None and core_count else None)
     if weaker and cores >= PARALLEL_SHARE * float(core_count):
         return (f"SERIALISE, probably: {weaker}, this looks like the parallel case -- many"
@@ -674,8 +686,9 @@ def _memory_sizing(found: dict) -> str:
                    " which for a nested container is not this pod's limit. Read that"
                    " container's own memory.max.")
     else:
-        advice += (" The largest single process was not recorded and the last sample has no"
-                   " cpu_last_cores, so the serialise test could not be applied.")
+        advice += (" The largest single process was not recorded and the job has neither a CPU"
+                   " peak nor a last-sample core count, so the serialise test could not be"
+                   " applied.")
     return advice + (unbounded or "") + shape_note
 
 
