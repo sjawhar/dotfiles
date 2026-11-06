@@ -284,9 +284,11 @@ class Driver:
         own stream when the project has exactly one. A claim a person holds is left out: executors are agent sessions."""
         out: list[tuple[str, str, str]] = []
         live, meta = data["live"], data["meta"]
-        name = lambda a: a.get("origin", {}).get("session_title") or live.get(a["id"]) or a["id"][:8]  # noqa: E731
+        # A session is named by its whole id: eight hex characters are not unique in this fleet (01a16a9e is both the
+        # task-making and the Rocq speed lead, 2026-11-05), so a prefix in a drive line can name the wrong executor.
+        name = lambda a: a.get("origin", {}).get("session_title") or live.get(a["id"]) or a["id"]  # noqa: E731
         add = lambda sid, label, why: (  # noqa: E731
-            out.append((sid, label or sid[:8], why))
+            out.append((sid, label or sid, why))
             if sid and sid not in NOT_LEADS and not any(c[0] == sid for c in out) else None)
         if w.author and w.author.get("kind") == "session":
             add(w.author["id"], name(w.author), "you opened this ask")
@@ -324,7 +326,7 @@ class Driver:
                 continue
             lead = st.get("lead") or {}
             if lead.get("session") and lead["session"] not in found:
-                found[lead["session"]] = (lead["session"], lead.get("title") or lead["session"][:8], key)
+                found[lead["session"]] = (lead["session"], lead.get("title") or lead["session"], key)
         return list(found.values())
 
     @staticmethod
@@ -353,7 +355,7 @@ class Driver:
             state = liveness.state(sid)
             if state in ("running", "paused"):
                 return (sid, label, why), state
-            passed.append(f"{label} ({sid[:8]}) is not listening on Envoy and has no pane on this box")
+            passed.append(f"{label} ({sid}) is not listening on Envoy and has no pane on this box")
         if not passed:
             passed.append(f"no session opened it, no session claims the issue, and no stream of {project} names a "
                           "lead")
@@ -383,7 +385,7 @@ class Driver:
             else None
         if rec is not None and due is not None and now <= due:
             at = rec["attempts"][-1]["at"]
-            return (f"drive: {rec['executor_name']} ({rec['executor'][:8]}) was sent this {at[11:16]}Z, "
+            return (f"drive: {rec['executor_name']} ({rec['executor']}) was sent this {at[11:16]}Z, "
                     f"acknowledgement due {due:%H:%M}Z, in {_minutes(due - now)}")
         if rec is not None and due is not None:
             out["PAST-ACK"].append((w.key, f"{w.key} {w.kind} {w.node[:8]}: no reply in its thread "
@@ -405,7 +407,7 @@ class Driver:
         self._record(w, found, new_due, now, why="", delivered=delivered)
         where = "" if state == "running" else f", {state}: the message waits for it"
         how = "would send" if self.dry_run else ("sent" if delivered else f"NOT DELIVERED ({err})")
-        return (f"drive {attempt}: {label} ({sid[:8]}){where}; {how}; acknowledge by {iso(new_due)}")
+        return (f"drive {attempt}: {label} ({sid}){where}; {how}; acknowledge by {iso(new_due)}")
 
     def _send(self, w: Wait, sid: str, text: str, attempt: int) -> tuple[bool, str]:
         self.sent.append((w.rid, sid, text))

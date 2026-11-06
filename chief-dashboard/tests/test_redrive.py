@@ -68,7 +68,7 @@ def test_an_answered_ask_goes_to_the_session_that_asked_with_a_time_to_answer_by
     assert "https://dispatch.test/issues/BET-1/asks/q1" in body
     assert "Acknowledge by 2026-10-25T13:00:00Z, in 1h 0m" in body
     assert "1. that you have it," in body and "3. when it is done." in body
-    assert drive_of(lines) == [f" 1: PIPE: task pipeline ({LIVE[:8]}); sent; acknowledge by 2026-10-25T13:00:00Z"]
+    assert drive_of(lines) == [f" 1: PIPE: task pipeline ({LIVE}); sent; acknowledge by 2026-10-25T13:00:00Z"]
     rows = redrive.Ledger.load(tmp_path / "redrive.json").rows
     assert rows["BET-1|ask|q1"]["due"] == "2026-10-25T13:00:00Z"
     assert rows["BET-1|ask|q1"]["attempts"] == [
@@ -85,7 +85,7 @@ def test_a_row_is_driven_once_inside_its_time_and_again_past_it_and_the_count_is
 
     inside = run(api, driver(tmp_path, sent), now=NOW + timedelta(minutes=30))
     assert len(sent) == 1, "a second run inside the time must not send again"
-    assert drive_of(inside) == [f": PIPE ({LIVE[:8]}) was sent this 12:00Z, acknowledgement due 13:00Z, in 30m"]
+    assert drive_of(inside) == [f": PIPE ({LIVE}) was sent this 12:00Z, acknowledgement due 13:00Z, in 30m"]
     assert "0 PAST-ACK" in inside[-1]
 
     past = run(api, driver(tmp_path, sent), now=NOW + timedelta(minutes=95))
@@ -129,7 +129,7 @@ def test_a_person_is_never_an_executor(tmp_path):
     assert [s["to"] for s in sent] == [LEAD]
     assert "you lead stream BET-59, which BET-1 belongs to" in sent[0]["message"]
     assert "sami@theorem.dev" not in sent[0]["message"]
-    assert drive_of(lines) == [f" 1: FRAC ({LEAD[:8]}); sent; acknowledge by 2026-10-25T13:00:00Z"]
+    assert drive_of(lines) == [f" 1: FRAC ({LEAD}); sent; acknowledge by 2026-10-25T13:00:00Z"]
 
 
 def test_the_claim_holder_takes_it_when_no_session_opened_the_ask(tmp_path):
@@ -160,7 +160,7 @@ def test_a_parked_legion_row_goes_to_its_controller_and_to_no_other_lead(tmp_pat
     coach = {"BET-59": {"project": "BET", "lead": {"title": "SPEEDCOACH", "session": LEAD}}}
     only_coach = run(api, driver(tmp_path, sent, panes={}), streams=coach)
     assert sent == [], "a stream coach is not asked to run somebody's Legion tree"
-    assert "Legion architect · BET-1 (01a1dead) is not listening on Envoy" in found(only_coach, "NO-EXECUTOR")[0]
+    assert f"Legion architect · BET-1 ({DEAD}) is not listening on Envoy" in found(only_coach, "NO-EXECUTOR")[0]
 
     both = dict(coach, **{"BET-83": {"project": "BET", "lead": {"title": "Legion controller · BET",
                                                                 "session": controller}}})
@@ -188,7 +188,7 @@ def test_a_paused_session_keeps_its_row_and_the_registry_alone_never_decides(tmp
     lines = run(api, d)
 
     assert [s["to"] for s in sent] == [DEAD], "a paused session is alive and keeps the row"
-    assert drive_of(lines) == [f" 1: PAUSED: a lane ({DEAD[:8]}), paused: the message waits for it; sent; "
+    assert drive_of(lines) == [f" 1: PAUSED: a lane ({DEAD}), paused: the message waits for it; sent; "
                                "acknowledge by 2026-10-25T13:00:00Z"]
 
 
@@ -204,7 +204,7 @@ def test_a_session_with_no_pane_is_passed_over_and_is_never_called_dead(tmp_path
     api2 = answered(author=session(DEAD, "LANE: an unlisted lane"))
     alone = run(api2, driver(tmp_path / "b", Sent(), panes={}))
     why = found(alone, "NO-EXECUTOR")[0]
-    assert "LANE: an unlisted lane (01a1dead) is not listening on Envoy and has no pane on this box" in why
+    assert f"LANE: an unlisted lane ({DEAD}) is not listening on Envoy and has no pane on this box" in why
     # It says what was checked, never that the session is gone for good, and never that it should be restarted.
     assert not re.search(r"\b(dead|gone|wedged|restart\w*)\b", why, re.I)
 
@@ -230,7 +230,7 @@ def test_a_dry_run_names_the_executor_and_sends_and_records_nothing(tmp_path):
 
     assert sent == [], "a dry run sends nothing"
     assert not (tmp_path / "redrive.json").exists(), "a dry run records nothing"
-    assert drive_of(lines) == [f" 1: PIPE ({LIVE[:8]}); would send; acknowledge by 2026-10-25T13:00:00Z"]
+    assert drive_of(lines) == [f" 1: PIPE ({LIVE}); would send; acknowledge by 2026-10-25T13:00:00Z"]
 
 
 def test_a_row_that_stopped_waiting_closes_its_record(tmp_path):
@@ -253,7 +253,7 @@ def test_a_hub_failure_is_reported_on_the_row_and_the_run_goes_on(tmp_path):
 
     api = answered(author=session(LIVE, "PIPE"))
     lines = run(api, driver(tmp_path, refuse))
-    assert drive_of(lines) == [f" 1: PIPE ({LIVE[:8]}); NOT DELIVERED (hub down); acknowledge by "
+    assert drive_of(lines) == [f" 1: PIPE ({LIVE}); NOT DELIVERED (hub down); acknowledge by "
                                "2026-10-25T13:00:00Z"]
 
 
@@ -273,7 +273,7 @@ def test_an_open_ask_waiting_on_an_agent_is_driven_too(tmp_path):
     lines = run(api, driver(tmp_path, sent))
     assert [s["to"] for s in sent] == [LIVE]
     assert "This has waited 2h 0m for an agent" in sent[0]["message"]
-    assert drive_of(lines) == [f" 1: PIPE ({LIVE[:8]}); sent; acknowledge by 2026-10-25T13:00:00Z"]
+    assert drive_of(lines) == [f" 1: PIPE ({LIVE}); sent; acknowledge by 2026-10-25T13:00:00Z"]
 
 
 @pytest.mark.parametrize(("screen", "state"), [("the agent is working", "running"), ("  P A U S E D  ", "paused")])
