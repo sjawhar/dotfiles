@@ -259,6 +259,32 @@ def resolve_tq() -> str:
     return shutil.which("tq") or str(Path.home() / ".local/bin/tq")
 
 
+def local_newest(root: Path | None = None) -> float | None:
+    """The newest mtime among this host's own session files, or None when there are none.
+
+    The lag that matters is the gap between what this host has PRODUCED and what the store
+    holds -- not the age of the store's newest entry. Those differ whenever a host stops
+    producing: on 2026-11-06 sami-rocqperf had had no live session since 2026-11-04T23:54:59Z,
+    every one of its 35,898 session files was already loaded (the importer's own count: 0 new,
+    0 grown, 0 batches), and this watch still said STILL BEHIND and grew the number every ten
+    minutes. A retired host would have alarmed for ever, and the only way to stop it was the
+    pause file -- which silences a real lag just as well.
+    """
+    root = root or Path.home() / ".omp/agent/sessions"
+    newest: float | None = None
+    try:
+        for path in root.rglob("*.jsonl"):
+            try:
+                at = path.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or at > newest:
+                newest = at
+    except OSError:
+        return None
+    return newest
+
+
 def store_sql(host: str, timeout: float) -> str:
     # The newest entry ignores rows stamped more than 5 min ahead of the store's clock, so one
     # session file with a wrong clock cannot hide the lag. loads.loaded_at is not Nullable: its
@@ -613,9 +639,13 @@ class Run:
 
     def newest_text(self) -> str:
         newest = self.reading.get("newest")
+        produced = self.reading.get("local_newest")
         if newest is None:
             return "no entry from this host in the store"
-        return f"newest entry {iso(newest)}, {age(self.lag)} old"
+        text = f"newest entry {iso(newest)}, {age(self.now - newest)} old"
+        if produced is not None:
+            text += f"; this host's newest session byte {iso(produced)}"
+        return text + f"; unimported {age(self.lag)}"
 
     # -- the store did not answer
 
@@ -660,7 +690,18 @@ class Run:
     def judge_lag(self, reading: dict) -> None:
         self.reading = reading
         newest = reading.get("newest")
-        self.lag = math.inf if newest is None else max(0.0, self.now - newest)
+        produced = reading.get("local_newest")
+        # The gap between what this host has PRODUCED and what the store holds. Measuring the
+        # wall-clock age of the store's newest entry instead reads an idle host as a broken
+        # importer, and the number grows for ever because nothing will ever refresh it.
+        if newest is None:
+            self.lag = math.inf
+        elif produced is None:
+            # No session file to compare against: fall back to the old reading rather than
+            # report zero, since "no files" is also what an unreadable sessions directory says.
+            self.lag = max(0.0, self.now - newest)
+        else:
+            self.lag = max(0.0, produced - newest)
         state = self.state
         episode = state.get("episode")
         if self.lag <= self.bar:
@@ -669,7 +710,7 @@ class Run:
             if episode and episode.get("told_at"):
                 self.add(
                     "caught-up",
-                    f"TRANSCRIPT STORE CAUGHT UP for {self.host}: newest entry {age(self.lag)} old,"
+                    f"TRANSCRIPT STORE CAUGHT UP for {self.host}: {age(self.lag)} unimported,"
                     f" after {age(self.now - episode['since'])} over the {self.options.lag_min:g} min bar.",
                     [],
                 )
@@ -873,6 +914,13 @@ def run_once(
         run.store_failed(str(error))
     else:
         run.store_answered()
+        # Only this machine's own session files answer for this machine. With --host naming
+        # another host, the local files belong to someone else and the gap is meaningless:
+        # measured 2026-11-06 18:12Z, `--host sami-rocqperf` run from sami-devbox read
+        # devbox's newest byte (18:12Z) against rocqperf's newest entry and called it 42.3 h
+        # unimported. Fall back to the age reading there, which is at least about the right host.
+        if host == socket.gethostname():
+            reading["local_newest"] = local_newest()
         run.judge_lag(reading)
     took = time.monotonic() - started
 
