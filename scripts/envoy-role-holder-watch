@@ -2901,6 +2901,43 @@ def move_claim(session: str, transcript: str = "") -> str:
     return ""
 
 
+# agentbox-run's own end line, verbatim from two panes on 2026-11-06:
+#   ... agentbox-c63e8d4dca13: omp (pid 1621) exited after 20732s (exit code 0, signal none); the box ends
+#   ... agentbox-57dd6193d84d: omp (pid 2184) exited after 67631s (exit code 137, signal SIGKILL); the box ends
+# Both halves are read: a lane killed by earlyoom reports 137/SIGKILL and must still alert.
+BOX_EXIT_RE = re.compile(
+    r"omp \(pid \d+\) exited after \S+ \(exit code (-?\d+), signal (\S+?)\); the box ends"
+)
+
+
+@bounded_step("the pane's box-exit line")
+def box_exit_code(pane_id: str) -> tuple[int, str] | None:
+    """(exit code, signal) agentbox printed for this pane's omp, or None if it printed none.
+
+    The LAST such line only: a pane that ran several boxed sessions holds one per session, and
+    the one that matters is the end of the most recent. A capture that fails, or a pane whose
+    scrollback no longer holds the line, returns None and the pane is judged by everything else.
+
+    -J joins wrapped lines. Without it tmux returns the line in terminal-width pieces and this
+    never matches: the first attempt at this check read `omp (pid 1621) exited` and `exit code 0`
+    as two lines and found nothing.
+    """
+    try:
+        out = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-J", "-t", pane_id, "-S", "-200"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    found = BOX_EXIT_RE.findall(out.stdout)
+    if not found:
+        return None
+    code, signal = found[-1]
+    return int(code), signal
+
+
 @bounded_step("the pane's release check")
 def pane_release(record: dict, session: str | None, transcript: str) -> str:
     """Why a pane whose omp is gone is NOT at a shell in the sense this check alerts on, or "".
@@ -3294,6 +3331,25 @@ def check_panes(options: argparse.Namespace, state: State, envoy: Envoy, session
             )
             if incident:
                 clear(key, incident, "its owner marks this pane @agent_oneshot: a one-shot omp that exits by design")
+            continue
+        # The box says how its omp ended, in the pane, and a clean end is not an incident. On
+        # 2026-11-06 pane %1907 alerted at 20:23Z while its own last line read
+        #   agentbox-...: omp (pid 1621) exited after 20732s (exit code 0, signal none); the box ends
+        # and its issue (LINUX-1288) was done: the lane had finished, and two leads each spent a
+        # round trip reading a pane to find that out. The transcript tests above miss this
+        # because a boxed session's exit is recorded by the box, not as a session_exit this host
+        # can read. Only 0 with no signal is release: pane %37 on the same day ended
+        # `exit code 137, signal SIGKILL`, which is a lane earlyoom killed and is exactly what
+        # this watch is for.
+        ended = box_exit_code(pane["pane_id"])
+        if ended and ended == (0, "none"):
+            log_change(
+                state, logged, "box-exit-clean",
+                f"pane {pane['pane_id']} {where}: at a shell, its box reports omp exit code 0"
+                " with no signal; the lane finished",
+            )
+            if incident:
+                clear(key, incident, "its box reports omp exited with code 0 and no signal: the lane finished")
             continue
         # A pane whose session was seen running in a process outside it is no longer that lane's
         # pane: the lane went elsewhere, and where it runs is watched there. Until omp runs in
