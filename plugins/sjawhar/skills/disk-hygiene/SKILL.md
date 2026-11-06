@@ -1,11 +1,20 @@
 ---
 name: disk-hygiene
-description: Use when a shared dev box is low on disk or RAM or `df` far exceeds what known work explains, on load spikes with D-state processes, when agent sessions pile up workspaces, worktrees, docker images, build cache or temp dirs, and to clean up after yourself. Triggers - disk full, ENOSPC, stale worktrees, missing git worktree entry, docker prune, buildx cache, /tmp full, io pressure, jj op store growth.
+description: Use when a shared dev box is low on disk or RAM or `df` far exceeds what known work explains, on load spikes with D-state processes, when agent sessions pile up workspaces, worktrees, docker images, build cache or temp dirs, and to clean up after yourself. Triggers - disk full, ENOSPC, stale worktrees, missing git worktree entry, docker prune, buildx cache, /tmp full, io pressure, jj op store growth, a shell where every command times out.
 ---
 
 # Disk hygiene
 
 Reasons: `references/reasons.md`.
+
+## When a shell hangs
+
+A shell where every command times out, even `echo`, is usually a stalled filesystem, not a broken shell: a process in uninterruptible IO wait (D state) on /mnt/nvme or /mnt/durable blocks any fork whose working directory is on the stalled mount, so the shell is fine and the mount is not. Probe in two seconds before you conclude the shell is dead:
+
+- `timeout 2 true` - can the shell fork at all? If this hangs, the shell itself cannot fork and the filesystem is not the cause.
+- `timeout 2 ls -d <cwd>` - is that filesystem the stalled one?
+
+If the probes hang, wait and re-probe rather than rebuild the shell or work around it; the stall recovers on its own.
 
 ## Safety rules (your own paths too)
 
