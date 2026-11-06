@@ -38,7 +38,8 @@
 #
 # Overrides, for a test against a scratch tree: BOX_CLEANUP_STATE, BOX_CLEANUP_LOG,
 # BOX_CLEANUP_ENVOY_URL, BOX_CLEANUP_STEP_TIMEOUT, BOX_CLEANUP_DF (a command printing df's
-# output, so a test can feed it filesystems that are not this machine's).
+# output, so a test can feed it filesystems that are not this machine's), BOX_CLEANUP_STEPS
+# (newline-separated step lines replacing STEPS, so a test can run stand-in cleaners).
 set -uo pipefail
 
 here="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
@@ -115,6 +116,11 @@ STEPS=(
     # sooner -- at 12% duty instead of 50%.
     "docker-cap|3600|/var/run/docker.sock|$here/docker-cap"
 )
+
+# A test supplies its own cleaners; see the overrides above.
+if [[ -n "${BOX_CLEANUP_STEPS:-}" ]]; then
+    mapfile -t STEPS <<<"$BOX_CLEANUP_STEPS"
+fi
 
 usage() {
     echo "usage: box-cleanup [--dry-run] [--only NAME]... [--no-alert] [--report]" >&2
@@ -440,7 +446,7 @@ fi
 read_free
 
 declare -A BEFORE
-summary=() json_steps=() failed_steps=() failed=0 total_freed=0 total_gained=0 attempted=0
+summary=() json_steps=() failed_steps=() unmeasured=() failed=0 total_freed=0 total_gained=0 attempted=0
 for entry in "${run_steps[@]}"; do
     IFS='|' read -r name interval needs command <<<"$entry"
 
@@ -448,7 +454,7 @@ for entry in "${run_steps[@]}"; do
     if [[ -n "$skip_reason" ]]; then
         say "$name: skipped, $skip_reason"
         summary+=("$name skipped")
-        json_steps+=("{\"step\": \"$name\", \"freed\": 0, \"gained\": 0, \"seconds\": 0, \"exit\": null, \"skipped\": true, \"reason\": \"$(json_string "$skip_reason")\"}")
+        json_steps+=("{\"step\": \"$name\", \"reclaimed\": 0, \"moved\": 0, \"gained\": 0, \"seconds\": 0, \"exit\": null, \"skipped\": true, \"reason\": \"$(json_string "$skip_reason")\"}")
         continue
     fi
     attempted=$((attempted + 1))
@@ -463,17 +469,32 @@ for entry in "${run_steps[@]}"; do
     [[ -n "$output" ]] && printf '%s\n' "$output" | sed "s/^/  $name: /"
 
     read_free
-    freed=0 gained_here=0 where=""
+    moved=0 gained_here=0 where=""
     for mount in "${!AVAIL[@]}"; do
         before="${BEFORE[$mount]:-${AVAIL[$mount]}}"
         delta=$((AVAIL[$mount] - before))
         if ((delta != 0)); then
-            freed=$((freed + delta))
+            moved=$((moved + delta))
             ((delta > 0)) && gained_here=$((gained_here + delta))
             where+="${where:+, }$mount $(human "$delta")"
         fi
     done
-    total_freed=$((total_freed + freed))
+
+    # What this step REMOVED is what the step says it removed. A df delta measured around it is
+    # what the FILESYSTEM did while it ran, which on this box is seventy other lanes' writes:
+    # today it credited session-tmp-reap, which is report-only and deletes nothing, with 192.9
+    # GB, and charged docker-cap, which deleted 28 images, with -40.5 GB. A cleaner that prints
+    # `reclaimed-bytes: N` is believed about its own work; one that does not is reported as
+    # unmeasured rather than given the filesystem's number.
+    # Summed, not taken once: a cleaner that walks several roots reports one line per root.
+    reclaimed="$(printf '%s\n' "$output" |
+        sed -n 's/.*reclaimed-bytes:[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+        awk 'BEGIN { n = 0 } { n += $1; seen = 1 } END { if (seen) print n }')"
+    if [[ -n "$reclaimed" ]]; then
+        total_freed=$((total_freed + reclaimed))
+    else
+        unmeasured+=("$name")
+    fi
     total_gained=$((total_gained + gained_here))
 
     STEP_LAST_EXIT["$name"]="$rc"
@@ -494,9 +515,14 @@ for entry in "${run_steps[@]}"; do
         STEP_ALERTED["$name"]=0
         STEP_LAST_SUCCESS["$name"]=$((step_start + step_seconds))
     fi
-    say "$name: $(human "$freed")${where:+ (${where})} in ${step_seconds}s, $state_word"
-    summary+=("$name $(human "$freed")")
-    json_steps+=("{\"step\": \"$name\", \"freed\": $freed, \"gained\": $gained_here, \"seconds\": $step_seconds, \"exit\": $rc}")
+    if [[ -n "$reclaimed" ]]; then
+        said_freed="removed $(human "$reclaimed")"
+    else
+        said_freed="removed an unreported amount"
+    fi
+    say "$name: ${said_freed}${where:+; the filesystem moved ${where} while it ran} in ${step_seconds}s, $state_word"
+    if [[ -n "$reclaimed" ]]; then summary+=("$name $(human "$reclaimed")"); else summary+=("$name unreported"); fi
+    json_steps+=("{\"step\": \"$name\", \"reclaimed\": ${reclaimed:-null}, \"moved\": $moved, \"gained\": $gained_here, \"seconds\": $step_seconds, \"exit\": $rc}")
 done
 
 # The floors, judged on what is left after the run.
@@ -557,7 +583,12 @@ free_line=""
 for mount in $(mounts_sorted); do
     free_line+="${free_line:+, }$mount $(human "${AVAIL[$mount]}") free"
 done
-say "run: $line; total $(human "$total_freed"); $free_line; $failed failed; $(($(date -u +%s) - started_epoch))s"
+# The total is the sum of what the cleaners themselves reported removing. Steps that report
+# nothing are named rather than folded in at the filesystem's number, so a run that measured
+# little cannot read as a run that cleaned little.
+unmeasured_line=""
+((${#unmeasured[@]})) && unmeasured_line="; no reclaim reported by $(join_with ', ' "${unmeasured[@]}")"
+say "run: $line; reclaimed $(human "$total_freed")${unmeasured_line}; $free_line; $failed failed; $(($(date -u +%s) - started_epoch))s"
 
 mkdir -p "$(dirname "$log_file")" 2>/dev/null
 {

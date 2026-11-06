@@ -370,6 +370,13 @@ reap_tmp_root() {
 
     echo "session-scratch-reap: $root: ${stance}: ${going} $([[ -n "$removing" ]] && echo removed || echo "would be removed") ($(gb "$going_bytes")), ${kept_live} with a live owner ($(gb "$live_bytes")), ${kept_held} held by a process ($(gb "$held_bytes")), ${kept_recent} written inside the ${idle_days}d window ($(gb "$recent_bytes")), ${unowned} unowned ($(gb "$unowned_bytes")); ${failed} failed; $(df -h --output=avail "$root" | tail -1 | tr -d ' ') free"
 
+    # What a caller may count as reclaimed. ZERO unless this pass actually removed: in
+    # report-only mode going_bytes is what WOULD go, and a caller that counts it reports a
+    # deletion that never happened. box-cleanup credited this script with freeing 192.9 GB on
+    # 2026-11-06 while it was report-only and deleted nothing, because it measured a df delta
+    # around the run instead of asking the run.
+    echo "session-scratch-reap: reclaimed-bytes: $([[ -n "$removing" ]] && echo "$going_bytes" || echo 0)"
+
     # The unowned entries are the whole of what this root can never reclaim on its own, so once a
     # week the big ones are named for the box-health owner to take to their lanes.
     if [[ -n "$report" ]] || weekly_report_due; then

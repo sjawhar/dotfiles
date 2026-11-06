@@ -36,14 +36,28 @@ steps but does not bypass their intervals.
 
 A line per step and a summary line in the journal
 (`journalctl --user -u box-cleanup.service`), and one JSON object per run appended to
-`~/.local/state/box-cleanup/log.jsonl` with each step's bytes, seconds and exit, or its skip
-reason, and every watched filesystem's free, total and floor.
+`~/.local/state/box-cleanup/log.jsonl` with each step's `reclaimed` and `moved` bytes, seconds
+and exit, or its skip reason, and every watched filesystem's free, total and floor.
 
-The bytes are **what that filesystem gained across that step**, not what the cleaner deleted:
-eighty sessions write to these disks throughout, so a step can read negative, and the log prints
-it as it is. The filesystems are found from the cleaners' own paths and keyed by device — on
-sami-devbox `/home`, `/mnt/nvme` and `/var/lib/docker` are one disk, and 216 agentbox loop
-mounts are not the cleaners' business.
+**`reclaimed` is what the cleaner itself says it removed**, read from a `reclaimed-bytes: N`
+line in its own output. A cleaner that prints no such line is reported as not having said, and
+its step contributes nothing to the run's total: the total names the steps that did not report
+rather than filling them in.
+
+**`moved` is what that filesystem did while the step ran**, which is a different thing and is
+labelled as one. Eighty sessions write to these disks throughout, so it can read negative, and
+the log prints it as it is. **It is never attributed to the step.** On 2026-11-06 it was: the
+run credited `session-tmp-reap`, which is report-only and deletes nothing, with freeing 192.9
+GB, and charged `docker-cap`, which had just removed 28 images, with −40.5 GB. A df delta on a
+shared mount bills every lane's writes to whoever reads the clock twice.
+
+A cleaner that reports must report **zero when it did not delete**. In report-only mode its
+candidate total is what *would* go, and a caller counting that publishes a deletion that never
+happened.
+
+The filesystems are found from the cleaners' own paths and keyed by device — on sami-devbox
+`/home`, `/mnt/nvme` and `/var/lib/docker` are one disk, and 216 agentbox loop mounts are not
+the cleaners' business.
 
 ## When it speaks, and when it does not
 

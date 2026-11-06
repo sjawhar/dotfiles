@@ -522,4 +522,8 @@ if ((status == 0)); then
     free="${free// /} free on $root"
 fi
 echo "tmp-stale-reap: $root: ${removed} $([[ -z "$apply" ]] && echo "would be removed" || echo "removed") ($(size "$removed_bytes")), ${kept_live} live, ${kept_young} written inside the ${age_hours}h window, ${kept_pattern} on the keep list, ${kept_other_owner} another user's, ${kept_foreign} holding another user's files, ${kept_type} not a plain file or directory, ${kept_unsure} unreadable; ${failed} failed; ${free}"
+# What a caller may count as reclaimed: zero without --apply, where removed_bytes is only what
+# would have gone. See the same line in session-scratch-reap for why a caller must not measure
+# this with a df delta of its own.
+echo "tmp-stale-reap: reclaimed-bytes: $([[ -z "$apply" ]] && echo 0 || echo "$removed_bytes")"
 ((failed == 0))
