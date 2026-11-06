@@ -107,6 +107,30 @@ def v8_regression(test):
     return unittest.expectedFailure(test) if installed_check_is_v8() else test
 
 
+# leak-check-v10's public_leak_check.py. It refuses a clean push to a `<helper>::https://github.com/...` URL whenever
+# GIT_SSH_COMMAND, GIT_SSH or core.sshCommand is set (its ssh_alias_override does not strip `<transport>::`): a v10
+# false refusal, dispatch://BET-744 (ROCQ, filed 2026-11-06). Same mechanism as v8_regression: an expected failure
+# against exactly this module, and run in full, so it must pass, against every other check; a fixed check has another
+# sha256, so the test runs normally there again.
+V10_CHECK_SHA256 = "266ea24b69d027270b015d297369ff878b4b55c1fc0b7912ddaa7a95fc0329cb"
+
+
+def installed_check_is_v10() -> bool:
+    try:
+        check = leak_check()
+    except unittest.SkipTest:
+        return False
+    py = check.resolve().parent / "public_leak_check.py"
+    return py.is_file() and hashlib.sha256(py.read_bytes()).hexdigest() == V10_CHECK_SHA256
+
+
+def v10_false_refusal(test):
+    """Marks TEST an expected failure when the check this run uses is leak-check-v10 (v10 false refusal,
+    dispatch://BET-744, ROCQ, filed 2026-11-06); leaves it as it is for every other check."""
+    return unittest.expectedFailure(test) if installed_check_is_v10() else test
+
+
+
 # The hooks dispatcher of dispatch://BET-706 R6, from a leak-check tag: `install-global-hooks.sh <dir>` builds
 # <dir>/global/ (one entry per git hook name, each running the dispatcher) from the global-hooks/ beside it, and writes
 # <dir>/global.gitconfig, which sets core.hooksPath to it, last. The dotfiles' .gitconfig includes that file.
@@ -526,6 +550,20 @@ class JjPushLeakGateTest(unittest.TestCase):
         if not gh:
             self.assertEqual(self.unexpected_gh_calls(), [])
 
+    def assert_refused_either(self, r: subprocess.CompletedProcess[str], commit: str, url: str, gh: bool = False):
+        """Refused, by either kind of refusal spec R4 allows for a target whose visibility may be unknown: unread
+        ("LEAK CHECK: cannot read the visibility of ...", the gate's refusal line for URL) or for the leaked content
+        (assert_refused, with GH as there). Either way the push fails, nothing of COMMIT reaches URL, and, unless GH says
+        a read was due, gh got no unexpected call (unexpected_gh_calls), as assert_refused requires."""
+        if "LEAK CHECK: cannot read the visibility of " in r.stderr:
+            self.assertNotEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}", r.stderr)
+            self.assertNotIn(url, self.received(commit))
+            if not gh:
+                self.assertEqual(self.unexpected_gh_calls(), [])
+        else:
+            self.assert_refused(r, commit, url, gh=gh)
+
     def assert_refused_unreadable(self, r: subprocess.CompletedProcess[str], commit: str, url: str, slug: str):
         """Refused by the check because it cannot read the visibility of SLUG, the target at URL; nothing of COMMIT
         received there, and no leaked text named."""
@@ -609,6 +647,26 @@ class JjPushLeakGateTest(unittest.TestCase):
         }
         self.ghlog.write_text("".join(f"{call}\x1e{parent}\n" for call, parent in lines.values()), encoding="utf-8")
         self.assertEqual(self.unexpected_gh_calls(), [call for k, (call, _) in lines.items() if not k.startswith("allowed")])
+
+    def test_both_refusal_helpers_reject_an_unexpected_gh_call(self):
+        # Round 7 review (Slice3XFDotfiles): the unread branch of assert_refused_either, and assert_git_hook_refused,
+        # must reject an unexpected gh call as assert_refused does. One injected gate read of the destination (not a
+        # check's read of another remote), then each helper on an otherwise passing unread refusal.
+        url = ROCQ
+        c = self.init  # a commit no sink holds
+        self.ghlog.write_text("api repos/theorem-labs/rocq --jq .visibility\x1ebash\x1f/x/scripts/github-repo-visibility\n", encoding="utf-8")
+        unread = subprocess.CompletedProcess([], 1, "", "error: LEAK CHECK: cannot read the visibility of theorem-labs/rocq\n"
+                                                        f"error: git shim: the public leak check refused this jj push to {url}: ...\n")
+        with self.assertRaises(AssertionError):
+            self.assert_refused_either(unread, c, url)
+        self.assert_refused_either(unread, c, url, gh=True)  # with a read declared due, the same refusal passes
+        hook = subprocess.CompletedProcess([], 1, "", "LEAK CHECK: cannot read the visibility of theorem-labs/rocq\n")
+        with self.assertRaises(AssertionError):
+            self.assert_git_hook_refused(hook)
+        self.assert_git_hook_refused(hook, gh=True)
+        self.ghlog.unlink()
+        self.assert_refused_either(unread, c, url)
+        self.assert_git_hook_refused(hook)
 
     # Every way of naming what to push: jj resolves them all before it runs git.
     def test_bookmark_content(self):
@@ -727,12 +785,15 @@ class JjPushLeakGateTest(unittest.TestCase):
     def test_ssh_aliases_are_guarded(self):
         # The reviewer's three aliases (lanes/jj-gate-review-xf-2026-11-02.md, B2), each the checkout's only remote:
         # SSH_CONFIG resolves each to github.com (`ssh -G`, with the URL's user, so the Match on the user applies), and
-        # theorem-labs/rocq there is public, so the checkout is guarded.
+        # theorem-labs/rocq there is public, so the checkout is guarded. setUp sets GIT_SSH_COMMAND, so git's own ssh
+        # command may resolve an alias otherwise: since leak-check-v10 the check refuses such a target unread (README:
+        # "An ssh alias has unreadable visibility whenever ... GIT_SSH_COMMAND ... is set"; FRAC's ruling), where v4
+        # to v9 refused the leaked content. Either refusal is accepted; the push must fail and the receiver stay empty.
         c = self.leak()
         for url in ("git@alias-xf:theorem-labs/rocq.git", "git@UPPERALIAS:theorem-labs/rocq.git", "git@useralias:theorem-labs/rocq.git"):
             self.git("remote", "set-url", "origin", url)
             r = self.jj("git", "push", "-b", "b1")
-            self.assert_refused(r, c, url)
+            self.assert_refused_either(r, c, url)
         self.assertEqual(self.received(c), [])
 
     def guard_checkouts(self, env: dict[str, str]) -> list[str]:
@@ -897,6 +958,10 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertIn("LEAK CHECK: clean", r.stderr)
         self.assert_ref_kept(at, "refs/heads/b1", clean)
 
+    # v10 false refusal, dispatch://BET-744 (ROCQ, filed 2026-11-06): leak-check-v10 refuses this test's clean push to
+    # `sink::https://github.com/theorem-labs/rocq`. Expected to fail against v10 only (v10_false_refusal); unchanged,
+    # and run in full, against every other check.
+    @v10_false_refusal
     def test_a_transport_prefixed_url_is_guarded(self):
         # dispatch://BET-706 A3: git's <transport>::<address> form names the repository at the address, here a public
         # theorem-labs one; the old helper read the transport as an ssh host and said not-github. GUARD_TABLE holds the
@@ -1065,15 +1130,9 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.git("config", "core.sshCommand", "ssh -F /nonexistent")
         c = self.leak(path="guard2.v")
         # Spec R4: a target whose visibility cannot be read is refused before anything is scanned, so the check may
-        # refuse this target unread (as assert_refused_unreadable expects) or refuse the leaked content. Either way it
-        # must refuse, and nothing may reach the receiver.
-        r = self.jj("git", "push", "-b", "b1")
-        if "LEAK CHECK: cannot read the visibility of " in r.stderr:
-            self.assertNotEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}", r.stderr)
-            self.assertNotIn(url, self.received(c))
-        else:
-            self.assert_refused(r, c, url)
+        # refuse this target unread or refuse the leaked content. Either way it must refuse, and nothing may reach the
+        # receiver.
+        self.assert_refused_either(self.jj("git", "push", "-b", "b1"), c, url)
 
     def test_an_unguarded_checkout_is_untouched(self):
         # Every remote is private or not GitHub, even where its path names theorem-labs/rocq: the sweep installs no
@@ -1281,18 +1340,18 @@ class JjPushLeakGateTest(unittest.TestCase):
             self.assertIn("LEAK CHECK: cannot read the visibility of theorem-labs/cached-public", g.stderr)
             self.assert_refused_unreadable(r, c, url, "theorem-labs/cached-public")
         # The review's control over git's own ssh transport: the `.cache` variant with only an ssh alias of github.com
-        # as the remote. The gate reads no visibility and guards; the check, which does not resolve ssh aliases, scans
-        # the target as one outside GitHub. Both pushes are refused for the content, and the commit never reaches the
-        # far side.
+        # as the remote. The gate reads no visibility and guards. use_ssh sets GIT_SSH_COMMAND, so since leak-check-v10
+        # the check refuses the alias target unread (README: an ssh alias is unknown while GIT_SSH_COMMAND is set); v4
+        # to v9 scanned it as a target outside GitHub and refused the content. Either refusal is accepted, for both
+        # pushes, and the commit never reaches the far side.
         self.use_ssh()
         url = "git@alias-xf:theorem-labs/cached-public.git"
         self.git("remote", "set-url", "origin", url)
         self.git("config", "--unset-all", "remote.origin.vcs")
         sink = self.ssh_sink("git@alias-xf", "theorem-labs/cached-public.git")
         g, r = self.hidden_push(self.home / ".cache", commit=c)
-        self.assertNotEqual(g.returncode, 0, g.stderr)
-        self.assertIn("LEAK CHECK: refusing to push", g.stderr)
-        self.assert_refused(r, c, url, gh=True)
+        self.assert_git_hook_refused(g, gh=True)
+        self.assert_refused_either(r, c, url, gh=True)
         self.assertFalse(self.holds(sink, c), f"{c} reached {url}")
         self.assertTrue(sink.is_dir(), "git did not reach the ssh adapter")
 
@@ -1362,17 +1421,26 @@ class JjPushLeakGateTest(unittest.TestCase):
         })
         self.assertEqual(self.received(c), [PRIVATE])
 
+    def assert_git_hook_refused(self, g: subprocess.CompletedProcess[str], gh: bool = False):
+        """A plain git push refused by the installed hook: for the content, or (leak-check-v10 and later, an ssh alias
+        while GIT_SSH_COMMAND is set) unread because the target's visibility is unknown; and, unless GH says a read was
+        due, gh got no unexpected call (unexpected_gh_calls), as assert_refused requires."""
+        self.assertNotEqual(g.returncode, 0, g.stderr)
+        self.assertTrue("LEAK CHECK: refusing to push" in g.stderr or "LEAK CHECK: cannot read the visibility of " in g.stderr, g.stderr)
+        if not gh:
+            self.assertEqual(self.unexpected_gh_calls(), [])
+
     def assert_same_refusal_over_git_transport(self, url: str, sink: Path):
         """URL as the checkout's only remote, over git's own transport into SINK: a plain git push through the
-        installed hook and the jj push both refuse a fresh leaking commit, and SINK never holds it."""
+        installed hook and the jj push both refuse a fresh leaking commit (for its content, or unread where the check
+        cannot read the target's visibility), and SINK never holds it."""
         self.git("remote", "set-url", "origin", url)
         subprocess.run(["/usr/bin/git", "config", "--unset-all", "remote.origin.vcs"], cwd=self.repo, env=self.env, capture_output=True)
         c = self.leak(path=f"guard-{hashlib.sha1(url.encode()).hexdigest()[:8]}.v")
         g = self.git_push("origin", c, "git-case")
-        self.assertNotEqual(g.returncode, 0, g.stderr)
-        self.assertIn("LEAK CHECK: refusing to push", g.stderr)
+        self.assert_git_hook_refused(g)
         self.assertFalse(self.holds(sink, c), f"git sent {c} to {url}")
-        self.assert_refused(self.jj("git", "push", "-b", "b1"), c, url)
+        self.assert_refused_either(self.jj("git", "push", "-b", "b1"), c, url)
         self.assertFalse(self.holds(sink, c), f"jj sent {c} to {url}")
 
     def test_a_remote_path_with_a_space_is_read_whole(self):
