@@ -813,5 +813,69 @@ class ASampledPeakIsLabelledNotRefused(unittest.TestCase):
         self.assertIn("DO NOT RAISE MEMORY YET", WATCH.memory_advice(found))
 
 
+
+class AKilledPodWhoseJobIsGoneIsStillNamed(unittest.TestCase):
+    """The nodes' failures record names a pod the cluster no longer has.
+
+    2026-11-06: the OSS Verify curl lane's `9edfc2` was OOM-killed at 12Gi and the lane deleted
+    the Job rather than let it retry at a limit that had already killed it -- the right thing to
+    do. The watch then answered `memory_shape unknown, reason "no pod name"`, which is the one
+    answer its own rule cannot branch on, while `failures.jsonl` held the pod, the limit and the
+    largest killed process. Every kernel-oom row carries a pod name (654 of 654 measured), so the
+    record was never the gap: the watch did not read it.
+    """
+
+    RUN = "ossv-farm-20261106t085937z-9edfc2"
+    POD = "ossv-farm-20261106t085937z-9edfc2-59sdw-pp9gt"
+
+    def record(self, *rows: dict) -> str:
+        handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        self.addCleanup(os.unlink, handle.name)
+        with handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        return handle.name
+
+    def rows(self) -> tuple[dict, dict]:
+        return (
+            {"at": "2026-11-06T09:04:50Z", "kind": "container", "pod": self.POD,
+             "container": "job", "ns": "builds-ossv", "reason": "OOMKilled",
+             "resources": {"limits": {"cpu": "16", "memory": "12Gi"}}},
+            {"at": "2026-11-06T09:06:44Z", "kind": "kernel-oom", "pod": self.POD,
+             "container": "job", "ns": "builds-ossv", "task": "rocqworker",
+             "killedRssKb": 3141236, "reason": "OOMKilled",
+             "resources": {"limits": {"memory": "12Gi"}}},
+        )
+
+    def test_the_pod_name_comes_from_the_record_when_the_cluster_has_lost_it(self) -> None:
+        path = self.record(*self.rows())
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures=path)
+        self.assertEqual(found.get("pod"), self.POD)
+        self.assertEqual(found.get("pod_from"), "failures record")
+
+    def test_the_largest_killed_process_comes_with_it(self) -> None:
+        path = self.record(*self.rows())
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures=path)
+        self.assertEqual(found.get("largest_process_bytes"), 3141236 * 1024)
+
+    def test_a_record_naming_another_run_is_not_borrowed(self) -> None:
+        other = dict(self.rows()[1], pod="ossv-farm-20261106t000000z-aaaaaa-x-y")
+        path = self.record(other)
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures=path)
+        self.assertIsNone(found.get("pod"))
+
+    def test_no_record_at_all_still_says_no_pod_name(self) -> None:
+        found = WATCH.evidence({"id": self.RUN}, {}, None, failures="/nonexistent/failures.jsonl")
+        self.assertIsNone(found.get("pod"))
+        self.assertEqual(WATCH.read_memory_shape(found).get("reason"), "no pod name")
+
+    def test_a_live_pod_is_never_overridden_by_the_record(self) -> None:
+        path = self.record(*self.rows())
+        found = WATCH.evidence({"id": self.RUN}, {"failed_pods": [{"name": "from-the-result"}]},
+                               None, failures=path)
+        self.assertEqual(found.get("pod"), "from-the-result")
+        self.assertIsNone(found.get("pod_from"))
+
+
 if __name__ == "__main__":
     unittest.main()

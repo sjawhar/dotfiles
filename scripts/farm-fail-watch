@@ -191,7 +191,51 @@ def pod_evidence(pod: dict | None) -> dict:
     return {key: value for key, value in found.items() if value is not None}
 
 
-def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
+# The nodes' own record of every container the kernel or the kubelet killed. It outlives the
+# pod, the Job and result.json, so it is the last place a killed pod can still be named.
+FAILURES_RECORD = os.environ.get(
+    "FARM_FAILURES_RECORD", "/mnt/durable/sami/tmp/farm-util/failures.jsonl")
+
+
+def failures_evidence(run: str | None, path: str | None = None) -> dict:
+    """What the failures record knows about one run: its pod, and the largest process killed.
+
+    `killedRssKb` is the resident size of the task the kernel chose, which is the largest
+    single process at the moment of death. It is the field that separates a unit wanting one
+    big allocation from a unit running too many workers at once: CURL's 9edfc2 died at a 12Gi
+    limit with a largest process of 3.0 GiB, so the 11.19 GiB peak was sixteen workers, not one
+    heavy file, and the fix was `-j`, not memory (2026-11-06).
+
+    Rows naming another run are never borrowed, and an unreadable record is not an error: the
+    caller is already in a failure path and must not be stopped by a missing file.
+    """
+    if not run:
+        return {}
+    found: dict = {}
+    try:
+        with open(path or FAILURES_RECORD, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if run not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                pod = row.get("pod")
+                if not pod or run not in pod:
+                    continue
+                found["pod"] = pod
+                found["pod_from"] = "failures record"
+                killed = number(row.get("killedRssKb"))
+                if killed:
+                    found["largest_process_bytes"] = int(killed) * 1024
+    except OSError:
+        return {}
+    return found
+
+
+def evidence(job: dict | None, result: dict | None, pod: dict | None,
+             failures: str | None = None) -> dict:
     """Everything the verdict is allowed to read, in one dict.
 
     The pod is preferred for the bounds and the end, because it is what the kubelet acted
@@ -263,6 +307,17 @@ def evidence(job: dict | None, result: dict | None, pod: dict | None) -> dict:
         "recent_memory_peaks": [number(peak.get("memory_peak_bytes"))
                                 for peak in (job.get("size") or {}).get("recent_peaks") or []],
     }
+    if not found.get("pod"):
+        # The cluster and result.json can both have lost the pod: a lane that deletes a killed
+        # Job, rather than let it retry at a limit that already killed it, is doing the right
+        # thing and takes the pod with it. Without a name read_memory_shape returns `unknown /
+        # no pod name`, which is the ONE answer the raise-or-fix rule cannot branch on -- so the
+        # advice went branchless exactly for the lanes that cleaned up properly (CURL, 9edfc2,
+        # 2026-11-06). The nodes' record has the name: 654 of 654 kernel-oom rows carry one.
+        recovered = failures_evidence(found.get("run"), failures)
+        for key, value in recovered.items():
+            if found.get(key) is None:
+                found[key] = value
     return found
 
 
