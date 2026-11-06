@@ -9,7 +9,11 @@ Reasons: `references/reasons.md`.
 
 ## When a shell hangs
 
-A shell where every command times out, even `echo`, is usually a stalled filesystem, not a broken shell: a process in uninterruptible IO wait (D state) on /mnt/nvme or /mnt/durable blocks any fork whose working directory is on the stalled mount, so the shell is fine and the mount is not. Probe in two seconds before you conclude the shell is dead:
+A shell where every command times out, even `echo`, is usually not a broken shell: one stalled filesystem has wedged the session's tool threads. The search tools (`glob`, `grep`, `fuzzyFind`, `ast_grep`, `ast_edit`) and `shell.run` share ONE pool of 8 threads, and each search makes its filesystem calls inside it; an uncached inode on a stalled mount (/mnt/durable or /mnt/nvme) parks a worker in uninterruptible IO wait. At 8 of 8 parked, nothing else in the process runs - and a session is a tenant of its omp process, so one session's unbounded walk wedges every session in that process, including ones running nothing.
+
+So the rule that matters most, more than any probe: **scope every search to a specific path, never a bare recursive walk, and never search over /mnt/durable.** Falling back to `grep` or `read` when the shell feels slow is the trap - an unbounded recursive grep parks the next eight workers.
+
+To tell a stalled mount from a shell that cannot fork, probe in two seconds:
 
 - `timeout 2 true` - can the shell fork at all? If this hangs, the shell itself cannot fork and the filesystem is not the cause.
 - `timeout 2 ls -d <cwd>` - is that filesystem the stalled one?
