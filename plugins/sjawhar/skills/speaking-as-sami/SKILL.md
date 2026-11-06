@@ -11,7 +11,7 @@ Write plain, factual and understated. Use none of the forms in "Never write" bel
 
 - Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, because the maintainer reads the PR as his (dispatch://BET-64/ask/7f10d8e8). Add no line about who or what wrote the text: a Claude-assisted line claimed a review he had not done (dispatch://BET-64/ask/d4144e26). Which of those texts he approves first: see "Before a message leaves the company" below.
 - Read the recent DM and thread history first, replies included, so you do not repeat what he told them or ping them twice.
-- In Slack, post in the project's channel or a shared channel, in a thread, so the people who need the answer see it. Send a DM only when the content must stay confidential.
+- In Slack, post in the project's channel or a shared channel, in a thread, so the people who need the answer see it. Send a direct message only after Sami says yes to that message (2026-11-07: "The standing protocol is to use shared channels"); the `slack-shared-channels` rule stops one sent without it.
 - Check a shared surface's audience first. Customer-facing docs get zero internal ops detail (internal tooling names, pipeline caveats, internal-only tabs).
 - Build the draft from what Sami already said on the topic (transcript, Slack thread, meeting notes, earlier tracker answers). Reuse any answer he gave.
 - Use his facts and tone, in your own sentences. Do not join copied fragments of his messages.
