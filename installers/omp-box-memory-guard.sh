@@ -10,17 +10,20 @@
 # not protect it: they sum to about four times the machine's RAM, and the sessions that held
 # the memory had no scope at all (156 GiB of 193 GiB in one unlimited login scope).
 #
-# Three parts, in the order the kernel meets them:
+# Four parts, in the order the kernel meets them:
 #   1. swap on the big disk, so reclaim has somewhere to put cold anonymous memory;
 #   2. reclaim sysctls, so kswapd starts before every core is in direct reclaim;
 #   3. MemoryMax on user-<uid>.slice, so the user's sessions together can never take the RAM the
 #      system's daemons need.
+#   3b. MemoryHigh/MemoryMax on each session-<N>.scope (big machines only), so no single
+#      unbounded login can reach that slice ceiling on its own -- one did on sami-devbox on
+#      2026-11-06, at 684 GiB, and earlyoom answered with ~500 SIGTERMs across the fleet.
 # Below them earlyoom (agent-infra's guard, `-s 100,100`) is the last-resort net, and
-# scripts/earlyoom-kill-watch tells each session what it killed. The fourth part, a daemon that
-# shed the largest session (scripts/omp-box-memory-guard), never ran past a halted dry-run bake:
-# four open defects from 2026-10-27, a false shed on a box with 135 GiB free among them (git show
-# 2d52488). It was removed on 2026-11-03, and step 4 below takes its unit off a machine that has
-# it.
+# scripts/earlyoom-kill-watch tells each session what it killed. A further part once planned, a
+# daemon that shed the largest session (scripts/omp-box-memory-guard), never ran past a halted
+# dry-run bake: four open defects from 2026-10-27, a false shed on a box with 135 GiB free among
+# them (git show 2d52488). It was removed on 2026-11-03, and step 4 below takes its unit off a
+# machine that has it.
 #
 # Everything it does is idempotent and survives a reboot: a hand `echo` into cgroupfs or a
 # `swapon` at a shell is exactly how this box got where it was.
@@ -32,6 +35,11 @@ DOTFILES_DIR="${DOTFILES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SWAP_DIR="${OMP_SWAP_DIR:-/mnt/nvme/swap}"
 SWAP_FILE="${SWAP_DIR}/swapfile"
 SLICE_DROPIN=/etc/systemd/system/user-.slice.d/60-omp-memory-guard.conf
+SESSION_DROPIN=/etc/systemd/system/session-.scope.d/60-omp-memory-guard.conf
+# A login session scope is capped only on a machine big enough for the absolute numbers in
+# devbox/session-scope-memory-guard.conf to be a real bound well under the slice ceiling; that
+# file's header has the reasoning.
+SESSION_DROPIN_MIN_KB=$((512 * 1024 * 1024))
 SYSCTL_FILE=/etc/sysctl.d/70-omp-memory-guard.conf
 
 mem_total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
@@ -152,6 +160,29 @@ echo "user-$(id -u).slice: MemoryMax=${slice_max}"
 if [ "$slice_max" = infinity ] || [ "$slice_max" = unknown ]; then
     echo "omp-box-memory-guard: the slice did not take its MemoryMax; check ${SLICE_DROPIN}" >&2
     exit 1
+fi
+
+# --- 3b. each login session's ceiling ---------------------------------------------------------
+# The slice's 92% is an aggregate, and one unbounded login can reach it alone: on 2026-11-06 a
+# single plain-ssh session scope on sami-devbox held 684 GiB and earlyoom answered with ~500
+# SIGTERMs across the fleet. logind's session-<N>.scope has no limit of its own, so give every
+# one of them a MemoryHigh/MemoryMax through the prefix drop-in directory session-.scope.d/.
+if [ "$mem_total_kb" -lt "$SESSION_DROPIN_MIN_KB" ]; then
+    echo "omp-box-memory-guard: $((mem_total_kb / 1048576)) GiB of RAM; no session-scope cap here"
+elif ! sudo diff -q "${DOTFILES_DIR}/devbox/session-scope-memory-guard.conf" "$SESSION_DROPIN" >/dev/null 2>&1; then
+    echo "Installing ${SESSION_DROPIN}..."
+    sudo mkdir -p "$(dirname "$SESSION_DROPIN")"
+    sudo install -m 0644 "${DOTFILES_DIR}/devbox/session-scope-memory-guard.conf" "$SESSION_DROPIN"
+    sudo systemctl daemon-reload
+fi
+# Unlike a slice, a transient scope that is already running does not pick the drop-in up on
+# daemon-reload; sessions that log in after this point get it. Report, never fail on, what the
+# session this installer runs in has.
+if [ "$mem_total_kb" -ge "$SESSION_DROPIN_MIN_KB" ]; then
+    session_scope=$(awk -F/ '/^0::/ {for (i = 1; i <= NF; i++) if ($i ~ /^session-[0-9]+\.scope$/) print $i}' /proc/self/cgroup)
+    if [ -n "$session_scope" ]; then
+        echo "$session_scope: MemoryMax=$(systemctl show "$session_scope" -p MemoryMax --value 2>/dev/null || echo unknown) (older sessions keep their old limit until they log in again)"
+    fi
 fi
 
 # --- 4. the retired shed daemon --------------------------------------------------------------

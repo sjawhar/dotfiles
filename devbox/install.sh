@@ -48,8 +48,9 @@ bash "${DOTFILES_DIR}/installers/grade-farm.sh"
 # with the host name as theorem.lane (see installers/agent-spend.sh).
 AGENT_SPEND_LANE="$(hostname -s)" bash "${DOTFILES_DIR}/installers/agent-spend.sh"
 
-# Swap, reclaim settings and a ceiling on this user's slice, so one runaway session can no
-# longer wedge the box (see installers/omp-box-memory-guard.sh).
+# Swap, reclaim settings, a ceiling on this user's slice and one on each login session scope,
+# so neither the sessions together nor a single unbounded login can wedge the box (see
+# installers/omp-box-memory-guard.sh).
 bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
 
 # The empty tmp* directories Python's mkdtemp leaves in TMPDIR on the big disk, pruned daily
