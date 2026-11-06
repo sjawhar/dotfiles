@@ -13,6 +13,12 @@ import test_jj_push_leak_gate as gate
 from test_jj_push_leak_gate import ROCQ, PRIVATE
 from test_jj_lock_shim import real_jj, run_bounded
 
+# The agent markers shims/jj reads, and its own agent_context function, cut from the shim, so the harness can prove a
+# "person" environment is one the shim does not take for an agent session.
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+_JJ_SHIM = (Path(__file__).parents[1] / "jj").read_text(encoding="utf-8")
+AGENT_CONTEXT = _JJ_SHIM[_JJ_SHIM.index("agent_context() {"):_JJ_SHIM.index("\n}\n", _JJ_SHIM.index("agent_context() {")) + 3]
+
 
 class DirectPushGateTest(gate.JjPushLeakGateTest):
     # Only the cases below run here; the git shim's own cases, which this class inherits with its fixture, are blanked
@@ -236,6 +242,170 @@ class DirectPushGateTest(gate.JjPushLeakGateTest):
         self.assertIn("LEAK CHECK: refusing to push", result.stderr)
         for commit in (first, middle, last):
             self.assertEqual(self.received(commit), [])
+
+    # Round 8 (dispatch://BET-706, Sami: dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5): a person's own
+    # `jj git push` outside an agent session runs the same gate where this machine has the check installed.
+    def as_person(self):
+        """No agent marker shims/jj reads (agent_context): none of the four session variables, and no GIT_CONFIG_*
+        entries (the gh-app routing include is one), whatever the environment running this test holds."""
+        self.env = {k: v for k, v in self.env.items() if k not in AGENT_MARKERS and not k.startswith("GIT_CONFIG_")}
+        probe = subprocess.run(["bash", "-c", "set -u; " + AGENT_CONTEXT + "\nagent_context"], env=self.env, capture_output=True, text=True)
+        self.assertEqual(probe.returncode, 1, "an agent marker is still set: " + probe.stderr)
+
+    def without_check(self):
+        """No check on this machine, by any of the three ways the shim looks: PUBLIC_LEAK_CHECK, PATH, the pointer."""
+        self.env.pop("PUBLIC_LEAK_CHECK", None)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmp / "no-check-config")
+        self.env["PATH"] = os.pathsep.join(p for p in self.env["PATH"].split(os.pathsep) if not (Path(p) / "public-leak-check.sh").exists())
+
+    def test_a_persons_leaking_push_is_refused_where_the_check_is_installed(self):
+        # (a)
+        self.as_person()
+        commit = self.leak()
+        result = self.push("-b", "b1")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", result.stderr)
+        self.assertEqual(result.stderr.rstrip().splitlines()[-1],
+                         "error: jj shim: to push this one command without the public leak check, run it with DOTFILES_JJ_NO_LEAK_CHECK=1.")
+        self.assertEqual(self.received(commit), [])
+        self.assertEqual(subprocess.run(["/usr/bin/git", "--git-dir", str(self.sink_of(ROCQ)), "for-each-ref"], capture_output=True, text=True).stdout, "")
+
+    def test_a_persons_clean_push_lands_after_one_check(self):
+        # (b)
+        self.as_person()
+        checks = self.count_checks()
+        commit = self.commit("a", "clean", "clean", "clean")
+        self.assert_pushed(self.push("-b", "clean"), commit)
+        self.assertEqual(self.lines(checks), [f"origin {ROCQ}"])
+
+    def test_a_persons_push_without_a_check_is_unchanged(self):
+        # (c) A machine without the check (a laptop): the push goes through as jj runs it, the leak included.
+        self.as_person()
+        self.without_check()
+        commit = self.leak()
+        result = self.push("-b", "b1")
+        self.assert_pushed(result, commit)
+        self.assertNotIn("jj shim", result.stderr)
+
+    def test_a_person_may_skip_the_check_for_one_command(self):
+        # (d) DOTFILES_JJ_NO_LEAK_CHECK=1 outside an agent session: no check runs, the push goes through.
+        self.as_person()
+        checks = self.count_checks()
+        self.env["DOTFILES_JJ_NO_LEAK_CHECK"] = "1"
+        commit = self.leak()
+        self.assert_pushed(self.push("-b", "b1"), commit)
+        self.assertEqual(self.lines(checks), [])
+
+    def test_an_agent_cannot_skip_the_check(self):
+        # (e) In an agent session the variable is ignored, and the refusal names no way past it.
+        self.env["DOTFILES_JJ_NO_LEAK_CHECK"] = "1"
+        commit = self.leak()
+        result = self.push("-b", "b1")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", result.stderr)
+        self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
+        self.assertEqual(self.received(commit), [])
+
+    def test_an_agent_without_a_check_is_unchanged(self):
+        # (f) Agent session, no check: a public destination is refused, a confirmed-private one passes.
+        self.without_check()
+        commit = self.commit("a", "clean", "clean", "clean")
+        result = self.push("-b", "clean")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no public leak check", result.stderr)
+        self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
+        self.assertEqual(self.received(commit), [])
+        self.test_private_push_passes_sensitive_message()
+
+    def test_a_person_is_not_refused_deleted(self):
+        # The --deleted refusal stays agent-only: a person's `jj git push --deleted` with nothing to delete runs.
+        self.as_person()
+        result = self.push("--deleted")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("is refused in an agent session", result.stderr)
+
+    # Round 8b (review slice3-xf-dotfiles.md "## Round 8", P2): a person's command that is not a push runs as jj runs
+    # it, however deep its aliases; a deep push alias is still resolved and checked.
+    def alias_chain(self, prefix: str, levels: int, target: list[str]) -> str:
+        for index in range(levels):
+            self.ok("config", "set", "--repo", f"aliases.{prefix}{index}", f'["{prefix}{index + 1}"]')
+        self.ok("config", "set", "--repo", f"aliases.{prefix}{levels}", "[" + ", ".join(f'"{t}"' for t in target) + "]")
+        return f"{prefix}0"
+
+    def test_a_persons_deep_non_push_alias_runs_unchanged(self):
+        # The reviewer's l0 -> ... -> l9 -> log chain, with the check installed.
+        self.as_person()
+        first = self.alias_chain("l", 9, ["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        direct = run_bounded([str(real_jj()), first], self.repo, self.env)
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        through = self.jj(first)
+        self.assertEqual((through.returncode, through.stdout, through.stderr), (direct.returncode, direct.stdout, direct.stderr))
+
+    def test_a_persons_deep_push_alias_is_checked(self):
+        self.as_person()
+        commit = self.leak()
+        self.push_command = (self.alias_chain("p", 9, ["git", "push", "-b", "b1"]),)
+        result = self.push()
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", result.stderr)
+        self.assertEqual(self.received(commit), [])
+
+    def test_an_agents_deep_push_alias_is_still_refused_at_the_cap(self):
+        commit = self.leak()
+        self.push_command = (self.alias_chain("p", 9, ["git", "push", "-b", "b1"]),)
+        result = self.push()
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("alias expansion exceeds 8 levels", result.stderr)
+        self.assertEqual(self.received(commit), [])
+
+    # Round 8c P1 (review of 8b): for a person the shim cannot prove an unresolved alias is not a push, so it fails
+    # closed, except for a cycle, which jj refuses itself.
+    BYPASS_LINE = "error: jj shim: to push this one command without the public leak check, run it with DOTFILES_JJ_NO_LEAK_CHECK=1."
+
+    def assert_person_refused_unpushed(self, result, commit, why: str):
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(why, result.stderr)
+        self.assertEqual(result.stderr.rstrip().splitlines()[-1], self.BYPASS_LINE)
+        self.assertEqual(self.received(commit), [])
+
+    def test_a_persons_push_alias_past_64_levels_is_refused(self):
+        self.as_person()
+        commit = self.leak()
+        self.push_command = (self.alias_chain("q", 66, ["git", "push", "-b", "b1"]),)
+        self.assert_person_refused_unpushed(self.push(), commit, "alias expansion exceeds 64 levels")
+
+    def test_a_persons_short_push_alias_is_refused_when_the_alias_probe_fails(self):
+        self.as_person()
+        commit = self.leak()
+        self.ok("config", "set", "--repo", "aliases.p", '["git", "push", "-b", "b1"]')
+        wrapper = self.fake / "jj"
+        wrapper.write_text('#!/bin/bash\nprevious=""\nfor arg in "$@"; do\n if [[ "$previous" == config && "$arg" == list ]]; then exit 2; fi\n previous="$arg"\ndone\nexec "' + str(real_jj()) + '" "$@"\n')
+        wrapper.chmod(0o755)
+        self.push_command = ("p",)
+        self.assert_person_refused_unpushed(self.push(), commit, "cannot read alias configuration for p")
+
+    def test_a_persons_builtin_runs_without_any_alias_work(self):
+        # A builtin other than `git` is no push and needs no alias probe: it runs even where the probe fails.
+        self.as_person()
+        wrapper = self.fake / "jj"
+        wrapper.write_text('#!/bin/bash\nprevious=""\nfor arg in "$@"; do\n if [[ "$previous" == config && "$arg" == list ]]; then exit 2; fi\n previous="$arg"\ndone\nexec "' + str(real_jj()) + '" "$@"\n')
+        wrapper.chmod(0o755)
+        argv = ["log", "-r", "@", "--no-graph", "-T", "commit_id"]
+        direct = run_bounded([str(real_jj()), *argv], self.repo, self.env)
+        through = self.jj(*argv)
+        self.assertEqual((through.returncode, through.stdout, through.stderr), (direct.returncode, direct.stdout, direct.stderr))
+
+    def test_a_persons_cyclic_alias_gets_jjs_own_error_and_pushes_nothing(self):
+        self.as_person()
+        commit = self.leak()
+        self.ok("config", "set", "--repo", "aliases.c1", '["c2", "git", "push", "-b", "b1"]')
+        self.ok("config", "set", "--repo", "aliases.c2", '["c1"]')
+        direct = run_bounded([str(real_jj()), "c1"], self.repo, self.env)
+        self.assertNotEqual(direct.returncode, 0, direct.stderr)
+        through = self.jj("c1")
+        self.assertEqual((through.returncode, through.stdout, through.stderr), (direct.returncode, direct.stdout, direct.stderr))
+        self.assertNotIn("jj shim", through.stderr)
+        self.assertEqual(self.received(commit), [])
 
 
 # The git shim's cases belong to test_jj_push_leak_gate alone. Run through this class, every jj push goes through

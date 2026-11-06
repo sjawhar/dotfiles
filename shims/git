@@ -230,10 +230,15 @@ jj_gate_visibility="${BASH_SOURCE[0]%/*}/../scripts/github-repo-visibility"
 # jj_push_guarded LISTING: true when the checkout whose `git remote -v` is LISTING is guarded (above): some URL in it
 # is GUARD. Each URL is read once, and the first GUARD one decides. The checkout's core.sshCommand goes to the helper
 # as GIT_SSH_COMMAND, which git itself puts ahead of it. A helper that exits other than 0 is unknown, whatever it
-# printed.
+# printed. A remote whose config has no url is listed with a blank URL (`<name><TAB>` and nothing else); git pushes to
+# its name as the URL, after url.<base>.insteadOf and pushInsteadOf rewrite it, so such a remote's URLs are those
+# `git remote get-url --push --all <name>` and `git remote get-url --all <name>` print, read with the same global
+# options as `git remote -v`, and a failure of either is unknown (dispatch://BET-706: seven partial clones of
+# `[remote "https://github.com/theorem-labs/rocq.git"]`; the sweep reads them by the same rule).
 jj_push_guarded() {
-    local line url sshcmd v
-    local -A checked=()
+    local line url name push fetch sshcmd v
+    local -a urls
+    local -A checked=() named=()
     sshcmd="$("$_real" "${args[@]:0:i}" config --get core.sshCommand 2> /dev/null)" || sshcmd=""
     while IFS= read -r line; do
         [[ "$line" == *$'\t'* ]] || continue
@@ -243,13 +248,25 @@ jj_push_guarded() {
         # reads the lines by the same rule.
         url="${line#*$'\t'}"
         if [[ "$url" == *" (push)" ]]; then url="${url% (push)}"; else url="${url%% (fetch)*}"; fi
-        [[ -n "$url" && -z "${checked[$url]:-}" ]] || continue
-        checked[$url]=1
-        v="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$jj_gate_visibility" "$url" 2> /dev/null)" || v=unknown
-        case "$v" in
-            private | internal | not-github) ;;
-            *) return 0 ;;
-        esac
+        if [[ -n "$url" ]]; then
+            urls=("$url")
+        else
+            name="${line%%$'\t'*}"
+            [[ -z "${named[$name]:-}" ]] || continue
+            named[$name]=1
+            push="$("$_real" "${args[@]:0:i}" remote get-url --push --all -- "$name" 2> /dev/null)" || return 0
+            fetch="$("$_real" "${args[@]:0:i}" remote get-url --all -- "$name" 2> /dev/null)" || return 0
+            mapfile -t urls <<< "$push"$'\n'"$fetch"
+        fi
+        for url in "${urls[@]}"; do
+            [[ -n "$url" && -z "${checked[$url]:-}" ]] || continue
+            checked[$url]=1
+            v="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$jj_gate_visibility" "$url" 2> /dev/null)" || v=unknown
+            case "$v" in
+                private | internal | not-github) ;;
+                *) return 0 ;;
+            esac
+        done
     done <<< "$1"
     return 1
 }

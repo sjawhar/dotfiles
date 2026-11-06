@@ -248,8 +248,12 @@ CACHE = {
 # any of its URLs is GUARD. (want, remote name, URL, how the config holds it: "" as `git remote add` writes it,
 # "quoted" with the URL in double quotes, "insteadOf" for a URL that url.https://github.com/theorem-labs/.insteadOf=r3:
 # rewrites, as in the revision-3 review's R3-2, "also <URL>" for a second remote, `zzz`, at <URL>, "sshCommand" for
-# a checkout whose core.sshCommand is set, or "partial" for a partial clone's remote (promisor, filter blob:none), whose
-# fetch line git prints as `<URL> (fetch) [blob:none]`.) Each row is judged with neither GIT_SSH_COMMAND nor GIT_SSH set. A comment
+# a checkout whose core.sshCommand is set, "partial" for a partial clone's remote (promisor, filter blob:none), whose
+# fetch line git prints as `<URL> (fetch) [blob:none]`, or "nourl" for a remote whose config section has no `url` key,
+# written as `[remote "<name>"]` with only a fetch refspec: git then pushes to the remote's name as its URL, after its
+# url.<base>.insteadOf and pushInsteadOf rewrites (`git remote get-url --push --all` prints that), while `git remote -v`
+# prints the name and an empty URL; such a row's URL column is empty, and "nourl <key> <prefix> <base>" also writes
+# url.<base>.<key>=<prefix> into the checkout.) Each row is judged with neither GIT_SSH_COMMAND nor GIT_SSH set. A comment
 # "was N" or "was Y" marks rows whose answer BET-706 changed from the old rule (a fixed list of names matched in
 # `git remote -v`).
 GUARD_TABLE = [
@@ -361,6 +365,19 @@ GUARD_TABLE = [
     ("Y", "origin", "https://github.com/theorem-labs/rocq.git", "partial"),
     ("Y", "origin", "git@alias-xf:theorem-labs/private-fixture space.git", "partial"),
     ("N", "origin", "git@corp.example:theorem-labs/rocq.git", "partial"),
+    # Round 8c: a remote with no `url` key (the sweep builder found 7 such partial clones). git pushes to its name.
+    ("Y", "https://github.com/theorem-labs/rocq.git", "", "nourl"),
+    ("Y", "git@github.com:theorem-labs/rocq.git", "", "nourl"),
+    ("N", "https://github.com/theorem-labs/private-fixture.git", "", "nourl"),
+    ("N", "../srv/theorem-labs/rocq.git", "", "nourl"),
+    ("N", "git@corp.example:theorem-labs/rocq.git", "", "nourl"),
+    # Round 8d: git rewrites the name before it pushes to it, so the rewritten URLs decide, not the name (the review of
+    # 8c, P1: a local-path name and a private name, each rewritten to a public repository, leaked unchecked).
+    ("Y", "../github/theorem-labs/rocq.git", "", "nourl insteadOf ../github/ https://github.com/"),
+    ("Y", "https://github.com/theorem-labs/private-fixture.git", "", "nourl insteadOf https://github.com/theorem-labs/private-fixture.git https://github.com/theorem-labs/rocq.git"),
+    ("Y", "https://github.com/theorem-labs/private-fixture.git", "", "nourl pushInsteadOf https://github.com/theorem-labs/private-fixture.git https://github.com/theorem-labs/rocq.git"),
+    ("N", "https://github.com/theorem-labs/rocq.git", "", "nourl insteadOf https://github.com/ ../srv/"),
+    ("N", "https://github.com/theorem-labs/rocq.git", "", "nourl insteadOf https://github.com/ git@corp.example:"),
     # A filter may hold ` [`, `]` and ` (fetch)` itself (git accepts `sparse:oid=<blob-ish>` naming any path, as
     # Bet2211RedTeam showed with a real clone): a fetch line's URL ends at its first ` (fetch)`.
     ("N", "origin", "https://github.com/theorem-labs/private-fixture.git", "partial sparse:oid=HEAD:sparse [x]"),
@@ -802,6 +819,14 @@ class JjPushLeakGateTest(unittest.TestCase):
         for k, (_, name, url, how) in enumerate(GUARD_TABLE):
             co = self.tmp / "guard" / f"{k:02d}"
             subprocess.run(["/usr/bin/git", "init", "-q", str(co)], env=env, check=True)
+            if how == "nourl" or how.startswith("nourl "):
+                subprocess.run(["/usr/bin/git", "-C", str(co), "config", f"remote.{name}.fetch", "+refs/heads/*:refs/remotes/nourl/*"],
+                               env=env, check=True)
+                if how != "nourl":
+                    _, key, prefix, base = how.split()
+                    subprocess.run(["/usr/bin/git", "-C", str(co), "config", f"url.{base}.{key}", prefix], env=env, check=True)
+                checkouts.append(str(co))
+                continue
             subprocess.run(["/usr/bin/git", "-C", str(co), "remote", "add", name, url], env=env, check=True)
             if how == "quoted":
                 cfg = co / ".git" / "config"
@@ -880,8 +905,19 @@ class JjPushLeakGateTest(unittest.TestCase):
         own = judge(load + 'for co in "$@"; do\n'
                     # The checkout's URLs as the gate reads them, after the tab (a line with none is no remote's, such
                     # as the rest of a filter holding a newline): a push line's without its final " (push)", a fetch
-                    # line's up to its first " (fetch)" (a partial clone's filter follows it).
-                    '  mapfile -t urls < <(/usr/bin/git -C "$co" remote -v | sed -E "/\t/!d; s/^[^\t]*\t//; / \\(push\\)$/{s/ \\(push\\)$//;b}; s/ \\(fetch\\).*$//" | sort -u)\n'
+                    # line's up to its first " (fetch)" (a partial clone's filter follows it); a remote listed with no
+                    # URL (`name<TAB>` and nothing else) has the URLs `git remote get-url --push --all` and `git remote
+                    # get-url --all` print for its name, which are where git pushes it and fetches from.
+                    '  urls=()\n'
+                    "  while IFS= read -r l; do\n"
+                    "    [[ $l == *$'\\t'* ]] || continue\n"
+                    "    u=\"${l#*$'\\t'}\"\n"
+                    '    if [[ $u == *" (push)" ]]; then u="${u% (push)}"; else u="${u%% (fetch)*}"; fi\n'
+                    '    if [[ -n $u ]]; then urls+=("$u"); continue; fi\n'
+                    "    n=\"${l%%$'\\t'*}\"\n"
+                    '    mapfile -t -O "${#urls[@]}" urls < <(/usr/bin/git -C "$co" remote get-url --push --all -- "$n"; /usr/bin/git -C "$co" remote get-url --all -- "$n")\n'
+                    '  done < <(/usr/bin/git -C "$co" remote -v)\n'
+                    '  mapfile -t urls < <(printf "%s\\n" "${urls[@]}" | sort -u)\n'
                     # -C names the checkout, so the sweep reads its core.sshCommand, as `sweep` does.
                     '  v=$(verdict -C "$co" "${urls[@]}")\n'
                     '  if config_may_guard "$(config_of "$co/.git" "$co")"; then p=P; else p=S; fi\n'
@@ -1993,6 +2029,142 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((self.lines(checks), self.lines(calls)), ([], []))
         self.assertIn(ROCQ, self.received(leaky))
+
+    # Round 8c: a remote whose config has no `url` key. git pushes to the remote's name as its URL, but `git remote -v`
+    # prints an empty URL for it. Round 8d: git applies url.<base>.insteadOf and pushInsteadOf to that name first, so the
+    # gate reads the URLs `git remote get-url --push --all` and `git remote get-url --all` print for it, as the sweep does.
+    def nourl_remote(self, name: str, prefix: str = "", to: str = "", key: str = "insteadOf") -> None:
+        """NAME as the checkout's only remote, with no url key (only a fetch refspec), as the sweep builder found it.
+        git pushes to the name, with insteadOf applied; PREFIX -> TO (url.TO.KEY=PREFIX) routes that to a local receiver.
+        No remote.<name>.vcs: with one, git would not take the name as the URL."""
+        self.git("remote", "remove", "origin")
+        self.git("config", f"remote.{name}.fetch", "+refs/heads/*:refs/remotes/nourl/*")
+        if prefix:
+            self.git("config", f"url.{to}.{key}", prefix)
+        listing = subprocess.run(["/usr/bin/git", "remote", "-v"], cwd=self.repo, env=self.env, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(listing, f"{name}\t\n", "git no longer prints an empty URL for a remote with none")
+        self.assertEqual(self.git("remote", "get-url", "--push", name), name.replace(prefix, to, 1) if prefix else name)
+
+    def nourl_push(self, name: str, commit: str, protocols: str = "sink") -> subprocess.CompletedProcess[str]:
+        self.keep_cache_fresh()
+        return subprocess.run(["git", "push", name, f"{commit}:refs/heads/x"], cwd=self.repo,
+                              env={**self.env, "GIT_ALLOW_PROTOCOL": protocols}, capture_output=True, text=True)
+
+    def test_a_remote_named_by_a_public_github_url_with_no_url_is_checked(self):
+        leaky, clean = self.leak_and_clean()
+        self.nourl_remote(ROCQ, "https://github.com/", "sink::https://github.com/")
+        checks = self.count_checks()
+        r = self.nourl_push(ROCQ, leaky)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertEqual(self.received(leaky), [])
+        self.assertEqual(self.lines(checks), [f"{ROCQ} sink::{ROCQ}"])
+        r = self.nourl_push(ROCQ, clean)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lines(checks), [f"{ROCQ} sink::{ROCQ}"] * 2)
+        self.assertEqual(self.received(clean), [ROCQ])
+
+    def test_a_remote_named_by_a_local_path_with_no_url_is_untouched(self):
+        # A relative path (git refuses a remote name that begins with `/`), pushed by git's file transport.
+        leaky, _ = self.leak_and_clean()
+        receiver = self.tmp / "mirror" / "rocq.git"
+        subprocess.run(["/usr/bin/git", "init", "-q", "--bare", str(receiver)], check=True)
+        self.nourl_remote("../mirror/rocq.git")
+        checks = self.count_checks()
+        r = self.nourl_push("../mirror/rocq.git", leaky, "sink:file")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("git shim:", r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertTrue(self.holds(receiver, leaky))
+
+    def test_a_remote_named_by_another_host_with_no_url_is_untouched(self):
+        # setUp's GIT_SSH_COMMAND stays: it would make the ssh name an unknown alias, but the gate reads the URL git
+        # pushes to, which insteadOf rewrites to https.
+        leaky, _ = self.leak_and_clean()
+        name = "git@corp.example:theorem-labs/rocq.git"
+        self.nourl_remote(name, "git@corp.example:", "sink::https://corp.example/")
+        checks = self.count_checks()
+        r = self.nourl_push(name, leaky)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("git shim:", r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertEqual(self.received(leaky), ["https://corp.example/theorem-labs/rocq.git"])
+
+    def assert_nourl_leak_checked(self, name: str, commits: tuple[str, str]) -> None:
+        """A leak pushed to the no-url remote NAME, which git sends to sink::ROCQ, is refused after one check with
+        nothing at the receiver; the clean commit then lands after one more check."""
+        leaky, clean = commits
+        checks = self.count_checks()
+        r = self.nourl_push(name, leaky)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertEqual(self.received(leaky), [])
+        self.assertEqual(self.lines(checks), [f"{name} sink::{ROCQ}"])
+        r = self.nourl_push(name, clean)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lines(checks), [f"{name} sink::{ROCQ}"] * 2)
+        self.assertEqual(self.received(clean), [ROCQ])
+
+    def test_a_no_url_remote_whose_local_path_name_is_rewritten_to_public_github_is_checked(self):
+        # The review of 8c, P1, first case: read by its name, a local path, the checkout was not guarded.
+        commits = self.leak_and_clean()
+        name = "../github/theorem-labs/rocq.git"
+        self.nourl_remote(name, "../github/", "sink::https://github.com/")
+        self.assert_nourl_leak_checked(name, commits)
+
+    def test_a_no_url_remote_whose_private_name_is_rewritten_to_a_public_url_is_checked(self):
+        # The review of 8c, P1, second case: read by its name, a private repository, the checkout was not guarded.
+        commits = self.leak_and_clean()
+        self.nourl_remote(PRIVATE, PRIVATE, f"sink::{ROCQ}")
+        self.assert_nourl_leak_checked(PRIVATE, commits)
+
+    def test_a_no_url_remote_whose_private_name_is_push_rewritten_to_a_public_url_is_checked(self):
+        # pushInsteadOf rewrites only where git pushes: the fetch URL stays the private name.
+        commits = self.leak_and_clean()
+        self.nourl_remote(PRIVATE, PRIVATE, f"sink::{ROCQ}", "pushInsteadOf")
+        self.assertEqual(self.git("remote", "get-url", PRIVATE), PRIVATE)
+        self.assert_nourl_leak_checked(PRIVATE, commits)
+
+    def test_a_no_url_remote_whose_public_name_is_rewritten_to_a_local_path_is_untouched(self):
+        leaky, _ = self.leak_and_clean()
+        receiver = self.tmp / "mirror" / "theorem-labs" / "rocq.git"
+        subprocess.run(["/usr/bin/git", "init", "-q", "--bare", str(receiver)], check=True)
+        self.nourl_remote(ROCQ, "https://github.com/", f"{self.tmp}/mirror/")
+        checks = self.count_checks()
+        r = self.nourl_push(ROCQ, leaky, "sink:file")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("git shim:", r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertTrue(self.holds(receiver, leaky))
+
+    def test_a_no_url_remote_whose_public_name_is_rewritten_to_another_host_is_untouched(self):
+        leaky, _ = self.leak_and_clean()
+        self.nourl_remote(ROCQ, "https://github.com/", "sink::https://corp.example/")
+        checks = self.count_checks()
+        r = self.nourl_push(ROCQ, leaky)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("git shim:", r.stderr)
+        self.assertEqual(self.lines(checks), [])
+        self.assertEqual(self.received(leaky), ["https://corp.example/theorem-labs/rocq.git"])
+
+    def test_a_no_url_remote_whose_urls_cannot_be_read_is_guarded(self):
+        # Unknown counts as public (spec R4): the git past the shim fails `remote get-url`, so the local-path remote,
+        # untouched when its URL can be read, is guarded and the check runs.
+        leaky, _ = self.leak_and_clean()
+        receiver = self.tmp / "mirror" / "rocq.git"
+        subprocess.run(["/usr/bin/git", "init", "-q", "--bare", str(receiver)], check=True)
+        self.nourl_remote("../mirror/rocq.git")
+        (self.fake / "git").write_text(
+            f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{self.calls}"\n'
+            'if [[ " $* " == *" remote get-url "* ]]; then echo "fatal: simulated failure" >&2; exit 128; fi\n'
+            'exec /usr/bin/git "$@"\n', encoding="utf-8")
+        checks = self.count_checks()
+        r = self.nourl_push("../mirror/rocq.git", leaky, "sink:file")
+        self.assertIn("remote get-url --push --all -- ../mirror/rocq.git", self.lines(self.calls), "the gate did not read the remote's URLs")
+        self.assertEqual(self.lines(checks), ["../mirror/rocq.git ../mirror/rocq.git"], r.stderr)
+        self.assertNotEqual(r.returncode, 0, r.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", r.stderr)
+        self.assertFalse(self.holds(receiver, leaky))
 
     def test_a_hooks_path_on_the_command_line_is_the_callers_choice(self):
         # A caller's own `git -c core.hooksPath=...` is left as it is (scope `command`), as before.

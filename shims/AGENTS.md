@@ -140,14 +140,25 @@ before handing the call to the real one.
   another session's unpushed commits in such a repository can be rewritten without
   `--ignore-immutable`. Read-only commands (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`,
   …) skip the check.
-  In an agent session, `jj git push` also runs the shared public leak check before
-  sending anything. The shim resolves push aliases (up to eight levels) in jj's
-  startup invocation context; lookup/decoding failures and deeper expansions
-  refuse. The checked expanded argv is the actual push argv. jj's dry-run resolves
+  `jj git push` also runs the shared public leak check before sending anything: in an agent
+  session always, and outside one (a person's own terminal, which no git hook reaches, since
+  jj runs git with `--no-verify`) wherever this machine has the check installed, found as
+  below (`PUBLIC_LEAK_CHECK`, `public-leak-check.sh` on PATH, then
+  `~/.config/public-leak-check/path`; dispatch://BET-706). Outside an agent session a machine
+  without the check is unchanged, and `DOTFILES_JJ_NO_LEAK_CHECK=1` skips the check for that one
+  command, as `git push --no-verify` does for git; a refusal there ends with a line naming that
+  variable. In an agent session the variable is ignored. The `--deleted` refusal and the
+  trailer handling stay as they were. The shim resolves push aliases in jj's startup invocation
+  context: up to eight levels in an agent session, up to 64 outside one. A command whose first word
+  is a builtin other than `git` needs no alias lookup. Lookup/decoding failures and deeper
+  expansions refuse (a person's refusal names `DOTFILES_JJ_NO_LEAK_CHECK=1`), since an alias the
+  shim cannot resolve may be a push; outside an agent session a cyclic alias is left to jj, which
+  refuses it itself and runs nothing. The checked expanded argv is the actual push argv. jj's dry-run resolves
   remote patterns and bookmark/tag selectors; each GitHub destination's full
   old/new ref updates go to the check's pre-push interface. Every destination must
   pass before any actual push. A failed dry-run, unreadable plan or nonzero check
-  refuses; without a check, only a destination confirmed private passes.
+  refuses; without a check, only a destination confirmed private passes (an agent session
+  only: outside one, no check means no gate).
   Non-GitHub destinations pass unchanged. `--quiet` needs a second dry-run with
   only that rendering flag removed to read the plan. The gate does not depend on
   jj's git executable or git's hooks, and aliases cannot bypass `--deleted` refusal.
@@ -193,7 +204,11 @@ before handing the call to the real one.
   guarded, the shim drops `--no-verify` and adds a last `-c core.hooksPath=jj-push-hooks/`. A
   checkout is guarded when some URL its `git remote -v` prints (read whole after the tab: a push
   line without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial
-  clone's filter, which may hold anything, follows that) is a
+  clone's filter, which may hold anything, follows that; a remote listed with a blank URL, its
+  name and a tab only, has no url in its config, and git pushes to its name after
+  `url.<base>.insteadOf` and `pushInsteadOf` rewrite it, so its URLs are those
+  `git remote get-url --push --all <name>` and `git remote get-url --all <name>` print, and a
+  failure of either is unknown) is a
   GitHub repository that is public or whose visibility cannot be read, or has a host part that
   cannot be parsed, as `scripts/github-repo-visibility` reads it: a leading `<transport>::` and
   `git+` stripped, github.com, www.github.com or ssh.github.com (one trailing dot allowed)
