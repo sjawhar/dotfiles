@@ -100,6 +100,14 @@ window_end() {
 	printf '%02d:00' $(( (h + 24) % 24 ))
 }
 
+# window_day prints the UTC date the window ending at END (HH:00) started on: the day before
+# when the window crosses midnight (22:00 to 01:00Z), so the 01:29Z poll does not name a
+# window that has not happened yet.
+window_day() {
+	local end=$1
+	if [ "$((10#${end%%:*}))" -lt 3 ]; then date -u -d 'yesterday' +%F; else date -u +%F; fi
+}
+
 poll() {
 	local end start msg n=0 failed=0 sid
 	resolve_infra || return 1
@@ -108,7 +116,7 @@ poll() {
 	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
 	msg="$state/poll-message.txt"
 	cat >"$msg" <<EOF
-INFRA-6 blocked-agent-hours poll, window $(date -u +%F) $start to ${end}Z. From the holder of $INFRA_ROLE ($INFRA_SESSION), sent by its job infra6-scoreboard-poll.
+INFRA-6 blocked-agent-hours poll, window $(window_day "$end") $start to ${end}Z. From the holder of $INFRA_ROLE ($INFRA_SESSION), sent by its job infra6-scoreboard-poll.
 
 Reply to me with one line for your lane:
 - agents idle x hours idle in that window because of infrastructure (merge path, apply, credential, the box, Dispatch, CI, Envoy, model gateway or login), from your own count. Give one item for each cause.
@@ -193,7 +201,7 @@ wake() {
 	start=$(printf '%02d:00' $(( (10#${end%%:*} + 21) % 24 )))
 	msg="$state/wake-message.txt"
 	{
-		echo "infra6-scoreboard-poll: add up the blocked-agent-hours replies for $(date -u +%F) $start-${end}Z (poll sent at ${end%%:*}:29Z; $(tail -1 "$state/polls.log" | cut -d' ' -f3) leads asked). Count each lane's own figure only, name each cause, give n and how it was asked, and do not add two lanes' counts of one cause. Append the reading to dispatch://INFRA-6/artifact/scoreboard-json."
+		echo "infra6-scoreboard-poll: add up the blocked-agent-hours replies for $(window_day "$end") $start-${end}Z (poll sent at ${end%%:*}:29Z; $(tail -1 "$state/polls.log" | cut -d' ' -f3) leads asked). Count each lane's own figure only, name each cause, give n and how it was asked, and do not add two lanes' counts of one cause. Append the reading to dispatch://INFRA-6/artifact/scoreboard-json."
 		if [ -s "$state/gone.txt" ]; then
 			echo "Leads in $leads_file that are no longer live, not asked; replace or remove each:"
 			cat "$state/gone.txt"
