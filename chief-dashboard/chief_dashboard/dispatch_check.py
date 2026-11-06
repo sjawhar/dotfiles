@@ -572,12 +572,10 @@ def _followed_here(e: dict, later: list[dict]) -> bool:
     return any(is_session(x) and re.match(r"(comment|message|ask)\.", x["type"]) for x in later)
 
 def is_approval(p: dict) -> bool:
-    """Whether an ask is a spec-approval request (`dispatch request-approval`): its kind says so, or its question opens
-    "Approve " and its answer is Approve or Request changes."""
-    if p.get("kind") == "approval":
-        return True
-    selected = set((p.get("answer") or {}).get("selected") or [])
-    return (p.get("question") or "").startswith("Approve ") and bool(selected) and selected <= {"Approve", "Request changes"}
+    """Whether an ask is a spec-approval request (`dispatch request-approval`), read from its `kind` alone: wording is no
+    test, since a question that opens "Approve" is still a question (agent-infra's ask advisory hid a real answer that way,
+    cybermonklabs/legion#2819, 2026-11-05)."""
+    return p.get("kind") == "approval"
 
 
 
