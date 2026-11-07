@@ -13,9 +13,11 @@ RestartSec=30
 Nice=15
 IOSchedulingClass=idle
 # 32 bytes is enough for a directory name and keeps three of them inside the BPF stack limit;
-# the default 64 overflows it and the program will not load.
-Environment=BPFTRACE_MAX_STRLEN=32
-ExecStart=/bin/sh -c 'exec sudo -n bpftrace %h/.dotfiles/scripts/unlink-watch.bt >> %h/.local/state/unlink-watch.log 2>&1'
+# the default 64 overflows it and the program refuses to load ("BPF stack limit is exceeded").
+# It goes through `env` under sudo, NOT through the unit's Environment=: sudo resets the
+# environment, so a unit-level variable never reaches bpftrace and the program fails exactly as
+# if nothing had been set. That is how this unit failed its first start (2026-11-07 21:17Z).
+ExecStart=/bin/sh -c 'exec sudo -n env BPFTRACE_MAX_STRLEN=32 bpftrace %h/.dotfiles/scripts/unlink-watch.bt >> %h/.local/state/unlink-watch.log 2>&1'
 
 [Install]
 WantedBy=default.target
