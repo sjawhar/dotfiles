@@ -18,6 +18,16 @@ afternoon were each true of something other than the question asked.
   the next run, so one run per tree adds the shared bytes to each tree. Measured on two hardlink
   copies of one 1.94 GB tree, 2026-10-30: one du per tree came to 3.87 GB, one du over both to
   1.99 GB. Removing one copy frees only what the other does not share, here 0.05 GB.
+- A sparse file claims bytes it does not hold, so **rank by allocated blocks, never by apparent
+  size**. `du` is allocated by default and right; `du -b`, `du --apparent-size`, `find -printf %s`
+  and `stat -c %s` are apparent and wrong for this. Measured on sami-devbox, 2026-11-07:
+  `/mnt/nvme/sami/tmp/CcTranscripts-01a15d00-scratch` reads **1,024.0 GiB apparent and 3.4 MiB
+  allocated** — one deliberately sparse test fixture (`test_an_enormous_sparse_droppe0/huge.err`).
+  By apparent size it was the largest object on a 16 TB array and the true top ten sat beneath it.
+  Agent box disk images are sparse too, so the same mistake inflates any per-box accounting: one
+  image read 128 GiB apparent against 58 GiB allocated. `find -printf '%b'` gives 512-byte blocks
+  when you need a per-file figure; `scripts/agentbox` still uses `du -sb` in three places
+  (dispatch://INFRA-1547).
 - A tree too large to walk at once:
   `sudo python3 $SKILL/scripts/disk_attribution.py --out <file.tsv> <roots>`. Run it under
   `systemd-run` when it can outlive a tool call, because a tool timeout kills it. Never run one
