@@ -11,6 +11,13 @@ description: "Use before you send or publish any text a person reads: an ask, a 
 2. Start from what happens, not from a setting, a flag or a name: the reader can reach the setting from the behaviour, not the reverse.
 3. Define each term where you first use it, in literal words. No analogy: the reader cannot tell which part of one is true.
 
+## Quote with its source; a term with its instance
+
+Two things the gate refuses after you draft, so do them as you write and skip the loop:
+
+1. A quote carries its source. When you quote Sami or a decision, put the link to where it was written -- the Dispatch comment, ask, or message -- beside the quote. An artifact version is not a source; it is not where he wrote the words. A quote with no link is what the gate sends back.
+2. An abstraction carries one instance. Beside every coined name, abstraction, or term the reader cannot already resolve, put one concrete instance of it: the actual file, number, id, or example. A coined or undefined word in a person's text is the single most common thing they cannot read.
+
 ## Before you send
 
 A fresh session that has only what the reader has removes what the reader does not need, and lists every term it cannot define. Fix each listed term. A reviewer that reads only to approve has not done this step, and an instruction alone did not make it happen in 5 of 18 drafts, so the two lists are what show it ran.
