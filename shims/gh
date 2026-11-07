@@ -77,14 +77,48 @@ fi
 # scripts/agent-session and omp/extensions/session-env.ts export the agent
 # GH_CONFIG_DIR, so a gh that still runs past this shim finds no user login.
 agent_context() {
-    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}${CLAUDECODE:-}${ENVOY_SESSION_ID:-}${AGENT_SHIM_AGENT:-}${LEGION_ROLE:-}${LEGION_TREE:-}${LEGION_CONTROLLER:-}${LEGION_DAEMON_URL:-}" ]] && return 0
     local i v
     for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
         v="GIT_CONFIG_VALUE_$i"
         [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
     done
+    # There is no exception for tmux. A pane takes the SERVER's environment, not the environment
+    # of whoever asked for the pane, so "inside tmux means the person" let an agent's own
+    # `tmux new-window` under the person's server produce a pane with no marker that then ran as
+    # the person (round 3 of INFRA-1538). The fix is the other way round: shims/tmux and
+    # scripts/agentbox-tmux-guard pass the caller's markers to the new pane with tmux's -e, so an
+    # agent's pane carries them and is caught above.
+    # A command that arrives over SSH in a session with no terminal (`ssh host az account show`)
+    # is an agent's, not a person's: sshd gives a person's own session a terminal and names it in
+    # SSH_TTY for the whole session, so a pipe into one command of it (`echo x | az …`, git
+    # handing its credential helper the request) is still the person's, where testing this
+    # command's own stdin made it an agent's. AGENT_SHIM_PERSON=1 is the person's escape for a
+    # deliberate non-interactive SSH command of their own (INFRA-1538).
+    if [[ -n "${SSH_CONNECTION:-}" && -z "${SSH_TTY:-}" && "${AGENT_SHIM_PERSON:-}" != 1 ]]; then
+        AGENT_CONTEXT_VIA_SSH=1
+        return 0
+    fi
     return 1
 }
+
+# Say so when the SSH rule above, and not a session marker, made this an agent's call: nothing
+# else in the output names the identity, and a person whose own non-interactive ssh command this
+# is needs to see the escape. Once per call: the read cache and the stderr-keeping outer pass
+# below re-enter this shim.
+if [[ -z "${GH_SHIM_INNER:-}${GH_READ_CACHE_BYPASS:-}${KNIVES_GH_SHIM_DEPTH:-}" ]] &&
+    agent_context && [[ -n "${AGENT_CONTEXT_VIA_SSH:-}" ]]; then
+    echo "gh shim: non-interactive SSH, so an agent's call: routed to the GitHub App, not to any person's login (set AGENT_SHIM_PERSON=1 for your own)" >&2
+fi
+
+# There is no exception here for a machine that names gh-app.host-profile in its own git config
+# (sami-devbox, installers/gh-app-host.sh). An earlier draft kept the HOST route for a call whose
+# only agent evidence was the SSH rule, on the grounds that the agent route needs a broker session
+# an ssh command has not got. It does not: gh-app-token registers one itself (`secret-run
+# --register`, shims/gh-app-token), and that profile IS `agent`, so both routes mint the same
+# App token. The exception only lifted such a call out of the whole agent block below — past the
+# public-text leak check, past the refusal of `gh auth token`, past the agent GH_CONFIG_DIR, and
+# past the requirement that a call name the repository it targets (review of INFRA-1538).
 
 # A refusal names the exact call, the identity it would have acted as, why it
 # is refused and what to do instead, and exits non-zero. A silent or vague

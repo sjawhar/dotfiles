@@ -12,11 +12,14 @@ before. gh-app-token and the real gh are stubs that record how they were called.
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 SHIMS = Path(__file__).parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
 REQUEST = "protocol=https\nhost=github.com\npath=theorem-labs/machcsl-riscv\n\n"
 PROFILE = "[gh-app]\n\thost-profile = agent\n"
 
@@ -110,6 +113,55 @@ class HostCredential(unittest.TestCase):
                                 text=True, cwd=self.tmp, timeout=60, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("password=ghs_APPSTUB", result.stdout)
+        self.assertEqual(self.recorded()[0], "gh-app-token agent get")
+
+    # INFRA-1538, and its review: a command over SSH with no terminal in its session is an
+    # agent's, and the host profile is no exception to that — `gh-app-token` registers the broker
+    # session itself (`secret-run --register`), the profile installers/gh-app-host.sh writes IS
+    # `agent`, and the exception the first draft made lifted such a call out of every other agent
+    # safeguard too. So `ssh sami-devbox git clone …` now answers through the agent route, and
+    # only a person's own session (SSH_TTY set) keeps the host route. The profile name tells the
+    # two apart: the host route passes it on, the agent route says `agent`.
+    HOST_PROFILE = "[gh-app]\n\thost-profile = hostprof\n"
+
+    def test_a_credential_request_over_ssh_takes_the_agent_route(self):
+        self.machine_config(self.HOST_PROFILE)
+        env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "DOTFILES_DIR": str(SHIMS.parent)}
+        result = run_without_tty(["gh", "auth", "git-credential", "get"], env=env, cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.recorded()[0], "gh-app-token agent get")
+
+    def test_a_persons_ssh_session_keeps_the_host_route(self):
+        # Git hands a credential helper its request down a pipe, so this case has no terminal on
+        # stdin and must still be the person's (review of INFRA-1538).
+        self.machine_config(self.HOST_PROFILE)
+        for run in (run_without_tty, run_with_tty):
+            with self.subTest(run=run.__name__):
+                self.calls.unlink(missing_ok=True)
+                env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY}
+                result = run(["gh", "auth", "git-credential", "get"], env=env, cwd=self.tmp, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.recorded()[0], "gh-app-token hostprof get")
+
+    def test_git_in_a_persons_ssh_session_keeps_the_host_route(self):
+        # The whole chain the review drove: git in the person's interactive SSH shell, through
+        # ~/.gitconfig's `!gh auth git-credential` helper, which reads its request from a pipe.
+        self.shared_config('[credential "https://github.com"]\n\thelper =\n\thelper = !gh auth git-credential\n'
+                           "[credential]\n\tuseHttpPath = true\n")
+        self.machine_config(self.HOST_PROFILE)
+        env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY}
+        result = subprocess.run(["git", "credential", "fill"], env=env, input=REQUEST, capture_output=True,
+                                text=True, cwd=self.tmp, timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("password=ghs_APPSTUB", result.stdout)
+        self.assertEqual(self.recorded()[0], "gh-app-token hostprof get")
+
+    def test_a_session_marker_over_ssh_still_takes_the_agent_route(self):
+        self.machine_config(self.HOST_PROFILE)
+        env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "OMP_SESSION_ID": "01a1-session",
+               "DOTFILES_DIR": str(SHIMS.parent)}
+        result = run_without_tty(["gh", "auth", "git-credential", "get"], env=env, cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.recorded()[0], "gh-app-token agent get")
 
 

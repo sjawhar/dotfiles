@@ -537,6 +537,152 @@ before handing the call to the real one.
   (`omp/plugins/package.json`). Its marker lets the package wrapper skip the shim while finding real
   gws; if the package is absent, the shim fails loudly and directs `bun install` in `omp/plugins`.
 
+## Who is an agent
+
+`az`, `gcloud`, `gh`, `git`, `jj` and `tmux` each hold a copy of one `agent_context` function,
+and `secrets` the same test in POSIX sh. All seven read one marker set: `OMP_SESSION_ID`,
+`PI_SESSION_FILE`, `PI_TOOL_BRIDGE_URL`, `AGENTBOX_SESSION`, `CLAUDECODE`, `ENVOY_SESSION_ID`,
+`AGENT_SHIM_AGENT`, Legion's `LEGION_ROLE`, `LEGION_TREE`, `LEGION_CONTROLLER` and
+`LEGION_DAEMON_URL` (`packages/daemon/internal/runtime/tmux/spawn.go`), and the gh-app routing
+include. Until round 3 of dispatch://INFRA-1538 `secrets` read four of those and no routing
+include, and no shim knew Legion at all. A caller is also an agent **when `SSH_CONNECTION` is
+set and `SSH_TTY` is not**: `ssh sami-devbox az account show` carries no marker, and until
+2026-11-07 every such command ran as the person whose login the machine holds — az with
+`~/.azure`, Sami's own.
+
+The SESSION decides, not the command's own stdin. sshd sets `SSH_TTY` for a session it gave a
+terminal, and every command of that session inherits it, so `echo x | gh …` in a person's
+interactive SSH shell, and git handing a credential helper its request down a pipe, stay the
+person's; the first draft tested `[[ ! -t 0 ]]` and made both an agent's. A person's own shell
+off SSH is unchanged, and `AGENT_SHIM_PERSON=1` is their escape for a deliberate non-interactive
+SSH command of their own; it does not turn a session marker off.
+
+**tmux decides nothing.** A pane takes the SERVER's environment, never the environment of
+whoever asked for the pane, so an exemption for `TMUX` was a hole in both directions: an SSH
+agent that started its own server got person panes, and an agent's `tmux new-window` under the
+person's server got an unmarked pane that ran `gcloud --account <the person>` with no refusal
+(round 3 of INFRA-1538, reproduced on a real server). The provenance travels instead, and
+`shims/tmux` adds nothing at all to a person's own tmux command:
+
+- **A command that makes a pane** — `new-session`, `new-window`, `split-window`,
+  `respawn-pane`, `respawn-window`, `display-popup` — gets `-e <marker>=<value>` for every
+  marker the caller holds, the whole `GIT_CONFIG_*` set when it holds the routing include, and
+  `AGENT_SHIM_AGENT=1`. That last one is the provenance of an agent with no marker of its own,
+  one the SSH rule alone classifies: without it, its pane under a person's server was the
+  person's (round 5). Every command of a `\;`-separated list is treated, not only the first.
+- **A command that runs a shell command** — `run-shell`, `pipe-pane` — takes no `-e`, so the
+  command travels in a FILE and tmux is handed `env <marker>=<value> … /bin/sh <path>`. The
+  directory is `$XDG_RUNTIME_DIR/tmux-shim`, else `/run/user/<uid>/tmux-shim` — which a cron
+  job or a system unit still has though its environment does not name it — and nowhere else: a
+  name in a shared temporary directory is another user's to guess and to plant a symlink at,
+  which `mkdir -p` and `chmod` would then follow (round 8). It is made with `mkdir 0700` and
+  checked with lstat — a symlink, another owner or any other mode refuses the call — and the
+  file inside it is created O_CREAT|O_EXCL, mode 0600, named `agent-XXXXXXXX`. Its first line
+  is `rm -f -- "$0"`, so it removes itself as the shell starts, and that is the ONLY thing that
+  removes it. **A command tmux never starts leaves its file** (a bad `-t`, `pipe-pane -o` on a
+  pipe already on). That residue is accepted: removing a file by age, or because the tmux call
+  exited non-zero, would take the file of a command tmux has only QUEUED (`run-shell -b -d 5`,
+  or a later command of the same list failing) and lose that work, and the residue is bytes of
+  the agent's own command text in a private directory (0700) on tmpfs that logout and reboot
+  clear (round 9). These are marked and not refused because `scripts/agentbox move`
+  starts the box relauncher with `tmux run-shell -b`. The command may not travel as TEXT in
+  the tmux argument: tmux expands `#{…}`, `#S`, `#T` and the rest in it after the quoting, so a
+  format value holding a quote — a server option, a window title any program can set — ended
+  the quoted word and the rest ran in tmux's own unmarked shell (round 6); and doubling every
+  `#` was no transport either, since a boxed caller passes through two wrappers and tmux leaves
+  `##` alone before `[`, which broke `${#v}`, `${v#*/}` and a literal `#[fg=red]` (round 7). A
+  path of `[A-Za-z0-9._/-]` holds nothing for tmux or a shell to read, so the command arrives
+  byte for byte. Two consequences, both deliberate: **an agent gets no tmux format expansion
+  inside `run-shell` and `pipe-pane`** (read the value first with
+  `tmux display-message -p '#{pane_id}'`, which this shim does not touch, and pass it), and
+  **`$0` in such a command is the path of that file**, not the shell's name. A marker value
+  holding whitespace, a quote or a `#` cannot travel in that one argument, so it refuses the
+  call instead of marking it in part.
+- **A boxed caller passes through two wrappers**, this shim and the relay, and exactly one may
+  rewrite the command: the relay, which runs where the tmux server and its filesystem are. So
+  when a call is bound for `AGENTBOX_TMUX_GUARD_SOCK`, this shim leaves `run-shell` and
+  `pipe-pane` alone; the relay wraps them with the two markers it can know, `AGENTBOX_SESSION`
+  and `AGENT_SHIM_AGENT=1`.
+- **A command that hands the SERVER a tmux command** to run later or in another session —
+  `if-shell`, `bind-key`, `set-hook`, `confirm-before`, `command-prompt`, `display-menu`,
+  `run-shell -C` — is REFUSED for an agent. The environment of an if-shell condition is not the
+  environment of its branch, so there is nothing to mark, and a binding or a hook an agent
+  installs outlives it. The person's own bindings live in `.tmux.conf`, which the server reads
+  itself; `scripts/tmux-urls` and `scripts/tmux-omp-ids` reach `display-menu` from those
+  bindings, in the server's own environment, so they are not an agent's calls and are not
+  refused.
+- `scripts/agentbox-tmux-guard` does all three with `AGENTBOX_SESSION=<box>`, so a pane or a
+  command a box starts on the host server is marked, or refused, whatever shim the box runs.
+- `.tmux.conf` adds `SSH_TTY` to `update-environment`, beside the `SSH_CONNECTION` tmux carries
+  by default, so the windows a person opens after reattaching over ssh stay the person's. A
+  server started before that line, or under another config, carries `SSH_CONNECTION` without
+  `SSH_TTY` into those windows and they read as a non-interactive ssh command: the safe
+  direction, with `AGENT_SHIM_PERSON=1` as the escape.
+
+`shims/tests/test_shim_agent_context.py` (`TmuxPanes`, `TmuxMarkedArgv`) drives a real server
+and the shim's own argv through each case, and `scripts/tests/test_agentbox_tmux_guard.py` the
+relay.
+
+**These are guardrails against an accident, not a sandbox**, and two gaps are accepted and
+known (dispatch://INFRA-1538, rounds 4 and 5):
+
+- `/usr/bin/tmux` run directly passes no marker. Only the shim on PATH adds them, and an agent
+  that reaches past its own PATH is past every shim here, not only this one.
+- `send-keys` into a shell that is already running carries nothing: the command runs as that
+  shell's owner, with that shell's environment. Typed into a MARKED shell it stays an agent's;
+  typed into the person's it is the person's. The relay allows `send-keys` on purpose — a lead
+  steers other sessions with it (`agentbox/AGENTS.md`) — so this is a deliberate limit, not an
+  oversight. Anything that must be an agent's gets its own pane (`new-window -d`), which is
+  marked.
+
+Each shim prints one stderr line when the SSH rule, and not a marker, made the decision, naming
+the escape. `az` and `gcloud` name the identity the call ENDED on, never one they have not
+selected:
+
+- `gcloud` resolves the final configuration and account in main's own order — `--configuration`,
+  then `GCLOUD_ACCOUNT`, then `CLOUDSDK_ACTIVE_CONFIG_NAME`, then `active_config`; and
+  `--account`, then `CLOUDSDK_CORE_ACCOUNT`, then that configuration's `account` — and reports
+  impersonation from the flag, the environment or the configuration's own
+  `[auth] impersonate_service_account`, as the SDK resolves a property
+  (`core/properties.py:5487-5527`). A call that chose nothing gets configuration `box`; one that
+  chose a configuration, a `--cred-file` or an account keeps its choice (a person's own login
+  named that way is refused earlier, by the agent-session account guard); and where this machine
+  has no `box` configuration and the one in force holds a person's login, the call is refused.
+- **A `--flags-file` in an agent session is refused outright, and nothing in it is parsed.** It
+  is argv gcloud has not expanded yet: the SDK loads the file's YAML — a mapping, a list of
+  mappings, a JSON one-liner — expands it IN PLACE, in argument order, before it resolves
+  `--account`, `--configuration`, `--cred-file` and impersonation, and follows a flags file a
+  flags file names (`calliope/cli.py:92-108,125-130,985`). Three rounds of review found a
+  reader here missing one valid shape after another, each of which ran as the person while the
+  shim named the machine identity, so there is no reader: the refusal is one line and says to
+  pass the flags on the command line. A person's own session is unchanged.
+- **The one exception to the box selection:** a command whose change outlives it — `auth login`,
+  `auth revoke`, `auth application-default …`, `config set`/`unset`/`configurations`, `init`, or
+  a path an unknown flag makes ambiguous (`persists_config_change`) — keeps the configuration it
+  would have used instead of being moved to `box`, because selecting `box` for it would write or
+  empty the machine identity's own state, or sign a person's login into it. The notice says so
+  and names that configuration.
+
+`gh`, `git`, `jj` and `secrets` name the rules the call now runs under.
+
+There is no exception for `gh` on a machine whose own git config names `gh-app.host-profile`
+(sami-devbox, `installers/gh-app-host.sh`). The host route stays what it always was — a person's
+own shell and the machine's own units on a machine with no person's GitHub login — but an SSH
+call takes the AGENT route, with every agent safeguard: the public-text leak check, the refusal
+of `gh auth` verbs, the agent `GH_CONFIG_DIR`, and the requirement to name the target repository.
+The first draft kept the host route for such a call, which lifted it out of all four. It needed
+no exception: `gh-app-token` registers its own broker session (`secret-run --register`), and the
+profile `installers/gh-app-host.sh` writes is `agent`, so both routes mint the same App token
+(`shims/tests/test_gh_host_credential.py`, `test_gh_host_token.py`, `test_gh_unrouted.py`).
+
+The copies are kept identical by hand — `shims/` has no sourced library, and a shim that sources
+one would be a second file every call must find — so `shims/tests/test_shim_agent_context.py`
+compares them byte for byte and drives the whole matrix; each shim's own test file carries its
+end-to-end case. A test that means a person must drop `SSH_CONNECTION` from the environment it
+inherits, or set `SSH_TTY` beside it, and name its own stdin either way
+(`shims/tests/stdin_cases.py`); a test fixture that commits must bring its own `HOME`, git
+configuration and author, or whoever runs the suite decides the case.
+
 ## Adding to a shim
 
 A shim composes with everything else that wraps its binary or already does what it adds.

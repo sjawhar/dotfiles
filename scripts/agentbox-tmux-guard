@@ -43,10 +43,13 @@ from __future__ import annotations
 import base64
 import fcntl
 import os
+import re
 import shlex
 import signal
+import stat as stat_module
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -92,6 +95,23 @@ NO_NEW_PANE = (
     "set-option", "set", "set-window-option", "setw", "show-environment", "showenv",
     "show-messages", "showmsgs", "show-options", "show", "show-window-options", "showw",
     "swap-pane", "swapp", "swap-window", "swapw", "wait-for", "wait",
+)
+# Commands that create a pane and take tmux's `-e NAME=VALUE`, with their aliases.
+# Prefix-matched like the kills.
+PANE_CREATORS = (
+    "new-session", "new", "new-window", "neww", "split-window", "splitw", "respawn-pane",
+    "respawnp", "respawn-window", "respawnw", "display-popup", "popup",
+)
+# Commands that run a shell command without making a pane, so they take no -e: their command is
+# wrapped in a shell of its own with the marker set for all of it. These flags take a value.
+SHELL_RUNNERS = ("run-shell", "run", "pipe-pane", "pipep")
+SHELL_RUNNER_VALUE_FLAGS = ("-c", "-d", "-t")
+# Commands that hand the SERVER a tmux command to run later, or in another session, where the
+# marker cannot follow: the environment of an if-shell condition is not the environment of its
+# branch, and a binding or a hook outlives the box that installed it. Refused (INFRA-1538).
+NESTED_TMUX_COMMANDS = (
+    "if-shell", "if", "bind-key", "bind", "set-hook", "confirm-before", "confirm",
+    "command-prompt", "display-menu", "menu",
 )
 
 
@@ -140,6 +160,18 @@ def refuse(message: str) -> None:
     log("REFUSED " + message.splitlines()[0])
     respond(b"", message.encode("utf-8") + b"\n", 1)
     sys.exit(0)
+
+
+def refuse_nested(word: str) -> None:
+    """A command that hands the server a tmux command to run later, where no marker follows."""
+    refuse(
+        f"agentbox-tmux-guard: refusing `tmux {word} …` from box {BOX}.\n"
+        "  It hands the host's tmux SERVER a command to run later, or in another session, where\n"
+        "  neither this relay nor ~/.dotfiles/shims can mark it as an agent's: the pane it\n"
+        "  eventually makes would run as the person whose server it is (dispatch://INFRA-1538),\n"
+        "  and a key binding or a hook a box installs outlives the box.\n"
+        "  Instead: run the work in a pane of your own now — `tmux new-window -d <command>`,\n"
+        "  which this relay marks — and read it back with capture-pane.")
 
 
 def tmux_bin() -> str:
@@ -276,6 +308,161 @@ def after_server_options(args: list[str]) -> list[str]:
     return []
 
 
+def shell_command_file(command: str) -> str:
+    """The box's command, byte for byte, in a private file whose path tmux reads nothing in.
+
+    The command may not travel as text in the tmux argument: tmux expands `#{…}`, `#S`, `#T`
+    and the rest in it AFTER this relay has quoted it, so a format value holding a quote broke
+    out of the quoted word, and doubling every `#` is no transport either — the box's own shim
+    doubles them as well, and tmux leaves `##` alone before `[` (dispatch://INFRA-1538, rounds
+    6 and 7). The file's first line is `rm -f -- "$0"`, so it removes itself as the shell
+    starts, which also makes `$0` the file's path rather than the shell's name, and is the ONLY
+    thing that removes it: a file whose command tmux never starts, or has only QUEUED, stays.
+    Removing it by age or on a failed call would take a queued command's file with it, and the
+    residue is bytes of the box's own command text in a private directory on tmpfs that logout
+    and reboot clear (round 9).
+
+    The directory is XDG_RUNTIME_DIR's, else /run/user/<uid>, else this guard's own state
+    directory, and nothing else: a name under a shared temporary directory is another user's to
+    guess and to plant a symlink at, which `makedirs(exist_ok=True)` and `chmod` would then
+    follow (round 8). It is made with mkdir 0700 and then checked with lstat — a symlink,
+    another owner or any other mode refuses the call — and the file inside it is created
+    O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600.
+    """
+    base = next((candidate for candidate in
+                 (os.environ.get("XDG_RUNTIME_DIR"), f"/run/user/{os.getuid()}", STATE)
+                 if candidate and private_directory(candidate)), "")
+    if not base:
+        refuse(f"agentbox-tmux-guard: refusing `tmux run-shell …` from box {BOX}.\n"
+               "  None of XDG_RUNTIME_DIR, /run/user/<uid> and this relay's state directory is a\n"
+               "  directory of this user's own, mode 0700, and the box's command needs one to\n"
+               "  reach tmux unchanged.")
+    directory = os.path.join(base, "agentbox-tmux-guard-commands")
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        refuse(f"agentbox-tmux-guard: refusing `tmux run-shell …` from box {BOX}.\n"
+               f"  {directory} cannot be made ({error}), and the box's command needs it.")
+    if not private_directory(directory):
+        refuse(f"agentbox-tmux-guard: refusing `tmux run-shell …` from box {BOX}.\n"
+               f"  {directory} is not a directory of this user's own, mode 0700 and no symlink,\n"
+               "  so a command cannot be handed to tmux through it. Remove it and try again.")
+    handle, path = tempfile.mkstemp(prefix="agent-", dir=directory)
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", path):
+        os.close(handle)
+        os.unlink(path)
+        refuse(f"agentbox-tmux-guard: refusing `tmux run-shell …` from box {BOX}.\n"
+               f"  The private directory for the command ({directory}) has characters tmux or a\n"
+               "  shell would read, so the command cannot be handed over unchanged.")
+    os.fchmod(handle, 0o600)
+    with os.fdopen(handle, "w", encoding="utf-8") as file:
+        file.write('rm -f -- "$0"\n' + command + "\n")
+    return path
+
+
+def private_directory(path: str) -> bool:
+    """A real directory of this user's own, mode 0700, reached through no symlink."""
+    try:
+        found = os.lstat(path)
+    except OSError:
+        return False
+    return (stat_module.S_ISDIR(found.st_mode) and found.st_uid == os.getuid()
+            and stat_module.S_IMODE(found.st_mode) == 0o700)
+
+
+def mark_new_panes(args: list[str]) -> list[str]:
+    """Mark every command this box starts on the host server as the box's.
+
+    A new pane takes the SERVER's environment, not the environment of whoever asked for it, so a
+    box's `tmux new-window` produced a host pane with no marker at all, and ~/.dotfiles/shims
+    read every command in it as the person's own (dispatch://INFRA-1538, rounds 3 and 4). The
+    box's own shims/tmux passes the markers it holds; this adds the one the relay knows for
+    certain, the box, whatever shim the box runs. tmux takes the last -e for a name, so a marker
+    the box already passed keeps its value.
+
+    A command that makes a pane takes `-e NAME=VALUE`. run-shell and pipe-pane make no pane and
+    take no -e: their command goes into a file of its own (shell_command_file) and tmux is
+    handed `env <markers> /bin/sh <path>`. This relay, not the box's shim, is the one wrapper
+    that may do it: the file has to be on the machine the tmux server runs on, and two wrappers
+    rewriting one command is what broke `${#v}` (round 7). The relay cannot see the box's own
+    environment, so the markers are the two it knows: the box, and AGENT_SHIM_AGENT=1, which
+    every agent_context copy reads. They are marked and not refused because `scripts/agentbox
+    move` starts the box relauncher with `tmux run-shell -b`. Every command of a `;`-separated
+    list is treated.
+    """
+    if not BOX:
+        return args
+    marker = f"AGENTBOX_SESSION={BOX}"
+    prefix = f"env {marker} AGENT_SHIM_AGENT=1 "
+    out: list[str] = []
+    index = 0
+    while index < len(args):  # the server options, which sit before the first command word
+        arg = args[index]
+        if arg == "--":
+            out.append(arg)
+            index += 1
+            break
+        if not arg.startswith("-") or arg == "-":
+            break
+        out.append(arg)
+        if arg in SERVER_OPTION_WITH_VALUE and index + 1 < len(args):
+            out.append(args[index + 1])
+            index += 1
+        index += 1
+    starts_command = True
+    awaiting_shell_command = False
+    rest = args[index:]
+    position = 0
+    while position < len(rest):
+        arg = rest[position]
+        position += 1
+        if arg == ";":
+            ends_command, word = True, ""
+        elif arg.endswith(";") and not arg.endswith("\\;"):
+            ends_command, word = True, arg[:-1]
+        else:
+            ends_command, word = False, arg
+        if starts_command and word:
+            if any(name.startswith(word) for name in NESTED_TMUX_COMMANDS):
+                refuse_nested(word)
+            if any(name.startswith(word) for name in PANE_CREATORS):
+                out.append(word)
+                out.extend(["-e", marker])
+                if ends_command:
+                    out.append(";")
+                starts_command = ends_command
+                continue
+            if any(name.startswith(word) for name in SHELL_RUNNERS):
+                out.append(arg)
+                awaiting_shell_command = not ends_command
+                starts_command = ends_command
+                continue
+        if awaiting_shell_command and not ends_command:
+            if "C" in arg[1:] and arg.startswith("-"):
+                # run-shell -C: the argument is a tmux command the server runs, not a shell
+                # command of its own, so there is nothing here to mark.
+                refuse_nested("run-shell -C")
+            if arg in SHELL_RUNNER_VALUE_FLAGS and position < len(rest):
+                out.extend([arg, rest[position]])
+                position += 1
+                continue
+            if not arg.startswith("-"):
+                # The shell command: the first word that is not a flag. It goes to tmux as a
+                # FILE, whose path holds nothing tmux expands and nothing a shell splits, so
+                # the command arrives byte for byte; `env <markers> /bin/sh <path>` then runs
+                # all of it marked.
+                out.append(f"{prefix}/bin/sh {shell_command_file(arg)}")
+                awaiting_shell_command = False
+                continue
+        out.append(arg)
+        if ends_command:
+            awaiting_shell_command = False
+        starts_command = ends_command
+    return out
+
+
 def kill_target(command: list[str]) -> tuple[str | None, bool]:
     """The -t value of a kill command (None when it has none) and whether -a was given."""
     target: str | None = None
@@ -401,12 +588,16 @@ def main() -> int:
     global TMUX
     TMUX = tmux_bin()
     commands = check(args)
+    args = mark_new_panes(args)
 
     census = any(may_create_pane(command[0]) for command in commands)
     before = {row[0] for row in pane_table()} if census else set()
     directory = cwd if cwd and os.path.isdir(cwd) else os.path.expanduser("~")
     done = subprocess.run([TMUX, "-S", SOCK, *args], capture_output=True, check=False,
                           cwd=directory)
+    # Nothing removes a command file from here: the file's own first line does that when its
+    # command starts, and a file whose command tmux has only QUEUED must survive a failure
+    # elsewhere in the same call (round 9 of dispatch://INFRA-1538).
     if census:
         remember_panes({row[0] for row in pane_table()} - before)
     respond(done.stdout, done.stderr, done.returncode)

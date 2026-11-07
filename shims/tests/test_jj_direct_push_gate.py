@@ -15,7 +15,9 @@ from test_jj_lock_shim import real_jj, run_bounded
 
 # The agent markers shims/jj reads, and its own agent_context function, cut from the shim, so the harness can prove a
 # "person" environment is one the shim does not take for an agent session.
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
 _JJ_SHIM = (Path(__file__).parents[1] / "jj").read_text(encoding="utf-8")
 AGENT_CONTEXT = _JJ_SHIM[_JJ_SHIM.index("agent_context() {"):_JJ_SHIM.index("\n}\n", _JJ_SHIM.index("agent_context() {")) + 3]
 
@@ -246,10 +248,14 @@ class DirectPushGateTest(gate.JjPushLeakGateTest):
     # Round 8 (dispatch://BET-706, Sami: dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5): a person's own
     # `jj git push` outside an agent session runs the same gate where this machine has the check installed.
     def as_person(self):
-        """No agent marker shims/jj reads (agent_context): none of the four session variables, and no GIT_CONFIG_*
-        entries (the gh-app routing include is one), whatever the environment running this test holds."""
-        self.env = {k: v for k, v in self.env.items() if k not in AGENT_MARKERS and not k.startswith("GIT_CONFIG_")}
-        probe = subprocess.run(["bash", "-c", "set -u; " + AGENT_CONTEXT + "\nagent_context"], env=self.env, capture_output=True, text=True)
+        """No agent marker shims/jj reads (agent_context): none of the four session variables, no GIT_CONFIG_*
+        entries (the gh-app routing include is one), no SSH_CONNECTION, which in a session with no terminal is
+        an agent's command too, and no SSH_TTY or TMUX, which would make a case that means an agent a person
+        (INFRA-1538), whatever the environment running this test holds."""
+        dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON")
+        self.env = {k: v for k, v in self.env.items() if k not in dropped and not k.startswith("GIT_CONFIG_")}
+        probe = subprocess.run(["bash", "-c", "set -u; " + AGENT_CONTEXT + "\nagent_context"], env=self.env,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True)
         self.assertEqual(probe.returncode, 1, "an agent marker is still set: " + probe.stderr)
 
     def without_check(self):
@@ -305,6 +311,40 @@ class DirectPushGateTest(gate.JjPushLeakGateTest):
         self.assertIn("LEAK CHECK: refusing to push", result.stderr)
         self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
         self.assertEqual(self.received(commit), [])
+
+    def test_a_push_over_ssh_with_no_terminal_is_an_agents(self):
+        # INFRA-1538: `ssh sami-devbox jj git push` cannot skip the check, as no agent can.
+        self.as_person()
+        self.env["SSH_CONNECTION"] = "10.0.0.1 54321 10.0.0.2 22"
+        self.env["DOTFILES_JJ_NO_LEAK_CHECK"] = "1"
+        commit = self.leak()
+        result = self.push("-b", "b1")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LEAK CHECK: refusing to push", result.stderr)
+        self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
+        self.assertEqual(self.received(commit), [])
+
+    def test_agent_shim_person_keeps_the_persons_skip_over_ssh(self):
+        self.as_person()
+        self.env["SSH_CONNECTION"] = "10.0.0.1 54321 10.0.0.2 22"
+        self.env["AGENT_SHIM_PERSON"] = "1"
+        self.env["DOTFILES_JJ_NO_LEAK_CHECK"] = "1"
+        checks = self.count_checks()
+        commit = self.leak()
+        self.assert_pushed(self.push("-b", "b1"), commit)
+        self.assertEqual(self.lines(checks), [])
+
+    def test_a_persons_ssh_session_keeps_the_persons_skip(self):
+        # jj's own stdin here is no terminal, as it is for any command in a pipeline; the
+        # person's session is what decides (review of INFRA-1538).
+        self.as_person()
+        self.env["SSH_CONNECTION"] = "10.0.0.1 54321 10.0.0.2 22"
+        self.env["SSH_TTY"] = "/dev/pts/7"
+        self.env["DOTFILES_JJ_NO_LEAK_CHECK"] = "1"
+        checks = self.count_checks()
+        commit = self.leak()
+        self.assert_pushed(self.push("-b", "b1"), commit)
+        self.assertEqual(self.lines(checks), [])
 
     def test_an_agent_without_a_check_is_unchanged(self):
         # (f) Agent session, no check: a public destination is refused, a confirmed-private one passes.

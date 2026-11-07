@@ -12,11 +12,14 @@ real gh are stubs that record how they were called.
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 SHIMS = Path(__file__).parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_without_tty  # noqa: E402
 PROFILE = "[gh-app]\n\thost-profile = agent\n"
 
 
@@ -117,6 +120,28 @@ class HostToken(unittest.TestCase):
         self.machine_config()
         self.gh("auth", "status")
         self.assertEqual(self.recorded(), ["real gh auth status token=none"])
+
+    # INFRA-1538, and its review: a command over SSH with no terminal in its session is an
+    # agent's, and a host profile is NOT an exception to that. The host token below is for a
+    # person's own shell and for the machine's own units; an agent's call takes the agent route,
+    # with every agent safeguard (test_gh_unrouted.py), and mints no owner-wide host token here.
+    def test_a_call_over_ssh_takes_the_agent_route_and_mints_no_host_token(self):
+        self.machine_config()
+        result = run_without_tty(["gh", "api", "repos/theorem-labs/x"],
+                                 env={**self.env, "SSH_CONNECTION": SSH_CONNECTION,
+                                      "DOTFILES_DIR": str(SHIMS.parent)},
+                                 cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse([c for c in self.recorded() if c.startswith("gh-app-token")], self.recorded())
+        self.assertEqual(self.recorded()[-1], "real gh api repos/theorem-labs/x token=none")
+
+    def test_a_persons_ssh_session_still_gets_the_host_token(self):
+        self.machine_config()
+        result = run_without_tty(["gh", "api", "repos/theorem-labs/x"],
+                                 env={**self.env, "SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY},
+                                 cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.recorded()[-1], "real gh api repos/theorem-labs/x token=ghs_APP_theorem-labs")
 
 
 if __name__ == "__main__":

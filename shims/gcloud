@@ -462,14 +462,31 @@ is_box_routed_auth_login() {
 # Agent session: the test `shims/gh` uses (omp's bash tool and eval kernel, an agentbox session,
 # anything launched with the gh-app routing include). Any other process is the user's own.
 agent_context() {
-    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}" ]] && return 0
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}${CLAUDECODE:-}${ENVOY_SESSION_ID:-}${AGENT_SHIM_AGENT:-}${LEGION_ROLE:-}${LEGION_TREE:-}${LEGION_CONTROLLER:-}${LEGION_DAEMON_URL:-}" ]] && return 0
     local i v
     for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
         v="GIT_CONFIG_VALUE_$i"
         [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
     done
+    # There is no exception for tmux. A pane takes the SERVER's environment, not the environment
+    # of whoever asked for the pane, so "inside tmux means the person" let an agent's own
+    # `tmux new-window` under the person's server produce a pane with no marker that then ran as
+    # the person (round 3 of INFRA-1538). The fix is the other way round: shims/tmux and
+    # scripts/agentbox-tmux-guard pass the caller's markers to the new pane with tmux's -e, so an
+    # agent's pane carries them and is caught above.
+    # A command that arrives over SSH in a session with no terminal (`ssh host az account show`)
+    # is an agent's, not a person's: sshd gives a person's own session a terminal and names it in
+    # SSH_TTY for the whole session, so a pipe into one command of it (`echo x | az …`, git
+    # handing its credential helper the request) is still the person's, where testing this
+    # command's own stdin made it an agent's. AGENT_SHIM_PERSON=1 is the person's escape for a
+    # deliberate non-interactive SSH command of their own (INFRA-1538).
+    if [[ -n "${SSH_CONNECTION:-}" && -z "${SSH_TTY:-}" && "${AGENT_SHIM_PERSON:-}" != 1 ]]; then
+        AGENT_CONTEXT_VIA_SSH=1
+        return 0
+    fi
     return 1
 }
+
 
 # One configuration directory per agent session (2026-11-03). gcloud keeps credentials and access
 # tokens in sqlite files in its configuration directory, with a 5 s busy timeout, and every gcloud
@@ -553,6 +570,20 @@ config_account() {
     printf '%s' "$account"
 }
 
+# The service account a configuration impersonates: its `[auth] impersonate_service_account`
+# property. The SDK resolves a property from the flag, then the environment, then the
+# configuration FILE (core/properties.py:5487-5527), so a notice that reads only the first two
+# missed an impersonation the configuration set (round 3 of INFRA-1538). The property name is
+# unique across the file's sections, so the section header need not be tracked, as for `account`.
+config_impersonation() {
+    local value="" line
+    resolve_config_root
+    while IFS= read -r line; do
+        [[ "$line" =~ ^impersonate_service_account[[:space:]]*=[[:space:]]*([^[:space:]]+) ]] && value="${BASH_REMATCH[1]}"
+    done < "${GCLOUD_CONFIG_ROOT}/configurations/config_$1" 2> /dev/null || true
+    printf '%s' "$value"
+}
+
 # The configuration a call runs under, as the SDK picks it: the last --configuration when it is not
 # empty, then the environment, then active_config, then `default` (named_configs.py:119-148,494-511).
 effective_configuration() {
@@ -584,15 +615,132 @@ print_agent_route() {
     echo "  A step only a person can make: send that person a dispatch ask that cites ${GCLOUD_BREAK_GLASS_URL}, which gives the person's steps."
 }
 
+# The configuration and the account a call ENDS UP on, in the order main below and the SDK
+# actually apply, so nothing here can name one identity while gcloud runs another: with
+# CLOUDSDK_ACTIVE_CONFIG_NAME=box and GCLOUD_ACCOUNT=theorem the notice said box and the command
+# ran theorem (re-review of INFRA-1538). Sets _eff_config, _eff_account, _eff_explicit_account
+# and _eff_impersonate.
+#  - Configuration: the last non-empty --configuration, which the SDK reads from raw argv before
+#    any environment (cli.py:974, named_configs.py:119-148); then GCLOUD_ACCOUNT, which main
+#    exports as CLOUDSDK_ACTIVE_CONFIG_NAME; then CLOUDSDK_ACTIVE_CONFIG_NAME as the caller set
+#    it; then active_config; then `default`.
+#  - Account: the last non-empty --account, then CLOUDSDK_CORE_ACCOUNT, then that
+#    configuration's own `account` property — properties.py's flag, environment, property-file
+#    order. _eff_explicit_account is 1 for the first two: an account the CALL chose.
+#  - Impersonation does not replace the credential, it borrows another identity with it, so it
+#    is named beside the account rather than in place of it.
+resolve_effective_identity() { # ARGV
+    _eff_config="$(effective_option_value --configuration "$@")"
+    [[ -n "$_eff_config" ]] || _eff_config="${GCLOUD_ACCOUNT:-}"
+    [[ -n "$_eff_config" ]] || _eff_config="${CLOUDSDK_ACTIVE_CONFIG_NAME:-}"
+    if [[ -z "$_eff_config" ]]; then
+        resolve_config_root
+        _eff_config="$(cat "${GCLOUD_CONFIG_ROOT}/active_config" 2> /dev/null || true)"
+    fi
+    [[ -n "$_eff_config" ]] || _eff_config=default
+    _eff_explicit_account=1
+    _eff_account="$(effective_option_value --account "$@")"
+    [[ -n "$_eff_account" ]] || _eff_account="${CLOUDSDK_CORE_ACCOUNT:-}"
+    if [[ -z "$_eff_account" ]]; then
+        _eff_explicit_account=0
+        _eff_account="$(config_account "$_eff_config")"
+    fi
+    _eff_impersonate="$(effective_option_value --impersonate-service-account "$@")"
+    [[ -n "$_eff_impersonate" ]] || _eff_impersonate="${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT:-}"
+    [[ -n "$_eff_impersonate" ]] || _eff_impersonate="$(config_impersonation "$_eff_config")"
+}
+
+# A call whose only agent evidence is the SSH rule (no session marker) must END UP on an identity
+# this shim chose, and say which: the first draft of INFRA-1538 announced "using the machine
+# identity" before any identity was resolved, and with active_config naming a person's
+# configuration the call then ran as that person under that claim (review of INFRA-1538).
+#  - The call chose an identity — a configuration (--configuration, GCLOUD_ACCOUNT,
+#    CLOUDSDK_ACTIVE_CONFIG_NAME), a --cred-file, or an account (--account,
+#    CLOUDSDK_CORE_ACCOUNT): that choice stands, as it does for every other agent call, and the
+#    line names what it resolves to. An explicitly named account is a choice of its own: an
+#    agent's own service account passed this way was refused as if it were the configuration
+#    file's person (re-review of INFRA-1538). A person's own login named that way is already
+#    refused by refuse_user_account_in_agent_session, before this runs.
+#  - A command whose change outlives the call (a sign-in, a revoke, a configuration or property
+#    change) keeps the configuration it would have used: selecting box for it would write box's,
+#    or sign a person's login into it. The line names that configuration. A plain `auth login`
+#    that lands on box is already routed away by is_box_routed_auth_login before this runs.
+#  - Otherwise: select configuration box, the machine's own identity, and name its account.
+#    Where this machine has no box configuration there is nothing to select, so a configuration
+#    holding a person's own login (an account that is not a service account) refuses the call
+#    rather than acting as them; a machine configuration passes, named.
+route_ssh_rule_identity() { # ARGV
+    agent_context || return 0
+    [[ -n "${AGENT_CONTEXT_VIA_SSH:-}" ]] || return 0
+    # A --flags-file is refused before this runs (refuse_flags_file_in_agent_session), so the
+    # argv read here is the whole of the call's identity.
+    local why
+    resolve_effective_identity "$@"
+    if identity_is_selected "$@" || ((_eff_explicit_account)); then
+        why="the identity this call selected"
+    elif persists_config_change "$@"; then
+        why="a change that outlives this call, so the configuration it would have used"
+    else
+        resolve_config_root
+        if [[ -f "${GCLOUD_CONFIG_ROOT}/configurations/config_box" ]]; then
+            export CLOUDSDK_ACTIVE_CONFIG_NAME=box
+            resolve_effective_identity "$@"
+            why="no identity selected, so this machine's own"
+        elif [[ -n "$_eff_account" && "$_eff_account" != *.gserviceaccount.com ]]; then
+            {
+                printf 'gcloud shim: REFUSED, a command over non-interactive SSH, which is an agent'"'"'s (argv:'
+                printf ' %q' "$@"
+                printf ')\n'
+                echo "  Identity: it would have run as ${_eff_account}, a person's own Google login, from configuration ${_eff_config}, which nothing in this call chose."
+                echo "  Why: this machine has no box configuration to fall back to, and a call under that login is that person's own act in Google Cloud."
+                print_agent_route
+                echo "  If this non-interactive SSH command is your own, run it with AGENT_SHIM_PERSON=1."
+            } >&2
+            exit 1
+        else
+            why="no identity selected and no box configuration here"
+        fi
+    fi
+    echo "gcloud shim: non-interactive SSH, so an agent's call: ${why}, configuration ${_eff_config}${_eff_account:+, account ${_eff_account}}${_eff_impersonate:+, impersonating ${_eff_impersonate}} (set AGENT_SHIM_PERSON=1 for your own login)" >&2
+}
+
+# Refuses, in an agent session, a call that carries a --flags-file at all.
+#
+# A flags file is argv gcloud has not expanded yet: it loads the file's YAML — a mapping, or a
+# list of mappings, each entry another flag — and expands it IN PLACE, in argument order, before
+# it resolves --account, --configuration, --cred-file and --impersonate-service-account, and a
+# file may name another flags file, which it expands the same way (calliope/cli.py:92-108,
+# 125-130,985). Nothing short of the SDK's own loader can say what identity such a call ends up
+# with: three rounds of review on INFRA-1538 found a reader here missing one valid shape after
+# another ("--account": …, a one-line JSON mapping, a list item), each of which ran as the
+# person while this shim named the machine identity. So the whole flag is refused here, in one
+# line, and nothing is parsed. The flags a person's own session passes are unchanged.
+refuse_flags_file_in_agent_session() { # ARGV
+    agent_context || return 0
+    has_option --flags-file "$@" || return 0
+    {
+        printf 'gcloud shim: REFUSED in an agent session (argv:'
+        printf ' %q' "$@"
+        printf ')\n'
+        echo "  Identity: unknown. gcloud expands --flags-file itself, before any check here sees it, and the file (or another it names) can set --account, --configuration, --cred-file or impersonation."
+        echo "  Why: a call whose identity cannot be established here cannot be allowed to claim one; the shim would otherwise name the machine identity while the call ran as a person."
+        echo "  Instead: pass the flags on the command line, where every check and every notice sees them. gcloud takes each of them as a flag of its own."
+        print_agent_route
+    } >&2
+    exit 1
+}
+
 # Refuses, in an agent session, a call that names a person's own Google login as its account,
-# through --account or CLOUDSDK_CORE_ACCOUNT, under any configuration but the one that holds that
-# login. A service account (*.gserviceaccount.com, the box identity among them) is a machine's and
+# through --account or CLOUDSDK_CORE_ACCOUNT, under
+# any configuration but the one that holds that login. A service account
+# (*.gserviceaccount.com, the box identity among them) is a machine's and
 # passes. An explicit --configuration whose own account is that login is the route an apply that no
 # declared identity can make yet takes under Sami's standing permission, each use recorded
 # (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec), and passes. On 2026-11-02T00:07Z
 # one agent shell exported its account as the user's; every later kubectl in it minted his token
 # through gke-gcloud-auth-plugin, whose cache beside the kubeconfig is keyed by context, not
 # account, so for an hour every caller of that kubeconfig created GKE Jobs as him.
+
 refuse_user_account_in_agent_session() {
     agent_context || return 0
     local account source configuration file name holder=""
@@ -602,6 +750,7 @@ refuse_user_account_in_agent_session() {
         account="${CLOUDSDK_CORE_ACCOUNT:-}"
         source="CLOUDSDK_CORE_ACCOUNT in the environment"
     fi
+    # A flags file, which could name another account, is refused before this runs.
     [[ -n "$account" && "$account" != *.gserviceaccount.com ]] || return 0
     configuration="$(effective_option_value --configuration "$@")"
     if [[ -n "$configuration" && "$(config_account "$configuration")" == "$account" ]]; then
@@ -1296,6 +1445,8 @@ main() {
 
     parse_gcloud_command_path "$@"
     use_session_config "$@"
+    # First of the agent-session guards: a flags file hides the identity from all of them.
+    refuse_flags_file_in_agent_session "$@"
     refuse_adc_write_in_agent_session "$@"
     refuse_user_account_in_agent_session "$@"
     refuse_instance_create_without_run_limit "$@"
@@ -1348,6 +1499,10 @@ main() {
         export CLOUDSDK_ACTIVE_CONFIG_NAME="$USER_LOGIN_CONFIGURATION"
         exec_real_gcloud "$real_gcloud" "${routed_args[@]}"
     fi
+
+    # After the box-routed `auth login` above, which chooses its own configuration, and before
+    # GCLOUD_ACCOUNT selects one.
+    route_ssh_rule_identity "$@"
 
     local account="${GCLOUD_ACCOUNT:-}"
     if [[ -z "$account" ]]; then

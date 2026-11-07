@@ -40,10 +40,13 @@ def real_jj_dir() -> str:
 SYSTEM_JJ = [p for p in ("/usr/bin/jj", "/bin/jj") if os.path.exists(p)]
 
 
-def run_bounded(argv: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_bounded(argv: list[str], cwd: Path, env: dict[str, str], stdin: int = subprocess.DEVNULL) -> subprocess.CompletedProcess[str]:
     """argv in a session of its own, so a shim that loops fails the test at the timeout and
-    leaves no process behind: the workspace-add path forks a new subshell on every pass."""
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    leaves no process behind: the workspace-add path forks a new subshell on every pass.
+
+    stdin is /dev/null unless a case names its own: shims/jj reads whether stdin is a terminal
+    (INFRA-1538), so the terminal of whoever runs the suite must not decide a case."""
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         out, err = proc.communicate(timeout=60)
     except subprocess.TimeoutExpired:

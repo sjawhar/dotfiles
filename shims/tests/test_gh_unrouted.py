@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,9 @@ from pathlib import Path
 SHIMS = Path(__file__).parents[1]
 DOTFILES = SHIMS.parent
 GH = SHIMS / "gh"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
+
 KNIVES = """#!/bin/bash
 # stub knives: `knives gh -- ARGV`; routes (a token in GH_TOKEN) when GH_REPO names a repository, as knives does
 shift; [[ "${1:-}" == -- ]] && shift
@@ -126,6 +130,67 @@ class Unrouted(unittest.TestCase):
         result = self.run_gh(["api", "user"], self.base)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.gh_calls(), ["token=none args=api user"])
+
+    # INFRA-1538: `ssh sami-devbox gh …` is an agent's call, so it gets the agent's routing rules;
+    # a person's own SSH session (SSH_TTY set), and a person who sets AGENT_SHIM_PERSON=1, reach
+    # gh as before.
+    def test_an_unrouted_call_over_ssh_with_no_terminal_is_refused(self):
+        result = run_without_tty([str(GH), "api", "user"], env={**self.base, "SSH_CONNECTION": SSH_CONNECTION},
+                                 cwd=self.work, timeout=120)
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("NOT ROUTED, so not sent", result.stderr)
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_a_persons_ssh_session_reaches_gh_as_the_person(self):
+        # Whatever this one command reads on stdin: a pipe into it is not an agent (review of
+        # INFRA-1538).
+        for run in (run_with_tty, run_without_tty):
+            with self.subTest(run=run.__name__):
+                self.log.write_text("")
+                env = {**self.base, "SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY}
+                result = run([str(GH), "api", "user"], env=env, cwd=self.work, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.gh_calls(), ["token=none args=api user"])
+
+    def test_agent_shim_person_reaches_gh_as_the_person(self):
+        env = {**self.base, "SSH_CONNECTION": SSH_CONNECTION, "AGENT_SHIM_PERSON": "1"}
+        result = run_without_tty([str(GH), "api", "user"], env=env, cwd=self.work, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gh_calls(), ["token=none args=api user"])
+
+    # A machine that names gh-app.host-profile in its own git config (sami-devbox,
+    # installers/gh-app-host.sh) is NOT an exception to any of this. The first draft of INFRA-1538
+    # kept the host route for such a call and so lifted it out of the whole agent block: past the
+    # leak check, past the refusal of the person's own login, past the agent config directory and
+    # past the requirement to name the target repository (review of INFRA-1538).
+    def host_profile(self) -> dict[str, str]:
+        config = Path(self.base["XDG_CONFIG_HOME"]) / "git"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "config").write_text("[gh-app]\n\thost-profile = agent\n")
+        return {**self.base, "SSH_CONNECTION": SSH_CONNECTION}
+
+    def test_a_targetless_mutation_over_ssh_is_refused_on_a_host_profile_machine(self):
+        result = run_without_tty([str(GH), *self.MUTATION], env=self.host_profile(), cwd=self.work, timeout=120)
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("NOT ROUTED, so not sent", result.stderr)
+        self.assertEqual(self.gh_calls(), [], "a targetless mutation reached gh with an owner-wide token")
+
+    def test_the_leak_check_still_runs_over_ssh_on_a_host_profile_machine(self):
+        check = self.bin / "leak-check"
+        check.write_text('#!/bin/sh\necho LEAK-CHECK-CALLED >&2\nexit 1\n')
+        check.chmod(0o755)
+        env = {**self.host_profile(), "GH_REPO": "o/r"}
+        result = run_without_tty([str(GH), "issue", "comment", "1", "--body", "x"], env=env,
+                                 cwd=self.work, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("LEAK-CHECK-CALLED", result.stderr)
+        self.assertEqual(self.gh_calls(), [], "gh ran although the leak check refused the call")
+
+    def test_gh_auth_token_is_still_refused_over_ssh_on_a_host_profile_machine(self):
+        result = run_without_tty([str(GH), "auth", "token"], env=self.host_profile(), cwd=self.work, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("gh shim: REFUSED", result.stderr)
+        self.assertEqual(self.gh_calls(), [], "gh auth token reached the real gh")
 
 
 if __name__ == "__main__":

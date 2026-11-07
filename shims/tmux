@@ -40,6 +40,260 @@ while (( i < $# )); do
     esac
 done
 
+# The agent test the identity shims share, byte for byte (shims/AGENTS.md, "Who is an agent";
+# shims/tests/test_shim_agent_context.py compares the copies). This shim needs it twice over:
+# for what it adds below, and for what it refuses.
+agent_context() {
+    [[ -n "${OMP_SESSION_ID:-}${PI_SESSION_FILE:-}${PI_TOOL_BRIDGE_URL:-}${AGENTBOX_SESSION:-}${CLAUDECODE:-}${ENVOY_SESSION_ID:-}${AGENT_SHIM_AGENT:-}${LEGION_ROLE:-}${LEGION_TREE:-}${LEGION_CONTROLLER:-}${LEGION_DAEMON_URL:-}" ]] && return 0
+    local i v
+    for ((i = 0; i < ${GIT_CONFIG_COUNT:-0}; i++)); do
+        v="GIT_CONFIG_VALUE_$i"
+        [[ "${!v:-}" == *gh-app-routes.gitconfig ]] && return 0
+    done
+    # There is no exception for tmux. A pane takes the SERVER's environment, not the environment
+    # of whoever asked for the pane, so "inside tmux means the person" let an agent's own
+    # `tmux new-window` under the person's server produce a pane with no marker that then ran as
+    # the person (round 3 of INFRA-1538). The fix is the other way round: shims/tmux and
+    # scripts/agentbox-tmux-guard pass the caller's markers to the new pane with tmux's -e, so an
+    # agent's pane carries them and is caught above.
+    # A command that arrives over SSH in a session with no terminal (`ssh host az account show`)
+    # is an agent's, not a person's: sshd gives a person's own session a terminal and names it in
+    # SSH_TTY for the whole session, so a pipe into one command of it (`echo x | az …`, git
+    # handing its credential helper the request) is still the person's, where testing this
+    # command's own stdin made it an agent's. AGENT_SHIM_PERSON=1 is the person's escape for a
+    # deliberate non-interactive SSH command of their own (INFRA-1538).
+    if [[ -n "${SSH_CONNECTION:-}" && -z "${SSH_TTY:-}" && "${AGENT_SHIM_PERSON:-}" != 1 ]]; then
+        AGENT_CONTEXT_VIA_SSH=1
+        return 0
+    fi
+    return 1
+}
+
+# An agent's provenance must reach every command it starts through tmux. A pane takes the
+# SERVER's environment, never the environment of whoever asked for the pane, so an omp session's
+# `tmux new-window` under the person's own server made a pane with NO session marker, and the
+# identity shims then read every command in it as the person's: from such a pane
+# `gcloud --account <the person>` ran with no refusal (dispatch://INFRA-1538, rounds 3 to 5).
+# Nothing is added to a person's own tmux command.
+#
+# What travels: every marker this caller holds, the gh-app routing include, and
+# AGENT_SHIM_AGENT=1, which all six agent_context copies read as a marker of its own. That last
+# one is what gives an agent with no marker at all — one the SSH rule alone classifies — durable
+# provenance in the pane it opens (round 5).
+#
+# How it travels, by the kind of command:
+#   -e NAME=VALUE for the commands that make a pane — new-session, new-window, split-window,
+#     respawn-pane, respawn-window, display-popup — which all take it.
+#   `env NAME=VALUE … /bin/sh -c '<the whole original command>'` for run-shell and pipe-pane,
+#     which run a shell command and take no -e. The original goes inside a shell of its own, so
+#     the markers cover all of it: a bare `env …` prefix set them for the first simple command
+#     only (`true && gcloud …` ran unmarked) and broke a builtin (`cd … && …`, exit 127), round
+#     5. run-shell is marked and not refused because `scripts/agentbox move` starts the box
+#     relauncher with `tmux run-shell -b`.
+#   Nothing for a command that hands the SERVER a tmux command to run later or elsewhere —
+#     if-shell, bind-key, set-hook, confirm-before, command-prompt, display-menu, run-shell -C.
+#     The environment of an if-shell condition is not the environment of its branch, so there is
+#     nothing there to mark; those are refused for an agent instead. An agent has no business
+#     installing a key binding or a hook in a person's server, and its own work goes in its own
+#     pane. The person's own bindings (.tmux.conf) are the server's, not this shim's callers.
+# Every command of a `\;`-separated list is treated, not only the first.
+# shell_command_file COMMAND: the agent's command, byte for byte, in a private file whose path
+# tmux can carry without quoting or expanding anything. Sets _shell_file.
+#
+# The command may not travel as text in the tmux argument: tmux expands #{…} and #S, #T and the
+# rest in it AFTER this shim has quoted it, so a format value holding a quote broke out of the
+# quoted word (round 6), and doubling every `#` is no transport either — two wrappers double it
+# twice, and tmux leaves `##` alone before `[`, so `${#v}`, `${v#*/}` and a literal `#[fg=red]`
+# all came out wrong (round 7). A path of [A-Za-z0-9._/-] has nothing for tmux or a shell to
+# read, so the file is the transport and the command inside it is never parsed by anything but
+# the shell that runs it.
+#
+# The directory holding it must be this user's own and nobody else's reach: XDG_RUNTIME_DIR,
+# else /run/user/<uid>, which is what sets it and which a cron job or a system unit still has
+# though its environment does not (round 9) — and nothing else. A name under a shared /tmp is
+# another user's to guess and to plant a symlink at, and `mkdir -p` plus `chmod` would then
+# follow it (round 8). The directory is made with mkdir 0700, then checked with lstat: a
+# symlink, another owner or any other mode refuses the call. Inside it, mktemp creates with
+# O_CREAT|O_EXCL and mode 0600.
+#
+# The file's first line removes it: `rm -f -- "$0"`, which runs when the shell starts, and that
+# is the ONLY thing that removes it. `$0` inside such a command is therefore the path of this
+# file, not the shell's name; that is the one visible difference from `sh -c`.
+#
+# A command tmux never starts leaves its file behind: a bad -t, `pipe-pane -o` on a pipe that is
+# already on, `run-shell -d` on a server that goes away. That residue is accepted (round 9).
+# Removing it on a non-zero exit or by age would also remove the file of a command tmux has
+# QUEUED and not yet started — `run-shell -b -d 5`, or a later command of the same list failing
+# — and losing queued work is worse than a few bytes left in a directory that is tmpfs, private
+# to this user (0700), cleared at logout and at reboot, and holds nothing but the agent's own
+# command text.
+shell_command_file() { # COMMAND
+    local dir base owner mode
+    base="${XDG_RUNTIME_DIR:-}"
+    [[ -n "$base" ]] || base="/run/user/$(id -u)"
+    read -r mode owner < <(stat -c '%a %u' -- "$base" 2> /dev/null || echo "none none")
+    if [[ -L "$base" || ! -d "$base" || "$owner" != "$(id -u)" || "$mode" != 700 ]]; then
+        echo "tmux shim: REFUSED in an agent session: neither XDG_RUNTIME_DIR nor /run/user/$(id -u) is a directory of this user's own, mode 0700, and an agent's command needs one to reach tmux unchanged. Set XDG_RUNTIME_DIR to a private directory of your own." >&2
+        exit 1
+    fi
+    dir="$base/tmux-shim"
+    mkdir -m 700 -- "$dir" 2> /dev/null || true
+    read -r mode owner < <(stat -c '%a %u' -- "$dir" 2> /dev/null || echo "none none")
+    if [[ -L "$dir" || ! -d "$dir" || "$owner" != "$(id -u)" || "$mode" != 700 ]]; then
+        echo "tmux shim: REFUSED in an agent session: $dir is not a directory of this user's own, mode 0700 and no symlink, so a command cannot be handed to tmux through it. Remove it and run the command again." >&2
+        exit 1
+    fi
+    _shell_file="$(mktemp -- "$dir/agent-XXXXXXXX")" || {
+        echo "tmux shim: refusing: cannot make the file that carries this command to tmux" >&2
+        exit 1
+    }
+    chmod 600 -- "$_shell_file"
+    # A path tmux would expand, or a shell would split, is no transport either.
+    if [[ ! "$_shell_file" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+        rm -f -- "$_shell_file"
+        echo "tmux shim: refusing: the private directory's path has characters tmux or a shell would read ($_shell_file)" >&2
+        exit 1
+    fi
+    printf 'rm -f -- "$0"\n%s\n' "$1" > "$_shell_file"
+}
+refuse_nested_tmux_command() { # WORD
+    {
+        echo "tmux shim: REFUSED in an agent session: \`tmux $1 …\`"
+        echo "  Why: it hands the tmux SERVER a command to run later, or in another session, where this"
+        echo "  shim cannot mark it as an agent's, so the pane it eventually makes would run as the"
+        echo "  person whose server it is (dispatch://INFRA-1538). A key binding or a hook an agent"
+        echo "  installs outlives the agent as well."
+        echo "  Instead: run the work in a pane of your own now — \`tmux new-window -d <command>\`, which"
+        echo "  this shim marks — and read it back with capture-pane."
+        echo "  If this is your own command, run it with AGENT_SHIM_PERSON=1; that does not turn off a"
+        echo "  session marker, and a marked session has no route to these commands."
+    } >&2
+    exit 1
+}
+
+# A boxed caller's command goes through this shim AND through scripts/agentbox-tmux-guard on
+# the host. Exactly one of them may rewrite it, and it must be the one on the machine the tmux
+# server runs on, which is the relay: the file this shim would write is not in the host's
+# filesystem. So when the call is bound for the relay, run-shell and pipe-pane pass through
+# untouched and the relay wraps them, with its own marker set (round 7).
+relaying=0
+if [[ -n "${AGENTBOX_TMUX_GUARD_SOCK:-}" && -S "${AGENTBOX_TMUX_GUARD_SOCK:-}" ]] \
+    && { ((! explicit_socket)) || [[ -n "$explicit_path" && "$explicit_path" == "$AGENTBOX_TMUX_GUARD_SOCK" ]]; }; then
+    relaying=1
+fi
+
+if agent_context; then
+    marker_env=()
+    marker_prefix=""
+    for marker in OMP_SESSION_ID PI_SESSION_FILE PI_TOOL_BRIDGE_URL AGENTBOX_SESSION \
+        CLAUDECODE ENVOY_SESSION_ID LEGION_ROLE LEGION_TREE LEGION_ISSUE LEGION_CONTROLLER \
+        LEGION_DAEMON_URL LEGION_STATE_DIR; do
+        [[ -n "${!marker:-}" ]] && marker_env+=(-e "$marker=${!marker}")
+    done
+    # The one every agent's pane gets, whatever told this shim that this is an agent.
+    marker_env+=(-e "AGENT_SHIM_AGENT=1")
+    # The gh-app routing include is a marker too, and it is one setting spread over
+    # GIT_CONFIG_COUNT and a key/value pair per index: all of them travel, or none does.
+    routed=0
+    for ((n = 0; n < ${GIT_CONFIG_COUNT:-0}; n++)); do
+        value="GIT_CONFIG_VALUE_$n"
+        [[ "${!value:-}" == *gh-app-routes.gitconfig ]] && routed=1
+    done
+    if ((routed)); then
+        marker_env+=(-e "GIT_CONFIG_COUNT=$GIT_CONFIG_COUNT")
+        for ((n = 0; n < GIT_CONFIG_COUNT; n++)); do
+            key="GIT_CONFIG_KEY_$n"
+            value="GIT_CONFIG_VALUE_$n"
+            marker_env+=(-e "$key=${!key:-}" -e "$value=${!value:-}")
+        done
+    fi
+    # `env NAME=VALUE … /bin/sh <path>` is one tmux argument that a shell then splits, so every
+    # part of it must be free of whitespace, quotes and `#`. A -e pair is tmux's own argument
+    # and needs none of that, so only the prefix is checked — and a value that fails it refuses
+    # the call rather than travelling half-marked (round 7).
+    for value in "${marker_env[@]}"; do
+        [[ "$value" == -e ]] && continue
+        if [[ ! "${value#*=}" =~ ^[A-Za-z0-9._/:@+,=-]*$ ]]; then
+            echo "tmux shim: REFUSED in an agent session: the marker ${value%%=*} holds whitespace, a quote or a '#', which cannot travel in the command tmux runs. Unset it, or give it a plain value." >&2
+            exit 1
+        fi
+        marker_prefix+="$value "
+    done
+    marker_prefix="env $marker_prefix"
+
+    marked=("${@:1:i}")
+    starts_command=1
+    awaiting_shell_command=0
+    j=$i
+    while ((j < $#)); do
+        arg="${@:j+1:1}"
+        j=$((j + 1))
+        # tmux's own splitting: a bare `;` separates, a word ending in an unescaped `;`
+        # separates after itself, and `\;` is a literal semicolon.
+        ends_command=0
+        word="$arg"
+        if [[ "$arg" == ";" ]]; then
+            ends_command=1
+            word=""
+        elif [[ "$arg" == *\; && "$arg" != *\\\; ]]; then
+            ends_command=1
+            word="${arg%;}"
+        fi
+        if ((starts_command)) && [[ -n "$word" ]]; then
+            case "$word" in
+                if | if-s* | bind | bind-k* | set-h* | confirm | confirm-b* | command-p* | \
+                    menu | display-menu)
+                    refuse_nested_tmux_command "$word"
+                    ;;
+                new | new-s* | neww | new-w* | splitw | split-w* | respawnp | respawn-p* | \
+                    respawnw | respawn-w* | display-popup | popup)
+                    marked+=("$word" "${marker_env[@]}")
+                    ((ends_command)) && marked+=(";")
+                    ;;
+                run | run-s* | pipep | pipe-p*)
+                    marked+=("$arg")
+                    # Bound for the relay: it wraps these, on the host, exactly once.
+                    ((ends_command || relaying)) || awaiting_shell_command=1
+                    ;;
+                *) marked+=("$arg") ;;
+            esac
+            starts_command=$ends_command
+            continue
+        fi
+        if ((awaiting_shell_command)); then
+            case "$arg" in
+                # -C makes run-shell's argument a tmux command the server runs, not a shell
+                # command of its own, so there is nothing here to mark.
+                -*C*) refuse_nested_tmux_command "run-shell -C" ;;
+                # The flags of run-shell and pipe-pane that take a value of their own.
+                -c | -d | -t)
+                    marked+=("$arg" "${@:j+1:1}")
+                    j=$((j + 1))
+                    starts_command=0
+                    continue
+                    ;;
+                -*) ;;
+                *)
+                    # The shell command itself: the first word that is not a flag. It goes to
+                    # tmux as a FILE (shell_command_file above): a path tmux expands nothing in
+                    # and a shell splits nowhere, holding the original bytes. `env … /bin/sh
+                    # <path>` then runs all of it with the markers set.
+                    shell_command_file "$word"
+                    marked+=("${marker_prefix}/bin/sh $_shell_file")
+                    ((ends_command)) && marked+=(";")
+                    awaiting_shell_command=0
+                    starts_command=$ends_command
+                    continue
+                    ;;
+            esac
+        fi
+        marked+=("$arg")
+        ((ends_command)) && awaiting_shell_command=0
+        starts_command=$ends_command
+    done
+    set -- ${marked[@]+"${marked[@]}"}
+fi
+
 # In an agent box the host's tmux server is reached through a guard, not through its own
 # protocol: scripts/agentbox-tmux-guard answers the box's relay socket, runs the command as the
 # user against the host server, and refuses `kill-server` and the kills aimed at panes the box

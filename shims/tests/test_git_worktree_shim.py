@@ -3,27 +3,57 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 SHIMS = Path(__file__).parents[1]
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
 # The porcelain line of the lock shims/git puts on every `git worktree add` of an agent session.
 ADD_LOCK = "locked agent session: locked on add (AGENTC-431)"
 # Where the checkouts other sessions and boxes share live; never a temporary root.
 SRC = Path.home() / "src"
 
 
-def plain_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in AGENT_MARKERS and not k.startswith("GIT_CONFIG_")}
-    env["PATH"] = f"{SHIMS}{os.pathsep}{os.environ['PATH']}"
+def plain_env(home: Path) -> dict[str, str]:
+    """A person's environment, independent of whoever runs this suite.
+
+    No agent marker; no SSH_CONNECTION or SSH_TTY, since a command in an SSH session with no
+    terminal is an agent's (INFRA-1538); and a HOME and git configuration of its own — until the
+    review of INFRA-1538 this fixture inherited the reviewer's, so `git commit` here took their
+    author, signing key and hooks, and with an empty HOME it failed with "Author identity
+    unknown" before reaching an assertion.
+    """
+    dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON", "HOME",
+               "XDG_CONFIG_HOME")
+    env = {k: v for k, v in os.environ.items() if k not in dropped and not k.startswith("GIT_")}
+    (home / ".config").mkdir(parents=True, exist_ok=True)
+    config = home / ".gitconfig"
+    config.write_text("[user]\n\tname = Shim Test\n\temail = shim-test@example.invalid\n"
+                      "[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n"
+                      "[init]\n\tdefaultBranch = main\n")
+    env.update({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "GIT_CONFIG_GLOBAL": str(config),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Shim Test", "GIT_AUTHOR_EMAIL": "shim-test@example.invalid",
+        "GIT_COMMITTER_NAME": "Shim Test", "GIT_COMMITTER_EMAIL": "shim-test@example.invalid",
+        "PATH": f"{SHIMS}{os.pathsep}{os.environ['PATH']}",
+    })
     return env
 
 
 class GitWorktreeShimTest(unittest.TestCase):
     def setUp(self):
-        self.plain = plain_env()
+        home = Path(tempfile.mkdtemp(prefix=".git-shim-home-"))
+        self.addCleanup(shutil.rmtree, home)
+        self.plain = plain_env(home)
         self.agent = {**self.plain, "OMP_SESSION_ID": "test-session"}
         self.tmp = self.scratch()
         self.repo = self.new_repo(self.tmp / "repo")
@@ -97,6 +127,38 @@ class GitWorktreeShimTest(unittest.TestCase):
         self.use_shared_store()
         path = self.missing_worktree("gone")
         self.assertEqual(self.git("worktree", "prune", env=self.plain).returncode, 0)
+        self.assertNotIn(str(path), self.registrations())
+
+    # INFRA-1538: `ssh sami-devbox git …` is an agent's command, so the agent-session rules apply;
+    # a person's own SSH session (SSH_TTY set, whatever one command reads on stdin), and a person
+    # who sets AGENT_SHIM_PERSON=1, keep git as it was.
+    def prune_over_ssh(self, tty: bool, **extra: str):
+        run = run_with_tty if tty else run_without_tty
+        env = {**self.plain, "SSH_CONNECTION": SSH_CONNECTION, **extra}
+        return run(["git", "worktree", "prune"], cwd=self.repo, env=env)
+
+    def test_a_command_over_ssh_with_no_terminal_is_an_agent_session(self):
+        self.use_shared_store()
+        path = self.missing_worktree("gone")
+        result = self.prune_over_ssh(tty=False)
+        self.assert_refused(result)
+        self.assertIn("git shim: non-interactive SSH", result.stderr)
+        self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
+        self.assertIn(str(path), self.registrations())
+
+    def test_a_persons_ssh_session_is_the_person(self):
+        for tty in (True, False):
+            with self.subTest(tty=tty):
+                self.use_shared_store()
+                path = self.missing_worktree("gone")
+                result = self.prune_over_ssh(tty=tty, SSH_TTY=SSH_TTY)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(str(path), self.registrations())
+
+    def test_agent_shim_person_is_the_persons_escape(self):
+        self.use_shared_store()
+        path = self.missing_worktree("gone")
+        self.assertEqual(self.prune_over_ssh(tty=False, AGENT_SHIM_PERSON="1").returncode, 0)
         self.assertNotIn(str(path), self.registrations())
 
     def test_a_prune_in_a_throwaway_repository_is_allowed(self):

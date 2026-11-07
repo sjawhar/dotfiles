@@ -15,7 +15,9 @@ from pathlib import Path
 
 SHIMS = Path(__file__).parents[1]
 SCRIPTS = SHIMS.parent / "scripts"
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
 SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
 TRAILER = f"Omp-Session: {SESSION}"
 PUBLIC = "https://github.com/theorem-labs/oss-verify-proofs.git"
@@ -46,7 +48,10 @@ class Base(unittest.TestCase):
         self.log.touch()
         config = self.tmp / "gitconfig"
         config.write_text("[user]\n\tname = Agent\n\temail = agent@example.com\n[init]\n\tdefaultBranch = main\n")
-        base = {k: v for k, v in os.environ.items() if k not in AGENT_MARKERS and not k.startswith("GIT_CONFIG_") and k != "JJ_CONFIG"}
+        # SSH_CONNECTION in a session with no terminal is an agent's command too (INFRA-1538), so a
+        # person's environment here drops it, and SSH_TTY and TMUX with it, wherever this suite is run from.
+        dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON", "JJ_CONFIG")
+        base = {k: v for k, v in os.environ.items() if k not in dropped and not k.startswith("GIT_CONFIG_")}
         self.plain = {
             **base,
             "PATH": os.pathsep.join([str(fake), str(SHIMS), os.environ["PATH"]]),

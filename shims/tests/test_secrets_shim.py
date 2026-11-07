@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +20,12 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 SHIMS = DOTFILES / "shims"
 TIMEOUT = 20
-AGENT_VARS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "CLAUDECODE", "ENVOY_SESSION_ID")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
+
+AGENT_VARS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+              "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+              "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
 
 STUB_SECRETS = r"""#!/bin/bash
 { printf 'argv'; for arg in "$@"; do printf '\t%s' "$arg"; done; printf '\n'; } >> "$STUB_LOG"
@@ -259,6 +265,58 @@ class SecretsShim(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.stdout, b"stdout from real secrets: list\n")
+
+    # INFRA-1538: `ssh sami-devbox secrets get HUMAN_KEY` is an agent's call, so it is refused and
+    # sent to the broker; a person at a terminal, and AGENT_SHIM_PERSON=1, still reach the YubiKey.
+    def secrets_over_ssh(self, *args: str, tty: bool, **env: str):
+        run = run_with_tty if tty else run_without_tty
+        full_env = {**self.base_env, "SSH_CONNECTION": SSH_CONNECTION, **env}
+        return run(["secrets", *args], env=full_env, timeout=TIMEOUT)
+
+    NOTICE = "secrets shim: non-interactive SSH, so an agent's call"
+
+    def test_a_command_over_ssh_with_no_terminal_is_an_agent(self) -> None:
+        result = self.secrets_over_ssh("get", "HUMAN_KEY", tty=False)
+        self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertEqual(self.argv_log(), [], "the real secrets ran")
+        self.assertIn(self.NOTICE, result.stderr)
+        self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
+
+    def test_a_persons_ssh_session_is_the_person(self) -> None:
+        for tty in (True, False):
+            with self.subTest(tty=tty):
+                self.log.unlink(missing_ok=True)
+                result = self.secrets_over_ssh("get", "HUMAN_KEY", tty=tty, SSH_TTY=SSH_TTY)
+                self.assertNotEqual(result.returncode, 77, result.stderr)
+                self.assertEqual(self.argv_log(), [["get", "HUMAN_KEY"]])
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_agent_shim_person_is_the_persons_escape(self) -> None:
+        result = self.secrets_over_ssh("get", "HUMAN_KEY", tty=False, AGENT_SHIM_PERSON="1")
+        self.assertNotEqual(result.returncode, 77, result.stderr)
+        self.assertEqual(self.argv_log(), [["get", "HUMAN_KEY"]])
+
+    def test_every_marker_the_other_shims_read_is_an_agent_here_too(self) -> None:
+        """One marker set across all six shims (round 3 of INFRA-1538).
+
+        This shim read OMP_SESSION_ID, PI_SESSION_FILE, CLAUDECODE and ENVOY_SESSION_ID only, so
+        a boxed agent (AGENTBOX_SESSION, or the gh-app routing include and nothing else) reached
+        the human tier here while every other shim called it an agent.
+        """
+        routing = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "include.path",
+                   "GIT_CONFIG_VALUE_0": "/home/u/.dotfiles/gh-app-routes.gitconfig"}
+        cases: tuple[dict[str, str], ...] = (
+            {"PI_TOOL_BRIDGE_URL": "http://127.0.0.1:1"}, {"AGENTBOX_SESSION": "agentbox-01"},
+            {"LEGION_ROLE": "worker"}, {"LEGION_TREE": "t"}, {"LEGION_CONTROLLER": "1"},
+            {"LEGION_DAEMON_URL": "http://127.0.0.1:2"}, routing,
+        )
+        for marker in cases:
+            with self.subTest(marker=sorted(marker)):
+                self.log.unlink(missing_ok=True)
+                result = run_with_tty(["secrets", "get", "HUMAN_KEY"],
+                                      env={**self.base_env, **marker}, timeout=TIMEOUT)
+                self.assertEqual(result.returncode, 77, result.stderr)
+                self.assertEqual(self.argv_log(), [], "the real secrets ran")
 
 
 if __name__ == "__main__":

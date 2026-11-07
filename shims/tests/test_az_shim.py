@@ -24,10 +24,14 @@ from pathlib import Path
 
 SHIMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SHIMS.parent / "scripts" / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gce_metadata_stub import MetadataStub, id_token  # noqa: E402 - found through the path above
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
 
 SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
 TIMEOUT = 20
 
 STUB = 'echo "config=${AZURE_CONFIG_DIR-unset} args=$*"'
@@ -260,6 +264,52 @@ class AzShim(unittest.TestCase):
         result = self.az(env, "account", "show")
         self.assertEqual(result.stdout, "config=unset args=account show\n")
         self.assertEqual(self.logins(), [])
+
+
+class AzShimNonInteractiveSsh(unittest.TestCase):
+    """INFRA-1538: `ssh sami-devbox az account show` is an agent's command, not Sami's. The shim
+    takes the box identity for it and names the config dir it ended on; a person's own SSH
+    session (sshd gave it a terminal, so SSH_TTY is set, whatever one command reads on stdin) —
+    and a person who sets AGENT_SHIM_PERSON=1 — keep their own login."""
+
+    setUp = AzShim.setUp
+    tearDown = AzShim.tearDown
+    NOTICE = "az shim: non-interactive SSH, so an agent's call: AZURE_CONFIG_DIR="
+
+    def az(self, env: dict[str, str], *args: str, tty: bool = False) -> subprocess.CompletedProcess[str]:
+        run = run_with_tty if tty else run_without_tty
+        return run([str(SHIMS / "az"), *args], cwd=self.root, env=env, timeout=TIMEOUT)
+
+    def ssh(self, **extra: str) -> dict[str, str]:
+        return {**self.plain, "SSH_CONNECTION": SSH_CONNECTION, **extra}
+
+    def test_a_command_over_ssh_with_no_terminal_gets_the_box_identity(self) -> None:
+        result = self.az(self.ssh(), "account", "show")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"config={self.box} args=account show\n")
+        # The notice names the directory the call ended on, not a machine identity it has not
+        # selected (review of INFRA-1538).
+        self.assertIn(f"{self.NOTICE}{self.box}", result.stderr)
+        self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
+
+    def test_a_persons_ssh_session_is_the_person(self) -> None:
+        for stdin_is_a_pipe in (True, False):
+            with self.subTest(piped=stdin_is_a_pipe):
+                result = self.az(self.ssh(SSH_TTY=SSH_TTY), "account", "show", tty=not stdin_is_a_pipe)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "config=unset args=account show\n")
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_agent_shim_person_keeps_the_persons_own_login(self) -> None:
+        result = self.az(self.ssh(AGENT_SHIM_PERSON="1"), "account", "show")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "config=unset args=account show\n")
+        self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_a_session_marker_needs_no_notice(self) -> None:
+        result = self.az({**self.agent, "SSH_CONNECTION": SSH_CONNECTION}, "account", "show")
+        self.assertEqual(result.stdout, f"config={self.box} args=account show\n")
+        self.assertNotIn(self.NOTICE, result.stderr)
 
 
 def real_az_python() -> str | None:

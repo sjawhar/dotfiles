@@ -25,7 +25,9 @@ from pathlib import Path
 
 SHIMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SHIMS.parent / "scripts" / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gce_metadata_stub import MetadataStub  # noqa: E402 - found through the path above
+from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
 
 # The SDK 589.0.0 root parser's own flag table, each flag with the number of
 # values it takes: written by `python3 scripts/gcloud-global-flags --json` from
@@ -1000,6 +1002,9 @@ class GcloudRouting(unittest.TestCase):
         {"OMP_SESSION_ID": "01a00000-0000-7000-8000-000000000000"},
         {"PI_SESSION_FILE": "/tmp/session.jsonl"},
         {"AGENTBOX_SESSION": "1"},
+        # What shims/tmux puts in the pane of an agent that had no marker of its own, so every
+        # refusal below holds for the pane an SSH-only agent opens (round 5 of INFRA-1538).
+        {"AGENT_SHIM_AGENT": "1"},
         {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "include.path",
          "GIT_CONFIG_VALUE_0": "/home/u/.dotfiles/gh-app-routes.gitconfig"},
     )
@@ -1011,7 +1016,8 @@ class GcloudRouting(unittest.TestCase):
         ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login", "--update-adc"]),
         ({}, ["auth", "login", "--cred-file=/tmp/key.json", "--update-adc"]),
         ({}, ["--configuration", "box", "auth", "login", "--cred-file", "/tmp/key.json", "--update-adc"]),
-        ({}, ["auth", "login", "--flags-file", "/tmp/flags.yaml"]),
+        # `auth login --flags-file …` is refused one step earlier now, by the flags-file guard
+        # (test_agent_session_refuses_a_flags_file_whatever_it_holds).
         ({}, ["auth", "application-default", "login"]),
         ({}, ["beta", "auth", "application-default", "login", "--no-launch-browser"]),
         ({}, ["auth", "application-default", "revoke"]),
@@ -1076,7 +1082,7 @@ class GcloudRouting(unittest.TestCase):
         ["beta", "compute", "instances", "create", "vm-1"],
         ["compute", "instances", "bulk", "create", "--count", "2", "--name-pattern", "vm-#"],
         ["compute", "instances", "create", "vm-1", "--instance-termination-action=STOP"],
-        ["compute", "instances", "create", "vm-1", "--flags-file", "/tmp/flags.yaml"],
+        # A --flags-file create is refused by the flags-file guard before this one sees it.
     )
 
     def test_agent_session_refuses_a_vm_create_without_a_run_limit(self):
@@ -1193,6 +1199,49 @@ class GcloudRouting(unittest.TestCase):
                     self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by {source}.",
                                   result.stderr)
                     self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
+
+    # A --flags-file is argv gcloud has not expanded yet: it loads YAML — a mapping, a list of
+    # mappings, a JSON one-liner — expands it IN PLACE before it resolves --account,
+    # --configuration, --cred-file and impersonation, and follows a flags file a flags file
+    # names (calliope/cli.py:92-108,125-130,985). Three rounds of INFRA-1538 found a reader here
+    # missing one valid shape after another, each of which ran as the person while the shim
+    # named the machine identity. In an agent session the flag is refused outright, and nothing
+    # is parsed; a person's own session is untouched.
+    def test_agent_session_refuses_a_flags_file_whatever_it_holds(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        flags_file = self.stub_dir / "flags.yaml"
+        contents = (f"--account: {self.USER}\n", f'"--account": {self.USER}\n',
+                    f'{{"--account": "{self.USER}"}}\n', f"- --account: {self.USER}\n",
+                    f"--account: {self.BOX}\n", "--project: p\n", "")
+        commands = (["auth", "print-access-token", f"--flags-file={flags_file}"],
+                    ["config", "list", "--flags-file", str(flags_file)],
+                    ["auth", "login", f"--flags-file={flags_file}"],
+                    ["compute", "instances", "create", "vm-1", f"--flags-file={flags_file}"])
+        for marker in self.AGENT_MARKERS:
+            for text in contents:
+                for args in commands:
+                    with self.subTest(marker=sorted(marker), text=text, args=args[0]):
+                        flags_file.write_text(text, encoding="utf-8")
+                        result = self.run_shim(marker, args=args)
+                        self.assert_agent_refusal(result)
+                        self.assertIn("Identity: unknown.", result.stderr)
+                        self.assertIn("--flags-file", result.stderr)
+
+    def test_a_flags_file_this_shim_cannot_read_is_refused_too(self):
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(self.AGENT_MARKERS[0],
+                               args=["config", "list", "--flags-file", str(self.stub_dir / "gone.yaml")])
+        self.assert_agent_refusal(result)
+
+    def test_a_persons_own_flags_file_runs(self):
+        self.write_identity_configs()
+        flags_file = self.stub_dir / "flags.yaml"
+        flags_file.write_text(f"--account: {self.USER}\n", encoding="utf-8")
+        args = ["config", "list", f"--flags-file={flags_file}"]
+        result = self.run_shim(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stub_argv(result), args)
 
     def test_agent_session_refusal_without_a_holding_configuration_routes_to_a_person(self):
         self.stub_gcloud_that_must_not_run()
@@ -2085,6 +2134,210 @@ class GcloudSessionConfig(unittest.TestCase):
         self.assertEqual(self.run_shim(["auth", "list"]), "<unset>")
         self.assertFalse(self.copy.exists())
         self.assertEqual([p for p in self.scratch.iterdir()], [], "a partial copy was left behind")
+
+
+class GcloudNonInteractiveSsh(unittest.TestCase):
+    """INFRA-1538: `ssh sami-devbox gcloud …` is an agent's command, not Sami's, so the
+    agent-session rules apply to it, the shim selects the machine's own configuration for it, and
+    the notice names the identity the call ENDED on — the first draft announced "the machine
+    identity" before resolving one, and with active_config naming a person's configuration the
+    call ran as that person under that claim (review of INFRA-1538). A person's own SSH session
+    (SSH_TTY set, whatever one command reads on stdin), and a person who sets
+    AGENT_SHIM_PERSON=1, are unchanged."""
+
+    USER = "Sami@Theorem.dev"
+    BOX = "box-identity@theorem-agent-infra.iam.gserviceaccount.com"
+    setUp = GcloudRouting.setUp
+    tearDown = GcloudRouting.tearDown
+    write_user_adc = GcloudRouting.write_user_adc
+    stub_gcloud_that_must_not_run = GcloudRouting.stub_gcloud_that_must_not_run
+    NOTICE = "gcloud shim: non-interactive SSH, so an agent's call"
+
+    def write_identity_configs(self, box: bool = True) -> None:
+        """A person's configuration active, as on a machine where Sami signed in."""
+        (self.configs_dir / "config_theorem").write_text(f"[core]\naccount = {self.USER}\n", encoding="utf-8")
+        if box:
+            (self.configs_dir / "config_box").write_text(f"[core]\naccount = {self.BOX}\n", encoding="utf-8")
+        (self.cloudsdk_config / "active_config").write_text("theorem\n", encoding="utf-8")
+
+    def run_shim(self, extra_env: Mapping[str, str] | None = None, args: list[str] | None = None,
+                 tty: bool = False) -> subprocess.CompletedProcess[str]:
+        run = run_with_tty if tty else run_without_tty
+        env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, **(extra_env or {})}
+        return run([str(SHIMS / "gcloud"), *(args or ["config", "list"])], env=env)
+
+    def test_a_command_over_ssh_with_no_terminal_is_an_agent_session(self) -> None:
+        adc = self.write_user_adc()
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(args=["auth", "application-default", "login"])
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+        self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+        self.assertEqual(adc.read_text(encoding="utf-8"), '{"type":"authorized_user"}\n')
+
+    def test_an_active_human_configuration_is_replaced_by_box(self) -> None:
+        # The review's case: active_config=theorem holding Sami@Theorem.dev. The call must not run
+        # as him, and the line must name the account it does run as.
+        self.write_identity_configs()
+        result = self.run_shim()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=box", result.stdout)
+        self.assertNotIn(self.USER, result.stdout)
+        self.assertIn(f"configuration box, account {self.BOX}", result.stderr)
+        self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
+
+    def test_an_active_human_configuration_with_no_box_here_is_refused(self) -> None:
+        # Nothing to select instead, so the call does not run as the person either.
+        self.write_identity_configs(box=False)
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+        self.assertIn("gcloud shim: REFUSED, a command over non-interactive SSH", result.stderr)
+        self.assertIn(self.USER, result.stderr)
+        self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
+
+    def test_an_explicitly_selected_human_configuration_is_named_as_itself(self) -> None:
+        # The standing exception (dispatch://INFRA-6/ask/6c7b1e80) still passes, and the line says
+        # whose account it is rather than calling it the machine identity.
+        self.write_identity_configs()
+        result = self.run_shim(args=["--configuration", "theorem", "config", "list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+        self.assertNotIn("machine identity", result.stderr)
+        self.assertEqual(stub_argv(result), ["--configuration", "theorem", "config", "list"])
+
+    def test_gcloud_account_still_selects_its_configuration(self) -> None:
+        self.write_identity_configs()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "theorem"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+
+    # The notice must name the configuration and account the command ENDS UP on, in main's own
+    # order, not the first one some helper resolves: with CLOUDSDK_ACTIVE_CONFIG_NAME=box and
+    # GCLOUD_ACCOUNT=theorem it said box while gcloud ran theorem (re-review of INFRA-1538).
+    def test_gcloud_account_beats_an_active_config_name_in_the_notice_too(self) -> None:
+        self.write_identity_configs()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"},
+                               args=["auth", "print-access-token"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONFIG=theorem", result.stdout)
+        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+        self.assertNotIn("configuration box", result.stderr)
+
+    def test_a_configuration_flag_beats_both_environment_selections(self) -> None:
+        # gcloud reads --configuration from raw argv before any environment variable.
+        self.write_identity_configs()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "box", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"},
+                               args=["--configuration", "theorem", "config", "list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+
+    # An account the CALL names is a choice of its own. identity_is_selected knows only
+    # configurations and --cred-file, so a service account passed this way was refused as if it
+    # were the configuration file's person (re-review of INFRA-1538).
+    SERVICE_ACCOUNT = "alternate@p.iam.gserviceaccount.com"
+
+    def test_an_explicit_service_account_runs_and_is_the_named_account(self) -> None:
+        for selection in (("flag", ["--account", self.SERVICE_ACCOUNT, "config", "list"], {}),
+                          ("environment", ["config", "list"], {"CLOUDSDK_CORE_ACCOUNT": self.SERVICE_ACCOUNT})):
+            label, args, env = selection
+            for box in (True, False):
+                with self.subTest(selection=label, box=box):
+                    self.write_identity_configs(box=box)
+                    result = self.run_shim(env, args=args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"account {self.SERVICE_ACCOUNT}", result.stderr)
+                    self.assertNotIn(self.USER, result.stderr)
+                    self.assertEqual(stub_argv(result), args)
+
+    def test_an_explicit_human_account_is_still_refused(self) -> None:
+        # The existing agent-session guard, not weakened by the account-aware route above.
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(args=["--account", self.USER, "config", "list"])
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+        self.assertIn("REFUSED in an agent session", result.stderr)
+
+    def test_impersonation_is_named_beside_the_account(self) -> None:
+        applier = "applier@p.iam.gserviceaccount.com"
+        self.write_identity_configs()
+        result = self.run_shim({"CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT": applier})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"configuration box, account {self.BOX}, impersonating {applier}", result.stderr)
+
+    def test_impersonation_the_configuration_sets_is_named_too(self) -> None:
+        # The SDK resolves a property from the flag, then the environment, then the
+        # configuration FILE (core/properties.py:5487-5527); the notice read only the first two
+        # and so named an identity short of the one the call acts with (round 3 of INFRA-1538).
+        applier = "infra-applier@p.iam.gserviceaccount.com"
+        self.write_identity_configs()
+        (self.configs_dir / "config_box").write_text(
+            f"[core]\naccount = {self.BOX}\n[auth]\nimpersonate_service_account = {applier}\n",
+            encoding="utf-8")
+        result = self.run_shim()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"configuration box, account {self.BOX}, impersonating {applier}", result.stderr)
+
+    # The SSH rule makes this an agent session too, so the flags-file refusal applies here, and
+    # it comes before this route names any identity: with `--account: <the person>` in a file
+    # the notice used to claim the machine's while the SDK ran as the person (INFRA-1538).
+    def test_a_flags_file_is_refused_before_any_identity_claim(self) -> None:
+        self.write_identity_configs()
+        flags_file = self.stub_dir / "flags.yaml"
+        for text in (f"--account: {self.USER}\n", "--project: p\n"):
+            with self.subTest(text=text):
+                flags_file.write_text(text, encoding="utf-8")
+                self.stub_gcloud_that_must_not_run()
+                result = self.run_shim(args=["config", "list", f"--flags-file={flags_file}"])
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                self.assertNotIn("configuration box, account", result.stderr)
+
+    def test_a_change_that_outlives_the_call_keeps_its_configuration(self) -> None:
+        # The deliberate exception: selecting box for `auth revoke` or `config set` would write
+        # or empty box's own state. The notice says which configuration it is.
+        self.write_identity_configs()
+        for args in (["auth", "revoke"], ["config", "set", "project", "p"]):
+            with self.subTest(args=args):
+                result = self.run_shim(args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CONFIG=<unset>", result.stdout)
+                self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+                self.assertIn("outlives this call", result.stderr)
+
+    def test_a_persons_ssh_session_is_the_person(self) -> None:
+        for stdin_is_a_pipe in (True, False):
+            with self.subTest(piped=stdin_is_a_pipe):
+                self.write_user_adc()
+                result = self.run_shim({"SSH_TTY": SSH_TTY}, args=["auth", "application-default", "login"],
+                                       tty=not stdin_is_a_pipe)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("REFUSED in an agent session", result.stderr)
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_agent_shim_person_leaves_the_person_alone(self) -> None:
+        self.write_identity_configs()
+        self.write_user_adc()
+        result = self.run_shim({"AGENT_SHIM_PERSON": "1"}, args=["auth", "application-default", "login"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("REFUSED in an agent session", result.stderr)
+        self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_a_call_that_is_allowed_still_runs_and_is_named_once(self) -> None:
+        result = self.run_shim(args=["config", "list"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stub_argv(result), ["config", "list"])
+        self.assertEqual(result.stderr.count(self.NOTICE), 1, result.stderr)
+
+    def test_a_session_marker_needs_no_notice(self) -> None:
+        result = self.run_shim({"OMP_SESSION_ID": "01a00000-0000-7000-8000-000000000000"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.NOTICE, result.stderr)
+
 
 
 if __name__ == "__main__":

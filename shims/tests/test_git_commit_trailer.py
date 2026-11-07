@@ -11,7 +11,9 @@ from pathlib import Path
 from test_jj_push_leak_gate import install_global_hooks
 
 SHIMS = Path(__file__).parents[1]
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL")
 SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
 
 
@@ -28,7 +30,10 @@ class GitCommitTrailerTest(unittest.TestCase):
             "[gpg]\n\tformat = ssh\n[gpg \"ssh\"]\n\tallowedSignersFile = " + str(signers) + "\n"
             "[commit]\n\tgpgsign = true\n[init]\n\tdefaultBranch = main\n"
         )
-        base = {k: v for k, v in os.environ.items() if k not in AGENT_MARKERS and not k.startswith("GIT_CONFIG_")}
+        # SSH_CONNECTION in a session with no terminal is an agent's command too (INFRA-1538), so a
+        # person's environment here drops it, and SSH_TTY and TMUX with it, wherever this suite is run from.
+        dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON")
+        base = {k: v for k, v in os.environ.items() if k not in dropped and not k.startswith("GIT_CONFIG_")}
         self.plain = {**base, "PATH": f"{SHIMS}{os.pathsep}{os.environ['PATH']}", "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}
         self.agent = {**self.plain, "OMP_SESSION_ID": SESSION}
         self.repo = self.tmp / "repo"

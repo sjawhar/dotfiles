@@ -31,6 +31,15 @@
 # the evidence. The log goes to CUTOVER_DIR/a2-<UTC time>.log as well as to stdout.
 set -uo pipefail
 
+# Run through `ssh sami-devbox sami-devbox-check` this is a command in an SSH session sshd gave
+# no terminal (no SSH_TTY),
+# which the identity shims read as an agent's (INFRA-1538). The checks below merge gcloud's
+# stderr into the value they compare (`2>&1`), and one of the shims' stderr lines would then read
+# as the account. The check asks what this MACHINE holds, not what an agent session gets, so it
+# names itself a person's command; a check run inside a box still carries that box's markers and
+# is unaffected.
+export AGENT_SHIM_PERSON=1
+
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 CUTOVER_DIR="${SAMI_DEVBOX_CUTOVER_DIR:-/mnt/nvme/$(id -un)/cutover}"
 TAILNET=tail12ec1c.ts.net
