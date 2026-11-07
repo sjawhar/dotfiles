@@ -15,19 +15,20 @@ IOSchedulingClass=idle
 # one ssh probe (about 1 s), one liveness call (one `omp-session-live` per auto_restart=yes entry
 # on sami-devbox, about 0.75 s each), and as many restarts as still fit before this limit.
 #
-# Two of the numbers this comment used to give had gone stale by 2026-11-07, and the watch was
-# killed here in 3 of the 11 runs that ended in the hour to 05:52Z, each one a run that restarted
-# a flapping session. It said "some 35 s at 44 entries" (measured: 52 s at 101 entries, 68 of
-# them auto_restart=yes) and "at most 3 restarts of 45 s each" (a restart's ssh call is given
-# AWAIT_SECONDS + 60, so up to 105 s, and the cap of 3 is a cross-RUN rate window, not a bound on
-# one run). Worst case was 52 + 3 x 105 = 367 s against this 240 s.
+# This number is not advice to the script: it is the budget EVERY remote call of a run is given a
+# share of (budget_left() in the script). A call allowed to outlive this does not time out -- it
+# gets the run killed, with nothing written and no report.
 #
-# The script now checks the clock before each restart and defers the ones that would not finish
-# in time to the next run, which is already what it does for a session still coming up. So a run
-# stays inside this limit as the registry grows, rather than being killed mid-work -- being
-# killed leaves the session unrestarted AND loses the rest of the pass. Raising this number
-# without raising OnUnitActiveSec in the timer brings back the 2026-11-04 `activating` stall, so
-# the two move together or not at all.
+# That is what happened on 2026-11-07: the liveness call was given `300 + 3 * len(ids)`, which is
+# 504 s at 68 auto_restart entries, so a box that would not answer its scan hung the call and
+# systemd killed the run at 240 s. Six runs died that way in the 90 minutes to 06:33Z, and the
+# journal is clear about what they were NOT doing: none of them printed a "restarting" line,
+# while every run that did restart finished in 40-52 s. (An earlier comment here, mine, blamed
+# the restarts; the run boundaries say otherwise.)
+#
+# The timer's OnUnitActiveSec and this number move together or not at all: a run that outlives
+# its period leaves the service in `activating` and the timer never fires again, which is the
+# 2026-11-04 19:46:31Z stall that unit-health-watch reported as "TIMER STOPPED FIRING".
 TimeoutStartSec=240
 # `envoy` is a bash script that needs the same tools a shell gives it, and ssh must find its config.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin

@@ -119,27 +119,33 @@ TRAIN_IDLE_SECONDS = 1800
 # stopped. A session that is not up yet is checked again on the next run, and gets its `after`
 # message then.
 AWAIT_SECONDS = 45
-# A restart's worst case in wall time, and the unit limit it has to fit inside.
+# No remote call of a run may outlive the unit. devbox-offbox-watch.service sets
+# TimeoutStartSec=240; every ssh call below is given a timeout computed against that, so a call
+# that hangs ends as a reported failure inside the run instead of systemd killing the run.
 #
-# devbox-offbox-watch.service sets TimeoutStartSec=240 and its comment budgets "at most 3 restarts
-# of 45 s each ... about 170 s at worst". Two of those three numbers had drifted by 2026-11-07:
+# Measured on sami-rocqperf on 2026-11-07, from the journal, for the hour to 06:33Z:
 #
-#   * a restart's ssh call is given AWAIT_SECONDS + 60, so it costs up to 105 s, not 45 s, and
-#   * the liveness leg is one call per auto_restart entry at about 0.75 s, budgeted at "some 35 s
-#     at 44 entries" and measured at 52 s with 101 entries, 68 of them auto_restart=yes.
+#   * runs that COMPLETED, restart included, took 40-52 s: 05:52:27->05:53:07, 06:07:28->06:08:18
+#     (restart at 06:08:03), 06:22:30->06:23:17, 06:27:30->06:28:22.
+#   * runs that were KILLED at 240 s printed no "restarting" line at all: 05:42, 05:47, 05:57,
+#     06:02, 06:12, 06:17. They never reached a restart.
 #
-# The existing cap is a cross-run RATE window (RESTARTS_PER_10_MIN, kept in state), not a bound on
-# one run, so a run that found an empty window could still start three restarts: 52 + 3 x 105 =
-# 367 s against a 240 s limit. That is what killed 3 of 11 runs in the hour to 05:52Z on
-# 2026-11-07, every one of them a run that restarted the cost lead.
+# So restarts were never the cost. The liveness call was: ask_live was given
+# `300 + 3 * len(ids)` -- 504 s at 68 auto_restart entries, more than twice the unit's limit --
+# and its box scan blocks on a container that does not answer ("the second liveness test did not
+# run (failed 1 container(s) did not answer)", 06:23Z). A call allowed to run for twice the
+# unit's life can only ever end by the unit being killed.
 #
-# So a restart is started only while the run can still finish it inside the limit. The guard is
-# wall-clock rather than a count, because the count is what went stale: it holds as the registry
-# grows, and the sessions it defers are restarted by the next run 5 minutes later, which is what
-# this watch already does for a session that is not up when AWAIT_SECONDS expires.
-RESTART_WORST_CASE_SECONDS = AWAIT_SECONDS + 60
+# An earlier fix of mine budgeted restarts instead, on the reasonable-looking theory that the
+# killed runs were the ones restarting the flapping cost lead. The journal says the opposite, and
+# the theory survived only because I had not read the run boundaries. The restart guard stays --
+# it is correct and bounds several restarts in one pass -- but it was not the bug.
 UNIT_TIMEOUT_SECONDS = 240
+# Left for cleanup, the state write and the exit after the last remote call returns.
 RESTART_MARGIN_SECONDS = 20
+# Below this there is no point starting a remote call at all: it would be cut off before it could
+# do anything useful, and a cut-off restart is worse than one deferred to the next run.
+MIN_USEFUL_SECONDS = 30
 ENTRY_KEYS = ("session", "title", "role", "tmux", "cwd", "resume", "after", "order",
               "auto_restart", "owner_note")
 STREAM_WINDOWS = ("chief", "ossv", "linux", "tasks", "grader", "infra", "rocq", "cicd")
@@ -178,6 +184,16 @@ def utc(epoch: float) -> str:
 
 def minutes(seconds: float) -> int:
     return int(seconds // 60)
+
+
+def budget_left(run_started: float) -> int:
+    """Seconds this run may still spend in a remote call before TimeoutStartSec kills the unit.
+
+    Every ssh call takes its timeout as min(its own, this), so a hung call fails inside the run
+    and the run reports it, rather than the run being killed with nothing written. Can be
+    negative; callers compare against MIN_USEFUL_SECONDS, not against zero.
+    """
+    return int(UNIT_TIMEOUT_SECONDS - RESTART_MARGIN_SECONDS - (time.monotonic() - run_started))
 
 
 # --------------------------------------------------------------------------------------------
@@ -549,7 +565,7 @@ FRESH_SECONDS = 120
 BOX_RESTART_SECONDS = 180
 
 
-def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict[str, str], dict[str, int], str]:
+def liveness(remote: Remote, ids: list[str], run_started: float) -> tuple[dict[str, list[str]], dict[str, str], dict[str, int], str]:
     """Every reading sami-devbox has about each session, and whether the box scan can be trusted.
 
     Returns, per id, the reasons it is alive (strongest first); separately the host and box
@@ -571,7 +587,14 @@ def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict
         return {}, {}, {}, ""
     # One `omp-session-live` per id (about 0.75 s), one `ps` and one descriptor pass on the host,
     # and the box scan: 24 s over 116 containers, measured 2026-11-04.
-    done = remote.ask_live(ids, FRESH_SECONDS, timeout=300 + 3 * len(ids))
+    #
+    # Bounded by what is left of the unit's life. `300 + 3 * len(ids)` is 504 s at 68 entries,
+    # which cannot be reached inside a 240 s unit: a call allowed to outlive its unit does not
+    # time out, it gets the unit killed. Six runs in the 90 minutes to 06:33Z on 2026-11-07 ended
+    # that way, each hung on a box that does not answer the scan. With this, the call returns and
+    # the run says which part failed.
+    done = remote.ask_live(ids, FRESH_SECONDS,
+                           timeout=min(300 + 3 * len(ids), max(budget_left(run_started), MIN_USEFUL_SECONDS)))
     if done.returncode != 0:
         raise RuntimeError(f"liveness check failed: exit {done.returncode}:"
                            f" {(done.stderr or done.stdout).strip()[:400]}")
@@ -602,7 +625,7 @@ def liveness(remote: Remote, ids: list[str]) -> tuple[dict[str, list[str]], dict
 
 
 def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict, now: float,
-            host: str, sre: str, dry_run: bool) -> None:
+            host: str, sre: str, dry_run: bool, run_started: float) -> None:
     session, title = entry["session"], entry["title"]
     targets = [sre] + ([f"notifications.role.{entry['role']}"] if entry.get("role") else [])
     dirs = describe_dirs(entry["resume"])
@@ -617,7 +640,9 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
     record = session_state(state, session)
     record["last_restart"] = now
     record["last_dirs"] = dir_list(entry["resume"])
-    done = remote.ask_restart(entry, timeout=180)
+    # Bounded like every other remote call: 180 s is the cost of a slow box creation, but never
+    # more than this run may still spend.
+    done = remote.ask_restart(entry, timeout=min(180, max(budget_left(run_started), MIN_USEFUL_SECONDS)))
     if done.returncode != 0:
         detail = (done.stderr or done.stdout).strip()[:500]
         report.send(targets, "restart-failed",
@@ -632,7 +657,8 @@ def restart(remote: Remote, entry: dict[str, str], report: Reporter, state: dict
         elif line.startswith("pane="):
             pane = line[len("pane="):]
 
-    waited = remote.ask_await(session, AWAIT_SECONDS, timeout=AWAIT_SECONDS + 60)
+    waited = remote.ask_await(session, AWAIT_SECONDS,
+                              timeout=min(AWAIT_SECONDS + 60, max(budget_left(run_started), MIN_USEFUL_SECONDS)))
     came_back = waited.stdout.strip() == "live"
     after = entry.get("after", "")
     if came_back and after:
@@ -732,7 +758,8 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
     watched.sort(key=lambda e: (int(e["order"]) if e.get("order", "").lstrip("-").isdigit() else 999,
                                 e["title"]))
     try:
-        alive, named, restarting, scan_failed = liveness(remote, [e["session"] for e in watched])
+        alive, named, restarting, scan_failed = liveness(remote, [e["session"] for e in watched],
+                                                         run_started)
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
         log(f"liveness check failed: {error}")
         save_state(state_path, state)
@@ -911,18 +938,18 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
             log(f"report-only: would restart {title} ({session})")
             continue
 
-        # Start this restart only if the run can still finish it before TimeoutStartSec kills the
-        # unit mid-work. A run killed at the limit is worse than a deferred restart: it leaves the
-        # session unrestarted anyway AND loses the rest of the pass, state write included.
-        spent = time.monotonic() - run_started
-        if spent + RESTART_WORST_CASE_SECONDS > UNIT_TIMEOUT_SECONDS - RESTART_MARGIN_SECONDS:
+        # Start this restart only while the run has time to do something useful with it. A
+        # restart cut off halfway is worse than one deferred: it counts against the rate limits,
+        # may leave a half-made box, and the session is unrestarted either way.
+        left = budget_left(run_started)
+        if left < MIN_USEFUL_SECONDS:
             left_for_budget.append(f"{title} ({session})")
             log(f"deferring the restart of {title} ({session}) to the next run:"
-                f" {spent:.0f} s spent, a restart costs up to {RESTART_WORST_CASE_SECONDS} s,"
-                f" and the unit is killed at {UNIT_TIMEOUT_SECONDS} s")
+                f" {left} s left of the unit's {UNIT_TIMEOUT_SECONDS} s, under the"
+                f" {MIN_USEFUL_SECONDS} s a restart needs to be worth starting")
             continue
 
-        restart(remote, entry, report, state, now, args.host, args.sre, args.dry_run)
+        restart(remote, entry, report, state, now, args.host, args.sre, args.dry_run, run_started)
 
     if would_restart:
         report.send([args.sre], "report-only",
@@ -959,8 +986,8 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
         report.send([args.sre], "defer-budget",
                     f"DEFERRED TO THE NEXT RUN, {len(left_for_budget)} dead session(s) on"
                     f" {args.host}: {', '.join(left_for_budget)}. This run had no wall-clock room"
-                    f" left: a restart costs up to {RESTART_WORST_CASE_SECONDS} s and the unit is"
-                    f" killed at {UNIT_TIMEOUT_SECONDS} s (TimeoutStartSec). Nothing is wrong with"
+                    f" left: under {MIN_USEFUL_SECONDS} s remained of the unit's"
+                    f" {UNIT_TIMEOUT_SECONDS} s (TimeoutStartSec). Nothing is wrong with"
                     f" these sessions; the next run in 5 min restarts them. If the SAME session is"
                     f" deferred run after run, the liveness leg has outgrown the budget -- measure"
                     f" a run and either make it cheaper or raise both limits together.")
