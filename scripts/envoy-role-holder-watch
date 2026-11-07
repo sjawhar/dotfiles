@@ -2765,9 +2765,18 @@ def pane_head(incident: dict, now: float) -> list[str]:
         f"AGENT PANE AT SHELL: tmux pane {incident['pane_id']} ({incident['where']}, window"
         f" \"{incident['window_name']}\") has had no omp in it for"
         f" {human(now - incident['opened_at'])}, since {iso(incident['opened_at'])}.",
-        f"Do: re-read the pane (`tmux capture-pane -p -t {incident['pane_id']} | tail -n 15`);"
-        " only if it is still a shell, restart the lane IN THAT PANE, never a new one. This"
-        " watch restarted nothing.",
+        f"Do: re-read the pane (`tmux capture-pane -p -t {incident['pane_id']} | tail -n 15`)"
+        f" AND ask the host whether the session still runs"
+        f" (`ssh {socket.gethostname()} omp-session-live {session}`)."
+        " Restart the lane IN THAT PANE, never a new one, only if BOTH say so: the pane is still"
+        " a shell and no process holds the session. A pane can be a shell while its session runs"
+        " elsewhere, and on 2026-11-07 that nearly produced a twin."
+        " Do not use pgrep from inside a box: it sees only that box's processes and answers 0 for"
+        " a session running on the host. This watch restarted nothing."
+        if session else
+        f"Do: re-read the pane (`tmux capture-pane -p -t {incident['pane_id']} | tail -n 15`)."
+        " The session is NOT RESOLVED, so there is nothing to test for liveness and nothing to"
+        " resume; find the session first. This watch restarted nothing.",
         f"Last session: {session}." if session else "Last session: NOT RESOLVED.",
         f"cwd {incident['cwd']}.",
     ]
