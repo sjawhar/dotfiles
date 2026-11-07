@@ -62,8 +62,19 @@ def at(stamp: str) -> float:
     return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")))
 
 
-def writer(pid: int, gigabytes: float, session: str, command: str, on_mount: bool = True) -> dict:
-    """One described writer, as describe_writers() returns it."""
+def writer(
+    pid: int, gigabytes: float, session: str, command: str, on_mount: bool = True,
+    cwd_on_mount: bool | None = None,
+) -> dict:
+    """One described writer, as describe_writers() returns it.
+
+    `cwd_on_mount` is the evidence that places a writer in the alert's first group, the one a
+    person is told to act on: its working directory is on the mount, so its traffic very likely
+    lands there. Since 1cb73600 ("do not call a process a writer on a mount it barely touches")
+    a row without it is a CANDIDATE instead -- listed under the "share is UNKNOWN" heading and
+    named in no instruction. It defaults to `on_mount` so the long-standing fixtures describe
+    what they always meant: real writers on the alerting disk.
+    """
     return {
         "pid": pid,
         "written": int(gigabytes * GB),
@@ -75,6 +86,8 @@ def writer(pid: int, gigabytes: float, session: str, command: str, on_mount: boo
         "pane": "lane-7:work.0",
         "cwd": "/mnt/nvme/sami/src/oss-verify-proofs-internal" if on_mount else "/home/sami",
         "on_mount": on_mount,
+        "cwd_on_mount": on_mount if cwd_on_mount is None else cwd_on_mount,
+        "mount_bytes": int(2.1 * GB) if on_mount else 0,
         "example": "/mnt/nvme/sami/tmp/pytest-of-sami/run-1234/output.bin (2.1 GB)" if on_mount else "",
         "read_only": "",
         "fd_error": "",
@@ -401,6 +414,40 @@ class CrossingResendTest(Harness):
         self.assertIn("Top writers now", report)
         for row in WRITERS:
             self.assertIn(str(row["pid"]), report)
+
+    def test_writers_with_no_open_file_here_are_candidates_and_name_nobody(self) -> None:
+        """The other half of 1cb73600: no evidence on the mount, no instruction.
+
+        The same fall, with the same processes, except that none of them holds a file open on
+        /mnt/nvme or has its working directory there. They still wrote a great deal -- the
+        write-traffic figure counts every filesystem -- so they belong in the report, but under
+        the heading that says their share of THIS mount is unknown, and the short message must
+        not name them: acting on them frees nothing here. Measured case behind the rule: on
+        2026-11-05 a process wrote 1.5 GB in 15 s with a 16.0 kB log the only thing it held on
+        the alerting mount.
+        """
+        rootless = [
+            writer(row["pid"], row["written"] / GB, row["session_id"], row["command"],
+                   on_mount=True, cwd_on_mount=False)
+            for row in WRITERS[:3]
+        ]
+        original = WATCH.describe_writers
+        WATCH.describe_writers = lambda rows, device, seconds, top: [dict(r) for r in rootless[:top]]
+        self.addCleanup(setattr, WATCH, "describe_writers", original)
+        self.seed(
+            self.series([(8460 - 300 * i, 120.0 - 1.3 * i) for i in range(29)]),
+        )
+        self.free = int(9.2 * GIB)
+
+        self.run_watch()
+
+        self.assertEqual(1, len(self.messages()))
+        text = self.messages()[0]
+        report = self.assert_short(text)
+        for row in rootless:
+            self.assertNotIn(f"pid {row['pid']}", text)
+            self.assertIn(str(row["pid"]), report)
+        self.assertIn("share of it is UNKNOWN", report)
 
 
 class MessageShapeTest(Harness):
