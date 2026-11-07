@@ -89,6 +89,23 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 
 **Ask a fresh reviewer, for each claimed cause, to name the command or record that would show it FALSE, and to run it.** A reviewer that reads only the prose confirms a confident wrong cause. The causes that cost most are the ones nobody could falsify, because nobody looked for what would disprove them.
 
+## A check that could not have failed is not evidence
+
+**"Did my check pass?" and "could my check have failed?" are different questions, and only the second is evidence.** Before you report a clean result, say what would have made it dirty, and make it dirty once.
+
+Ten clean results in one day's batch came from instruments that could not have seen the defect: a gate reporting zero regressions over a corpus that generated none of the construct; `cargo clippy --workspace` certifying, for seven minutes, a crate that was not a workspace member and did not compile; a `strings` scan for a name the code assembles from a ternary; a scan of a binary at a path that did not exist, which returned zero for every string including the control; a test whose comment called it load-bearing while it passed with the mechanism deleted; a changelog check counting deletions, which a misplaced addition does not make; GitHub's `mergeable`, a cache, wrong for five of seven pull requests; and a review verdict read at a head that had moved.
+
+**Attribution is the same test.** "A live process holds 710 of them" is a sentence no evidence can contradict, because it names nobody; `/proc/<pid>/cmdline` turned out to name the session saying it. A claim that cannot be wrong is not a finding.
+
+**A tool that cannot run must refuse, not pass.** The leak check exits 2 when its interpreter is missing, and says why. Four shims were 0-byte files for two minutes on 2026-11-07: an empty script exits 0 and prints nothing, so `git commit` reported success and committed nothing. Count exit status, never output lines.
+
+## Nothing important may live only in a session's context
+
+**This is the whole defence against a memory cap, and it is cheaper than any amount of discipline.** A lead running many lanes accumulates context that cannot be freed in place: one session reached 100.8 GiB against a 160 GiB cap; another was killed twice at 128 GiB and lost no measured work, because its results were on durable storage and its heavy jobs ran off-box.
+
+Put decisions in `knives notch`, defects in Dispatch, limitations in the pull request body, and what is in flight in a continuity file. Then a kill costs the conversation and no work, and you can refuse a bigger box honestly — **the cap is usually the only reason anyone looked.**
+
+
 ## Incidents on shared resources
 
 A shared resource (a box disk, the model quota, cloud billing) has one owner, named in the stream table's `## Shared resources` section of dispatch://INFRA-202. An incident is a failure or a shortage of a shared resource, or an event that two or more streams would act on.
