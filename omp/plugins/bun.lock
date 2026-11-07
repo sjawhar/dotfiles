@@ -18,6 +18,7 @@
   },
   "patchedDependencies": {
     "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch",
+    "@sjawhar/pi-envoy@16.3.1": "patches/@sjawhar%2Fpi-envoy@16.3.1.patch",
   },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],

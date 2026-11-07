@@ -12,6 +12,7 @@
     "superpowers": "github:obra/superpowers#v7.0.1"
   },
   "patchedDependencies": {
-    "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch"
+    "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch",
+    "@sjawhar/pi-envoy@16.3.1": "patches/@sjawhar%2Fpi-envoy@16.3.1.patch"
   }
 }
