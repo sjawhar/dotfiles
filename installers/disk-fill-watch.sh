@@ -37,11 +37,18 @@ fi
 # assumes for /mnt/durable. The layout, not the host name, picks it: a machine whose
 # /mnt/scratch and /mnt/durable are both mounts is that machine. The unit is committed and
 # linked, so the per-machine arguments go in a drop-in beside the link.
+# --no-mount-alerts is this machine only: agent-infra#2349 (merged 2026-11-07 15:15:09Z)
+# gives sami-devbox the owner:sjawhar attribute, which puts it inside the Datadog host
+# monitors that already page on a filesystem filling. The timer stays for its other three
+# duties -- the IOPS-cap check, naming the processes that are writing, and the free-space
+# series the forecast reads -- but two alerts for one crossing teach people to ignore both.
+# A machine outside those monitors keeps the alert, which is why the flag is here and not
+# in the committed unit.
 dropin="$HOME/.config/systemd/user/disk-fill-watch.service.d/devbox-disks.conf"
 if mountpoint -q /mnt/scratch && mountpoint -q /mnt/durable; then
     mkdir -p "$(dirname "$dropin")"
     printf '%s\n' '[Service]' 'ExecStart=' \
-        'ExecStart=%h/.dotfiles/scripts/disk-fill-watch --mount / --mount /mnt/nvme --mount /mnt/scratch --mount /mnt/durable --floor /=50 --floor /mnt/nvme=400 --floor /mnt/scratch=500 --floor /mnt/durable=200 --iops-cap /mnt/nvme=160000 --iops-cap /mnt/durable=3000' \
+        'ExecStart=%h/.dotfiles/scripts/disk-fill-watch --mount / --mount /mnt/nvme --mount /mnt/scratch --mount /mnt/durable --floor /=50 --floor /mnt/nvme=400 --floor /mnt/scratch=500 --floor /mnt/durable=200 --iops-cap /mnt/nvme=160000 --iops-cap /mnt/durable=3000 --no-mount-alerts' \
         >"$dropin.new"
     if cmp -s "$dropin.new" "$dropin"; then rm -f "$dropin.new"; else mv -f "$dropin.new" "$dropin" && echo "disk-fill-watch: four disks and their floors ($dropin)"; fi
 fi
