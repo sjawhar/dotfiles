@@ -333,8 +333,11 @@ def notify_author(token: str, slug: str, pr: str, head: str, event: str, stamp: 
         )
         # The body goes on stdin: `envoy send` refuses one given as a command-line word in an
         # agent session, where the shell expands backticks and $(...) in it before envoy sees it.
+        # With no omp session the send says `--source envoy`, or the listener labels it `human`
+        # (dispatch://INFRA-1577).
+        source = [] if os.environ.get("OMP_SESSION_ID") else ["--source", "envoy"]
         sent = subprocess.run(
-            ["envoy", "send", "--message-file", "-", session],
+            ["envoy", "send", *source, "--message-file", "-", session],
             input=text, capture_output=True, text=True, timeout=60,
         )
         if sent.returncode == 0:

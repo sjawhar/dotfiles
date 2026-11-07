@@ -919,10 +919,14 @@ def send(owner: str, text: str) -> bool:
     """One Envoy message to the lane that owns the job, its body on stdin.
 
     `envoy send` refuses a body given as a command-line word in an agent session: the shell
-    expands backticks and $(...) in such a word before envoy sees it.
+    expands backticks and $(...) in such a word before envoy sees it. Run with no omp session
+    (a timer, a shell over ssh), the send says `--source envoy`: without it the listener labels
+    a sender it cannot name `human`, and the lane reads a script's notice as a person's
+    (dispatch://INFRA-1577).
     """
     here = os.path.dirname(os.path.abspath(__file__))
-    done = subprocess.run([os.path.join(here, "envoy"), "send", "--message-file", "-", owner],
+    source = [] if os.environ.get("OMP_SESSION_ID") else ["--source", "envoy"]
+    done = subprocess.run([os.path.join(here, "envoy"), "send", *source, "--message-file", "-", owner],
                           input=text, capture_output=True, text=True, timeout=60)
     if done.returncode != 0:
         print(f"farm-fail-watch: envoy send to {owner} failed: {done.stderr.strip()}", file=sys.stderr)
