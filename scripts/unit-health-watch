@@ -60,6 +60,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -471,6 +472,34 @@ def transcript_held(path: str) -> bool | None:
     return path in held["paths"] or path.rsplit("/", 1)[-1] in held["names"]
 
 
+def session_live(session: str) -> bool | None:
+    """Whether omp-session-live finds a live omp for this session: True, False, None if it did not run.
+
+    This is the box's canonical liveness test and it reads more than descriptors: a process whose
+    COMMAND LINE names the session, a process inside an agent box, and the transcript's freshness.
+    `transcript_held` above reads descriptors alone, and that is not enough to call a session
+    gone: on 2026-11-07 at 08:04Z this watch reported SCIENCE (01a1a7ce) gone while its omp had
+    been running for seven and a half hours and never died, because nothing held its transcript
+    by a descriptor the test could see. Its transcript sits under `-src-machcsl-riscv`, the same
+    directory that gave four false deaths for another session on 11-03 and 11-04.
+
+    A false "gone" is not a harmless extra alert. It invites a person to resume a session that is
+    already running, which is the duplicate `agentbox new`'s own guard exists to refuse.
+    """
+    live = shutil.which("omp-session-live")
+    if not live:
+        return None
+    try:
+        done = subprocess.run([live, session], capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # 0 live, 1 not live, 3 "cannot tell from inside a box" -- anything else is not an answer.
+    if done.returncode == 0:
+        return True
+    if done.returncode == 1:
+        return False
+    return None
+
 def dead_sessions(
     directory: Path, root: Path, now: float, silence: float
 ) -> tuple[list[dict], int]:
@@ -504,6 +533,12 @@ def dead_sessions(
             continue
         if transcript_held(transcript) is not False:
             continue
+        # The descriptor test says nobody holds the transcript. That is necessary and not
+        # sufficient, so the canonical test has to agree before anyone is told a session is gone.
+        # `session_live` returning None means it could not answer, and an unanswered question is
+        # not a death: say nothing rather than send a person to resume a live session.
+        if session_live(entry.get("session", "")) is not False:
+            continue
         found.append(
             {
                 "session": entry.get("session", ""),
@@ -526,9 +561,15 @@ def dead_session_message(item: dict, registry: str, host: str) -> str:
     inherited by nobody -- so it gets whatever room is left after the facts, and the entry file
     is named for the rest of it and for the resume command.
     """
+    # What actually restarts a session on sami-devbox is devbox-offbox-watch, which runs OFF the
+    # box on sami-rocqperf every five minutes and restarted two sessions on 2026-11-07 alone. The
+    # old text here said nothing restarts them any more, which was true only of the on-box
+    # restarter that INFRA-993 removed, and sent readers looking for a person when the watch was
+    # already handling it.
     restart = (
-        "The registry says auto_restart=yes, but nothing restarts sessions on this machine any"
-        " more"
+        "The registry says auto_restart=yes, so devbox-offbox-watch (on sami-rocqperf, every"
+        " 5 min) should bring it back; if it has not within about 10 minutes, its refusal says"
+        " why -- a flap window, the restart rate limit, or a box mid-relaunch"
         if item["auto_restart"] == "yes"
         else f"The registry says auto_restart={item['auto_restart']}, so nothing would have"
         " brought it back in any case"
