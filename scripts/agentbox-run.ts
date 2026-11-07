@@ -378,11 +378,47 @@ export function dispatchEnv(argv: string[], env: Record<string, string | undefin
 	return out;
 }
 
+// omp's stderr goes to the pane AND to a file. Bun writes its panic and its bun.report URL
+// there and nowhere else: the box runs with `--log-driver none`, so docker keeps nothing, and
+// the pane is replaced by the next restart. Three aborts on 2026-11-07 left no reason at all.
+// stdout is deliberately left inherited -- it is a full-screen TUI, and teeing it would bury
+// the one useful line under megabytes of redraw.
+const stderrPath = logPath.replace(/\.log$/, "") + ".stderr.log";
+const STDERR_CAP_BYTES = 1 << 20;
+let stderrWritten = 0;
+
+function appendStderr(chunk: Uint8Array): void {
+	try {
+		fs.mkdirSync(path.dirname(stderrPath), { recursive: true });
+		if (stderrWritten + chunk.byteLength > STDERR_CAP_BYTES) {
+			// The end of a crash is the part worth keeping, so start again rather than stop.
+			fs.writeFileSync(stderrPath, `--- restarted at ${new Date().toISOString()}, cap ${STDERR_CAP_BYTES} bytes ---\n`);
+			stderrWritten = 0;
+		}
+		fs.appendFileSync(stderrPath, chunk);
+		stderrWritten += chunk.byteLength;
+	} catch {
+		// A stderr capture must never be able to stop a box from running.
+	}
+}
+
 function spawnOmp(argv: string[]) {
-	return Bun.spawn(argv, {
-		stdio: ["inherit", "inherit", "inherit"],
+	const child = Bun.spawn(argv, {
+		stdio: ["inherit", "inherit", "pipe"],
 		env: { ...process.env, ...dispatchEnv(argv, process.env), AGENTBOX_RUNNER_PID: String(process.pid) },
 	});
+	// Straight through to the pane as before, and into the file on the way.
+	(async () => {
+		try {
+			for await (const chunk of child.stderr as ReadableStream<Uint8Array>) {
+				process.stderr.write(chunk);
+				appendStderr(chunk);
+			}
+		} catch {
+			// The pipe closing with the child is normal.
+		}
+	})();
+	return child;
 }
 
 // OOM bias inside the box (dispatch://INFRA-702). At the box's memory limit the kernel kills
