@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Report a new symlink in ~/src that points out of it, because each one widens every box.
+
+agentbox gives every box `~/src` together with the targets of the symlinks inside it. So adding
+one symlink to ~/src silently mounts its target into every agent box on the machine — on
+sami-devbox, 82 of them — and nothing says so.
+
+Found on 2026-11-07 (dispatch://INFRA-675) while answering Sami's rule that a box should hold
+what the agent owns and nothing else: five links in ~/src were pulling five lanes' private trees
+into all 82 boxes. Each was one lane's worktree or clone. None was shared infrastructure, and
+none of them was held open by any box at the moment they were measured. They had been there for
+up to twelve days.
+
+The census that found them took an afternoon. This takes a second, and tells the box-health
+owner the same day: it lists the links whose target resolves outside ~/src, compares with what it
+saw last time, and sends one Envoy note naming each new one, its target, and the number of live
+boxes that will therefore mount it.
+
+It reports; it changes nothing. Removing a link is a decision per lane, and the hazard of
+removing one is real: a path a box is NOT given is silently writable inside the box and lost at
+its exit, with no error (agentbox/AGENTS.md).
+"""
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from envoy_client import Envoy  # noqa: E402
+
+
+def outside_links(src: pathlib.Path) -> dict[str, str]:
+    """Each symlink directly in src whose target resolves outside src, name -> target."""
+    found: dict[str, str] = {}
+    try:
+        entries = sorted(src.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.is_symlink():
+            continue
+        target = os.path.realpath(entry)
+        if not target.startswith(str(src) + os.sep):
+            found[entry.name] = target
+    return found
+
+
+def live_boxes() -> int:
+    got = subprocess.run(
+        ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.Names}}"],
+        capture_output=True, text=True, check=False,
+    )
+    return len([line for line in got.stdout.splitlines() if line.strip()])
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--src", default=str(pathlib.Path.home() / "src"))
+    ap.add_argument("--state", default=None, help="where the known links are remembered")
+    ap.add_argument("--role", default="lead-box-health", help="Envoy role to tell")
+    ap.add_argument("--report", action="store_true", help="print every outside link and send nothing")
+    ap.add_argument("--dry-run", action="store_true", help="say what would be sent, send nothing")
+    args = ap.parse_args()
+
+    src = pathlib.Path(args.src)
+    state_path = pathlib.Path(
+        args.state
+        or os.environ.get("XDG_STATE_HOME", str(pathlib.Path.home() / ".local/state"))
+    ) / "src-symlink-watch.json"
+
+    links = outside_links(src)
+
+    if args.report:
+        boxes = live_boxes()
+        print(f"{len(links)} symlink(s) in {src} point outside it; {boxes} live box(es) mount each")
+        for name, target in sorted(links.items()):
+            print(f"  {name} -> {target}")
+        return 0
+
+    try:
+        known = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        known = None
+
+    if known is None:
+        # First run records what is there and says nothing: everything would be "new", which
+        # would be a page about a state that has existed for days.
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(links, indent=1, sort_keys=True), encoding="utf-8")
+        print(f"first run: remembered {len(links)} existing outside link(s), sent nothing")
+        return 0
+
+    added = {name: target for name, target in links.items() if known.get(name) != target}
+    gone = sorted(set(known) - set(links))
+
+    if added:
+        boxes = live_boxes()
+        lines = [
+            f"**A new symlink in `~/src` points out of it, so its target is now mounted into "
+            f"every agent box on this machine ({boxes} live).**",
+            "",
+        ]
+        for name, target in sorted(added.items()):
+            lines.append(f"- `~/src/{name}` -> `{target}`")
+        lines += [
+            "",
+            "agentbox binds `~/src` with the targets of the links inside it, so this reaches "
+            "every box, not only the lane that needs it. If one lane needs that tree, a named "
+            "`--dir` at its next re-box is the narrower way (dispatch://INFRA-675).",
+            "",
+            "Nothing has been changed. Removing a link is a decision per lane: a path a box is "
+            "NOT given is silently writable inside the box and lost at its exit, with no error.",
+        ]
+        message = "\n".join(lines)
+        if args.dry_run:
+            print(message)
+        else:
+            Envoy().publish(f"notifications.role.{args.role}", message)
+            print(f"told {args.role}: {len(added)} new outside link(s)")
+    else:
+        print(f"no new outside links ({len(links)} known, {len(gone)} gone)")
+
+    if not args.dry_run:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(links, indent=1, sort_keys=True), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly check for a new ~/src symlink that widens every agent box
+
+[Timer]
+# Hourly: a link added now reaches boxes made after it, so same-day is the requirement and
+# same-minute is not. The five found on 2026-11-07 had been there for up to twelve days.
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

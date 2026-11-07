@@ -1,0 +1,11 @@
+[Unit]
+Description=Report a new symlink in ~/src that points out of it, which every box then mounts
+Documentation=file:%h/.dotfiles/scripts/src-symlink-watch
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+# One directory listing and one `docker ps`; a pass that cannot finish in a minute is wrong.
+TimeoutStartSec=60
+ExecStart=%h/.dotfiles/scripts/src-symlink-watch
