@@ -1,3 +1,13 @@
+> **Status, 2026-11-07: `STACKS` is empty and the timer is disabled.** `bootstrap/prod` was the
+> only stack and was dropped. agent-infra #1064 (2026-11-05) moved `bootstrap/`'s state into
+> `root/`'s per-program bucket, `gs://theorem-agent-root-bootstrap-pulumi-state`, which
+> `infra-applier@` cannot list, so every preview since returned a 403 before planning anything
+> (report `20261107T090237Z-failed.txt` on sami-rocqperf). The gap this watch measures is now
+> covered for `bootstrap/` by its own CI account, which applies the stack on every merge
+> (agent-infra `envoy.yaml`). The machinery is kept, tested, and ready for the next stack that
+> has a reader for its state and no apply-on-merge of its own; re-arm with `systemctl --user
+> enable --now pulumi-drift-watch.timer` when `STACKS` gets an entry.
+
 # pulumi-drift-watch
 
 Reports Pulumi stacks whose `main` is declared and not applied. Previews only: it applies
@@ -33,14 +43,27 @@ service account with state-bucket and state-key access.
 3. Appends one sample per stack per run to `samples.jsonl` beside the checkout, whether or not
    anything is pending — a silent log cannot be told from a dead watch.
 4. Sends an Envoy message **only** when a stack's pending set changes (a URN added or removed),
-   when its preview starts failing, or when a run cannot start (once per cause). A clean stack
-   says nothing: a daily "nothing to report" trains its reader to skip the day it matters. The
+   when its preview starts failing, when a preview is refused for want of a state reader, or
+   when a run cannot start (once per cause). A clean stack says nothing: a daily "nothing to
+   report" trains its reader to skip the day it matters. The
    same pending set again says nothing either: bootstrap/prod had pending steps in all 7 samples
    from 2026-10-30 to 2026-11-02 (6, 6, 6, 6, 1, 9, 6), so pending alone is a standing fact.
 5. The message is at most 600 characters and names every pending resource by its name (the 6 of
    2026-11-02 take 193 characters), what changed since the last report, and `Full report:
    <path>` last. The report (`/mnt/nvme/sami/pulumi-drift-watch/reports/<UTC>-pending.txt`,
    pruned after 7 days) has every URN and the preview's last lines.
+6. With `STACKS` empty it does none of the above: it clones nothing, mints no token, prints
+   that it watches nothing, and exits 0.
+
+### The four things a report can say
+
+| status | report file | what it means |
+| --- | --- | --- |
+| `PULUMI PLAN PENDING` | `<UTC>-pending.txt` | merged and declared, not live. Sent again when the URN set changes. |
+| `PULUMI PREVIEW FAILED` | `<UTC>-failed.txt` | the preview ran and broke. What is pending is unknown. |
+| `NO READER FOR THIS STACK'S STATE` | `<UTC>-no-state-reader.txt` | the preview was refused with a 403 on the stack's state bucket before it planned anything. **Not drift and not a broken preview**: the identity this watch previews as cannot read that state, and the only fixes are a grant or dropping the stack from `STACKS`. Its own fingerprint, so it is said once per change rather than daily, and it does not make the run exit non-zero — a red unit every day adds nothing to the one message that already said it. |
+| `PULUMI DRIFT WATCH COULD NOT RUN` | `<UTC>-could-not-run.txt` | no preview ran at all. Once per cause. |
+
 
 ## What it deliberately does not do
 
@@ -65,7 +88,9 @@ admin key, which is a human-tier broker secret and must not sit behind a timer.
 
 ## Configuration
 
-`STACKS` at the top of the script: `[(directory, stack)]`, today `[("bootstrap", "prod")]`.
+`STACKS` at the top of the script: `[(directory, stack)]`, today `[]` — see the comment there
+for why `bootstrap/prod` was dropped. A stack belongs here only when this box's identity can
+read its state and nothing else applies it on merge.
 `TARGET` is the Envoy role that hears a report: `notifications.role.legion-infra-controller`,
 the INFRA project's Legion controller, which owns the pending applies (dispatch://INFRA-430,
 comment c78927c8) and asked for the report at 2026-10-30T02:28Z with the INFRA lead. A role

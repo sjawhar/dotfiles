@@ -22,6 +22,8 @@ SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC is not None
 WATCH = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(WATCH)
+SHIPPED_STACKS = list(WATCH.STACKS)
+REAL_PREVIEW = WATCH.preview  # setUp replaces WATCH.preview; one test exercises the real one
 
 ROLE = "notifications.role.legion-infra-controller"
 INFRA_LEAD = "01a13c57-d826-7242-80fe-5f0670188b11"
@@ -37,10 +39,20 @@ SIX = [
 ]
 
 
-def plan(steps, rc=0, tail="Resources:\n    + 6 to create\n"):
+NO_STATE_TAIL = (
+    "error: error listing stacks: could not list bucket: blob (code=NotFound): googleapi: Error 403:"
+    " infra-applier@theorem-agent-infra.iam.gserviceaccount.com does not have storage.objects.list"
+    " access to the Google Cloud Storage bucket. Permission 'storage.objects.list' denied on resource"
+    " '//storage.googleapis.com/projects/_/buckets/theorem-agent-root-bootstrap-pulumi-state' (or it"
+    " may not exist)., forbidden\n"
+)
+
+
+def plan(steps, rc=0, tail="Resources:\n    + 6 to create\n", no_state_access=False):
     counts = {"create": len(steps)} if steps else {}
     return {"dir": "bootstrap", "stack": "prod", "rc": rc, "counts": counts, "pending": len(steps),
-            "unchanged": 560, "steps": list(steps), "tail": tail}
+            "unchanged": 560, "steps": list(steps), "tail": tail,
+            "no_state_access": no_state_access}
 
 
 class DriftWatchTest(unittest.TestCase):
@@ -66,6 +78,9 @@ class DriftWatchTest(unittest.TestCase):
             "STATE_ROOT": self.root, "CHECKOUT": self.root / "agent-infra", "LOG": self.root / "samples.jsonl",
             "send": send, "ensure_checkout": ensure_checkout, "preview_env": lambda: {},
             "preview": lambda directory, stack, env: self.plans.pop(0),
+            # The shipped STACKS is empty (bootstrap/prod is applied by its own CI on merge).
+            # These tests are about what one stack's run reports, so they give it one.
+            "STACKS": [("bootstrap", "prod")],
         }
         for name, value in patches.items():
             original = getattr(WATCH, name)
@@ -178,6 +193,55 @@ class DriftWatchTest(unittest.TestCase):
         self.run_watch(SIX)
         self.assertFalse(old.exists())
         self.assertTrue(recent.exists())
+
+    def test_a_403_on_the_state_bucket_is_recognised_by_the_preview(self) -> None:
+        """The real 2026-11-07 text, after agent-infra #1064 moved bootstrap/'s state."""
+        completed = unittest.mock.Mock(returncode=1, stdout=NO_STATE_TAIL)
+        with unittest.mock.patch.object(WATCH, "run", return_value=completed):
+            got = REAL_PREVIEW("bootstrap", "prod", {})
+        self.assertTrue(got["no_state_access"])
+        self.assertFalse(plan(SIX)["no_state_access"])
+        self.assertFalse(plan([], rc=255, tail="error: preview failed")["no_state_access"])
+
+    def test_no_state_reader_is_its_own_status_said_once_and_is_not_a_failed_run(self) -> None:
+        for _ in range(2):
+            self.assertEqual(self.run_watch([], rc=1, tail=NO_STATE_TAIL, no_state_access=True), 0,
+                             "a stack with no reader is not a failed run; the fix is a grant or STACKS")
+        self.assertEqual(len(self.sent), 1, "said once, until the state changes")
+        target, text = self.sent[0]
+        self.assertEqual(target, ROLE)
+        self.assertIn("NO READER FOR THIS STACK'S STATE", text)
+        self.assertNotIn("PULUMI PREVIEW FAILED", text)
+        self.assertNotIn("PENDING", text)
+        report = self.report(text)
+        self.assertIn("NO READER FOR THIS STACK'S STATE", report)
+        self.assertIn("theorem-agent-root-bootstrap-pulumi-state", report)
+        self.assertTrue(text.rsplit("Full report: ", 1)[1].strip().endswith("-no-state-reader.txt"))
+
+    def test_a_plain_failure_and_a_missing_state_reader_are_different_news(self) -> None:
+        self.assertEqual(self.run_watch([], rc=255, tail="error: preview failed: boom"), 1)
+        self.assertEqual(self.run_watch([], rc=1, tail=NO_STATE_TAIL, no_state_access=True), 0)
+        self.assertEqual(len(self.sent), 2, "a different fact with a different fix is said again")
+        self.assertIn("PULUMI PREVIEW FAILED", self.sent[0][1])
+        self.assertIn("NO READER", self.sent[1][1])
+
+    def test_an_empty_stacks_watches_nothing_and_exits_0(self) -> None:
+        WATCH.STACKS = []
+
+        def unreachable(*_a, **_k):
+            raise AssertionError("an empty STACKS must clone nothing and mint no token")
+
+        with unittest.mock.patch.object(WATCH, "ensure_checkout", unreachable), \
+                unittest.mock.patch.object(WATCH, "preview_env", unreachable), \
+                unittest.mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out, \
+                unittest.mock.patch.object(sys, "argv", ["pulumi-drift-watch"]):
+            self.assertEqual(WATCH.main(), 0)
+        self.assertIn("watches nothing", out.getvalue())
+        self.assertEqual(self.sent, [])
+
+    def test_the_shipped_stacks_is_empty(self) -> None:
+        """bootstrap/prod was the last entry; agent-infra's CI applies it on every merge."""
+        self.assertEqual(SHIPPED_STACKS, [])
 
 
 if __name__ == "__main__":

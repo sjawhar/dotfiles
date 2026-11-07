@@ -23,13 +23,17 @@ What one run does:
      operation here: this script applies nothing and can refuse nothing.
   3. Append one sample per stack per run to the log, whether or not anything is pending. A
      silent log cannot be told from a dead watch.
-  4. Alert over Envoy only when a stack's pending set changes, or a preview starts failing, or a
-     run cannot start. A clean stack says nothing, because a daily "nothing to report" trains
-     its reader to ignore it; and bootstrap/prod had pending steps in every one of its 7
-     samples (2026-10-30..11-02), so the same pending set again is not news either.
+  4. Alert over Envoy only when a stack's pending set changes, or a preview starts failing, or
+     the preview is refused for want of a state reader, or a run cannot start. A clean stack
+     says nothing, because a daily "nothing to report" trains its reader to ignore it; and
+     bootstrap/prod had pending steps in every one of its 7 samples (2026-10-30..11-02), so the
+     same pending set again is not news either. "No reader for this stack's state" -- the
+     preview refused with a 403 on the state bucket -- is its own status, said once per change:
+     it is neither drift nor a broken preview, and its fix is a grant or a line in STACKS.
   5. Name every pending resource in the message (at most 600 characters, short names), and
      every URN in the report file it names, so the reader can tell whose change it is without
      running the preview again.
+  6. With STACKS empty, do none of this: say so and exit 0.
 
 What it does not do: it does not apply, does not refresh (a refresh takes a lock and rewrites
 state), does not read or print any secret, and does not judge whether a pending plan is good.
@@ -66,8 +70,17 @@ CHECKOUT = STATE_ROOT / "agent-infra"
 LOG = STATE_ROOT / "samples.jsonl"
 
 # Each entry: the directory under the checkout, and the stack name. Only stacks whose preview
-# reaches no provider that needs a credential this box does not hold.
-STACKS = [("bootstrap", "prod")]
+# reaches no provider that needs a credential this box does not hold, and whose state this
+# box's identity can read.
+#
+# Empty since 2026-11-07. bootstrap/prod was the only entry and was dropped: agent-infra #1064
+# (2026-11-05) moved bootstrap/'s state into root/'s per-program bucket,
+# gs://theorem-agent-root-bootstrap-pulumi-state, which infra-applier@ cannot list, so every
+# preview here now returns 403 before it plans anything. The gap this watch measures -- merged,
+# declared, never applied -- is covered for bootstrap/ by its own CI account, which applies the
+# stack on every merge (agent-infra envoy.yaml). A stack returns here only with a reader for its
+# state and no apply-on-merge of its own.
+STACKS: list[tuple[str, str]] = []
 
 # The controller owns pending applies. The INFRA lead's session is the fallback when the role
 # is unheld; its receipt is checked too, so an expired fallback cannot count as delivery.
@@ -129,6 +142,16 @@ def preview_env() -> dict:
 STEP_RE = re.compile(r"^\s*([+~\-]|\+-)\s+(\S+)\s+(\S+)\s+(create|update|delete|replace)\b")
 
 
+# A preview that never got as far as a plan because this box's identity cannot read the
+# stack's state bucket. That is not drift and not a broken preview: it is a stack this watch
+# has no reader for, and the only fix is a grant or dropping the stack. Pulumi reports it as a
+# Google 403 on the state bucket while listing stacks.
+NO_STATE_ACCESS_RE = re.compile(
+    r"does not have storage\.objects\.\w+ access"
+    r"|Permission 'storage\.objects\.\w+' denied",
+)
+
+
 def preview(directory: str, stack: str, env: dict) -> dict:
     """Run one preview. Returns the plan: counts, the steps, and the raw tail."""
     cwd = CHECKOUT / directory
@@ -157,12 +180,27 @@ def preview(directory: str, stack: str, env: dict) -> dict:
     return {
         "dir": directory, "stack": stack, "rc": r.returncode, "counts": counts,
         "pending": pending, "unchanged": unchanged, "steps": steps, "tail": out[-4000:],
+        "no_state_access": r.returncode != 0 and bool(NO_STATE_ACCESS_RE.search(out)),
     }
 
 
 def report_text(commit: str, plan: dict) -> str:
     """Everything a reader needs to act: the full report file a message names."""
     where = f"{plan['dir']}/ stack {plan['stack']}"
+    if plan.get("no_state_access"):
+        return (
+            f"NO READER FOR THIS STACK'S STATE: {where} on theorem-labs/agent-infra main at "
+            f"{commit[:9]}. The preview was refused before it planned anything: the identity "
+            f"this watch previews as ({APPLIER}) cannot read the stack's state bucket. This is "
+            "not drift and not a broken preview -- nothing is known about what is pending, and "
+            "nothing can be until this stack has a reader.\n\n"
+            "What to do: either grant that identity read on the stack's state bucket, or drop "
+            "the stack from STACKS in this watch (scripts/pulumi-drift-watch) because something "
+            "else now applies it. Said once, until the state changes.\n\n"
+            f"The preview's last lines:\n\n{plan['tail']}\n\n"
+            f"From pulumi-drift-watch (~/.dotfiles/scripts/pulumi-drift-watch) on "
+            f"{socket.gethostname()}, a systemd --user timer.\n"
+        )
     if plan["rc"] != 0:
         return (
             f"PULUMI PREVIEW FAILED: {where} on theorem-labs/agent-infra main at {commit[:9]}, "
@@ -240,6 +278,12 @@ def message_text(commit: str, plan: dict, previous: str | None, report: str) -> 
     box, so the names are in the message itself; the 6 pending on 2026-11-02 take 193 characters."""
     where = f"{plan['dir']}/{plan['stack']} at agent-infra {commit[:9]}"
     tail = f"Full report: {report}"
+    if plan.get("no_state_access"):
+        return bounded(
+            f"NO READER FOR THIS STACK'S STATE: {where}: the preview was refused before it planned"
+            f" anything, because {APPLIER.split('@')[0]}@ cannot read the stack's state bucket. Not drift"
+            " and not a failed preview: nothing is known about this stack until it has a reader. Grant"
+            " that read, or drop the stack from STACKS. Said once, until this changes. ", tail)
     if plan["rc"] != 0:
         last = next((line.strip() for line in reversed(plan["tail"].splitlines()) if line.strip()), "")
         return bounded(
@@ -247,7 +291,8 @@ def message_text(commit: str, plan: dict, previous: str | None, report: str) -> 
             f" works. Last line: {last[:200]}. Applied and refused nothing. Said once, until a preview"
             " works again. ", tail)
     parts = ", ".join(f"{n} to {k}" for k, n in sorted(plan["counts"].items()))
-    before = set(previous.splitlines()) if previous and previous != "failed" else None
+    # "failed" and "no-state-access" are the non-plan fingerprints: neither is a step set to diff.
+    before = set(previous.splitlines()) if previous and previous not in ("failed", "no-state-access") else None
     now = set(plan["steps"])
     change = (f"Changed since the last report: {len(now - before)} added, {len(before - now)} gone. "
               if before is not None else "")
@@ -280,11 +325,17 @@ def write_report(kind: str, text: str) -> str:
 
 
 def plan_fingerprint(plan: dict) -> str:
-    """What makes one report different news from the last: the step set, or a failed preview.
+    """What makes one report different news from the last: the step set, a failed preview, or a
+    stack whose state this box cannot read.
 
     The counts and the unchanged total are deliberately left out. The same six URNs with a
-    different unchanged total is the same news; one more URN is not.
+    different unchanged total is the same news; one more URN is not. The three non-plan states
+    are distinct fingerprints, so a preview that goes from failing to refused for lack of a
+    state reader -- a different fact, with a different fix -- is said once more, and then not
+    again until it changes.
     """
+    if plan.get("no_state_access"):
+        return "no-state-access"
     if plan["rc"] != 0:
         return "failed"
     return "\n".join(sorted(plan["steps"]))
@@ -369,6 +420,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="report even a stack with nothing pending (for proving the path)")
     args = ap.parse_args(argv)
 
+    if not STACKS:
+        # Nothing to measure is a clean exit, not a failure: the last stack was dropped because
+        # something else now covers it, and a watch that exits non-zero over that turns a
+        # deliberate decision into a daily red unit. Clone nothing and mint no token.
+        print("pulumi-drift-watch: STACKS is empty; this watch watches nothing. See the comment"
+              " on STACKS in this script for why each stack was dropped.")
+        return 0
+
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     try:
         commit = ensure_checkout()
@@ -392,7 +451,8 @@ def main(argv: list[str] | None = None) -> int:
     for directory, stack in STACKS:
         plan = preview(directory, stack, env)
         sample = {"t": time.time(), "commit": commit, **{
-            k: plan[k] for k in ("dir", "stack", "rc", "counts", "pending", "unchanged")}}
+            k: plan[k] for k in ("dir", "stack", "rc", "counts", "pending", "unchanged")},
+            "no_state_access": bool(plan.get("no_state_access"))}
         with LOG.open("a") as fh:
             fh.write(json.dumps(sample) + "\n")
         noisy = plan["rc"] != 0 or plan["pending"] > 0 or args.always
@@ -409,17 +469,21 @@ def main(argv: list[str] | None = None) -> int:
         # time it comes back it is news again. Only a hand run with --always repeats a set.
         fingerprint = plan_fingerprint(plan)
         previous = last_sent(directory, stack)
-        if plan["rc"] != 0:
+        # A stack with no reader for its state is reported, but it is not a failed run: the fix
+        # is a grant or a line in STACKS, and a red unit every day adds nothing to the one
+        # message that already said so.
+        if plan["rc"] != 0 and not plan.get("no_state_access"):
             rc = 1
         if not args.always and fingerprint == previous:
-            print(f"{directory}/{stack}: unchanged pending set, not resent ({plan['pending']} pending)")
+            print(f"{directory}/{stack}: unchanged since the last report, not resent ({fingerprint.splitlines()[0][:40]})")
             continue
         full = report_text(commit, plan)
         if args.dry_run:
             print(message_text(commit, plan, previous, "(not written in a dry run)"))
             print(full)
             continue
-        text = message_text(commit, plan, previous, write_report("failed" if plan["rc"] else "pending", full))
+        kind = "no-state-reader" if plan.get("no_state_access") else ("failed" if plan["rc"] else "pending")
+        text = message_text(commit, plan, previous, write_report(kind, full))
         if args.print_alert:
             print(text)
         # Claiming delivery without checking it is how a watch becomes decorative.

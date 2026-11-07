@@ -27,6 +27,20 @@ command -v pulumi >/dev/null || {
     echo "pulumi-drift-watch: no envoy.json; the watch has no listener to send its report through" >&2
     exit 1
 }
+# Nothing to watch is not worth a timer. STACKS is empty as of 2026-11-07 (see the comment on
+# it in scripts/pulumi-drift-watch); a run would print that it watches nothing and exit 0.
+if ! python3 - "$(dirname "${BASH_SOURCE[0]}")/../scripts/pulumi-drift-watch" <<'PY'
+import ast, sys
+tree = ast.parse(open(sys.argv[1]).read())
+stacks = next(n.value for n in tree.body if isinstance(n, (ast.Assign, ast.AnnAssign))
+              and "STACKS" in ast.dump(n.target if isinstance(n, ast.AnnAssign) else n.targets[0]))
+sys.exit(0 if ast.literal_eval(stacks) else 1)
+PY
+then
+    echo "pulumi-drift-watch: STACKS is empty; the watch has nothing to preview, so no timer is armed."
+    echo "  Add a stack to scripts/pulumi-drift-watch, then run this installer again."
+    exit 0
+fi
 if ! gcloud auth print-access-token \
     --impersonate-service-account=infra-applier@theorem-agent-infra.iam.gserviceaccount.com >/dev/null 2>&1; then
     echo "pulumi-drift-watch: this machine's gcloud identity mints no token as infra-applier@ (impersonation)." >&2
