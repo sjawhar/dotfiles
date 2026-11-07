@@ -3,8 +3,8 @@ name: oracle
 description: |
   Strategic technical advisor on a non-Anthropic model. Read-only. Use for architecture
   decisions, hard tradeoffs, and complex debugging where correctness matters more than
-  speed. Consulted by the sdd workflow for strategy questions. Runs GPT-6.1 Sol through the
-  OSS Verify gateway -- on its Flex tier, which promotes itself to the standard tier on a
+  speed. Consulted by the sdd workflow for strategy questions. Runs GPT-6.1 Sol through
+  Theorem's model gateway -- on its Flex tier, which promotes itself to the standard tier on a
   429, a server-fault 5xx or a timeout -- then Sol on the Codex subscription when its window
   is open, and never Anthropic -- so a refusal means no non-Anthropic model
   was reachable, and the caller should run a Claude reader and label that read same-family.

@@ -11,7 +11,7 @@ modelRoles:
   task: anthropic/claude-opus-5-5
   vision: google/gemini-3.7-flash:medium
   # The review gates and the oracle advisors run cross-family on GPT-6.1 Sol
-  # through the OSS Verify gateway (team `box`; no OpenAI key sits on the box,
+  # through Theorem's model gateway (team `box`; no OpenAI key sits on the box,
   # but the gateway's own OpenAI credential IS billed PER TOKEN -- measured
   # 2026-11-04: one client on sami-devbox took gateway Sol from $14/h at 22Z to
   # $973/h at 05:55Z, and two OpenAI auto top-ups of about $4k hit the card that
@@ -26,7 +26,7 @@ modelRoles:
   # A role may list models; the first one the machine declares is used:
   # sami-rocqperf's id first, then sami-devbox's (measured 2026-11-03 on
   # devbox: code-reviewer on this list was served by
-  # ossv-gateway/openai/gpt-6.1-sol). Their chains below end on Codex Sol and
+  # model-gateway/openai/gpt-6.1-sol). Their chains below end on Codex Sol and
   # name no Anthropic model, so a gate with nothing reachable refuses.
   #
   # 2026-11-04: both roles lead on the gateway's Flex tier
@@ -169,13 +169,13 @@ retry:
     # 2026-11-03 (INFRA cost cut, dispatch://INFRA-165): per-token
     # openai/gpt-6-astra cost about $19.8k/day once the Codex window was spent
     # (11-02 ~21:00Z), since it was the astra chain's first link. Both astra
-    # keys now go to GPT-6.1 Sol through the OSS Verify gateway (Sami's
+    # keys now go to GPT-6.1 Sol through Theorem's model gateway (Sami's
     # preference, dispatch://BET-545), then Codex Sol, and never to a per-token
     # `openai/` model. Codex Astra stays the `astra` agent's own model: a
     # subscription, not per-token, used whenever its window is open. The
     # gateway Sol id differs per machine: sami-rocqperf declares it as
-    # `ossv-gateway-openai/openai/gpt-6.1-sol`, sami-devbox as
-    # `ossv-gateway/openai/gpt-6.1-sol` (devbox/sami-devbox-model-routes); each
+    # `model-gateway-openai/openai/gpt-6.1-sol`, sami-devbox as
+    # `model-gateway/openai/gpt-6.1-sol` (devbox/sami-devbox-model-routes); each
     # chain names both, and a machine skips the id it does not declare.
     openai-codex/gpt-6-astra:high:
       - anthropic/claude-opus-5-5:xhigh
@@ -194,10 +194,10 @@ retry:
       - openai-codex/gpt-6.1-sol
     # The `sol` agent (agents/sol.md), the default cross-family subagent since
     # Sami's preference of 2026-11-02 (dispatch://BET-545). Its model is
-    # GPT-6.1 Sol through the OSS Verify gateway, a provider only this box's
+    # GPT-6.1 Sol through Theorem's model gateway, a provider only this box's
     # omp/models.local.yml declares; its one fallback is GPT-6.1 Sol on the
     # Codex subscription, and the two keys name each other as the astra pair
-    # does. `ossv-gateway-openai/*: []` keeps any other model on that provider
+    # does. `model-gateway-openai/*: []` keeps any other model on that provider
     # off the Anthropic `default` chain, and the codex key keeps Codex Sol off
     # `openai-codex/*` below, which ends on Claude. No per-token `openai/` link:
     # the gateway bills OpenAI under team `box`'s budget instead -- which is
@@ -209,7 +209,7 @@ retry:
     # unreachable, and on a machine without the provider, the spawn fell to
     # Codex Sol and refused (`usage_limit_reached`) instead of answering.
     # The Flex tier the @review and @oracle chains lead on. Named explicitly so
-    # `ossv-gateway-openai/*: []` below does not leave a Flex call without a
+    # `model-gateway-openai/*: []` below does not leave a Flex call without a
     # fallback: the other machine's Flex id first, then the standard tier.
     # HDO maxed out with an auto-regulating back-off (Sami, 2026-11-05 08:50Z; chain shape from GATE 14:44Z).
     # The chain head is the BARE id on purpose: `claude-opus-5-5` hits the gateway's dedicated Opus 5.5 group
@@ -239,9 +239,9 @@ retry:
     model-gateway/openai/gpt-6.1-sol:
       - model-gateway-openai/openai/gpt-6.1-sol
       - openai-codex/gpt-6.1-sol
-    # 2026-11-06 23:4xZ: the `ossv-gateway*` aliases and their mirror chains are GONE, with the
-    # provider aliases in each machine's models.local.yml, in one cutover (Sami, INFRA-481:
-    # the gateway is Theorem's, not OSS Verify's, and is not to carry that name anywhere).
+    # 2026-11-06 23:4xZ: the old OSS-named provider aliases and their mirror chains are
+    # GONE, with those aliases in each machine's models.local.yml, in one cutover (Sami,
+    # INFRA-481: the gateway is Theorem's, not OSS Verify's, and is not to carry that name).
     #
     # They existed because the 14:55Z rename on 11-05 moved every chain key here to
     # model-gateway* while the aliases still served live arms: a session on an alias matched NO
@@ -381,13 +381,9 @@ compaction:
   modelThresholds:
     model-gateway-openai/openai/gpt-6.1-sol*: "f250000"
     model-gateway/openai/gpt-6.1-sol*: "f250000"
-    # TRANSITIONAL (2026-11-06): the 14:54Z provider rename moved these keys to model-gateway*, but
-    # machine-local config.local.yml files are gitignored and still route roles to the ossv-gateway*
-    # ids, so no threshold matched them and the long-context bound stopped applying. Measured in the
-    # gateway log: calls over 272K tokens were near zero until 11-05 14:00Z, then 1,000-1,700 an hour.
-    # Deleted WITH the aliases, never before them -- the same ordering mistake as the fallback chains.
-    ossv-gateway/openai/gpt-6.1-sol*: "f250000"
-    ossv-gateway-openai/openai/gpt-6.1-sol*: "f250000"
+    # The 2026-11-05 14:54Z provider rename moved these keys to model-gateway*; the old
+    # OSS-named duplicates were deleted on 2026-11-07 with the provider aliases themselves
+    # (INFRA-481), once every machine's config.local.yml routed roles at model-gateway* ids.
 advisor:
   enabled: true
 # omp's own interceptor stays on in this shared file: a session that predates the experiments

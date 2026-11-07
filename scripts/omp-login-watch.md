@@ -201,7 +201,7 @@ To turn it off: `systemctl --user disable --now omp-login-watch.timer`.
 - It never logs in, refreshes, writes or repairs a credential. It reads, and it tells.
 - It never reads the `data` column, and it keeps no copy of the store.
 - It does not watch a provider whose key comes from configuration (`omp/models.local.yml`
-  gives `openai`, `ossv-gateway` and `vertex` an `apiKey`): such a provider has no row in
+  gives `openai`, `model-gateway` and `vertex` an `apiKey`): such a provider has no row in
   `auth_credentials`, so there is no login for a person to repeat.
 - A non-default `--state` or `--db` forces `--dry-run`: a run reading another box's copy must
   never send, because its memory of what was already said is not this box's.

@@ -2,10 +2,14 @@
 # The check that makes the gateway cutover safe, and the count that says when it is finished.
 #
 # Why it exists: on 2026-11-05 at 14:55Z the chain keys were renamed to model-gateway* while the
-# ossv-gateway* provider aliases still served live arms. A session on an alias matched NO chain
+# old OSS-named provider aliases still served live arms. A session on an alias matched NO chain
 # key and NO guard, fell through to `default` -- which is Claude -- and 64 turns of #18131
 # round 7 were written by Anthropic wearing a Sol verdict. Nothing failed; the answer was just
 # from the wrong family. So the cutover is not "read it carefully", it is these two readings.
+#
+# The literal old names below are GUARDS, not the gateway's name: the gateway is Theorem's model
+# gateway, reached as the `model-gateway*` providers (Sami, INFRA-481). `ossv-model-gateway.
+# tail12ec1c.ts.net` is the RETIRING VM's hostname, matched here only to find sessions still on it.
 #
 #   gateway-cutover-check.sh          both sections
 #   gateway-cutover-check.sh --count  only the live-session count
@@ -131,7 +135,7 @@ else:
     print("  every named id resolves to a declared provider")
 
 stale = sorted(i for i in named if "ossv-gateway" in i)
-print("  ids still naming ossv-gateway: %d%s" % (len(stale), " -> " + ", ".join(stale[:4]) if stale else ""))
+print("  ids still naming the retired alias: %d%s" % (len(stale), " -> " + ", ".join(stale[:4]) if stale else ""))
 raise SystemExit(1 if bad or stale else 0)
 PY
 rc=$?

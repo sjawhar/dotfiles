@@ -12,12 +12,12 @@
 # gateway GPT-6.1 Terra and the astra and sami-proxy agents on gateway GPT-6 Astra, about $56/h of
 # OpenAI spend (INFRA cost lead). This script:
 #   1. in omp/models.local.yml, declares GPT-6.1 Sol and its Flex tier twice on the same
-#      route: as the provider `ossv-gateway-openai` (OpenAI Responses at <gateway>/v1),
-#      sami-rocqperf's ids, and as `ossv-gateway/openai/gpt-6.1-sol[-flex]`, the ids
+#      route: as the provider `model-gateway-openai` (OpenAI Responses at <gateway>/v1),
+#      sami-rocqperf's ids, and as `model-gateway/openai/gpt-6.1-sol[-flex]`, the ids
 #      omp/config.yml's Sol chains name second. It removes every other `openai/` model from
-#      `ossv-gateway`, so nothing here reaches Terra, Astra or Luna;
+#      `model-gateway`, so nothing here reaches Terra, Astra or Luna;
 #   2. in omp/config.local.yml, points the slow and deep roles and the astra, sami-proxy, astra-api
-#      and gpt-api agents at `ossv-gateway/openai/gpt-6.1-sol` (the id a session started before
+#      and gpt-api agents at `model-gateway/openai/gpt-6.1-sol` (the id a session started before
 #      step 1 already knows: a live session re-reads config.local.yml at each subagent spawn but
 #      keeps the models.yml it started with), leaves review and oracle to omp/config.yml, and
 #      removes the fallback chains that sent openai-codex/<id> and openai/<id> to gateway models;
@@ -31,16 +31,16 @@ models="$DOTFILES_DIR/omp/models.local.yml"
 config="$DOTFILES_DIR/omp/config.local.yml"
 for f in "$models" "$config"; do [[ -f "$f" ]] || { echo "sami-devbox-model-routes: no $f" >&2; exit 1; }; done
 
-url="$(yq -r '.providers["ossv-gateway"].baseUrl // ""' "$models")"
-[[ -n "$url" ]] || { echo "sami-devbox-model-routes: no ossv-gateway baseUrl in $models" >&2; exit 1; }
-key="$(yq -r '.providers["ossv-gateway"].apiKey // ""' "$models")"
-[[ "$key" == '!'* ]] || { echo "sami-devbox-model-routes: ossv-gateway's apiKey in $models is not a !command" >&2; exit 1; }
+url="$(yq -r '.providers["model-gateway"].baseUrl // ""' "$models")"
+[[ -n "$url" ]] || { echo "sami-devbox-model-routes: no model-gateway baseUrl in $models" >&2; exit 1; }
+key="$(yq -r '.providers["model-gateway"].apiKey // ""' "$models")"
+[[ "$key" == '!'* ]] || { echo "sami-devbox-model-routes: model-gateway's apiKey in $models is not a !command" >&2; exit 1; }
 
 SOL=openai/gpt-6.1-sol
 # @review and @oracle lead on the Flex tier (omp/config.yml, 2026-11-04), so this box must
 # declare it as well, or those chains fall through to the standard ids below it.
 FLEX=openai/gpt-6.1-sol-flex
-ROUTE="ossv-gateway/$SOL"
+ROUTE="model-gateway/$SOL"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -48,19 +48,19 @@ cp -p "$models" "$tmp/models.yml"
 cp -p "$config" "$tmp/config.yml"
 
 ID="$SOL" FLEXID="$FLEX" URL="$url/v1" KEY="$key" yq -i '
-    .providers["ossv-gateway"].models |= map(select((.id | test("^openai/") | not)
+    .providers["model-gateway"].models |= map(select((.id | test("^openai/") | not)
         or .id == strenv(ID) or .id == strenv(FLEXID))) |
-    (select([.providers["ossv-gateway"].models[] | select(.id == strenv(ID))] | length == 0)
-        | .providers["ossv-gateway"].models) += [{
+    (select([.providers["model-gateway"].models[] | select(.id == strenv(ID))] | length == 0)
+        | .providers["model-gateway"].models) += [{
             "id": strenv(ID), "name": strenv(ID), "api": "openai-responses", "baseUrl": strenv(URL),
             "reasoning": true, "thinking": {"mode": "effort", "efforts": ["low", "medium", "high", "xhigh", "max"]},
             "input": ["text", "image"], "contextWindow": 1050000, "maxTokens": 128000}] |
-    (select([.providers["ossv-gateway"].models[] | select(.id == strenv(FLEXID))] | length == 0)
-        | .providers["ossv-gateway"].models) += [{
+    (select([.providers["model-gateway"].models[] | select(.id == strenv(FLEXID))] | length == 0)
+        | .providers["model-gateway"].models) += [{
             "id": strenv(FLEXID), "name": strenv(FLEXID), "api": "openai-responses", "baseUrl": strenv(URL),
             "reasoning": true, "thinking": {"mode": "effort", "efforts": ["low", "medium", "high", "xhigh", "max"]},
             "input": ["text", "image"], "contextWindow": 1050000, "maxTokens": 128000}] |
-    (select(.providers["ossv-gateway-openai"] == null) | .providers["ossv-gateway-openai"]) = {
+    (select(.providers["model-gateway-openai"] == null) | .providers["model-gateway-openai"]) = {
         "baseUrl": strenv(URL), "apiKey": strenv(KEY), "api": "openai-responses",
         "models": [{
             "id": strenv(ID), "name": "gpt-6.1-sol", "reasoning": true, "input": ["text", "image"],
@@ -84,7 +84,7 @@ ROUTE="$ROUTE" yq -i '
     .task.agentModelOverrides["gpt-api"] = strenv(ROUTE) + ":xhigh" |
     .retry.fallbackChains |= ((. // {}) | with_entries(select(
         ((.key | test("^openai(-codex)?/")) and (.value | length > 0) and
-         ([.value[] | select(test("^ossv-gateway/openai/") | not)] | length == 0)) | not)))
+         ([.value[] | select(test("^model-gateway/openai/") | not)] | length == 0)) | not)))
 ' "$tmp/config.yml"
 
 # Install by mv, keeping each file's mode; only a changed file moves.
@@ -94,5 +94,5 @@ cmp -s "$tmp/config.yml" "$config" || mv "$tmp/config.yml" "$config"
 DOTFILES_DIR="$DOTFILES_DIR" "$DOTFILES_DIR/scripts/omp-models-build"
 
 out="${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml"
-echo "sami-devbox-model-routes: ossv-gateway-openai: $(yq -r '[.providers["ossv-gateway-openai"].models[].id] | join(" ")' "$out"); ossv-gateway openai/: $(yq -r '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | join(" ")' "$out") at $url/v1"
+echo "sami-devbox-model-routes: model-gateway-openai: $(yq -r '[.providers["model-gateway-openai"].models[].id] | join(" ")' "$out"); model-gateway openai/: $(yq -r '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | join(" ")' "$out") at $url/v1"
 yq -r '"slow=" + .modelRoles.slow + " deep=" + .modelRoles.deep + " astra=" + .task.agentModelOverrides.astra + " sami-proxy=" + .task.agentModelOverrides["sami-proxy"]' "$config"

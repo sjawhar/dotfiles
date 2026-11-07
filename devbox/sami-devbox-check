@@ -417,15 +417,15 @@ PY
     else
         fail "slack MCP: live Slack credentials: $got (all live credentials: $live)"
     fi
-    # anthropic/ goes through ossv-gateway with the dev-box@ token (omp/models.local.yml, written
+    # anthropic/ goes through model-gateway with the dev-box@ token (omp/models.local.yml, written
     # by sami-devbox-provision's secrets step): a real turn from inside the box.
     got="$(timeout 200 omp -p "say ok" --model anthropic/claude-opus-4-8 2>&1 | tail -1)"
-    [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through ossv-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
+    [[ "${got,,}" == *ok* ]] && ok "anthropic/claude-opus-4-8 through model-gateway answers: $got" || fail "anthropic/claude-opus-4-8: $got"
     # openai/ goes through the gateway's openai group too (devbox/sami-devbox-model-routes): the
     # slow role and astra's model each answer a real turn. A fail prints "Use /login" or an HTTP 4xx.
-    for model in @slow ossv-gateway/openai/gpt-6-astra:xhigh; do
+    for model in @slow model-gateway/openai/gpt-6-astra:xhigh; do
         got="$(timeout 200 omp -p "say ok" --model "$model" 2>&1 | tail -1)"
-        [[ "${got,,}" == *ok* ]] && ok "$model through ossv-gateway's openai group answers: $got" || fail "$model: $got"
+        [[ "${got,,}" == *ok* ]] && ok "$model through model-gateway's openai group answers: $got" || fail "$model: $got"
     done
 }
 
@@ -454,9 +454,9 @@ gateway_check() {
     # This box's own account, which the gateway's list serves as team `box` with no pins. No
     # impersonation: dev-box@ is for a machine that has no accepted identity of its own.
     [[ "$email" == "$ACCOUNT" && "$aud" == model-gateway-gce ]] && ok "model gateway: minted an ID token for $email, audience $aud" || fail "model gateway: minted token: want $ACCOUNT for model-gateway-gce, got ${email:-none} for ${aud:-none}"
-    # The gateway sessions use: the ossv-gateway provider's baseUrl in omp/models.local.yml.
-    url="$(awk '/^  ossv-gateway:/ { p = 1; next } p && /baseUrl:/ { print $2; exit } /^  [^ ]/ { p = 0 }' "$DOTFILES_DIR/omp/models.local.yml" 2>/dev/null)"
-    [[ -n "$url" ]] || { fail "model gateway: no ossv-gateway baseUrl in $DOTFILES_DIR/omp/models.local.yml"; return; }
+    # The gateway sessions use: the model-gateway provider's baseUrl in omp/models.local.yml.
+    url="$(awk '/^  model-gateway:/ { p = 1; next } p && /baseUrl:/ { print $2; exit } /^  [^ ]/ { p = 0 }' "$DOTFILES_DIR/omp/models.local.yml" 2>/dev/null)"
+    [[ -n "$url" ]] || { fail "model gateway: no model-gateway baseUrl in $DOTFILES_DIR/omp/models.local.yml"; return; }
     code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -K <(printf 'header = "Authorization: Bearer %s"\n' "$token") "$url/v1/models" 2>&1)"
     [[ "$code" == 200 ]] && ok "model gateway: $url/v1/models with a freshly minted token: 200" || fail "model gateway: $url/v1/models with a freshly minted token answered $code"
     # And a token it cannot verify is refused, so the 200 above was the token's doing.
@@ -1089,21 +1089,21 @@ host() {
     # (omp/AGENTS.md; the assertion that demanded the opposite stood here until 2026-11-05 and had
     # been failing since the direct route was restored).
     local want="!$DOTFILES_DIR/scripts/gateway-token"
-    missing="$(WANT="$want" yq '.providers["ossv-gateway"].apiKey == strenv(WANT) and .providers["ossv-gateway-openai"].apiKey == strenv(WANT)' "$HOME/.omp/agent/models.yml" 2>&1)"
+    missing="$(WANT="$want" yq '.providers["model-gateway"].apiKey == strenv(WANT) and .providers["model-gateway-openai"].apiKey == strenv(WANT)' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == true ]] && ok "omp models.yml: both gateway providers mint their token per call ($want)" || fail "omp models.yml: a gateway provider does not use $want: $missing"
     missing="$(yq -r '[.providers[] | (.apiKey // "")] | map(select(test("/ossv-box/|/verified-grader/"))) | length' "$HOME/.omp/agent/models.yml" 2>&1)"
     [[ "$missing" == 0 ]] && ok "omp models.yml: no provider reads a cached gateway credential file" || fail "omp models.yml: $missing provider(s) still read a cached gateway credential file"
     # The openai/ agents and roles go to the gateway's openai group (devbox/sami-devbox-model-routes):
-    # the slow and deep roles and the astra and sami-proxy agents name ossv-gateway/openai/ models,
-    # and omp's merged models.yml declares at least 4 of them.
+    # the slow and deep roles and the astra and sami-proxy agents name model-gateway/openai/ models,
+    # and omp's merged models.yml declares at least 2 of them (Sol and Sol Flex).
     missing="$(yq -r '.modelRoles.slow, .modelRoles.deep, .task.agentModelOverrides.astra, .task.agentModelOverrides["sami-proxy"]' "$DOTFILES_DIR/omp/config.local.yml" 2>&1)"
-    if [[ "$(grep -c '^ossv-gateway/openai/' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
-        ok "omp config.local.yml: slow, deep, astra and sami-proxy use ossv-gateway/openai/ ($(tr '\n' ' ' <<<"$missing"))"
+    if [[ "$(grep -c '^model-gateway/openai/' <<<"$missing")" == 4 && "$(wc -l <<<"$missing")" == 4 ]]; then
+        ok "omp config.local.yml: slow, deep, astra and sami-proxy use model-gateway/openai/ ($(tr '\n' ' ' <<<"$missing"))"
     else
-        fail "omp config.local.yml: slow, deep, astra, sami-proxy want ossv-gateway/openai/<id> each, got: $(tr '\n' ';' <<<"$missing")"
+        fail "omp config.local.yml: slow, deep, astra, sami-proxy want model-gateway/openai/<id> each, got: $(tr '\n' ';' <<<"$missing")"
     fi
-    missing="$(yq '[.providers["ossv-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
-    [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 4 ]] && ok "omp models.yml: ossv-gateway declares $missing openai/ models" || fail "omp models.yml: ossv-gateway's openai/ models: want 4 or more, got: $missing"
+    missing="$(yq '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | length' "$HOME/.omp/agent/models.yml" 2>&1)"
+    [[ "$missing" =~ ^[0-9]+$ && "$missing" -ge 2 ]] && ok "omp models.yml: model-gateway declares $missing openai/ models" || fail "omp models.yml: model-gateway's openai/ models: want 2 or more, got: $missing"
     host_logins
     host_owners
     host_guard

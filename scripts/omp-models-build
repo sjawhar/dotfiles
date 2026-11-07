@@ -39,7 +39,7 @@ yq '(.providers // {}) | to_entries | .[] | select(.value.apiKeyFile != null) | 
             echo "omp-models-build: $file is missing or empty; provider $provider reads it with a command" >&2
         fi
     done
-# Every Anthropic-format provider a machine points at its own address (the OSS Verify gateway, as `ossv-gateway`
+# Every Anthropic-format provider a machine points at its own address (Theorem's model gateway, as `model-gateway`
 # or as `anthropic` with a gateway baseUrl) gets the 1-hour prompt-cache marker. omp sends `ttl: 1h` only to
 # Anthropic's own address unless `compat.supportsLongCacheRetention` is set, so `providers.cacheRetention: long`
 # (omp/config.yml) gave these routes 5-minute entries (dispatch://INFRA-1058). The gateway honours the marker:
