@@ -30,11 +30,6 @@
       "enabledFeatures": null,
       "enabled": true
     },
-    "verification-skills": {
-      "version": "0.21.29",
-      "enabledFeatures": null,
-      "enabled": true
-    },
     "slack": {
       "version": "1.4.1",
       "enabledFeatures": null,
@@ -45,8 +40,23 @@
       "enabledFeatures": null,
       "enabled": true
     },
+    "verification": {
+      "version": "0.23.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "tasks": {
+      "version": "0.2.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
+    "engineering": {
+      "version": "0.2.0",
+      "enabledFeatures": null,
+      "enabled": true
+    },
     "dev-infra": {
-      "version": "0.2.56",
+      "version": "0.4.0",
       "enabledFeatures": null,
       "enabled": true
     }

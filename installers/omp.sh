@@ -118,6 +118,19 @@ install_marketplace_plugin() {
         omp plugin install "$plugin" || rc=$?
     elif [ -n "$want" ] && [ "$have" != "$want" ]; then
         { omp plugin marketplace update "${plugin#*@}" && omp plugin upgrade "$plugin"; } || rc=$?
+    else
+        # The catalog is checked even when the version already matches the lock. Until 2026-11-07
+        # the update ran ONLY on a mismatch, so a marketplace that had stopped resolving was
+        # invisible on any machine whose versions happened to agree: theorem-labs/verification-skills
+        # renamed its catalog to `agent-skills` and split its plugin in three, `marketplace update`
+        # began refusing outright ("Marketplace catalog name changed ... Remove and re-add"), and
+        # sami-devbox reported nothing at all because `have == want` for dev-infra kept it off that
+        # branch. It surfaced only on sami-rocqperf, which had drifted far enough to need an upgrade
+        # -- and that machine retires under dispatch://INFRA-993. A check that runs only on a
+        # mismatch cannot report a breakage that prevents mismatches from being fixed, so this one
+        # does not restore the lock afterwards: it only reads, and a failure is reported, never fatal.
+        omp plugin marketplace update "${plugin#*@}" >/dev/null 2>&1 \
+            || echo "omp: marketplace ${plugin#*@} no longer resolves; ${plugin} is pinned at ${have} and cannot be upgraded" >&2
     fi
     cp "$saved" "$lock"
     rm -f "$saved"
@@ -131,8 +144,19 @@ install_marketplace_plugin() {
 }
 # theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped,
 # and dev-infra, whose running-heavy-jobs skill sends heavy work to the cluster (dispatch://INFRA-898).
-install_marketplace_plugin theorem-labs/verification-skills verification-skills@verification-skills
-install_marketplace_plugin theorem-labs/verification-skills dev-infra@verification-skills
+#
+# The catalog was renamed `verification-skills` -> `agent-skills` and the single `verification-skills`
+# plugin split into three on 2026-11-07, which broke the install outright: `omp plugin marketplace
+# update verification-skills` refuses with "Marketplace catalog name changed ... Remove and re-add",
+# so both machines sat three releases behind the lock (0.21.26 against 0.21.29) and could not catch up.
+# All four are installed because the fleet uses skills from each: verification-before-completion and
+# validation-loop (verification); designing-tasks through running-task-qa (tasks); opening-a-pr,
+# landing-a-pr, finding-dropped-work and using-transcript-store (engineering); running-heavy-jobs
+# (dev-infra). Taking fewer would drop skills in daily use.
+install_marketplace_plugin theorem-labs/verification-skills verification@agent-skills
+install_marketplace_plugin theorem-labs/verification-skills tasks@agent-skills
+install_marketplace_plugin theorem-labs/verification-skills engineering@agent-skills
+install_marketplace_plugin theorem-labs/verification-skills dev-infra@agent-skills
 # theorem-labs/core-ops: the company's operations skills, for the documents a customer reads.
 install_marketplace_plugin theorem-labs/core-ops core-ops@core-ops
 # slack@claude-plugins-official brings the Slack skills (slack-messaging, slack-search, ...) written
