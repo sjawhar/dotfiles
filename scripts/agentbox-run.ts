@@ -170,7 +170,10 @@ const SESSION_SOURCE_FLAGS: Record<string, true> = {
 // A profile's transcripts live under ~/.omp/profiles/<name>/agent/sessions/, so the
 // optional segment is load-bearing: without it every `--profile` session in every box
 // was unrestartable, and the runner logged "this box has no session yet" instead.
-const SESSION_FILE = /\/\.omp\/(?:profiles\/[^/]+\/)?agent\/sessions\/[^/]+\/[0-9T:-]+Z_([0-9a-f-]{36})\.jsonl$/;
+// A session resumed from a subagent transcript lives one or more directories deeper
+// (sessions/<cwd>/<parent>/<child>.jsonl), so any depth under sessions/ is accepted:
+// one level made every such session unrestartable (METARQ's box, 2026-11-07).
+const SESSION_FILE = /\/\.omp\/(?:profiles\/[^/]+\/)?agent\/sessions\/(?:[^/]+\/)+[0-9T:-]+Z_([0-9a-f-]{36})\.jsonl$/;
 const SESSION_UUID = /^[0-9a-f-]{36}$/;
 
 function flagConsumesValue(flag: string, next: string | undefined): boolean {
@@ -337,7 +340,8 @@ function sessionId(pid: number, argv: string[]): string | undefined {
 			}
 		}
 	}
-	return newest ? SESSION_FILE.exec(newest.path)?.[1] : sessionIdFromArgv(argv);
+	// A newest file the pattern cannot name falls through to argv, as no file does.
+	return (newest && SESSION_FILE.exec(newest.path)?.[1]) || sessionIdFromArgv(argv);
 }
 
 // The Dispatch and Envoy environment of a host session, for the omp of a box: the pi-envoy
