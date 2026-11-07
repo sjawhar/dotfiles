@@ -1,0 +1,21 @@
+[Unit]
+Description=Record who deletes anything under the shared scratch tree
+Documentation=file:%h/.dotfiles/scripts/unlink-watch.md
+
+[Service]
+# A kernel tracer, so root: bpftrace needs CAP_BPF and CAP_PERFMON. It stays a USER unit, as
+# devbox/docker-cap does, because the thing it watches belongs to this user and the install
+# path for user units is the one this repo has; the installer refuses when `sudo -n` is not
+# available rather than arming something that cannot start.
+Type=simple
+Restart=always
+RestartSec=30
+Nice=15
+IOSchedulingClass=idle
+# 32 bytes is enough for a directory name and keeps three of them inside the BPF stack limit;
+# the default 64 overflows it and the program will not load.
+Environment=BPFTRACE_MAX_STRLEN=32
+ExecStart=/bin/sh -c 'exec sudo -n bpftrace %h/.dotfiles/scripts/unlink-watch.bt >> %h/.local/state/unlink-watch.log 2>&1'
+
+[Install]
+WantedBy=default.target
