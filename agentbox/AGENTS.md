@@ -139,6 +139,29 @@ knives: claims are keyed by the omp session id, so a boxed `knives start` is rel
 
 Secrets work from a box on both tiers as of `forward` v3.2.3 (sjawhar/forward#40): the daemon runs in the private user namespace its mount protections imply, so a same-uid client in a box arrives at `SO_PEERCRED` as the overflow uid, and the daemon decides admission on the socket node being owner-only rather than on that uid. With the socket mounted directly, omp's `REGISTER` pins the box's omp process and the ancestry walk crosses the container boundary (box pids are host pids to the daemon). `agentbox doctor` runs it on the host and inside the throwaway box.
 
+### Every host path a box gets by default, and who asked for it
+
+Sami's rule (dispatch://INFRA-675, 2026-11-07): *"with agentbox, ownership is always clear, it's whatever is in the agent's box. Just use that and stop mounting extra directories into the box."* A default mount with no named owner and no incident behind it is the thing to remove. This table is the list; measured from `docker inspect` of all 82 live boxes on sami-devbox at 20:11Z.
+
+| host path | mode | who needs it | why it is there |
+| --- | --- | --- | --- |
+| `~/src` | rw | every session | the repo tree; its symlink targets and borrowed object stores come with it (below) |
+| `/mnt/durable/<user>` | rw | every session | the shared durable disk |
+| `/mnt/nvme/<user>/farm-pkg` | **ro** | the `farm` shim | `~/.local/bin/farm` is a symlink into it, so a box without it has a dangling link and every call dies `No such file or directory`. That is what every box had after the 18:05Z re-box on 2026-11-04, and it stopped the release builds |
+| `/mnt/nvme/<user>/grade-farm` | rw | the grading farm | its root: fleet, boxes, `ssh_config`, `known_hosts`, the no-start switch, the ssh control sockets a run opens |
+| `/mnt/nvme/<user>/boxid` | rw | the box identity | its ssh key and gcloud configuration, whose token cache gcloud rewrites on every refresh |
+| `/mnt/nvme/<user>/compute-inventory` | rw | `ossv-vm` | the compute ledger it writes; a box without it failed its ledger write, 2026-11-03 03:01Z, `FileNotFoundError` |
+| `/mnt/nvme/<user>/oss-verifier/ssh` | rw | `bin/ossv-vm` | the shared VM ssh identity and `known_hosts` |
+| `/mnt/nvme/<user>/ossv-n6` | rw | `bin/ossv-n6-farm` | the N6 work root. A box that cannot see it stages a run into its own overlay and loses the directory at box exit; both were absent from `agentbox-079d42c861b6` on 2026-11-03 |
+| `/mnt/nvme/<user>/scratch/disk-gate` | rw | `scripts/disk-gate` | the one lock and count every lane's large writes pass through; a box without it keeps a count of its own and the gate stops serialising |
+| the session's own config dirs | rw | that session | a `CLOUDSDK_CONFIG` a move brought with it, and the like (`move_config_dirs`) |
+| `~/…` from `agentbox/mounts` | rw | every session | the home allow-list, read that file |
+| `/run/user/<uid>/…` | rw | every session | the host relays: session bus, Envoy, forward, secretsd, tmux, the metadata service, post-review, omp-session-sql, the verified grader |
+
+**Five host trees reach every box only because `~/src` holds five symlinks that point out of it** — `machloop-certtest` -> `/mnt/durable/src/machloop-certtest`, `speed-lane-engine` -> `/mnt/nvme/<user>/speed-lane-engine/base-clones`, `proof-efficiency-eval` -> `/mnt/nvme/<user>/trend/worktrees/…`, and the `clones` and `wt` trees. They are not defaults anyone chose: one person's checkout layout, in all 82 boxes. A symlink added to `~/src` silently widens every box on the machine, which is worth knowing before adding one.
+
+Anything **not** in this table needs an explicit `--dir`. Beware the shape of the failure when a path is missing: a box writes to it happily inside its own filesystem and loses it at exit, with no error (see `--dir` above), so removing a default is a change to make deliberately and announce, not one to try.
+
 ### How changes take effect
 
 Host-mounted tool, plugin, and configuration updates reach the next omp process. `agentbox restart` reuses the container, mounts, and environment. Changed mounts or launch environment require a new box. The image tag hashes `Dockerfile`, `entrypoint.sh`, `box-ssh-config`, and `agentbox_sandbox_skips.py`. `agentbox new` builds a missing image; `agentbox rebuild` builds it explicitly and lists older running images. Existing boxes are not restarted automatically. `agentbox doctor` compares the host with a throwaway box, and `agentbox sh <box|session-id>` opens a running box.
