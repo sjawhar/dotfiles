@@ -4,26 +4,40 @@
   omp-fork [--at ENTRY] [--model M] [--max-time T] [--cwd DIR] [--keep DIR]
            SESSION.jsonl (PROMPT | --prompt-file FILE)
 
-The session file is copied into a private scratch directory and omp is asked to FORK that copy
-for one non-interactive turn (`omp -p --mode json --fork`), in the session's own working
-directory and with its own model unless --model or --cwd say otherwise. The original file is
-never written.
+The session file is copied into a private scratch directory and the copy is resumed for one
+non-interactive turn (`omp -p --mode json`), in the session's own working directory and with its
+own model unless --model or --cwd say otherwise. The original file is never written.
 
 --at ENTRY cuts the copy after that line of the file, so the fork answers as the agent stood then.
 The cut moves back to the last message after which no tool call is waiting for its result; a call
-whose result never arrived within 60 lines is treated as abandoned. omp's own `--fork` does not
-cut; it takes the whole file it is given, which is why the cut copy exists.
+whose result never arrived within 60 lines is treated as abandoned.
 
-`--fork` gives the run a session id of ITS OWN, recorded with `parentSession` set to the source,
-and resolves it before any session is created; it keeps every non-header entry, so the fork
-answers with the source's full context. That new id is what makes this safe: everything keyed by
-session id -- Envoy's registry of sessions, roles and messages, and secretsd's registry of
-tokens and grants -- sees a new session rather than a second copy of the live one. A plain
-`omp --resume` of the copy kept the live session's id, and both registries were taken over by
-it: Envoy on 2026-11-05, and on 2026-11-07 secretsd, where the copy's REGISTER revoked the live
-session's grants and its exit UNREGISTERed the id, leaving 59 of 153 live sessions answering
-UNKNOWN_TOKEN (dispatch://INFRA-1644). The fork therefore runs with the caller's own environment,
-Envoy, profile and secretsd included. Telling the fork not to change anything is the prompt's job.
+The fork runs with Envoy off: a resumed copy otherwise re-registers under the live session's id,
+takes messages addressed to it and re-claims its roles, and on exit drops the live session's
+registration until its next heartbeat. The config the session reads is copied with
+`envoy.enabled` set to false; its Dispatch section is kept, so `dispatch` reads still work.
+Telling the fork not to change anything is the prompt's job.
+
+The copy is also given no profile (`OMP_PROFILE=default`). pi-envoy reads a named profile's own
+`$PI_CODING_AGENT_DIR/envoy.json` and ignores ENVOY_CONFIG_FILE entirely; that file is a link to
+the live ~/.config/legion/envoy.json (`shims/omp`), so a fork started from a session under a
+named profile joined the real Envoy under the live session's id. Measured on 2026-11-05: with a
+named profile the copy was in Envoy's session list for its whole run (20:53:16-20:54:10Z), with
+none it was absent (20:33:22-20:34:34Z).
+
+The fork is also cut off from secretsd, for the same reason and a worse consequence
+(dispatch://INFRA-1644). secretsd's registry is keyed by session id alone: the copy's secretsd
+plugin mints a token of its own, REGISTERs it under the LIVE session's id -- which displaces the
+live session's token and revokes its grants (`Registry::register`) -- and on exit UNREGISTERs
+that id outright. The live session never notices, because its own plugin still believes it is
+registered and only re-registers when the daemon's instance id changes, so from then on every
+`secrets` call and every `forward browser grant` in it answers UNKNOWN_TOKEN until the session
+restarts. Measured on 2026-11-07: 58 of 154 live box sessions on sami-devbox were in that state.
+The copy therefore gets a private `XDG_RUNTIME_DIR` under its scratch directory, so its token
+file cannot land on the live session's, and a `SECRETSD_SOCK` inside it that nothing is listening
+on, so its REGISTER and its UNREGISTER never reach the real daemon. The copy itself then has no
+secrets: `secrets` and `forward` in it report an unreachable broker, as Envoy being off reports
+no listener.
 
 Prints {"text", "model", "fallback", "cost", "tokens", "cut", "fork_session"} on stdout. `fallback` is
 true when an answer came from a model other than the session's own (omp's fallback chain, often
@@ -67,6 +81,22 @@ def cut_line(path: Path, at: int) -> int:
     return best
 
 
+def envoy_config_source() -> Path:
+    handed = os.environ.get("ENVOY_CONFIG_FILE")
+    if handed:
+        return Path(handed)
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "legion" / "envoy.json"
+
+
+def write_envoy_off(dest: Path) -> None:
+    src = envoy_config_source()
+    config = json.loads(src.read_text()) if src.exists() else {}
+    config["envoy"] = {**config.get("envoy", {}), "enabled": False}
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(config, fh)
+
+
 def session_cwd(path: Path) -> str:
     with path.open("rb") as fh:
         for raw in fh:
@@ -108,6 +138,7 @@ def main() -> None:
     scratch = Path(tempfile.mkdtemp(prefix="omp-fork-"))
     try:
         os.chmod(scratch, 0o700)
+        write_envoy_off(scratch / "envoy.json")
         copy = scratch / session.name
         cut = None
         if args.at is None:
@@ -121,12 +152,33 @@ def main() -> None:
                     dst.write(raw)
         expected = args.model.split(":")[0] if args.model else last_model(copy)
         before = set(scratch.glob("*.jsonl"))
-        # --fork, never --resume: the run gets a session id of its own, so nothing keyed by
-        # session id (Envoy, secretsd) is taken from the live session the copy was cut from.
-        cmd = ["omp", "-p", "--mode", "json", "--session-dir", str(scratch), "--fork", str(copy), "--max-time", args.max_time]
+        cmd = ["omp", "-p", "--mode", "json", "--session-dir", str(scratch), "--resume", str(copy), "--max-time", args.max_time]
         if args.model:
             cmd += ["--model", args.model]
-        proc = subprocess.run(cmd + [prompt], cwd=cwd, capture_output=True, text=True)
+        # A runtime directory of its own, holding a secretsd socket path nothing listens on.
+        # The secretsd plugin derives both the token file (`<dir>/secretsd/<session id>.token`)
+        # and, without SECRETSD_SOCK, the socket from this one variable, and it refuses a
+        # directory another user can write, so 0700 under the scratch root is what it accepts.
+        # SECRETSD_SOCK is set as well, since a caller that already exports it would otherwise
+        # hand the copy the live daemon again.
+        runtime = scratch / "run"
+        runtime.mkdir(mode=0o700)
+        env = {**os.environ, "ENVOY_CONFIG_FILE": str(scratch / "envoy.json"), "OMP_PROFILE": "default",
+               "XDG_RUNTIME_DIR": str(runtime), "SECRETSD_SOCK": str(runtime / "secretsd.sock")}
+        env.pop("PI_PROFILE", None)
+        env.pop("PI_CODING_AGENT_DIR", None)
+        parent_profile = os.environ.get("OMP_PROFILE") or os.environ.get("PI_PROFILE") or ""
+        if parent_profile and parent_profile != "default":
+            # Never silent: the copy's model can differ from the parent's, and a model that
+            # changed without a word is read as the fork misbehaving days later. Carrying the
+            # profile's own agent directory instead was measured on 2026-11-05 and does not
+            # work: that directory holds no models.yml of its own (shims/omp writes it only on
+            # a launch of that profile), so the fork could not restore its model at all.
+            print(f"omp-fork: the parent session runs under profile {parent_profile!r}; this copy"
+                  " runs under the default profile, so it cannot register with Envoy as the live"
+                  " session, and its model and provider keys are the default profile's and may"
+                  " differ from the parent's.", file=sys.stderr)
+        proc = subprocess.run(cmd + [prompt], cwd=cwd, env=env, capture_output=True, text=True)
         text, cost, model, models = "", 0.0, None, set()
         tokens = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         for line in proc.stdout.splitlines():
