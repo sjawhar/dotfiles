@@ -3464,7 +3464,24 @@ def run_once(options: argparse.Namespace) -> int:
 
     alerts = cleared = 0
     tmp_device = device_of(options.tmp)
-    for now in verdicts:
+
+    # --no-mount-alerts turns off THIS duty only: the fullness alert for a watched mount.
+    # Everything above has already run and still runs -- the free-space samples, the fill rates,
+    # the held-floor notes -- and so does everything below: the IOPS-against-cap check, the
+    # writer attribution and the agent-box pass. Datadog's disk-full and disk-forecast cover
+    # host mounts AND every box's loop image once the box carries owner:sjawhar (the Agent's
+    # disk check reports 1,760 loop devices here, measured 2026-11-07), so the fullness alert is
+    # the one part that would double-alert. Nothing else it does is duplicated anywhere.
+    #
+    # Open incidents are dropped when the switch goes on, because a crossing recorded under the
+    # old regime would otherwise sit open for ever with no run left that could clear it.
+    if options.no_mount_alerts:
+        if state.data.get("incidents"):
+            state.data["incidents"] = {}
+            state.commit(options)
+            log("mount alerting off (--no-mount-alerts): dropped the open mount incidents")
+
+    for now in ([] if options.no_mount_alerts else verdicts):
         mount = now["mount"]
         incident = incidents.get(mount)
         if not now["crossing"]:
@@ -3796,6 +3813,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="a mount point to watch; repeatable (default / and /mnt/nvme, plus /mnt/scratch where it is mounted)",
+    )
+    parser.add_argument(
+        "--no-mount-alerts",
+        action="store_true",
+        help="do not alert on a watched mount filling up, and drop any open mount incident."
+        " Everything else still runs: the free-space samples and fill rates, the IOPS-against-cap"
+        " check, the writer attribution and the agent-box pass. For a machine whose mount"
+        " fullness is alerted elsewhere -- on sami-devbox, Datadog's disk-full and disk-forecast,"
+        " which cover the host mounts and every box's loop image once the box carries"
+        " owner:sjawhar",
     )
     parser.add_argument(
         "--floor",
