@@ -3403,6 +3403,170 @@ def check_agentboxes(options: argparse.Namespace, state: State, envoy: Envoy, de
 
 
 
+# ------------------------------------------------------------------------- box memory headroom
+
+# Where the boxes' cgroups live. Overridable so the forced-crossing test can point this at a
+# directory of its own making, which is the only way to prove the thresholds without waiting for
+# a real box to approach its limit.
+BOX_SLICE = Path(os.environ.get(
+    "DISK_FILL_WATCH_BOX_SLICE",
+    "/sys/fs/cgroup/user.slice/user-1000.slice/user-1000-agentbox.slice",
+))
+# LPS died at about 80% of its cap. 75% on a 160 GiB box is 8 GiB of warning, which at the rate
+# these grow is minutes rather than seconds. The clear is well below the alert so a box sitting
+# on the line does not alternate.
+BOX_MEMORY_ALERT_PCT = 75.0
+BOX_MEMORY_CLEAR_PCT = 65.0
+
+
+def cgroup_stat(directory: Path, key: str) -> int | None:
+    try:
+        for line in (directory / "memory.stat").read_text().splitlines():
+            name, _, value = line.partition(" ")
+            if name == key:
+                return int(value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def box_container_names() -> dict:
+    """Container id -> box name, in one docker call. The cgroup directory carries the full id."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=^agentbox-", "--format", "{{.ID}}\t{{.Names}}"],
+            capture_output=True, text=True, timeout=5, check=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"box memory census unavailable: {error}")
+        return {}
+    rows = {}
+    for line in result.stdout.splitlines():
+        short, _, name = line.partition("\t")
+        if short and name:
+            rows[short] = name
+    return rows
+
+
+def box_memory_readings() -> list[dict]:
+    """Each capped box cgroup: what can be killed, what it is using, and its ceiling.
+
+    `killable` is anon + shmem: the pages the kernel cannot reclaim, which is what the OOM killer
+    actually weighs. A cgroup with no limit is skipped -- it cannot be near a ceiling it has not
+    got -- and so is one whose memory.stat will not read.
+    """
+    names = box_container_names()
+    readings = []
+    for directory in sorted(BOX_SLICE.glob("docker-*.scope")):
+        try:
+            cap_raw = (directory / "memory.max").read_text().strip()
+            current = int((directory / "memory.current").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if cap_raw == "max":
+            continue
+        try:
+            cap = int(cap_raw)
+        except ValueError:
+            continue
+        if cap <= 0:
+            continue
+        anon = cgroup_stat(directory, "anon")
+        if anon is None:
+            continue
+        killable = anon + (cgroup_stat(directory, "shmem") or 0)
+        full_id = directory.name[len("docker-"):-len(".scope")]
+        name = next((n for short, n in names.items() if full_id.startswith(short)), full_id[:12])
+        readings.append({"name": name, "killable": killable, "current": current, "cap": cap,
+                         "pct": 100.0 * killable / cap})
+    return readings
+
+
+def box_memory_text(reading: dict, sid: str, clearing: bool) -> str:
+    what = "BOX MEMORY CLEARED" if clearing else "BOX MEMORY HIGH"
+    tail = (
+        "It has come back under"
+        f" {BOX_MEMORY_CLEAR_PCT:.0f}% of its cap."
+        if clearing else
+        "The box that died today was at about 80%. Nothing outside the box can see this: the host"
+        " is not short, so no host alert fires, and the first signal is a SIGKILL that takes every"
+        " live context with it. A delivered subagent left resident costs what a busy one does."
+    )
+    return (
+        f"{what} on {socket.gethostname()}: {reading['name']} is holding"
+        f" {gib(reading['killable'])} that the kernel cannot reclaim (anon + shmem) against a"
+        f" {gib(reading['cap'])} cap, {reading['pct']:.0f}%."
+        f" memory.current reads {gib(reading['current'])}; the difference is page cache and does"
+        " not matter."
+        f" Session: {sid or 'not found; SRE must identify it'}."
+        f" {tail}"
+        " This watch acts on nothing: no cap is raised and nothing is stopped."
+    )
+
+
+def check_box_memory(
+    options: argparse.Namespace, state: State, envoy: Envoy, deadline: float
+) -> tuple[int, int]:
+    """(alerts sent, crossings cleared). One message per box per crossing, to the box-health role
+    and to the session that owns the box, because that session is the only one that can act."""
+    incidents = state.data.setdefault("box_memory", {})
+    alerts = cleared = 0
+    for reading in box_memory_readings():
+        name = reading["name"]
+        log(f"{name}: {reading['pct']:.0f}% of its memory cap"
+            f" ({gib(reading['killable'])} killable of {gib(reading['cap'])},"
+            f" memory.current {gib(reading['current'])})")
+        incident = incidents.get(name)
+        if reading["pct"] < BOX_MEMORY_CLEAR_PCT:
+            if not incident:
+                continue
+            # Only say "cleared" to whoever was told it was high.
+            targets = list(incident.get("told", []))
+            incidents.pop(name, None)
+            state.commit(options)
+            if not targets:
+                continue
+            text = box_memory_text(reading, incident.get("owner", ""), clearing=True)
+            for target in targets:
+                if options.dry_run:
+                    log(f"DRY RUN -> {target}")
+                elif not envoy.send(target, text):
+                    log(f"{name}: clear not delivered to {target}")
+            cleared += 1
+            log(f"{name}: BOX MEMORY CLEARED ({reading['pct']:.0f}%)")
+            if options.print_alert:
+                print(text)
+            continue
+        if reading["pct"] < BOX_MEMORY_ALERT_PCT:
+            continue
+        incident = incidents.setdefault(name, {"told": []})
+        if incident.get("owner") in incident["told"] and BOX_HEALTH_SRE in incident["told"]:
+            continue
+        if room(deadline) < 12 + 2 * options.http_timeout:
+            log(f"{name}: memory alert pending; this run has too little time to look up and send")
+            continue
+        sid = box_disk_session(name)
+        if sid:
+            incident["owner"] = sid
+        text = box_memory_text(reading, sid, clearing=False)
+        report = write_report(options.state, f"box-memory-{name}", time.time(), text)
+        text = with_report(text, report)
+        # On disk before the message leaves, as every other alert here is.
+        state.commit(options)
+        for target in dict.fromkeys([BOX_HEALTH_SRE] + ([sid] if sid else [])):
+            if target in incident["told"]:
+                continue
+            if options.dry_run:
+                log(f"DRY RUN -> {target}")
+            elif envoy.send(target, text):
+                incident["told"].append(target)
+                state.commit(options)
+            alerts += 1
+        log(f"{name}: BOX MEMORY HIGH ({reading['pct']:.0f}% of its cap)")
+        if options.print_alert:
+            print(text)
+    return alerts, cleared
+
+
 def run_once(options: argparse.Namespace) -> int:
     started = time.time()
     # What this run may spend. Everything cheap -- statvfs, the rate, the IOPS counters, the
@@ -3615,6 +3779,11 @@ def run_once(options: argparse.Namespace) -> int:
     cleared += iops_clears
     box_storage_reading(state, deadline)
     alerts += check_agentboxes(options, state, envoy, deadline)
+    # A box's memory cap is a separate death from its disk: it kills the session outright, the
+    # host is never short when it happens, and nobody inside the box can see it coming.
+    memory_alerts, memory_clears = check_box_memory(options, state, envoy, deadline)
+    alerts += memory_alerts
+    cleared += memory_clears
 
     # The scratch rule: name each young, big top-level entry of /tmp and of the checkout root
     # (~/src) ONCE, whether or not a mount is crossing. It is the measurement step before any
