@@ -168,6 +168,29 @@ class BoxHomeCarry(unittest.TestCase):
         self.assertEqual(carried.stdout.strip(), "")
         self.assertIn(".docker/config.json", carried.stderr)
 
+    def test_a_sid_that_is_not_a_uuid_carries_unattributed(self) -> None:
+        """A caller once passed docker's stderr as the session id; it became a directory under
+        box-homes and five sessions never got their homes back on rebox."""
+        box = "agentbox-000000000007"
+        junk = "OCI runtime exec failed: exec failed: container_linux.go:439"
+        self.box_with_home(box, {"notes.md": "work\n"})
+        carried = self.run_bash(f'box_home_carry {box} "{junk}"')
+        self.assertEqual(carried.returncode, 0, carried.stderr)
+        dest = Path(carried.stdout.strip())
+        # Keyed by the box, not by the junk: nothing is lost, nothing is attributed.
+        self.assertEqual(dest.parent, self.homes / box)
+        self.assertEqual((dest / "notes.md").read_text(encoding="utf-8"), "work\n")
+        self.assertFalse((self.homes / junk).exists())
+        self.assertIn(f"is not a UUID ({len(junk)} characters)", carried.stderr)
+        self.assertNotIn("OCI runtime", carried.stderr, "the length is logged, never the value")
+        # A seed asked for with the same junk does nothing rather than reading a junk directory.
+        new = "agentbox-000000000008"
+        (self.boxes / new / "home").mkdir(parents=True)
+        seeded = self.run_bash(f'BOX_SEED_SID="{junk}" seed_box_home {new}')
+        self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        self.assertIn("BOX_SEED_SID is not a UUID", seeded.stderr)
+        self.assertEqual(list((self.boxes / new / "home").iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

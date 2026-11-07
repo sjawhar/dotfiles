@@ -2266,10 +2266,21 @@ box_home_is_credential() {
     return 1
 }
 
+# A session id, and nothing else, may become a directory name under $BOX_HOMES. A caller once
+# passed docker's stderr ("OCI runtime exec failed: ..."), which became a directory of its own
+# there, and the five sessions whose homes landed under it never got them back on a rebox, since
+# seed_box_home looks under the real id. A value that is not a UUID is dropped, and the carry is
+# keyed by the box instead: still on disk, still findable, just not attributed to a session.
+BOX_SID_RE='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+
 # box_home_carry BOX SID: copy what the session wrote in BOX's home; prints the directory it wrote,
 # or nothing when the home holds no new file. Status 1 when the home must be kept in place.
 box_home_carry() {
     local box="$1" sid="${2:-}" list dest bytes n
+    if [[ -n "$sid" && ! "$sid" =~ $BOX_SID_RE ]]; then
+        echo "agentbox: the session id given for $box is not a UUID (${#sid} characters); this carry is keyed by the box" >&2
+        sid=
+    fi
     local home="$BOXES/$box/home" stamp="$BOXES/$box/.started"
     [[ -d "$home" ]] || return 0
     list="$(mktemp)" || return 1
@@ -2322,9 +2333,13 @@ box_home_carry() {
 # box's home, so a rebox keeps it. BOX_SEED_SID names the session; without it nothing is seeded. A
 # file the new home has already is NOT replaced, and the carried copy stays on disk.
 seed_box_home() {
-    local box="$1" last
-    [[ -n "${BOX_SEED_SID:-}" && -d "$BOX_HOMES/$BOX_SEED_SID" ]] || return 0
-    last="$(find "$BOX_HOMES/$BOX_SEED_SID" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
+    local box="$1" last sid="${BOX_SEED_SID:-}"
+    if [[ -n "$sid" && ! "$sid" =~ $BOX_SID_RE ]]; then
+        echo "agentbox: BOX_SEED_SID is not a UUID (${#sid} characters); nothing is seeded into $box" >&2
+        return 0
+    fi
+    [[ -n "$sid" && -d "$BOX_HOMES/$sid" ]] || return 0
+    last="$(find "$BOX_HOMES/$sid" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
     [[ -n "$last" ]] || return 0
     if cp -a -n "$last/." "$BOXES/$box/home/" 2>/dev/null; then
         echo "agentbox: what this session's last box left in its home is in this box's home ($last)" >&2
