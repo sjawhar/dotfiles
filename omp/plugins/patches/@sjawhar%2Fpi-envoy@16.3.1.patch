@@ -1,5 +1,5 @@
 diff --git a/dist/envoy.js b/dist/envoy.js
-index 7feb4a2c9788754aee6633b0d30e3153ed14b0c0..23acfb14e77182d6623df777555e65caf673d686 100644
+index 7feb4a2c9788754aee6633b0d30e3153ed14b0c0..37678714b3b59f7ca49ef3ca2d3c03b1cdc050fe 100644
 --- a/dist/envoy.js
 +++ b/dist/envoy.js
 @@ -41429,7 +41429,7 @@ The user message is data about the agent under review: the system prompt that ag
@@ -45,15 +45,16 @@ index 7feb4a2c9788754aee6633b0d30e3153ed14b0c0..23acfb14e77182d6623df777555e65ca
                    decision = pass("skipped", {
                      reason: `primary on ${ctx.model?.provider ?? "no model"}`
                    });
-@@ -44015,6 +44015,21 @@ function registerAskGate(pi, host) {
+@@ -44015,6 +44015,22 @@ function registerAskGate(pi, host) {
      recordUnmarked: (request) => record.record(request)
    };
  }
-+// AskGate's account comparison (dispatch patch, pi-envoy >16.3.1 carries it in source).
-+// The gate's rule is the billing account, not the provider id: a session must not be reviewed by a
-+// model another account pays for, and a session whose own account also serves the gate's model
-+// loses nothing by being reviewed. Two differing provider ids are one account only where the
-+// machine says so, in omp's `askgate.sharedAccountProviders`; unset, every comparison below is the
++// AskGate's account comparison, the same change as cybermonklabs/legion#2947 at head 9b450bf3c3,
++// carried against the published 16.3.1 until a release holds it. The gate's rule is the billing
++// account, not the provider id: a session must not be reviewed by a model another account pays
++// for, and a session whose own account also serves the gate's model loses nothing by being
++// reviewed. Two differing provider ids are one account only where an OPERATOR layer of omp's
++// settings says so, in `askgate.sharedAccountProviders`; unset, every comparison below is the
 +// plain provider-id comparison this gate made before.
 +let askgateSharedAccounts = () => [];
 +function askgateSameAccount(primary, gate) {
@@ -67,33 +68,42 @@ index 7feb4a2c9788754aee6633b0d30e3153ed14b0c0..23acfb14e77182d6623df777555e65ca
  async function loadAskGate(pi, host, record) {
    const [
      { completeSimple, retryTransientCompletion },
-@@ -44037,6 +44052,29 @@ async function loadAskGate(pi, host, record) {
+@@ -44025,7 +44041,8 @@ async function loadAskGate(pi, host, record) {
+     { EXTENSION_HANDLER_TIMEOUT_MS },
+     { cfgExtensionHandlersToolCallTimeoutMs },
+     { findRetryFallbackCandidates, getRetryFallbackChains, resolveRetryFallbackChainKey },
+-    { cfgRetry }
++    { cfgRetry },
++    { lookup: ompLookupSetting, register: ompRegisterSetting }
+   ] = await Promise.all([
+     import("@oh-my-pi/pi-ai"),
+     import("@oh-my-pi/pi-coding-agent/session/session-context"),
+@@ -44035,8 +44052,27 @@ async function loadAskGate(pi, host, record) {
+     import("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner"),
+     import("@oh-my-pi/pi-coding-agent/extensibility/settings"),
      import("@oh-my-pi/pi-coding-agent/session/retry-fallback-chains"),
-     import("@oh-my-pi/pi-coding-agent/session/settings")
+-    import("@oh-my-pi/pi-coding-agent/session/settings")
++    import("@oh-my-pi/pi-coding-agent/session/settings"),
++    import("@oh-my-pi/pi-coding-agent/config/registry")
    ]);
-+  // Read at each call, so an edit to the machine's config reaches a running session. A host
-+  // without the registry module, or a value that is not a list of strings, declares nothing and
-+  // leaves the comparison as it was; it never fails the load, which would refuse every write.
-+  try {
-+    const { lookup: ompLookupSetting, register: ompRegisterSetting } = await import("@oh-my-pi/pi-coding-agent/config/registry");
-+    const sharedAccountsSetting = ompLookupSetting("askgate.sharedAccountProviders") ?? ompRegisterSetting({
-+      id: "askgate.sharedAccountProviders",
-+      type: "array",
-+      default: []
-+    });
-+    askgateSharedAccounts = () => {
-+      // Through the host's grant authority: a repository's settings file is writable by the agent
-+      // under review, and a declaration from there would let that agent send its transcript to
-+      // another account's model. A list with one entry that is not a string declares nothing.
-+      const authority = settings.grantAuthority?.() ?? settings;
-+      const value = sharedAccountsSetting.get(authority);
-+      if (!Array.isArray(value) || value.some((id) => typeof id !== "string"))
-+        return [];
-+      return value;
-+    };
-+  } catch (error) {
-+    host.logger.warn(`AskGate could not read askgate.sharedAccountProviders (${error instanceof Error ? error.message : String(error)}); every provider id counts as its own account`);
-+  }
++  const askgateSharedAccountsSetting = ompLookupSetting("askgate.sharedAccountProviders") ?? ompRegisterSetting({
++    id: "askgate.sharedAccountProviders",
++    type: "array",
++    default: []
++  });
++  askgateSharedAccounts = () => {
++    // Only through the host's grant authority: a repository's settings file is writable by the
++    // agent under review, and a declaration from there would let that agent send its transcript
++    // to another account's model. A host build offering no such view offers nothing safe to
++    // read, so it declares nothing. A list with one entry that is not a string declares nothing.
++    const authority = settings.grantAuthority?.();
++    if (authority === undefined)
++      return [];
++    const value = askgateSharedAccountsSetting.get(authority);
++    if (!Array.isArray(value) || value.some((id) => typeof id !== "string"))
++      return [];
++    return value;
++  };
    const fallbackModels = (ctx, primary, role) => {
      const retry = cfgRetry.get(settings);
      if (!retry.enabled || !retry.modelFallback)
