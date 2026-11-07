@@ -25,7 +25,9 @@ from pathlib import Path
 # The script under test, and the unit files beside it. Both are overridable, because
 # ~/.dotfiles is production with no staging step: a change is tested from a copy outside the
 # checkout (OMP_LOGIN_WATCH_SCRIPT=<copy> OMP_LOGIN_WATCH_UNITS=<dir> python3 this file) and
-# saved into the checkout only once it passes.
+# saved into the checkout only once it passes. The copy needs scripts/envoy_client.py beside
+# it: the script imports the shared Envoy client from its own directory, so that a copy under
+# test never reaches the live checkout's.
 SCRIPT = Path(os.environ.get("OMP_LOGIN_WATCH_SCRIPT") or Path(__file__).resolve().parents[1] / "omp-login-watch")
 UNITS = Path(os.environ.get("OMP_LOGIN_WATCH_UNITS") or Path(__file__).resolve().parents[2] / "omp")
 LOADER = importlib.machinery.SourceFileLoader("omp_login_watch", str(SCRIPT))

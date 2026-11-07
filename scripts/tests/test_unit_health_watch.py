@@ -12,7 +12,9 @@ whose runs are long by nature and cleared by itself 10-15 min later; units with 
 OnFailure= handler were told twice; a condition was said again after 2 h with nothing new; a
 message ran to 3,625 characters.
 
-UNIT_HEALTH_WATCH_SCRIPT=<copy> runs these against another copy of the script.
+UNIT_HEALTH_WATCH_SCRIPT=<copy> runs these against another copy of the script. The copy needs
+scripts/envoy_client.py beside it: the script imports the shared Envoy client from its own
+directory, so that a copy under test never reaches the live checkout's.
 """
 
 import argparse

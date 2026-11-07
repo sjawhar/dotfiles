@@ -70,17 +70,19 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+# scripts/ is this file's own directory; the shared Envoy client lives beside it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import envoy_client  # noqa: E402
 
 # Box health belongs to the SRE session (dispatch://INFRA-6) when nobody holds the role, as for
 # unit-health-watch, load-swap-watch and disk-fill-watch.
 SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
-DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 OWNER_RE = re.compile(
     r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
 )
@@ -150,76 +152,11 @@ def tail(text: str, lines: int = 15) -> str:
 # ------------------------------------------------------------------------------- Envoy
 
 
-class Envoy:
-    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+class Envoy(envoy_client.Envoy):
+    """scripts/envoy_client's client, logging through this watch's log()."""
 
     def __init__(self, timeout: float = 8.0) -> None:
-        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
-            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-            / "legion/envoy.json"
-        )
-        try:
-            config = json.loads(Path(path).read_text()).get("envoy") or {}
-        except (OSError, ValueError):
-            config = {}
-        if config.get("enabled") is False:
-            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
-        self.url = (
-            os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL
-        ).rstrip("/")
-        self.timeout = timeout
-        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
-        if token.startswith("!"):
-            try:
-                done = subprocess.run(
-                    ["/bin/sh", "-c", token[1:]],
-                    capture_output=True,
-                    check=False,
-                    text=True,
-                    timeout=10,
-                    stdin=subprocess.DEVNULL,
-                )
-                token = done.stdout.strip() if done.returncode == 0 else ""
-            except (OSError, subprocess.SubprocessError):
-                token = ""
-        self.token = token
-
-    def request(self, path: str, body: dict) -> tuple[int, dict]:
-        request = urllib.request.Request(
-            self.url + path, data=json.dumps(body).encode(), method="POST"
-        )
-        request.add_header("Content-Type", "application/json")
-        if self.token:
-            request.add_header("Authorization", f"Bearer {self.token}")
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
-                return answer.status, json.loads(answer.read().decode() or "{}")
-        except urllib.error.HTTPError as error:
-            raw = error.read().decode() or "{}"
-            try:
-                return error.code, json.loads(raw)
-            except ValueError:
-                return error.code, {"error": raw.strip()}
-        except (TimeoutError, urllib.error.URLError, ValueError, OSError) as error:
-            return 0, {"error": str(error)}
-
-    def send(self, session_id: str, message: str) -> bool:
-        status, body = self.request(
-            "/v1/messages/send",
-            {"target_session": session_id, "message": message, "source": "envoy"},
-        )
-        if status != 200:
-            log(f"  send to {session_id} failed: {status} {body}")
-        return status == 200
-
-    def publish(self, topic: str, message: str) -> bool:
-        status, body = self.request(
-            "/v1/messages/publish",
-            {"topic": topic, "message": message, "source": "envoy"},
-        )
-        if status != 200:
-            log(f"  publish to {topic} failed: {status} {body}")
-        return status == 200
+        super().__init__(timeout=timeout, log=log)
 
 
 def box_health_owner() -> str:

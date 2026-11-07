@@ -110,6 +110,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# scripts/ is this file's own directory; the shared Envoy client lives beside it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import envoy_client  # noqa: E402
+
 # Where a crossing goes when nobody holds the box-health role below. Box health is the SRE's
 # work, decided 2026-10-31T02:37:50Z: the chief of staff was on the escalation until then, and
 # the INFRA lead, which owned this detector, handed the lane over and stood down. Neither is on
@@ -120,7 +124,6 @@ BOX_HEALTH_SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 # crossing goes to the role, not to a session id that moves when the lane changes hands.
 BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
 
-DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 GIB = 1073741824
 GB = 1000000000
 
@@ -419,75 +422,11 @@ def with_report(body: str, report: str, limit: int = MESSAGE_LIMIT) -> str:
 # --------------------------------------------------------------------------- Envoy transport
 
 
-class Envoy:
-    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+class Envoy(envoy_client.Envoy):
+    """scripts/envoy_client's client, logging through this watch's log()."""
 
     def __init__(self, timeout: float = 8.0) -> None:
-        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
-            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "legion/envoy.json"
-        )
-        try:
-            config = json.loads(Path(path).read_text()).get("envoy") or {}
-        except (OSError, ValueError):
-            config = {}
-        if config.get("enabled") is False:
-            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
-        self.url = (os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL).rstrip("/")
-        self.timeout = timeout
-        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
-        if token.startswith("!"):
-            try:
-                done = subprocess.run(
-                    ["/bin/sh", "-c", token[1:]],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    stdin=subprocess.DEVNULL,
-                )
-                token = done.stdout.strip() if done.returncode == 0 else ""
-            except (OSError, subprocess.SubprocessError):
-                token = ""
-        self.token = token
-
-    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | list]:
-        data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(self.url + path, data=data, method=method)
-        if data is not None:
-            request.add_header("Content-Type", "application/json")
-        if self.token:
-            request.add_header("Authorization", f"Bearer {self.token}")
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
-                raw = answer.read().decode() or "{}"
-                return answer.status, json.loads(raw)
-        except urllib.error.HTTPError as error:
-            raw = error.read().decode() or "{}"
-            try:
-                return error.code, json.loads(raw)
-            except ValueError:
-                return error.code, {"error": raw.strip()}
-        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as error:
-            return 0, {"error": str(error)}
-
-    def send(self, session_id: str, message: str) -> bool:
-        status, body = self.request(
-            "POST",
-            "/v1/messages/send",
-            {"target_session": session_id, "message": message, "source": "envoy"},
-        )
-        if status != 200:
-            log(f"  send to {session_id} failed: {status} {body}")
-        return status == 200
-
-    def publish(self, topic: str, message: str) -> bool:
-        status, body = self.request(
-            "POST",
-            "/v1/messages/publish",
-            {"topic": topic, "message": message, "source": "envoy"},
-        )
-        if status != 200:
-            log(f"  publish to {topic} failed: {status} {body}")
-        return status == 200
+        super().__init__(timeout=timeout, log=log)
 
 
 # ------------------------------------------------------------------------------- the mounts

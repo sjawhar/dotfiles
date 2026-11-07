@@ -126,9 +126,11 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+# scripts/ is this file's own directory; the shared Envoy client lives beside it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import envoy_client  # noqa: E402
 
 # Named duties resolve from GET /v1/sessions only; role lookups can release unseen claims.
 # These overridable sessions are fallbacks when the corresponding role is unheld.
@@ -156,7 +158,6 @@ DEFAULT_STATE = (
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
     / "envoy-role-holder-watch/state.json"
 )
-DEFAULT_ENVOY_URL = "http://127.0.0.1:9020"
 SESSION_ROOT = Path.home() / ".omp/agent/sessions"
 # The procfs every process read goes through. A module constant so tests can point it at a tree.
 PROC_ROOT = Path("/proc")
@@ -695,59 +696,18 @@ def named_recipient(fallback: str, sessions: list[dict]) -> str:
     ) if role else fallback
 
 
-class Envoy:
-    """The listener this machine's sessions use, resolved the way scripts/envoy resolves it."""
+class Envoy(envoy_client.Envoy):
+    """scripts/envoy_client's client, logging through this watch's log().
+
+    send() and publish() below are this watch's own: it treats a 200 that carries no event_id,
+    or one whose topic is not the one asked for, as a message that did not arrive, and it
+    resolves a named duty against the listing it already read before it sends. The shared
+    client answers the plainer question its other callers ask, which is whether the POST was
+    accepted.
+    """
 
     def __init__(self, timeout: float = 8.0) -> None:
-        path = os.environ.get("ENVOY_CONFIG_FILE") or str(
-            Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-            / "legion/envoy.json"
-        )
-        config: dict = {}
-        try:
-            config = json.loads(Path(path).read_text()).get("envoy") or {}
-        except (OSError, ValueError):
-            config = {}
-        if config.get("enabled") is False:
-            raise SystemExit(f"{path} sets envoy.enabled to false: Envoy is off")
-        self.url = (os.environ.get("ENVOY_URL") or config.get("url") or DEFAULT_ENVOY_URL).rstrip("/")
-        self.timeout = timeout
-        token = os.environ.get("ENVOY_TOKEN") or config.get("token") or ""
-        if token.startswith("!"):
-            # An envoy.json token may be a command; run it the way envoy-client does, and never
-            # print either of its streams.
-            try:
-                done = subprocess.run(
-                    ["/bin/sh", "-c", token[1:]],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    stdin=subprocess.DEVNULL,
-                )
-                token = done.stdout.strip() if done.returncode == 0 else ""
-            except (OSError, subprocess.SubprocessError):
-                token = ""
-        self.token = token
-
-    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | list]:
-        data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(self.url + path, data=data, method=method)
-        if data is not None:
-            request.add_header("Content-Type", "application/json")
-        if self.token:
-            request.add_header("Authorization", f"Bearer {self.token}")
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as answer:
-                raw = answer.read().decode() or "{}"
-                return answer.status, json.loads(raw)
-        except urllib.error.HTTPError as error:
-            raw = error.read().decode() or "{}"
-            try:
-                return error.code, json.loads(raw)
-            except ValueError:
-                return error.code, {"error": raw.strip()}
-        except (urllib.error.URLError, socket.timeout, ValueError, OSError) as error:
-            return 0, {"error": str(error)}
+        super().__init__(timeout=timeout, log=log)
 
     def sessions(self) -> list[dict]:
         status, body = self.request("GET", "/v1/sessions")
