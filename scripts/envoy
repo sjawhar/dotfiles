@@ -320,6 +320,42 @@ listener_curl() {
     fi
 }
 
+# envoy role [--json] <role>: the role's live holder, read from Envoy's own
+# role record (GET /v1/roles/<role>) rather than from the session listing.
+# The two are not the same source: a session row can carry `roles: []` after a
+# restart while the role record still names that session, which on 2026-11-07
+# lost two INFRA-6 polls (dispatch://INFRA-6). It prints the holder's session
+# id, or nothing and exit 1 when the listener names no live holder (a 404) or
+# the lookup fails, with the reason on stderr. --json prints the whole answer.
+_envoy_role() {
+    local json=false role=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            *) role="$1"; shift; break ;;
+        esac
+    done
+    if [ -z "$role" ] || [ $# -gt 0 ]; then
+        echo "Usage: envoy role [--json] <role>" >&2
+        return 2
+    fi
+    resolve_listener
+    local raw status=0 holder
+    raw=$(listener_curl -sS --fail-with-body --max-time "$ENVOY_MAX_TIME" \
+        "$LISTENER_URL/v1/roles/$(jq -rn --arg r "$role" '$r | @uri')" 2>&1) || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "envoy: Envoy at $LISTENER_URL failed GET /v1/roles/$role: $raw" >&2
+        return 1
+    fi
+    if [ "$json" = true ]; then
+        printf '%s\n' "$raw" | jq .
+        return
+    fi
+    holder=$(printf '%s\n' "$raw" | jq -r '.holder // empty' 2>/dev/null) || holder=""
+    [ -n "$holder" ] || { echo "envoy: no live holder for role $role" >&2; return 1; }
+    printf '%s\n' "$holder"
+}
+
 _envoy_ps() {
     local json=false local_only=false sub_agents=false
     for arg in "$@"; do
@@ -651,6 +687,7 @@ Usage: envoy <command> [args]
 
 Commands:
   ps [--json] [--local] [--sub-agents]    list live sessions registered with Envoy
+  role [--json] <role>                    print the session id holding <role>
   send [--source envoy] <target> <msg>    send to a session UUID, else publish to a topic
   notify <topic> <msg>                    publish as envoy (send --source envoy)
   broadcast [--all-machines|--machine <id>] [--untitled] [--dir <substr>] [--dry-run] <msg>
@@ -673,6 +710,7 @@ EOF
 
 case "${1:-}" in
     ps)          shift; _envoy_ps "$@"; exit ;;
+    role)        shift; _envoy_role "$@"; exit ;;
     send)        shift; _envoy_send "$@"; exit ;;
     notify)      shift; _envoy_notify "$@"; exit ;;
     broadcast)   shift; _envoy_broadcast "$@"; exit ;;

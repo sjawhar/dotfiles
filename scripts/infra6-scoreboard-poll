@@ -55,19 +55,39 @@ if [ "${1:-}" = --dry-run ]; then
 	trap 'rm -rf -- "$state"' EXIT
 fi
 mkdir -p "$state"
+: >"$state/run.txt"
 
-log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
+# Every line is kept in this run's own log too, so a mark recorded missed can say why in the
+# message it sends (record_missed below).
+log() {
+	local line
+	line="$(date -u +%FT%TZ) $*"
+	printf '%s\n' "$line"
+	printf '%s\n' "$line" >>"$state/run.txt"
+}
 
-# The current role holder owns both the wake and the reply inbox. Resolve it with a read-only
-# session-list query, never a role lookup, and refuse to impersonate an unheld duty.
+# The current role holder owns both the wake and the reply inbox, and this job refuses to
+# impersonate an unheld duty. Two read-only lookups name it, because they are two different
+# records and either can be behind: the session listing, whose own `roles` field is the usual
+# answer, and Envoy's role record (`envoy role`, GET /v1/roles/<role>). On 2026-11-07 the
+# holder session restarted and the listing carried it with `roles: []` while the role record
+# still named it, so the 01:29Z and 04:29Z polls resolved nobody and were recorded missed in
+# silence. The role record's answer is accepted only when that session is live in the listing,
+# by session id alone — its `roles` field is the field that went empty.
 resolve_infra() {
-	local sessions
+	local sessions holder
 	sessions=$(envoy ps --json --sub-agents) || return 1
-	INFRA_SESSION=$(jq -er --arg role "$INFRA_ROLE" \
-		'[.[] | select((.roles // []) | index($role)) | .session_id | select(. != null and . != "")][0] // empty' <<<"$sessions") || {
-		log "role $INFRA_ROLE has no live holder; sending nothing" >&2
-		return 1
-	}
+	INFRA_SESSION=$(jq -r --arg role "$INFRA_ROLE" \
+		'[.[] | select((.roles // []) | index($role)) | .session_id | select(. != null and . != "")][0] // empty' <<<"$sessions")
+	[ -z "$INFRA_SESSION" ] || return 0
+	holder=$(envoy role "$INFRA_ROLE" 2>/dev/null) || holder=
+	if [ -n "$holder" ] && jq -e --arg s "$holder" 'any(.[]; .session_id == $s)' <<<"$sessions" >/dev/null; then
+		INFRA_SESSION=$holder
+		log "role $INFRA_ROLE is held by $holder, which envoy ps lists with no role; taking the role record"
+		return 0
+	fi
+	log "role $INFRA_ROLE has no live holder in envoy ps and none from envoy role; sending nothing" >&2
+	return 1
 }
 
 # A zero exit code is not a receipt: require a nonempty event_id for this exact session.
@@ -263,7 +283,8 @@ next_at() {
 # the first pass within MARK_GRACE of it and recorded in marks.txt; a mark older than that is
 # recorded as missed and never fired, since the hours it would ask for are gone with the lanes
 # that were asked. A wake whose own tick's poll never went out is skipped: nothing was asked,
-# so there is nothing to add up.
+# so there is nothing to add up. Every missed mark is also sent to someone (record_missed):
+# a mark nobody is told about is a reading nobody knows is absent.
 readonly MARK_GRACE=1500
 
 # mark_at MM: the epoch of the latest tick hour's MM at or before now.
@@ -283,6 +304,37 @@ mark_at() {
 mark_done() { grep -qxF "$1" "$state/marks.txt" 2>/dev/null; }
 mark_seen() { grep -qxE "$1( missed)?" "$state/marks.txt" 2>/dev/null; }
 
+# record_missed MARK WHY: settle MARK as missed, and tell someone. Before this a missed mark
+# was a line in marks.txt and nothing else: on 2026-11-07 the 01:29Z and 04:29Z polls were
+# recorded missed because no holder could be resolved, and nobody was told for hours
+# (dispatch://INFRA-6). One message per mark — this is the only place a missed line is
+# written, and mark_seen keeps a settled mark from being written twice. It goes to the role
+# holder when there is one, and otherwise to the SRE's role, since a job that can find nobody
+# at all is box health's to look at.
+record_missed() {
+	local mark=$1 why=$2 target msg
+	log "$mark missed: $why" >&2
+	echo "$mark missed" >>"$state/marks.txt"
+	[ -n "$INFRA_SESSION" ] || resolve_infra >/dev/null 2>&1 || true
+	target=${INFRA_SESSION:-notifications.role.lead-box-health}
+	msg="$state/missed-message.txt"
+	{
+		echo "infra6-scoreboard-poll on $(hostname -s) recorded \"$mark\" as MISSED: $why. The INFRA-6 scoreboard has no reading for that mark."
+		echo
+		echo "This run's log:"
+		tail -n 10 "$state/run.txt" 2>/dev/null
+		echo
+		echo "Run that mark by hand on $(hostname -s) with: infra6-scoreboard-poll tick"
+		echo "(state $state; the stream job is ~/.config/stream-jobs/infra6-scoreboard-poll.job)."
+	} >"$msg"
+	if "$dry_run"; then
+		log "dry-run: would tell $target that $mark is missed"
+		return 0
+	fi
+	envoy notify --message-file - "$target" <"$msg" >/dev/null ||
+		log "could not tell $target that $mark is missed" >&2
+}
+
 cron() {
 	local now poll_at wake_at poll_mark wake_mark
 	now=$(date -u +%s)
@@ -296,23 +348,20 @@ cron() {
 				[ "$(window_end)" = "10:00" ] && { "$dry_run" || daily >"$state/daily.txt" 2>&1; }
 				echo "$poll_mark" >>"$state/marks.txt"
 			else
-				echo "$poll_mark missed" >>"$state/marks.txt"
+				record_missed "$poll_mark" "the poll did not go out"
 			fi
 		else
-			echo "$poll_mark missed" >>"$state/marks.txt"
-			log "poll of ${poll_mark#poll } missed: $(((now - poll_at) / 60)) min late"
+			record_missed "$poll_mark" "$(((now - poll_at) / 60)) min late, past the ${MARK_GRACE}s grace; never fired"
 		fi
 	fi
 	if ! mark_seen "$wake_mark"; then
 		if [ $((now - wake_at)) -gt "$MARK_GRACE" ]; then
-			echo "$wake_mark missed" >>"$state/marks.txt"
-			log "wake of ${wake_mark#wake } missed: $(((now - wake_at) / 60)) min late"
+			record_missed "$wake_mark" "$(((now - wake_at) / 60)) min late, past the ${MARK_GRACE}s grace; never fired"
 		elif mark_done "poll $(date -u -d "@$((wake_at - 1800))" +%FT%TZ)"; then
 			if wake; then echo "$wake_mark" >>"$state/marks.txt";
-			else echo "$wake_mark missed" >>"$state/marks.txt"; fi
+			else record_missed "$wake_mark" "the wake send failed"; fi
 		else
-			echo "$wake_mark missed" >>"$state/marks.txt"
-			log "wake of ${wake_mark#wake } skipped: that tick's poll did not go out"
+			record_missed "$wake_mark" "that tick's poll did not go out, so there is nothing to add up"
 		fi
 	fi
 	# The file answers one question, "is this mark settled", and two days of marks answer it.
