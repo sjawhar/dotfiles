@@ -207,7 +207,13 @@ platforms.linux-arm64 = { asset_pattern = "forward-aarch64-unknown-linux-musl.ta
 # a client-side accessor), so this client was proven read-only against the running 3.3.1 daemon
 # (`secrets grants`, `secrets get <human key> --no-request`) and the daemon was not restarted; its
 # unit runs installs/secrets/latest, so its next start runs 3.7.0.
-version = "3.7.0"
+# 3.8.2 (2026-11-07) refuses a REGISTER or UNREGISTER that would displace or remove a session a
+# live process holds, unless the caller is that process or its descendant (sjawhar/forward#77,
+# dispatch://INFRA-1644). Wire protocol is still 4 (`git diff v3.7.0 v3.8.2 -- crates/proto` is
+# empty). The daemon keeps registrations in memory, and the omp extension re-registers the same
+# token when the handshake's instance id changes, so a restart costs each session at most one
+# UNKNOWN_TOKEN answer on its first call.
+version = "3.8.2"
 platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz" }
 
 # The agent-secrets client and host helper (AGENTC-393), from sjawhar/legion's legion-envoy-v*
