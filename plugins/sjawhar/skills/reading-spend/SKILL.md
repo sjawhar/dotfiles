@@ -23,7 +23,7 @@ One row per UTC `day`, `project`, `platform`, `item`, `kind`, with `usd`.
 
 - `project`: `BET`, `OSSV`, `LINUX`, `INFRA`; other streams by their own name (`Rocq speed`, `lean-speed`, `shared`, `untagged`). `(no project)` is the part of a bill no record places in a stream, including Azure outside VMs and disks (before 2026-10-25, the whole Azure bill) and, before 2026-10-31, all of GitHub.
 - `platform` and `item`: `Anthropic`, `OpenAI`, `Other model providers` by model; `Google Cloud` by lane or machine group; `Azure` by service; `GitHub` by repository from 2026-10-31 only.
-- Sum every `kind` except `attributed_org_unknown`: that kind may be in a bill already, and adding it counts dollars twice.
+- Sum every `kind` except `attributed_org_unknown` and `not_billed`. `attributed_org_unknown` may be in a bill already, so adding it counts dollars twice. `not_billed` is calls of an Anthropic organization the company is not charged for, which cost nothing.
 - `Google Cloud` is the estimate for spend-cloud-cost's projects only, at list price, about $725-$3,835 a day below Google's bill of every project (`infra_spend_daily_v`). Read it as a close figure per project, not the invoice.
 - OpenAI's report is in the view every day, as in `infra_spend_daily_v`, but OpenAI posts a day's costs during that day and the next, so today and yesterday still grow by the hour.
 
@@ -32,7 +32,7 @@ My project this week by platform:
 ```sql
 SELECT platform, ROUND(SUM(usd), 2) AS usd
 FROM `theorem-agent-infra.agent_spend.project_spend_daily_v`
-WHERE project = 'BET' AND day >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND kind != 'attributed_org_unknown'
+WHERE project = 'BET' AND day >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND kind NOT IN ('attributed_org_unknown', 'not_billed')
 GROUP BY platform ORDER BY usd DESC
 ```
 
