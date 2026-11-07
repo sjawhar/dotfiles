@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import pathlib
 import re
 import shlex
 import subprocess
@@ -95,6 +96,30 @@ def read_when(path: Path) -> float | None:
         return float(head[0]) if head else None
     except ValueError:
         return None
+
+
+def job_env() -> dict[str, str]:
+    """This process's environment with the shims on PATH, for the job to inherit.
+
+    A systemd USER unit inherits the manager's default PATH -- no dotfiles shims and no mise
+    shims -- so a job that shells out to `gh`, `jj`, `knives` or any mise-managed tool fails
+    where the same command run by hand from a pane works. The gate lane's publication scan died
+    on exactly that four times in the 05Z hour of 2026-11-07, one second each, with
+    `gh auth git-credential get: 1: gh: not found`, and it read as a fault in the scan.
+
+    Order is scripts/agent-session's: this checkout's shims first, then the rest. mise's shims
+    come next, since a shim this repository does not carry (gh does, uv does not) is mise's.
+    Both are derived -- the first from this file's location, the second from MISE_DATA_DIR --
+    so neither can drift from where the tools really are.
+    """
+    env = dict(os.environ)
+    here = pathlib.Path(__file__).resolve().parent
+    mise_data = os.environ.get("MISE_DATA_DIR") or str(pathlib.Path.home() / ".mise")
+    wanted = [str(here / "../shims"), str(pathlib.Path(mise_data) / "shims")]
+    wanted = [str(pathlib.Path(p).resolve()) for p in wanted]
+    rest = [p for p in env.get("PATH", "").split(os.pathsep) if p and p not in wanted]
+    env["PATH"] = os.pathsep.join([p for p in wanted if pathlib.Path(p).is_dir()] + rest)
+    return env
 
 
 def write_state(directory: Path, name: str, text: str) -> None:
@@ -197,6 +222,7 @@ def run_job(job: dict, directory: Path, now: float) -> str:
                 timeout=job["timeout"],
                 stdin=subprocess.DEVNULL,
                 cwd=str(job["workdir"]),
+                env=job_env(),
             )
             output = (done.stdout or "") + (done.stderr or "")
             exit_code = str(done.returncode)
