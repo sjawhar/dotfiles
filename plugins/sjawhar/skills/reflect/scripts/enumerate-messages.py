@@ -33,7 +33,8 @@ with the reason, so the coverage check can count it and a reader can audit the r
   the named artifact before it can be read.
 - `legion-daemon-prompt`: a typed row on a `legion-*` host, which is the Legion daemon's own
   phase prompt; his words reach a Legion pod as a Dispatch row, counted above.
-- `not-his-machine`: a typed row on a `machcsl-gcp-*` host, which is another person's machine.
+- `not-his-machine`: a typed row on a `machcsl-gcp-*` host. No typed row of Sami's is on these
+  hosts in the 14 days to 2026-11-07; the human ones there are Nickolai's.
 """
 from __future__ import annotations
 
@@ -56,8 +57,9 @@ WORKERS = 4          # searches in flight; the store is shared, so keep it small
 # phase prompt ("Continue <issue> … Phase: …", a production check, a round-cap notice): Sami's
 # words reach a Legion pod as Dispatch rows, never as typed ones.
 LEGION_HOST = re.compile(r"^legion-")
-# machcsl-gcp-* are Nickolai's machines: no typed row there is Sami's (his own, Nickolai's
-# `Tool loaded.` boilerplate and the harness's briefs alike).
+# machcsl-gcp-*: no typed row of Sami's in the 14 days to 2026-11-07 (every transcript is under
+# /home/nickolai, and the one human voice there names Sami in the third person); recheck if he
+# starts working there.
 OTHER_PEOPLE_HOST = re.compile(r"^machcsl-gcp-")
 
 
