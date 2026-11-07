@@ -60,6 +60,16 @@ If artifacts may contain sensitive code, prompts, screenshots, HTTP bodies, or h
 - `NOT VERIFIED`: the behavior is unchanged, moves the wrong way, or misses the threshold.
 - `INCONCLUSIVE`: no valid baseline, noisy signal, failed measurement, or an environment difference invalidates the comparison.
 
+**An empty result is `INCONCLUSIVE` until a control proves the measurement ran.** A search that matches nothing, a listing that returns nothing and a scan that finds nothing all produce the same output as a search of the wrong object, a listing of an unmounted path and a scan of a file that is not there. Nothing in the output distinguishes them, so a bare negative is not evidence of absence — it is evidence that a command exited.
+
+Before reporting any empty result as `NOT VERIFIED`, include a **control that must appear** and show that it did:
+
+- Searching a binary or a tree for a string? Also search one you know is present. On 2026-11-07 a scan of `~/.local/bin/omp` returned 0 for six strings including the control, because the path does not exist on that host — the binary is mise-managed behind a shim. With no control it reads as a clean negative.
+- Listing a directory? Show that a sibling you expect is in the listing. A path not bound into an agent box returns an **empty listing, not an error**, and visibility is per-path: one directory can be real while the one beside it is an empty lookalike in the same listing. Four sessions published a false absence this way on one night.
+- Matching on a name? Search the longest fragment the source could hold, not the name as it appears on disk. `omp-task-<id>` directories are built from the literal `omp-task` plus a hyphen added at runtime, so searching `omp-task-` misses the creator by one character while matching an unrelated `omp-task-index-`.
+
+The general form: **name the object you measured and the side you measured it from**, and when the answer is "nothing", say what would have shown up if the measurement had worked.
+
 ## Output
 
 Use this shape:
