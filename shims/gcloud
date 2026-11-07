@@ -969,16 +969,27 @@ route_get_credentials_kubeconfig() {
 # metadata lookup. The removal's report goes to stderr; a failed removal is reported and the call
 # runs anyway, and gcloud then says what is wrong.
 #
-# The grep opens the credential store, which the Datadog CWS rule
-# theorem_gcloud_credential_read reports as a credential file read by another process: between
-# 2026-10-30 and 2026-11-06 it fired 109 times, all of them this grep, since it ran before every
-# gcloud call on the box. So the grep's verdict is remembered per config dir, keyed by the store's
-# identity and mtime (nanoseconds), size and inode, which `stat` reads from the inode without
-# opening the file. An unchanged store reuses the remembered verdict and nothing reads the file;
-# any difference, and a store with no marker, runs exactly what ran before and records the new
-# verdict. The marker lives in $XDG_RUNTIME_DIR, else ~/.cache: outside the config dir, which is
-# copied between machines and scanned as a credential store. A marker that cannot be read or
-# written only costs the grep, as before.
+# Opening the credential store is what the Datadog CWS rule theorem_gcloud_credential_read
+# reports: between 2026-10-30 and 2026-11-06 it fired 109 times, all of them this shim's check,
+# and again as a [high] at 2026-11-06 09:15:05Z. Nothing here opens the store any more. The
+# verdict is remembered per config dir, keyed by the store's identity and mtime (nanoseconds),
+# size and inode, which `stat` reads from the inode without opening the file, AND by the boot:
+# on a Google VM no process writes an Azure external_account entry into a store -- only
+# installers/gcloud-box.sh does, on an Azure box -- so a dir that reads absent here stays absent
+# for the life of the boot however often gcloud rewrites the file. Without the boot key every
+# write bought another read and another signal. The cost is that a config dir copied from an
+# Azure box over a path already checked this boot is not noticed until the next boot, and gcloud
+# then says plainly what is wrong; a dir arriving at a new path, which is every case seen, has no
+# marker and is checked. The marker lives in $XDG_RUNTIME_DIR, else ~/.cache: outside the config
+# dir, which is copied between machines and scanned as a credential store. A marker that cannot
+# be read or written costs one check per call, as before.
+#
+# The check itself is scripts/gcloud-drop-azure-credential, which opens the store once, removes
+# what it finds and prints nothing when there is nothing to remove. There is no separate read: a
+# grep for the Azure path reported as a bare grep on a credential store, which reads to a human
+# like an exfiltration and cost one [high] triage. GCLOUD_CHILD does not exempt either of them --
+# it wants the SDK's bundled interpreter with empty arguments (monitoring/host/guard.sh) -- so
+# the fix is to not read, not to be excused for reading.
 AZURE_IMDS_TOKEN_PATH=/metadata/identity/oauth2/token
 
 # The marker file for a config dir's credential store, or nothing when there is nowhere to keep
@@ -999,8 +1010,15 @@ azure_check_marker() {
     printf '%s/azure-check.%s\n' "$base" "$digest"
 }
 
+# This boot, so a verdict is not carried across a reboot by the ~/.cache marker.
+azure_check_boot() {
+    local id=""
+    [[ -r /proc/sys/kernel/random/boot_id ]] && id="$(</proc/sys/kernel/random/boot_id)"
+    printf '%s' "${id:-unknown}"
+}
+
 drop_azure_credential_on_google_vm() {
-    local dir dmi="" bin store stamp marker remembered verdict
+    local dir dmi="" bin store stamp boot marker remembered report
     if [[ -n "${CLOUDSDK_CONFIG:-}" ]]; then
         dir="$CLOUDSDK_CONFIG"
     elif resolve_user_home; then
@@ -1011,35 +1029,37 @@ drop_azure_credential_on_google_vm() {
     store="$dir/credentials.db"
     [[ -f "$store" ]] || return 0
     stamp="$(stat -c '%y %s %i' -- "$store" 2>/dev/null)" || stamp=""
+    boot="$(azure_check_boot)"
     marker="$(azure_check_marker "$dir")" || marker=""
-    if [[ -n "$stamp" && -n "$marker" && -r "$marker" ]]; then
+    if [[ -n "$marker" && -r "$marker" ]]; then
         remembered="$(<"$marker")"
-        if [[ "$remembered" == "absent|$stamp" ]]; then
+        # Same store, or the same boot on a machine where no Azure entry can appear.
+        if [[ "$remembered" == "absent|$stamp|"* || "$remembered" == "absent|"*"|$boot" ]]; then
             return 0
-        elif [[ "$remembered" == "present|$stamp" ]]; then
-            verdict=present
         fi
     fi
-    if [[ -z "${verdict:-}" ]]; then
-        if grep -qaF "$AZURE_IMDS_TOKEN_PATH" "$store" 2>/dev/null; then
-            verdict=present
-        else
-            verdict=absent
-        fi
-        if [[ -n "$stamp" && -n "$marker" ]]; then
-            printf '%s|%s\n' "$verdict" "$stamp" >"$marker.$$" 2>/dev/null &&
-                mv -f "$marker.$$" "$marker" 2>/dev/null ||
-                rm -f "$marker.$$" 2>/dev/null
-        fi
-    fi
-    [[ "$verdict" == present ]] || return 0
+    # Nothing above opened the store. Everything below needs a Google VM, so the gate comes first.
     if [[ -z "${GCE_METADATA_HOST:-}" ]]; then
         [[ -r /sys/class/dmi/id/product_name ]] && dmi="$(</sys/class/dmi/id/product_name)"
         [[ "$dmi" == "Google Compute Engine" ]] || return 0
     fi
     bin="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts"
     "$bin/on-google-vm" || return 0
-    "$bin/gcloud-drop-azure-credential" "$dir" 2>&1 | sed 's/^/gcloud shim: /' >&2 || true
+    # The one reader: it decides and removes in the same open, and prints nothing when there was
+    # nothing to remove.
+    report="$("$bin/gcloud-drop-azure-credential" "$dir" 2>&1)" || true
+    [[ -n "$report" ]] && sed 's/^/gcloud shim: /' <<<"$report" >&2
+    if [[ -n "$marker" ]]; then
+        # A store it had to change is re-read next call; one it left alone is skipped this boot.
+        if [[ -z "$report" ]]; then
+            printf 'absent|%s|%s\n' "$stamp" "$boot" >"$marker.$$" 2>/dev/null &&
+                mv -f "$marker.$$" "$marker" 2>/dev/null ||
+                rm -f "$marker.$$" 2>/dev/null
+        else
+            rm -f "$marker" 2>/dev/null
+        fi
+    fi
+    return 0
 }
 
 # gcloud writes one log file per call into <config dir>/logs and never prunes it: on
