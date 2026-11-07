@@ -66,6 +66,33 @@ class AgentboxPredecessor(unittest.TestCase):
         # Nothing here reaches the host. docker answers the two forms the code uses: the census's
         # `ps --no-trunc --format` listing and reap_box's `ps -a --filter name=^<box>$`.
         write_stub(self.stubs, "docker", r'''
+# inspect: the state this test gave the container, defaulting to running, so a test that says
+# nothing about state keeps the old meaning of "the container is still there".
+if [[ "${1:-}" == inspect ]]; then
+    fmt=""; name=""
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in -f|--format) fmt="$2"; shift 2 ;; *) name="$1"; shift ;; esac
+    done
+    grep -qxF "$name" "$STUB_CONTAINERS" 2>/dev/null || exit 1
+    state="$(cat "$STUB_CONTAINER_STATE" 2>/dev/null)"; state="${state:-running}"
+    case "$fmt" in
+        *State.Status*) echo "$state" ;;
+        *State.Running*) [[ "$state" == running ]] && echo true || echo false ;;
+        *State.ExitCode*) cat "$STUB_CONTAINER_RC" 2>/dev/null || echo 0 ;;
+        *State.OOMKilled*) cat "$STUB_CONTAINER_OOM" 2>/dev/null || echo false ;;
+        *State.FinishedAt*) echo "2026-11-07T15:18:00Z" ;;
+        *) echo "" ;;
+    esac
+    exit 0
+fi
+if [[ "${1:-}" == rm ]]; then
+    shift
+    while [[ "${1:-}" == -* ]]; do shift; done
+    grep -vxF "${1:-}" "$STUB_CONTAINERS" >"$STUB_CONTAINERS.new" 2>/dev/null || :
+    mv -f "$STUB_CONTAINERS.new" "$STUB_CONTAINERS"
+    exit 0
+fi
 want=""
 for a in "$@"; do case "$a" in name=^*) want="${a#name=^}"; want="${want%$}" ;; esac; done
 if [[ -n "$want" ]]; then
@@ -88,7 +115,8 @@ exit 0''')
         # mounted; no test may run it for real, so sudo refuses unless a test says otherwise.
         write_stub(self.stubs, "sudo", 'printf "%s\\n" "$*" >>"$STUB_SUDO"; exit "${STUB_SUDO_RC:-1}"')
         for name in ("STUB_CONTAINERS", "STUB_PGREP", "STUB_ENVOY", "STUB_ENVOY_PS",
-                     "STUB_SECRETS", "STUB_SUDO"):
+                     "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE",
+                     "STUB_CONTAINER_RC", "STUB_CONTAINER_OOM"):
             (self.root / name).write_text("", encoding="utf-8")
         self.env = {
             # These tests run INSIDE a box themselves, and the script takes its in-box paths when
@@ -113,6 +141,10 @@ exit 0''')
             "STUB_ENVOY_PS": str(self.root / "STUB_ENVOY_PS"),
             "STUB_SECRETS": str(self.root / "STUB_SECRETS"),
             "STUB_SUDO": str(self.root / "STUB_SUDO"),
+            "STUB_CONTAINER_STATE": str(self.root / "STUB_CONTAINER_STATE"),
+            "STUB_CONTAINER_RC": str(self.root / "STUB_CONTAINER_RC"),
+            "STUB_CONTAINER_OOM": str(self.root / "STUB_CONTAINER_OOM"),
+            "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
         }
 
     # ── fixtures ────────────────────────────────────────────────────────────────────────────
@@ -125,6 +157,16 @@ exit 0''')
 
     def set_containers(self, *names: str) -> None:
         (self.root / "STUB_CONTAINERS").write_text("".join(f"{n}\n" for n in names), encoding="utf-8")
+
+    def set_container_state(self, state: str, rc: str = "0", oom: str = "false") -> None:
+        """What `docker inspect` answers for every stub container."""
+        (self.root / "STUB_CONTAINER_STATE").write_text(state + "\n", encoding="utf-8")
+        (self.root / "STUB_CONTAINER_RC").write_text(rc + "\n", encoding="utf-8")
+        (self.root / "STUB_CONTAINER_OOM").write_text(oom + "\n", encoding="utf-8")
+
+    def exits_tally(self) -> str:
+        path = self.root / "agentbox-exits.tsv"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
 
     def register(self, session: str, when_ms: int | None = None) -> None:
         """What `envoy ps --json` answers: this session registered at WHEN (now by default)."""
@@ -254,18 +296,51 @@ exit 0''')
         self.assertEqual(again.returncode, 1)
         self.assertTrue((self.boxes / old).exists())
 
-    def test_a_predecessor_whose_container_still_exists_is_kept(self) -> None:
+    def test_a_predecessor_whose_container_is_not_exited_is_kept(self) -> None:
         old, new = "agentbox-old000000001", "agentbox-new000000002"
         self.make_box(old, SID)
         self.make_box(new, SID, created="2026-11-04T20:00:00Z")
         self.set_containers(old, new)
+        self.set_container_state("running")
         self.register(SID)
         self.make_omp(999001, SID)
         result = self.run_bash(f"cmd_reap {SID} {new} 0")
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn(f"{old} kept: its container still exists", result.stdout)
+        self.assertIn(f"{old} kept: its container is not exited", result.stdout)
         self.assertTrue((self.boxes / old).exists())
         self.assertTrue((self.disks / f"{old}.info").exists())
+
+    def test_a_predecessor_whose_container_exited_is_recorded_then_removed(self) -> None:
+        """The case the fleet lost a record to on 2026-11-07.
+
+        A box runs without --rm, so a predecessor's container is normally sitting there exited
+        with its status still readable. The reaper is often the only thing that will ever look
+        at it -- the launcher that would have recorded the exit is, by then, gone -- so it reads
+        the status, writes the tally row, and only then removes the container.
+        """
+        old, new = "agentbox-old000000001", "agentbox-new000000002"
+        self.make_box(old, SID)
+        self.make_box(new, SID, created="2026-11-04T20:00:00Z")
+        self.set_containers(old, new)
+        self.set_container_state("exited", rc="134", oom="false")
+        self.register(SID)
+        self.make_omp(999001, SID)
+        result = self.run_bash(f"cmd_reap {SID} {new} 0")
+        self.assertIn(f"{old}: its exited container was recorded and removed", result.stdout)
+        row = self.exits_tally()
+        self.assertIn(old, row)
+        self.assertIn("134", row)
+        self.assertIn("SIGABRT", row)
+
+    def test_an_exit_is_recorded_once_however_many_times_it_is_tried(self) -> None:
+        """The launcher, close_box, the reaper and the sweep each try; the tally gets one row."""
+        box = "agentbox-old000000001"
+        self.make_box(box, SID)
+        self.set_containers(box)
+        self.set_container_state("exited", rc="137")
+        first = self.run_bash(f'record_box_exit {box} {SID} ""; record_box_exit {box} {SID} ""')
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(self.exits_tally().count(box), 1, self.exits_tally())
 
     def test_a_predecessor_holding_work_no_remote_has_is_kept(self) -> None:
         old, new = "agentbox-old000000001", "agentbox-new000000002"

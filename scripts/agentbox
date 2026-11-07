@@ -299,7 +299,27 @@ BOX_EXITS="${AGENTBOX_EXITS:-/mnt/durable/$(id -un)/agentbox-exits.tsv}"
 # never blocks its cleanup: a missing directory, a full disk or a read-only mount costs the
 # record, not the box's removal.
 record_box_exit() {
-    local box="$1" sid="$2" rc="$3" signal="" dir
+    local box="$1" sid="$2" rc="${3:-}" signal="" dir marker oom="." finished="."
+    # One row, one line. `box_session_id` answers with whatever the box said, and on a box whose
+    # command is not omp that can be a multi-line docker error -- which, written through, breaks
+    # every reader of this file. Only a UUID is a session id; anything else is no session.
+    [[ "$sid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || sid=""
+    # Written at most once per box. The launcher, close_box, the reaper and the sweep each try,
+    # because any one of them may be the only one that runs; the marker is what keeps the tally
+    # one row per box. It sits beside the box record, so it goes when the record goes.
+    marker="$(box_record "$box").exit"
+    [[ -e "$marker" ]] && return 0
+    # Without --rm the container is still there after it ends, so docker can be asked what
+    # happened. This is the whole point of the change: a launcher that died recorded nothing,
+    # and now whoever arrives next can still read it.
+    if [[ -z "$rc" ]]; then
+        rc="$(docker inspect -f '{{.State.ExitCode}}' "$box" 2>/dev/null)" || rc=""
+    fi
+    oom="$(docker inspect -f '{{.State.OOMKilled}}' "$box" 2>/dev/null)" || oom=""
+    finished="$(docker inspect -f '{{.State.FinishedAt}}' "$box" 2>/dev/null)" || finished=""
+    # Nothing to say and nothing to ask: no row, and no marker either, so a later caller that
+    # can see the container still gets its chance.
+    [[ -z "$rc" ]] && return 0
     # 128+N is a signal death; name the ones that matter rather than leaving a bare number.
     case "$rc" in
         134) signal=SIGABRT ;;
@@ -310,10 +330,32 @@ record_box_exit() {
     esac
     dir="$(dirname "$BOX_EXITS")"
     [[ -d "$dir" ]] || return 0
-    # One short line, opened O_APPEND: concurrent launchers do not interleave it.
-    printf '%s\t%s\t%s\t%s\t%s\n' \
+    # One short line, opened O_APPEND: concurrent launchers do not interleave it. The two
+    # columns after the signal are new in 2026-11: the kernel OOM flag and docker's own finish
+    # time, which a reader of this file previously had no way to get at all.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$box" "${sid:-(no session)}" "$rc" "${signal:-.}" \
+        "${oom:-.}" "${finished:-.}" \
         >>"$BOX_EXITS" 2>/dev/null || true
+    : >"$marker" 2>/dev/null || true
+    return 0
+}
+
+# sweep_exited_boxes: remove agentbox containers that ended more than SWEEP_EXITED_AFTER ago and
+# whose box is gone, recording each first. Without --rm an exited container is new state on this
+# machine, and a reaper that never runs must not be able to accumulate them. A container whose
+# box directory or record still exists is left alone: that is the reaper's to judge, not this.
+SWEEP_EXITED_AFTER="${AGENTBOX_SWEEP_EXITED_AFTER:-6h}"
+sweep_exited_boxes() {
+    local c swept=0
+    while read -r c; do
+        [[ -n "$c" ]] || continue
+        [[ -e "$(box_record "$c")" || -d "$BOXES/$c" ]] && continue
+        record_box_exit "$c" "" ""
+        docker rm "$c" >/dev/null 2>&1 && swept=$((swept + 1))
+    done < <(docker ps -a --filter 'name=^agentbox-' --filter status=exited \
+        --filter "until=$SWEEP_EXITED_AFTER" --format '{{.Names}}' 2>/dev/null)
+    (( swept )) && echo "agentbox: swept $swept exited container(s) older than $SWEEP_EXITED_AFTER"
     return 0
 }
 EMBED_NAME=omp-embed
@@ -2389,14 +2431,25 @@ box_reclaim() {
 close_box() {
     local box="$1" sid="$2" repo ws work kept=0 _
     shift 2
+    # Without --rm the container does not disappear on its own, so the wait is for it to STOP,
+    # not to vanish. A container that is already gone (an older box, a forced removal) leaves
+    # the loop at once.
     for _ in $(seq 1 60); do
         docker inspect "$box" >/dev/null 2>&1 || break
+        [[ "$(docker inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" == true ]] || break
         sleep 1
     done
-    if docker inspect "$box" >/dev/null 2>&1; then
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" == true ]]; then
+        # Still running after 60 s: there is no clean exit to record, and the page cache must be
+        # reclaimed before the container goes or every umount on the machine queues behind it.
         echo "agentbox: $box is still running after 60s; removing it" >&2
         box_reclaim "$box"
         docker rm -f "$box" >/dev/null 2>&1 || true
+    elif docker inspect "$box" >/dev/null 2>&1; then
+        # Exited, and without --rm it is still there with its status readable. Write the row
+        # before removing it; record_box_exit is a no-op when the launcher already wrote one.
+        record_box_exit "$box" "$sid" ""
+        docker rm "$box" >/dev/null 2>&1 || true
     fi
     # An omp in the box may have queued this pane for the attention cockpit, and
     # its own shutdown drop died with the container. The launcher runs in the same
@@ -2490,14 +2543,25 @@ reap_box() {
         reap_say "$box has no image and no directory; its record is removed"
         return 0
     fi
-    # A container of ANY state means the box may still be in use: never touched, never killed.
+    # A LIVE container means the box may still be in use: never touched, never killed. An exited
+    # one is the case this function exists for since --rm was dropped: its status is read, the
+    # tally row is written, and then it is removed. Before that change an exited container could
+    # not be seen here at all, which is why a launcher that died left no record.
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
         reap_say "$box kept: docker could not be asked whether its container is gone"
         return 1
     fi
     if [[ -n "$names" ]]; then
-        reap_say "$box kept: its container still exists"
-        return 1
+        if [[ "$(docker inspect -f '{{.State.Status}}' "$box" 2>/dev/null)" != exited ]]; then
+            reap_say "$box kept: its container is not exited"
+            return 1
+        fi
+        record_box_exit "$box" "$sid" ""
+        if ! docker rm "$box" >/dev/null 2>&1; then
+            reap_say "$box kept: its exited container could not be removed"
+            return 1
+        fi
+        reap_say "$box: its exited container was recorded and removed"
     fi
     # Its clones and its home are inside its own filesystem, so an image that is not mounted
     # (the usual state after a reboot) is mounted here to be read. Read-write: a carry copies
@@ -2565,6 +2629,9 @@ cmd_reap() {
         reap_box "$p" "$sid" || kept=1
     done < <(box_predecessors "$sid" "$box")
     (( n )) || reap_say "$sid has no older box on this host; nothing to remove"
+    # The reaper is the one thing that already runs after every box with a predecessor, so it is
+    # where the sweep belongs: no new unit, which this machine does not take.
+    sweep_exited_boxes
     return "$kept"
 }
 
@@ -2832,7 +2899,7 @@ cmd_new() {
     exec {stdin_fd}<&0
     # --log-driver none: stdout is the omp TUI's redraw stream, gigabytes a day
     # per box that nothing reads (the transcript is in ~/.omp; attach is live).
-    docker run --rm --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
+    docker run --init --runtime "$RUNTIME" --name "$box" --hostname "$box" --log-driver none \
         --network "$NETWORK" --dns 100.100.100.100 --dns 1.1.1.1 \
         "${RESOURCE_ARGS[@]}" \
         -w "$workdir" "${tty[@]}" ${add_hosts[@]+"${add_hosts[@]}"} \
