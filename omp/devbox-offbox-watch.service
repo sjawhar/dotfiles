@@ -13,10 +13,21 @@ IOSchedulingClass=idle
 # 2026-11-04 a run waited 180 s for each of three restarts, stayed `activating` past three
 # periods, and unit-health-watch reported "TIMER STOPPED FIRING". So a run is bounded instead:
 # one ssh probe (about 1 s), one liveness call (one `omp-session-live` per auto_restart=yes entry
-# on sami-devbox, about 0.75 s each, some 35 s at 44 entries), and at most 3 restarts of 45 s
-# each, since a session that is not up by then is looked at again on the next run. That is about
-# 170 s at worst. TimeoutStartSec kills a run that goes past 240 s, so systemd is free again
-# before the next start rather than sitting in `activating`.
+# on sami-devbox, about 0.75 s each), and as many restarts as still fit before this limit.
+#
+# Two of the numbers this comment used to give had gone stale by 2026-11-07, and the watch was
+# killed here in 3 of the 11 runs that ended in the hour to 05:52Z, each one a run that restarted
+# a flapping session. It said "some 35 s at 44 entries" (measured: 52 s at 101 entries, 68 of
+# them auto_restart=yes) and "at most 3 restarts of 45 s each" (a restart's ssh call is given
+# AWAIT_SECONDS + 60, so up to 105 s, and the cap of 3 is a cross-RUN rate window, not a bound on
+# one run). Worst case was 52 + 3 x 105 = 367 s against this 240 s.
+#
+# The script now checks the clock before each restart and defers the ones that would not finish
+# in time to the next run, which is already what it does for a session still coming up. So a run
+# stays inside this limit as the registry grows, rather than being killed mid-work -- being
+# killed leaves the session unrestarted AND loses the rest of the pass. Raising this number
+# without raising OnUnitActiveSec in the timer brings back the 2026-11-04 `activating` stall, so
+# the two move together or not at all.
 TimeoutStartSec=240
 # `envoy` is a bash script that needs the same tools a shell gives it, and ssh must find its config.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.dotfiles/scripts:%h/.local/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin

@@ -119,6 +119,27 @@ TRAIN_IDLE_SECONDS = 1800
 # stopped. A session that is not up yet is checked again on the next run, and gets its `after`
 # message then.
 AWAIT_SECONDS = 45
+# A restart's worst case in wall time, and the unit limit it has to fit inside.
+#
+# devbox-offbox-watch.service sets TimeoutStartSec=240 and its comment budgets "at most 3 restarts
+# of 45 s each ... about 170 s at worst". Two of those three numbers had drifted by 2026-11-07:
+#
+#   * a restart's ssh call is given AWAIT_SECONDS + 60, so it costs up to 105 s, not 45 s, and
+#   * the liveness leg is one call per auto_restart entry at about 0.75 s, budgeted at "some 35 s
+#     at 44 entries" and measured at 52 s with 101 entries, 68 of them auto_restart=yes.
+#
+# The existing cap is a cross-run RATE window (RESTARTS_PER_10_MIN, kept in state), not a bound on
+# one run, so a run that found an empty window could still start three restarts: 52 + 3 x 105 =
+# 367 s against a 240 s limit. That is what killed 3 of 11 runs in the hour to 05:52Z on
+# 2026-11-07, every one of them a run that restarted the cost lead.
+#
+# So a restart is started only while the run can still finish it inside the limit. The guard is
+# wall-clock rather than a count, because the count is what went stale: it holds as the registry
+# grows, and the sessions it defers are restarted by the next run 5 minutes later, which is what
+# this watch already does for a session that is not up when AWAIT_SECONDS expires.
+RESTART_WORST_CASE_SECONDS = AWAIT_SECONDS + 60
+UNIT_TIMEOUT_SECONDS = 240
+RESTART_MARGIN_SECONDS = 20
 ENTRY_KEYS = ("session", "title", "role", "tmux", "cwd", "resume", "after", "order",
               "auto_restart", "owner_note")
 STREAM_WINDOWS = ("chief", "ossv", "linux", "tasks", "grader", "infra", "rocq", "cicd")
@@ -648,6 +669,9 @@ def run(args: argparse.Namespace) -> int:
 
 def run_pass(args: argparse.Namespace, shadow: dict) -> int:
     now = time.time()
+    # Wall clock for the restart budget below. monotonic, not `now`: a clock step must not hand a
+    # run more room than TimeoutStartSec actually gives it.
+    run_started = time.monotonic()
     state_path = Path(args.state)
     state = load_state(state_path)
     report = Reporter(state_path.parent, args.dry_run, args.host)
@@ -783,6 +807,8 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
 
     left_for_stall: list[str] = []
     left_for_limit: list[str] = []
+    # Sessions this run had no wall-clock room left to restart; the next run takes them.
+    left_for_budget: list[str] = []
     left_for_box_restart: list[str] = []
     would_restart: list[str] = []
     for entry in dead:
@@ -885,6 +911,17 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
             log(f"report-only: would restart {title} ({session})")
             continue
 
+        # Start this restart only if the run can still finish it before TimeoutStartSec kills the
+        # unit mid-work. A run killed at the limit is worse than a deferred restart: it leaves the
+        # session unrestarted anyway AND loses the rest of the pass, state write included.
+        spent = time.monotonic() - run_started
+        if spent + RESTART_WORST_CASE_SECONDS > UNIT_TIMEOUT_SECONDS - RESTART_MARGIN_SECONDS:
+            left_for_budget.append(f"{title} ({session})")
+            log(f"deferring the restart of {title} ({session}) to the next run:"
+                f" {spent:.0f} s spent, a restart costs up to {RESTART_WORST_CASE_SECONDS} s,"
+                f" and the unit is killed at {UNIT_TIMEOUT_SECONDS} s")
+            continue
+
         restart(remote, entry, report, state, now, args.host, args.sre, args.dry_run)
 
     if would_restart:
@@ -915,6 +952,18 @@ def run_pass(args: argparse.Namespace, shadow: dict) -> int:
                     f" (limit {RESTARTS_PER_HOUR}). devbox-offbox-watch has stopped restarting."
                     f" It starts again by itself once those windows empty, so if this repeats,"
                     f" something is resuming in a loop or the box is broken: look before it does.")
+    # Deliberately not wrapped in `once`: each run that defers names what it deferred, because a
+    # deferral is only harmless if the next run picks it up, and a silent one would hide a session
+    # that never gets its turn.
+    if left_for_budget:
+        report.send([args.sre], "defer-budget",
+                    f"DEFERRED TO THE NEXT RUN, {len(left_for_budget)} dead session(s) on"
+                    f" {args.host}: {', '.join(left_for_budget)}. This run had no wall-clock room"
+                    f" left: a restart costs up to {RESTART_WORST_CASE_SECONDS} s and the unit is"
+                    f" killed at {UNIT_TIMEOUT_SECONDS} s (TimeoutStartSec). Nothing is wrong with"
+                    f" these sessions; the next run in 5 min restarts them. If the SAME session is"
+                    f" deferred run after run, the liveness leg has outgrown the budget -- measure"
+                    f" a run and either make it cheaper or raise both limits together.")
     if once(state, "box_restart_reported", bool(left_for_box_restart)):
         report.send([args.sre], "refuse-box-restart",
                     f"NOT RESTARTED, {len(left_for_box_restart)} dead session(s) on {args.host}:"
