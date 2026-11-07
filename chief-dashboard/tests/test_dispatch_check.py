@@ -522,6 +522,33 @@ def test_a_child_of_a_suspended_legion_architect_is_parked_not_unowned():
     assert found(lines, "UNOWNED") == ["BET-63 [in_progress] title of BET-63 (no claim)"]
     assert found(lines, "LEGION-PARKED")[0].startswith("3 legion-labelled issues")
 
+
+def test_an_admitted_legion_issue_waiting_in_the_daemon_queue_is_not_unowned():
+    # INFRA Legion controller, 2026-11-07 05:47Z, on INFRA-1552: the daemon had admitted it (ninth of 136 in the
+    # waiting line) and Legion claims an issue only when its architect starts, so `todo` with no claim is the queue,
+    # not a drop. Admission is readable on the issue: the daemon's own actor moved the status to todo.
+    admit = ev("issue.updated", {"kind": "session", "id": "legion-daemon:BET"}, 1, status="todo", changed=["status"])
+    rank = ev("issue.updated", session(LIVE, "Legion controller · BET"), 1, status="todo", changed=["rank"])
+    api = FakeDispatch([
+        issue("BET-70", status="todo", labels=["legion"], events=[admit, rank]),
+        # Not admitted: still in triage, no daemon write. Its tree has not started and nobody holds it.
+        issue("BET-71", status="triage", labels=["legion"]),
+        # Admitted once, but it moved on and has no claim at all: a real stall, not a place in the line.
+        issue("BET-72", status="in_progress", labels=["legion"], events=[admit]),
+        # `todo` and unclaimed, but no daemon admission wrote it, and it is no Legion issue.
+        issue("BET-73", status="todo", events=[rank]),
+    ])
+    lines = check(api, dc.Scope("BET", issues=["BET-70", "BET-71", "BET-72", "BET-73"]))
+    assert found(lines, "UNOWNED") == [
+        "BET-71 [triage] title of BET-71 (no claim)",
+        "BET-72 [in_progress] title of BET-72 (no claim)",
+        "BET-73 [todo] title of BET-73 (no claim)"]
+    queued = found(lines, "LEGION-QUEUED")
+    assert len(queued) == 1
+    assert queued[0].startswith("1 legion-labelled issues the Legion daemon has admitted wait unclaimed in its queue")
+    assert "legion/v1/state" in queued[0]
+    assert "1 LEGION-QUEUED" in lines[-1]
+
 def test_a_legion_issue_is_not_asked_for_a_plan_document():
     # Verified Linux lead, 2026-10-27 07:29Z: of 129 LINUX NO-PLAN lines, 125 were `Linux proof part` issues Legion
     # runs, whose plan is the architect's tree, not a document on the issue. Only 4 were real.

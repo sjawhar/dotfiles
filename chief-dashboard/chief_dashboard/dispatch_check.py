@@ -25,7 +25,12 @@ requests of ORG that name each issue in triage or in_progress, plus the pull req
                           PARKED summary line for the project, naming the count and the daemon state to read
                           (`GET $LEGION_DAEMON_URL/legion/v1/state`: issues.<KEY>.phase and
                           workers.<role>.claim.state; `held` or a failed claim is a stall, a suspended worker under a
-                          waiting tree is parking), not one line per issue;
+                          waiting tree is parking), not one line per issue; and an issue the Legion DAEMON itself
+                          admitted into its waiting line (its actor `legion-daemon:<PROJECT>` moved the status to
+                          `todo`) that waits there unclaimed is not one either: Legion claims an issue only when its
+                          architect starts, so unclaimed is the queue, not a drop (INFRA-1552, ninth of 136 at
+                          2026-11-07 05:47Z, the INFRA Legion controller). Those print one DISPATCH-LEGION-QUEUED
+                          summary line, naming the count and the daemon state to read;
   DISPATCH-QUIET          a claimed issue of the project that is not done or iceboxed, with no comment, message, ask,
                           status change or document version in the last 24 hours. An issue in `needs_review` whose
                           every linked delivering pull request is still open is NOT quiet: it waits on a reviewer or
@@ -115,7 +120,7 @@ EVENTS = 200
 # The person the check runs for: an issue assigned to anyone else is that person's, never unowned.
 OPERATOR = os.environ.get("DASHBOARD_OPERATOR", "sami@theorem.dev")
 KINDS = ("UNOWNED", "QUIET", "OVERDUE", "WAITING-ON-US", "PAST-ACK", "NO-EXECUTOR", "STATUS", "NO-PLAN",
-         "LEGION-PARKED", "STALE-NUMBER")
+         "LEGION-PARKED", "LEGION-QUEUED", "STALE-NUMBER")
 # The summary always carries these, so a run that found nothing still shows every check ran, and a re-drive that
 # matched no row says so instead of printing nothing. PAST-ACK is the number to drive to zero: the rows whose time
 # to acknowledge has passed. The rest are about Legion's claim model and the scoreboards rather than this project's
@@ -143,6 +148,9 @@ PLAN_GRAPH_STATE = re.compile(r"^(?:state|status)$", re.I)
 RELEASE_QUEUE_TITLES = ("Linux proof part ", "Linux proof model part ", "Linux proof hub part ")
 # The title a Legion architect session carries ("Legion architect · INFRA-156").
 LEGION_ARCHITECT = "Legion architect"
+# The actor id the Legion daemon writes a status under ("legion-daemon:INFRA"): its own admission of an issue into
+# the waiting line, as opposed to a controller session's or a person's write.
+DAEMON = "legion-daemon:"
 
 
 @dataclass
@@ -698,7 +706,25 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
             k = m.get("parent")
         return False
 
+    def admitted_and_queued(key: str, r: dict) -> bool:
+        """Whether the Legion daemon has ADMITTED KEY and it waits in the daemon's queue for its architect to start.
+        Legion claims an issue on Dispatch only when its architect starts, so an admitted issue reads `todo` and
+        "claimed by nobody" for as long as the waiting line is (INFRA-1552 was ninth of 136 at 2026-11-07 05:47Z; the
+        INFRA Legion controller's reading that day). Admission is written on the issue itself: the daemon's own actor
+        (`legion-daemon:<PROJECT>`) moves the status to `todo`, and that event is in the issue's events this run
+        already read. Narrow on purpose: a legion-labelled issue the daemon has NOT admitted (still `triage`, no such
+        event) is still unowned, and so is an admitted one that moved on and lost its holder -- a dead tree keeps its
+        architect's claim, which is the parked reading below, and an admitted issue in `in_progress` with no claim at
+        all is a real stall."""
+        if r["status"] != "todo" or not in_legion_tree(key):
+            return False
+        return any(e["type"] == "issue.updated" and str((e.get("actor") or {}).get("id") or "").startswith(DAEMON)
+                   and (e.get("payload") or {}).get("status") == "todo"
+                   and "status" in ((e.get("payload") or {}).get("changed") or [])
+                   for e in r["events"])
+
     legion_parked: list[str] = []
+    legion_queued: list[str] = []
     for key, r in reads.items():
         holder, is_live = claim(r)
         others = (r.get("assignee") or OPERATOR) != OPERATOR  # another person's issue: theirs, not ours to own
@@ -709,6 +735,8 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
             # own an issue Legion still holds.
             if in_legion_tree(key) and (holder is not None or under_architect(key, live_only=False)):
                 legion_parked.append(key)
+            elif holder is None and admitted_and_queued(key, r):
+                legion_queued.append(key)
             else:
                 why = "no claim" if holder is None else f"claim by {holder} since {r['claim']['at'][:16]}Z: not running"
                 out["UNOWNED"].append((key, f"{key} [{r['status']}] {r['title'][:90]} ({why})"))
@@ -810,6 +838,13 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
                                      "the daemon says otherwise: read GET $LEGION_DAEMON_URL/legion/v1/state, "
                                      "issues.<KEY>.phase and workers.<role>.claim.state (held or a failed claim is a "
                                      "stall; a suspended worker under a waiting tree is parking)"))
+    if legion_queued:
+        out["LEGION-QUEUED"].append((legion_queued[0], f"{len(legion_queued)} legion-labelled issues the Legion "
+                                     f"daemon has admitted wait unclaimed in its queue for an architect "
+                                     f"({short(sorted(legion_queued)[:5])}...). Legion claims an issue only when "
+                                     "its architect starts, so unclaimed is the queue, not a drop: read GET "
+                                     "$LEGION_DAEMON_URL/legion/v1/state, admission and issues.<KEY>.phase, to see "
+                                     "where each one sits in the line"))
     for key, st in sorted(data["streams"].items()):
         main = st.get("main")
         if main is None or (st.get("project") or key.rsplit("-", 1)[0]) != scope.project:
