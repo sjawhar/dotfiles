@@ -177,7 +177,10 @@ class EntryOwnerTest(unittest.TestCase):
         self.assertEqual(self.notices(), [])
         kept = self.pending()
         self.assertEqual(len(kept), 1)
-        self.assertEqual(kept[0]["bytes"], 1_000_000)
+        # Allocated, not the file's own size: since 2026-11-07 the scratch rule measures
+        # st_blocks, so a 1,000,000-byte file occupies 1,003,520 bytes of 4 KiB blocks. That is
+        # the number a person needs, because it is what the disk has actually given away.
+        self.assertEqual(kept[0]["bytes"], 1_003_520)
 
     def test_the_digest_goes_out_as_one_message_with_a_line_each_in_its_report(self) -> None:
         self.owner_answer = ""

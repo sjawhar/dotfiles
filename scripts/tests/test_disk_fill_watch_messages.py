@@ -618,8 +618,13 @@ class ScratchEntryTest(unittest.TestCase):
             mount=[self.MOUNT],
             tmp=str(self.scratch),
             tmp_age=10 * 86400.0,  # the clock moves days here; every test entry stays young
-            tmp_big=500,  # bytes: the test's entries are small
-            root_big=2000,
+            # Block multiples, not bytes. The rule measures allocated blocks since 2026-11-07,
+            # so a threshold under one 4 KiB block cannot separate two entries: a 1,000-byte
+            # file and a 1,999-byte file both occupy exactly one block. These keep the old
+            # 1:4 ratio between the shared floor and the root-disk floor, in units the
+            # filesystem can actually express.
+            tmp_big=512 * 1024,
+            root_big=2 * 1024 * 1024,
         )
         values.update(overrides)
         return argparse.Namespace(**values)
@@ -642,14 +647,23 @@ class ScratchEntryTest(unittest.TestCase):
         return json.loads(self.state.read_text())
 
     def entry(self, name: str, size: int) -> Path:
+        """A scratch entry that really occupies `size` bytes on disk.
+
+        It used to be made sparse with truncate(), on the reasoning that the size was "the size
+        the rule reads, and no disk". Since 2026-11-07 the rule reads st_blocks, not st_size,
+        because a sparse file claims bytes it does not hold and this watch exists to say what is
+        consuming the disk -- so a truncate()d fixture is now a file of no size, and the rule
+        rightly ignores it. posix_fallocate reserves the blocks without writing them, which is
+        both what the rule measures and fast enough for a test.
+        """
         path = self.scratch / name
         with open(path, "wb") as handle:
-            handle.truncate(size)  # sparse: the size the rule reads, and no disk
+            os.posix_fallocate(handle.fileno(), 0, size)
         return path
 
     def test_an_owned_entry_goes_to_its_owner_only(self) -> None:
         self.owner_answer = LANE
-        self.entry("rev1", 3000)
+        self.entry("rev1", 3 * 1024 * 1024)
 
         self.run_watch()
 
@@ -663,7 +677,7 @@ class ScratchEntryTest(unittest.TestCase):
     def test_a_short_disk_no_longer_takes_an_owned_entry_from_its_owner(self) -> None:
         self.owner_answer = LANE
         self.free = 50 * GIB  # short (under 100 GB), and above the 20 GiB floor
-        self.entry("rev1", 3000)
+        self.entry("rev1", 3 * 1024 * 1024)
 
         self.run_watch()
 
@@ -671,7 +685,7 @@ class ScratchEntryTest(unittest.TestCase):
         self.assertEqual([LANE], [who for who, _ in self.envoy.sent])
 
     def test_an_unowned_entry_waits_for_one_digest_a_day(self) -> None:
-        self.entry("rev1", 3000)
+        self.entry("rev1", 3 * 1024 * 1024)
         start = self.now
 
         self.run_watch()
@@ -689,7 +703,7 @@ class ScratchEntryTest(unittest.TestCase):
         digest = self.envoy.published[0][1]
         self.assertIn("rev1", digest + self.assert_short(digest))
 
-        self.entry("rev2", 3000)
+        self.entry("rev2", 3 * 1024 * 1024)
         self.now = start + 86400 + 300
         self.run_watch()
         self.now = start + 86400 + 3600
@@ -702,9 +716,12 @@ class ScratchEntryTest(unittest.TestCase):
 
     def test_a_big_unowned_entry_waits_for_the_digest_too(self) -> None:
         """/tmp/argv-src.tar.gz, 1.7 GB, 2026-11-02T03:23Z: nobody was named to act on it."""
-        self.entry("argv-src.tar.gz", 2_100_000_000)
+        # 3 MiB against a 2 MiB root floor, not the incident's real 2.1 GB: the rule measures
+        # allocated blocks now, so a fixture of that size would really reserve 2.1 GB of disk
+        # on a box whose root filesystem is 92% full. The boundary under test is the same one.
+        self.entry("argv-src.tar.gz", 3 * 1024 * 1024)
 
-        self.run_watch(root_big=2_000_000_000, tmp_big=500_000_000)
+        self.run_watch(root_big=2 * 1024 * 1024, tmp_big=512 * 1024)
 
         self.assertEqual([], self.messages())
         self.assertEqual(1, len(self.kept()["tmp_pending"]))
@@ -712,7 +729,7 @@ class ScratchEntryTest(unittest.TestCase):
     def test_an_owner_that_refuses_the_send_puts_the_entry_in_the_digest(self) -> None:
         self.owner_answer = LANE
         self.envoy.send_ok = False
-        self.entry("rev1", 3000)
+        self.entry("rev1", 3 * 1024 * 1024)
 
         self.run_watch()
 
@@ -722,7 +739,7 @@ class ScratchEntryTest(unittest.TestCase):
 
     def test_an_entry_on_the_root_disk_must_reach_two_gigabytes(self) -> None:
         self.owner_answer = LANE
-        self.entry("rev1", 1000)  # over --tmp-big (500), under --root-big (2000)
+        self.entry("rev1", 1024 * 1024)  # over --tmp-big (512 KiB), under --root-big (2 MiB)
 
         self.run_watch()
 
@@ -744,7 +761,7 @@ class ScratchEntryTest(unittest.TestCase):
     def test_the_digest_is_short_and_lists_every_entry_in_its_report(self) -> None:
         names = [f"lockprobe-{index:02d}-" + "x" * 90 for index in range(30)]
         for name in names:
-            self.entry(name, 3000)
+            self.entry(name, 3 * 1024 * 1024)
 
         self.run_watch(tmp_digest=0.0, top_writers=40)
 

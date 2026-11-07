@@ -894,7 +894,7 @@ def mount_evidence(pid: int, device: int, limit: int = FD_SCAN_LIMIT) -> dict:
             else f"its open files could not be read ({error.strerror or error})"
         )
         return found
-    biggest = ("", -1)
+    biggest = ("", 0, -1)  # path, its own size (shown), allocated bytes (ranked on)
     directory = ""
     readable = ("", 0)
     for index, descriptor in enumerate(sorted(descriptors, key=lambda name: int(name) if name.isdigit() else 0)):
@@ -913,17 +913,24 @@ def mount_evidence(pid: int, device: int, limit: int = FD_SCAN_LIMIT) -> dict:
         elif not stat.S_ISREG(status.st_mode):
             continue  # a pipe, a socket or a device carries no filesystem traffic
         elif not writable_fd(pid, descriptor):
-            readable = (readable[0] or f"{path_of_fd(pid, descriptor)} ({size(status.st_size)})", readable[1] + 1)
+            readable = (
+                readable[0] or f"{path_of_fd(pid, descriptor)} ({size(status.st_size)})",
+                readable[1] + 1,
+            )
             continue
-        elif status.st_size > biggest[1]:
-            biggest = (path_of_fd(pid, descriptor), status.st_size)
+        # Ranked by ALLOCATED bytes, shown as the file's own size. The two differ, and each is
+        # right for its job: the biggest consumer of the mount is the one holding the most
+        # blocks, so a 1 TiB sparse file must not win the comparison; but a reader who has to
+        # find that file is helped by the size it reports, not by its block count rounded up.
+        elif status.st_blocks * 512 > biggest[2]:
+            biggest = (path_of_fd(pid, descriptor), status.st_size, status.st_blocks * 512)
         found["on_mount"] = True
     # The example is for a reader who must act on it, so a file with bytes in it comes first,
     # then the cwd, and an empty or deleted open file only when there is nothing else: an
     # inherited 0-byte handle names the mount but tells that reader nothing.
-    if biggest[1] > 0:
+    if biggest[2] > 0:
         found["example"] = f"{biggest[0]} ({size(biggest[1])})"
-        found["mount_bytes"] = biggest[1]
+        found["mount_bytes"] = biggest[2]
     elif not found["example"]:
         found["example"] = directory or (f"{biggest[0]} ({size(biggest[1])})" if biggest[0] else "")
     if not found["on_mount"] and readable[1]:
@@ -1550,20 +1557,29 @@ def young_entries(
                         continue
                 dirs[:] = kept
                 for name in files:
+                    # st_blocks, not st_size, here and in every size rule: a sparse file claims
+                    # bytes it does not hold, and this watch exists to say what is consuming
+                    # the disk. Measured on sami-devbox on 2026-11-07:
+                    # tmp/CcTranscripts-01a15d00-scratch reads 1,024.0 GiB apparent and 3.4 MiB
+                    # allocated -- a deliberately sparse test fixture
+                    # (test_an_enormous_sparse_droppe0/huge.err). By st_size it is the largest
+                    # thing on the box and an alert would name it first; by st_blocks it is
+                    # nothing. The box-image accounting already used st_blocks for the same
+                    # reason; these rules did not.
                     try:
                         child = os.lstat(os.path.join(walked, name))
                     except OSError:
                         continue
                     if child.st_dev != tmp_dev:
                         continue
-                    total += child.st_size
+                    total += child.st_blocks * 512
                     newest_mtime = max(newest_mtime, child.st_mtime)
                 if time.time() > deadline:
                     break
             if total >= big:
                 found.append((total, entry.path, newest_mtime))
-        elif stat.st_size >= big:
-            found.append((stat.st_size, entry.path, newest_mtime))
+        elif stat.st_blocks * 512 >= big:
+            found.append((stat.st_blocks * 512, entry.path, newest_mtime))
     found.sort(key=lambda row: row[0], reverse=True)
     return found
 

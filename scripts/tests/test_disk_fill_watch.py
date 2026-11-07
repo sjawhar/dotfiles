@@ -799,7 +799,10 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
                 self.tmp.name, age=60.0, big=0, walk_dirs=True, budget=5.0
             )
             bytes_there, path, newest_mtime = next(row for row in found if row[1] == str(entry))
-            self.assertEqual(1, bytes_there)
+            # One byte of content, one 4 KiB block of disk. young_entries reports what the
+            # filesystem gave away, not what the file claims, so that a sparse file cannot read
+            # as the largest thing on the machine.
+            self.assertEqual(4096, bytes_there)
             owner = WATCH.tmp_owner_text("", newest_mtime, time.time())
             self.assertIn("no open descriptor or cwd was observed at the sample", owner)
             self.assertIn("newest observed file or directory mtime", owner)
