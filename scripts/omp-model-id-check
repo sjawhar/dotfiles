@@ -32,7 +32,14 @@ count_sessions() {
         "$HOME"/.omp/profiles/*/agent/models.yml 2>/dev/null | wc -l)
     echo "  model files still naming ossv-model-gateway: $inflight"
     echo "  sessions whose environment names it: $n"
-    echo "  FINISHED when both are 0"
+    # A zero here is not an all-clear, and saying so beside it is the point. A box's omp runs
+    # as another uid, so /proc/<pid>/environ is unreadable and this counts 0 whether or not
+    # that session is migrated. On 2026-11-07 it read 0 while 53 boxes had not yet restarted.
+    # The reading that CAN close it is the gateway's own call count, from the other side.
+    echo "  NOTE: this count proves presence, never absence -- a box's environ is unreadable"
+    echo "        here, so 0 means 'none seen', not 'none left'. Close it on the gateway's"
+    echo "        own call count, not on this."
+    echo "  FINISHED when both are 0 AND the gateway reports no calls from this host"
 }
 
 [[ "${1:-}" == --count ]] && { count_sessions; exit 0; }
