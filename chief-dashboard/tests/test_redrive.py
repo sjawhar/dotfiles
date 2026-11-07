@@ -35,11 +35,12 @@ def driver(tmp_path, sent=None, *, dry_run=False, ack_minutes=60, panes=None, sc
                           locate=(panes or {}).get, tmux=lambda *a, **k: screen)
 
 
-def answered(key: str = "BET-1", ask_id: str = "q1", hours: float = 60, author=None, live=(LIVE,),
+def answered(key: str = "BET-1", ask_id: str = "q1", hours: float = 60, author=None, live=(LIVE,), extra=(),
              **kw) -> FakeDispatch:
-    """An issue carrying one ask of Sami's that no session followed, with the ask node AUTHOR opened."""
+    """An issue carrying one ask of Sami's that no session followed, with the ask node AUTHOR opened. EXTRA is the
+    events that came after his answer."""
     events = [ev("ask.answered", SAMI, hours, id=ask_id, question="Do we ship the gate?",
-                 author=author, answer={"selected": ["Approve"], "text": "Ship it"})]
+                 author=author, answer={"selected": ["Approve"], "text": "Ship it"}), *extra]
     nodes = {ask_id: {"ask": {"id": ask_id, "author": author}, "replies": []}}
     return FakeDispatch([issue(key, status="backlog", events=events, **kw)], nodes=nodes, live=live)
 
@@ -138,6 +139,36 @@ def test_the_claim_holder_takes_it_when_no_session_opened_the_ask(tmp_path):
     run(api, driver(tmp_path, sent))
     assert [s["to"] for s in sent] == [LIVE]
     assert "you claim BET-1" in sent[0]["message"]
+
+
+def gate_comment(hours: float = 15) -> dict:
+    """GATE's acceptance of the item, on the issue and not in the ask's thread."""
+    return ev("comment.created", session(OFF_ROSTER, "GATE: gateway"), hours, id="c1",
+              body="the model gateway owner owns this, following the answer")
+
+
+def test_a_claim_holder_that_acted_after_the_answer_takes_the_row_even_off_the_lead_roster(tmp_path):
+    """INFRA-1168, 2026-11-07: the 13:27Z board printed NO-EXECUTOR although GATE had accepted the item in a comment
+    at 2026-11-06T22:07:24Z and claimed the issue at 05:46:29Z. The session that opened the ask was dead and GATE is
+    off the lead roster, so the claim was never read and the chief nearly sent the row to the session already on it."""
+    sent = Sent()
+    api = answered(author=session(DEAD, "ORCH: the session that asked"), claim=session(OFF_ROSTER, "GATE: gateway"),
+                   live=(OFF_ROSTER,), extra=[gate_comment()])
+    lines = run(api, driver(tmp_path, sent))
+
+    assert found(lines, "NO-EXECUTOR") == []
+    assert [s["to"] for s in sent] == [OFF_ROSTER]
+    assert "you claim BET-1 and acted on it after he wrote" in sent[0]["message"]
+
+
+def test_a_claim_held_by_a_dead_session_or_by_a_silent_off_roster_one_is_still_no_executor(tmp_path):
+    """The two cases the rule above must not swallow: a claim is an executor only when its session is alive, and an
+    off-roster session that did nothing after his answer has not taken the issue."""
+    dead_claim = answered(author=None, claim=session(DEAD, "LANE: the claim"), live=(), extra=[gate_comment()])
+    assert len(found(run(dead_claim, driver(tmp_path)), "NO-EXECUTOR")) == 1
+
+    silent = answered(author=None, claim=session(OFF_ROSTER, "GATE: gateway"), live=(OFF_ROSTER,))
+    assert len(found(run(silent, driver(tmp_path)), "NO-EXECUTOR")) == 1
 
 
 def test_an_issue_under_no_stream_falls_back_to_the_project_s_lead(tmp_path):

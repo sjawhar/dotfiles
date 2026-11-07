@@ -57,7 +57,10 @@ requests of ORG that name each issue in triage or in_progress, plus the pull req
   DISPATCH-PAST-ACK       a driven row with no reply in its thread after the time its executor was given. This is
                           the count to drive to zero, not the raw waiting count. The row is driven again;
   DISPATCH-NO-EXECUTOR    a waiting row that no session can take: nobody opened it, nobody claims the issue and its
-                          stream names no live lead. It is listed for the chief to place by hand, never dropped;
+                          stream names no live lead. A live claim holder that acted on the issue after Sami wrote
+                          takes the row whatever the lead roster says, since it has already taken the issue; a
+                          claim held by a dead session, or by an off-roster one that stayed silent, leaves the row
+                          here. It is listed for the chief to place by hand, never dropped;
   DISPATCH-STATUS         an issue in triage while work runs on it (a live claim, an agent comment or message in the
                           last 24 hours, or an open pull request DELIVERING it; agent comments on a release-queue issue
                           in triage do not count): it should be in_progress; and one
@@ -608,10 +611,18 @@ def unfollowed(events: list[dict], open_ask_ids: set) -> list[tuple[str, str]]:
             if e["type"] != "message.created" and not _followed_here(e, events[i + 1:])]
 
 
+def _acted_since(later: list[dict]) -> frozenset[str]:
+    """The sessions that acted on the issue after Sami's event: any event of theirs among LATER. A session that
+    claims the issue and is in this set is carrying the row out, which is what makes it an executor the re-drive
+    can name even when it is off the lead roster (`redrive.Driver.candidates`)."""
+    return frozenset(e["actor"]["id"] for e in later if is_session(e) and e["actor"].get("id"))
+
+
 def waiting_on_us(key: str, events: list[dict], open_ask_ids: set, remote: dict, authors: dict, server: str,
                   now: dt.datetime) -> list[Wait]:
     """Sami's comments, ask answers and messages that no session followed (see the module docstring), as the rows the
-    re-drive works on: each carries the node it is about and the session that opened it, when there is one."""
+    re-drive works on: each carries the node it is about, the session that opened it when there is one, and the
+    sessions that acted on the issue after he wrote."""
     rows: list[Wait] = []
     for i, e in _sami_waits(events, open_ask_ids):
         p = e["payload"]
@@ -620,11 +631,11 @@ def waiting_on_us(key: str, events: list[dict], open_ask_ids: set, remote: dict,
         at = ts(e["created_at"])
         if any(at < ts(t) <= now for t, _ in remote.get(p.get("id"), [])):
             continue
-        waited, node = age(at, now), p.get("id") or ""
+        waited, node, acted = age(at, now), p.get("id") or "", _acted_since(events[i + 1:])
         if e["type"] == "comment.created":
             where = f" on {p['artifact_name']}" if p.get("artifact_name") else ""
             body = " ".join((p.get("body") or "").split())
-            rows.append(Wait(key, "comment", node, waited=waited, question=body,
+            rows.append(Wait(key, "comment", node, waited=waited, question=body, acted=acted,
                              text=f"{key} comment{where} by sami {waited} ago, unanswered and unresolved: "
                                   f"{body[:180]} ({server}/issues/{key}/comments/{node})"))
             continue
@@ -646,7 +657,7 @@ def waiting_on_us(key: str, events: list[dict], open_ask_ids: set, remote: dict,
             what = f"message: {question[:160]}"
             since = "no agent comment, message or ask since"
         rows.append(Wait(key, kind, node, waited=waited, author=author, question=question, answer=answer,
-                         text=f"{key} {what[:260]} (sami, {waited} ago; {since})"))
+                         acted=acted, text=f"{key} {what[:260]} (sami, {waited} ago; {since})"))
     return rows
 
 

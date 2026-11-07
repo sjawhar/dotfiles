@@ -16,7 +16,9 @@ What it does with each WAITING-ON-US row:
    Legion controller at the last step: an architect's claim outlives its process, so the tree is parked rather than
    gone, and the controller is the session that wakes it. When nothing resolves, the row prints as
    `DISPATCH-NO-EXECUTOR` with what was checked about each candidate it passed over. That row is for the chief to
-   place by hand; it is never dropped and nothing is invented to send it to.
+   place by hand; it is never dropped and nothing is invented to send it to. The claim holder is read whatever the
+   lead roster says, as long as it acted on the issue after Sami wrote: it has already taken the issue, so the
+   roster, which governs who a stream's work may be handed to, does not apply (INFRA-1168, 2026-11-07).
 2. **Sets a time to acknowledge by** (`ACK_MINUTES`, default 60) and writes it to the ledger
    (`$DASHBOARD_STATE_DIR/redrive.json`), so the next run can tell an acknowledged row from a silent one.
 3. **Sends one message** naming the ask, Sami's answer, how long the row has waited, and what an acknowledgement is:
@@ -71,7 +73,8 @@ NOT_LEADS = frozenset({
 @dataclass
 class Wait:
     """One row that waits on us: the finding's issue, the Dispatch node it is about, its printed text, how long it
-    has waited, and the session that opened it when it is an ask."""
+    has waited, the session that opened it when it is an ask, and the sessions that acted on its issue after Sami
+    wrote (`acted`), which is how a claim holder that is carrying the row out is told from one that is not."""
 
     key: str
     kind: str  # ask | comment | message
@@ -81,6 +84,7 @@ class Wait:
     author: dict | None = None
     question: str = ""
     answer: str = ""
+    acted: frozenset[str] = frozenset()
 
     @property
     def rid(self) -> str:
@@ -281,20 +285,29 @@ class Driver:
     def candidates(self, w: Wait, data: dict, project: str) -> list[tuple[str, str, str]]:
         """(session id, name, why it is the executor), in the order the rule gives: the session that opened the ask,
         the issue's claim holder, the lead of the stream the issue belongs to, and last the lead of the project's
-        own stream when the project has exactly one. A claim a person holds is left out: executors are agent sessions."""
+        own stream when the project has exactly one. A claim a person holds is left out: executors are agent sessions.
+
+        A claim holder that acted on the issue after Sami wrote is an executor even when the lead roster no longer
+        names it: the roster says who a STREAM's work may be handed to, not who has already taken this issue. On
+        2026-11-07 INFRA-1168 printed NO-EXECUTOR at 13:27Z although GATE had accepted the item in a comment at
+        2026-11-06T22:07:24Z and claimed the issue at 05:46:29Z; the session that opened the ask was dead and GATE
+        is off the roster, so nothing was left. A claim held by a session that did not act after the answer, or by
+        one that is off the roster and silent, is passed over as before."""
         out: list[tuple[str, str, str]] = []
         live, meta = data["live"], data["meta"]
         # A session is named by its whole id: eight hex characters are not unique in this fleet (01a16a9e is both the
         # task-making and the Rocq speed lead, 2026-11-05), so a prefix in a drive line can name the wrong executor.
         name = lambda a: a.get("origin", {}).get("session_title") or live.get(a["id"]) or a["id"]  # noqa: E731
-        add = lambda sid, label, why: (  # noqa: E731
+        add = lambda sid, label, why, off_roster=False: (  # noqa: E731
             out.append((sid, label or sid, why))
-            if sid and sid not in NOT_LEADS and not any(c[0] == sid for c in out) else None)
+            if sid and (off_roster or sid not in NOT_LEADS) and not any(c[0] == sid for c in out) else None)
         if w.author and w.author.get("kind") == "session":
             add(w.author["id"], name(w.author), "you opened this ask")
         claim = ((meta.get(w.key) or {}).get("claim") or {}).get("actor") or {}
         if claim.get("kind") == "session":
-            add(claim["id"], name(claim), f"you claim {w.key}")
+            acted = claim["id"] in w.acted
+            why = f"you claim {w.key} and acted on it after he wrote" if acted else f"you claim {w.key}"
+            add(claim["id"], name(claim), why, off_roster=acted)
         seen: set[str] = set()
         k: str | None = w.key
         while k and k not in seen:
