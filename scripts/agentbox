@@ -549,11 +549,27 @@ BOX_MOUNTS=()
 
 # These exact destinations belong to the box. Replacing them breaks its disk
 # accounting or runtime brokers rather than adding access to shared host state.
+#
+# The last case is the one that cost a lane its trees. A box builds its own
+# /mnt/nvme/<user> for its disks, caches and clones, so a --dir naming that exact
+# path is SHADOWED by the box's copy: `agentbox move --self --dir /mnt/nvme/sami`
+# reported success, the path existed in the box, it held plausible content
+# (agentbox, boxid, clones, compute-inventory, farm-pkg, grade-farm), and the
+# session's own gate-briefs and gate-runs were simply absent. A bind that fails
+# loudly sends its owner back with the right path; this one hands them a
+# same-named directory with different contents, so a lane can WRITE into it
+# believing it is the host tree, and that work dies with the box (SRE, 2026-11-07,
+# box agentbox-b935af17a8e1). Name the subdirectories you actually work in.
 box_dir_private_why() {
+    local state_root
+    state_root="$(dirname "$(dirname "$BOXES")")"
     case "$1" in
         /tmp) echo "every box has a /tmp of its own, inside its disk limit" ;;
         "$HOME/.omp/run") echo "every box has its own ~/.omp/run, or one box's omp broker deletes another's live scopes" ;;
         "/run/user/$UID_") echo "every box has a runtime dir of its own, holding the host's sockets at their usual paths" ;;
+        "$state_root")
+            echo "a box builds its own $state_root for its disks, caches and clones, so this bind is shadowed by the box's copy and your trees under it are NOT in the box, with no error at any point; name the subdirectories you work in instead, e.g. $(printf -- '--dir %s/<your-tree>' "$state_root")"
+            ;;
         *) return 1 ;;
     esac
 }
