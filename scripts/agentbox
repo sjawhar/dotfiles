@@ -280,6 +280,42 @@ box_record_session() {
         || { rm -f "$tmp"; echo "agentbox: could not record $sid as $box's session in $rec" >&2; }
     return 0
 }
+
+# Where every box's exit status is kept, one TSV line per box that ended. Durable and shared, so
+# a count survives the box, the pane and a reboot.
+#
+# Why this exists: `docker run --rm` removes the container the moment it ends, so its exit status
+# lives only in this launcher's $rc and then in `exit $rc`, which nothing reads -- a tmux pane is
+# not a record. On 2026-11-07 the fleet could not answer "how many boxes aborted tonight": the
+# host journal carries each box's tmux RELAY exiting 143 on a normal stop and nothing about the
+# omp inside, so a scan for SIGABRT (134) found zero while three aborts were known from stderr
+# files and bun.report links. A session that aborts cannot write its own abort into its
+# transcript either, so a transcript scan is blind to it as well. This file is the surface that
+# can count them (dispatch://INFRA-1537).
+# Not DURABLE_DIR: that is set further down this file. Same expression it uses.
+BOX_EXITS="${AGENTBOX_EXITS:-/mnt/durable/$(id -un)/agentbox-exits.tsv}"
+
+# record_box_exit BOX SID RC: append one line for a box that ended. Never fails the launcher and
+# never blocks its cleanup: a missing directory, a full disk or a read-only mount costs the
+# record, not the box's removal.
+record_box_exit() {
+    local box="$1" sid="$2" rc="$3" signal="" dir
+    # 128+N is a signal death; name the ones that matter rather than leaving a bare number.
+    case "$rc" in
+        134) signal=SIGABRT ;;
+        137) signal=SIGKILL ;;
+        139) signal=SIGSEGV ;;
+        143) signal=SIGTERM ;;
+        *) signal="" ;;
+    esac
+    dir="$(dirname "$BOX_EXITS")"
+    [[ -d "$dir" ]] || return 0
+    # One short line, opened O_APPEND: concurrent launchers do not interleave it.
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$box" "${sid:-(no session)}" "$rc" "${signal:-.}" \
+        >>"$BOX_EXITS" 2>/dev/null || true
+    return 0
+}
 EMBED_NAME=omp-embed
 EMBED_PORT="${OMP_EMBED_PORT:-8087}"
 IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
@@ -2758,6 +2794,9 @@ cmd_new() {
         if wait "$child"; then rc=0; else rc=$?; fi
         kill -0 "$child" 2>/dev/null || break
     done
+    # Record the status before anything else: close_box and the exit below are where it would be
+    # lost, and a box that aborted is exactly the one whose cleanup is most likely to go wrong.
+    record_box_exit "$box" "$sid" "$rc"
     # The pane can go away while close is still running (a pane kill, a server
     # exit). That must not stop the box's removal: the launcher ignores the
     # hangup from here on (knives runs in its own session, see `detached`), and
