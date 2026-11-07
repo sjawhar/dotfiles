@@ -450,7 +450,9 @@ class MessageShapeTest(Harness):
     def test_the_iops_alert_and_clear_are_short_and_name_their_reports(self) -> None:
         ops = [5_000_000]
         original = WATCH.device_ops
-        WATCH.device_ops = lambda mount: ("nvme0n2", ops[0])
+        # Write-bound: device_ops now reports (device, reads, writes) and this case puts the
+        # whole count on the write side, so the totals are what they were.
+        WATCH.device_ops = lambda mount: ("nvme0n2", 0, ops[0])
         self.addCleanup(setattr, WATCH, "device_ops", original)
 
         def step(iops: float) -> None:
@@ -465,7 +467,15 @@ class MessageShapeTest(Harness):
         self.assertIn("DISK AT ITS IOPS CAP", alert)
         report = self.assert_short(alert)
         self.assertIn("Why this alerts", report)
-        self.assertIn("Top writers now", report)
+        # An IOPS alert attributes by OPERATIONS, not bytes. It used to reuse the fill alert's
+        # "Top writers now" paragraph unchanged, which ranks by write_bytes: on a device held
+        # at its cap by many small operations that names whichever lane moved the most data,
+        # which is the wrong lane to go and stop. The heading differing from the fill alert's
+        # is the point, so this asserts the operations wording and that the bytes wording is
+        # absent.
+        self.assertIn("Busiest processes now", report)
+        self.assertIn("READ AND WRITE SYSCALLS", report)
+        self.assertNotIn("Top writers now", report)
 
         step(3750.0)
         self.assertEqual(2, len(self.messages()))
@@ -1213,7 +1223,7 @@ class LiveIopsCapTest(Harness):
         # so it answers by the clock the child inherited rather than by mutating test state.
         self.live: list[tuple[float, dict]] = []
         original_ops = WATCH.device_ops
-        WATCH.device_ops = lambda mount: ("nvme44n1", self.ops)
+        WATCH.device_ops = lambda mount: ("nvme44n1", 0, self.ops)
         self.addCleanup(setattr, WATCH, "device_ops", original_ops)
 
         def lookup(mounts: list[str]) -> dict:

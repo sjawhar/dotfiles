@@ -1523,8 +1523,11 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
         original_writers = WATCH.writers_now
         original_time = WATCH.time.time
         WATCH.Envoy = lambda timeout=8.0: self.envoy
-        WATCH.device_ops = lambda mount: ("nvme0n2", self.ops)
-        WATCH.writers_now = lambda options, device, mount, deadline: (
+        # device_ops reports reads and writes apart, so the caller can say which side a device
+        # at its cap is spending itself on. These cases are write-bound: all of self.ops are
+        # writes, which keeps their totals what they were.
+        WATCH.device_ops = lambda mount: ("nvme0n2", 0, self.ops)
+        WATCH.writers_now = lambda options, device, mount, deadline, measure="bytes": (
             "Top writers now: (none in this test)",
             [],
         )
@@ -1566,16 +1569,23 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
     def test_the_iops_figure_comes_from_two_diskstats_readings(self) -> None:
         before = WATCH.diskstats_rows(self.FIRST)[(259, 1)]
         after = WATCH.diskstats_rows(self.SECOND)[(259, 1)]
-        self.assertEqual(("nvme0n2", 3000), before)
-        self.assertEqual(("nvme0n2", 2_253_000), after)
+        # Reads and writes come back apart. The cap is on their sum, and the rate below still
+        # uses the sum; keeping them separate is what lets the alert say which side a device at
+        # its cap is spending itself on, which decides what a person does about it.
+        self.assertEqual(("nvme0n2", 1000, 2000), before)
+        self.assertEqual(("nvme0n2", 751_000, 1_502_000), after)
+        self.assertEqual(3000, before[1] + before[2])
+        self.assertEqual(2_253_000, after[1] + after[2])
 
-        rate, span = WATCH.iops_rate({"at": 1000.0, "ops": before[1]}, after[1], 1300.0)
+        rate, span = WATCH.iops_rate(
+            {"at": 1000.0, "ops": before[1] + before[2]}, after[1] + after[2], 1300.0
+        )
 
         self.assertEqual(300.0, span)
         self.assertAlmostEqual(7500.0, rate)
 
     def test_an_array_is_read_from_its_own_line_not_from_its_members(self) -> None:
-        self.assertEqual(("md127", 110), WATCH.diskstats_rows(self.FIRST)[(9, 127)])
+        self.assertEqual(("md127", 50, 60), WATCH.diskstats_rows(self.FIRST)[(9, 127)])
 
     def test_a_counter_that_went_backwards_produces_no_figure(self) -> None:
         """A reboot, or another device under the mount: the counters restart at zero."""
@@ -1589,7 +1599,10 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
 
     def test_the_run_logs_the_iops_figure_whether_or_not_anything_is_wrong(self) -> None:
         self.step(100.0)
-        self.assertIn(f"{self.MOUNT}: 100 IOPS over the last 300 s, cap 7500", self.step(100.0))
+        line = self.step(100.0)
+        # The log carries the read/write split beside the total, so a device at its cap can be
+        # told apart from one merely busy on the side this watch cannot attribute.
+        self.assertIn(f"{self.MOUNT}: 100 IOPS over the last 300 s, 0 read + 100 write, cap 7500", line)
         self.assertEqual([], self.messages())
 
     def test_three_consecutive_runs_at_the_cap_alert_once(self) -> None:
