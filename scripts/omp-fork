@@ -25,6 +25,20 @@ named profile joined the real Envoy under the live session's id. Measured on 202
 named profile the copy was in Envoy's session list for its whole run (20:53:16-20:54:10Z), with
 none it was absent (20:33:22-20:34:34Z).
 
+The fork is also cut off from secretsd, for the same reason and a worse consequence
+(dispatch://INFRA-1644). secretsd's registry is keyed by session id alone: the copy's secretsd
+plugin mints a token of its own, REGISTERs it under the LIVE session's id -- which displaces the
+live session's token and revokes its grants (`Registry::register`) -- and on exit UNREGISTERs
+that id outright. The live session never notices, because its own plugin still believes it is
+registered and only re-registers when the daemon's instance id changes, so from then on every
+`secrets` call and every `forward browser grant` in it answers UNKNOWN_TOKEN until the session
+restarts. Measured on 2026-11-07: 58 of 154 live box sessions on sami-devbox were in that state.
+The copy therefore gets a private `XDG_RUNTIME_DIR` under its scratch directory, so its token
+file cannot land on the live session's, and a `SECRETSD_SOCK` inside it that nothing is listening
+on, so its REGISTER and its UNREGISTER never reach the real daemon. The copy itself then has no
+secrets: `secrets` and `forward` in it report an unreachable broker, as Envoy being off reports
+no listener.
+
 Prints {"text", "model", "fallback", "cost", "tokens", "cut", "fork_session"} on stdout. `fallback` is
 true when an answer came from a model other than the session's own (omp's fallback chain, often
 after a refusal); `fork_session` is the fork's own transcript when --keep DIR saved it, else null.
@@ -141,7 +155,16 @@ def main() -> None:
         cmd = ["omp", "-p", "--mode", "json", "--session-dir", str(scratch), "--resume", str(copy), "--max-time", args.max_time]
         if args.model:
             cmd += ["--model", args.model]
-        env = {**os.environ, "ENVOY_CONFIG_FILE": str(scratch / "envoy.json"), "OMP_PROFILE": "default"}
+        # A runtime directory of its own, holding a secretsd socket path nothing listens on.
+        # The secretsd plugin derives both the token file (`<dir>/secretsd/<session id>.token`)
+        # and, without SECRETSD_SOCK, the socket from this one variable, and it refuses a
+        # directory another user can write, so 0700 under the scratch root is what it accepts.
+        # SECRETSD_SOCK is set as well, since a caller that already exports it would otherwise
+        # hand the copy the live daemon again.
+        runtime = scratch / "run"
+        runtime.mkdir(mode=0o700)
+        env = {**os.environ, "ENVOY_CONFIG_FILE": str(scratch / "envoy.json"), "OMP_PROFILE": "default",
+               "XDG_RUNTIME_DIR": str(runtime), "SECRETSD_SOCK": str(runtime / "secretsd.sock")}
         env.pop("PI_PROFILE", None)
         env.pop("PI_CODING_AGENT_DIR", None)
         parent_profile = os.environ.get("OMP_PROFILE") or os.environ.get("PI_PROFILE") or ""
