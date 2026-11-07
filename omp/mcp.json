@@ -21,6 +21,7 @@
       ]
     },
     "home-assistant": {
+      "lazy": true,
       "command": "secrets",
       "args": [
         "HA_MCP_URL",
