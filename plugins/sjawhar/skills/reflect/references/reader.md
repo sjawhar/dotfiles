@@ -20,6 +20,8 @@ A finding is one agent failure. It needs these quotes, each copied verbatim (whi
 - `action`: the agent's words or tool call that broke it, from the record.
 - `pushback`: Sami's words that object to it, from one of his messages in the record. If he did not push back, set `pushback` to `null` and still record the finding.
 
+Every quote comes from the record you are reading. A sibling record of the same session is not your evidence, however clearly it shows the mistake: name it by its record id in `summary` and quote only what is in front of you. The checker rejects a quote it cannot find in your record, and that one cause was a sixth of the 2026-11-07 run's rejections.
+
 Do not record as a finding:
 
 - a critique of something the agent did right, or a choice Sami accepted;
