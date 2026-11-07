@@ -7,9 +7,9 @@ an account, not a session.
 
 Why this exists. A verdict that reaches a peer in conversation and not the author is a verdict
 that was not delivered: agent infra's 2026-10-31 drop sweep put 233.3 of 240.0 delayed hours on
-owed gate verdicts. `post-review` closes the gap between posting and telling. This closes the
-other half — the silence while a gate runs, which is minutes to an hour — so the author knows a
-verdict is coming and holds the head still rather than pushing under it. The measured form is
+owed gate verdicts. This closes the silence while a gate runs, which is minutes to an hour, so
+the author knows a verdict is coming and holds the head still rather than pushing under it.
+The measured form is
 FRAC's (tick 46-47, dispatch://BET-59/artifact/speed-log-md): 33 of 36 verdicts reached their
 owner in 1-20 s.
 

@@ -1773,14 +1773,6 @@ mount_args() {
     for key_dir in "/run/user/$UID_/verified-grader" "/run/user/$UID_/omp-session-sql"; do
         box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir")
     done
-    # The review App's installation token cache (scripts/post-review). It is the machine's, not
-    # the box's: each mint is a grant of a human-tier secret that Sami approves by hand, and
-    # while the cache followed the box's private /run/user/$UID every box asked him again, and a
-    # box made by `agentbox move` threw away the hour its session already had. A directory, so
-    # the rename post-review's mint does is seen at once by every box.
-    mkdir -p -m 700 "/run/user/$UID_/post-review"
-    box_dir_named "/run/user/$UID_/post-review" \
-        || a+=(-v "/run/user/$UID_/post-review:/run/user/$UID_/post-review")
     # The shared ssh identity bin/ossv-vm uses to reach the gateway VM, where the host has it:
     # without it `ossv-vm` in a box cannot reach that VM at all (agentvm, 2026-11-03). A box is
     # for segregation, not for keeping a session from what its host gives it (Sami,

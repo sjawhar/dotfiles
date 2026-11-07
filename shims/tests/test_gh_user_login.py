@@ -236,13 +236,12 @@ class UserLogin(unittest.TestCase):
         self.assertNotIn("is never used by an agent", err)
         self.assertIn("`gh pr comment 1178 -R o/r --body-file <file>`", err)
         self.assertIn("`VERDICT: APPROVE at <full 40-character head sha>`", err)
-        # agent-infra main needs an approving review, which a comment is not.
-        self.assertIn(
-            "`~/.dotfiles/scripts/post-review 1178 <full 40-character head sha> APPROVE <body-file> o/r`", err
-        )
-        self.assertIn("only when your session did not author the pull request", err)
-        # A CODEOWNERS approval in Sami's name is not the review App's to give: the admin token route
-        # is offered for the refused review itself.
+        # agent-infra main needs an approving review, which a comment is not. Nothing on the box
+        # is the review App, so an approval this identity cannot give is asked of the controller.
+        self.assertIn("ask the INFRA Legion controller for a review issue", err)
+        self.assertNotIn(".dotfiles/scripts/", err)  # no script stands between a session and gh
+        # A CODEOWNERS approval in Sami's name needs the admin token route, which is offered
+        # for the refused review itself.
         self.assertIn("a CODEOWNERS approval in his name", err)
         self.assertIn("GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' "
                       "gh pr review 1178 -R o/r --approve --body VERDICT:\\ APPROVE`", err)
@@ -254,7 +253,8 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`gh pr comment 7 -R o/r --body-file <file>`", result.stderr)
         self.assertIn("`VERDICT: REQUEST_CHANGES at", result.stderr)
-        self.assertIn("post-review 7 <full 40-character head sha> REQUEST_CHANGES <body-file> o/r`", result.stderr)
+        self.assertIn("ask the INFRA Legion controller for a review issue", result.stderr)
+        self.assertNotIn(".dotfiles/scripts/", result.stderr)
 
     def test_an_unrouted_call_is_not_sent_and_says_to_name_a_repository(self):
         # Since 2026-11-03 gh runs only with a routed token in an agent session (scripts/gh-routed-only):
