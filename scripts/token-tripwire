@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Tell a session the moment its secretsd token stops being known (dispatch://INFRA-1644).
+
+`scripts/omp-fork` resumed a copy of a live session under the live session's own id; secretsd
+keys its registry on the id alone, so the copy displaced the live token and its exit removed it.
+59 of 153 live box sessions were left that way, silently. dotfiles ba86aedf fixes new forks, and
+one secrets request re-registers an affected session.
+
+The state cannot be enumerated: secretsd has no registry dump, and the failing log line carries
+no session id -- `untrusted_registered_session=None` is exactly what being unknown looks like.
+Measured on 2026-11-07, the whole day's journal held nine such pids and every one had already
+exited, so there was nobody left to tell. A session with a dead token is invisible until it asks.
+
+So this is a tripwire, not a census. It follows secretsd's journal; a healthy request logs twice
+for one pid (`scope_kind=None` with `decision="UNKNOWN_TOKEN"`, then `Some(VerifiedSession)`
+naming the session), and a broken one logs only the first. On a first line with no second within
+the window, while the pid is still alive, it reads /proc/<pid>/cgroup, names the box, reads that
+box's record for the session id, and sends that session one Envoy note with the recovery. It
+never acts for the session: a credential is the session's own.
+
+One note per session per hour, so a session failing in a loop is told once.
+"""
+import collections
+import os
+import re
+import subprocess
+import sys
+import time
+
+WINDOW_S = 2.0
+QUIET_S = 3600
+RECORD_DIRS = ["/mnt/scratch/sami/agentbox/disks", "/mnt/nvme/sami/agentbox/boxes"]
+# By path: a systemd unit has no login shell, so `envoy` alone is not found.
+ENVOY = "/home/sami/.dotfiles/scripts/envoy"
+# A variable, not the literal, so the tests can build a /proc of their own.
+PROC_ROOT = "/proc"
+
+line_re = re.compile(
+    r"^(?P<ts>\S+)\s+INFO request handled .*?peer_pid=(?P<pid>\d+).*?"
+    r"scope_kind=(?P<scope>\S+)"
+)
+
+def box_of(pid: str) -> str:
+    """The box a host pid runs in, or "" for a host process or one that has exited.
+
+    The cgroup names the container by id, not by box name --
+    `…/user-1000-agentbox.slice/docker-<64 hex>.scope/init.scope` -- so the id is resolved
+    through docker. A pid outside a container has neither.
+    """
+    try:
+        with open(f"{PROC_ROOT}/{pid}/cgroup", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return ""
+    for part in text.replace("\n", "/").split("/"):
+        if part.startswith("agentbox-"):
+            return part.split(".")[0]
+        if part.startswith("docker-") and part.endswith(".scope"):
+            container = part[len("docker-"):-len(".scope")]
+            got = subprocess.run(["docker", "inspect", "--format", "{{.Name}}", container],
+                                 capture_output=True, text=True, check=False)
+            name = got.stdout.strip().lstrip("/")
+            if name.startswith("agentbox-"):
+                return name
+    return ""
+
+def session_of(box: str) -> str:
+    for directory in RECORD_DIRS:
+        path = os.path.join(directory, f"{box}.info")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for row in fh:
+                    if row.startswith("session="):
+                        return row.split("=", 1)[1].strip()
+        except OSError:
+            continue
+    return ""
+
+def tell(session: str, box: str, pid: str) -> None:
+    message = (
+        f"Box health: **this session's secretsd token is not known to the daemon**, so its "
+        f"secret requests are failing. Seen just now: pid {pid} in {box} asked for a key and "
+        f"secretsd answered UNKNOWN_TOKEN with no session behind it.\n\n"
+        f"**Recovery takes one call and no restart:** make a single `secrets_request` for any "
+        f"agent-tier key you normally use (the `xd://secrets_request` device), or run "
+        f"`secrets get <KEY>` in a shell. That re-registers this session's token.\n\n"
+        f"Cause, for the record: `scripts/omp-fork` resumed a session copy under the live "
+        f"session's own id, and secretsd keys its registry on the id alone, so the copy "
+        f"displaced the token and its exit removed it (dispatch://INFRA-1644). Fixed for new "
+        f"forks in dotfiles ba86aedf. Nothing of yours is lost; the token just has to be "
+        f"re-registered."
+    )
+    subprocess.run([ENVOY, "send", "--message", message, session], check=False,
+                   capture_output=True, text=True)
+
+def main() -> None:
+    pending: dict[str, float] = {}
+    verified_at: dict[str, float] = {}
+    told: dict[str, float] = {}
+    proc = subprocess.Popen(
+        ["journalctl", "-t", "secrets", "-f", "-n", "0", "-o", "cat"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        now = time.time()
+        m = line_re.match(line)
+        if m:
+            pid, scope = m["pid"], m["scope"]
+            if scope.startswith("Some(VerifiedSession)"):
+                verified_at[pid] = now
+                pending.pop(pid, None)
+            elif "UNKNOWN" in line:
+                pending.setdefault(pid, now)
+        for pid, seen in list(pending.items()):
+            if now - seen < WINDOW_S:
+                continue
+            del pending[pid]
+            if now - verified_at.get(pid, 0) < WINDOW_S:
+                continue
+            box = box_of(pid)
+            if not box:
+                continue  # exited, or not in a box: nobody to tell
+            session = session_of(box)
+            if not session or now - told.get(session, 0) < QUIET_S:
+                continue
+            told[session] = now
+            tell(session, box, pid)
+            print(f"{time.strftime('%H:%M:%SZ', time.gmtime())} told {session} ({box}, pid {pid})",
+                  flush=True)
+
+if __name__ == "__main__":
+    sys.exit(main())

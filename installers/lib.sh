@@ -153,3 +153,35 @@ arm_user_timer() {
     }
     echo "$name: armed ($(systemctl --user show -p NextElapseUSecRealtime --value "$name.timer"))"
 }
+
+# Arm the systemd user SERVICE <name>, whose unit is <unit-dir>/<name>.service in ~/.dotfiles:
+# link it into ~/.config/systemd/user, enable and start it, and prove it is running. For a
+# watch that follows something (a journal, an inotify stream) rather than waking on a period,
+# where a timer would be the wrong shape: the state it watches for can be unobservable by the
+# time the next period comes round. Same refusals as arm_user_timer, for the same reasons.
+arm_user_service() {
+    local dir="$1" name="$2" state
+    local units="$HOME/.dotfiles/$dir"
+    if [[ -f /.dockerenv ]] || [[ "$(systemd-detect-virt 2>/dev/null)" == docker ]]; then
+        echo "$name: this is an agentbox; the host systemd cannot see its ~/.config/systemd." >&2
+        echo "  Run $0 from a host shell instead." >&2
+        return 1
+    fi
+    [[ -f "$units/$name.service" ]] || {
+        echo "$name: $units/$name.service is missing; advance ~/.dotfiles to a main that has it" >&2
+        return 1
+    }
+    mkdir -p "$HOME/.config/systemd/user" || return 1
+    ensure_link "$units/$name.service" "$HOME/.config/systemd/user/$name.service" || return 1
+    systemctl --user daemon-reload || return 1
+    systemctl --user enable --now "$name.service" || return 1
+    # Prove it is running rather than trusting `enable --now`: a Restart=always unit whose
+    # ExecStart dies immediately reports success at enable time and is dead a second later.
+    sleep 2
+    state="$(systemctl --user is-active "$name.service" 2>/dev/null)" || true
+    [[ "$state" == active ]] || {
+        echo "$name: not running after start ($state); see systemctl --user status $name.service" >&2
+        return 1
+    }
+    echo "$name: armed (running, $(systemctl --user show -p MainPID --value "$name.service"))"
+}
