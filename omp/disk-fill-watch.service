@@ -15,4 +15,10 @@ IOSchedulingClass=idle
 # Seven runs in the 6 h to 2026-11-03T02:39Z were killed here because the scan had no bound of
 # its own; now the run skips what it cannot pay for and still sends.
 TimeoutStartSec=120
-ExecStart=%h/.dotfiles/scripts/disk-fill-watch
+# --no-mount-alerts: from 2026-11-07, agent-infra#2349 gives this machine the `owner:sjawhar`
+# attribute, so Datadog's own host monitors page on a filesystem filling here. The timer stays,
+# because nothing else does its other three duties -- the IOPS-cap check, naming the processes
+# that are writing, and the free-space series the forecast reads -- but two alerts for one
+# crossing teach people to ignore both. Turning off the one duty rather than removing the timer
+# was the INFRA lead's call, 2026-11-07 14:08Z.
+ExecStart=%h/.dotfiles/scripts/disk-fill-watch --no-mount-alerts
