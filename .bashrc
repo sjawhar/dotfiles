@@ -91,6 +91,14 @@ unset _path _parts _p
 # jj (Jujutsu) - load config from both user-specific and shared dotfiles
 export JJ_CONFIG="${HOME}/.config/jj/config.toml:${DOTFILES_DIR}/.jjconfig.toml"
 
+# pup (Datadog CLI) keeps its OAuth tokens in ~/.config/pup/ at 0600, not in a keyring.
+# No machine here runs a Secret Service -- gnome-keyring is not installed -- so pup falls back
+# to the KERNEL keyring, which is session-scoped: the login dies with the shell that made it.
+# That is why the 2026-11-06 17:59Z login left the box unauthenticated within minutes. pup reads
+# this from the environment only; `token_storage: file` in ~/.config/pup/config.yml is ignored
+# (measured 2026-11-07 19:20Z: with the config alone pup still warns, with this it does not).
+export DD_TOKEN_STORAGE=file
+
 # Route xdg-open through forward to the laptop browser. The daemon pins an
 # absolute opener path, so this is safe on both machines.
 export BROWSER="${DOTFILES_DIR}/shims/xdg-open"
