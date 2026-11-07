@@ -167,7 +167,11 @@ const SESSION_SOURCE_FLAGS: Record<string, true> = {
 	"--from-claude": true,
 	"--from-codex": true,
 };
-const SESSION_FILE = /\/\.omp\/agent\/sessions\/[^/]+\/[0-9T:-]+Z_([0-9a-f-]{36})\.jsonl$/;
+// A profile's transcripts live under ~/.omp/profiles/<name>/agent/sessions/, so the
+// optional segment is load-bearing: without it every `--profile` session in every box
+// was unrestartable, and the runner logged "this box has no session yet" instead.
+const SESSION_FILE = /\/\.omp\/(?:profiles\/[^/]+\/)?agent\/sessions\/[^/]+\/[0-9T:-]+Z_([0-9a-f-]{36})\.jsonl$/;
+const SESSION_UUID = /^[0-9a-f-]{36}$/;
 
 function flagConsumesValue(flag: string, next: string | undefined): boolean {
 	if (flag.startsWith("--") && flag.includes("=")) return false;
@@ -276,7 +280,31 @@ export function movedRefusal(argv: string[], home: string, machine: string): str
 // $HOME, `--mnt-nvme-<user>-agentbox-boxes-<box>-<repo>--` on the big disk, agentbox's
 // BOXES). A box name is never reused, so the newest file in a directory naming this
 // box is its current session.
-function sessionId(pid: number): string | undefined {
+// Every sessions root this box could hold a transcript in: the default one, and one per
+// profile. A `--profile pbc` session writes under ~/.omp/profiles/pbc/agent/sessions/.
+function sessionRoots(): string[] {
+	const omp = `${process.env.HOME}/.omp`;
+	const roots = [`${omp}/agent/sessions`];
+	try {
+		for (const name of fs.readdirSync(`${omp}/profiles`)) roots.push(`${omp}/profiles/${name}/agent/sessions`);
+	} catch {}
+	return roots;
+}
+
+// A resumed session carries its own id in the runner's argv, which needs no open file
+// descriptor and no directory naming. Used last, never first: argv is authoritative only
+// at launch, so a session that later forked or switched would make it stale.
+function sessionIdFromArgv(argv: string[]): string | undefined {
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] !== "--resume") continue;
+		const value = argv[i + 1];
+		if (!value) return undefined;
+		return SESSION_UUID.test(value) ? value : SESSION_FILE.exec(value)?.[1];
+	}
+	return undefined;
+}
+
+function sessionId(pid: number, argv: string[]): string | undefined {
 	try {
 		for (const name of fs.readdirSync(`/proc/${pid}/fd`)) {
 			try {
@@ -287,19 +315,29 @@ function sessionId(pid: number): string | undefined {
 	} catch {
 		return undefined; // omp is gone
 	}
-	const root = `${process.env.HOME}/.omp/agent/sessions`;
+	// A session whose working directory is a shared tree (~/src/...) names its directory
+	// after that path, so it holds no box marker and this scan cannot find it. That is why
+	// argv is the last resort rather than the only fallback.
 	const marker = `-${process.env.AGENTBOX_BOX}-`;
 	let newest: { path: string; mtimeMs: number } | undefined;
-	for (const dir of fs.readdirSync(root)) {
-		if (!dir.includes(marker)) continue;
-		for (const file of fs.readdirSync(`${root}/${dir}`)) {
-			if (!file.endsWith(".jsonl")) continue;
-			const p = `${root}/${dir}/${file}`;
-			const mtimeMs = fs.statSync(p).mtimeMs;
-			if (!newest || mtimeMs > newest.mtimeMs) newest = { path: p, mtimeMs };
+	for (const root of sessionRoots()) {
+		let dirs: string[];
+		try {
+			dirs = fs.readdirSync(root);
+		} catch {
+			continue;
+		}
+		for (const dir of dirs) {
+			if (!dir.includes(marker)) continue;
+			for (const file of fs.readdirSync(`${root}/${dir}`)) {
+				if (!file.endsWith(".jsonl")) continue;
+				const p = `${root}/${dir}/${file}`;
+				const mtimeMs = fs.statSync(p).mtimeMs;
+				if (!newest || mtimeMs > newest.mtimeMs) newest = { path: p, mtimeMs };
+			}
 		}
 	}
-	return newest ? SESSION_FILE.exec(newest.path)?.[1] : undefined;
+	return newest ? SESSION_FILE.exec(newest.path)?.[1] : sessionIdFromArgv(argv);
 }
 
 // The Dispatch and Envoy environment of a host session, for the omp of a box: the pi-envoy
@@ -449,7 +487,7 @@ if (import.meta.main) {
 	process.on("SIGUSR1", () => {
 		if (shuttingDown || restarting) return;
 		restarting = true;
-		const sid = sessionId(child.pid);
+		const sid = sessionId(child.pid, launchArgv);
 		if (!sid) {
 			note("restart requested, but this box has no session yet; omp left running, restart not performed");
 			restarting = false;
