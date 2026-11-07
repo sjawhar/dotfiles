@@ -44,13 +44,10 @@ ensure_link "${DOTFILES_DIR}/omp/agents"      "${OMP_AGENT_DIR}/agents"
 ensure_link "${DOTFILES_DIR}/omp/keybindings.yml" "${OMP_AGENT_DIR}/keybindings.yml"
 # omp loads <agent dir>/hooks/<pre|post>/*.ts; post/jj-snapshot.ts is the one jj snapshotter.
 ensure_link "${DOTFILES_DIR}/omp/hooks"       "${OMP_AGENT_DIR}/hooks"
-# Standing rules (omp/AGENTS.md, rules/). memory-graph.md is linked by installers/ctx-memory.sh.
-mkdir -p "${OMP_AGENT_DIR}/rules"
-ensure_link "${DOTFILES_DIR}/omp/rules/github-api-budget.md" "${OMP_AGENT_DIR}/rules/github-api-budget.md"
-ensure_link "${DOTFILES_DIR}/omp/rules/task-validity.md" "${OMP_AGENT_DIR}/rules/task-validity.md"
-ensure_link "${DOTFILES_DIR}/omp/rules/slack-shared-channels.md" "${OMP_AGENT_DIR}/rules/slack-shared-channels.md"
-ensure_link "${DOTFILES_DIR}/omp/rules/dispatch-defects.md" "${OMP_AGENT_DIR}/rules/dispatch-defects.md"
-ensure_link "${DOTFILES_DIR}/omp/rules/deleting-shared-resources.md" "${OMP_AGENT_DIR}/rules/deleting-shared-resources.md"
+# Standing rules (omp/AGENTS.md, rules/): link every omp/rules/*.md. memory-graph.md is linked by
+# installers/ctx-memory.sh. scripts/dotfiles-follow runs this same script after a pull, so a rule
+# added by commit goes live without a hand-run installer.
+"${DOTFILES_DIR}/scripts/omp-link-rules"
 
 # Extensions: dotfiles-owned sources are linked here; everything else is an OMP
 # plugin installed from GitHub or npm. The pins live in the committed omp/plugins/package.json and

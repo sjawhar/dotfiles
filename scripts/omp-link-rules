@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Link every omp/rules/*.md into ~/.omp/agent/rules/, except memory-graph.md, which
+# installers/ctx-memory.sh links only on a machine whose ctx server answers. Run by
+# installers/omp.sh at install and by scripts/dotfiles-follow after a pull, so a rule file
+# added by commit goes live on its own, without a hand-run installer (a new rule used to stay
+# dark until someone re-ran the installer).
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
+OMP_AGENT_DIR="${HOME}/.omp/agent"
+mkdir -p "${OMP_AGENT_DIR}/rules"
+for rule in "${DOTFILES_DIR}"/omp/rules/*.md; do
+  name="$(basename "$rule")"
+  [ "${name}" = "memory-graph.md" ] && continue
+  ensure_link "${rule}" "${OMP_AGENT_DIR}/rules/${name}"
+done

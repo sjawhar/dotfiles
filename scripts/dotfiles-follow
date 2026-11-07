@@ -519,7 +519,13 @@ def install_marketplace_plugins(repo: Path, timeout: float) -> str:
 
 
 def install_tools(repo: Path, options: argparse.Namespace) -> str:
-    """Return why mise, Bun, marketplace plugins or the check's pin lines did not pass."""
+    """Return why the rule links, mise, Bun, marketplace plugins or the check's pin lines did not pass."""
+    # Link omp/rules/*.md first, so a rule added by commit goes live on this pull even if a later
+    # tool step is stuck (a new rule used to stay dark until someone re-ran install.sh).
+    code, out = run_step([str(repo / "scripts/omp-link-rules")], repo, options.check_timeout)
+    if code != 0:
+        return f"`scripts/omp-link-rules` in {display_path(repo)} exited {code}:\n{tail(out)}"
+    log("rules: omp/rules/*.md linked into ~/.omp/agent/rules/")
     code, out = run_step(["mise", "install"], repo, options.mise_timeout)
     if code != 0:
         return f"`mise install` in {display_path(repo)} exited {code}:\n{tail(out)}"
