@@ -48,8 +48,8 @@ docs/superpowers/
 omp/models.local.yml
 # shims/omp loads omp/config.<profile>.local.yml for a named profile, as it loads config.local.yml for the default one.
 omp/config.*.local.yml
-# The machine's own model routing (roles and fallback chains): on sami-rocqperf it points the Claude roles at the
-# OSS Verify model gateway. shims/omp loads it after omp/config.yml for the default profile only.
+# The machine's own model routing (roles and fallback chains): on sami-rocqperf it points the Claude roles at
+# Theorem's model gateway. shims/omp loads it after omp/config.yml for the default profile only.
 omp/config.local.yml
 # backups of the machine-local files above (2026-11-03: four sat staged in the checkout)
 omp/*.local.yml.*

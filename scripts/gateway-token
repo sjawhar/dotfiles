@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gateway-token [ACCOUNT] -- print a Google identity token for the OSS Verify model gateway on
+# gateway-token [ACCOUNT] -- print a Google identity token for Theorem's model gateway on
 # stdout, minted when it is asked for. Nothing is stored: no file, no timer, no refresher
 # (Sami, 2026-11-04, dispatch://INFRA-993/comment/be112388: "The idea that we have a mono gateway
 # credential refresher is just nonsense... We're supposed to be using WIF with the model gateway").

@@ -89,7 +89,7 @@ if [[ -n "$profile" && ! "$profile" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
 fi
 
 # omp/config.local.yml (gitignored, machine-local) is the box's own model routing. On sami-rocqperf it points every
-# Anthropic role at the OSS Verify model gateway and falls each one back to the same model on the direct Anthropic
+# Anthropic role at Theorem's model gateway and falls each one back to the same model on the direct Anthropic
 # login (dispatch://INFRA-398; Sami, 2026-11-01 17:13Z, after the 12:35-16:20Z outage of the shared login). It
 # loads after omp/config.yml, so it wins on the roles it names, and before a caller's own overlays, so a `--config`
 # file still wins over both. A machine without the file is unchanged.
