@@ -27,6 +27,18 @@ If the probes hang, wait and re-probe rather than rebuild the shell or work arou
 - Learn liveness from check-in replies and process cwds; age or mtime never proves a path dead. Use an age threshold only to keep a path longer.
 - Run this skill by hand, never on a timer or cron, and stop when done. What timers already prune: `references/automatic-pruning.md`.
 - A `.no-offbox` file in a directory means nothing in it or below it may leave this machine; `~/.config/no-offbox/patterns` lists more such paths. The owner of the data writes the marker (a lane on its embargoed trees), never a cleaner, and nobody removes it but that owner. A move on this machine (to `/mnt/durable`) is allowed but must keep the protection: when the marker is in a directory above the tree you move, copy it to the same directory above the new path. Run `~/.dotfiles/scripts/no-offbox <path>` before you copy anything to another machine or a bucket; any exit status but 0 means do not copy.
+- **A mount's name does not tell you whether it survives a stop, and `/mnt/nvme` means opposite things on the two boxes.** Read the device before you move anything onto a mount, or treat anything found on one as safe.
+
+  | box | mount | device | survives a stop |
+  |---|---|---|---|
+  | sami-devbox | `/mnt/nvme` | `/dev/nvme46n1`, model `nvme_card-pd` (GCP Persistent Disk, 16 TiB) | **yes** |
+  | sami-devbox | `/mnt/scratch` | `/dev/md127`, raid0 over local SSD | no |
+  | sami-rocqperf | `/mnt/durable` | `/dev/nvme0n1`, Azure managed disk `sami-rocqperf-durable-1` (Premium_LRS) | **yes** |
+  | sami-rocqperf | `/mnt/nvme` | `/dev/md127`, raid0 over four `Microsoft NVMe Direct Disk v2` | no — empty after any stop |
+
+  How to read it on an unfamiliar box, since the model string alone misleads: `findmnt -no SOURCE,FSTYPE <mount>`, then `sudo nvme list`. On Azure, a **managed** disk reports `MSFT NVMe Accelerator` with `SN: 00000`, and a **local** one reports `Microsoft NVMe Direct Disk` with a real serial; the surest check is that the managed disks share a controller with the namespace `/dev/disk/azure/os` points at, and the OS disk certainly survives a stop. `/dev/disk/azure/data/by-lun` is **empty** on a VM whose data disk arrives as an NVMe namespace rather than a SCSI LUN, so an empty `by-lun` is not evidence of no data disk — that reading cost two leads a disagreement on 2026-11-07 that took a `nvme list` to settle.
+
+  Two lanes acted on the wrong half of this table in one morning: one was told `/mnt/durable` on rocqperf was local and nearly refused a safe move, and another raised an alarm that a lane's live tooling sat on scratch when the path was on the devbox's persistent disk all along. Name the machine with the mount, always.
 
 Tool: `S=$SKILL/scripts/disk_hygiene.py`, `SKILL=~/.dotfiles/plugins/sjawhar/skills/disk-hygiene` (`$S --help`); you judge liveness and ownership.
 
