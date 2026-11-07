@@ -2359,8 +2359,15 @@ box_home_carry() {
     fi
     dest="$BOX_HOMES/${sid:-$box}/$box-$(date -u +%Y%m%dT%H%M%SZ)"
     # 0700 for the root and every directory under it: a carry holds a session's private files.
+    # tar, not `cp -a --parents`: cp recreates each parent with the SOURCE's mode, so a
+    # read-only directory -- Go's module cache is 0555 throughout -- cannot then receive the file
+    # under it, and the whole carry fails. On 2026-11-07 that happened twice, at 15:19:26Z and
+    # 17:25:54Z, each time leaving a box behind with part of its home copied. tar applies a
+    # directory's permissions after writing its contents, which is the case cp gets wrong, and
+    # preserves modes, symlinks and sparse files the same way.
     if ! (umask 077; mkdir -p "$dest") || ! chmod 700 "$BOX_HOMES" "$BOX_HOMES/${sid:-$box}" "$dest" \
-        || ! (cd "$home" && xargs -0r cp -a --parents -t "$dest" <"$list"); then
+        || ! (cd "$home" && tar --null --no-recursion -T "$list" -cf - 2>/dev/null) \
+             | (cd "$dest" && tar -xf - 2>/dev/null); then
         rm -f "$list"
         echo "agentbox: could not copy what $home holds to $dest; $BOXES/$box is left in place for its owner" >&2
         return 1

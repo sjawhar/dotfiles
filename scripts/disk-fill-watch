@@ -3639,13 +3639,16 @@ def run_once(options: argparse.Namespace) -> int:
     #
     # Open incidents are dropped when the switch goes on, because a crossing recorded under the
     # old regime would otherwise sit open for ever with no run left that could clear it.
-    if options.no_mount_alerts:
+    # getattr, not attribute access: this script's own tests build options by hand, and
+    # when this flag was added every one of them broke on the missing attribute.
+    no_mount_alerts = getattr(options, "no_mount_alerts", False)
+    if no_mount_alerts:
         if state.data.get("incidents"):
             state.data["incidents"] = {}
             state.commit(options)
             log("mount alerting off (--no-mount-alerts): dropped the open mount incidents")
 
-    for now in ([] if options.no_mount_alerts else verdicts):
+    for now in ([] if no_mount_alerts else verdicts):
         mount = now["mount"]
         incident = incidents.get(mount)
         if not now["crossing"]:

@@ -13,6 +13,7 @@ call box_home_carry and seed_box_home against box directories under a temporary 
 from __future__ import annotations
 
 import os
+import pathlib
 import subprocess
 import tempfile
 import time
@@ -98,6 +99,36 @@ class BoxHomeCarry(unittest.TestCase):
                          "a file the new box has already is not replaced")
         # The copy stays where it is, so nothing depends on the new box surviving.
         self.assertTrue((dest / "WAKE-peer-01a13837.md").exists())
+
+    def test_a_read_only_directory_does_not_stop_the_carry(self) -> None:
+        """Go's module cache is 0555 throughout, and a carry that cannot write under it used to
+        fail whole: on 2026-11-07 that left 1.4 GiB of `go` and all of `wt` behind, and the
+        caller read the failure as "the home could not be carried" and kept the entire box."""
+        old = "agentbox-74a3ddaacbdd"
+        home = self.box_with_home(old, {
+            "go/pkg/mod/example.com/dep@v1.0.0/go.mod": "module example.com/dep\n",
+            "go/pkg/mod/example.com/dep@v1.0.0/sub/file.go": "package dep\n",
+            "notes.md": "work\n",
+        })
+        # As Go leaves them: every directory of the module cache read-only, deepest first.
+        cache = home / "go/pkg/mod/example.com/dep@v1.0.0"
+        for directory in sorted(cache.rglob("*"), reverse=True):
+            if directory.is_dir():
+                directory.chmod(0o555)
+        cache.chmod(0o555)
+        self.addCleanup(lambda: [p.chmod(0o755) for p in [cache, *cache.rglob("*")] if p.is_dir()])
+
+        carried = self.run_bash(f'box_home_carry {old} {self.sid}')
+        self.assertEqual(carried.returncode, 0, carried.stderr)
+        dest = pathlib.Path(carried.stdout.strip())
+        self.assertEqual((dest / "notes.md").read_text(encoding="utf-8"), "work\n")
+        # The whole of it, not the part that happened to be writable.
+        self.assertEqual(
+            (dest / "go/pkg/mod/example.com/dep@v1.0.0/go.mod").read_text(encoding="utf-8"),
+            "module example.com/dep\n")
+        self.assertEqual(
+            (dest / "go/pkg/mod/example.com/dep@v1.0.0/sub/file.go").read_text(encoding="utf-8"),
+            "package dep\n")
 
     def test_a_home_with_nothing_new_is_carried_as_nothing_and_a_big_one_keeps_the_box(self) -> None:
         empty = "agentbox-000000000002"
