@@ -180,6 +180,26 @@ mirror_links() { # mirror_links SRC DST [copy-files]
 # The merge deep-merges maps but replaces arrays, so an overlay that carries a `models:` list
 # replaces the default's list instead of adding to it. Measured by the omp maintainer on a scratch
 # home (2026-10-30): one SQLite WAL set, one session store, and sessions resume through either root.
+# same_content A B: do two regular files say the same thing? Bytes first, and for JSON a parse,
+# because omp writes these with its own key order: the pbc profile's marketplaces.json and the
+# default's were equal as documents and different as bytes. Anything that is not two readable
+# regular files, or JSON that will not parse, is "different" -- the careful answer, since the
+# caller refuses the launch on it.
+same_content() {
+    local a="$1" b="$2"
+    [[ -f "$a" && -f "$b" ]] || return 1
+    cmp -s "$a" "$b" && return 0
+    [[ "$a" == *.json && "$b" == *.json ]] || return 1
+    python3 - "$a" "$b" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fa, open(sys.argv[2]) as fb:
+        sys.exit(0 if json.load(fa) == json.load(fb) else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
 share_links() { # share_links SRC DST KEEP_NAME...
     local src="$1" dst="$2" entry name keep dotglob_was=""
     shift 2
@@ -191,7 +211,19 @@ share_links() { # share_links SRC DST KEEP_NAME...
         name="${entry##*/}"
         for keep in "$@"; do [[ "$name" == $keep ]] && continue 2; done
         if [[ -e "$src/$name" || -L "$src/$name" ]]; then
-            echo "omp: $dst/$name and $src/$name are both real; this profile shares all state with the default, so remove the copy that is not real and launch again" >&2
+            # Same content on both sides is not divergent state, and refusing on it costs every
+            # launch of the profile. omp rewrites some of these files itself (marketplaces.json
+            # on a marketplace refresh) and has twice replaced the link with a regular file, on
+            # 2026-11-04 and again at 16:37Z on 2026-11-07, when concurrent `omp -p` launches
+            # raced; the two copies then differed only in key order. Move the copy aside, keep
+            # it, and link. Only a real difference still stops the launch.
+            if same_content "$entry" "$src/$name"; then
+                mv "$entry" "$entry.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
+                ln -s "$src/$name" "$entry"
+                echo "omp: $dst/$name was a copy of $src/$name; moved it aside and relinked" >&2
+                continue
+            fi
+            echo "omp: $dst/$name and $src/$name are both real and their contents differ; this profile shares all state with the default, so remove the copy that is not real and launch again" >&2
             exit 1
         fi
         mv "$entry" "$src/$name"
