@@ -2211,7 +2211,8 @@ box_home_carry() {
     fi
     if [[ ! -s "$list" ]]; then rm -f "$list"; return 0; fi
     n="$(tr -dc '\0' <"$list" | wc -c)"
-    bytes="$(cd "$home" && xargs -0r du -scb <"$list" 2>/dev/null | awk '$2 == "total" { print $1 }')"
+    # -B1, never -b: `du -b` is --apparent-size, which counts a sparse file's holes.
+    bytes="$(cd "$home" && xargs -0r du -scB1 <"$list" 2>/dev/null | awk '$2 == "total" { print $1 }')"
     if [[ -n "$bytes" ]] && (( bytes > BOX_HOME_CARRY_BYTES )); then
         rm -f "$list"
         echo "agentbox: $home holds $(numfmt --to=iec "$bytes") written since the box started, over the $(numfmt --to=iec "$BOX_HOME_CARRY_BYTES") a close copies; $BOXES/$box is left in place for its owner" >&2
@@ -6370,7 +6371,7 @@ move_to_gate() {
         while IFS=$'\t' read -r size p; do
             [[ -n "$p" ]] && sizes[$p]="$size"
         done < <(printf '%s\0' "${check[@]}" \
-            | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_GATE_WAIT" du -sxb 2>/dev/null || true)
+            | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_GATE_WAIT" du -sxB1 2>/dev/null || true)
     fi
     for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}; do
         move_to_kernel_path "$p" && { MOVE_TO_UNASKED+=("$p (a kernel filesystem; never copied)"); continue; }
@@ -8944,7 +8945,7 @@ cmd_move_plan_to() {
     while IFS=$'\t' read -r size p; do
         [[ -n "$p" ]] && sizes[$p]="$size"
     done < <(printf '%s\0' ${paths[@]+"${paths[@]}"} \
-        | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_SIZE_WAIT" du -sb 2>/dev/null || true)
+        | xargs -0 -r -P "$MOVE_RECORD_JOBS" -n 1 timeout "$MOVE_TO_SIZE_WAIT" du -sB1 2>/dev/null || true)
     echo "agentbox move --plan --to $target: $(hostname -s), $(date -u +%FT%TZ); nothing is changed, copied or sent"
     for ((i = 0; i < ${#g_name[@]}; i++)); do
         echo
