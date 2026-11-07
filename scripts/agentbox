@@ -2232,6 +2232,40 @@ unpushed_work() {
 BOX_HOMES="${AGENTBOX_BOX_HOMES:-${XDG_STATE_HOME:-$HOME/.local/state}/agentbox/box-homes}"
 BOX_HOME_CARRY_BYTES="${AGENTBOX_BOX_HOME_CARRY_BYTES:-2000000000}"
 
+# box_home_is_credential PATH: true when PATH, relative to the box home as `find .` prints it, is a
+# live credential store. A carry copies a box home into $BOX_HOMES, which outlives the box and the
+# session, so a token copied there is a long-lived secret nobody is watching: the 2026-11-03 and
+# 11-04 snapshots held gcloud refresh and access tokens and a docker `auth` line, under a tree that
+# was world-readable until an SRE set it 0700 (INFRA-6). The list is explicit on purpose -- each
+# entry is a file format that holds a usable token -- with two short patterns standing in for whole
+# credential trees: a *token*/*credential* basename anywhere under .config, and a gcloud or docker
+# store wherever a session put one (the 11-04 snapshot's gcloud store was under
+# scratch/<peer>/agentbox-gcloud-session/gcloud/, not in .config at all). Everything else is carried
+# as before; a session's notes are the point of the carry.
+box_home_is_credential() {
+    local p="${1#./}" base
+    case "$p" in
+        .netrc|*/.netrc) return 0 ;;
+        .kube/config|*/.kube/config) return 0 ;;
+        .docker/config.json|*/.docker/config.json) return 0 ;;
+        .azure/msal_token_cache*|*/.azure/msal_token_cache*) return 0 ;;
+        .azure/accessTokens.json|*/.azure/accessTokens.json) return 0 ;;
+        */legacy_credentials/*) return 0 ;;
+        .config/gh/hosts.yml|.config/gh-*/hosts.yml|*/.config/gh/hosts.yml|*/.config/gh-*/hosts.yml) return 0 ;;
+    esac
+    base="${p##*/}"
+    case "$base" in
+        credentials.db|access_tokens.db|application_default_credentials.json) return 0 ;;
+    esac
+    # The documented pattern: under .config, a name that says token or credential.
+    case "$p" in
+        .config/*|*/.config/*)
+            case "${base,,}" in *token*|*credential*) return 0 ;; esac
+            ;;
+    esac
+    return 1
+}
+
 # box_home_carry BOX SID: copy what the session wrote in BOX's home; prints the directory it wrote,
 # or nothing when the home holds no new file. Status 1 when the home must be kept in place.
 box_home_carry() {
@@ -2246,6 +2280,22 @@ box_home_carry() {
         (cd "$home" && find . \( -type f -o -type l \) -print0 >"$list")
     fi
     if [[ ! -s "$list" ]]; then rm -f "$list"; return 0; fi
+    # A credential store is never carried; its NAME (never its contents) goes in the summary.
+    local keep path skipped=()
+    keep="$(mktemp)" || { rm -f "$list"; return 1; }
+    while IFS= read -r -d '' path; do
+        if box_home_is_credential "$path"; then
+            skipped+=("${path#./}")
+        else
+            printf '%s\0' "$path" >>"$keep"
+        fi
+    done <"$list"
+    rm -f "$list"
+    list="$keep"
+    if (( ${#skipped[@]} )); then
+        echo "agentbox: ${#skipped[@]} credential file(s) in $home are NOT carried: ${skipped[*]}" >&2
+    fi
+    if [[ ! -s "$list" ]]; then rm -f "$list"; return 0; fi
     n="$(tr -dc '\0' <"$list" | wc -c)"
     # -B1, never -b: `du -b` is --apparent-size, which counts a sparse file's holes.
     bytes="$(cd "$home" && xargs -0r du -scB1 <"$list" 2>/dev/null | awk '$2 == "total" { print $1 }')"
@@ -2255,7 +2305,9 @@ box_home_carry() {
         return 1
     fi
     dest="$BOX_HOMES/${sid:-$box}/$box-$(date -u +%Y%m%dT%H%M%SZ)"
-    if ! mkdir -p "$dest" || ! (cd "$home" && xargs -0r cp -a --parents -t "$dest" <"$list"); then
+    # 0700 for the root and every directory under it: a carry holds a session's private files.
+    if ! (umask 077; mkdir -p "$dest") || ! chmod 700 "$BOX_HOMES" "$BOX_HOMES/${sid:-$box}" "$dest" \
+        || ! (cd "$home" && xargs -0r cp -a --parents -t "$dest" <"$list"); then
         rm -f "$list"
         echo "agentbox: could not copy what $home holds to $dest; $BOXES/$box is left in place for its owner" >&2
         return 1

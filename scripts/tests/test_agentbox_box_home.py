@@ -129,6 +129,45 @@ class BoxHomeCarry(unittest.TestCase):
         # With no session id the copy is keyed by the box, so it is still findable.
         self.assertEqual(dest.parent, self.homes / old)
 
+    def test_a_credential_store_is_not_carried_and_is_named_in_the_summary(self) -> None:
+        """A carry outlives the box and the session, so it never copies a live token out of a box
+        home: the 2026-11-03/04 snapshots held gcloud refresh tokens and a docker `auth` line."""
+        box = "agentbox-000000000005"
+        creds = {
+            ".config/gcloud/credentials.db": "refresh-token",
+            ".config/gcloud/access_tokens.db": "access-token",
+            ".config/gcloud/application_default_credentials.json": "{}",
+            ".config/gcloud/legacy_credentials/a@b.com/adc.json": "{}",
+            ".config/gh/hosts.yml": "oauth_token: gho_x",
+            ".config/gh-agent/hosts.yml": "oauth_token: gho_y",
+            ".docker/config.json": '{"auths":{"x":{"auth":"abc"}}}',
+            ".kube/config": "token: k",
+            ".azure/msal_token_cache.json": "{}",
+            ".azure/accessTokens.json": "[]",
+            ".netrc": "machine x password y",
+            "scratch/peer/agentbox-gcloud-session/gcloud/credentials.db": "refresh-token",
+        }
+        self.box_with_home(box, {**creds, "notes.md": "work\n"})
+        carried = self.run_bash(f'box_home_carry {box} {self.sid}')
+        self.assertEqual(carried.returncode, 0, carried.stderr)
+        dest = Path(carried.stdout.strip())
+        self.assertEqual((dest / "notes.md").read_text(encoding="utf-8"), "work\n")
+        for name in creds:
+            self.assertFalse((dest / name).exists(), f"{name} must not be carried")
+            self.assertIn(name, carried.stderr, f"{name} must be named in the carry summary")
+        self.assertNotIn("refresh-token", carried.stderr, "a name is logged, never contents")
+        # The carry tree is private: the root, the session directory, and the snapshot.
+        for path in (self.homes, dest.parent, dest):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700, str(path))
+
+    def test_a_home_of_nothing_but_credentials_is_carried_as_nothing(self) -> None:
+        box = "agentbox-000000000006"
+        self.box_with_home(box, {".docker/config.json": '{"auths":{}}'})
+        carried = self.run_bash(f'box_home_carry {box} {self.sid}')
+        self.assertEqual(carried.returncode, 0, carried.stderr)
+        self.assertEqual(carried.stdout.strip(), "")
+        self.assertIn(".docker/config.json", carried.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
