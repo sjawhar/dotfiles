@@ -3451,6 +3451,12 @@ def box_memory_readings() -> list[dict]:
     """Each capped box cgroup: what can be killed, what it is using, and its ceiling.
 
     `killable` is anon + shmem: the pages the kernel cannot reclaim, which is what the OOM killer
+    This watches the BOX's own cgroup and nothing nested inside it. A box runs each job in its
+    own scope with its own, smaller limit, so a process can be OOM-killed while the box reads
+    far from its cap: at 18:50:40Z on 2026-11-07 a bash holding 7.9 GiB died in
+    `…/docker-<id>.scope/agentbox-run-3617297-3920.scope` while agentbox-ee8837148334 sat at 24%
+    of 109 GiB. That is agentbox enforcing a per-run limit, not a warning this duty missed.
+
     actually weighs. A cgroup with no limit is skipped -- it cannot be near a ceiling it has not
     got -- and so is one whose memory.stat will not read.
     """
