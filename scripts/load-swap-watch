@@ -1959,6 +1959,18 @@ STALL_ACTION = (
     " devbox/bulk-copy/pull-unit.sh stop."
 )
 
+# The same crossing with nothing blocked. The switch rate is the precursor and is worth saying --
+# it is how the stall is seen coming -- but a reset costs every session on the box, and on
+# 2026-11-07T16:24:04Z sami-rocqperf's alert asked for one while its own capture said no task was
+# in D state, `sync -f` returned at once and the box had no containers at all.
+STALL_PRECURSOR_ACTION = (
+    "DO (box-health owner): nothing yet. No task is blocked on this, so this is the rate, not the"
+    " stall: watch it, and do not reset. It becomes the stall when a umount, a fusermount3 or a"
+    " sync sits in D state; the report's own D-state list is the test. Cause either way: a dead"
+    " cgroup that wrote millions of inodes; stop such a copy only with"
+    " devbox/bulk-copy/pull-unit.sh stop, which reclaims its memory first."
+)
+
 
 def told_of(now: dict, when: float, told: dict | None = None, figure: float | None = None) -> dict:
     """The marks a new fact must beat: the worst figure this crossing has said, per figure.
@@ -2114,7 +2126,11 @@ def compose_message(
         # A kernel stall's action is whole in every message about it; the other actions and the
         # context give way first when the message is long.
         if any(kind in STALL_KINDS for kind in speaking):
-            keep = [STALL_ACTION]
+            # Blocked work is what makes this worth a reset. Without a capture there is no
+            # evidence either way, and the stronger line is the safe one; with a capture that
+            # found nothing in D state, say so instead of asking for a reset.
+            blocked = capture is None or bool(capture.get("tasks"))
+            keep = [STALL_ACTION if blocked else STALL_PRECURSOR_ACTION]
             if capture:
                 # The one line that says the evidence exists, as short as it can be: the reading
                 # is the reader's whole question (reboot or not), and what it costs is a little

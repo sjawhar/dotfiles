@@ -436,6 +436,47 @@ class ConsumerAttributionTest(unittest.TestCase):
         self.assertAlmostEqual(rate, 2.0, places=3)
         self.assertAlmostEqual(window, 100, places=0)
 
+    # ── which action a writeback stall asks for ─────────────────────────────────────────────
+    def stall_message(self, capture: dict | None) -> str:
+        """One WRITEBACK SWITCH STALL alert, composed the way a run composes it."""
+        item = {
+            "kind": "writeback",
+            "event": "alert",
+            "incident": {"alerted_at": 1000.0},
+            "finding": {"evidence": "303 inodes/s switched over 5 s (rule 20/s)"},
+            "facts": [],
+        }
+        options = argparse.Namespace(verbose=False)
+        # context_line reads these three whatever the condition is.
+        now = {"cpu": {}, "io": {}, "memory_pressure": {}}
+        return WATCH.compose_message(
+            [item], now, options, None, "/tmp/report.txt", 1000.0, "sami-rocqperf", capture
+        )
+
+    def test_a_stall_with_nothing_blocked_does_not_ask_for_a_reset(self) -> None:
+        """2026-11-07T16:24:04Z on sami-rocqperf: 303 inodes/s, and the capture's own D-state list
+        read `none`. Checked by hand a minute later, `sync -f` returned at once, the box had no
+        containers and 99.1% of its memory free. The rate is the precursor; the stall is when
+        something waits on it."""
+        message = self.stall_message({"half": "neither", "tasks": [], "workers": []})
+        self.assertIn("nothing yet", message)
+        self.assertNotIn("reset by the reset plan", message)
+        self.assertIn("do not reset", message)
+
+    def test_a_stall_with_a_blocked_umount_does_ask_for_a_reset(self) -> None:
+        capture = {
+            "half": "waiting",
+            "tasks": [{"pid": 1, "comm": "umount", "blocked": 3600.0, "wchan": "x", "stack": None}],
+            "workers": [],
+        }
+        message = self.stall_message(capture)
+        self.assertIn("reset by the reset plan", message)
+        self.assertNotIn("nothing yet", message)
+
+    def test_a_stall_with_no_capture_still_asks_for_a_reset(self) -> None:
+        """No capture is no evidence either way, and the stronger line is the safe one."""
+        self.assertIn("reset by the reset plan", self.stall_message(None))
+
     def test_swap_drain_rate_needs_two_samples(self) -> None:
         self.assertEqual(WATCH.swap_drain_rate([[time.time(), 1]], 3600), (None, 0.0))
 
