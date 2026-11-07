@@ -2,8 +2,10 @@
 """List every message Sami sent agent sessions in a window: what he typed, and what he wrote in
 Dispatch that reached a session. One JSON line per message, full text, nothing cut.
 
-    enumerate-messages.py --from '2026-10-12 03:21' --to '2026-10-19 03:21' --out messages.jsonl
+    enumerate-messages.py --from '2026-10-12T03:21:00Z' --to '2026-10-19T03:21:00Z' --out messages.jsonl
     enumerate-messages.py ... --legion legion-messages.jsonl   # add Legion's sessions (see below)
+
+A window may be written with a `Z` suffix, with an offset, or as plain naive UTC.
 
 Sources:
 
@@ -29,6 +31,9 @@ with the reason, so the coverage check can count it and a reader can audit the r
   A real one-message session of Sami's is excluded too; the report lists these rows' count.
 - `pruned`: the transcript keeps only a `[shaken …]` placeholder; the text must be recovered from
   the named artifact before it can be read.
+- `legion-daemon-prompt`: a typed row on a `legion-*` host, which is the Legion daemon's own
+  phase prompt; his words reach a Legion pod as a Dispatch row, counted above.
+- `not-his-machine`: a typed row on a `machcsl-gcp-*` host, which is another person's machine.
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 TQ = "tq"
 DISPATCH_USER = "\n  dispatch:\n(?:    [^\n]*\n)*?    actor:\n(?:      [^\n]*\n)*?      kind: user(?:\n|$)"
@@ -47,10 +52,30 @@ WORD_FIELDS = re.compile(r"\n(?:    (?:answer|reply)|      (?:body|reason)): ([^
 NEEDLE_LEN = 48
 BATCH = 200          # needles per search; the whole query is one argv word, which has a size limit
 WORKERS = 4          # searches in flight; the store is shared, so keep it small
+# Legion runs its sessions on hosts named legion-*, where every typed row is the daemon's own
+# phase prompt ("Continue <issue> … Phase: …", a production check, a round-cap notice): Sami's
+# words reach a Legion pod as Dispatch rows, never as typed ones.
+LEGION_HOST = re.compile(r"^legion-")
+# machcsl-gcp-* are Nickolai's machines: no typed row there is Sami's (his own, Nickolai's
+# `Tool loaded.` boilerplate and the harness's briefs alike).
+OTHER_PEOPLE_HOST = re.compile(r"^machcsl-gcp-")
 
 
 def sql_str(s: str) -> str:
     return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def window(value: str) -> str:
+    """A window end as the store wants it: naive UTC, whatever form the caller wrote.
+
+    `2026-11-06T15:00:00Z`, `2026-11-06T15:00:00+00:00` and `2026-11-06 15:00` all mean the same
+    instant; ClickHouse and this script's own date arithmetic take only the naive form, so the
+    `Z` the skill's own example uses used to end the run in a tq error.
+    """
+    t = datetime.fromisoformat(value.strip().replace("Z", "+00:00").replace("z", "+00:00"))
+    if t.tzinfo is not None:
+        t = t.astimezone(timezone.utc).replace(tzinfo=None)
+    return t.isoformat(sep=" ")
 
 
 def tq(query: str) -> list[dict]:
@@ -211,6 +236,10 @@ def build(start: str, end: str, actor: str) -> tuple[list[dict], dict[str, dict]
             excluded = "agent-sent"
         elif n == 1 and r["raw_line"] == first_line:
             excluded = "single-prompt"
+        elif LEGION_HOST.match(r["host"] or ""):
+            excluded = "legion-daemon-prompt"
+        elif OTHER_PEOPLE_HOST.match(r["host"] or ""):
+            excluded = "not-his-machine"
         out.append({
             "source": "tq", "kind": "typed", "ts": r["ts"], "host": r["host"], "session_id": r["session_id"],
             "raw_file": r["raw_file"], "raw_line": r["raw_line"], "cwd": r.get("cwd"), "title": r.get("title"),
@@ -237,13 +266,14 @@ def build(start: str, end: str, actor: str) -> tuple[list[dict], dict[str, dict]
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--from", dest="start", required=True, help="UTC start, e.g. '2026-10-12 03:21'")
-    ap.add_argument("--to", dest="end", required=True, help="UTC end (exclusive)")
+    ap.add_argument("--from", dest="start", required=True,
+                    help="UTC start, e.g. '2026-10-12 03:21' or '2026-10-12T03:21:00Z'")
+    ap.add_argument("--to", dest="end", required=True, help="UTC end (exclusive), same forms")
     ap.add_argument("--actor", default="^sami@", help="regex on the Dispatch actor id (default ^sami@)")
     ap.add_argument("--legion", action="append", default=[], help="JSONL of Legion rows in this script's shape")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    rows, by_event = build(a.start, a.end, a.actor)
+    rows, by_event = build(window(a.start), window(a.end), a.actor)
     merged = 0
     for path in a.legion:
         for line in open(path):

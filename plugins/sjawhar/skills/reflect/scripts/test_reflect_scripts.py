@@ -14,6 +14,8 @@ What each test holds to, with the defect it was written for (reflect run of 2026
     -> test_agent_words_are_not_sami, test_cli_flags_the_agent_quote_and_passes_his
   enumerate-messages, the words the text index can be asked for
     -> test_index_tokens_are_whole_words, test_index_tokens_hold_in_any_containing_text
+  enumerate-messages, a window written with a Z, and the rows that are nobody's message
+    -> test_window_takes_a_z_suffix, test_legion_and_other_people_hosts_are_excluded
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -178,6 +181,33 @@ class EnumerateMessages(unittest.TestCase):
     def test_needle_is_the_first_filled_line(self) -> None:
         self.assertEqual(enumerate_messages.needle("\n\n  why is the lander taking so long?\nmore\n"),
                          "why is the lander taking so long?")
+
+    def test_window_takes_a_z_suffix(self) -> None:
+        """The skill's own example writes the window with a Z; the store takes only naive UTC."""
+        self.assertEqual(enumerate_messages.window("2026-11-06T15:00:00Z"), "2026-11-06 15:00:00")
+
+    def test_window_takes_an_offset_and_the_plain_forms(self) -> None:
+        self.assertEqual(enumerate_messages.window("2026-11-06T10:00:00-05:00"), "2026-11-06 15:00:00")
+        self.assertEqual(enumerate_messages.window(" 2026-11-06 15:00:00 "), "2026-11-06 15:00:00")
+        self.assertEqual(enumerate_messages.window("2026-11-06 15:00"), "2026-11-06 15:00:00")
+
+    def test_legion_and_other_people_hosts_are_excluded(self) -> None:
+        """A Legion pod's typed rows are the daemon's prompts; machcsl-gcp-* is another person's."""
+        rows = [
+            {"session_id": "s-legion", "host": "legion-infra", "ts": "2026-11-06 15:01:00", "raw_file": "f",
+             "raw_line": 851, "text": "Continue INFRA-1240. Phase: reviewing.", "cwd": None, "title": None},
+            {"session_id": "s-mach", "host": "machcsl-gcp-1", "ts": "2026-11-06 15:02:00", "raw_file": "f",
+             "raw_line": 7, "text": "Tool loaded.", "cwd": None, "title": None},
+            {"session_id": "s-sami", "host": "sami-devbox", "ts": "2026-11-06 15:03:00", "raw_file": "f",
+             "raw_line": 9, "text": "why is the lander taking so long?", "cwd": None, "title": None},
+        ]
+        life = {r["session_id"]: (2, 1) for r in rows}  # none is its session's only typed row
+        with unittest.mock.patch.object(enumerate_messages, "typed_rows", lambda *a: rows), \
+                unittest.mock.patch.object(enumerate_messages, "first_typed_line", lambda *a: life), \
+                unittest.mock.patch.object(enumerate_messages, "agent_sent", lambda *a: set()), \
+                unittest.mock.patch.object(enumerate_messages, "dispatch_rows", lambda *a: []):
+            out, _ = enumerate_messages.build("2026-11-06 15:00:00", "2026-11-07 15:00:00", "^sami@")
+        self.assertEqual([r["excluded"] for r in out], ["legion-daemon-prompt", "not-his-machine", None])
 
 
 if __name__ == "__main__":
