@@ -31,7 +31,14 @@
 
 # --- box health: the watches the box-health lead (the SRE) owns ---
 disk-fill-watch.timer              # owner: box-health lead. Filesystems heading for full.
-load-swap-watch.timer              # owner: box-health lead. CPU, swap, memory, kernel stalls.
+# load-swap-watch.timer was retired on 2026-11-08 and is deliberately not here. Sami's answer at
+# dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c: a dev box is monitored by the
+# standard Datadog or Cloud agent and "we don't need custom timer units for it". What it watched
+# is carried by the live, unmuted monitor "Memory thrashing"
+# (host.pressure.memory.full.avg60 >= 25, scoped owner:sjawhar) plus the agent's own
+# system.load.1, system.swap.used and system.mem.used series for these hosts. earlyoom-kill-watch
+# went the same day for the same reason, replaced by "Process killed (earlyoom)" and
+# "Process killed (kernel OOM)"; it was a service rather than a timer, so it never had a line here.
 unit-health-watch.timer            # owner: box-health lead. This list, and every timer's runs.
 envoy-role-holder-watch.timer      # owner: box-health lead. Envoy role holders still alive.
 omp-dup-watch.timer                # owner: box-health lead. One omp per session id.
