@@ -1,5 +1,5 @@
 #!/bin/bash
-# Direct MCP tool call to the ha-mcp server over its webhook URL (stateless streamable HTTP).
+# Direct MCP tool call to the ha-mcp server over its connect URL (webhook or loopback; stateless streamable HTTP).
 # For batch/scripted operations the skill_mcp tool can't loop efficiently.
 # Usage: secrets HA_MCP_URL -- ha-mcp-call.sh <tool_name> '<json_args>'
 # The URL is the credential, so curl reads it from a config file on a /dev/fd path (printf is a
