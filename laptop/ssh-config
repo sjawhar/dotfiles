@@ -62,6 +62,31 @@ Host oryx-tunnel
   ServerAliveInterval 15
   RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
 
+# oryx through Cloudflare Tunnel + Access (dojo platform/oryx-edge), with no tailnet. First use
+# opens a browser for the Access sign-in and caches it in ~/.cloudflared/ for 24 h. Needs the
+# cloudflared client (platform/oryx-edge/deploy/install-cloudflared.sh client). Same sshd and host
+# key as `oryx`. No mosh (Cloudflare carries TCP only): `devbox oryx-cf` uses ssh -t.
+Host oryx-cf
+  HostName oryx.thecybermonk.com
+  User agent
+  HostKeyAlias oryx.tail12ec1c.ts.net
+  ProxyCommand cloudflared access ssh --hostname %h
+  IPQoS lowdelay throughput
+
+# The YubiKey tunnel of `devbox oryx-cf`: sshd's port 2222 on oryx's loopback.
+Host oryx-cf-tunnel
+  HostName oryx-pcsc.thecybermonk.com
+  User agent
+  HostKeyAlias oryx.tail12ec1c.ts.net
+  ProxyCommand cloudflared access ssh --hostname %h
+  IdentityFile ~/.ssh/oryx-tunnel
+  IdentitiesOnly yes
+  ControlPath ~/.ssh/sockets/tunnel-%r@%h
+  ControlPersist no
+  ExitOnForwardFailure yes
+  ServerAliveInterval 15
+  RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
+
 # Every login key lives in 1Password, except trajectory-route's key file.
 Host *
   IdentityAgent ~/.1password/agent.sock

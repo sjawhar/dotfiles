@@ -1,20 +1,23 @@
 #!/bin/bash
-# devbox — open a mosh session on a machine: devbox <host> [-- mosh arguments].
+# devbox — open a session on a machine: devbox <host> [-- mosh/ssh arguments].
 #
 # <host> is any name ssh resolves: a tailnet machine name (sami-rocqperf) or an
 # ssh alias (oryx). Bare `devbox` lists the Linux machines on the tailnet that are
 # online. Arguments after the host pass through to mosh, e.g.: devbox sami-rocqperf -- tm
+# (to ssh -t for oryx-cf, which reaches oryx through Cloudflare, where mosh's UDP cannot go).
 #
 # Every devbox but oryx reaches the YubiKey through forward's PC/SC channel. The
-# tunnel machinery below serves oryx only: it lets oryx decrypt sops human-tier
+# tunnel machinery below serves oryx only (as `oryx` over the tailnet or `oryx-cf`
+# over Cloudflare): it lets oryx decrypt sops human-tier
 # secrets with the YubiKey plugged into this laptop. Mosh can't carry SSH
 # forwards, so the tunnel is a separate background ssh held by a dedicated
-# control socket (Host oryx-tunnel in ssh config), created here on demand. A
+# control socket (Host oryx-tunnel or oryx-cf-tunnel in ssh config), created here on demand. A
 # reconnect supervisor (below) then keeps it alive across laptop sleep and Wi-Fi
 # changes for the lifetime of this login session; after a logout or reboot, run
 # `devbox oryx` once to restart it. The tunnel is chosen by the name oryx, not by
 # whether a Host <name>-tunnel block exists: forward's own tunnels to the Azure
-# VMs use such blocks too (forward-tunnel@.service).
+# VMs use such blocks too (forward-tunnel@.service). Both oryx tunnels forward to
+# the same 127.0.0.1:12799 on oryx, so either one being up counts for both.
 #
 # CRITICAL: The oryx tunnel MUST be created from an active local session (a
 # terminal on the laptop). If started from a non-interactive SSH session (e.g.
@@ -31,7 +34,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: devbox <host> [-- mosh arguments]" >&2
+    echo "usage: devbox <host> [-- mosh arguments, or ssh arguments for oryx-cf]" >&2
     echo "Linux machines online on the tailnet:" >&2
     tailscale status --json \
         | jq -r '.Peer[] | select(.Online and .OS == "linux") | .DNSName | split(".")[0]' \
@@ -48,11 +51,15 @@ else
     [[ -n "$target" && "$target" != -* ]] || usage
     shift
 fi
-if [[ "$target" == oryx ]]; then
+# oryx-cf is oryx through Cloudflare Tunnel + Access (laptop/ssh-config): the same tunnel, over
+# oryx-cf-tunnel, and plain ssh instead of mosh, since Cloudflare carries TCP only.
+if [[ "$target" == oryx || "$target" == oryx-cf ]]; then
     tunnel_host="${target}-tunnel"
+    if [[ "$target" == oryx ]]; then other_tunnel=oryx-cf-tunnel; else other_tunnel=oryx-tunnel; fi
     readonly tunnel_control="$(ssh -G "$tunnel_host" | awk '/^controlpath /{print $2}')"
     readonly supervisor_lock=~/.ssh/sockets/devbox-tunnel-supervisor-${target}.lock
     readonly supervisor_log=~/.ssh/sockets/devbox-tunnel-supervisor-${target}.log
+    tunnel_up() { ssh -O check "$tunnel_host" 2>/dev/null || ssh -O check "$other_tunnel" 2>/dev/null; }
 
     if [[ "$supervisor" == 1 ]]; then
         # One supervisor per laptop: the lock holder is it, everyone else leaves.
@@ -72,7 +79,7 @@ if [[ "$target" == oryx ]]; then
                 # refused by pcscd anyway, so wait for the session to come back.
                 [[ "$state" == active ]] || continue
             fi
-            ssh -O check "$tunnel_host" 2>/dev/null && continue
+            tunnel_up && continue
             rm -f "$tunnel_control"
             if ssh -N -f "$tunnel_host" 2>>"$supervisor_log"; then
                 printf '%s tunnel reconnected\n' "$(date -Is)" >> "$supervisor_log"
@@ -80,7 +87,7 @@ if [[ "$target" == oryx ]]; then
         done
     fi
 
-    if ! ssh -O check "$tunnel_host" 2>/dev/null; then
+    if ! tunnel_up; then
         # Dead or stale control socket — clear it so we don't spawn a masterless dup.
         rm -f "$tunnel_control"
         echo "${target}: starting YubiKey tunnel..." >&2
@@ -113,4 +120,5 @@ MSG
     setsid "$0" --tunnel-supervisor "$target" < /dev/null > /dev/null 2>&1 &
 fi
 
+[[ "$target" == oryx-cf ]] && exec ssh -t "$target" "$@"
 exec mosh "$target" "$@"
