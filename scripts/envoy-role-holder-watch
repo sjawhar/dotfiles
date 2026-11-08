@@ -3378,6 +3378,36 @@ def keep_known_transcripts(state: State) -> None:
     }
 
 
+# Where `agentbox finish` records that a session was stopped on purpose. Overridable so the
+# tests can point at a registry of their own; the default is the one directory the restart
+# registry lives in (its README is the format).
+RESTART_REGISTRY = os.environ.get(
+    "RESTART_REGISTRY_DIR", "/mnt/durable/sami/restart-registry/sessions"
+)
+
+
+def deliberately_finished(holder: str) -> str:
+    """The owner's note when this session was stopped on purpose, else "".
+
+    Reads one small file and never writes. A registry entry that cannot be read, or that has
+    no `auto_restart=no` line, returns "" — this answers "somebody stopped it", never "it is
+    gone", so an unreadable registry leaves the holder to the evidence that follows.
+    """
+    if not re.fullmatch(r"[0-9a-f-]{36}", holder or ""):
+        return ""
+    try:
+        with open(os.path.join(RESTART_REGISTRY, f"{holder}.entry"), encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return ""
+    if not any(line.strip() == "auto_restart=no" for line in lines):
+        return ""
+    for line in lines:
+        if line.startswith("owner_note="):
+            return line.split("=", 1)[1].strip()[:160] or "auto_restart=no"
+    return "auto_restart=no"
+
+
 def check_roles(
     options: argparse.Namespace, state: State, envoy: Envoy, sessions: list[dict],
     live: dict[str, dict], held: dict[str, int], roles_state: dict, incidents: dict,
@@ -3399,6 +3429,19 @@ def check_roles(
         record = roles_state[role]
         holder = record.get("holder")
         if not holder or short_host(record.get("host") or "") not in local_names:
+            # The one skip in this function that used to log nothing, and it costs an hour
+            # whenever it is the one that fires: run this file's tests inside an agent box and
+            # every fixture role takes this branch, because the tests read `socket.gethostname()`
+            # (the container) while the watch resolves AGENTBOX_HOST (the machine). 24 tests then
+            # fail with no decision line anywhere to say why, which reads exactly like a product
+            # defect; on 2026-11-08 I filed one (dispatch://INFRA-1733) before finding this.
+            # `log_change` so a steady state stays quiet, as everywhere else here.
+            log_change(
+                state, f"role:{role}", f"other-host:{short_host(record.get('host') or '')}",
+                f"{role}: skipping {holder or '(no holder)'}: its host"
+                f" {short_host(record.get('host') or '') or '(none recorded)'} is not one of"
+                f" this machine's names {sorted(local_names)}",
+            )
             continue
         record["checked_at"] = started
         key = f"{role}|{holder}"
@@ -3450,6 +3493,25 @@ def check_roles(
         if where and where not in local_names:
             cause = f"holder registered on {where}. This host skips it. Its host's watch judges it"
             if incident and send_clear(envoy, options, role, incident, holder, cause, started, "elsewhere"):
+                clears += 1
+            log(f"{role}: skipping {holder}: {cause}")
+            incidents.pop(key, None)
+            roles_state.pop(role, None)
+            state.commit(options)
+            continue
+        # A holder somebody stopped on purpose is not an outage. `agentbox finish` writes
+        # auto_restart=no and an owner_note into the session's restart-registry entry BEFORE
+        # the process dies, so the record exists by the time this runs. Without this branch
+        # every clean stop alerts for ever: on 2026-11-08 three sessions were stopped between
+        # 00:36:20Z and 00:36:38Z at their own leads' request, and the watch was still paging
+        # the chief of staff about bet64-eta-meta, infra-utilization and ossv-schedfix at
+        # 00:49:59Z, thirteen minutes later, with the roles themselves already unheld on the
+        # hub (404 / no holder, read at 00:41:26Z). An alert that is usually wrong is an alert
+        # nobody reads.
+        stopped_note = deliberately_finished(holder)
+        if stopped_note:
+            cause = f"holder stopped on purpose: {stopped_note}"
+            if incident and send_clear(envoy, options, role, incident, holder, cause, started, "finished"):
                 clears += 1
             log(f"{role}: skipping {holder}: {cause}")
             incidents.pop(key, None)
