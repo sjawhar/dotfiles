@@ -25,11 +25,8 @@ for tool in github:matrix-construct/tuwunel github:mautrix/gmessages github:maut
     github:mautrix/linkedin github:mautrix/manager; do
     "$MISE" install "$tool" >/dev/null
 done
-# chathub/login-screen shows mautrix-manager through VNC and noVNC (Xvfb ships with
-# the desktop).
-if ! dpkg -s x11vnc novnc >/dev/null 2>&1; then
-    sudo apt-get install -y -qq x11vnc novnc >/dev/null
-fi
+# chathub/login-screen runs mautrix-manager on Xvfb (it ships with the desktop) and shows it
+# through Chromium's DevTools over `forward port`; it needs no other package.
 YQ="$("$MISE" which yq)"
 
 install -d -m 0700 "$STATE"

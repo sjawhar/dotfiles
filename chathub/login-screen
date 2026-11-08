@@ -1,16 +1,16 @@
 #!/bin/bash
-# The chat hub's login screen, for Sami's browser at https://chathub-login.thecybermonk.com
-# (the oryx Cloudflare Tunnel, with Cloudflare Access letting in only Sami; sjawhar/dojo
-# platform/oryx-edge). Runs on the hub machine until stopped, and serves on loopback only:
+# The chat hub's login screen, shown in Sami's laptop browser through `forward port`:
 #
-#   / (also /qr.html)                   the newest QR code a chathub/login run received
-#                                       (WhatsApp, Signal, Discord), renewed as it rotates
-#   /vnc.html?autoconnect=1&resize=scale mautrix-manager on a virtual display, through VNC
-#                                       and noVNC, for logins that need a website sign-in
-#                                       (Google Messages, Messenger, Instagram, LinkedIn)
+#   http://localhost:6080/                 the newest QR code a chathub/login run received
+#                                          (WhatsApp, Signal, Discord), renewed as it rotates
+#   a Chrome DevTools link per window      mautrix-manager, for logins that need a website
+#                                          sign-in (Google Messages, Messenger, Instagram,
+#                                          LinkedIn); printed as each window opens
 #
-# Everything stops together. No tailnet: cloudflared reaches 127.0.0.1:6080 itself and
-# checks each request's Access token before passing it on.
+# mautrix-manager runs on a virtual display nobody watches, with Chromium's remote debugging
+# port on loopback; Sami sees and drives each window in the DevTools page's screencast.
+# Runs until stopped; everything stops together. `forward port` holds both ports to the
+# laptop and is started again if it ends (a restart of the host's `forward serve` ends it).
 #
 # The bridges drop a login nobody finished within 30 minutes; restart this to start afresh.
 # The manager keeps its sign-in to the hub and its bridge list in its own profile, so
@@ -23,20 +23,19 @@ MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
 export MISE_AUTO_INSTALL=0
 export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
 DISPLAY_NUM=73
-VNC_PORT=5973
 WEB_PORT=6080
-URL=https://chathub-login.thecybermonk.com
+CDP_PORT=9347
+CDP="http://127.0.0.1:$CDP_PORT"
+# The DevTools pages that may open the debugging socket: the copy Chromium serves on the port
+# itself (the links below; a loopback page reaching loopback needs no local-network prompt),
+# and Google's hosted copy.
+ORIGINS="$CDP,http://localhost:$CDP_PORT,https://chrome-devtools-frontend.appspot.com"
 
-# The web root: noVNC's files and the QR page (also served as /), beside which
-# chathub/login writes qr.png and status.json (the same directory as its screen_dir()).
-# Rebuilt on each start; a code left by a run that no longer holds login.lock is cleared.
+# The QR page's directory, beside which chathub/login writes qr.png and status.json (the same
+# directory as its screen_dir()). A code left by a run that no longer holds login.lock is cleared.
 WEB="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/chathub-login-screen"
 install -d -m 0700 "$WEB"
 find "$WEB" -mindepth 1 -maxdepth 1 \( -type l -o -name '.*.tmp' \) -delete
-for f in /usr/share/novnc/*; do
-    ln -s "$f" "$WEB/$(basename "$f")"
-done
-ln -s "$HERE/qr.html" "$WEB/qr.html"
 ln -s "$HERE/qr.html" "$WEB/index.html"
 if flock -n "$WEB/login.lock" true; then
     rm -f "$WEB/qr.png"
@@ -47,6 +46,9 @@ fi
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null' EXIT INT TERM
 
+python3 -m http.server "$WEB_PORT" --bind 127.0.0.1 --directory "$WEB" >/dev/null 2>&1 &
+pids+=($!)
+
 Xvfb ":$DISPLAY_NUM" -screen 0 1280x900x24 -nolisten tcp 2>/dev/null &
 pids+=($!)
 for _ in $(seq 50); do
@@ -56,13 +58,31 @@ done
 
 # --no-sandbox: Chromium's sandbox needs unprivileged user namespaces, which this
 # Ubuntu's AppArmor policy denies to unlisted binaries.
-DISPLAY=":$DISPLAY_NUM" "$MISE" exec -- mautrix-manager --no-sandbox >/dev/null 2>&1 &
+DISPLAY=":$DISPLAY_NUM" "$MISE" exec -- mautrix-manager --no-sandbox \
+    --remote-debugging-port="$CDP_PORT" --remote-allow-origins="$ORIGINS" >/dev/null 2>&1 &
 pids+=($!)
 
-x11vnc -display ":$DISPLAY_NUM" -localhost -rfbport "$VNC_PORT" -forever -shared -nopw -quiet >/dev/null 2>&1 &
-pids+=($!)
-websockify --web "$WEB" "127.0.0.1:$WEB_PORT" "127.0.0.1:$VNC_PORT" >/dev/null 2>&1 &
+# Through mise: a systemd unit's PATH has no mise shims.
+(until "$MISE" exec -- forward port "$WEB_PORT" "$CDP_PORT"; do
+    echo "forward port ended (exit $?); holding again in 5 s" >&2
+    sleep 5
+done) &
 pids+=($!)
 
-echo "Login screen: $URL/ (QR codes) and $URL/vnc.html?autoconnect=1&resize=scale (mautrix-manager). Ctrl-C stops it."
+# One DevTools link per page the manager opens (its main window, then e.g. a Google sign-in):
+# the page's devtoolsFrontendUrl, on the forwarded port.
+(
+    shown=" "
+    while sleep 2; do
+        while IFS=$'\t' read -r id title path; do
+            case "$shown" in *" $id "*) continue ;; esac
+            shown="$shown$id "
+            echo "Window \"$title\": $CDP$path"
+        done < <(curl -sf "$CDP/json/list" |
+            jq -r '.[] | select(.type == "page") | "\(.id)\t\(.title)\t\(.devtoolsFrontendUrl)"' 2>/dev/null)
+    done
+) &
+pids+=($!)
+
+echo "Login screen: QR codes at http://localhost:$WEB_PORT/ on Sami's laptop; a DevTools link follows for each mautrix-manager window. Ctrl-C stops it."
 wait -n "${pids[@]}"

@@ -67,13 +67,13 @@ one user's contacts don't leak to the others on a shared bridge.
 
 ## Logins (once per network, by Sami)
 
-Each bridge is logged in through its bot. Both login tools reach Sami's browser at
-`https://chathub-login.thecybermonk.com` (oryx's Cloudflare Tunnel, with Cloudflare Access
-admitting only him; no tailnet), served by `chathub/login-screen` on oryx's loopback.
-WhatsApp, Signal and Discord show a QR code, which `chathub/login` puts on that page.
-Google Messages, Messenger, Instagram and LinkedIn need a website sign-in: the same screen
-shows mautrix-manager on a virtual display through noVNC. Google Messages finishes with an
-emoji tap on his phone (Google ended its QR pairing).
+Each bridge is logged in through its bot. `chathub/login-screen` on oryx shows both login
+tools in Sami's laptop browser through `forward port`. WhatsApp, Signal and Discord show a QR
+code, which `chathub/login` puts on a page at `http://localhost:6080/`. Google Messages,
+Messenger, Instagram and LinkedIn need a website sign-in: mautrix-manager runs on a virtual
+display nobody watches, and Sami drives each of its windows in a Chrome DevTools screencast
+over its forwarded debugging port. Google Messages finishes with an emoji tap on his phone
+(Google ended its QR pairing).
 
 ## Done means
 

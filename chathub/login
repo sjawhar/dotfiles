@@ -5,8 +5,8 @@ Usage: secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- chathub/login [--keep MINUTES]
 
 Sends `command` (default: `login`) to the network's bridge bot in its DM and prints every
 bot reply. Any image the bot sends (a QR code) goes to the login screen: run
-`chathub/login-screen` beside this, and Sami opens https://chathub-login.thecybermonk.com/
-(Cloudflare Access in front; no tailnet). A rotated code replaces the shown one; one run at a
+`chathub/login-screen` beside this, and Sami opens http://localhost:6080/ on his laptop (the
+screen holds that port there with `forward port`). A rotated code replaces the shown one; one run at a
 time shows its code there. Exits 0 when the bot reports a successful login, 1 on failure, and
 2 when the bot asks for input or goes quiet, so the caller can answer with another run, e.g.
 `chathub/login whatsapp login qr`. A command of `-` is read from stdin and never printed:
@@ -37,7 +37,7 @@ BOTS = {
 SUCCESS = re.compile(r"successfully logged in|logged in as|login successful", re.I)
 FAILURE = re.compile(r"login failed|failed to log in|timed out|cancell?ed|error", re.I)
 QUIET_SECS = 120
-SCREEN_URL = "https://chathub-login.thecybermonk.com/"
+SCREEN_URL = "http://localhost:6080/"  # on Sami's laptop, while chathub/login-screen runs
 SCREEN_LOCAL = "http://127.0.0.1:6080/status.json"  # chathub/login-screen's own address
 MAX_KEEP_MINUTES = 720
 

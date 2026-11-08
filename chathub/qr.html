@@ -27,12 +27,12 @@ const HINTS = {
 let shown = null;
 let failures = 0;
 function lost() {
-  // The screen is down or Access wants a new sign-in: never leave an old code on show.
+  // The screen is down or restarting: never leave an old code on show.
   document.getElementById("qr").hidden = true;
   document.getElementById("hint").hidden = true;
   document.getElementById("state").textContent = "Lost contact with the login screen; retrying…";
   failures += 1;
-  if (failures >= 5) location.reload();  // lets Access sign you in again
+  if (failures >= 5) location.reload();
 }
 async function poll() {
   try {
