@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Tell a session the moment its secretsd token stops being known (dispatch://INFRA-1644).
 
-`scripts/omp-fork` resumed a copy of a live session under the live session's own id; secretsd
-keys its registry on the id alone, so the copy displaced the live token and its exit removed it.
-59 of 153 live box sessions were left that way, silently. dotfiles ba86aedf fixes new forks, and
-one secrets request re-registers an affected session.
+A session-interview script resumed a copy of a live session under the live session's own id;
+secretsd keys its registry on the id alone, so the copy displaced the live token and its exit
+removed it. 59 of 153 live box sessions were left that way, silently. That script is gone (the
+librarian interviews through omp's read-only seance consult), and one secrets request
+re-registers an affected session.
 
 The state cannot be enumerated: secretsd has no registry dump, and the failing log line carries
 no session id -- `untrusted_registered_session=None` is exactly what being unknown looks like.
@@ -84,11 +85,10 @@ def tell(session: str, box: str, pid: str) -> None:
         f"**Recovery takes one call and no restart:** make a single `secrets_request` for any "
         f"agent-tier key you normally use (the `xd://secrets_request` device), or run "
         f"`secrets get <KEY>` in a shell. That re-registers this session's token.\n\n"
-        f"Cause, for the record: `scripts/omp-fork` resumed a session copy under the live "
-        f"session's own id, and secretsd keys its registry on the id alone, so the copy "
-        f"displaced the token and its exit removed it (dispatch://INFRA-1644). Fixed for new "
-        f"forks in dotfiles ba86aedf. Nothing of yours is lost; the token just has to be "
-        f"re-registered."
+        f"Cause, for the record: a session-interview script resumed a session copy under the "
+        f"live session's own id, and secretsd keys its registry on the id alone, so the copy "
+        f"displaced the token and its exit removed it (dispatch://INFRA-1644). That script is "
+        f"gone. Nothing of yours is lost; the token just has to be re-registered."
     )
     subprocess.run([ENVOY, "send", "--message", message, session], check=False,
                    capture_output=True, text=True)

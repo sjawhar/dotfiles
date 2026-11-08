@@ -176,7 +176,7 @@ fi
 # TMPDIR is per session and removed when the session ends: the directory is named for this
 # shell's pid, which is the agent's own pid (every hop from here is an exec), and
 # devbox/session-scratch-reap.service removes a directory no live process holds. A nested launch
-# (scripts/omp-fork) inherits the session's directory rather than making one that outlives it.
+# inherits the session's directory rather than making one that outlives it.
 #
 # On sami-devbox TMPDIR, GOTMPDIR, the session's TMPDIR and the Go build and uv caches go to the
 # local-SSD scratch, /mnt/scratch/<user>, which devbox/gce-disks makes at every boot with the same
@@ -225,7 +225,7 @@ if [[ -d "$nvme_home" ]]; then
     # `go test` in the box-wide directory, and that build failed on "vet.cfg: no such file or
     # directory". The box-wide value that .bashrc and the systemd manager (devbox/nvme-tmp.conf,
     # scratch-tmp.conf) give every shell counts as unset; any other value a caller set wins, so a
-    # nested launch (scripts/omp-fork) keeps its parent session's. GOCACHE stays shared: that is
+    # nested launch keeps its parent session's. GOCACHE stays shared: that is
     # where builds reuse each other's work.
     if [[ -z "${GOTMPDIR:-}" || "$GOTMPDIR" == "$shared_gotmp" || "$GOTMPDIR" == "$nvme_home/gotmp" ]]; then
         if [[ -n "${AGENT_SESSION_SCRATCH:-}" && -d "$AGENT_SESSION_SCRATCH" ]] && mkdir -p "$AGENT_SESSION_SCRATCH/gotmp" 2>/dev/null \

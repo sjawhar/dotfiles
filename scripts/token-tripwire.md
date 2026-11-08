@@ -6,12 +6,13 @@ Armed with `installers/token-tripwire.sh`; runs as the user service `token-tripw
 
 ## Why
 
-On 2026-11-07 `scripts/omp-fork` resumed a copy of a live session **under that session's own
-id**. secretsd keys its registry on the id alone, so the copy displaced the live token and its
-exit unregistered it. **59 of 153 live box sessions were left unable to fetch a secret, with no
-error anywhere until each one next asked**, and it went unnoticed for a day. Forks are fixed
-(dotfiles `ba86aedf`: a fork gets its own `XDG_RUNTIME_DIR` and a dead `SECRETSD_SOCK`).
-dispatch://INFRA-1644.
+On 2026-11-07 a session-interview script, since deleted, resumed a copy of a
+live session **under that session's own id**. secretsd keys its registry on the id alone, so the
+copy displaced the live token and its exit unregistered it. **59 of 153 live box sessions were
+left unable to fetch a secret, with no error anywhere until each one next asked**, and it went
+unnoticed for a day. Nothing resumes a live session's transcript any more: the skill librarian
+interviews a session through omp's read-only seance consult (`task` with `agent: "seance"`),
+which reads the saved transcript and never becomes the session. dispatch://INFRA-1644.
 
 ## Why a tripwire and not a report
 

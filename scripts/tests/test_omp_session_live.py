@@ -6,9 +6,9 @@ On 2026-11-03 a second tmux server's restore resumed 51 live sessions a second t
 child of it had died (00:37Z). scripts/agent-session (every host or in-box omp launch) and
 `agentbox new` (a box launched on the host) now ask omp-session-live and refuse, exit 3 and 1.
 
-A transcript path names one file, not every file of that session: scripts/omp-fork resumes a
-copy of a live session in its own --session-dir, and from f007ab4d the guard refused every such
-fork by the id in the copy's name (the librarian's rounds 213 and 214, 2026-11-03: 26 of 26).
+A transcript path names one file, not every file of that session, and a path on a command line
+counts for a bare id when its file name ends `_<id>.jsonl` wherever that file sits: a session
+started with a `--session-dir` of any name was otherwise invisible (2026-11-04, 20:00Z).
 
 Technique: a fixture /proc (OMP_SESSION_LIVE_PROC) with comm, cmdline, cwd and fd links; for
 agent-session, a scratch DOTFILES_DIR as test_agent_session_moved.py builds it.
@@ -48,9 +48,12 @@ class OmpSessionLive(unittest.TestCase):
         self.transcript.parent.mkdir(parents=True)
         self.transcript.write_text("{}\n", encoding="utf-8")
         self.real = os.path.realpath(self.transcript)
-        self.copy = self.root / "omp-fork-scratch" / self.transcript.name
+        self.copy = self.root / "copy-scratch" / self.transcript.name
         self.copy.parent.mkdir()
         shutil.copyfile(self.transcript, self.copy)
+        self.other = self.root / ".omp/agent/sessions/-other" / f"2026-11-02T09-18-52-000Z_{OTHER}.jsonl"
+        self.other.parent.mkdir(parents=True)
+        self.other.write_text("{}\n", encoding="utf-8")
 
     def omp(self, pid: int, cmdline: list[str], holds: Path | None = None, comm: str = "omp",
             cwd: Path | None = None, reads: Path | None = None) -> None:
@@ -120,7 +123,7 @@ class OmpSessionLive(unittest.TestCase):
         2026-11-03 05:59:13Z omp 2559955 (session 01a170df) held 01a170e0's transcript that way,
         and omp-dup-watch, which used this rule, called 01a170e0 run twice. Only a writer runs a
         transcript: omp's session writer keeps its file open O_WRONLY|O_APPEND for its life."""
-        self.omp(210, ["omp", "--resume", OTHER], holds=self.copy, reads=self.transcript)
+        self.omp(210, ["omp", "--resume", OTHER], holds=self.other, reads=self.transcript)
         self.assert_not_live(SID)
         self.assert_not_live(SID[:13])
         self.assert_not_live(str(self.transcript))
@@ -170,28 +173,16 @@ class OmpSessionLive(unittest.TestCase):
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertIn("LAUNCHED --resume", resumed.stdout)
 
-    def test_a_copy_of_a_live_transcript_is_not_live_and_its_fork_resumes(self) -> None:
-        """omp-fork's resume: the live omp names the original path and holds it open."""
+    def test_a_copy_of_a_live_transcript_is_not_live_by_its_own_path(self) -> None:
+        """The live omp names the original path and holds it open; a copy of that file elsewhere
+        is a different file, so a path that names the copy is nobody's live session."""
         self.omp(500, ["omp", "--resume", str(self.transcript)], holds=self.transcript)
         self.assert_not_live(str(self.copy))
-        forked = self.resume("-p", "--mode", "json", "--session-dir", str(self.copy.parent), "--resume", str(self.copy))
-        self.assertEqual(forked.returncode, 0, forked.stderr)
-        self.assertIn(f"LAUNCHED -p --mode json --session-dir {self.copy.parent} --resume {self.copy}", forked.stdout)
-
-    def test_a_running_fork_does_not_make_its_source_live_by_id(self) -> None:
-        """An id names the transcript omp finds in a sessions folder. omp-fork's omp names and holds
-        a copy outside one, so it never blocks a resume of its source by id (a pane restarter's
-        `omp --resume <id>` after the source's omp died, while a librarian round forks it)."""
-        self.omp(520, ["omp", "-p", "--mode", "json", "--session-dir", str(self.copy.parent), "--resume", str(self.copy)],
-                 holds=self.copy)
-        self.assert_not_live(SID)
-        self.assert_not_live(SID[:13])
-        resumed = self.resume("--resume", SID)
-        self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        self.assertIn(f"LAUNCHED --resume {SID}", resumed.stdout)
         self.omp(521, ["omp", "--resume", str(self.transcript)])
         self.omp(522, ["omp", "--resume", f"./{self.transcript.name}"], cwd=self.transcript.parent)
-        self.assertEqual(self.live(SID).stdout, f"521\tits command line names {SID}\n522\tits command line names {SID}\n")
+        self.assertEqual(self.live(SID).stdout,
+                         f"500\tits command line names {SID}\n521\tits command line names {SID}\n"
+                         f"522\tits command line names {SID}\n")
 
     def test_a_session_dir_not_named_sessions_is_still_found_by_id(self) -> None:
         """`--session-dir` (and PI_CODING_AGENT_SESSION_DIR) can name any directory, and the id is
@@ -213,11 +204,6 @@ class OmpSessionLive(unittest.TestCase):
         self.omp(540, ["omp"], holds=held)
         self.assertIn(f"540\tit holds {held} open", self.live(SID).stdout)
         shutil.rmtree(self.proc / "540")
-        # And a fork's copy still counts for neither, by id or by prefix.
-        self.omp(541, ["omp", "-p", "--session-dir", str(self.copy.parent), "--resume", str(self.copy)],
-                 holds=self.copy)
-        self.assert_not_live(SID)
-        self.assert_not_live(SID[:13])
 
     def test_the_live_transcript_is_live_by_any_spelling_of_its_path(self) -> None:
         self.omp(500, ["omp", "--resume", str(self.transcript)], holds=self.transcript)
@@ -239,13 +225,13 @@ class OmpSessionLive(unittest.TestCase):
                             f"session {SID} is running already on this machine (600: its command line names {SID}")
         self.assertIn(f"600\tit holds {self.real} open", self.live(str(self.transcript)).stdout)
         self.assert_not_live(str(self.copy))
-        forked = self.resume("-p", "--session-dir", str(self.copy.parent), "--resume", str(self.copy))
-        self.assertEqual(forked.returncode, 0, forked.stderr)
-        self.assertIn("LAUNCHED -p", forked.stdout)
+        copied = self.resume("-p", "--session-dir", str(self.copy.parent), "--resume", str(self.copy))
+        self.assertEqual(copied.returncode, 0, copied.stderr)
+        self.assertIn("LAUNCHED -p", copied.stdout)
 
     def test_a_boxed_omp_resumed_by_id_is_asked_in_its_box_which_file_it_holds(self) -> None:
         """A boxed omp runs under the box's uid: the host cannot read its fd links, so the box
-        is asked (rounds 213 and 214 forked 01a175f1 and 01a19225, both boxed and resumed by id)."""
+        is asked (rounds 213 and 214 interviewed 01a175f1 and 01a19225, both boxed, both resumed by id)."""
         self.omp(620, ["omp", "--resume", SID])
         stubs = self.box(620, 884)
         self.assertIn(f"620\tit holds {self.real} open in its box", self.live(str(self.transcript), stubs).stdout)

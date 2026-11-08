@@ -112,12 +112,11 @@ def named_session(argv: list[str]) -> str | None:
     2026-11-03 at 23:15Z two `omp -p` reviewers whose one prompt argument held `git ls-tree -r
     f1006fe8` read as one session, "f1006fe8", run twice.
 
-    A COPY of a session is not that session. `scripts/omp-fork` resumes a copy under a store of
-    its own (`--session-dir /tmp/omp-fork-XXXX --resume /tmp/omp-fork-XXXX/<copy>.jsonl`): it
-    writes nothing to the original, registers no second Envoy row, and the live session it was
-    cut from is untouched. Six such consults from one box were reported as six duplicates
-    (03:57:17Z, 2026-11-04). A resume of a path INSIDE the process's own --session-dir, and
-    outside the shared store, names no session here."""
+    A COPY of a session is not that session. A tool that resumes a copy under a store of its own
+    (`--session-dir /tmp/XXXX --resume /tmp/XXXX/<copy>.jsonl`) writes nothing to the original,
+    registers no second Envoy row, and leaves the live session untouched. Six such consults from
+    one box were reported as six duplicates (03:57:17Z, 2026-11-04). A resume of a path INSIDE
+    the process's own --session-dir, and outside the shared store, names no session here."""
     session_dir = own_session_dir(argv)
     for i, word in enumerate(argv[1:], 1):
         flag, eq, value = word.partition("=")
