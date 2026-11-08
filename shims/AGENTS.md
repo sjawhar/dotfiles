@@ -128,6 +128,11 @@ before handing the call to the real one.
   knives: mise's shim is one more process per call, and under load mise hung for minutes
   (2026-11-03). mise's shim runs only when that install is missing
   (`shims/tests/test_gh_mise_pin.py`).
+  A `gh api` call for a job's log (`…actions/jobs/<id>/logs`) gets
+  `--allow-escape-sequences` unless it already carries it: a job log holds terminal escape
+  sequences, which gh refuses to print, so the call returned nothing and the caller read no CI
+  failure (11,209 such refusals on this fleet in the week to 2026-11-08). A log is text to read,
+  not a document to render.
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and where
   `scripts/omp-session-trailer` says no for the backing git repository (`git config
   omp.sessionTrailer false` there, or a throwaway repository, as for `git` below)

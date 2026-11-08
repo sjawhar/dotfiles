@@ -57,6 +57,27 @@ if [[ -z "${KNIVES_GH_SHIM_DEPTH:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${
     _gh_call_log call "$@" || true
 fi
 
+# A job's log holds terminal escape sequences, and gh 2.98.0 refuses to print
+# one without --allow-escape-sequences, so a plain
+# `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs` returns nothing and the
+# caller reads no CI failure (11,209 such refusals on this fleet in the week to
+# 2026-11-08). A job log is text to read, never a document to render, so the
+# shim asks for it allowed; a call that already passes the flag is unchanged.
+if [[ "${1:-}" == api ]]; then
+    _esc_logs=0
+    _esc_have=0
+    for _esc_a in "$@"; do
+        case "$_esc_a" in
+            --allow-escape-sequences) _esc_have=1 ;;
+            *actions/jobs/*/logs) _esc_logs=1 ;;
+        esac
+    done
+    if ((_esc_logs)) && ((!_esc_have)); then
+        set -- "$@" --allow-escape-sequences
+    fi
+    unset _esc_a _esc_logs _esc_have
+fi
+
 # Agent context: an omp session (its bash tool carries OMP_SESSION_ID, its
 # eval kernel PI_SESSION_FILE with an allow-listed environment that drops
 # GIT_CONFIG_*), an agentbox session, or anything launched with the gh-app
