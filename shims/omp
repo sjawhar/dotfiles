@@ -185,6 +185,16 @@ mirror_links() { # mirror_links SRC DST [copy-files]
 # default's were equal as documents and different as bytes. Anything that is not two readable
 # regular files, or JSON that will not parse, is "different" -- the careful answer, since the
 # caller refuses the launch on it.
+#
+# A field the writer stamps on every write is not content. At 02:15:41Z on 2026-11-08 a writer
+# replaced the pbc profile's marketplaces.json link with a real file, and the copy differed from
+# the default in `updatedAt` ALONE -- 02:15:41.817Z against 02:17:45.524Z, diffed twice by the
+# grading lane, once pretty-printed and once with sorted keys. That one field made this function
+# say "different", so every omp launch under the profile refused from 02:15Z until the link was
+# restored by hand at 02:19Z, and three review arms died on it. A stale duplicate is not
+# divergent state. Only these write stamps are ignored, and only inside JSON: anything the
+# profile actually says differently still stops the launch, because a real per-profile change
+# silently discarded at startup is worse than the breakage this prevents.
 same_content() {
     local a="$1" b="$2"
     [[ -f "$a" && -f "$b" ]] || return 1
@@ -192,9 +202,20 @@ same_content() {
     [[ "$a" == *.json && "$b" == *.json ]] || return 1
     python3 - "$a" "$b" <<'PY'
 import json, sys
+STAMPS = {"updatedAt", "updated_at", "fetchedAt", "fetched_at", "lastChecked", "checkedAt"}
+
+
+def strip(value):
+    if isinstance(value, dict):
+        return {k: strip(v) for k, v in value.items() if k not in STAMPS}
+    if isinstance(value, list):
+        return [strip(v) for v in value]
+    return value
+
+
 try:
     with open(sys.argv[1]) as fa, open(sys.argv[2]) as fb:
-        sys.exit(0 if json.load(fa) == json.load(fb) else 1)
+        sys.exit(0 if strip(json.load(fa)) == strip(json.load(fb)) else 1)
 except Exception:
     sys.exit(1)
 PY
