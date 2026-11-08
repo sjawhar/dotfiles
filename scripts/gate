@@ -1,0 +1,604 @@
+#!/usr/bin/env bash
+# Fleet-wide semaphore for memory-heavy gates (tsgo typechecks, test suites).
+#
+# Why it exists: every lane of session 01a15237 shares ONE cgroup scope with a
+# 24 GiB memory.max. At 23:16:57Z it hit the ceiling: 103 processes, 20.34 GiB
+# RSS, 16.2 GiB unreclaimable. The three largest were tsgo typechecks at 4.15,
+# 2.29 and 2.21 GiB. A memcg OOM kill there loses every in-flight lane with no
+# exit record. Per-lane caps do not bound the total; this does.
+#
+# Why it is FIFO: with a free-for-all poll, a late arrival can take the slot a
+# long waiter was polling for. One review arm waited 1,680 s and then abandoned
+# its typecheck at a 1,800 s deadline; a second was cancelled at 960 s. Both
+# reviews shipped with no typecheck. Starvation costs more than contention.
+#
+# Usage:  gate <pool> -- <command...>
+#   gate tsc  -- bun run check:ts
+#   gate test -- bun test packages/coding-agent/test/foo.test.ts
+#
+# WHERE THIS FILE LIVES. The canonical copy is ~/.dotfiles/scripts/gate, under version control,
+# and `scripts/` is on PATH, so `gate tsc -- ...` works by name. The paths the fleet's briefs name
+# are symlinks to it: /mnt/nvme/tmp-omp-batch/gate-token/gate (the live one) and
+# /mnt/durable/sami/tmp-omp-batch-tooling/gate. Edit it HERE and publish with
+# scripts/dotfiles-publish; never edit a deployed path. 23:38Z 2026-11-08, the reason: there were
+# two unversioned copies and they had drifted. The durable one was four days cold and still said
+# heavy=6 where the live one said 10, and nothing recorded which was real.
+#
+# Slots are held by a file descriptor, so a killed process cannot leak one.
+set -euo pipefail
+
+POOL="${GATE_TOKEN_DIR:-/mnt/nvme/tmp-omp-batch/gate-token}"
+NAME="${1:?usage: gate <pool> -- <command...>}"
+shift
+[[ "${1:-}" == "--" ]] && shift
+[[ $# -gt 0 ]] || { echo "gate: no command given" >&2; exit 2; }
+
+# Measured 01:38Z: scope 8.03 GiB of 24, max-events frozen at 15804, oom_kill 0,
+# each), max-events counter frozen, oom_kill 0. Three typechecks fit.
+# 16:58Z 2026-11-02: host MemAvailable ~10%; earlyoom SIGTERMed three 2.5-4.2 GiB tsgo runs in 13 minutes
+# (exit 143, no message). One typecheck at a time until the host has headroom again.
+# 08:03Z 2026-11-04: SLOTS and the slot LIST used to be computed once, here, at start-up. That
+# made every capacity change invisible to the callers already queued — which is the only moment
+# anyone changes it. Measured tonight: the rust pool went 2 -> 4 at 07:26Z, and an hour later two
+# jobs were running with rust.3 and rust.4 standing free and no holder, while 39 LIVE tickets
+# waited. The waiters that started before 07:26Z were enforcing a limit of 2 AND only ever trying
+# the two slot files they knew about; they hold the head of the queue, so newer waiters that do
+# know about four slots were stuck behind them. The pool could not exceed 2 until the old cohort
+# drained. Capacity is therefore read on EVERY pass now, from one file all callers share, so a
+# raise reaches the processes already waiting for it.
+LIMITS="$POOL/limits.conf"
+refresh_limits() {
+	local conf=""
+	# `|| true` is load-bearing: this script runs under `set -e`, so a pool with NO line in
+	# limits.conf makes grep exit 1 and aborts the whole gate before it ever queues. Measured
+	# 09:05Z 11-04, by me, fifteen minutes after I added that file: `gate lint`, `gate build`,
+	# `gate gh` and `gate rescue` exited 1 instantly for every lane, because limits.conf names
+	# only rust, test and tsc. The listed pools kept working, which is exactly why a rust-only
+	# smoke test missed it. Test every pool a shared tool serves, not the one you changed it for.
+	[[ -r "$LIMITS" ]] && conf=$(grep -E "^$NAME=[0-9]+$" "$LIMITS" 2>/dev/null | tail -1 || true)
+	if [[ -n "$conf" ]]; then
+		SLOTS="${conf#*=}"
+	else
+		case "$NAME" in
+			tsc)  SLOTS="${GATE_TSC_SLOTS:-2}" ;;  # REVERTED to 2 at ~03:25Z 11-05 by the omp lead, as
+			                                       # agreed with the box-health lead when it approved the
+			                                       # temporary raise at 23:58Z. It was 2 -> 4 for about
+			                                       # three and a half hours while 13 lanes serialised at
+			                                       # their final typecheck before the reboot.
+			                                       # IT BOUGHT NOTHING, and that is the useful record:
+			                                       # measured afterwards, two of the four slots sat FREE
+			                                       # while 78 jobs waited, because a tsc job needs BOTH a
+			                                       # pool slot and a heavy slot and all six heavy slots
+			                                       # were held. The heavy cap is the binding constraint,
+			                                       # and it was deliberately left at 6 because this
+			                                       # kernel cleans up each finished cgroup slowly at a
+			                                       # cost that grows with the pile-up — the thing that
+			                                       # stalled this box four times on 11-04. If this pool
+			                                       # looks starved again, measure which slot is missing
+			                                       # before raising anything.
+			test) SLOTS="${GATE_TEST_SLOTS:-6}" ;;
+			rust) SLOTS="${GATE_RUST_SLOTS:-4}" ;; # 07:26Z 11-04: 2 -> 4, a reallocation under the
+			                                       # unchanged heavy cap, not a raise. Since the engine
+			                                       # swap most ports are Rust-only, so this pool is the
+			                                       # batch's path.
+			*)    SLOTS="${GATE_SLOTS:-2}" ;;
+		esac
+	fi
+	POOL_SLOTS=$(seq 1 "$SLOTS")
+	# A review arm needs BOTH a pool slot and a heavy slot, so reserving only a heavy slot buys
+	# nothing when the pool is full — measured 11:0xZ 11-04, when an arm with its heavy slot free
+	# still could not start because four implementer jobs held every rust pool slot. GATE_ARM=1
+	# therefore gets a named pool slot of its own, exactly as a release run does. The heavy cap
+	# still bounds the total, and the arm's heavy slot is reserved too, so this adds no concurrency.
+	# 12:51Z 2026-11-04: it was ONE named slot, shared by every arm in a pool. Measured by a lane:
+	# three GATE_ARM=1 arms queued on `test.arm` while `heavy.arm` stood free and 146 `gate test`
+	# processes existed — so the POOL slot, not the heavy cap, was what held arms back, and a
+	# single reserved slot serialises every arm in the batch behind one another. Three concurrent
+	# arms is ordinary when several pull requests are in review at once.
+	# This does NOT raise concurrency: the heavy cap still bounds what actually runs, and arms
+	# past the first still contend for heavy slots exactly as before. It only stops arms queueing
+	# behind each other for the right to wait.
+	if [[ ${GATE_ARM:-0} == 1 ]]; then
+		for _a in $(seq 1 "${GATE_ARM_POOL_SLOTS:-3}"); do POOL_SLOTS="arm$_a $POOL_SLOTS"; done
+	fi
+	[[ ${GATE_RELEASE:-0} == 1 ]] && POOL_SLOTS="release $POOL_SLOTS"
+	for i in $POOL_SLOTS; do : >>"$POOL/$NAME.$i"; done
+}
+
+WAITDIR="$POOL/wait"
+mkdir -p "$POOL" "$WAITDIR"
+# 05:35Z 2026-11-04: the reserved RELEASE slot was only a heavy slot, so a release run still had to
+# win one of this pool's own slots first. Measured then: heavy.release free while rust.1 and
+# rust.2 were both held and 40 rust jobs queued — the release build was waiting exactly as if it
+# had no reservation. A reservation that stops one queue short is not a reservation.
+refresh_limits
+
+# Take a ticket. Name sorts by arrival; mtime is the owner's heartbeat.
+# A RELEASE call takes NO ticket and does not queue. 06:45Z 2026-11-04: reserving slots was still
+# not enough, because the FIFO check below runs BEFORE any slot is tried, so a release call sat
+# behind 41 older rust tickets with its reserved slot standing free — measured, 1,500 s and still
+# waiting. My earlier proof was invalid: I ran the release call AFTER the competing job had already
+# exited, so the queue was empty, which is the one condition that could not fail.
+if [[ ${GATE_RELEASE:-0} == 1 ]]; then
+	TICKET=""
+	cleanup() { :; }
+else
+	TICKET="$WAITDIR/$NAME.$(date -u +%s%N).$$"
+	: >"$TICKET"
+	cleanup() { rm -f "$TICKET" 2>/dev/null || true; }
+fi
+trap cleanup EXIT
+
+# 04:35Z 2026-11-04: liveness is a HEARTBEAT, never /proc. An agent running inside a
+# container has its OWN pid namespace (measured: 19 pids visible, pid 1 = docker-init,
+# while live host lane pids 3616053 and 812184 were not among them). The previous
+# `[[ ! -d /proc/$p ]]` test therefore judged every HOST ticket dead the moment one
+# gated call ran from a container, and deleted the whole queue: that is what cleared
+# the tickets at 03:25Z and starved five calls for 40-100 minutes. mtime cannot lie
+# about a namespace. Each waiter touches its own ticket every pass; a ticket nobody
+# has touched for GATE_STALE_S is abandoned.
+STALE="${GATE_STALE_S:-180}"
+# Tickets created before this script gained the heartbeat are never touched by the
+# process holding them, so they must not be judged by it. They carry their creation
+# time in their own name, their owner removes them on exit, and any pre-cutover caller
+# still prunes them the old way; this bound only stops one leaking forever.
+CUTOVER_NS=1793766960000000000
+PRE_CUTOVER_MAX_S="${GATE_PRE_CUTOVER_MAX_S:-7200}"
+
+my_turn() {
+	# A release call never queues: it has no ticket and goes straight to its reserved slot.
+	[[ -z "$TICKET" ]] && return 0
+	# One touch does both jobs: it recreates the ticket if something removed it, keeping
+	# the ORIGINAL name and therefore our place in the queue, and records this pass.
+	touch "$TICKET" 2>/dev/null || true
+	# 11:58Z 2026-11-04: AN ARM DOES NOT WAIT IN THE FIFO EITHER. GATE_ARM=1 reserved a pool
+	# slot (refresh_limits) and a heavy slot (the rust branch below) at 11:00-11:05Z, and I
+	# announced it fleet-wide as a 0 s start. It was not: this FIFO check runs BEFORE any slot
+	# is tried, so an arm still queued behind every older ticket while its two reserved slots
+	# stood free. Measured by a lane at 11:57Z: a GATE_ARM sweep waited over 900 s with 47
+	# tickets ahead, and a second probe was killed at 900 s having executed nothing.
+	#
+	# This is the IDENTICAL defect written down 30 lines above for the release path — which I
+	# fixed there and did not carry here. And my "0 s" proof repeated the invalid method named
+	# in that same comment: I measured against a short queue, the one condition that cannot
+	# fail. A reservation that stops one queue short is not a reservation.
+	#
+	# The ticket is still created and still heartbeats, so an arm stays visible to the reaper
+	# and to anyone counting the queue; it simply does not wait behind it. Concurrency is
+	# unchanged: the reserved pool slot and the reserved heavy slot still bound how many arms
+	# run at once, and a second arm waits for that slot rather than for the queue.
+	[[ ${GATE_ARM:-0} == 1 ]] && return 0
+	# 07:59Z 2026-11-04: this loop used to STOP at the first of two points — our own ticket, or
+	# the SLOTS-th live ticket ahead. Everything past that point was never examined, so an
+	# abandoned ticket behind a live one was never reaped and sat in the directory for hours.
+	# Measured: 46 rust tickets queued, the oldest 7,434 s by arrival, two pool slots standing
+	# free with no holder — and a FRESH `gate rust -- true` took a slot in 0 s. The queue was
+	# almost entirely dead tickets. Two leads escalated it as starvation, and the number that
+	# convinced them was this directory's file count, which counts the dead with the living.
+	# So: scan the WHOLE list every pass, reap by heartbeat wherever it is found, and count only
+	# live tickets. The early exit saved 46 stat calls and cost two hours of other people's time.
+	local n=0 t born age now mine=0 live=0
+	now=$(date -u +%s)
+	for t in $(ls -1 "$WAITDIR" 2>/dev/null | grep "^$NAME\." | sort); do
+		if [[ "$WAITDIR/$t" == "$TICKET" ]]; then mine=1; continue; fi
+		age=$(( now - $(stat -c %Y "$WAITDIR/$t" 2>/dev/null || echo "$now") ))
+		born="${t#"$NAME".}"; born="${born%%.*}"
+		if [[ "$born" =~ ^[0-9]+$ ]] && (( born < CUTOVER_NS )); then
+			(( age > PRE_CUTOVER_MAX_S )) && { rm -f "$WAITDIR/$t" 2>/dev/null || true; continue; }
+		elif (( age > STALE )); then
+			rm -f "$WAITDIR/$t" 2>/dev/null || true; continue
+		fi
+		live=$((live + 1))
+		(( mine )) || n=$((n + 1))
+	done
+	LIVE_AHEAD=$n
+	LIVE_TOTAL=$live
+	(( n >= SLOTS )) && return 1
+	return 0
+}
+
+waited=0
+
+# 14:50Z 2026-11-04: jobs.tsv records a job when it FINISHES, so it contains only the work that got
+# through and nothing about the work still queued. Measured: 44 records showing 30 s of total heavy
+# wait, in the same minute that all six heavy slots were held and lanes were reporting individual
+# waits of 399 s and 48 minutes. Both true; the queue's cost lives in jobs that have not finished,
+# which is exactly what that record cannot see. This writes the waiting side.
+#
+# Appended at most once a minute, by whichever waiter notices the snapshot is stale, and only while
+# something is actually waiting — an idle box writes nothing, which is correct rather than a gap.
+# Duplicate lines from two waiters racing are harmless; a missing minute is not worth a lock.
+# EVERY test here is an `if`, never `(( ... )) && action`. An arithmetic compound that evaluates to
+# zero RETURNS NON-ZERO, so under `set -e` that idiom aborts the shell the first time the condition
+# is false. It killed this function on its first run — the gate exited silently before taking a slot
+# and wrote no job record at all. It is the third time today the same shell hazard has bitten:
+# a command under `set -e` skipping the record, a `;` where an `&&` was meant, and now this.
+snapshot_queue() {
+	local snap="${GATE_RECORD_DIR:-$POOL/records}/queue.tsv"
+	local now last pool n oldest tick base age mt
+	now=$(date -u +%s)
+	last=$(stat -c %Y "$snap" 2>/dev/null || echo 0)
+	if [ $((now - last)) -lt 60 ]; then return 0; fi
+	mkdir -p "$(dirname "$snap")" 2>/dev/null || return 0
+	for pool in $(ls -1 "$WAITDIR" 2>/dev/null | sed 's/\..*//' | sort -u); do
+		n=0
+		oldest=0
+		for tick in "$WAITDIR/$pool".*; do
+			if [ ! -e "$tick" ]; then continue; fi
+			mt=$(stat -c %Y "$tick" 2>/dev/null || echo "$now")
+			if [ $((now - mt)) -gt "${GATE_STALE_S:-180}" ]; then continue; fi
+			base=${tick##*/}
+			base=${base#*.}
+			base=${base%%.*}
+			case "$base" in ('' | *[!0-9]*) continue ;; esac
+			age=$((now - base / 1000000000))
+			if [ "$age" -lt 0 ]; then age=0; fi
+			n=$((n + 1))
+			if [ "$age" -gt "$oldest" ]; then oldest=$age; fi
+		done
+		if [ "$n" -gt 0 ]; then
+			printf '%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$pool" "$n" "$oldest" >>"$snap"
+		fi
+	done
+	return 0
+}
+
+while :; do
+	# Re-read capacity every pass: a raise must reach the callers already queued for it.
+	refresh_limits
+	snapshot_queue 2>/dev/null || true
+	if my_turn; then
+		for i in $POOL_SLOTS; do
+			exec {fd}<>"$POOL/$NAME.$i"
+			if flock -n "$fd"; then
+				# 12:35Z 2026-11-04: the ticket used to be dropped HERE, on taking the POOL slot,
+				# before the heavy-slot wait below. A job waiting for a heavy slot then held a pool
+				# slot with NO ticket: invisible to every queue count, reporting "0 live jobs ahead"
+				# while never starting, and holding one of rust's own slots shut the whole time.
+				# Measured by a lane at 12:33Z: an ordinary rust call had not started after 9,900 s
+				# and had reported 0 live ahead for 2,100 s while 47-51 tickets were queued. It is
+				# the same class as every other failure tonight — an instrument whose own state says
+				# nothing is wrong. The ticket is now released only when the job actually starts.
+				[[ $waited -gt 0 ]] && echo "gate: waited ${waited}s for a '$NAME' slot ($i/$SLOTS)" >&2
+				printf '%s pid=%s %s\n' "$(date -u +%FT%TZ)" "$$" "$*" >&"$fd" || true
+				# 18:36Z 2026-11-02: host MemAvailable sat at ~10% (another session's clone storm), and
+				# earlyoom killed nine 2.4-8.6 GiB typecheck/lint runs, gated ones included. Holding the
+				# slot, wait for headroom before starting one; a killed run is wasted and reports nothing.
+				# 09:10Z 11-03: tsc hold 48 -> 34 GiB: at 48 the host (25-45 GiB free) never qualified, both slots sat
+				# waiting and 42 runs queued. 34 GiB = earlyoom's 10% line (25.8) + one oxlint run (~8).
+				# 00:40Z 11-03: MemAvailable fell to 6%; earlyoom killed 200-300 MiB test runs too. Tests wait
+				# for 26 GiB (just above earlyoom's 10% line) so a run does not start into a kill.
+				if [[ "$NAME" == tsc || "$NAME" == test ]]; then
+					if [[ "$NAME" == tsc ]]; then min_kib="${GATE_TSC_MIN_AVAIL_KIB:-35651584}"; else min_kib="${GATE_TEST_MIN_AVAIL_KIB:-27262976}"; fi
+					mw=0
+					while avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo) && (( avail < min_kib )); do
+						(( mw % 300 == 0 )) && echo "gate: holding the '$NAME' slot until MemAvailable >= $((min_kib / 1048576)) GiB (now $((avail / 1048576)) GiB, waited ${mw}s)" >&2
+						sleep 10
+						mw=$((mw + 10))
+					done
+				fi
+				# 01:20Z 2026-11-04 (SRE): sami-devbox ran short of CPU, 395 load on 288 cores,
+				# 131 runnable, CPU pressure 41%, every other session on the box waiting. The
+				# per-pool slots above bound each KIND of job; they do not bound the total, and
+				# 31 lanes running tsc + test + rust at once did. GATE_HEAVY_SLOTS is the cap
+				# across every pool and every lane; the command also runs at nice 10 so an
+				# unrelated session's shell stays responsive while a build has the CPU.
+				# 03:25Z 2026-11-04, box-health lead's call: keep the cap at 6 (CPU pressure on
+				# this host was still 46-49% against a 35% alert line) and give release
+				# verification ONE reserved slot, so a cut is never stuck behind review builds
+				# as it was tonight. Set GATE_RELEASE=1 for a release-verification run; it takes
+				# the reserved slot first and falls back to the shared ones. Nothing else may
+				# use it. Raise the cap to 8 when pressure stays under 30% for an hour, and tell
+				# the box-health lead.
+				# 05:00Z 2026-11-04: the `test` pool has 6 slots and the heavy cap is also 6, so test
+				# jobs can hold EVERY heavy slot and the rust pool never runs. Measured by a lane:
+				# 38 rust jobs queued, draining about one per five minutes, while host load sat at
+				# 168-213 of 288 cores with memory free. That is starvation by configuration, not by
+				# load. The last two heavy slots are therefore reserved for `rust`; everything else
+				# shares the first four. The TOTAL is unchanged at 6, so the box-health lead's cap
+				# still holds exactly, and the slot FILES are the same ones older running processes
+				# use, so nothing overshoots while they drain.
+				# 05:15Z 2026-11-04, box-health lead: 6 -> 8. The cap was set when one job could take
+				# 14.1 cores; since 04:55Z every gated job is bounded (cargo 4, threads 8, inline
+				# assignments clamped too), so six slots was at most ~36 of 288 cores while 132 jobs
+				# queued. Host then: load 222/288, CPU some avg60 52.7%, memory and IO pressure ~0 —
+				# much of that pressure is cgroup limits, not a full machine.
+				# PUT IT BACK TO 6 AT ONCE if load1 > 270, CPU some avg60 > 65%, or memory some
+				# avg60 > 1%. If 8 holds clean to 05:45Z, 10 next, and tell the box-health lead.
+				# 05:22Z 2026-11-04: ROLLED BACK 8 -> 6 after six minutes. load1 reached 356.31 against
+				# the box-health lead's 270 rollback line (142 at 05:16Z, 206 at 05:20Z, 356 at 05:21Z);
+				# CPU some avg60 63.5% against a 65% line, memory 0.00%. The rollback was agreed in
+				# advance and taken without asking. Whether the cap caused the rise is NOT established:
+				# the queue barely moved (rust 40->39, test 83->87), so the extra slots may not even
+				# have been taken yet. Re-raise only with the box-health lead and a quieter host.
+				# 09:15Z 2026-11-05: RAISED 6 -> 9 with the box-health lead's explicit approval, which
+				# is the precondition the 05:22Z rollback above set ("re-raise only with the box-health
+				# lead and a quieter host"). BOTH halves hold this time. Host read on sami-devbox at
+				# 08:59:48Z: load1 114.50 of 288 cores against the 270 bar (it was 222 rising to 356
+				# when 8 was rolled back), CPU some avg60 22.34% against 65% with full 0.00 throughout,
+				# memory some avg60 0.06% against 1% with 1,484 GiB of 2,196 available, 75 boxes live.
+				# THE REASON IS ARITHMETIC, NOT HEADROOM. Of 6 slots, 3 were reserved (2 rust, 1 arm),
+				# so an ORDINARY ticket contended for 3 while the cap read 6. Measured cost: a #18017
+				# typecheck waited 11,901 s and a fold's `bun install` waited 2,400 s and never started,
+				# both at 22% CPU pressure — an allocation sitting idle on purpose, not a busy machine.
+				# At 9 with the same reservations an ordinary ticket gets 6: shared heavy.1-6, rust
+				# heavy.7-8, arm heavy.9.
+				# THE BAR THAT BITES FIRST HERE IS IO, NOT CPU (box-health lead): watch `io full avg10`,
+				# not load1 — a writeback stall shows there minutes before load moves, and a writeback
+				# stall took this box down four times before the kernel fix. ROLL BACK TO 6 if io full
+				# avg10 holds above 5 for a minute (that is the reading the off-box watcher refuses
+				# restarts on), or on the standing bars: load1 > 270, CPU some avg60 > 65%, memory some
+				# avg60 > 1%.
+				# KNOWN WART, named by the box-health lead and NOT fixed here: this number is what the
+				# cap reads, not what a ticket can take, so a reader still has to subtract the
+				# reservations. The right fix is naming the pools separately in the config so one
+				# number means one thing; that is a bigger change than a live gate should take while
+				# ten lanes are on it.
+								# 09:35Z 2026-11-05: ROLLED BACK 9 -> 6 after about twenty minutes, on the agreed
+				# CPU bar and without asking, exactly as the 05:22Z rollback was taken. Measured with
+				# all NINE slots held: CPU some avg60 72.47% against the 65% line (avg10 81.90,
+				# avg300 45.17 which still includes the pre-raise window), load1 134.14 of 288 which
+				# is FINE, memory fine, and io full avg10 0.00 - so the bar the box-health lead said
+				# would bite first did NOT bite, and the one that did is CPU. The rise tracks the
+				# raise: 22.34% at 08:59Z before it, 72.47% at 09:35Z with 9 of 9 held.
+				# NOT established: whether 9 is unsafe or merely fully used. Nine slots being taken
+				# at once is what the raise was FOR, and some-pressure counts any task stalled, not a
+				# saturated machine. An intermediate 7 or 8 may well hold. That is the box-health
+				# lead's call and the figures have gone to them; do not re-raise without it.
+								# 09:45Z 2026-11-05: RE-RAISED 6 -> 8 at the box-health lead's recommendation, and
+				# THE 65% CPU `some` BAR IS WITHDRAWN. Two measured facts killed it. (1) CPU `full` at
+				# host level is ALWAYS zero on Linux - total=0 since boot - because the kernel defines
+				# it as every task stalled, which cannot happen while anything runs; adding it as a bar
+				# would add one that never fires. (2) THE 09:35Z ROLLBACK WAS ATTRIBUTED WRONGLY BY ME:
+				# CPU some avg60 read 82.08% AFTER rolling back to 6, HIGHER than the 72.47% measured
+				# with all nine held, with load1 up 114 -> 175. The nine slots were riding a rising tide,
+				# not making one, and the bar would have tripped at cap 6 just as surely. `some` counts
+				# any task that waited for CPU at all, so on a box deliberately run hot it is high
+				# whenever the box is doing its job - a cap that rolls back on it rolls back for ever.
+				# THE BARS THAT ACTUALLY MOVE WHEN THIS BOX IS IN TROUBLE: load1 sustained above 250 of
+				# 288; io full avg10 above 5 for a minute (the writeback stall that took the box down
+				# four times); memory FULL above 1%; any earlyoom kill at all.
+				# JUDGE THE CAP ON JOB WALL TIME, NOT PRESSURE - the gate records it and the box cannot.
+				# First 20 minutes at 9 showed NO oversubscription: rust median duration FELL 290.5s ->
+				# 94.0s, tsc wait median collapsed 735s -> 18s, test rose only 3.0s -> 5.5s. Weak (n=22
+				# against 281, different pool mix) but it points one way and there is no signal of harm.
+				# If eight heavy tickets each take materially longer than six did, come down; if they do
+				# not, the queue was the only cost.
+				# 12:43Z 2026-11-05, omp lead, on the SRE/box-health call: box half idle, CPU full=0 (always
+				# zero at host level, see above), load1 122/288. Raised 8 -> 10, one measured step past the
+				# cap-9 data that showed only improvement; judge on wall time, not pressure. SRE watches the
+				# real bars (load1>250, io full>5/min, mem full>1%, earlyoom) and will ask for it back by number.
+				heavy="${GATE_HEAVY_SLOTS:-10}"
+				# 12:56Z 2026-11-04: the arm's reserved HEAVY slot was carved inside the `rust`
+				# branch below, so only a rust arm ever got one. Measured by a lane: a `test` arm
+				# took pool slot test.arm3 in 0 s and then queued 74 s and counting for a shared
+				# heavy slot (heavy.1..6 holding 2/7/3/3/10/7) while the arm-reserved heavy slot
+				# stood free with zero holders. The reservation is now carved ONCE, for every
+				# pool, before the pool-specific split.
+				# The TOTAL is unchanged at $heavy: slot 6 is the arm's, 5 is rust's, 1-4 shared.
+				arm_reserved="${GATE_ARM_RESERVED:-1}"
+				(( arm_reserved >= heavy )) && arm_reserved=0
+				nonarm_hi=$(( heavy - arm_reserved ))
+				rust_reserved="${GATE_RUST_RESERVED:-2}"
+				(( rust_reserved >= nonarm_hi )) && rust_reserved=$(( nonarm_hi > 1 ? 1 : 0 ))
+				shared_last=$(( nonarm_hi - rust_reserved ))
+				slots=$(seq 1 "$shared_last")
+				if [[ "$NAME" == rust ]]; then
+					# 11:00Z 2026-11-04: one of rust's two reserved heavy slots is reserved again,
+					# for REVIEW ARMS (GATE_ARM=1). Measured: an arm made four gate attempts over
+					# 160 minutes against a queue of 38-47, never got a slot, and returned WITHOUT
+					# a verdict — after its lane correctly refused an earlier report that had
+					# passed on source reading alone. For Rust pull requests the queue, not the
+					# review, had become what set the round time: 2-3 hours of waiting before an
+					# arm starts.
+					#
+					# An arm is on the critical path and an implementer's re-measure is not: a
+					# pull request cannot leave draft without two arms, and nothing waits on a
+					# re-measure. Worse, a starved arm does not merely wait — it quietly becomes
+					# a reader, and a reading verdict is indistinguishable from a running one in
+					# the report. That is a silent quality tax, not just a delay.
+					#
+					# The TOTAL is unchanged: this takes from rust's own two, it does not add a
+					# seventh. Non-arm rust keeps slot 5 plus the shared four; an arm gets 6
+					# first, then 5, then the shared four.
+					# rust keeps its own reserved slot (now computed from nonarm_hi above, so
+					# the arm's slot is already excluded and nothing is carved twice).
+					rust_slots="$(seq $((shared_last + 1)) "$nonarm_hi" | tr '\n' ' ')"
+					slots="$rust_slots$slots"
+				fi
+				# The arm's reserved heavy slot, for EVERY pool, tried first; then rust's reserved
+				# slot, for a non-rust arm.
+				# 13:06Z 2026-11-04: measured by a lane after the 12:56Z fix — three arms held
+				# test.arm1/2/3 while FIVE GATE_ARM openers queued on heavy.6. Three pool slots
+				# against ONE arm heavy slot, so three arms could hold a place and only one could
+				# run, and one held it 9+ minutes for a multi-file sweep. That sweep is correct
+				# behaviour (one ticket per sweep) and it makes the single arm heavy slot binding.
+				# This does NOT raise the cap, which is the box-health lead's and stays at $heavy,
+				# and it does not take rust's slot: rust reaches it first in its own list, and an
+				# arm wins it only when no rust build holds it. An arm is on the critical path for
+				# undrafting; a rust re-measure is not.
+				if [[ ${GATE_ARM:-0} == 1 && $arm_reserved -gt 0 ]]; then
+					slots="$(seq $((nonarm_hi + 1)) "$heavy" | tr '\n' ' ')$slots"
+					if [[ "$NAME" != rust ]] && (( rust_reserved > 0 )); then
+						# The space is load-bearing: without it "3 1" + "2 " became "3 12 " and the
+						# gate created a phantom heavy.12 nobody else contends for — an unbounded
+						# slot that would have bypassed the cap entirely. Caught by the test below
+						# on the first run, which is the only reason it is not live.
+						slots="$slots $(seq $((shared_last + 1)) "$nonarm_hi" | tr '\n' ' ')"
+					fi
+				fi
+				[[ ${GATE_RELEASE:-0} == 1 ]] && slots="release $slots"
+				for h in $slots; do : >>"$POOL/heavy.$h"; done
+				hw=0
+				while :; do
+					for h in $slots; do
+						exec {hfd}<>"$POOL/heavy.$h"
+						if flock -n "$hfd"; then
+							[[ $hw -gt 0 ]] && echo "gate: waited ${hw}s for a heavy slot ($h/$heavy)" >&2
+							# 15:00Z 2026-11-04: record WHO holds this heavy slot. Pool slot files
+							# carry a holder line; heavy ones did not, so the only way to find the
+							# job occupying a heavy slot was `fuser` plus guesswork — which is how a
+							# four-hour incumbent on the arm-reserved slot stayed anonymous for an
+							# hour while arms queued behind it. Truncate-then-write: the file is a
+							# lock we already hold, so the line is always the current holder.
+							printf '%s pid=%s kind=%s pool=%s %s\n' \
+								"$(date -u +%FT%TZ)" "$$" \
+								"$([[ ${GATE_ARM:-0} == 1 ]] && echo arm || echo normal)" \
+								"$NAME" "$*" >"$POOL/heavy.$h" 2>/dev/null || true
+							break 2
+						fi
+						exec {hfd}>&-
+					done
+					# Keep the ticket alive while we wait for a heavy slot, so the reaper does
+					# not judge us dead at GATE_STALE_S and delete a live waiter's place.
+					touch "$TICKET" 2>/dev/null || true
+					sleep 3
+					hw=$((hw + 3))
+					(( hw % 300 == 0 )) && echo "gate: still waiting ${hw}s for a heavy slot (cap $heavy across all pools), holding '$NAME' slot $i" >&2
+				done
+				# The job starts now, so its queue place is genuinely finished. Until 12:35Z this
+				# ran on the POOL slot instead, which made a heavy-slot waiter invisible.
+				cleanup
+				# 06:25Z 2026-11-04 (box-health lead): the cap counts JOBS, not cores. One gated
+				# pi_shell test binary used 14.1 cores on its own, the room of two slots, because
+				# libtest and cargo default to one thread per CPU on a 288-core host. Bound each
+				# job's parallelism so "six heavy jobs" means roughly six jobs' worth of CPU. A
+				# caller that has set its own value keeps it; nothing here raises a lower one.
+				# 08:15Z 2026-11-04 (box-health lead): the thread bound above does NOT bound rustc.
+				# Measured at 03:50Z: `rustc --crate-name pi_natives` alone ran at 8.9 cores and a
+				# second rustc at 7.7, because cargo's job count MULTIPLIES with each rustc's own
+				# codegen threads. Cutting the job count is the safe lever: cargo hands out jobserver
+				# tokens, which bounds the codegen threads of ALL rustc processes together. Deliberately
+				# NOT setting `-Z threads`: it is nightly-only, and a lane building on stable would get
+				# a hard failure on every gated Rust build, which is far worse than the load it saves.
+				export RUST_TEST_THREADS="${RUST_TEST_THREADS:-${GATE_JOB_THREADS:-8}}"
+				# CLAMP rather than default: a caller asking for MORE than the limit escaped the bound
+				# entirely, which is the hole the box-health lead measured. A caller asking for less
+				# (say 1, for a deterministic run) keeps its own lower number.
+				_cap="${GATE_CARGO_JOBS:-4}"
+				if [[ -n "${CARGO_BUILD_JOBS:-}" && "${CARGO_BUILD_JOBS}" =~ ^[0-9]+$ && "${CARGO_BUILD_JOBS}" -lt "$_cap" ]]; then
+					export CARGO_BUILD_JOBS
+				else
+					export CARGO_BUILD_JOBS="$_cap"
+				fi
+				export NEXTEST_TEST_THREADS="${NEXTEST_TEST_THREADS:-${GATE_JOB_THREADS:-8}}"
+				# 04:55Z 2026-11-04: the clamp above only binds variables the caller EXPORTED. A caller
+				# that writes them inline — `gate rust -- env CARGO_BUILD_JOBS=8 bun run ... build`, which
+				# is what one lane was running while the host had 85 jobs queued — passes them as argv,
+				# so they override everything exported here. Clamp those too, in place, and say so:
+				# silently running a build at twice the agreed parallelism is how the cap stops meaning
+				# anything. Only these three names are touched, and only when the value is higher.
+				_clamp_arg() { # <name> <value> -> prints the value to use
+					local n="$1" v="$2" lim
+					case "$n" in
+						CARGO_BUILD_JOBS) lim="$_cap" ;;
+						RUST_TEST_THREADS|NEXTEST_TEST_THREADS) lim="${GATE_JOB_THREADS:-8}" ;;
+						*) printf '%s' "$v"; return ;;
+					esac
+					if [[ "$v" =~ ^[0-9]+$ ]] && (( v > lim )); then
+						echo "gate: $n=$v exceeds the fleet cap; running with $n=$lim" >&2
+						printf '%s' "$lim"
+					else
+						printf '%s' "$v"
+					fi
+				}
+				_args=(); _i=0
+				for _a in "$@"; do
+					if [[ "$_a" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+						_args+=("${BASH_REMATCH[1]}=$(_clamp_arg "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")")
+					elif [[ $_i -eq 0 && ( "$_a" == env || "$_a" == */env ) ]]; then
+						_args+=("$_a")
+					else
+						_args+=("$_a")
+						# past the leading assignments: the command has started, copy the rest verbatim
+						shift $((_i + 1)); _args+=("$@"); break
+					fi
+					_i=$((_i + 1))
+				done
+				# A bare `VAR=value cmd` prefix cannot be exec'd (nice would look for a program called
+				# "VAR=value", which failed with 127 long before this clamp existed). Hand those to env.
+				[[ "${_args[0]:-}" =~ ^[A-Z_][A-Z0-9_]*= ]] && _args=(env "${_args[@]}")
+				# 13:20Z 2026-11-04, asked for by the infrastructure lead and its remote-build
+				# planner: one append-only record per job, so queue cost is a measurement rather
+				# than a snapshot, and so a farm Job can be sized from real build durations.
+				# Before this the gate kept NO durable history: the slot file holds only the
+				# current holder, and waits went to the caller's stderr. That is why the 07-10Z
+				# blocked-hours figure could only be given as an order of magnitude — its tickets
+				# were gone by the time anyone asked.
+				# One printf per job, under 4096 bytes so a concurrent append cannot interleave
+				# on a local filesystem. A failure to record NEVER affects the job: the record is
+				# written after the command's status is captured and before the gate exits with it.
+				# `|| _rec_exit=$?` is load-bearing: this script runs under `set -e`, so a plain
+				# call that exits non-zero aborts the shell before the record is written. The
+				# first version did exactly that and logged ONLY SUCCESSFUL jobs — a history that
+				# would have told the farm planner every build succeeds and sized Jobs from the
+				# happy path alone. Caught by testing a job that exits 7, which is the only reason
+				# it is not live.
+				# 15:40Z 2026-11-04: CLOSE THE LOCK DESCRIPTORS IN THE CHILD. A slot is held by
+				# whoever holds the flock'd fd, and `exec {fd}<>` leaves it inheritable, so every
+				# process the job spawns inherits both locks. When the job died, its children were
+				# reparented to init and KEPT THE SLOT.
+				#
+				# Measured by the review steward at 15:39Z: heavy.3 held for 5 h 51 m by three
+				# orphaned `sh` stubs, PPID 1, each spinning on a sentinel file that was never
+				# written because the test fixture that would have written it was long gone. One of
+				# six heavy slots, lost for six hours, while the queue ran 69 to 90 deep and arms
+				# waited 20 to 70 minutes. The gate's own display showed the slot held with no
+				# holder recorded, which reads as a bookkeeping glitch rather than a lost slot —
+				# the same shape as every other failure today, where the instrument's report of its
+				# own breakage is indistinguishable from normal.
+				#
+				# `{fd}<&- {hfd}<&-` closes both in the child only. The gate keeps them, so the
+				# lock still spans the whole run and is released when THIS process exits, which is
+				# the lifetime we actually mean. A descendant can no longer outlive its parent and
+				# keep a slot shut.
+				_rec_start=$(date -u +%s)
+				_rec_exit=0
+				nice -n "${GATE_NICE:-10}" "${_args[@]}" {fd}<&- {hfd}<&- || _rec_exit=$?
+				{
+					_rec_dir="${GATE_RECORD_DIR:-$POOL/records}"
+					mkdir -p "$_rec_dir" 2>/dev/null &&
+						printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+							"$(date -u -d "@$_rec_start" +%FT%TZ)" \
+							"$NAME" \
+							"$((waited + hw))" \
+							"$(( $(date -u +%s) - _rec_start ))" \
+							"$_rec_exit" \
+							"$([[ ${GATE_ARM:-0} == 1 ]] && echo arm || { [[ ${GATE_RELEASE:-0} == 1 ]] && echo release || echo normal; })$(if [[ ${GATE_REMOTE:-0} == 1 ]]; then printf ':remote'; fi)" \
+							"$(printf '%s' "$*" | cksum | cut -d' ' -f1)" \
+							"$hw" \
+							>>"$_rec_dir/jobs.tsv"
+				} 2>>"${GATE_RECORD_DIR:-$POOL/records}/record-errors.log" || true
+				# 05:40Z 11-05: was `2>/dev/null || true`. The `|| true` is right — a recording
+				# failure must never fail the job it is recording. The `2>/dev/null` was not: it
+				# hid WHY, and a silently failing write is indistinguishable from "no jobs ran".
+				# That ambiguity already produced one wrong diagnosis tonight, when a gap in
+				# jobs.tsv across the reboot was read as a dead producer. Errors now go to
+				# records/record-errors.log rather than to the job's stderr, which lanes parse
+				# for test output. If that file is non-empty, the records are incomplete and any
+				# conclusion drawn from a gap in them is unsafe.
+				exit $_rec_exit
+			fi
+			exec {fd}>&-
+		done
+	fi
+	# 23:38Z 2026-11-08: the depth was reported only from the first 300 s tick below, so for its
+	# first five minutes a caller could not tell a deep queue from a hung gate, and neither could
+	# anyone reading its transcript afterwards. Measured that night on a private pool: a waiter
+	# queued behind a held slot printed NOTHING for its whole 20 s window (23:37:58Z), while the
+	# same harness on this version printed its depth 29 ms after queueing (23:38:29Z), and the
+	# job records of the two runs were byte-identical. Say how deep the queue is on the pass
+	# that decides we have to wait; the 300 s cadence below is untouched, and so is every slot,
+	# ticket and lock decision — this writes one line to stderr and nothing else.
+	if (( waited == 0 )); then
+		echo "gate: queued for a '$NAME' slot (${LIVE_AHEAD:-?} live ahead of us, ${LIVE_TOTAL:-?} live in the '$NAME' queue, capacity $SLOTS)" >&2
+	fi
+	sleep 3
+	waited=$((waited + 3))
+	if (( waited % 300 == 0 )); then
+		# Report LIVE tickets, not files. The file count includes tickets whose owner died, and
+		# a lane reading "47 in the queue" escalated a queue that was in fact empty enough to
+		# serve a new call in 0 s.
+		echo "gate: still waiting ${waited}s for a '$NAME' slot (${LIVE_AHEAD:-?} live ahead of us, ${LIVE_TOTAL:-?} live in the '$NAME' queue)" >&2
+	fi
+done
