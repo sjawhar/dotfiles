@@ -132,12 +132,16 @@ class AgentboxLimits(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return self.run_args.read_text(encoding="utf-8").splitlines()
 
-    def assert_limits(self, args: list[str], memory: str, swap: str, cpus: str) -> None:
+    def assert_limits(self, args: list[str], memory: str, swap: str, cpus: str,
+                      pids: str = "32768") -> None:
         for flag, value in (
             ("--memory", memory),
             ("--memory-swap", swap),
             ("--cpus", cpus),
-            ("--pids-limit", "8192"),
+            # 32768, not the old 8192: the limit counts THREADS, and on 2026-11-08 a plain
+            # `go test` at default parallelism held 5,602 of them in one box. Three boxes
+            # reached 8192 that night and one died of it whole (dispatch://INFRA-1739).
+            ("--pids-limit", pids),
             # Every box shares the user slice's ceiling with the host's sessions.
             ("--cgroup-parent", f"user-{os.getuid()}-agentbox.slice"),
         ):
@@ -184,6 +188,34 @@ class AgentboxLimits(unittest.TestCase):
                 result = self.launch(*options)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn(options[0], result.stderr)
+
+    def test_the_pids_flag_and_variable_change_one_box(self) -> None:
+        want = max(24, int(MEM_TOTAL_KB / 20) >> 20)
+        self.assert_limits(self.run_args_of("--pids", "65536"), f"{want}g", f"{want + 8}g", "8",
+                           pids="65536")
+        self.assert_limits(self.run_args_of(AGENTBOX_PIDS="4096"), f"{want}g", f"{want + 8}g", "8",
+                           pids="4096")
+        # A flag still wins over the environment, as for memory and cpus.
+        self.assert_limits(self.run_args_of("--pids", "16384", AGENTBOX_PIDS="4096"),
+                           f"{want}g", f"{want + 8}g", "8", pids="16384")
+
+    def test_a_pids_value_outside_the_range_is_refused_before_any_box_starts(self) -> None:
+        for options, naming in (
+            (("--pids", "999999"), ("--pids", "999999", "262144")),
+            (("--pids", "0"), ("--pids", "0")),
+            (("--pids", "many"), ("--pids", "many")),
+        ):
+            with self.subTest(options[1]):
+                result = self.launch(*options)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                for word in naming:
+                    self.assertIn(word, result.stderr)
+                self.assertFalse(self.run_args.exists(), "a box started despite the refusal")
+
+    def test_an_out_of_range_pids_variable_names_its_variable(self) -> None:
+        result = self.launch(AGENTBOX_PIDS="999999")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("AGENTBOX_PIDS", result.stderr)
 
     def test_docker_is_still_given_no_storage_opt(self) -> None:
         """--storage-opt size= needs overlay2 on xfs with project quotas; this host's docker data

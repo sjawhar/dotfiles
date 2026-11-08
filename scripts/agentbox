@@ -2,7 +2,7 @@
 # agentbox: one disposable Sysbox container per agent session, working in a
 # checkout made for it.
 #
-#   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE]
+#   agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE]
 #                [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]
 #                                       run a command in a fresh box holding a
 #                                       checkout of each repo, working in the
@@ -182,8 +182,17 @@ BOX_SWAP=8g
 # A box above these starves the machine instead of its own session, so the launcher refuses it.
 BOX_MEMORY_CAP="$((box_default_g * 4))g"
 BOX_CPUS_CAP=32
-# Processes per box: a fork bomb inside one otherwise takes the host's pid space.
-BOX_PIDS=8192
+# Processes per box: a fork bomb inside one otherwise takes the host's pid space. The limit
+# counts THREADS, not just processes, which is why 8192 was not the large number it looked:
+# on 2026-11-08 a plain `go test` at default parallelism on this 288-core host held 69 compile
+# processes and 5,602 threads in one box. Three boxes reached 8192 that night and one died of
+# it whole — the kernel refuses every fork at the limit, docker removes the container, and the
+# runner inside cannot even log its exit, so the session lost three workers and its /tmp
+# (dispatch://INFRA-1739). The host is nowhere near its own ceiling: the agentbox slice allows
+# 1,384,119 and held 32,059 across 65 boxes, so one box at 32768 is 2.4% of the slice.
+BOX_PIDS="${AGENTBOX_PIDS:-32768}"
+# Above this a box can still starve the host's pid space, so the launcher refuses it.
+BOX_PIDS_CAP=262144
 # Disk per box (dispatch://INFRA-702, the third limit its title asks for). docker's
 # --storage-opt size= is not available here: it needs the overlay2 driver on xfs with project
 # quotas, and this host's docker data root (/var/lib/docker, a bind of /dev/md127[/docker],
@@ -498,7 +507,7 @@ size_text() {
 # global rather than printing, because a $(…) would swallow its exit.
 RESOURCE_ARGS=()
 set_resource_args() {
-    local mem_from="${1:---memory}" cpu_from="${2:---cpus}" bytes cap swap
+    local mem_from="${1:---memory}" cpu_from="${2:---cpus}" pids_from="${3:---pids}" bytes cap swap
     bytes="$(size_bytes "$BOX_MEMORY")" || refuse "$mem_from '$BOX_MEMORY' is not a size (24g, 512m, or bytes)"
     cap="$(size_bytes "$BOX_MEMORY_CAP")"
     (( bytes > 0 )) || refuse "$mem_from '$BOX_MEMORY' is not a usable memory limit"
@@ -506,6 +515,10 @@ set_resource_args() {
     [[ "$BOX_CPUS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || refuse "$cpu_from '$BOX_CPUS' is not a number of cores"
     awk -v c="$BOX_CPUS" -v cap="$BOX_CPUS_CAP" 'BEGIN { exit !(c > 0 && c <= cap) }' \
         || refuse "$cpu_from '$BOX_CPUS' is above the $BOX_CPUS_CAP cores limit per box"
+    [[ "$BOX_PIDS" =~ ^[0-9]+$ ]] || refuse "$pids_from '$BOX_PIDS' is not a number of processes"
+    (( BOX_PIDS > 0 )) || refuse "$pids_from '$BOX_PIDS' is not a usable process limit"
+    (( BOX_PIDS <= BOX_PIDS_CAP )) \
+        || refuse "$pids_from '$BOX_PIDS' is above the $BOX_PIDS_CAP processes limit per box"
     swap="$(size_bytes "$BOX_SWAP")"
     RESOURCE_ARGS=(
         --memory "$BOX_MEMORY" --memory-swap "$(size_text $((bytes + swap)))"
@@ -2650,7 +2663,7 @@ reap_start() {
 }
 
 cmd_new() {
-    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--disk SIZE] [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE] [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
     # --drop-gone-dirs: this launch RESUMES a session (move_pane_command, tmux-resurrect-omp),
     # so its --dir paths were right when they were recorded, and
@@ -2680,9 +2693,11 @@ cmd_new() {
     BOX_DROP_GONE_DIRS=$drop_gone
     # Where each limit came from, so a refusal names what the caller actually set.
     local mem_from="AGENTBOX_MEMORY" cpu_from="AGENTBOX_CPUS" disk_from="AGENTBOX_DISK"
+    local pids_from="AGENTBOX_PIDS"
     [[ -n "${AGENTBOX_MEMORY:-}" ]] || mem_from="the default memory limit"
     [[ -n "${AGENTBOX_CPUS:-}" ]] || cpu_from="the default cpu limit"
     [[ -n "${AGENTBOX_DISK:-}" ]] || disk_from="the default disk limit"
+    [[ -n "${AGENTBOX_PIDS:-}" ]] || pids_from="the default process limit"
     while (( $# )) && [[ "$1" != -- ]]; do
         case "$1" in
             -e)
@@ -2698,6 +2713,11 @@ cmd_new() {
             --cpus)
                 [[ -n "${2:-}" ]] || die "--cpus takes a number of cores, e.g. --cpus 4  ($usage)"
                 BOX_CPUS="$2" cpu_from="--cpus"
+                shift 2
+                ;;
+            --pids)
+                [[ -n "${2:-}" ]] || die "--pids takes a number of processes, e.g. --pids 65536  ($usage)"
+                BOX_PIDS="$2" pids_from="--pids"
                 shift 2
                 ;;
             --disk)
@@ -2761,7 +2781,7 @@ cmd_new() {
         mkdir -p "$n6_work"
         box_dir_have "$n6_work" || box_add_mount "$n6_work"
     fi
-    set_resource_args "$mem_from" "$cpu_from"
+    set_resource_args "$mem_from" "$cpu_from" "$pids_from"
     set_disk_bytes "$disk_from"
     [[ "${1:-}" == -- ]] && (( ${#box_repos[@]} + ${#BOX_DIRS[@]} )) \
         || die "$usage  (a box needs a repo or a --dir; repos: $(repos | tr '\n' ' '))"
