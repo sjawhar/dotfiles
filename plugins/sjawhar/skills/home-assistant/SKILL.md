@@ -17,9 +17,18 @@ Read/write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (
 - The agent-tier secret `HA_MCP_URL` is a webhook URL, and its id is the credential. It holds the remote form `https://dojo.thecybermonk.com/api/webhook/<id>`, which works from any network. The same id at the LAN address `http://10.0.51.23:8123/api/webhook/<id>` works only on the house's LAN.
 - The SF Home Assistant on oryx (container `homeassistant-sf`) is a separate instance. Its key, the agent-tier `HA_MCP_URL_BUSH`, is the loopback endpoint `http://127.0.0.1:9584/<secret path>`, so it works only on oryx: its ha-mcp webhook is off. Call it with `secrets HA_MCP_URL_BUSH -- bash -c 'export HA_MCP_URL="$HA_MCP_URL_BUSH"; ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh <tool> "<json>"'`.
 - The MCP launch runs `~/.dotfiles/scripts/mcp-remote-from-env`. It takes the URL from `HA_MCP_URL`, unsets it, runs `mcp-remote` 0.14.3 in-process, and redacts the URL from stderr.
-- Never expand `$HA_MCP_URL` into command arguments (`curl "$HA_MCP_URL"`, `mcp-remote "$HA_MCP_URL"`): every user can read `/proc/<pid>/cmdline`, and any agent's `ps` or `pgrep -af` prints the id into its transcript. Pass it through the environment, a config file or stdin.
+- Never expand `$HA_MCP_URL` or a token into command arguments (`curl "$HA_MCP_URL"`, `mcp-remote "$HA_MCP_URL"`, `-H "Authorization: Bearer $TOKEN"`): every user can read `/proc/<pid>/cmdline`, and any agent's `ps` or `pgrep -af` prints the id into its transcript. Pass it through the environment, a config file or stdin.
 - Batch or scripted calls: `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'` ([ha-mcp-call.sh](ha-mcp-call.sh) gives curl the URL with `--config`).
 - File/YAML tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and not enabled. They need the "HA-MCP File & YAML Tools" entry and feature flags.
+
+### Webhook in "Sign in with Home Assistant" mode
+
+An ha-mcp webhook whose auth mode (HA-MCP Server options, `webhook_auth: ha_auth`) is "Sign in with Home Assistant" answers 401 unless the call carries an HA access token as `Authorization: Bearer`. A long-lived access token works: the SF instance's is the agent-tier `HA_TOKEN_BUSH`, Salt Lake's `HA_TOKEN`. Both callers send it when the variable named next to the URL holds it, and send no Authorization header when it is unset or empty:
+
+- `ha-mcp-call.sh` reads `HA_MCP_TOKEN` (and puts it in curl's `--config`, like the URL): `secrets HA_MCP_URL HA_TOKEN -- bash -c 'export HA_MCP_TOKEN="$HA_TOKEN"; ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh <tool> "<json>"'`. A refusal prints `curl: (22) The requested URL returned error: 401` and exits non-zero.
+- `mcp-remote-from-env <URL_NAME>` reads the name with its `URL` part replaced by `TOKEN` (`HA_MCP_URL` → `HA_MCP_TOKEN`, `HA_MCP_URL_BUSH` → `HA_MCP_TOKEN_BUSH`), unsets it, hands mcp-remote `--header "Authorization: Bearer <token>"` in-process, and redacts the token from stderr. For an auth-mode server, the launch becomes `secrets HA_MCP_URL HA_TOKEN -- bash -c 'export HA_MCP_TOKEN="$HA_TOKEN"; unset HA_TOKEN; exec npx -y -p mcp-remote@0.14.3 mcp-remote-from-env HA_MCP_URL --allow-http'`.
+
+`secrets` exports each key under its own name and cannot rename it, so the `bash -c` maps the token key to the name the caller reads.
 
 ## Work
 

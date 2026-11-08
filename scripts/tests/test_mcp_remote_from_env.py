@@ -8,13 +8,16 @@ scripts/mcp-remote-from-env: mcp-remote still receives it in `process.argv`, the
 line of every process in the launch never holds it, the variable is gone from the environment
 mcp-remote and its children see, and what mcp-remote logs to stderr (it logs the URL) reaches the
 launcher with the URL and the bare webhook id replaced by `<HA_MCP_URL>`. The wrapper refuses an
-unset or empty variable (exit 2) by name.
+unset or empty variable (exit 2) by name. A bearer token in the variable named like the URL's with
+`URL` replaced by `TOKEN` (HA_MCP_TOKEN, HA_MCP_TOKEN_BUSH) reaches mcp-remote as
+`--header "Authorization: Bearer <token>"` under the same guarantees; without it no header is added.
 
 Technique: stub `secrets` (injects each named key from STUB_SECRET_<KEY>) and `npx` (puts a fake
 mcp-remote package's bin dir first on PATH and runs the command as its child, as `npm exec` does)
 first on PATH. The fake package's dist/proxy.js records its argv, `/proc/self/cmdline` and the
 cmdline of each ancestor up to the test, its environment and a child's, then writes the URL and the
-bare id to stderr through console.error and process.stderr.write, as a string and as a Buffer.
+bare id to stderr through console.error and process.stderr.write, as a string and as a Buffer, and
+the Authorization header it was given, if any.
 """
 
 from __future__ import annotations
@@ -82,6 +85,8 @@ const url = process.argv[2];
 console.error(`[${process.pid}] Connecting to remote server: ${url}`);
 process.stderr.write(`webhook id ${url.split("/").pop()}\n`);
 process.stderr.write(Buffer.from(`buffered ${url}\n`));
+const auth = process.argv.find((arg) => arg.startsWith("Authorization:"));
+if (auth) process.stderr.write(`header ${auth}\n`);
 """
 
 
@@ -158,6 +163,39 @@ class HomeAssistantLaunch(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("HA_MCP_URL", result.stderr)
                 self.assertFalse(self.out.exists(), "mcp-remote must not start")
+
+    def test_a_token_goes_out_as_a_bearer_header_and_nowhere_else(self) -> None:
+        path = f"{self.npx_bin}:{self.env['PATH']}"
+        token = f"tok-{uuid.uuid4().hex}"
+        for url_name, token_name in (("HA_MCP_URL", "HA_MCP_TOKEN"), ("HA_MCP_URL_BUSH", "HA_MCP_TOKEN_BUSH")):
+            with self.subTest(url_name=url_name):
+                result = self.run_launch(
+                    [str(WRAPPER), url_name, "--allow-http"],
+                    PATH=path,
+                    **{url_name: self.url, token_name: token},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                record = json.loads(self.out.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    record["argv"][2:], [self.url, "--header", f"Authorization: Bearer {token}", "--allow-http"]
+                )
+                for cmdline in record["cmdlines"]:
+                    self.assertNotIn(token, " ".join(cmdline))
+                for seen in ("env", "childEnv"):
+                    self.assertNotIn(token_name, record[seen])
+                    self.assertFalse([k for k, v in record[seen].items() if token in v], seen)
+                self.assertNotIn(token, result.stderr)
+                self.assertIn(f"header Authorization: Bearer <{token_name}>", result.stderr)
+
+    def test_an_empty_token_adds_no_header(self) -> None:
+        path = f"{self.npx_bin}:{self.env['PATH']}"
+        result = self.run_launch(
+            [str(WRAPPER), "HA_MCP_URL", "--allow-http"], PATH=path, HA_MCP_URL=self.url, HA_MCP_TOKEN=""
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(record["argv"][2:], [self.url, "--allow-http"])
+        self.assertNotIn("HA_MCP_TOKEN", record["env"])
 
 
 if __name__ == "__main__":

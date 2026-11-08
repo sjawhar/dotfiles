@@ -15,10 +15,17 @@
 // `mcp-remote <url> args...` would get; and imports proxy.js in this process. The URL lives only
 // in this process's memory: the kernel's command line stays `node mcp-remote-from-env ENV_NAME ...`.
 //
+// A server that wants a bearer token (ha-mcp's webhook in "Sign in with Home Assistant" mode) gets
+// it from the variable named like ENV_NAME with its `URL` part replaced by `TOKEN` (HA_MCP_URL ->
+// HA_MCP_TOKEN, HA_MCP_URL_BUSH -> HA_MCP_TOKEN_BUSH; a name with no `URL` part gets `_TOKEN`
+// appended). When that variable is set and non-empty, the wrapper deletes it too and adds
+// `--header "Authorization: Bearer <token>"` to mcp-remote's in-process argv; when it is unset or
+// empty, mcp-remote runs exactly as before, with no Authorization header.
+//
 // mcp-remote also logs the URL to stderr (`Connecting to remote server: <url>`), and whoever
 // launched it may keep that stream. So every stderr write in this process, console.error's
-// included, has the URL and its path's last segment (the webhook id on its own) replaced with
-// `<ENV_NAME>` first.
+// included, has the URL, its path's last segment (the webhook id on its own) and the token
+// replaced with `<ENV_NAME>` (`<TOKEN_NAME>` for the token) first.
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
@@ -35,8 +42,20 @@ const url = process.env[name];
 if (!url) die(2, `${name} is unset or empty`);
 delete process.env[name];
 
-const secrets = [url, url.split(/[?#]/)[0].split("/").filter(Boolean).pop()].filter(Boolean);
-const redact = (text) => secrets.reduce((out, secret) => out.split(secret).join(`<${name}>`), text);
+const parts = name.split("_");
+const urlPart = parts.lastIndexOf("URL");
+if (urlPart === -1) parts.push("TOKEN");
+else parts[urlPart] = "TOKEN";
+const tokenName = parts.join("_");
+const token = process.env[tokenName] || "";
+delete process.env[tokenName];
+
+const secrets = [
+    [url, name],
+    [url.split(/[?#]/)[0].split("/").filter(Boolean).pop(), name],
+    [token, tokenName],
+].filter(([secret]) => secret);
+const redact = (text) => secrets.reduce((out, [secret, label]) => out.split(secret).join(`<${label}>`), text);
 const writeStderr = process.stderr.write.bind(process.stderr);
 process.stderr.write = (chunk, encoding, callback) => {
     if (typeof chunk === "string") return writeStderr(redact(chunk), encoding, callback);
@@ -63,5 +82,6 @@ function findProxy() {
 }
 
 const proxy = findProxy();
-process.argv = [process.argv[0], proxy, url, ...rest];
+const header = token ? ["--header", `Authorization: Bearer ${token}`] : [];
+process.argv = [process.argv[0], proxy, url, ...header, ...rest];
 import(pathToFileURL(proxy).href);
