@@ -41,7 +41,7 @@
       "enabled": true
     },
     "verification": {
-      "version": "0.23.0",
+      "version": "0.24.0",
       "enabledFeatures": null,
       "enabled": true
     },
@@ -51,12 +51,12 @@
       "enabled": true
     },
     "engineering": {
-      "version": "0.2.0",
+      "version": "0.3.0",
       "enabledFeatures": null,
       "enabled": true
     },
     "dev-infra": {
-      "version": "0.4.0",
+      "version": "0.5.0",
       "enabledFeatures": null,
       "enabled": true
     }
