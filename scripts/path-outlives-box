@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Does a write to this path outlive this box, and this machine?
+#
+# A lane cannot learn one rule for this, because there is no one rule. /home/<user>/src and
+# /mnt/durable/<user> are host disk in EVERY agent box, but /mnt/nvme/<anything> is host disk
+# only in a box that was given a --dir covering it, and the box's own private overlay in every
+# other box. Measured 2026-11-08 15:49Z on sami-devbox, same path, same moment:
+#
+#   agentbox-57869c9c891d  /mnt/nvme/sami/tmp -> /dev/nvme46n1[/sami/tmp] xfs   (host disk)
+#   agentbox-ecdd9de2d619  /mnt/nvme/sami/tmp -> overlay                        (dies with the box)
+#
+# So a handoff saying "preserved at /mnt/nvme/..." is true for its writer and false for its
+# reader, and neither can tell from the path. Two lanes lost work to this on 2026-11-08: a
+# reflect run's 1,415 holdout cases and four of an eval lane's files, both "kept" in an overlay.
+# Ask the box, never the path.
+#
+#   path-outlives-box /mnt/nvme/sami/holdout /mnt/durable/sami/keep
+#
+# Exit 0 when every path outlives this box, 1 when any does not, so a handoff writer can gate
+# on it. Read-only: it creates nothing and writes nothing.
+set -uo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+usage: path-outlives-box <path>... [--quiet]
+
+Prints one line per path:
+  HOST       the write lands on a host disk and outlives this box and a machine stop
+  EPHEMERAL  a real disk, but local SSD: it outlives this box and is EMPTY after a machine stop
+  BOX        this box's private overlay: the write DIES when the box ends
+  MEMORY     tmpfs: the write dies when the machine stops
+
+Exit 0 when every path is HOST, 1 otherwise.
+EOF
+}
+
+quiet=false
+paths=()
+for a in "$@"; do
+    case "$a" in
+        --quiet | -q) quiet=true ;;
+        -h | --help) usage; exit 0 ;;
+        -*) echo "path-outlives-box: unknown option $a" >&2; usage; exit 2 ;;
+        *) paths+=("$a") ;;
+    esac
+done
+[[ ${#paths[@]} -gt 0 ]] || { usage; exit 2; }
+
+# Name this box, so "dies with the box" names which one. A host shell has no box.
+box="${AGENTBOX_BOX:-}"
+if [[ -z "$box" && -r /proc/self/cgroup ]] && grep -qa docker /proc/self/cgroup 2>/dev/null; then
+    box="$(hostname)"
+fi
+where="${box:+box $box}"
+where="${where:-this host}"
+
+# A local-SSD mount is a real block device that is nonetheless empty after a machine stop, which
+# is a different hazard from an overlay and must not be reported as safe. On this fleet those are
+# the raid0 scratch mounts; a machine without one matches nothing here.
+is_local_ssd() { [[ "$1" == /mnt/scratch || "$1" == /mnt/scratch/* ]]; }
+
+rc=0
+for p in "${paths[@]}"; do
+    read -r src fstype target < <(findmnt -no SOURCE,FSTYPE,TARGET -T "$p" 2>/dev/null)
+    if [[ -z "${fstype:-}" ]]; then
+        printf 'UNKNOWN    %s\n           findmnt could not resolve it; the path may not exist in %s\n' "$p" "$where"
+        rc=1
+        continue
+    fi
+    case "$fstype" in
+        overlay)
+            printf 'BOX        %s\n           %s %s - DIES when %s ends\n' "$p" "$src" "$fstype" "$where"
+            rc=1
+            ;;
+        tmpfs | ramfs)
+            printf 'MEMORY     %s\n           %s %s - dies when the machine stops\n' "$p" "$src" "$fstype"
+            rc=1
+            ;;
+        *)
+            if is_local_ssd "$target"; then
+                printf 'EPHEMERAL  %s\n           %s %s on %s - outlives %s, EMPTY after a machine stop\n' \
+                    "$p" "$src" "$fstype" "$target" "$where"
+                rc=1
+            else
+                $quiet || printf 'HOST       %s\n           %s %s on %s\n' "$p" "$src" "$fstype" "$target"
+            fi
+            ;;
+    esac
+done
+exit $rc
