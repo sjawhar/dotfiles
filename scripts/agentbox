@@ -97,6 +97,13 @@ set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 SRC="${AGENTBOX_SRC:-$HOME/src}"
+# `agentbox new --no-host-writes`: the box gets no writable host path at all except the ones
+# its caller names with --dir. For a harness that runs untrusted or replayed sessions with
+# their tools on, where a write escaping into a lane's tree is the hazard, not a bug to find
+# afterwards. mount_args does the three parts: no durable bind, $SRC redirected to an empty
+# per-box directory, and every home allow-list entry read-only.
+NO_HOST_WRITES=false
+[[ "${AGENTBOX_NO_HOST_WRITES:-}" == 1 ]] && NO_HOST_WRITES=true
 # A box's checkouts, and the template clone per repo every one of them is copied from
 # (clone_checkout). Both go on the machine's big
 # disk where it has one, /mnt/nvme/<user>, tested as `.bashrc` tests it for the language caches:
@@ -1584,6 +1591,19 @@ ensure_forwarders() {
 # link into an unmounted path.
 mount_args() {
     local box="$1" a=() p src
+    # --no-host-writes: this box may not write anything another lane can see. The two disks
+    # every box gets are the ones to take away first -- ~/src and /mnt/durable/<user> are host
+    # binds in EVERY box, so a sandboxed copy with its tools on writes real files there, which
+    # is how an eval harness overwrote four lanes' trees on 2026-11-08 (dispatch://BET-831).
+    # $SRC moves to an empty per-box directory rather than being dropped: the bind is
+    # unconditional below and "$SRC" empty would hand docker `-v ":"`, and pointing it
+    # elsewhere leaves /home/<user>/src unbound, so it is the box's own private home and a
+    # write there dies with the box. A --dir is the explicit way back to one writable host path.
+    if $NO_HOST_WRITES; then
+        SRC="$BOXES/$box/empty-src"
+        DURABLE_DIR=""
+        mkdir -p "$SRC"
+    fi
     # Made here, as the user, when absent (a new machine): docker would make a missing bind source
     # as root, and nothing the user runs could then write under it (sami-devbox, 2026-11-02).
     mkdir -p "$SRC"
@@ -1715,12 +1735,18 @@ mount_args() {
     [[ "$DOTFILES_DIR" == "$SRC"/* || "$(readlink -f "$DOTFILES_DIR")" == "$(readlink -f "$HOME/.dotfiles")" ]] \
         || a+=(-v "$DOTFILES_DIR:$DOTFILES_DIR")
     a+=(-v "$HOME/.dotfiles:$HOME/.dotfiles")
+    # The home allow-list is the surface a lane does not think of: about fifty rw entries bound
+    # from the host home into every box, ~/.omp (every session's transcripts) and ~/.ssh among
+    # them. Under --no-host-writes each is read-only, so the box still READS the logins and
+    # settings it needs to work and can change none of them.
+    local home_mode=""
+    $NO_HOST_WRITES && home_mode=":ro"
     while read -r p; do
         if [[ ! -e "$HOME/$p" ]]; then
             case "$p" in .npmrc|.gitconfig) continue ;; esac
             mkdir -p "$HOME/$p"
         fi
-        a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p")
+        a+=(-v "$(readlink -f "$HOME/$p"):$HOME/$p$home_mode")
     done < <(mounts_of rw)
     while read -r p; do
         [[ -e "$HOME/$p" ]] || continue
@@ -1741,6 +1767,14 @@ mount_args() {
     mkdir -p -m 700 "$HOME/.omp/run/collab-hosts" "$BOXES/$box/omp-run/collab-hosts"
     a+=(-v "$BOXES/$box/omp-run:$HOME/.omp/run")
     a+=(-v "$HOME/.omp/run/collab-hosts:$HOME/.omp/run/collab-hosts")
+    # A read-only ~/.omp would leave omp unable to write its own transcript, so under
+    # --no-host-writes the session store is a private directory under the box, exactly as
+    # ~/.omp/run is above. It dies with the box, which is the trade the flag makes: a run whose
+    # record must survive passes a --dir and writes it there.
+    if $NO_HOST_WRITES; then
+        mkdir -p -m 700 "$BOXES/$box/omp-sessions"
+        a+=(-v "$BOXES/$box/omp-sessions:$HOME/.omp/agent/sessions")
+    fi
     # A per-box runtime dir owned by ubuntu (omp refuses a root-owned one), with
     # the host sockets bound at their usual paths. Never the host's whole
     # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
@@ -2694,7 +2728,7 @@ reap_start() {
 }
 
 cmd_new() {
-    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE] [--dir PATH]… [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
+    local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE] [--dir PATH]… [--no-host-writes] [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
     # --drop-gone-dirs: this launch RESUMES a session (move_pane_command, tmux-resurrect-omp),
     # so its --dir paths were right when they were recorded, and
@@ -2757,6 +2791,10 @@ cmd_new() {
                 shift 2
                 ;;
             --drop-gone-dirs) shift ;;
+            --no-host-writes)
+                NO_HOST_WRITES=true
+                shift
+                ;;
             --dir)
                 [[ -n "${2:-}" ]] || die "--dir takes an existing directory, e.g. --dir ~/src/bet-grade  ($usage)"
                 dirs_seen=$((dirs_seen + 1))
