@@ -45,13 +45,17 @@ class OmpProfileLinks(unittest.TestCase):
         # `mise env -s bash` puts the pinned release's install dir on PATH.
         tool = self.home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
         tool.mkdir(parents=True)
-        write_stub(tool, "omp", 'echo "AGENT omp $*"')
+        # The stub omp prints the profile variables it was started with.
+        write_stub(tool, "omp", 'echo "AGENT omp $*"\necho "PROFILE ${OMP_PROFILE-unset} ${OMP_IN_DEFAULT_PROFILE-unset}"')
         write_stub(stubs, "mise", f"echo 'export PATH=\"{tool}:$PATH\"'")
         self.env = {
             "DOTFILES_DIR": str(DOTFILES),
             "HOME": str(self.home),
             "PATH": f"{stubs}:/usr/bin:/bin",
             "XDG_CONFIG_HOME": str(self.home / ".config"),
+            # No memory scope: with no user manager here each launch would wait out the shim's
+            # 10 s scope retry, and the memory ceiling has its own test.
+            "OMP_MEMORY_SCOPE": "off",
         }
 
     def tearDown(self) -> None:
@@ -65,6 +69,14 @@ class OmpProfileLinks(unittest.TestCase):
     def assert_launched(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("AGENT omp", result.stdout)
+
+    def launched_env(self, *args: str, **extra: str) -> tuple[str, str]:
+        """OMP_PROFILE and OMP_IN_DEFAULT_PROFILE as omp saw them ("unset" when absent)."""
+        result = self.omp_run(*args, **extra)
+        self.assert_launched(result)
+        [line] = [line for line in result.stdout.splitlines() if line.startswith("PROFILE ")]
+        omp_profile, in_default = line.split(" ")[1:]
+        return omp_profile, in_default
 
     def assert_mirrors_canonical(self, profile: Path) -> None:
         self.assertEqual(os.readlink(profile / "plugins"), str(self.targets / "plugins"))
@@ -164,6 +176,46 @@ class OmpProfileLinks(unittest.TestCase):
             with self.subTest(args=args, env=extra):
                 self.assert_launched(self.omp_run(*args, **extra))
         self.assertFalse((self.omp / "profiles").exists())
+
+    def test_a_machine_file_names_the_profile_of_a_bare_launch(self) -> None:
+        """oryx, Sami's personal machine, holds `personal` in $XDG_CONFIG_HOME/omp/profile."""
+        (self.home / ".config" / "omp").mkdir()
+        (self.home / ".config" / "omp" / "profile").write_text("theorem\n", encoding="utf-8")
+        self.assertEqual(self.launched_env(), ("theorem", "unset"))
+        self.assert_mirrors_canonical(self.omp / "profiles" / "theorem")
+        # A flag or a defined variable still wins over the file.
+        self.assertEqual(self.launched_env("--profile", "other"), ("unset", "unset"))
+        self.assertEqual(self.launched_env(OMP_PROFILE="other"), ("other", "unset"))
+        self.assertEqual(self.launched_env(PI_PROFILE="other"), ("unset", "unset"))
+        self.assertTrue((self.omp / "profiles" / "other").is_dir())
+
+    def test_the_default_profile_stays_reachable_beside_a_machine_file(self) -> None:
+        (self.home / ".config" / "omp").mkdir()
+        (self.home / ".config" / "omp" / "profile").write_text("theorem\n", encoding="utf-8")
+        # omp drops OMP_PROFILE in a default-profile session, so the marker is what keeps an omp
+        # that session starts with no profile named in the default.
+        for args, extra in ((("--profile", "default"), {}), (("--profile=default",), {}), ((), {"OMP_PROFILE": ""}),
+                            ((), {"OMP_PROFILE": "default"}), ((), {"OMP_IN_DEFAULT_PROFILE": "1"})):
+            with self.subTest(args=args, env=extra):
+                omp_profile, in_default = self.launched_env(*args, **extra)
+                self.assertEqual(in_default, "1")
+                self.assertNotEqual(omp_profile, "theorem")
+        self.assertFalse((self.omp / "profiles").exists())
+        # Naming a profile clears the marker for that session's own children.
+        self.assertEqual(self.launched_env("--profile", "theorem", OMP_IN_DEFAULT_PROFILE="1"), ("unset", "unset"))
+
+    def test_a_machine_without_the_file_exports_nothing_new(self) -> None:
+        for args in ((), ("--profile", "default")):
+            with self.subTest(args=args):
+                self.assertEqual(self.launched_env(*args), ("unset", "unset"))
+        self.assertFalse((self.omp / "profiles").exists())
+
+    def test_a_bad_name_in_the_machine_file_refuses_before_omp_runs(self) -> None:
+        (self.home / ".config" / "omp").mkdir()
+        (self.home / ".config" / "omp" / "profile").write_text("../x\n", encoding="utf-8")
+        result = self.omp_run()
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("AGENT", result.stdout)
 
     def test_bad_profile_name_refuses_before_omp_runs(self) -> None:
         for name in ("..", ".hidden", "a/b"):

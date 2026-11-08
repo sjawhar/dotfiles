@@ -68,7 +68,18 @@ fi
 # ~/.omp/agent (created, re-pointed, retired), and its real files are its own. config.yml comes
 # from the overlay above; models.yml (provider routes and keys) and envoy.json are the profile's
 # own, so neither is mirrored or pruned. The profile is the last --profile before a `--`, else
-# OMP_PROFILE when it is defined, else PI_PROFILE; a misread costs only these links.
+# OMP_PROFILE when it is defined, else PI_PROFILE when it is defined, else the machine's own
+# default below; a misread costs only these links.
+#
+# A machine whose bare `omp` starts a named profile says so in a file of its own, outside this
+# repo: ${XDG_CONFIG_HOME:-$HOME/.config}/omp/profile, holding the profile's name. Sami's personal
+# machine (oryx) holds `personal`, so his sessions there start on his own accounts and memory
+# without a flag. A machine without the file keeps the default profile. The shim exports the name
+# as OMP_PROFILE, so omp, its subagents, its scripted `omp -p` runs and shims/ctx (which picks the
+# personal memory server by it) all see it. `--profile default` still starts the default profile.
+# omp removes OMP_PROFILE from a default-profile session's environment, so on such a machine a
+# launch that resolves to the default exports OMP_IN_DEFAULT_PROFILE=1, and an omp it starts with
+# no profile named stays in the default instead of taking the file's.
 profile="" flagged="" prev=""
 for arg in "$@"; do
     [[ "$arg" == -- ]] && break
@@ -79,13 +90,24 @@ for arg in "$@"; do
     fi
     prev="$arg"
 done
+profile_file="${XDG_CONFIG_HOME:-$HOME/.config}/omp/profile"
 if [[ -z "$flagged" ]]; then
-    if [[ -n "${OMP_PROFILE+x}" ]]; then profile="$OMP_PROFILE"; else profile="${PI_PROFILE:-}"; fi
+    if [[ -n "${OMP_PROFILE+x}" ]]; then
+        profile="$OMP_PROFILE"
+    elif [[ -n "${PI_PROFILE+x}" ]]; then
+        profile="$PI_PROFILE"
+    elif [[ -z "${OMP_IN_DEFAULT_PROFILE:-}" && -r "$profile_file" ]]; then
+        profile=$(tr -d '[:space:]' <"$profile_file")
+        export OMP_PROFILE="$profile"
+    fi
 fi
 [[ "$profile" == default ]] && profile=""
 if [[ -n "$profile" && ! "$profile" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     echo "omp: invalid profile name: $profile (lowercase letters, digits, '.', '-', '_'; starting with a letter or digit)" >&2
     exit 2
+fi
+if [[ -r "$profile_file" ]]; then
+    if [[ -z "$profile" ]]; then export OMP_IN_DEFAULT_PROFILE=1; else unset OMP_IN_DEFAULT_PROFILE; fi
 fi
 
 # omp/config.local.yml (gitignored, machine-local) is the box's own model routing. On sami-rocqperf it points every

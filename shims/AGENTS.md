@@ -285,6 +285,15 @@ before handing the call to the real one.
   all of the default's state into it and rebuilds its `models.yml` as the default's merged with the
   overlay, on every launch, under a 30 s lock; a real entry on both sides stops the launch
   (`omp/AGENTS.md`, "A shared profile").
+  The profile is the last `--profile`, else a defined `OMP_PROFILE`, else a defined `PI_PROFILE`,
+  else the machine's own default: `${XDG_CONFIG_HOME:-$HOME/.config}/omp/profile`, outside this
+  repo, holding a profile name. Oryx, Sami's personal machine, holds `personal`; the dev boxes
+  have no such file and keep the default profile. The shim exports the file's name as
+  `OMP_PROFILE`, so omp, its subagents, scripted `omp -p` runs and `ctx` see it, and
+  `--profile default` still starts the default profile. omp drops `OMP_PROFILE` in a
+  default-profile session, so on a machine with the file a launch that resolves to the default
+  exports `OMP_IN_DEFAULT_PROFILE=1`, and an omp it starts with no profile named stays in the
+  default (`scripts/tests/test_omp_profile_links.py`).
 - **`claude`** and **`codex`** (a link to `claude`) export the model-spend environment of
   `scripts/agent-spend-env.sh` (dispatch://INFRA-165), then exec the first real binary of that name
   past this dir on PATH, skipping mise's shims dir and any file whose real path is in a `shims/` dir,
@@ -361,7 +370,8 @@ before handing the call to the real one.
   missing" (sami-devbox, 2026-11-03). `devbox/sami-devbox-check` runs `dispatch --help` on the
   host and in a box.
 - **`ctx`** reaches one of two memory graphs. Sami's personal deployment is chosen when the omp
-  profile is `personal` or the caller sets `CTX_PERSONAL_ROOT`: its root (that variable, else
+  profile is `personal` (`OMP_PROFILE`, else `PI_PROFILE`; on oryx a bare `omp` sets it from the
+  machine's `omp/profile` file) or the caller sets `CTX_PERSONAL_ROOT`: its root (that variable, else
   `ctx-personal` under an absolute `$XDG_DATA_HOME`, else `~/.local/share`) names its server in
   `server-url` and its release in `ctx-version` (an executable `bin/ctx` overrides it), and the
   shim sets `CTX_DATA_DIR` and `CTX_STATE_DIR` under it. An inherited `CTX_SERVER` is ignored
