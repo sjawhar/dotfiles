@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""omp-models-check FILE…: reject PATH-dependent !commands without running them.
+
+Check apiKey and header values (provider, model and model override). The first shell
+word must be a literal absolute path; quoting is allowed. No executable lookup or
+shell expansion: this host's PATH and files need not be those of an agent box.
+Uses the same yq as both builders, including its YAML aliases and source lines.
+"""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+# Retain the source location before parsing the shell word; never print arguments,
+# header values or yq's parse errors, which can contain credentials.
+COMMANDS = '''explode(.) | [.. | select(tag == "!!str")
+    | select((path | reverse | .[0]) == "apiKey" or (path | reverse | .[1]) == "headers")
+    | select(test("^!")) | {"line": line, "path": path, "value": .}]'''
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: omp-models-check FILE…", file=sys.stderr)
+        return 2
+    failed = False
+    for file in sys.argv[1:]:
+        try:
+            result = subprocess.run(["yq", "-o=json", COMMANDS, "--", file],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError("cannot read models YAML with yq")
+            commands = json.loads(result.stdout)
+        except (OSError, ValueError) as error:
+            print(f"omp-models-check: {file}: {error}", file=sys.stderr)
+            failed = True
+            continue
+        for command in commands:
+            try:
+                lexer = shlex.shlex(command["value"][1:], posix=True, punctuation_chars=True)
+                lexer.whitespace_split = True
+                word = lexer.get_token()
+            except ValueError:
+                word = ""
+            if word and os.path.isabs(word):
+                continue
+            field = ".".join(str(part) for part in command["path"])
+            print(f"omp-models-check: {file}:{command['line']}: {field}: "
+                  'the !command must start with an absolute path, not a bare name or relative path; '
+                  'use "!/absolute/path/to/command ..." (arguments unchanged)', file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

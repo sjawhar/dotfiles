@@ -262,6 +262,9 @@ if [[ -n "$profile" ]]; then
     root="$HOME/${PI_CONFIG_DIR:-.omp}"
     overlay_models="$root/profiles/$profile/agent/models.overlay.yml"
     if [[ -f "$overlay_models" ]]; then
+        # Fail before changing profile state: a stale key may bill the wrong account, and a
+        # warning followed by retries hides the broken command until the first model call.
+        "$DOTFILES_DIR/scripts/omp-models-check" "$root/agent/models.yml" "$overlay_models"
         # Several sessions launch at once: one link pass at a time, so two shims never both move
         # the same new entry into the default. Bounded, so a stuck holder fails launches loudly
         # instead of hanging them, and never lets one start half-linked.
@@ -279,9 +282,15 @@ if [[ -n "$profile" ]]; then
         exec 9>&-
         models_out="$root/profiles/$profile/agent/models.yml"
         # 0600: the default's models.yml can hold literal keys (scripts/omp-models-build, `apiKeyFile`).
-        (umask 077 && yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" \
-            > "$models_out.new.$$")
-        if cmp -s "$models_out.new.$$" "$models_out"; then rm -f "$models_out.new.$$"; chmod 600 "$models_out"; else mv "$models_out.new.$$" "$models_out"; fi
+        (
+            umask 077
+            models_tmp="$models_out.new.$$"
+            trap 'rm -f "$models_tmp"' EXIT
+            yq eval-all '. as $item ireduce ({}; . * $item)' "$root/agent/models.yml" "$overlay_models" > "$models_tmp"
+            # Check the bytes being installed too: a source can change while the lock waits.
+            "$DOTFILES_DIR/scripts/omp-models-check" "$models_tmp"
+            if cmp -s "$models_tmp" "$models_out"; then chmod 600 "$models_out"; else mv "$models_tmp" "$models_out"; fi
+        )
     else
         mirror_links "$root" "$root/profiles/$profile"
         mirror_links "$root/agent" "$root/profiles/$profile/agent" copy-files

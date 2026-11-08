@@ -18,6 +18,10 @@
 set -euo pipefail
 dot="${DOTFILES_DIR:-$HOME/.dotfiles}"
 out="${1:-${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml}"
+sources=("$dot/omp/models.yml")
+if [ -f "$dot/omp/models.local.yml" ]; then sources+=("$dot/omp/models.local.yml"); fi
+# Refuse before replacing the last output; source files give useful line numbers.
+"$dot/scripts/omp-models-check" "${sources[@]}"
 umask 077
 tmp="$out.new.$$"
 trap 'rm -f "$tmp"' EXIT
@@ -33,8 +37,9 @@ yq '(.providers // {}) | to_entries | .[] | select(.value.apiKeyFile != null) | 
             P="$provider" F="$file" yq -i \
                 '.providers[strenv(P)].apiKey = (load_str(strenv(F)) | trim) | del(.providers[strenv(P)].apiKeyFile)' "$tmp"
         else
+            quoted_file=${file//\'/\'\\\'\'}
             # shellcheck disable=SC2016 # the command is for omp's /bin/sh, not this one
-            P="$provider" C="!IFS= read -r k < '$file' || [ -n \"\$k\" ]; printf %s \"\$k\"" yq -i \
+            P="$provider" C="!/bin/sh -c 'IFS= read -r k < \"\$1\" || [ -n \"\$k\" ]; printf %s \"\$k\"' sh '$quoted_file'" yq -i \
                 '.providers[strenv(P)].apiKey = strenv(C) | del(.providers[strenv(P)].apiKeyFile)' "$tmp"
             echo "omp-models-build: $file is missing or empty; provider $provider reads it with a command" >&2
         fi
@@ -48,6 +53,7 @@ yq '(.providers // {}) | to_entries | .[] | select(.value.apiKeyFile != null) | 
 # models.local.yml wins.
 yq -i '((.providers[] | select(.baseUrl != null and .api == "anthropic-messages") | .compat.supportsLongCacheRetention | select(. == null)) = true)
   | ((.providers.anthropic | select(.baseUrl != null and .api == null) | .compat.supportsLongCacheRetention | select(. == null)) = true)' "$tmp"
+"$dot/scripts/omp-models-check" "$tmp"
 chmod 600 "$tmp"
 if cmp -s "$tmp" "$out"; then
     chmod 600 "$out"
