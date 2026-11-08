@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- The chat hub's QR page: chathub/login-screen serves it at /qr.html, and chathub/login
+     writes the newest QR code (qr.png) and its state (status.json) beside it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat hub login</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 34rem; text-align: center; }
+  img { width: 22rem; max-width: 90vw; image-rendering: pixelated; background: #fff; padding: 1rem; }
+  #state { font-size: 1.2rem; margin: 1rem 0; }
+  .hint { color: #555; }
+</style>
+</head>
+<body>
+<h1 id="title">Chat hub login</h1>
+<p id="state">Waiting for a code…</p>
+<img id="qr" alt="QR code" hidden>
+<p class="hint" id="hint" hidden>Scan it with the app on your phone. The code renews itself; this page follows it.</p>
+<script>
+const HINTS = {
+  whatsapp: "Phone: WhatsApp \u2192 Settings \u2192 Linked devices \u2192 Link a device.",
+  signal: "Phone: Signal \u2192 Settings \u2192 Linked devices \u2192 +.",
+  discord: "Phone: Discord \u2192 You \u2192 Scan QR code.",
+};
+let shown = null;
+let failures = 0;
+function lost() {
+  // The screen is down or Access wants a new sign-in: never leave an old code on show.
+  document.getElementById("qr").hidden = true;
+  document.getElementById("hint").hidden = true;
+  document.getElementById("state").textContent = "Lost contact with the login screen; retrying…";
+  failures += 1;
+  if (failures >= 5) location.reload();  // lets Access sign you in again
+}
+async function poll() {
+  try {
+    const r = await fetch("status.json", { cache: "no-store", redirect: "error" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const s = await r.json();
+    failures = 0;
+    const qr = document.getElementById("qr");
+    const hint = document.getElementById("hint");
+    document.getElementById("title").textContent = "Chat hub login: " + s.network;
+    document.getElementById("state").textContent = s.message;
+    const waiting = s.state === "waiting";
+    if (waiting && shown !== s.updated) {
+      qr.src = "qr.png?v=" + encodeURIComponent(s.updated);
+      shown = s.updated;
+    }
+    qr.hidden = !waiting;
+    hint.hidden = !waiting;
+    if (HINTS[s.network]) hint.textContent = HINTS[s.network] + " The code renews itself; this page follows it.";
+  } catch (e) {
+    lost();
+  }
+  setTimeout(poll, 2000);
+}
+poll();
+</script>
+</body>
+</html>

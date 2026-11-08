@@ -44,8 +44,8 @@ When a bot posts that a login expired or ended, tell Sami which network and re-l
 
 | Network | Re-link |
 |---|---|
-| WhatsApp, Signal, Discord (QR code) | `secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login <net> <cmd>`: `whatsapp login qr`, `signal login qr`, `discord login-qr`. It opens the QR in Sami's browser through `forward open`. A rotated code overwrites the same file: refresh the tab. Exit 0 means linked. |
-| Google Messages, Messenger, Instagram, LinkedIn (website sign-in) | Run `~/.dotfiles/chathub/login-screen` (it runs `forward port 6080`) and keep it running. Send Sami `http://localhost:6080/vnc.html?autoconnect=1&resize=scale` (mautrix-manager, signed in to the hub). He picks the network and signs in. Google Messages ends with an emoji tap on his phone. Stop the script when he finishes. |
+| WhatsApp, Signal, Discord (QR code) | Run `~/.dotfiles/chathub/login-screen` and keep it running, then `secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/chathub/login [--keep MINUTES] <net> <cmd>`: `whatsapp login qr`, `signal login qr`, `discord login-qr`. Send Sami `https://chathub-login.thecybermonk.com/` (Cloudflare Access: `sami@thecybermonk.com`, then the emailed code; no tailnet). The page follows each rotated code; `--keep` starts the login again when the bot reports a code ran out. One `login` run at a time shows its code. Exit 0 means linked. Stop the screen when he finishes. |
+| Google Messages, Messenger, Instagram, LinkedIn (website sign-in) | Run `~/.dotfiles/chathub/login-screen` and keep it running. Send Sami `https://chathub-login.thecybermonk.com/vnc.html?autoconnect=1&resize=scale` (mautrix-manager, signed in to the hub as `sami` with `MATRIX_HUB_PASSWORD`). He picks the network and signs in. Google Messages has no QR login any more (Google ended it): he signs in to Google, then taps the emoji on his phone. A sign-in nobody finished in 30 minutes is dropped by the bridge: restart the script. Stop it when he finishes. |
 
 ## Running the hub (on oryx)
 

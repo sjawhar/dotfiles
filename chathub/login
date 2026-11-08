@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
 """Drive a chat hub bridge login (or any bot command) from a terminal or an agent.
 
-Usage: secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- chathub/login <network> [command... | -]
+Usage: secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- chathub/login [--keep MINUTES] <network> [command... | -]
 
-Sends `command` (default: `login`) to the network's bridge bot in its DM, prints every
-bot reply, and opens any image the bot sends (QR codes) on Sami's laptop with
-`forward open`. Exits 0 when the bot reports a successful login, 1 on failure, and 2
-when the bot asks for input or goes quiet, so the caller can answer with another run,
-e.g. `chathub/login whatsapp login qr`. A command of `-` is read from stdin and never
-printed: use it for cookies or tokens, which must not appear on a command line.
+Sends `command` (default: `login`) to the network's bridge bot in its DM and prints every
+bot reply. Any image the bot sends (a QR code) goes to the login screen: run
+`chathub/login-screen` beside this, and Sami opens https://chathub-login.thecybermonk.com/
+(Cloudflare Access in front; no tailnet). A rotated code replaces the shown one; one run at a
+time shows its code there. Exits 0 when the bot reports a successful login, 1 on failure, and
+2 when the bot asks for input or goes quiet, so the caller can answer with another run, e.g.
+`chathub/login whatsapp login qr`. A command of `-` is read from stdin and never printed:
+use it for cookies or tokens, which must not appear on a command line.
+
+`--keep MINUTES` (at most 720) keeps a code live that long: whenever the bot reports the login
+failed or timed out, the same command is sent again and the new code replaces the old.
 """
+import argparse
+import fcntl
 import json
+import math
 import os
 import re
-import subprocess
+import signal
 import sys
+import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -27,6 +37,9 @@ BOTS = {
 SUCCESS = re.compile(r"successfully logged in|logged in as|login successful", re.I)
 FAILURE = re.compile(r"login failed|failed to log in|timed out|cancell?ed|error", re.I)
 QUIET_SECS = 120
+SCREEN_URL = "https://chathub-login.thecybermonk.com/"
+SCREEN_LOCAL = "http://127.0.0.1:6080/status.json"  # chathub/login-screen's own address
+MAX_KEEP_MINUTES = 720
 
 HS = os.environ["MATRIX_HUB_URL"].rstrip("/")
 TOKEN = os.environ["MATRIX_HUB_TOKEN"]
@@ -58,74 +71,173 @@ def bot_room(bot):
     return room
 
 
-def show_on_laptop(mxc, network, state):
-    """Write the newest bot image to one fixed file and open it on Sami's machine once.
+def screen_dir():
+    """The directory chathub/login-screen serves; it must agree with login-screen's."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    path = os.path.join(base, "chathub-login-screen")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
 
-    The image itself is opened, not an HTML page around it: forward's preview server
-    sends pages with a sandbox CSP that blocks scripts and same-origin images. A
-    rotated code overwrites the same file, so refreshing the tab shows the newest one.
-    """
-    server, media_id = mxc.removeprefix("mxc://").split("/", 1)
-    data = call("GET", f"/_matrix/client/v1/media/download/{server}/{media_id}", raw=True)
-    page_dir = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"chathub-login-{network}")
-    os.makedirs(page_dir, mode=0o700, exist_ok=True)
-    path = os.path.join(page_dir, "qr.png")
-    with open(path + ".tmp", "wb") as f:
-        f.write(data)
-    os.replace(path + ".tmp", path)
-    if state.get("opened"):
-        print("[image] new code written; refresh the open tab to see it")
-        return
-    opened = subprocess.run(["forward", "open", path], capture_output=True, text=True)
-    state["opened"] = opened.returncode == 0
-    print(f"[image] {'opened on laptop' if state['opened'] else 'forward open failed: ' + opened.stderr.strip()}: {path}")
+
+class Screen:
+    """The login screen's QR page, held by one run at a time (a lock in its directory)."""
+
+    def __init__(self, network):
+        self.network = network
+        self.lock = None  # the open lock file once this run holds the page
+        self.refused = False
+
+    def _hold(self):
+        if self.lock is None and not self.refused:
+            f = open(os.path.join(screen_dir(), "login.lock"), "w")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.lock = f
+            except BlockingIOError:
+                f.close()
+                self.refused = True
+                print("[screen] another chathub/login run shows its code there; this one is not shown",
+                      flush=True)
+        return self.lock is not None
+
+    def _write(self, name, data):
+        d = screen_dir()
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{name}.", suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, os.path.join(d, name))
+
+    def publish(self, state, message, image=None):
+        """Show a state on the page; `waiting` shows `image` as the code."""
+        if not self._hold():
+            return
+        if image is not None:
+            self._write("qr.png", image)
+        self._write("status.json", json.dumps({"network": self.network, "state": state,
+                                               "message": message, "updated": time.time()}).encode())
+
+    def stop(self):
+        """Hide this run's code: nobody follows the login any more."""
+        if self.lock is not None:
+            self.publish("stopped", "No login is running. Ask for a new code.")
+
+
+def screen_up():
+    try:
+        with urllib.request.urlopen(SCREEN_LOCAL, timeout=5):
+            return True
+    except OSError:
+        return False
+
+
+class Bot:
+    """One network's bridge bot: send it commands and follow its replies."""
+
+    def __init__(self, network, screen):
+        self.network = network
+        self.bot = f"@{BOTS[network]}:chathub"
+        self.room = urllib.parse.quote(bot_room(self.bot))
+        self.screen = screen
+        self.seen = set()
+        self.sent_ts = None
+        self.sent = None
+        self.printed = False
+
+    def send(self, command, secret):
+        self.sent = call("PUT", f"/_matrix/client/v3/rooms/{self.room}/send/m.room.message/login{time.time_ns()}",
+                         {"msgtype": "m.text", "body": command})["event_id"]
+        self.seen = {self.sent}
+        self.sent_ts = None
+        print(f"> {self.bot}: {'<stdin, not shown>' if secret else command}", flush=True)
+
+    def follow(self):
+        """Follow the replies to the last command; return the exit code described above."""
+        # Bot replies are the bot's events after ours, read newest-first each round; a
+        # forward page from the room's "now" token returns nothing on Tuwunel.
+        last_reply = time.time()
+        while time.time() - last_reply < QUIET_SECS:
+            chunk = call("GET", f"/_matrix/client/v3/rooms/{self.room}/messages?dir=b&limit=50").get("chunk", [])
+            if self.sent_ts is None:
+                self.sent_ts = next((ev["origin_server_ts"] for ev in chunk
+                                     if ev.get("event_id") == self.sent), None)
+            fresh = sorted((ev for ev in chunk
+                            if ev.get("event_id") not in self.seen and ev.get("sender") == self.bot
+                            and ev.get("type") == "m.room.message"
+                            and self.sent_ts is not None and ev.get("origin_server_ts", 0) >= self.sent_ts),
+                           key=lambda ev: ev["origin_server_ts"])
+            for ev in fresh:
+                self.seen.add(ev["event_id"])
+                last_reply = time.time()
+                content = ev.get("content", {})
+                content = content.get("m.new_content", content)  # QR rotations arrive as edits
+                if content.get("msgtype") == "m.image" and content.get("url"):
+                    self.show(content["url"])
+                    continue
+                body = content.get("body", "")
+                print(f"< {body}", flush=True)
+                if SUCCESS.search(body):
+                    self.screen.publish("done", "Linked. You can close this tab.")
+                    return 0
+                if FAILURE.search(body):
+                    return 1
+            time.sleep(2)
+        print(f"(no bot reply for {QUIET_SECS}s; it may be waiting for input)", flush=True)
+        return 2
+
+    def show(self, mxc):
+        server, media_id = mxc.removeprefix("mxc://").split("/", 1)
+        image = call("GET", f"/_matrix/client/v1/media/download/{server}/{media_id}", raw=True)
+        self.screen.publish("waiting", "Scan this code with your phone.", image)
+        if self.printed:
+            print("[image] new code on the login screen", flush=True)
+            return
+        self.printed = True
+        if screen_up():
+            print(f"[image] code on {SCREEN_URL}", flush=True)
+        else:
+            print("[image] chathub/login-screen is not running: start it, then send Sami "
+                  f"{SCREEN_URL}", flush=True)
+
+
+def keep_minutes(text):
+    value = float(text)
+    if not math.isfinite(value) or not 0 <= value <= MAX_KEEP_MINUTES:
+        raise argparse.ArgumentTypeError(f"must be between 0 and {MAX_KEEP_MINUTES}")
+    return value
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in BOTS:
-        sys.exit(f"usage: login <{'|'.join(BOTS)}> [command...]")
-    network = sys.argv[1]
-    secret = sys.argv[2:] == ["-"]
-    command = sys.stdin.read().strip() if secret else (" ".join(sys.argv[2:]) or "login")
-    bot = f"@{BOTS[network]}:chathub"
-    room = urllib.parse.quote(bot_room(bot))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--keep", type=keep_minutes, metavar="MINUTES", default=0)
+    parser.add_argument("network", choices=BOTS)
+    parser.add_argument("command", nargs="*")
+    args = parser.parse_intermixed_args()
+    secret = args.command == ["-"]
+    if secret and args.keep:
+        parser.error("--keep cannot resend a command read from stdin")
+    command = sys.stdin.read().strip() if secret else (" ".join(args.command) or "login")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
-    sent = call("PUT", f"/_matrix/client/v3/rooms/{room}/send/m.room.message/login{time.time_ns()}",
-                {"msgtype": "m.text", "body": command})["event_id"]
-    print(f"> {bot}: {'<stdin, not shown>' if secret else command}")
-
-    # Bot replies are the bot's events after ours, read newest-first each round; a
-    # forward page from the room's "now" token returns nothing on Tuwunel.
-    seen = {sent}
-    page_state = {}
-    sent_ts = None
-    last_reply = time.time()
-    while time.time() - last_reply < QUIET_SECS:
-        chunk = call("GET", f"/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=50").get("chunk", [])
-        if sent_ts is None:
-            sent_ts = next((ev["origin_server_ts"] for ev in chunk if ev.get("event_id") == sent), None)
-        fresh = sorted((ev for ev in chunk
-                        if ev.get("event_id") not in seen and ev.get("sender") == bot
-                        and ev.get("type") == "m.room.message"
-                        and sent_ts is not None and ev.get("origin_server_ts", 0) >= sent_ts),
-                       key=lambda ev: ev["origin_server_ts"])
-        for ev in fresh:
-            seen.add(ev["event_id"])
-            last_reply = time.time()
-            content = ev.get("content", {})
-            content = content.get("m.new_content", content)  # QR rotations arrive as edits
-            if content.get("msgtype") == "m.image" and content.get("url"):
-                show_on_laptop(content["url"], network, page_state)
-                continue
-            body = content.get("body", "")
-            print(f"< {body}")
-            if SUCCESS.search(body):
-                sys.exit(0)
-            if FAILURE.search(body):
-                sys.exit(1)
-        time.sleep(2)
-    print(f"(no bot reply for {QUIET_SECS}s; it may be waiting for input)")
-    sys.exit(2)
+    screen = Screen(args.network)
+    bot = Bot(args.network, screen)
+    deadline = time.time() + args.keep * 60
+    code = 1
+    try:
+        bot.send(command, secret)
+        while True:
+            code = bot.follow()
+            if code == 0 or time.time() >= deadline:
+                break
+            if code == 2:
+                continue  # the code may still be live: keep following it
+            screen.publish("renewing", "Getting a new code…")
+            print("(starting the login again for a new code)", flush=True)
+            time.sleep(3)
+            bot.send(command, secret)
+    finally:
+        if code == 1 or sys.exc_info()[0] is not None:
+            screen.stop()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

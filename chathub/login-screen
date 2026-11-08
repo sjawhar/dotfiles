@@ -1,21 +1,48 @@
 #!/bin/bash
-# Show mautrix-manager on Sami's browser, for bridge logins that need a website
-# sign-in (Google Messages, Messenger, Instagram, LinkedIn). Runs on the hub machine until
-# stopped: a virtual display with the manager on it, VNC and noVNC on loopback only,
-# and `forward port` so http://localhost:6080/vnc.html?autoconnect=1&resize=scale on
-# Sami's machine reaches it. Everything stops together.
+# The chat hub's login screen, for Sami's browser at https://chathub-login.thecybermonk.com
+# (the oryx Cloudflare Tunnel, with Cloudflare Access letting in only Sami; sjawhar/dojo
+# platform/oryx-edge). Runs on the hub machine until stopped, and serves on loopback only:
 #
+#   / (also /qr.html)                   the newest QR code a chathub/login run received
+#                                       (WhatsApp, Signal, Discord), renewed as it rotates
+#   /vnc.html?autoconnect=1&resize=scale mautrix-manager on a virtual display, through VNC
+#                                       and noVNC, for logins that need a website sign-in
+#                                       (Google Messages, Messenger, Instagram, LinkedIn)
+#
+# Everything stops together. No tailnet: cloudflared reaches 127.0.0.1:6080 itself and
+# checks each request's Access token before passing it on.
+#
+# The bridges drop a login nobody finished within 30 minutes; restart this to start afresh.
 # The manager keeps its sign-in to the hub and its bridge list in its own profile, so
 # only the first run needs signing in (homeserver http://127.0.0.1:8008, user sami,
 # MATRIX_HUB_PASSWORD) and adding bridges http://127.0.0.1:<appservice port>.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MISE="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
 export MISE_AUTO_INSTALL=0
 export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
 DISPLAY_NUM=73
 VNC_PORT=5973
 WEB_PORT=6080
+URL=https://chathub-login.thecybermonk.com
+
+# The web root: noVNC's files and the QR page (also served as /), beside which
+# chathub/login writes qr.png and status.json (the same directory as its screen_dir()).
+# Rebuilt on each start; a code left by a run that no longer holds login.lock is cleared.
+WEB="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/chathub-login-screen"
+install -d -m 0700 "$WEB"
+find "$WEB" -mindepth 1 -maxdepth 1 \( -type l -o -name '.*.tmp' \) -delete
+for f in /usr/share/novnc/*; do
+    ln -s "$f" "$WEB/$(basename "$f")"
+done
+ln -s "$HERE/qr.html" "$WEB/qr.html"
+ln -s "$HERE/qr.html" "$WEB/index.html"
+if flock -n "$WEB/login.lock" true; then
+    rm -f "$WEB/qr.png"
+    printf '{"network":"chat hub","state":"idle","message":"No login is running.","updated":0}' >"$WEB/.status.json.tmp"
+    mv -f "$WEB/.status.json.tmp" "$WEB/status.json"
+fi
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null' EXIT INT TERM
@@ -34,11 +61,8 @@ pids+=($!)
 
 x11vnc -display ":$DISPLAY_NUM" -localhost -rfbport "$VNC_PORT" -forever -shared -nopw -quiet >/dev/null 2>&1 &
 pids+=($!)
-websockify --web /usr/share/novnc "127.0.0.1:$WEB_PORT" "127.0.0.1:$VNC_PORT" >/dev/null 2>&1 &
+websockify --web "$WEB" "127.0.0.1:$WEB_PORT" "127.0.0.1:$VNC_PORT" >/dev/null 2>&1 &
 pids+=($!)
 
-forward port "$WEB_PORT" &
-pids+=($!)
-
-echo "Login screen: http://localhost:$WEB_PORT/vnc.html?autoconnect=1&resize=scale on Sami's machine. Ctrl-C stops it."
+echo "Login screen: $URL/ (QR codes) and $URL/vnc.html?autoconnect=1&resize=scale (mautrix-manager). Ctrl-C stops it."
 wait -n "${pids[@]}"
