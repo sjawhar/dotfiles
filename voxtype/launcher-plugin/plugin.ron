@@ -1,0 +1,12 @@
+(
+    name: "Voxtype history",
+    description: "Syntax: vt <words>\nEnter pastes a past transcription; the context menu copies it",
+    query: (
+        regex: "^vt\\s",
+        help: "vt ",
+        isolate: true,
+        no_sort: true,
+    ),
+    bin: (path: "voxtype-history"),
+    icon: Name("audio-input-microphone-symbolic"),
+)

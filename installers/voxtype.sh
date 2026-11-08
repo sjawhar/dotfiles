@@ -55,12 +55,14 @@ fi
 mkdir -p ~/.config/voxtype
 mkdir -p ~/.config/autostart
 mkdir -p ~/.config/systemd/user
+mkdir -p ~/.local/share/pop-launcher/plugins
 ensure_link "${DOTFILES_DIR}/voxtype/config.toml"               ~/.config/voxtype/config.toml
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype-tray.desktop"     ~/.config/autostart/voxtype-tray.desktop
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype.service"          ~/.config/systemd/user/voxtype.service
 ensure_link "${DOTFILES_DIR}/voxtype/ydotoold.service"          ~/.config/systemd/user/ydotoold.service
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype-recordings-sync.service" ~/.config/systemd/user/voxtype-recordings-sync.service
 ensure_link "${DOTFILES_DIR}/voxtype/voxtype-recordings-sync.timer"   ~/.config/systemd/user/voxtype-recordings-sync.timer
+ensure_link "${DOTFILES_DIR}/voxtype/launcher-plugin"         ~/.local/share/pop-launcher/plugins/voxtype-history
 MODEL_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models/ggml-large-v3-turbo.bin"
 if [ ! -f "$MODEL_FILE" ]; then
     echo "Downloading whisper large-v3-turbo model (~1.6 GB)..."

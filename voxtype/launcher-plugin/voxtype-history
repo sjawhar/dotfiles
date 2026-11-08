@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""pop-launcher plugin: search past voxtype transcriptions from the COSMIC launcher.
+
+`vt <words>` lists the newest transcriptions holding every word (case-insensitive);
+`vt ` alone lists the newest. Enter pastes the selection into the window the
+launcher hands focus back to, leaving it on the clipboard; the context menu
+only copies it.
+
+Protocol (pop-os/launcher src/lib.rs): one JSON request per stdin line,
+one JSON response per stdout line.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from voxtype_history import load_all, preview, stamp, when  # noqa: E402
+
+PREFIX = "vt"
+MAX_RESULTS = 20
+ICON = {"Name": "audio-input-microphone-symbolic"}
+PASTE = os.path.join(
+    os.environ.get("DOTFILES_DIR", os.path.expanduser("~/.dotfiles")),
+    "voxtype",
+    "voxtype-paste",
+)
+# The launcher must be gone and focus back on the target window before
+# voxtype-paste synthesizes Ctrl+Shift+V.
+PASTE_DELAY_S = "0.3"
+CONTEXT_COPY = 0
+
+
+def send(response):
+    sys.stdout.write(json.dumps(response) + "\n")
+    sys.stdout.flush()
+
+
+def pipe_to(argv, text):
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, start_new_session=True)
+    proc.stdin.write(text.encode())
+    proc.stdin.close()
+
+
+class Plugin:
+    def __init__(self):
+        self.stamp = object()
+        self.entries = []  # (ts, text, lowered text), newest first
+        self.shown = []  # text of each result of the last search, by result id
+
+    def _reload(self):
+        current = stamp()
+        if current != self.stamp:
+            self.stamp = current
+            self.entries = [(ts, text, text.lower()) for ts, text in load_all()]
+
+    def search(self, query):
+        self._reload()
+        words = query[len(PREFIX):].lower().split()
+        self.shown = []
+        for ts, text, lowered in self.entries:
+            if all(w in lowered for w in words):
+                count = len(text.split())
+                send({"Append": {
+                    "id": len(self.shown),
+                    "name": preview(text, 90),
+                    "description": f"{when(ts)} · {count} word{'' if count == 1 else 's'}",
+                    "icon": ICON,
+                }})
+                self.shown.append(text)
+                if len(self.shown) == MAX_RESULTS:
+                    break
+        send("Finished")
+
+    def _text(self, result_id):
+        if 0 <= result_id < len(self.shown):
+            return self.shown[result_id]
+        return None
+
+    def activate(self, result_id):
+        text = self._text(result_id)
+        if text is None:
+            return
+        send("Close")
+        pipe_to(["sh", "-c", 'sleep "$1" && exec "$2"', "sh", PASTE_DELAY_S, PASTE], text)
+
+    def context(self, result_id):
+        send({"Context": {
+            "id": result_id,
+            "options": [{"id": CONTEXT_COPY, "name": "Copy to clipboard"}],
+        }})
+
+    def activate_context(self, result_id, context):
+        text = self._text(result_id)
+        if text is None or context != CONTEXT_COPY:
+            return
+        pipe_to(["wl-copy"], text)
+        send("Close")
+
+
+def main():
+    plugin = Plugin()
+    for line in iter(sys.stdin.readline, ""):
+        try:
+            request = json.loads(line)
+        except ValueError:
+            continue
+        if request == "Exit":
+            break
+        if not isinstance(request, dict):
+            continue  # Close, Interrupt: nothing held, nothing running
+        if "Search" in request:
+            plugin.search(request["Search"])
+        elif "Activate" in request:
+            plugin.activate(request["Activate"])
+        elif "Context" in request:
+            plugin.context(request["Context"])
+        elif "ActivateContext" in request:
+            body = request["ActivateContext"]
+            plugin.activate_context(body["id"], body["context"])
+
+
+if __name__ == "__main__":
+    main()
