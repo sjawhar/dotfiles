@@ -1,5 +1,7 @@
 # Chat hub Implementation Plan
 
+> **Superseded in part (HOME-104):** the hub no longer listens on the tailnet and its `MATRIX_HUB_*` secrets are in oryx's `secrets.local.env`, not the shared file. The tailnet address, `tailscale ip -4` and the remote checks from other machines below are history; the design doc has the current setup.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A Matrix hub on oryx that bridges SMS/RCS, WhatsApp, Signal, Discord, Instagram and Messenger, with one MCP that gives agents on any tailnet machine read/send access.
