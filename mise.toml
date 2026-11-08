@@ -104,9 +104,9 @@ zoxide = "0.10.0"
 # Vercel CLI: agent boxes read Lyon's Vercel request logs with the host's own CLI
 # login, mounted by agentbox/mounts (AGENTC-61).
 "npm:vercel" = "59.14.0"
-# Chat hub (docs/plans/2026-10-03-chat-hub-design.md): Tuwunel and the mautrix
-# bridges run on oryx only (installers/chathub.sh); matrix-mcp is the agents'
-# client on every machine (scripts/chathub-mcp).
+# Chat hub (docs/plans/2026-10-03-chat-hub-design.md): Tuwunel, the mautrix bridges
+# and matrix-mcp, the agents' client (scripts/chathub-mcp), run on oryx only
+# (installers/chathub.sh); the hub listens on loopback.
 "github:matrix-construct/tuwunel" = { version = "1.9.3", asset_pattern = "*-x86_64-v2-linux-gnu-tuwunel.zst", bin = "tuwunel" }
 "github:mautrix/gmessages" = { version = "0.2609.0", asset_pattern = "mautrix-gmessages-amd64", bin = "mautrix-gmessages" }
 "github:mautrix/whatsapp" = { version = "0.2609.0", asset_pattern = "mautrix-whatsapp-amd64", bin = "mautrix-whatsapp" }

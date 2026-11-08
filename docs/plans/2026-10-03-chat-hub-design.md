@@ -23,7 +23,7 @@ MCP for agents.
 
 | Piece | What | Where it listens |
 |---|---|---|
-| Tuwunel | Matrix homeserver, `server_name` `chathub` (host-independent IDs: `@sami:chathub`), federation off, registration off | `127.0.0.1:8008` for bridges; oryx tailnet address `:8008` for agents on other machines (token auth) |
+| Tuwunel | Matrix homeserver, `server_name` `chathub` (host-independent IDs: `@sami:chathub`), federation off, registration off | `127.0.0.1:8008` only, for the bridges and for agents on oryx (token auth); no tailnet listener since HOME-104 |
 | mautrix-gmessages | SMS/RCS via Google Messages pairing | loopback appservice port |
 | mautrix-whatsapp | WhatsApp linked device | loopback |
 | mautrix-signal | Signal linked device | loopback |
@@ -50,10 +50,12 @@ one user's contacts don't leak to the others on a shared bridge.
   `installers/chathub.sh` (role installer, run on oryx only).
 - Generated on oryx, never committed: appservice registrations and their `as_token` /
   `hs_token`, bridge databases, Tuwunel database, under `~/.local/share/chathub/` (0700).
-- Agent-tier secrets in the shared file: `MATRIX_HUB_URL` (oryx tailnet URL) and
-  `MATRIX_HUB_TOKEN` (an access token for `@sami:chathub`, device `agents`). The MCP entry
-  is the dotfiles repo's project config, `.omp/mcp.json`, so only omp sessions started in
-  the dotfiles repo load the tools.
+- Agent-tier secrets in oryx's own `secrets.local.env`, never the shared `secrets.env`:
+  `MATRIX_HUB_URL` (`http://127.0.0.1:8008`), `MATRIX_HUB_TOKEN` (an access token for
+  `@sami:chathub`, device `AGENTS`) and `MATRIX_HUB_PASSWORD`. No other machine can reach
+  the hub or read its token, since the token acts as Sami on every network (HOME-104). The
+  MCP entry is the dotfiles repo's project config, `.omp/mcp.json`, so only omp sessions
+  started in the dotfiles repo on oryx load the tools.
 
 ## Behavior rules for agents
 

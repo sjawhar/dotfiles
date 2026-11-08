@@ -5,7 +5,7 @@ description: Use when Sami mentions texting someone, a text, a DM or "did X repl
 
 # Chat hub
 
-The chat hub bridges Sami's chat networks into one private Matrix server on oryx. Each conversation is a Matrix room of `@sami:chathub`. The `chathub` MCP (mindroom-ai's matrix-mcp) reads and sends **as Sami, on his real accounts and real phone number**. It loads only in omp sessions started in the dotfiles repo (`~/.dotfiles/.omp/mcp.json`).
+The chat hub bridges Sami's chat networks into one private Matrix server on oryx. Each conversation is a Matrix room of `@sami:chathub`. The `chathub` MCP (mindroom-ai's matrix-mcp) reads and sends **as Sami, on his real accounts and real phone number**. It loads only in omp sessions started in the dotfiles repo (`~/.dotfiles/.omp/mcp.json`). The hub listens on oryx's loopback only and its `MATRIX_HUB_*` secrets are in oryx's `secrets.local.env`, so it works only in a session on oryx.
 
 ## Networks
 

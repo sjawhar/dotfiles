@@ -1,8 +1,8 @@
 #!/bin/bash
 # One time, on the hub machine, after installers/chathub.sh: create @sami:chathub and
 # give agents a token. Stores MATRIX_HUB_URL, MATRIX_HUB_TOKEN and MATRIX_HUB_PASSWORD in
-# the shared agent-tier secrets.env; commit and push that file afterwards so agents on
-# other machines can read them.
+# this machine's own agent-tier secrets.local.env, never the shared secrets.env: the hub
+# listens on loopback only, and the token acts as Sami on every chat network (HOME-104).
 set -euo pipefail
 
 DOTFILES="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -40,19 +40,18 @@ login="$(jq -n --arg pw "$password" '{
 token="$(curl -sf -X POST "$HUB/_matrix/client/v3/login" \
     -H 'Content-Type: application/json' -d "$login" | jq -er .access_token)"
 
-# `secrets edit` hands $EDITOR the decrypted file. This editor appends the three keys;
-# it lives on the per-user tmpfs, never on disk.
+# `secrets edit-local` hands $EDITOR the decrypted file. This editor appends the three
+# keys; it lives on the per-user tmpfs, never on disk.
 editor="$(mktemp -p "${XDG_RUNTIME_DIR:?}" chathub-editor.XXXXXX)"
 trap 'rm -f "$editor"' EXIT
 cat > "$editor" <<EOF
 #!/bin/bash
 printf '%s\n' \
-    'MATRIX_HUB_URL=http://$(tailscale ip -4):8008' \
+    'MATRIX_HUB_URL=$HUB' \
     'MATRIX_HUB_TOKEN=$token' \
     'MATRIX_HUB_PASSWORD=$password' >> "\$1"
 EOF
 chmod 700 "$editor"
-EDITOR="$editor" secrets edit --source dotfiles
+EDITOR="$editor" secrets edit-local --source dotfiles
 
-echo "Stored MATRIX_HUB_URL, MATRIX_HUB_TOKEN and MATRIX_HUB_PASSWORD in $DOTFILES/secrets.env."
-echo "Commit and push it so agents on other machines can read them."
+echo "Stored MATRIX_HUB_URL, MATRIX_HUB_TOKEN and MATRIX_HUB_PASSWORD in $DOTFILES/secrets.local.env."
