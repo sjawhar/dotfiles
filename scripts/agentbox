@@ -1941,12 +1941,43 @@ session_env() {
 # session has materialized, and for a --no-session run.
 box_session_id() {
     local sid
+    # Only a transcript held for WRITING names this box's session. omp's session writer holds
+    # its own file O_WRONLY|O_APPEND for its life, while an omp opens ANOTHER session's
+    # transcript read-only whenever a tool reads one -- which is why `omp-session-live` reads
+    # the access mode too. Without that filter this answered with a session that merely passed
+    # through: on 2026-11-08 the grading lane's box reported 01a1b8ff, a live session working
+    # in /mnt/nvme/sami/gate-runs, and `agentbox sh <that id>` then ran a command in the
+    # GRADING lane's box. For restart that is a hang-up of the wrong lane, and at close it is
+    # another session's knives claims released.
     sid="$(docker exec "$1" sh -c '
         for p in $(pgrep -x omp); do
             for fd in /proc/$p/fd/*; do
+                case "$(readlink "$fd" 2>/dev/null)" in
+                    *.jsonl) ;;
+                    *) continue ;;
+                esac
+                flags=$(sed -n "s/^flags:[[:space:]]*//p" "/proc/$p/fdinfo/${fd##*/}" 2>/dev/null)
+                [ -n "$flags" ] || continue
+                # O_WRONLY (1) or O_RDWR (2) in the low two bits: a reader has neither.
+                [ $(( 0$flags & 3 )) -ne 0 ] || continue
                 readlink "$fd" 2>/dev/null
             done
         done | sed -n "s#.*/\\.omp/agent/sessions/[^/]*/[0-9T:-]*Z_\\([0-9a-f-]\\{36\\}\\)\\.jsonl\$#\\1#p" | head -1' 2>/dev/null || true)"
+    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+    # The launch line the runner logged for this box. Under the SQL session store omp holds no
+    # transcript open at all, so the scan above now answers empty for EVERY box -- 0 of 12 host
+    # omp processes held one when measured on 2026-11-08 -- and with only the cwd fallback left,
+    # `agentbox restart|sh|grow <session id>` could not find a live, healthy box: the grading
+    # lane's at 02:03Z and the librarian's at 02:35Z, each with its omp alive and its cgroup
+    # naming the box (dispatch://INFRA-1720). This route is safe where the cwd glob is not,
+    # because it is not a guess from a shared directory: a resume names its own session in its
+    # own argv, so the id belongs to the omp this box started. A box launched with a brief and
+    # never resumed carries no id here and still answers empty.
+    local launched
+    launched="$(sed -n 's/.*: omp started ([^)]*): .*--resume \([^ ]*\).*/\1/p' \
+        "$HOME/.cache/omp/agentbox/$1.log" 2>/dev/null | tail -1 || true)"
+    # Either a bare id or a transcript path, whose own file name carries the id.
+    sid="$(sed -n 's#^\([0-9a-f-]\{36\}\)$#\1#p; s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$launched" | tail -1)"
     [[ -n "$sid" ]] && { echo "$sid"; return 0; }
     # Callers run under set -e: this must succeed, empty, while no file exists.
     local files
