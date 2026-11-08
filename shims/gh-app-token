@@ -765,6 +765,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--read-only", action="store_true",
         help="narrow the token to contents:read and metadata:read; never falls back to the personal token",
     )
+    parser.add_argument(
+        "--source", action="store_true",
+        help="print which identity this owner resolves to, 'app' or 'fallback-personal-token', "
+             "and exit 0 without printing a token; shims/gh gates writes on it",
+    )
     return parser.parse_args(argv)
 
 
@@ -855,6 +860,15 @@ def main(argv: list[str] | None = None) -> int:
             print("quit=1")
         log_decision_after_answer(args.profile, owner, request, "refused", str(error))
         return 1
+
+    if args.source:
+        # The caller is deciding whether to allow a write, not making one, so the token itself
+        # never leaves this process. shims/gh asks this before a write in an agent session: a
+        # write that would go out on the personal fallback is the user posting under their own
+        # name without having approved it (dispatch://INFRA-2006).
+        print(decision)
+        log_decision_after_answer(args.profile, owner, request, f"source:{decision}", "no token printed")
+        return 0
 
     if credential_mode:
         print(f"protocol={request.get('protocol', 'https')}")

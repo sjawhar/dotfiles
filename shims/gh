@@ -175,6 +175,50 @@ gh_shim_target_owner() {
     fi
     [[ -n "$_owner" ]] || _owner=theorem-labs
 }
+# gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
+# it names a method other than GET, which is how gh itself decides; every other verb is listed,
+# because a verb this misses is a write that goes out ungated. Read verbs are never listed, so a
+# new read command keeps working without an edit here.
+gh_shim_is_write() {
+    local a method=""
+    case "${1:-}" in
+        api)
+            for a in "$@"; do
+                case "$a" in
+                    -X | --method) method="NEXT" ;;
+                    -X?* ) method="${a#-X}" ;;
+                    --method=*) method="${a#--method=}" ;;
+                    *) [[ "$method" == NEXT ]] && method="$a" ;;
+                esac
+            done
+            # No method named is a GET, and `-f`/`-F` fields make gh POST without -X.
+            if [[ -z "$method" || "$method" == NEXT ]]; then
+                for a in "$@"; do
+                    case "$a" in -f | -F | --field | --raw-field | -f?* | -F?*) return 0 ;; esac
+                done
+                return 1
+            fi
+            [[ "${method^^}" == GET || "${method^^}" == HEAD ]] && return 1
+            return 0
+            ;;
+        issue | pr)
+            case "${2:-}" in
+                create | comment | edit | close | reopen | merge | review | ready | delete | lock \
+                    | unlock | pin | unpin | transfer | develop | checkout) return 0 ;;
+            esac
+            ;;
+        release | repo | label | secret | variable | gist | ruleset | project | codespace)
+            case "${2:-}" in
+                create | edit | delete | upload | set | remove | rename | archive | sync | fork \
+                    | clone | deploy-key | copy | close | stop) return 0 ;;
+            esac
+            ;;
+        workflow) case "${2:-}" in run | enable | disable) return 0 ;; esac ;;
+        run) case "${2:-}" in rerun | cancel | delete) return 0 ;; esac ;;
+        cache) case "${2:-}" in delete) return 0 ;; esac ;;
+    esac
+    return 1
+}
 # gh_shim_refuse WHY INSTEAD ARGV…: the shim itself refuses, before gh runs.
 gh_shim_refuse() {
     local why="$1" instead="$2"
@@ -395,6 +439,30 @@ if agent_context; then
         mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
         _approved_log="$_approved_root/log/approved-posts.jsonl"
         "$_dotfiles/scripts/gh-approved-post" --log "$_approved_log" -- "$@" || exit 1
+    fi
+    # A write that would go out on the user's own personal access token, with nobody having
+    # approved it. gh-app-token answers an owner the App does not cover with the profile's fallback
+    # secret, the user's PAT, so in an agent session a `gh issue comment` on such an owner posts
+    # under the user's name and looks to the outside like the user wrote it. On 2026-11-08T17:50:32Z
+    # an agent posted https://github.com/FreeMixer/plugin-hostd/issues/371#issuecomment-6724942068
+    # that way (dispatch://INFRA-2006): FreeMixer has no installation, and the approval check above
+    # runs only when a call opts in with GH_SHIM_APPROVAL.
+    # So: in an agent session, a write whose owner resolves to the fallback is refused unless that
+    # approval already passed, which $_approved_log records. Reads are untouched, and so is every
+    # write to an owner the App covers; a push to the user's own fork still works, because this gates
+    # gh, not git.
+    if agent_context && gh_shim_is_write "$@" && [[ -z "${_approved_log:-}" ]]; then
+        gh_shim_target_owner "$@"
+        _gate_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" || _gate_profile=""
+        [[ -n "$_gate_profile" ]] || _gate_profile=agent
+        _gate_source="$(gh-app-token "$_gate_profile" --owner "$_owner" --source 2> /dev/null)" || _gate_source=""
+        if [[ "$_gate_source" == fallback-personal-token ]]; then
+            gh_shim_refuse \
+                "this writes to $_owner, which the GitHub App is not installed on, so it would go out on the user's own personal access token and read as the user writing it." \
+                "a write as the user needs his approval: ask on the relevant Dispatch issue, and run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> naming the ask he answered. Reads of $_owner are unaffected. Do not look for another token." \
+                "$@"
+        fi
+        unset _gate_profile _gate_source
     fi
     # The outermost call runs the rest of this shim as a child and keeps a copy
     # of its stderr: when GitHub refuses the call, gh's own error ("Can not
