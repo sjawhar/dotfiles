@@ -461,8 +461,11 @@ class Room:
         message = (
             f"Sami said this in the standup room ({DISPATCH_WEB}/issues/{ISSUE}), sent from his streams dashboard "
             f"({PUBLIC_ORIGIN}/standup):\n\n{text}\n\nThis is Sami's own message; act on it as you would on any "
-            f"message from him. Answer in the room: dispatch message --issue {ISSUE} --in-reply-to {ROOT} "
-            "--body-file -"
+            f"message from him. The room gets ONE answer, and it is the chief of staff's ({CHIEF_SESSION}) unless "
+            "his line names your stream, your issue or you. If it does, answer in the room yourself: "
+            f"dispatch message --issue {ISSUE} --in-reply-to {ROOT} --body-file -. If it does not, post nothing "
+            "in the room; send the chief over Envoy any fact or time it needs from you. Six sessions answering "
+            "one line within two minutes is the noise he has called out."
         )
         key = hashlib.sha256(f"{time.time_ns()}{text}".encode()).hexdigest()[:32]
         results: dict[str, bool] = {}
