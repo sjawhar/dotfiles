@@ -159,7 +159,7 @@ reloads.
 - Each stream row's session count is the stream's live sessions on every machine (`sessions.stream_census`, as
   `pilot census` counts them): this reading's sessions in the stream's windows, sessions moved off this machine from
   them, and those an earlier read saw, live while `envoy ps` lists them. Its records are the pilot's
-  `DASHBOARD_PILOT_STATE/<issue>/members.txt` and `pilot-sessions.txt` (default `/mnt/nvme/sami/chief/streams`).
+  `DASHBOARD_PILOT_STATE/<issue>/members.txt` and `pilot-sessions.txt` (default `$XDG_STATE_HOME/chief/streams`).
 - Explainer videos: every `explainer*.mp4` artifact on a stream issue (latest version), titled by the `title:` front
   matter of `<same name>-script.md` when it exists, else by the file name. Dispatch serves files only with the
   machine token, as downloads, without Range support, so the page cannot link there: each version is downloaded once
@@ -193,7 +193,7 @@ as he types, resizable, up to 20,000 characters) with a link into the lead's liv
 (`/agents/<session>/live`; on a phone the player comes first). The plan, this week's plan, the bottleneck and the
 last 7 days follow in a `<details>` that starts closed.
 
-The learning loop's round (`/mnt/nvme/sami/chief/rounds/<UTC date>T<HH>.md`, its last `# FINAL` section, and
+The learning loop's round (`$CHIEF_ROUNDS/<UTC date>T<HH>.md`, its last `# FINAL` section, and
 `<same>-adoptions.md`) shows each change sent to other streams with its numbers, each recipient's answer (adopted, not
 adopted, no reply), the leads that missed the round (its `Missed:` line), and links to the round's files, served at
 `/rounds/<name>`.
@@ -205,34 +205,14 @@ and links his Dispatch Inbox.
 The Dispatch URL and token, and the Envoy hub URL, come from `~/.config/legion/envoy.json`. The page is standard-library
 Python; only `chief-dashboard sami-messages` needs PyYAML (in `pyproject.toml`; the system python3 has it).
 
-## Run, restart, remove
+## Run
 
 The code lives in the dotfiles at `~/.dotfiles/chief-dashboard`, which every machine has a copy of
-(dispatch://INFRA-906). It runs as the systemd user service `chief-dashboard` on the unix socket
-`/run/user/1000/chief-dashboard.sock`, published to the tailnet by `tailscale serve`. Lingering is on for the user,
-so it starts at boot; `tailscale serve --bg` settings persist across reboots.
-
-Install (once):
-
-```sh
-cp deploy/chief-dashboard.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now chief-dashboard
-sudo tailscale serve --bg --https=8446 unix:/run/user/1000/chief-dashboard.sock
-```
-
-Restart after a code change: `systemctl --user restart chief-dashboard`.
-Status and logs: `systemctl --user status chief-dashboard`, `journalctl --user -u chief-dashboard -f`.
-Is the data fresh: `curl -s --unix-socket /run/user/1000/chief-dashboard.sock http://x/healthz` (prints `read_at`).
-
-Remove:
-
-```sh
-sudo tailscale serve --https=8446 off
-systemctl --user disable --now chief-dashboard
-rm ~/.config/systemd/user/chief-dashboard.service && systemctl --user daemon-reload
-rm -rf ~/.local/state/chief-dashboard   # Sami's last-look times and the notes he sent
-```
+(dispatch://INFRA-906). It runs as commands, not as a service: `chief-dashboard dispatch-check` and
+`chief-dashboard lead-times` from the chief of staff's own tick. The page's service and its tailnet route were
+shut down on 2026-11-08, since nobody authorized them (dispatch://INFRA-2022/ask/b5ddab54), and the unit file is
+deleted; serve the page by hand (`chief-dashboard serve --socket <path>`) while prototyping, and nothing starts
+it on its own.
 
 ## Who may act as Sami
 

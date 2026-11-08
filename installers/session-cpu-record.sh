@@ -25,11 +25,14 @@ if ! [ -r /sys/fs/cgroup/cgroup.controllers ]; then
     echo "NOTE: no cgroup v2 at /sys/fs/cgroup; every session is counted from /proc/<pid>/stat,"
     echo "      which misses a child that has not been reaped yet."
 fi
-records=/mnt/nvme/sami/tmp/session-cpu
+# The same path scripts/session-cpu-record picks: the big disk's directory is named for the home
+# it belongs to, so the installer carries no one machine's path.
+nvme_tmp="/mnt/nvme/$(basename "$HOME")/tmp"
+records="$nvme_tmp/session-cpu"
 if mkdir -p "$records" 2>/dev/null; then
     echo "session-cpu-record: records go to $records (one file per UTC day, 7 days kept)"
 else
-    echo "NOTE: /mnt/nvme/sami/tmp is absent here; the records go under \$XDG_STATE_HOME instead."
+    echo "NOTE: $nvme_tmp is absent here; the records go under \$XDG_STATE_HOME instead."
 fi
 
 # Since 2026-11-04 this is a stream job where the box has the runner, not a timer of its own:

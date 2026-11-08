@@ -21,7 +21,7 @@ installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, j
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
 whatsapp/            # WhatsApp MCP daemon: wrapper + laptop user unit (holds the paired session)
-chief-dashboard/     # Sami's streams dashboard (chief-dashboard.service) and the dispatch-check / lead-times commands
+chief-dashboard/     # Sami's streams dashboard (run by hand) and the dispatch-check / lead-times commands
 gws/                 # gws-accounts account registry (accounts.json), linked to ~/.config/gws/
 bin/                 # Standalone binaries (mise, bun, kubectl)
 shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, google-user-token, aws-cp, az, git, jj, knives, omp, claude, codex, tmux, systemd-run, xdg-open, pyright, basedpyright)

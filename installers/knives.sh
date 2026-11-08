@@ -11,7 +11,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # reports one that is absent here as `not on this machine`. `knives register`
 # prints a paste-ready entry for the checkout you stand in.
 mkdir -p ~/.config/knives
-ensure_link "${DOTFILES_DIR}/knives/repos.toml" ~/.config/knives/repos.toml
+# The registry is rendered, not linked: a committed file names no machine's path, and oh-my-pi's
+# worktrees belong on the big local disk where the machine has one (the branches there are large
+# and rebuilt often). Everything else in the file is copied byte for byte.
+registry=~/.config/knives/repos.toml
+worktrees="$HOME/.worktrees/oh-my-pi"
+# The big disk's directory is named for the home it belongs to, not for the login name.
+nvme="/mnt/nvme/$(basename "$HOME")"
+[[ -d "$nvme" ]] && worktrees="$nvme/omp-worktrees/branches"
+rendered="$(mktemp "${registry}.XXXXXX")"
+sed "s#^workspaces = \"~/.worktrees/oh-my-pi\"\$#workspaces = \"${worktrees}\"#" \
+    "${DOTFILES_DIR}/knives/repos.toml" > "$rendered"
+chmod 644 "$rendered"
+mv -f "$rendered" "$registry"
 # Values that name a customer (a forbidden term, a consumer) stay out of this public repository:
 # the private repository theorem-labs/sami, cloned at .secrets, holds them, and knives reads
 # repos.local.toml beside repos.toml and adds them to the entries it names (knives 3.2.0 and later).

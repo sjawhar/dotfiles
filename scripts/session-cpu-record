@@ -57,12 +57,14 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # The records go on the big disk, beside the sibling watches' state (load-swap-watch keeps
-# /mnt/nvme/sami/tmp/load-swap-watch/state.json). Never on /, whose root filesystem on this box
-# reached 14 MiB free on 2026-10-30.
-_NVME_RECORDS = Path("/mnt/nvme/sami/tmp/session-cpu")
+# <nvme>/tmp/load-swap-watch/state.json). Never on /, whose root filesystem on this box
+# reached 14 MiB free on 2026-10-30. The disk's directory is named for the home it belongs to
+# (the account's login name differs from it on the dev boxes), since a committed file carries no
+# one machine's path (AGENTS.md, "Everything committed is portable").
+_NVME_TMP = Path("/mnt/nvme") / Path.home().name / "tmp"
 DEFAULT_RECORDS = (
-    _NVME_RECORDS
-    if os.access("/mnt/nvme/sami/tmp", os.W_OK)
+    _NVME_TMP / "session-cpu"
+    if os.access(_NVME_TMP, os.W_OK)
     else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "session-cpu"
 )
 

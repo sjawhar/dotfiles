@@ -1,7 +1,7 @@
-"""The learning loop's newest round (/mnt/nvme/sami/chief/learning-loop.md): the changes the chief of staff sent to other
+"""The learning loop's newest round: the changes the chief of staff sent to other
 streams with their before and after numbers, which of them each lead adopted, and the leads that missed the round.
 
-Read from the round files the chief of staff writes (`CHIEF_ROUNDS`, default /mnt/nvme/sami/chief/rounds/):
+Read from the round files the chief of staff writes (`CHIEF_ROUNDS`, default `$XDG_STATE_HOME/chief/rounds/`):
 
 - `<UTC date>T<HH>.md`, the round. Its header line `Missed: ...` names the leads that sent no input. Its last
   section, a heading starting `# FINAL`, lists the changes sent as bullets `* A. <text> -> LEAD, LEAD.` (the text
@@ -19,7 +19,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROUNDS = Path(os.environ.get("CHIEF_ROUNDS", "/mnt/nvme/sami/chief/rounds"))
+from .paths import chief_state
+
+ROUNDS = Path(os.environ.get("CHIEF_ROUNDS") or chief_state("rounds"))
 ROUND_NAME = re.compile(r"^\d{4}-\d\d-\d\dT\d\d\.md$")
 FILE_NAME = re.compile(r"^\d{4}-\d\d-\d\dT\d\d(?:-[a-z]+)?\.md$")  # the files /rounds/<name> may serve
 

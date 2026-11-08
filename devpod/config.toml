@@ -86,7 +86,10 @@ sed -i 's/^AcceptEnv LANG LC_\\*/AcceptEnv LANG LC_* SOPS_AGE_KEY/' /etc/ssh/ssh
 # --- Clone and install dotfiles ---
 
 DOTFILES_REPO="https://github.com/sjawhar/dotfiles"
-DOTFILES_DIR="/home/sami/.dotfiles"
+# The provisioned user's own home, read from the password database, so this file holds no
+# machine's path (AGENTS.md, "Everything committed is portable").
+USER_HOME="$(getent passwd sami | cut -d: -f6)"
+DOTFILES_DIR="$USER_HOME/.dotfiles"
 runuser -u sami -- git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
 runuser -u sami -- bash "$DOTFILES_DIR/install.sh"
 
@@ -98,8 +101,8 @@ runuser -u sami -- bash "$DOTFILES_DIR/install.sh"
 # the pubkey to the console -- it must be added to jj-allowed-signers and
 # registered at https://github.com/settings/ssh/new as a Signing Key before
 # commits from here show as Verified.
-runuser -u sami -- ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f /home/sami/.ssh/jj-signing
-cat /home/sami/.ssh/jj-signing.pub | tee /dev/console
+runuser -u sami -- ssh-keygen -t ed25519 -N "" -C "jj-signing-$(hostname -s)" -f "$USER_HOME/.ssh/jj-signing"
+cat "$USER_HOME/.ssh/jj-signing.pub" | tee /dev/console
 
 # --- Networking ---
 

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import model, render, rounds, standup, v2_model, v2_render, v3_render, videos
 from .collect import VersionCache, collect
+from .paths import chief_state
 from .prs import PrCache
 from .sources import Dispatch, envoy_send
 from .videos import VideoStore
@@ -64,7 +65,7 @@ def iso(t: datetime) -> str:
 
 
 # What Sami asked the chief of staff; each entry links to its answer in Dispatch (the answers live only there).
-ASKS_LEDGER = Path(os.environ.get("DASHBOARD_ASKS_LEDGER", "/mnt/nvme/sami/chief/asks-ledger.json"))
+ASKS_LEDGER = Path(os.environ.get("DASHBOARD_ASKS_LEDGER") or chief_state("asks-ledger.json"))
 
 
 def load_asks() -> list[dict] | None:

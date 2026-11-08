@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import sessions
+from .paths import chief_state
 from .plan import refs_in
 from .plan_issues import plan_items, read_issues, wanted_keys
 from .prs import PrCache
@@ -23,7 +24,7 @@ REGISTRY = Path(os.environ.get("STREAMS_REGISTRY", Path.home() / "src/scrum/work
 SCOREBOARD_SLUG = "scoreboard-json"
 # The pilot's state directory (`chief-dashboard pilot ... --state`): each stream's members.txt and pilot-sessions.txt,
 # which `sessions.stream_census` reads and extends.
-PILOT_STATE = Path(os.environ.get("DASHBOARD_PILOT_STATE", "/mnt/nvme/sami/chief/streams"))
+PILOT_STATE = Path(os.environ.get("DASHBOARD_PILOT_STATE") or chief_state("streams"))
 
 # This is Sami's page, so it shows the streams that are his. A stream is discovered by the label `stream` on an
 # open issue in any project, which means any session in the company can put a stream on his page by labelling its
