@@ -2,6 +2,19 @@
 // agentbox-run: the main process of an agent box running omp. omp is its
 // child; the box lives as long as this process does.
 //
+// BEFORE YOU CHANGE ANYTHING HERE: a running box has the version of this file that existed
+// when the box STARTED. This process is spawned once, at box creation, and nothing re-reads
+// the file afterwards — not `dotfiles-follow`, not a restart in place, which re-execs omp and
+// not the runner. So a fix here reaches a box only when that box is next created, and the
+// boxes that most need a fix are the oldest ones, which are the last to get it.
+// Measured 2026-11-08T03:22Z: `sessionIdFromArgv` (ecb30924) landed at 2026-11-07T00:43:39Z,
+// and 48 of the 66 live boxes had started before it, the oldest on 11-05. One of them, the
+// librarian lane's, was launched with `--resume <id>` and still answered "this box has no
+// session yet" to a restart in-box at 02:46Z and a forced one at 03:13:33Z, because the code
+// that reads that flag did not exist in its runner. Nothing on the host can fix such a box;
+// only a new one can. Say so in what you write, and prefer a change that degrades safely in
+// an old runner over one that needs the new code to be correct.
+//
 //   bun agentbox-run.ts omp [omp args…]
 //
 // Normally omp's exit is the box's exit (same code), and the launcher's
