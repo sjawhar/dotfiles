@@ -3,7 +3,7 @@
 
 The URL is the credential (its webhook id is the whole secret), and every user can read
 `/proc/<pid>/cmdline`, so any `ps` or `pgrep -af` prints what a launch puts in an argv. The launch,
-as omp/mcp.json and the skill's `mcp:` frontmatter define it, hands mcp-remote the URL through
+as the skill's `mcp:` frontmatter defines it (a project `.omp/mcp.json` that declares the server repeats this argv), hands mcp-remote the URL through
 scripts/mcp-remote-from-env: mcp-remote still receives it in `process.argv`, the kernel's command
 line of every process in the launch never holds it, the variable is gone from the environment
 mcp-remote and its children see, and what mcp-remote logs to stderr (it logs the URL) reaches the
@@ -31,7 +31,6 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 WRAPPER = DOTFILES / "scripts" / "mcp-remote-from-env"
-MCP_JSON = DOTFILES / "omp" / "mcp.json"
 SKILL = DOTFILES / "plugins" / "sjawhar" / "skills" / "home-assistant" / "SKILL.md"
 NODE_DIR = Path(
     subprocess.run(
@@ -99,11 +98,6 @@ def skill_launch() -> list[str]:
     return [block[1], *json.loads(block[2])]
 
 
-def mcp_json_launch() -> list[str]:
-    server = json.loads(MCP_JSON.read_text(encoding="utf-8"))["mcpServers"]["home-assistant"]
-    return [server["command"], *server["args"]]
-
-
 class HomeAssistantLaunch(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -143,21 +137,18 @@ class HomeAssistantLaunch(unittest.TestCase):
         return subprocess.run(argv, capture_output=True, text=True, env={**self.env, **env}, timeout=30)
 
     def test_the_url_reaches_mcp_remote_and_nowhere_else(self) -> None:
-        for source, argv in (("omp/mcp.json", mcp_json_launch()), ("SKILL.md frontmatter", skill_launch())):
-            with self.subTest(source=source):
-                self.out.unlink(missing_ok=True)
-                result = self.run_launch(argv, STUB_SECRET_HA_MCP_URL=self.url)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                record = json.loads(self.out.read_text(encoding="utf-8"))
-                self.assertEqual(record["argv"][2:], [self.url, "--allow-http"])
-                for cmdline in record["cmdlines"]:
-                    self.assertNotIn(self.fake_id, " ".join(cmdline))
-                for seen in ("env", "childEnv"):
-                    self.assertNotIn("HA_MCP_URL", record[seen])
-                    self.assertFalse([k for k, v in record[seen].items() if self.fake_id in v], seen)
-                # The three stderr lines arrive, each with the URL or the bare id redacted.
-                self.assertNotIn(self.fake_id, result.stderr)
-                self.assertEqual(result.stderr.count("<HA_MCP_URL>"), 3, result.stderr)
+        result = self.run_launch(skill_launch(), STUB_SECRET_HA_MCP_URL=self.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(record["argv"][2:], [self.url, "--allow-http"])
+        for cmdline in record["cmdlines"]:
+            self.assertNotIn(self.fake_id, " ".join(cmdline))
+        for seen in ("env", "childEnv"):
+            self.assertNotIn("HA_MCP_URL", record[seen])
+            self.assertFalse([k for k, v in record[seen].items() if self.fake_id in v], seen)
+        # The three stderr lines arrive, each with the URL or the bare id redacted.
+        self.assertNotIn(self.fake_id, result.stderr)
+        self.assertEqual(result.stderr.count("<HA_MCP_URL>"), 3, result.stderr)
 
     def test_an_unset_or_empty_variable_is_refused_by_name(self) -> None:
         path = f"{self.npx_bin}:{self.env['PATH']}"

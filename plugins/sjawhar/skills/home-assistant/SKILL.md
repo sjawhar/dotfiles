@@ -9,12 +9,12 @@ mcp:
 
 # Home Assistant
 
-Read/write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (78 tools on HA 2026.8), MCP server `home-assistant`. In omp, write JSON args to `xd://mcp__home_assistant_<tool>`. With `skill_mcp`, call `skill_mcp(mcp_name="home-assistant", ...)`.
+Read/write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (78 tools on HA 2026.8), MCP server `home-assistant`. omp loads that server only in a session whose working directory holds a `.omp/mcp.json` that declares it (omp does not look in parent directories); there, write JSON args to `xd://mcp__home_assistant_<tool>`. Anywhere else, use `ha-mcp-call.sh` (Access, below). With `skill_mcp`, call `skill_mcp(mcp_name="home-assistant", ...)`.
 
 ## Access
 
 - ha-mcp runs inside HA: HACS component "HA-MCP Custom Component", entry "HA-MCP Server". The admin-only **HA-MCP panel** in the HA sidebar sets tool enable/disable, Read Only Mode, feature flags and edit backups.
-- The agent-tier secret `HA_MCP_URL` is a webhook URL, and its id is the credential. It holds the LAN form `http://10.0.51.23:8123/api/webhook/<id>` (oryx and any home-LAN host). The same id at `https://dojo.thecybermonk.com/api/webhook/<id>` works from any network.
+- The agent-tier secret `HA_MCP_URL` is a webhook URL, and its id is the credential. It holds the remote form `https://dojo.thecybermonk.com/api/webhook/<id>`, which works from any network. The same id at the LAN address `http://10.0.51.23:8123/api/webhook/<id>` works only on the house's LAN.
 - The MCP launch runs `~/.dotfiles/scripts/mcp-remote-from-env`. It takes the URL from `HA_MCP_URL`, unsets it, runs `mcp-remote` 0.14.3 in-process, and redacts the URL from stderr.
 - Never expand `$HA_MCP_URL` into command arguments (`curl "$HA_MCP_URL"`, `mcp-remote "$HA_MCP_URL"`): every user can read `/proc/<pid>/cmdline`, and any agent's `ps` or `pgrep -af` prints the id into its transcript. Pass it through the environment, a config file or stdin.
 - Batch or scripted calls: `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'` ([ha-mcp-call.sh](ha-mcp-call.sh) gives curl the URL with `--config`).
