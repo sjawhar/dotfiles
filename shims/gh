@@ -125,10 +125,17 @@ fi
 # refusal reads as "no approval exists" and sends the next agent looking for
 # another credential (the chief of staff's requirement, 2026-11-02).
 gh_shim_user_login() {
-    local line user=""
-    while IFS= read -r line; do
-        [[ "$line" =~ ^\ {4}user:\ *([^[:space:]]+) ]] && { user="${BASH_REMATCH[1]}"; break; }
-    done < "${XDG_CONFIG_HOME:-$HOME/.config}/gh/hosts.yml" 2> /dev/null || true
+    local line user="" hosts="${XDG_CONFIG_HOME:-$HOME/.config}/gh/hosts.yml"
+    # Guarded, not `2> /dev/null` on the loop: redirections are applied left to right, so a
+    # missing hosts.yml printed "No such file or directory" BEFORE stderr was silenced, and that
+    # line landed between "REFUSED" and the reason, where it reads as the cause of the refusal
+    # (seen in the dispatch://INFRA-2006 smoke, 2026-11-08). An agent process normally has no
+    # hosts.yml at all, so this was the common case, not the rare one.
+    if [[ -r "$hosts" ]]; then
+        while IFS= read -r line; do
+            [[ "$line" =~ ^\ {4}user:\ *([^[:space:]]+) ]] && { user="${BASH_REMATCH[1]}"; break; }
+        done < "$hosts"
+    fi
     if [[ -n "$user" ]]; then
         printf "the user login \`%s\` from gh's hosts.yml and keyring" "$user"
     else

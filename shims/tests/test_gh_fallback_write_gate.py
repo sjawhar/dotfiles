@@ -91,6 +91,22 @@ class FallbackWriteGate(unittest.TestCase):
                               "--body", "b"])
         self.assertIn("GH_SHIM_APPROVAL", result.stderr)
 
+    def test_the_refusal_carries_no_stray_shell_error(self):
+        """A refusal must read as a refusal, not as a broken script.
+
+        gh_shim_user_login read ~/.config/gh/hosts.yml with `2> /dev/null` placed AFTER the
+        input redirect, and redirections apply left to right, so a missing file printed
+        "No such file or directory" to the real stderr -- between "REFUSED" and the reason,
+        where it reads as the cause. An agent process has no hosts.yml, so that was every
+        refusal, not a rare one.
+        """
+        self.source("fallback-personal-token")
+        result = self.run_gh(["issue", "comment", "371", "-R", "FreeMixer/plugin-hostd",
+                              "--body", "x"])
+        self.assertIn("REFUSED", result.stderr)
+        self.assertNotIn("No such file or directory", result.stderr)
+        self.assertNotIn("hosts.yml:", result.stderr)
+
     # --- what must keep working ------------------------------------------
 
     def test_a_read_of_the_same_owner_is_untouched(self):
