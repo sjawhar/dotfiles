@@ -559,7 +559,8 @@ class JjPushLeakGateTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stderr)
         err = re.sub(r"\x1b\[[0-9;]*m", "", r.stderr)
         self.assertIn("LEAK CHECK: refusing to push", err)
-        self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}", err)
+        # The summary carries the check's decisive line, not its self-test line, which the Python check prints first.
+        self.assertIn(f"error: git shim: the public leak check refused this jj push to {url}: refusing to push", err)
         shown = [ln for ln in err.splitlines() if ln.startswith("error: ")]
         self.assertTrue([ln for ln in shown if commit[:7] in ln], ("the refusal must name the commit", r.stderr))
         self.assertTrue([ln for ln in shown if f"[customer: {self.customer}]" in ln], ("the refusal must name what matched", r.stderr))
@@ -1703,7 +1704,7 @@ class JjPushLeakGateTest(unittest.TestCase):
     def assert_plain_refused(self, r: subprocess.CompletedProcess[str], commit: str, url: str = ROCQ):
         self.assertNotEqual(r.returncode, 0, r.stderr)
         self.assertIn("LEAK CHECK: refusing to push", r.stderr)
-        self.assertIn(f"error: git shim: the public leak check refused this push to {url}", r.stderr)
+        self.assertIn(f"error: git shim: the public leak check refused this push to {url}: refusing to push", r.stderr)
         self.assertNotIn(url, self.received(commit))
 
     def assert_own_hooks_path_is_checked_first(self, own: Path, commits: tuple[str, str]):

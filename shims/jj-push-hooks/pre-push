@@ -65,11 +65,13 @@ while IFS= read -r line; do printf 'error: %s\n' "$line"; done <<< "$out" >&2
 # refusal itself, sees only the advice. On 2026-11-06 that cost six agents about an hour and four
 # discarded theories: the first line said `cannot read the visibility of <repo>` because `gh` was
 # not on PATH, and the 37 lines after it sent every reader to the allow-list. The refusal is the
-# one line every reader sees, so it carries the reason rather than pointing above itself.
+# one line every reader sees, so it carries the reason rather than pointing above itself. The
+# Python check (leak-check-v7 on) prints its self-test line first, on a refusal too, so a refusal
+# read `refused this push to <url>: self-test: 41 of 41 fresh canaries found` (oryx, 2026-11-08).
 reason=
 while IFS= read -r line; do
     case "$line" in
-        *"reviewed row unused"*) continue ;;
+        *"reviewed row unused"* | "LEAK CHECK: self-test:"*) continue ;;
         "LEAK CHECK: "*) reason="${line#LEAK CHECK: }"; break ;;
     esac
 done <<< "$out"
