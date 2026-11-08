@@ -424,7 +424,17 @@ if agent_context; then
     # stops git with its own quit=1 when it can do neither.
     if [[ "${1:-}" == auth && "${2:-}" != status ]]; then
         if [[ "${2:-}" == git-credential ]]; then
-            [[ "${3:-}" == get ]] && exec gh-app-token agent get
+            # --for-write: this is git asking to authenticate, and git asks for a credential on
+            # a push, not on a fetch or clone of a public repository. gh-app-token then refuses
+            # the personal fallback rather than letting this push act as the account owner.
+            # Nothing else passes the flag: knives mints for every routed gh call through the
+            # same `get` interface, so flagging that would refuse ordinary reads.
+            # THIS CLOSES ONE ROUTE, NOT THE CLASS. An agent whose environment carries the
+            # gh-app-routes include reaches gh-app-token directly (`helper = !gh-app-token
+            # agent`) and never passes here, so its push is not refused; and a raw mint hands
+            # over a usable token in any case. The durable fix is a fallback secret that cannot
+            # write, which dispatch://INFRA-2031 asks for.
+            [[ "${3:-}" == get ]] && exec gh-app-token agent get --for-write
             exit 0
         fi
         gh_shim_refuse "gh auth ${2:-} reads or changes the user's own login, which no agent process may use or change." \

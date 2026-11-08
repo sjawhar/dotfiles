@@ -137,6 +137,28 @@ class GhAppTokenTests(unittest.TestCase):
     def set_broker_response(self, response):
         os.environ["SECRET_RUN_STUB_RESPONSE"] = response
 
+    # Every agent marker shims/gh and gh-app-token test for. A case that means "a person at
+    # their own shell" must clear all of them, because the test process is itself an agent's.
+    AGENT_MARKERS = (
+        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+        "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+        "LEGION_CONTROLLER", "LEGION_DAEMON_URL", "SSH_CONNECTION", "GIT_CONFIG_COUNT",
+    )
+
+    def as_person(self):
+        """Make this call look like a person at their own terminal.
+
+        An empty value is falsy to the same test the shim makes, and AGENT_SHIM_PERSON=1 is
+        the documented escape for a deliberate non-interactive command of their own.
+        """
+        return patch.dict(
+            os.environ,
+            {name: "" for name in self.AGENT_MARKERS} | {"AGENT_SHIM_PERSON": "1"},
+        )
+
+    def as_agent(self):
+        return patch.dict(os.environ, {"OMP_SESSION_ID": "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"})
+
     def run_main(self, argv, stdin=""):
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.object(sys, "stdin", io.StringIO(stdin)):
@@ -228,12 +250,15 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual((rc, stdout, stderr), (0, "broker-token-sjawhar\n", ""))
         self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
 
-    def test_owner_never_covered_uses_only_the_fallback_pat(self):
+    def test_owner_never_covered_uses_only_the_fallback_pat_for_a_person(self):
         # This catches treating a missing installation as an App failure or
         # consulting secretsd for the broker-only App key.
-        rc, stdout, stderr = self.run_main(
-            ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
-        )
+        # As a person: the fallback is what their own push to an uncovered owner runs on, and
+        # dispatch://INFRA-2031 refuses it only for an agent session.
+        with self.as_person():
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
+            )
 
         self.assertEqual(rc, 0)
         self.assertIn("username=x-access-token", stdout)
@@ -256,6 +281,60 @@ class GhAppTokenTests(unittest.TestCase):
         )
         # The fallback is static: no token-cache entry is written for it.
         self.assertFalse(gh_app_token.token_cache_file("agent", "metr").exists())
+
+    def test_an_agents_push_to_an_uncovered_owner_is_refused(self):
+        """The hole dispatch://INFRA-2006 left: `gh` writes were gated, `git push` was not.
+
+        git reaches the same personal token through the credential helper, which execs this
+        program before that gate, so an agent could push to a third-party repository under the
+        account owner's name. A fetch or clone of a public repository asks for no credential,
+        so refusing here does not touch reads.
+        """
+        with self.as_agent():
+            rc, stdout, stderr = self.run_main(
+                ["agent", "get", "--for-write"],
+                stdin="host=github.com\npath=METR/hawk.git\n\n",
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertIn("quit=1", stdout)
+        self.assertNotIn("password=", stdout)
+        self.assertIn("METR", stderr)
+        self.assertIn("personal token", stderr)
+        self.assertIn("have a person do it", stderr)
+
+    def test_an_agents_routed_read_through_the_credential_interface_still_works(self):
+        """knives mints for every routed `gh` call, read and write alike, through this same
+        `get` interface (knives 3.2.3, src/commands/gh.rs). An earlier version of this gate
+        refused on credential mode and would have failed ordinary `gh api` reads of uncovered
+        owners outright. The write signal is --for-write, which only shims/gh's
+        `gh auth git-credential` branch passes.
+        """
+        with self.as_agent():
+            rc, stdout, _ = self.run_main(
+                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertIn("password=ghp_stub_upstream_token", stdout)
+        self.assertNotIn("quit=1", stdout)
+
+    def test_an_agents_read_of_an_uncovered_owner_still_works(self):
+        """Reads are untouched: refusing them would drop public-upstream reads from 5,000 an
+        hour to the unauthenticated 60, shared across every box on the machine."""
+        with self.as_agent():
+            rc, stdout, _ = self.run_main(["agent", "--owner", "METR"])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("ghp_stub_upstream_token", stdout)
+
+    def test_an_agents_write_to_a_covered_owner_is_untouched(self):
+        """Only the personal fallback is refused; an App installation token is not the person."""
+        with self.as_agent():
+            rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar", "--for-write"])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("broker-token-sjawhar", stdout)
 
     def test_covered_owner_missing_from_later_broker_release_refuses_without_fallback(self):
         # 2026-09-17: two review verdicts on trajectory-labs-pbc/agent-c posted as the

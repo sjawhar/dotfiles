@@ -129,7 +129,7 @@ class HostCredential(unittest.TestCase):
         env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "DOTFILES_DIR": str(SHIMS.parent)}
         result = run_without_tty(["gh", "auth", "git-credential", "get"], env=env, cwd=self.tmp, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.recorded()[0], "gh-app-token agent get")
+        self.assertEqual(self.recorded()[0], "gh-app-token agent get --for-write")
 
     def test_a_persons_ssh_session_keeps_the_host_route(self):
         # Git hands a credential helper its request down a pipe, so this case has no terminal on
@@ -162,7 +162,7 @@ class HostCredential(unittest.TestCase):
                "DOTFILES_DIR": str(SHIMS.parent)}
         result = run_without_tty(["gh", "auth", "git-credential", "get"], env=env, cwd=self.tmp, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.recorded()[0], "gh-app-token agent get")
+        self.assertEqual(self.recorded()[0], "gh-app-token agent get --for-write")
 
 
 if __name__ == "__main__":
