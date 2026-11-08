@@ -1137,6 +1137,33 @@ class DiskFillWatchFloorAgainstDeviceTest(unittest.TestCase):
             WATCH.device_of = original
         self.assertEqual(["/", "/mnt/nvme"], kept)
 
+    def test_the_durable_disk_is_watched_for_free_space_not_only_for_iops(self) -> None:
+        """It had an IOPS cap and no floor, so every run measured it and none watched it.
+
+        A device this watch reads operations from and never reads free space from is the gap
+        that made this test: on 2026-11-08 /mnt/durable sat at 160 GiB of 3.9 TiB, falling,
+        with nothing able to alert on it.
+        """
+        original = WATCH.os.path.ismount
+        WATCH.os.path.ismount = lambda mount: mount in {"/mnt/durable", "/mnt/scratch"}
+        try:
+            mounts = WATCH.default_mounts()
+        finally:
+            WATCH.os.path.ismount = original
+        self.assertIn("/mnt/durable", mounts)
+        self.assertIn("/mnt/durable", WATCH.FLOORS)
+        # Every mount whose operations are measured must also have its free space measured.
+        self.assertEqual([], [mount for mount in WATCH.DEFAULT_IOPS_CAPS if mount not in mounts])
+
+    def test_a_machine_without_those_disks_watches_neither(self) -> None:
+        original = WATCH.os.path.ismount
+        WATCH.os.path.ismount = lambda mount: False
+        try:
+            mounts = WATCH.default_mounts()
+        finally:
+            WATCH.os.path.ismount = original
+        self.assertEqual(["/", "/mnt/nvme"], mounts)
+
 
 class DiskFillWatchHeadlineTest(unittest.TestCase):
     """Under a floor and falling toward full are different states and get different words."""

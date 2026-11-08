@@ -161,9 +161,19 @@ DEFAULT_STATE = (
 #              `agentbox new` refuses to create a box with under 500 GiB free on the image's
 #              filesystem. So the floor is that refusal: below it no new box starts, which is
 #              the machine not taking work rather than one lane being short.
+#   /mnt/durable  100 GiB. The persistent disk: records, transcripts, every lane's durable
+#              state, and the one filesystem here whose loss outlives the machine. It was
+#              measured but never watched -- DEFAULT_IOPS_CAPS has had an entry for it since
+#              the IOPS check was written, so every run read its operations and no run read
+#              its free space. The floor is set from the band it actually sits in rather than
+#              from a round number: 160 GiB free at 07:18Z on 2026-11-08, falling about
+#              15 GiB/h, so 100 GiB is about six hours of warning and does not fire at
+#              today's level. It is deliberately not a fraction of the device: 3.9 TiB x any
+#              sensible fraction is larger than the disk has had free all week.
 FLOORS = {
     "/": 18 * GIB,
     "/mnt/nvme": 84 * GB,
+    "/mnt/durable": 100 * GIB,
     "/mnt/scratch": 500 * GIB,
 }
 
@@ -4100,6 +4110,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def default_mounts() -> list[str]:
+    """The filesystems this watch covers when none are named on the command line.
+
+    The local SSD joins the watch where the machine has one: since dispatch://INFRA-1192 it
+    holds every box's disk image and build cache, and an unwatched disk that stops box creation
+    is exactly the silence this watch exists to end.
+
+    /mnt/durable is here for the same reason and was missing for longer. It had an entry in
+    DEFAULT_IOPS_CAPS from the start, so every run measured its operations and no run ever
+    measured its free space: on 2026-11-08 at 07:18Z this box's /mnt/durable had 160 GiB of
+    3.9 TiB left and was falling about 15 GiB/h, with no floor, no horizon and no alert over
+    it. It holds the records, the transcripts and every lane's durable state -- the one
+    filesystem here whose loss outlives the machine -- so filling it is worse than filling the
+    disk this watch was first written for. Measuring a device's throughput while never
+    measuring its free space is the same class of gap as watching one mount twice under two
+    names, pointing the other way.
+
+    Each optional mount is named only when it is a real mount, so a machine without it does not
+    watch a directory of its root disk a second time under another name.
+    """
+    optional = [mount for mount in ("/mnt/durable", "/mnt/scratch") if os.path.ismount(mount)]
+    return ["/", "/mnt/nvme"] + optional
+
+
 def main() -> int:
     parser = build_parser()
     options = parser.parse_args()
@@ -4114,12 +4148,7 @@ def main() -> int:
         print(f"# {newest}")
         print(Path(newest).read_text(), end="")
         return 0
-    # The local SSD joins the watch where the machine has one: since dispatch://INFRA-1192 it
-    # holds every box's disk image and build cache, and an unwatched disk that stops box
-    # creation is exactly the silence this watch exists to end. Named only when it is a real
-    # mount, so a machine without it does not watch a directory of its root disk twice.
-    options.mount = options.mount or (
-        ["/", "/mnt/nvme"] + (["/mnt/scratch"] if os.path.ismount("/mnt/scratch") else []))
+    options.mount = options.mount or default_mounts()
     options.tmp_big = int(options.tmp_big)
     options.root_big = int(options.root_big)
     # A window wider than the history is a window that quietly shrinks. Samples are dropped
