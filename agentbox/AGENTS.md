@@ -158,7 +158,7 @@ Sami's rule (dispatch://INFRA-675, 2026-11-07): *"with agentbox, ownership is al
 | `/mnt/nvme/<user>/scratch/disk-gate` | rw | `scripts/disk-gate` | the one lock and count every lane's large writes pass through; a box without it keeps a count of its own and the gate stops serialising |
 | the session's own config dirs | rw | that session | a `CLOUDSDK_CONFIG` a move brought with it, and the like (`move_config_dirs`) |
 | `~/…` from `agentbox/mounts` | rw | every session | the home allow-list, read that file |
-| `/run/user/<uid>/…` | rw | every session | the host relays: session bus, Envoy, forward, secretsd, tmux, the metadata service, post-review, omp-session-sql, the verified grader |
+| `/run/user/<uid>/…` | rw | every session | the host relays: session bus, Envoy, forward, secretsd, tmux, the metadata service, omp-session-sql, the verified grader |
 
 **Five host trees reach every box only because `~/src` holds five symlinks that point out of it** — `machloop-certtest` -> `/mnt/durable/src/machloop-certtest`, `speed-lane-engine` -> `/mnt/nvme/<user>/speed-lane-engine/base-clones`, `proof-efficiency-eval` -> `/mnt/nvme/<user>/trend/worktrees/…`, and the `clones` and `wt` trees. They are not defaults anyone chose: one person's checkout layout, in all 82 boxes. A symlink added to `~/src` silently widens every box on the machine, which is worth knowing before adding one.
 
