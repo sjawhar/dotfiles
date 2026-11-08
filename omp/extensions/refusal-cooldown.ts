@@ -122,6 +122,20 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("retry_fallback_applied", async (event, ctx) => {
 		if (event.role === "fireworks-fast") return undefined;
+		// A fallback off a model gateway is not a refusal and must not cost an hour. The gateway
+		// lead's ruling, 2026-11-08: a 401 of class auth_error is a credential fault that re-minting
+		// fixes, so it should start no cooldown at all; other gateway refusals (429, 5xx, overloaded)
+		// want five minutes, which is what omp's own selector suppression already applies. Declining
+		// to arm leaves exactly that, so both halves are right without this extension guessing which
+		// it was — `retry_fallback_applied` carries `reason` as free text and nothing populates it on
+		// the hard-error path, so the cause is not available here (turn-recovery.ts:2282, 3007).
+		//
+		// What the hour cost: an autonomous session runs one prompt for its whole life and omp only
+		// restores a fallback on a NEW prompt (INFRA-1824), so an hour of arming on top of that sent
+		// a whole session's work to a direct provider, off the gateway's accounting and team limits.
+		// Measured: one 401, then 0 gateway requests and 31 direct over ten minutes, nine and a half
+		// of them with the gateway already healthy.
+		if (/(^|\/)[a-z0-9-]*gateway[a-z0-9-]*\//i.test(event.from)) return undefined;
 		const fallback = own(event, ctx as unknown as FallbackCtx);
 		if (!fallback) return undefined;
 		const previous = armed.get(ctx.agent.id);
