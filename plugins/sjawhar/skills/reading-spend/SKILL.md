@@ -19,20 +19,21 @@ bq query --project_id=theorem-agent-infra --use_legacy_sql=false --maximum_bytes
 
 ## Start from `project_spend_daily_v`
 
-One row per UTC `day`, `project`, `platform`, `item`, `kind`, with `usd`.
+One row per UTC `day`, `project`, `platform`, `item`, `kind`, with `usd`. Since agent-infra#2436 (2026-11-08) every charged dollar is on a project or on a named row that is not ours.
 
-- `project`: `BET`, `OSSV`, `LINUX`, `INFRA`; other streams by their own name (`Rocq speed`, `lean-speed`, `shared`, `untagged`). `(no project)` is the part of a bill no record places in a stream, including Azure outside VMs and disks (before 2026-10-25, the whole Azure bill) and, before 2026-10-31, all of GitHub.
-- `platform` and `item`: `Anthropic`, `OpenAI`, `Other model providers` by model; `Google Cloud` by lane or machine group; `Azure` by service; `GitHub` by repository from 2026-10-31 only.
-- Sum every `kind` except `attributed_org_unknown` and `not_billed`. `attributed_org_unknown` may be in a bill already, so adding it counts dollars twice. `not_billed` is calls of an Anthropic organization the company is not charged for, which cost nothing.
-- `Google Cloud` is the estimate for spend-cloud-cost's projects only, at list price, about $725-$3,835 a day below Google's bill of every project (`infra_spend_daily_v`). Read it as a close figure per project, not the invoice.
-- OpenAI's report is in the view every day, as in `infra_spend_daily_v`, but OpenAI posts a day's costs during that day and the next, so today and yesterday still grow by the hour.
+- `project`: `BET`, `OSSV`, `LINUX`, `INFRA`, `LNB`, `Rocq speed`; catch-all labels (`Agents, no stream`, `untagged`) are not a project. `(no project)` holds bill remainders a record cannot place yet. `People's machines` is colleagues' own machines (Google Cloud and Azure); `No owner found` is cloud spend nobody claims.
+- `platform` and `item`: `Anthropic`, `OpenAI`, `Other model providers` by model; `Google Cloud` by lane or machine group; `Azure` by service; `GitHub` by repository.
+- `kind`: `attributed` (our sessions' calls), `estimated` (Google Cloud and Azure at list), `billed` (bill rows placed on a project), the signed remainders `billed_unattributed`, `cost_report_unattributed`, `estimated_unattributed`, and five kinds that are **not ours**: `colleague` (colleagues' share of an Anthropic PBC bill, one row per day and organization), `caller_unknown` (bill dollars no report can assign), `other_project` (OpenAI use by keys not ours), `overhead` (Google Support, GitHub seats), `credit` (Google's promotional credit, negative). `not_billed` is HDO, which costs nothing; `attributed_org_unknown` may be in a bill already. A column `provisional` marks an Anthropic split until both of its reports were read 24 hours after the day.
+- **The company's charged total** = every row except `not_billed` and `attributed_org_unknown`. **Ours** = also leave out `colleague`, `caller_unknown`, `other_project`, `overhead`, `credit` and projects `People's machines` and `No owner found`.
+- `Google Cloud` is counted before Google's promotional credit (from 2026-11-06 the credit pays most of the bill); the `credit` row brings the platform back to the bill Google charges. The bill less Support less the list estimate is split, signed, between ours, colleagues and nobody claims.
+- OpenAI's report posts a day's costs during that day and the next, so today and yesterday still grow by the hour.
 
 My project this week by platform:
 
 ```sql
 SELECT platform, ROUND(SUM(usd), 2) AS usd
 FROM `theorem-agent-infra.agent_spend.project_spend_daily_v`
-WHERE project = 'BET' AND day >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND kind NOT IN ('attributed_org_unknown', 'not_billed')
+WHERE project = 'BET' AND day >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND kind NOT IN ('attributed_org_unknown', 'not_billed', 'colleague', 'caller_unknown', 'other_project', 'overhead', 'credit')
 GROUP BY platform ORDER BY usd DESC
 ```
 
@@ -52,4 +53,4 @@ GROUP BY 1, 2, 3, 4 ORDER BY usd DESC LIMIT 20
 ## Other questions
 
 - One person's spend, how fresh each source is: the README section has the exact queries. Check freshness first when a number looks too low: a source whose last `day` is older than yesterday stopped loading.
-- Never name, stop, resize or act on a machine that is not ours. The views show colleagues' machines only as `People's machines`, but the tables (`cloud_cost_estimated`, `cloud_cost_today`) name them: do not read names from those tables, and treat `People's machines` as out of scope.
+- Never name, stop, resize or act on a machine that is not ours. The views show colleagues' machines only as `People's machines` and colleagues' model calls only as `colleague` (one row per organization, never per person), but the tables (`cloud_cost_estimated`, `cloud_cost_today`, `billed_usage_caller`) name them: do not read names from those tables, and treat colleagues' rows as out of scope.
