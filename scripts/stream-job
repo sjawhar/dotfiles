@@ -172,6 +172,9 @@ def read_job(path: Path) -> dict | None:
         "every": every,
         "timeout": timeout,
         "persistent": fields.get("persistent", "").lower() in TRUE,
+        # A job whose run outlives one tick: the runner starts it and moves on, so one long
+        # job no longer stops every short one. Its lock still forbids a second copy.
+        "detached": fields.get("detached", "").lower() in TRUE,
     }
 
 
@@ -198,6 +201,63 @@ def due(job: dict, directory: Path, now: float) -> tuple[bool, str]:
     return True, f"due {late - job['every']:.0f}s ago"
 
 
+def start_detached(job: dict, directory: Path, handle) -> str:
+    """Start a job in a session of its own and return at once, with its lock still held.
+
+    The runner runs jobs one at a time, so a job with a long timeout stops every short one:
+    on 2026-11-08 the gate lane's daily scan (90-minute timeout, started 05:04:00Z) held the
+    runner while `infra-oomnotify` — a four-minute OOM notifier — and four other jobs did not
+    start at all. `detached=yes` is for a job whose run outlives one tick.
+
+    Two things have to survive the parent returning. The LOCK: flock lives on the open file
+    description, so the child inherits it and no second copy can start while it runs, which is
+    the guarantee `detached` must not give up. And the RECORD: a detached job whose finish
+    nobody writes looks exactly like a job that never finishes, which is what unit-health-watch
+    alerts on, so the child writes its own `last-exit` and `last-finish`, in that order,
+    through the same shell.
+    """
+    os.set_inheritable(handle.fileno(), True)
+    exit_path = shlex.quote(str(directory / "last-exit"))
+    finish_path = shlex.quote(str(directory / "last-finish"))
+    # The command runs in a SUBSHELL. A job whose command ends in `exit` — or contains one on
+    # any path — would otherwise end this shell too, and the lines below would never run: the
+    # first version of this recorded `detached` for ever for a job that had already exited 3,
+    # and the job looked hung to unit-health-watch.
+    wrapper = (
+        "(\n"
+        f"{job['command']}\n"
+        ")\n"
+        "__rc=$?\n"
+        f"printf %s \"$__rc\" > {exit_path}.tmp && mv {exit_path}.tmp {exit_path}\n"
+        f"date -u +%Y-%m-%dT%H:%M:%SZ > {finish_path}.tmp && mv {finish_path}.tmp {finish_path}\n"
+    )
+    # Before the spawn, never after: a short job can finish and write its own status while
+    # the parent is still here, and a parent writing afterwards would clobber it. The first
+    # version of this did, and left `detached` standing as the final status of a job that had
+    # already exited 3.
+    write_state(directory, "last-exit", "detached")
+    try:
+        with open(directory / "last-output", "w") as out:
+            child = subprocess.Popen(
+                ["nice", "-n", str(NICE), "/bin/sh", "-c", wrapper],
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                cwd=str(job["workdir"]),
+                env=job_env(),
+                start_new_session=True,
+                pass_fds=(handle.fileno(),),
+            )
+    except OSError as error:
+        write_state(directory, "last-exit", "did-not-start")
+        write_state(directory, "last-line", str(error)[:LINE_KEEP])
+        write_state(directory, "last-finish", stamp(time.time()))
+        return f"{job['name']}: did not start: {error}"
+    write_state(directory, "last-line", f"running detached as pid {child.pid}")
+    return f"{job['name']}: started detached as pid {child.pid} (owner {job['owner']})"
+
+
+
 def run_job(job: dict, directory: Path, now: float) -> str:
     """Run one job under its own lock, record it, and give back one line for the log."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -213,6 +273,8 @@ def run_job(job: dict, directory: Path, now: float) -> str:
             write_state(directory, "last-line", f"{job['workdir']} is not a directory")
             return f"{job['name']}: {job['workdir']} is not a directory; not run"
         write_state(directory, "last-start", stamp(now))
+        if job["detached"]:
+            return start_detached(job, directory, handle)
         started = time.monotonic()
         try:
             done = subprocess.run(
