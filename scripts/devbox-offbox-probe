@@ -50,7 +50,7 @@ printf 'writeback_d_procs=%s\n' "$stuck_names"
 # --- the merge train -------------------------------------------------------------------------
 # Only facts. Which of them is an alert is the watch's decision, and its README says which rule
 # it used.
-if [[ -n "$train" && -d "$train" ]]; then
+if [[ -n "$train" && -d "$train" && -r "$train" && -x "$train" ]]; then
     printf 'train_present=yes\n'
     if [[ -r "$train/events.tsv" ]]; then
         printf 'train_events_mtime=%s\n' "$(stat -c %Y "$train/events.tsv")"
@@ -93,6 +93,81 @@ if [[ -n "$train" && -d "$train" ]]; then
         printf 'train_lock=\n'
         printf 'train_lock_pid_alive=unknown\n'
     fi
+
+    # The train's gate lock, the same shape as runner.lock (`pid <n> since <time>`). Three states,
+    # never two: a gate.lock that is missing, empty or carries no pid is `unreadable`, not `no`.
+    # "Could not look" and "it is dead" are different facts and the watch alerts differently on
+    # them; collapsing them makes a probe that cannot read the train report a healthy one.
+    if [[ -r "$train/gate.lock" ]]; then
+        gate="$(tr -d '\n' <"$train/gate.lock")"
+        printf 'train_gate_lock=%s\n' "$gate"
+        gate_pid="$(sed -n 's/.*pid \([0-9]\{1,\}\).*/\1/p' <<<"$gate")"
+        printf 'train_gate_pid=%s\n' "$gate_pid"
+        if [[ -z "$gate_pid" || ! -r "$proc" ]]; then
+            printf 'train_gate_pid_alive=unreadable\n'
+        elif [[ -d "$proc/$gate_pid" ]]; then
+            printf 'train_gate_pid_alive=yes\n'
+        else
+            printf 'train_gate_pid_alive=no\n'
+        fi
+    else
+        printf 'train_gate_lock=\n'
+        printf 'train_gate_pid=\n'
+        printf 'train_gate_pid_alive=unreadable\n'
+    fi
+
+    # The three standing train processes, from the process table rather than from `pgrep -f`:
+    # pgrep always reads the real /proc, and this probe's whole stall half is driven in the tests
+    # by a private procfs under <proc-root>, so a pgrep here would be the one fact no test could
+    # exercise. The bracketed patterns of operator/train_alive.sh survive the move for the same
+    # reason they were written -- a scanner must not match the scan -- and one awk over every
+    # `<pid>/cmdline` at once keeps the cost of 14,000 processes to a single process (the note
+    # above the writeback scan).
+    #
+    # Each file is read with `getline`, never as an awk input file: a process that exits between
+    # the glob and the read leaves a path that is gone, and that is a FATAL error to awk's own
+    # reader (mawk: `cannot open ... (No such file or directory)`, exit 2, nothing printed). On a
+    # box with thousands of short-lived processes that happens most passes, so the whole check
+    # would have read `unreadable` for ever. `getline` returns -1 instead and the scan goes on.
+    #
+    # Three states again: `unreadable` when the scan itself could not run (no procfs, no command
+    # line readable at all), never a silent `no` for every process.
+    train_procs_seen=""
+    train_procs_read=no
+    if [[ -r "$proc" ]]; then
+        train_procs_seen="$(awk '
+            BEGIN {
+                RS = "\0"
+                for (i = 1; i < ARGC; i++) {
+                    f = ARGV[i]
+                    c = ""
+                    while ((getline line < f) > 0) c = c line " "
+                    close(f)
+                    if (c == "") continue
+                    read_any = 1
+                    if (c ~ /operator\/revert_watch\.py/) found["revert_watch"] = 1
+                    if (c ~ /operator\/nightly_accept_load\.py/) found["nightly_accept_load"] = 1
+                    if (c ~ /operator\/snapshot\.sh --loop/) found["snapshot_loop"] = 1
+                }
+                if (read_any) print "read"
+                for (n in found) print n
+                exit 0
+            }
+        ' "$proc"/[0-9]*/cmdline 2>/dev/null)" && train_procs_read=yes
+    fi
+    [[ $'\n'"$train_procs_seen"$'\n' == *$'\n'read$'\n'* ]] || train_procs_read=no
+    for train_proc_name in revert_watch nightly_accept_load snapshot_loop; do
+        if [[ "$train_procs_read" != yes ]]; then
+            printf 'train_proc_%s=unreadable\n' "$train_proc_name"
+        elif [[ $'\n'"$train_procs_seen"$'\n' == *$'\n'"$train_proc_name"$'\n'* ]]; then
+            printf 'train_proc_%s=yes\n' "$train_proc_name"
+        else
+            printf 'train_proc_%s=no\n' "$train_proc_name"
+        fi
+    done
+elif [[ -n "$train" && -e "$train" ]]; then
+    # It is there and cannot be read. The watch says so; it never reads this as a quiet train.
+    printf 'train_present=unreadable\n'
 else
     printf 'train_present=no\n'
 fi

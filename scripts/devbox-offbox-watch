@@ -36,8 +36,14 @@ Three duties.
    that holds for 10 minutes, alerts the SRE and the chief of staff.
 
 3. The merge train (`--train`). Its operator, named in `runner.lock`, and the Verified Linux lead
-   hear when the queue holds work and `events.tsv` has not moved for 30 minutes, or when
-   `runner.lock` names a pid that is not running.
+   hear when the queue holds work and `events.tsv` has not moved for 30 minutes, when
+   `runner.lock` names a pid that is not running, when `gate.lock` does, and when any of the
+   three standing train processes (`operator/revert_watch.py`,
+   `operator/nightly_accept_load.py`, `operator/snapshot.sh --loop`) is not running -- one alert
+   per episode naming the whole missing set, and one line when they are all back. Each of those
+   facts has three states, not two: running, gone, and unreadable. An unreadable one is its own
+   alert naming what could not be read, never silence and never an all-clear. The watch starts
+   nothing: the alert quotes the train's HANDOFF.md, "restart it in its agents:* tmux window".
 
 Five limits on restarting, all mandatory:
 
@@ -506,15 +512,42 @@ def check_box(facts: dict[str, str], state: dict, report: Reporter, now: float,
     return True, detail
 
 
+# The three standing merge-train processes, with the pattern that finds each one. They are the
+# three the box's own liveness job watched (`operator/train_alive.sh`, run by the stream job
+# `merge-train-alive`), which this check replaces: a job armed ON sami-devbox dies with the box
+# it watches, which is the whole reason this watch runs off it.
+TRAIN_PROCESSES = {
+    "revert_watch": "operator/revert_watch.py",
+    "nightly_accept_load": "operator/nightly_accept_load.py",
+    "snapshot_loop": "operator/snapshot.sh --loop",
+}
+
+# What the train's HANDOFF.md tells its operator to do, quoted rather than paraphrased. This
+# watch starts nothing: decision 37 keeps the five processes in their own tmux windows.
+TRAIN_RESTART = ("restart it in its agents:* tmux window, per"
+                 " redesign/merge-train/HANDOFF.md. This watch starts nothing and has killed"
+                 " nothing.")
+
+
 def check_train(facts: dict[str, str], state: dict, report: Reporter, now: float,
                 train_dir: str, sre: str, vl_lead: str) -> None:
-    if facts.get("train_present") != "yes":
-        return
     train = state["train"]
     lock = facts.get("train_lock", "")
     operator = facts.get("train_lock_agent", "")
     open_items = facts.get("train_queue_open", "0")
     targets = [operator, vl_lead, sre]
+    present = facts.get("train_present", "no")
+    if present != "yes":
+        # A train directory that is there and cannot be read is its own alert: a probe that
+        # could not look must never be read as a quiet train. A directory that is not there at
+        # all is how this watch runs where there is no train, and stays silent.
+        if once(train, "unreadable", present == "unreadable"):
+            report.send([vl_lead, sre], "train-unreadable",
+                        f"MERGE TRAIN NOT READABLE: {train_dir} exists on the box and"
+                        f" devbox-offbox-probe could not read it, so NOTHING about the train was"
+                        f" checked this pass -- not the runner, not the gate, not the three"
+                        f" standing processes. This is a could-not-look, not an all-clear.")
+        return
     rule = ("Rule used: this watch's brief -- the queue holds work and events.tsv has had no new"
             " line for 30 min, or runner.lock names a pid that is not running. The train's own"
             " README states no stall condition of its own; its only word on a stopped runner is"
@@ -530,6 +563,52 @@ def check_train(facts: dict[str, str], state: dict, report: Reporter, now: float
                     f" in that directory; it gets the lock once the old process is gone, adopts the"
                     f" cycle if the head has not moved, and otherwise requeues the testing items."
                     f" Then relay the outbox after each landing. {rule}")
+
+    # The gate lock and the three standing processes, each in three states. "Could not look" is
+    # not "it is dead": an unreadable reading gets its own alert below and is never counted as
+    # alive, which is the whole failure mode a liveness check has.
+    gate = facts.get("train_gate_pid_alive", "unreadable")
+    gate_was_dead = bool(train.get("gate_dead"))
+    train["gate_dead"] = gate == "no"
+    if gate == "no" and not gate_was_dead:
+        report.send(targets, "train-gate-gone",
+                    f"MERGE TRAIN GATE GONE: {train_dir}/gate.lock names a pid that is not"
+                    f" running on the box. Lock: {facts.get('train_gate_lock', '') or '(empty)'}."
+                    f" {open_items} queue item(s) are open. The gate is the train's test gate:"
+                    f" {TRAIN_RESTART}")
+    elif gate_was_dead and gate == "yes":
+        report.send(targets, "train-gate-back",
+                    f"MERGE TRAIN GATE BACK: {train_dir}/gate.lock names a running pid again"
+                    f" ({facts.get('train_gate_lock', '') or '(empty)'}).")
+
+    missing = sorted(name for name in TRAIN_PROCESSES
+                     if facts.get(f"train_proc_{name}") == "no")
+    previously = list(train.get("procs_missing") or [])
+    train["procs_missing"] = missing
+    if missing and missing != previously:
+        # One alert per episode, naming the whole missing set; a set that grows or shrinks is a
+        # new fact and is said again, and an unchanged one is not.
+        gone = ", ".join(TRAIN_PROCESSES[name] for name in missing)
+        report.send(targets, "train-procs-gone",
+                    f"MERGE TRAIN PROCESS GONE: no process on the box matches {gone}"
+                    f" ({len(missing)} of {len(TRAIN_PROCESSES)} standing train processes)."
+                    f" Train dir {train_dir}; {open_items} queue item(s) are open. For each:"
+                    f" {TRAIN_RESTART}")
+    elif previously and not missing:
+        report.send(targets, "train-procs-back",
+                    f"MERGE TRAIN PROCESSES BACK: all {len(TRAIN_PROCESSES)} standing train"
+                    f" processes are running again (was:"
+                    f" {', '.join(TRAIN_PROCESSES[name] for name in previously)}).")
+
+    unreadable = [f"gate.lock ({train_dir}/gate.lock)"] if gate == "unreadable" else []
+    unreadable += [TRAIN_PROCESSES[name] for name in TRAIN_PROCESSES
+                   if facts.get(f"train_proc_{name}") == "unreadable"]
+    if once(train, "unreadable", bool(unreadable)):
+        report.send([vl_lead, sre], "train-unreadable",
+                    f"MERGE TRAIN CHECK COULD NOT LOOK: devbox-offbox-probe could not read"
+                    f" {'; '.join(unreadable)} on the box, so those facts are unknown this pass"
+                    f" -- not alive, not dead. Everything else about the train was checked"
+                    f" normally. Nothing was touched.")
 
     mtime = facts.get("train_events_mtime", "")
     if mtime and open_items.isdigit() and int(open_items) > 0:

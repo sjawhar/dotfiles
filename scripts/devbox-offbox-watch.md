@@ -93,10 +93,29 @@ never inferred from a title or directory. There is no separate window key or pla
    without stalling anything.
 3. The merge train, `/mnt/nvme/sami/tmp/verified-linux/redesign/merge-train`: its operator (the
    `agent` in `runner.lock`) and the Verified Linux lead hear when the queue holds work and
-   `events.tsv` has not moved for 30 minutes, or when `runner.lock` names a pid that is not
-   running. The train's own README states no stall threshold of its own — only the "Taking over"
-   procedure, which the alert quotes — so those two conditions are this watch's brief, and each
-   alert says so.
+   `events.tsv` has not moved for 30 minutes, when `runner.lock` names a pid that is not
+   running, when `gate.lock` does, and when any of the three standing train processes
+   (`operator/revert_watch.py`, `operator/nightly_accept_load.py`, `operator/snapshot.sh
+   --loop`) is not running — one alert per episode naming the whole missing set, one line when
+   they are all back. The train's own README states no stall threshold of its own — only the
+   "Taking over" procedure, which the alert quotes — so those conditions are this watch's brief,
+   and each alert says so; the restart advice is the train's HANDOFF.md, "restart it in its
+   `agents:*` tmux window", and this watch starts nothing.
+
+   **Three states per fact, never two.** Each of the five — runner.lock, gate.lock and the three
+   processes — is running, gone, or **unreadable**: no procfs, a missing or unparseable
+   `gate.lock`, a train directory that is there and cannot be read. An unreadable fact gets its
+   own alert naming what could not be read; it is never silence and never counted as alive. A
+   train directory that is not there at all is silence, which is how the watch runs where there
+   is no train. The process scan reads `--remote-proc`'s procfs (one `awk` over every
+   `<pid>/cmdline`, each file through `getline` so a process that exits mid-scan is not a fatal
+   error) rather than calling `pgrep`, which always reads the real `/proc` and so could not be
+   tested at all.
+
+   These four checks came off the box on 2026-11-09. Until then `operator/train_alive.sh`, the
+   `merge-train-alive` stream job armed **on** sami-devbox, made them every 4 minutes — a
+   watcher that dies with the machine it watches, which is the whole reason this one runs off
+   it, and agent timers on that box are going (dispatch://INFRA-2022/ask/4badbed6).
 4. Liveness, for every entry with `auto_restart=yes`. **The file is the test that works**, and a
    session is alive on any one of these readings:
    - a process holding its transcript open **for writing**, on the host or inside a box, from the
