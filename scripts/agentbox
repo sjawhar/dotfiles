@@ -1874,6 +1874,27 @@ session_env() {
     # ~/.cache/ms-playwright is mounted rw from the host; without this, a box's `playwright
     # install` deletes the browser builds of every checkout it cannot see (agentbox/AGENTS.md).
     e+=(-e PLAYWRIGHT_SKIP_BROWSER_GC=1)
+    # Machine-local session environment (dispatch://BET-765), the same file scripts/agent-session
+    # sources for a host session. A box builds its variables from scratch and never runs
+    # agent-session, so without this the file is visible in the box (agentbox/mounts has
+    # `ro .config/agent-session`) and nothing reads it: measured 2026-11-09 in a fresh box as
+    # BOX_ENVFILE=PRESENT with the variable UNSET. Sourced in a subshell on the host so a bad
+    # file cannot disturb the launcher, and only what it exports is passed on. Skipped unless it
+    # is owned by this user and not group- or world-writable, as it runs as the session.
+    local session_env_file="${XDG_CONFIG_HOME:-$HOME/.config}/agent-session/env"
+    if [[ -f "$session_env_file" && -O "$session_env_file" ]] \
+        && [[ -z "$(find "$session_env_file" -perm /022 -print -quit 2> /dev/null)" ]]; then
+        local kv
+        while IFS= read -r kv; do
+            [[ -n "$kv" ]] && e+=(-e "$kv")
+        done < <(env -i HOME="$HOME" DOTFILES_DIR="$DOTFILES_DIR" PATH="$PATH" bash -c '
+            before="$(compgen -e | sort)"
+            # shellcheck source=/dev/null
+            source "$1" 2> /dev/null || exit 0
+            comm -13 <(printf "%s\n" "$before") <(compgen -e | sort) | while read -r n; do
+                printf "%s=%s\n" "$n" "${!n}"
+            done' _ "$session_env_file")
+    fi
     # The team memory graph's server, which `ctx` (mise.toml) sends every command to, as host
     # shells get it from .bashrc. A box reaches the tailnet through the host, so the server names
     # a box's caller by the host's Tailscale login. The launcher's own value wins.
