@@ -340,7 +340,7 @@ def stream_sessions(directory: Path, issue: str, census: dict | None, live: list
 
     A session is the stream's when this machine's CENSUS (`measure`) has it in one of the stream's windows or as
     moved off this machine from one; when an earlier read saw either (`members.txt` in DIRECTORY, which this call
-    extends); or when it posted `LEDGER start` on the stream issue (PILOT_SESSIONS). The record is what counts a
+    extends); or when PILOT_SESSIONS lists it (`pilot-sessions.txt`, left by the removed `pilot` command). The record is what counts a
     session on a machine whose windows say nothing: `agentbox move --to` starts a moved session in tmux session
     `moved` on the target, in a window named for its id, and a reader in an agent box measures nothing (`read`).
     One in a window here is live by that reading; any other is live while Envoy (LIVE) lists it."""
@@ -362,8 +362,8 @@ def stream_sessions(directory: Path, issue: str, census: dict | None, live: list
 
 
 def stream_census(state: Path, issue: str, census: dict | None, live: list[dict] | None) -> list[dict]:
-    """`stream_sessions` with the stream's records under the pilot's state directory STATE (`STATE/<issue>/`, made
-    when absent; STATE itself must exist): its members.txt and the pilot's pilot-sessions.txt."""
+    """`stream_sessions` with the stream's records under the state directory STATE (`STATE/<issue>/`, made
+    when absent; STATE itself must exist): its members.txt and any pilot-sessions.txt left by the removed `pilot` command."""
     directory = state / issue
     directory.mkdir(exist_ok=True)
     pilot_path = directory / "pilot-sessions.txt"

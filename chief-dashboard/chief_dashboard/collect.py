@@ -22,8 +22,8 @@ from .videos import VideoStore
 # attention items, matched to a discovered stream by issue key or slug. Everything else comes from the scoreboard.
 REGISTRY = Path(os.environ.get("STREAMS_REGISTRY", Path.home() / "src/scrum/workstreams/streams.json"))
 SCOREBOARD_SLUG = "scoreboard-json"
-# The pilot's state directory (`chief-dashboard pilot ... --state`): each stream's members.txt and pilot-sessions.txt,
-# which `sessions.stream_census` reads and extends.
+# The per-stream session records (`DASHBOARD_PILOT_STATE`): each stream's members.txt, which
+# `sessions.stream_census` reads and extends, beside the pilot-sessions.txt an earlier `pilot` command wrote.
 PILOT_STATE = Path(os.environ.get("DASHBOARD_PILOT_STATE") or chief_state("streams"))
 
 # This is Sami's page, so it shows the streams that are his. A stream is discovered by the label `stream` on an

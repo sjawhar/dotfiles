@@ -1,4 +1,4 @@
-"""The standup room: Sami's morning department-heads meeting with his chief of staff and the stream leads.
+"""The standup room: Sami's morning department-heads meeting with his chief of staff and the projects' Legion controllers.
 
 The room is one Dispatch issue (`DASHBOARD_STANDUP_ISSUE`) and one message thread inside it
 (`DASHBOARD_STANDUP_ROOT`). Dispatch holds the meeting, so nothing is invented here: a lead posts with
@@ -391,7 +391,7 @@ class Room:
 
     # -------------------------------------------------------------------------------------- Sami speaking
     def leads(self) -> list[str]:
-        """Every session Sami's line is delivered to: the stream leads and the chief of staff."""
+        """Every session Sami's line is delivered to: the sessions LEADS_FILE lists (the projects' Legion controllers) and the chief of staff."""
         try:
             got = json.loads(LEADS_FILE.read_text())
         except (OSError, ValueError):
@@ -547,7 +547,7 @@ def line_html(room: Room, ln: Line) -> str:
 def transcript(room: Room) -> str:
     lines = room.all_lines()
     if not lines:
-        return ('<div id="transcript" class="tr"><p class="empty">Nothing said yet. The leads post their standups '
+        return ('<div id="transcript" class="tr"><p class="empty">Nothing said yet. The room posts its standups '
                 f'into <a href="{e(DISPATCH_WEB)}/issues/{e(ISSUE)}" target="_blank" rel="noopener">{e(ISSUE)}</a>'
                 " and each line appears here.</p></div>")
     return f'<div id="transcript" class="tr">{"".join(line_html(room, ln) for ln in lines)}</div>'
@@ -579,7 +579,7 @@ def body(room: Room, can_send: bool, notice: str | None = None, notice_error: bo
         f"{transcript(room)}"
         '<form class="say" id="say" method="post" action="/standup">'
         f'<textarea id="line" name="text" rows="4" maxlength="{MAX_LINE}" placeholder="Say something to the '
-        f'leads&hellip;"{disabled}></textarea>'
+        f'room&hellip;"{disabled}></textarea>'
         '<div class="row"><button type="submit" class="btn send"'
         f'{disabled}>Send as Sami</button>'
         f'<button type="button" id="talk" class="btn"{disabled}>Hold to talk</button>'

@@ -10,8 +10,9 @@ was the instruction step, and four hours later it had not held.
 What it does with each WAITING-ON-US row:
 
 1. **Names an executor**, in this order, and sends only to agent sessions, never to a person:
-   the session that opened the ask; else the session that claims the issue; else the lead of the stream the issue
-   belongs to; else the lead of the project's own stream (the session each scoreboard names). A candidate that is
+   the session that opened the ask; else the session that claims the issue; else the session the stream issue's
+   scoreboard names; else the one the project's own stream scoreboard names (with standing leads gone, that is the
+   project's Legion controller wherever a scoreboard names one). A candidate that is
    not alive is passed over. A row of a Legion tree, or one a Legion architect opened, takes only that project's
    Legion controller at the last step: an architect's claim outlives its process, so the tree is parked rather than
    gone, and the controller is the session that wakes it. When nothing resolves, the row prints as

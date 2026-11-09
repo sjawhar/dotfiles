@@ -619,9 +619,10 @@ def live_link(web: str, session: str, who: str, running: bool, label: str) -> st
 
 
 def lead_panel(st, page: PageV2, notes: list[dict], can_send: bool) -> str:
-    """Beside the player: a note to the lead that posts without reloading the page, so the video keeps playing
-    (Sami, 2026-10-26: "You took away my ability to send a message to the workstream lead while watching the video"),
-    and under it a link into the lead's live conversation in Dispatch."""
+    """Beside the player: a note to the session the stream's scoreboard names (its `lead` field, which is the
+    project's Legion controller where the scoreboard names one), posted without reloading the page so the video
+    keeps playing (Sami, 2026-10-26: "You took away my ability to send a message to the workstream lead while
+    watching the video"), and under it a link into that session's live conversation in Dispatch."""
     if not st.lead_session:
         return '<div class="notep"><p class="dim small">No lead session named, so a note has nowhere to go.</p></div>'
     disabled = "" if can_send else " disabled"
