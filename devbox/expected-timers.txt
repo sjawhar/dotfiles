@@ -30,7 +30,16 @@
 # for a timer nobody wants makes an alert every 5 minutes.
 
 # --- box health: the watches the box-health lead (the SRE) owns ---
-disk-fill-watch.timer              # owner: box-health lead. Filesystems heading for full.
+# disk-fill-watch.timer was retired on 2026-11-09, with the four below. Same ruling as
+# load-swap-watch (dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c): dotfiles
+# presence is not authorization, and a dev box is monitored by the standard agent. Its owner,
+# the omp lead, decided all six at 03:40Z and declined the replacement-before-removal this role
+# offered, on the grounds that keeping an unauthorized timer because it is useful is the move
+# the ruling names. What it caught that a host agent structurally cannot see is recorded as
+# requirements on the replacement, with the instance each: a box at 85% of its memory cap while
+# the host had 979 GiB free; an 8-core box throttled while host load.norm.1 read 1.6; three box
+# disks at 90-94% against 12 TiB free; and a box at 76% resolving to one omp --resume holding
+# 73.1 of 73.7 GiB (dispatch://INFRA-1876).
 # load-swap-watch.timer was retired on 2026-11-08 and is deliberately not here. Sami's answer at
 # dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c: a dev box is monitored by the
 # standard Datadog or Cloud agent and "we don't need custom timer units for it". What it watched
@@ -40,9 +49,12 @@ disk-fill-watch.timer              # owner: box-health lead. Filesystems heading
 # went the same day for the same reason, replaced by "Process killed (earlyoom)" and
 # "Process killed (kernel OOM)"; it was a service rather than a timer, so it never had a line here.
 unit-health-watch.timer            # owner: box-health lead. This list, and every timer's runs.
-envoy-role-holder-watch.timer      # owner: box-health lead. Envoy role holders still alive.
-omp-dup-watch.timer                # owner: box-health lead. One omp per session id.
-omp-login-watch.timer              # owner: box-health lead. Sessions still have a provider login.
+# envoy-role-holder-watch.timer, omp-dup-watch.timer and omp-login-watch.timer were retired on
+# 2026-11-09 with disk-fill-watch, under the same ruling and the same owner's decision.
+# Two of them watched things that are not cgroup-shaped, so the standard agent will not cover
+# them either and their loss is recorded with the rest: one omp session id running in two live
+# omps is a correctness hazard rather than a resource one, and src-symlink-watch (never in this
+# list) caught a symlink in ~/src pointing outside it, which every box on the machine mounts.
 # transcript-import.timer and transcript-lag-watch.timer were added here on 2026-11-05 and taken
 # out the same afternoon. sami-devbox has NO write path to the transcript store: 10.0.0.20:8123 is
 # the store VM's address inside Azure (200 from sami-rocqperf, TCP timeout from here), and the
@@ -56,7 +68,8 @@ omp-login-watch.timer              # owner: box-health lead. Sessions still have
 #   after Sami stopped the watch on 2026-11-04 and the INFRA lead confirmed DELETE at 19:57Z.
 #   An unarmed linked service is unwanted box clutter. Its script, installer and units are
 #   removed with no replacement. This line does not come back.
-omp-root-hang-watch.timer          # owner: box-health lead. A root session hung on a tool call.
+# omp-root-hang-watch.timer was retired on 2026-11-09 with the four above. Its owner called it
+# the clearest case the ruling covers: a bespoke watch for one named lead's session.
 # session-cpu-record.timer was here. It is now the stream job of the same name
 # (~/.config/stream-jobs/session-cpu-record.job, every 5 min); its first run through the runner
 # was 21:42:08Z, exit 0, 142 sessions. The timer was disabled at 21:42Z. unit-health-watch
