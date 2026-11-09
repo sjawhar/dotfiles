@@ -36,7 +36,7 @@ over many sub-issues and defer parts to other issues, so they can call themselve
   the parts you found late. Never create a child issue for any of it.
 - **Work outside your outcome** (another stream's bug, a separate feature) is not yours: search Dispatch, then file
   it unclaimed for its owner, and do not start it. It counts in the measurement as an issue you created.
-- **For judgment, ask a lead subagent** (skill://stream-lead). Its answer is advice; you decide.
+- **For judgment, ask the project's Legion controller.** Its answer is advice; you decide.
 
 ## Waiting on another issue
 

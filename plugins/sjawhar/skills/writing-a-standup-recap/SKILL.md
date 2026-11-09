@@ -1,12 +1,12 @@
 ---
 name: writing-a-standup-recap
-description: "Use for a standup recap, including a short chat update and a stream lead's standup lines. Also for any weekly or daily summary of delivered work for the team, or 'what did we ship'. Not for agent-to-agent status."
+description: "Use for a standup recap, including a short chat update and a Legion controller's standup lines. Also for any weekly or daily summary of delivered work for the team, or 'what did we ship'. Not for agent-to-agent status."
 ---
 
 # Writing a standup recap
 
 The readers are the people of the company: engineers on other projects and staff who are not technical. They are
-not agents and not the stream leads. Sami presents it, so it must be right without his edits. You are the editor:
+not agents and not the Legion controllers. Sami presents it, so it must be right without his edits. You are the editor:
 subagents draft and review, and you own what goes out.
 
 ## Steps
