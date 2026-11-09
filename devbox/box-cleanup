@@ -48,10 +48,16 @@ log_file="${BOX_CLEANUP_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/l
 envoy_url="${BOX_CLEANUP_ENVOY_URL:-http://127.0.0.1:9020}"
 step_timeout="${BOX_CLEANUP_STEP_TIMEOUT:-30m}"
 
-# Box health on this machine belongs to the SRE session, as it does for unit-health-watch,
-# load-swap-watch and disk-fill-watch: the role topic first, that session when nobody holds it.
+# Where a box-health notice goes. `lead-box-health` is an Envoy TOPIC NAME, not a standing lead:
+# Sami ended standing leads on 2026-11-09 (dispatch://INFRA-2397). The name stays until the
+# INFRA-2397 tree renames it together with its callers - the agent-session watch (#2824),
+# unit-health-watch, load-swap-watch, disk-fill-watch and agentbox all publish here, so renaming
+# it alone silently drops their reports, which is how they were lost until 20:13Z that day.
 BOX_HEALTH_TOPIC="notifications.role.lead-box-health"
-SRE="01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
+# Fallback when nobody holds the topic. One specific session, not a role: it is whoever last
+# watched this box, and it may well be gone. A notice that reaches nobody is the expected
+# outcome here, not a fault to work around.
+BOX_HEALTH_FALLBACK_SESSION="01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
 # One Envoy notice, and the detail is in the log this names. The sibling watches use 600.
 MESSAGE_LIMIT=600
 # Days of freeing nothing before the second rule speaks. Three, not one: a box whose caches are
@@ -365,7 +371,7 @@ tell() {
         -d "$body" "$envoy_url/v1/messages/publish" >/dev/null 2>&1; then
         sent=yes
     else
-        body="{\"target_session\": \"$SRE\", \"message\": \"$(json_string "$message")\", \"source\": \"envoy\"}"
+        body="{\"target_session\": \"$BOX_HEALTH_FALLBACK_SESSION\", \"message\": \"$(json_string "$message")\", \"source\": \"envoy\"}"
         if curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
             -d "$body" "$envoy_url/v1/messages/send" >/dev/null 2>&1; then
             sent=yes
