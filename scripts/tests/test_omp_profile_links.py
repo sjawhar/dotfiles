@@ -171,6 +171,23 @@ class OmpProfileLinks(unittest.TestCase):
         self.assert_launched(self.omp_run("--profile", "theorem"))
         self.assertFalse(os.path.lexists(self.omp / "profiles" / "theorem" / "agent" / "envoy.json"))
 
+    def test_a_profiles_link_beside_a_real_default_entry_is_its_own(self) -> None:
+        """2026-11-09 ~07:46Z on oryx: the legion profile's agent/agent.db, a link to the personal
+        profile's agent.db that holds every Legion pane's provider logins, was pruned because the
+        default's agent.db is a real file, not a link; the next run failed "No API key found".
+        The shim mirrors only the default's links, so a link it finds beside a real default entry
+        is one the profile made, and it stays. A mirrored link whose source is gone still goes."""
+        logins = self.omp / "profiles" / "personal" / "agent" / "agent.db"
+        logins.parent.mkdir(parents=True)
+        logins.write_text("logins", encoding="utf-8")
+        agent = self.omp / "profiles" / "legion" / "agent"
+        agent.mkdir(parents=True)
+        (agent / "agent.db").symlink_to(logins)
+        (agent / "retired").symlink_to(self.targets / "retired")
+        self.assert_launched(self.omp_run("--profile", "legion"))
+        self.assertEqual(os.readlink(agent / "agent.db"), str(logins))
+        self.assertFalse(os.path.lexists(agent / "retired"))
+
     def test_default_profile_creates_nothing(self) -> None:
         for args, extra in (((), {}), (("--profile", "default"), {}), ((), {"OMP_PROFILE": ""})):
             with self.subTest(args=args, env=extra):

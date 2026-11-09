@@ -65,7 +65,8 @@ if [[ -z "${MNEMOPI_EMBEDDING_API_URL:-}" && -r "$embed_file" ]]; then
 fi
 
 # A named profile gets the shared setup: its symlinks track installers/omp.sh's in ~/.omp and
-# ~/.omp/agent (created, re-pointed, retired), and its real files are its own. config.yml comes
+# ~/.omp/agent (created, re-pointed, retired), and its real files are its own, as is a link it holds
+# where the default has a real entry (legion's agent.db, a link to the personal profile's). config.yml comes
 # from the overlay above; models.yml (provider routes and keys) and envoy.json are the profile's
 # own, so neither is mirrored or pruned. The profile is the last --profile before a `--`, else
 # OMP_PROFILE when it is defined, else PI_PROFILE when it is defined, else the machine's own
@@ -171,7 +172,10 @@ mirror_links() { # mirror_links SRC DST [copy-files]
             continue
         fi
         case "$name" in config.yml|models.yml) rm -f "$entry"; continue ;; envoy.json) continue ;; esac
-        [[ -L "$src/$name" ]] || rm -f "$entry"
+        # Only the default's links are mirrored, so a link beside a real default entry is the
+        # profile's own (legion's agent.db, a link to the personal profile's logins, pruned at
+        # ~07:46Z on 2026-11-09). A mirrored link whose source is gone still goes.
+        [[ -L "$src/$name" || -e "$src/$name" ]] || rm -f "$entry"
     done
     for entry in "$src"/*; do
         name="${entry##*/}"
