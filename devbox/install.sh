@@ -99,12 +99,19 @@ if "${DOTFILES_DIR}/scripts/on-google-vm"; then
     arm_user_timer devbox dotfiles-follow
 fi
 
-# Every 10 min, tell the box-health owner over Envoy when the transcript store's newest entry from
-# this host is over 45 min old on two checks in a row (scripts/transcript-lag-watch.md). Quiet on a
-# machine with no transcript-import unit and no transcript-store config. BOX_HEALTH_OWNER, when
-# set, goes in its drop-in.
-ensure_box_health_owner transcript-lag-watch
-arm_user_timer devbox transcript-lag-watch
+# transcript-lag-watch is NOT armed here, and both halves of that are deliberate.
+#
+# It contradicted itself: this installer armed it on every box while devbox/expected-timers.txt
+# recorded it as taken out on 2026-11-05 because sami-devbox has no write path to the transcript
+# store. A machine cannot both expect a timer and expect it gone (dispatch://INFRA-2079 row M9).
+#
+# The contradiction is resolved by removing it rather than by expecting it, on Sami's answer at
+# dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c: a dev box is monitored by the
+# standard Datadog or Cloud agent, "we don't need custom timer units for it", and a unit living in
+# these dotfiles is not authorization for it. It was stopped on sami-rocqperf at 2026-11-09
+# 00:27Z; what it watched — the store's newest entry from a host going stale — is moot there,
+# since hosts.tsv gives that host no row of its own and sami-devbox imports its lines under
+# held_by.
 
 # Scratch on the big disk for the box's systemd --user services, which read environment.d and
 # not .bashrc (devbox/nvme-tmp.conf). Installed only where /mnt/nvme/<user> exists and is
