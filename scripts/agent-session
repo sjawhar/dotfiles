@@ -162,6 +162,21 @@ if [[ -f "$box_adc" ]] && [[ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" \
     export GOOGLE_APPLICATION_CREDENTIALS="$box_adc"
 fi
 
+# Machine-local environment, outside this public repository (dispatch://BET-765). A setting that
+# names a customer may not be committed here, so each machine keeps its own file and this reads it
+# if it exists. Sourced before the session starts, so every host session and every box gets it, and
+# a value already in the environment still wins when the file uses the ${VAR:-default} form. Owned
+# by this user and not group- or world-writable, or it is ignored: it runs as the session.
+session_env="${XDG_CONFIG_HOME:-$HOME/.config}/agent-session/env"
+if [[ -f "$session_env" && -O "$session_env" ]]; then
+    if [[ -n "$(find "$session_env" -perm /022 -print -quit 2> /dev/null)" ]]; then
+        printf 'agent-session: ignoring %s: group- or world-writable\n' "$session_env" >&2
+    else
+        # shellcheck source=/dev/null
+        source "$session_env"
+    fi
+fi
+
 # Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).
 # Root holds every session's transcript, so a root that fills wedges the whole box, and on
 # 2026-10-27 it filled in 5h41m - not from one writer, but from thousands of tool runs writing

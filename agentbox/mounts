@@ -12,6 +12,9 @@ rw .cache/omp
 # Native user skills (the pinned GitHub CLI skill lives here).
 rw .agents
 
+# Machine-local session environment (dispatch://BET-765); read-only, the host owns it.
+ro .config/agent-session
+
 
 # Share unit-file state without starting, stopping, or enabling any service.
 rw .config/systemd/user
