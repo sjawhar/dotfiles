@@ -34,13 +34,13 @@ Rule 1 binds your own tool calls whenever your session's cwd is not the tree you
 
 ## While lanes run
 
-Run `envoy_whoami` once. If it returns a session ID, every brief carries your session ID with the instruction to `envoy_send(session_id="<your-id>", …)` on finish, blocker or a decision it cannot make, including its own id so you can reply; and the line that asking a clarification beats guessing, since a wrong guess burns the whole run and a question costs a minute. The brief also says WHEN and WHICH: send a blocker within three rounds of the same wall, naming the file, the line and the goal, so the lane does not spend an hour on a wall a sibling clears in a minute, and send a decision its lead owes the moment it knows one is needed, not in its report. Only a question of the project's goal or a real preference goes up; one the code, the records or a command can settle, the lane settles itself, since an answer it could have read costs a person's turn (librarian ledger L1213).
+Run `envoy_whoami` once. If it returns a session ID, every brief carries your session ID with the instruction to `envoy_send(session_id="<your-id>", …)` on finish, blocker or a decision it cannot make, including its own id so you can reply; and the line that asking a clarification beats guessing, since a wrong guess burns the whole run and a question costs a minute. Replies arrive as turns in your session with a reply-to id, and you answer on the channel a message arrived on (`references/waiting.md`).
 
 - Address every message to one session id; a broadcast (`agent://all`) interrupts each working lane, and lanes given different broadcasts act on contradictory instructions.
 - Take the time from `date -u`; a message's `at` stamp is when it was sent, and delivery lags, so it is a receipt and not the clock.
 - A subagent runs **inside its parent's process**, so a parent that finishes ends every child it still has, with no notice to anyone. A lane waiting on an external job (a k8s Job, a farm grade, a long build) is the easy one to lose, because it does not look like work in progress: dispatch it as a **sibling at top level**, never as a child of an agent that is about to report, and do not let a parent complete while a child waits. Measured on 2026-11-04: a watcher holding a fork member's pre-registered analysis died when its parent reported, after 7h37m of waiting; the k8s Job had completed and all three result sets were in GCS, so nothing was lost but the 40 minutes before anyone noticed it had gone. Nothing reports such a death — `read proc://` no longer listing a lane is the only signal.
 
-Push a branch after every reviewed task, and keep no subagent's work unpushed past its own task: a branch that exists only in a working copy is one bad command from gone. Delete a working copy only after every background job it started has returned: a job still writing there loses its output, and its failure reaches nobody.
+Push a branch after every reviewed task, and keep no subagent's work unpushed past its own task: a branch that exists only in a working copy is one bad command from gone.
 
 ## When a lane reports
 

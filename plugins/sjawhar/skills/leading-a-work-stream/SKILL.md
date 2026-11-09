@@ -35,7 +35,7 @@ A date is the time the work takes at agent speed, plus only the waits nobody can
 - Ask agents for a report of each decision or step. Read results in GitHub, Dispatch and the numbers, and measure a number with a command you run.
 - Ration a shared resource (disk, VMs, compute) by approving each use. Set the limit, and the agents apply it themselves or through a tool.
 - Relay messages between agents who can talk directly.
-- Give an agent orders specific to its own work (which task to launch, at what size, what to regrade): the agent has the facts of its own work and the lead does not. Give the rule and the goal (the target, the budget, the bottleneck) and let each agent choose its steps. Before you pass on a claim of theirs, read its source yourself (below).
+- Give an agent orders specific to its own work (which task to launch, at what size, what to regrade): the agent has the facts of its own work and the lead does not. Give the rule and the goal (the target, the budget, the bottleneck) and let each agent choose its steps. Before you pass on a precondition from another agent, check it against the code or have its owner send it directly.
 
 ## Decision rights
 
@@ -81,11 +81,11 @@ Every morning by 09:00 Pacific, you and your agents agree on Envoy what the stre
 
 From records you read yourself (GitHub, Dispatch, the numbers), answer: what is the target; what is the actual value now; what is the obstacle, and which one is being worked on; what is the next step and what should it do to the number; when will we know? Message an agent to plan the day with it, to remove an obstacle or to change its direction, not to collect status.
 
-## Before you relay or report a claim
-
-**A claim you did not read the source of is not yours to pass on.** Another agent's or a person's statement — a precondition, a blocker, a number, a "done" — is re-read at its live source before it reaches Sami, another stream or your own report, and travels with the command or record that shows it. Without that, each reader spends a check to disprove it after acting on it; with no source to re-read, name whose unread claim it is.
+## Before you say something is blocked
 
 **Read the thing itself, not the thing next to it.** Before you write that X is blocked by Y, read X's own state: `gh pr checks` at the head, not the queue's length; the process (`ps -eo pid,etimes,args | grep <session-id>`) and the session's last tool call, not a registry's session list; the job's own start time, not the pool's history; the commit its owner made, not an exit snapshot of its workspace, whose own message says it was not built or reviewed. A stopped resource and a contended one look identical from a queued job, and a session waiting for its workers looks identical to a dead one.
+
+**A blocker you relay to other streams carries the command that shows it.** Without it, each stream spends a check to disprove it after acting on it.
 
 **Ask a fresh reviewer, for each claimed cause, to name the command or record that would show it FALSE, and to run it.** A reviewer that reads only the prose confirms a confident wrong cause. The causes that cost most are the ones nobody could falsify, because nobody looked for what would disprove them.
 
@@ -93,17 +93,18 @@ From records you read yourself (GitHub, Dispatch, the numbers), answer: what is 
 
 **"Did my check pass?" and "could my check have failed?" are different questions, and only the second is evidence.** Before you report a clean result, say what would have made it dirty, and make it dirty once.
 
-Ten clean results in one day's batch came from instruments that could not have seen the defect: a gate reporting zero regressions over a corpus that generated none of the construct; a test whose comment called it load-bearing while it passed with the mechanism deleted; GitHub's `mergeable`, a cache, wrong for five of seven pull requests; and a review verdict read at a head that had moved.
+Ten clean results in one day's batch came from instruments that could not have seen the defect: a gate reporting zero regressions over a corpus that generated none of the construct; `cargo clippy --workspace` certifying, for seven minutes, a crate that was not a workspace member and did not compile; a `strings` scan for a name the code assembles from a ternary; a scan of a binary at a path that did not exist, which returned zero for every string including the control; a test whose comment called it load-bearing while it passed with the mechanism deleted; a changelog check counting deletions, which a misplaced addition does not make; GitHub's `mergeable`, a cache, wrong for five of seven pull requests; and a review verdict read at a head that had moved.
 
-**Attribution is the same test.** "A live process holds 710 of them" is a sentence no evidence can contradict, because it names nobody; `/proc/<pid>/cmdline` named the session saying it. A claim that cannot be wrong is not a finding.
+**Attribution is the same test.** "A live process holds 710 of them" is a sentence no evidence can contradict, because it names nobody; `/proc/<pid>/cmdline` turned out to name the session saying it. A claim that cannot be wrong is not a finding.
 
-**A tool that cannot run must refuse, not pass.** The leak check exits 2 when its interpreter is missing, and says why. An empty script exits 0 and prints nothing, so a `git commit` over a truncated shim reports success and commits nothing. Count exit status, never output lines.
+**A tool that cannot run must refuse, not pass.** The leak check exits 2 when its interpreter is missing, and says why. Four shims were 0-byte files for two minutes on 2026-11-07: an empty script exits 0 and prints nothing, so `git commit` reported success and committed nothing. Count exit status, never output lines.
 
 ## Nothing important may live only in a session's context
 
-**This is the whole defence against a memory cap, and it is cheaper than any amount of discipline.** A lead running many lanes accumulates context that cannot be freed in place; a session killed at its cap lost no measured work, because its results were on durable storage and its heavy jobs ran off-box.
+**This is the whole defence against a memory cap, and it is cheaper than any amount of discipline.** A lead running many lanes accumulates context that cannot be freed in place: one session reached 100.8 GiB against a 160 GiB cap; another was killed twice at 128 GiB and lost no measured work, because its results were on durable storage and its heavy jobs ran off-box.
 
 Put decisions in `knives notch`, defects in Dispatch, limitations in the pull request body, and what is in flight in a continuity file. Then a kill costs the conversation and no work, and you can refuse a bigger box honestly — **the cap is usually the only reason anyone looked.**
+
 
 ## Incidents on shared resources
 
@@ -120,8 +121,7 @@ Why: every coordination failure from 2026-10-15 to 2026-10-28 was at a resource 
 - Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you: when a delegated result lands, read the number it was meant to move yourself.
 - When an agent starts a long project, check that it uses the workflow skill for that kind of work and name the skill: `sdd` for an engineering project, `skill://building-and-delivering-tasks` for RL task work. That skill's own review steps replace review by the lead.
 - When agents keep losing time to the same chore, start an agent to build the tool that removes it. Do not wait to be asked.
-- Do not build, file or ask for a restriction, guard, gate or process against a failure nobody has seen. Fix a real failure at its cause, after it happens.
-- Size the machinery to the problem: when the ceremony around a step costs more than the failure it prevents, delete the ceremony rather than tune it. Build only measures that feed the stream's top-level numbers, and never ask Sami to approve a recurring job whose numbers he has not seen (ledger L1214).
+- Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.
 - When the user asks the stream for an explainer video, you own it: have a subagent make it with `skill://making-explainer-videos`.
 - **A brief for work on a shared machine names the identity and its limits, and forbids what hits everyone else.** Write in every such brief:
   - Which login the work uses (on sami-rocqperf, the box's own: `AZURE_CONFIG_DIR=/home/sami/.azure-box-identity`, `gcloud` with no `--account`), because an agent whose brief names a cloud action and no identity takes the ambient one.

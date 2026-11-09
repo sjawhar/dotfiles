@@ -1,6 +1,6 @@
 ---
 name: analyze
-description: Use before you report work done, checked or handled, or commit or open a PR; not another's diff. Use it at the analyze step of opening-a-pr, when you finished a task and the working copy or your unpushed commits hold your own changes, or when someone asks you to analyze changes you just made.
+description: Use before you commit or open a PR on code you wrote; not when dispatched to review someone's diff. Use it at the analyze step of opening-a-pr, when you finished a task and the working copy or your unpushed commits hold your own changes, or when someone asks you to analyze changes you just made.
 ---
 
 # Analyze
@@ -17,5 +17,5 @@ description: Use before you report work done, checked or handled, or commit or o
    - **Low**, optional: style, minor suggestions.
 
    Fix every Critical and High finding (`opening-a-pr` requires it); Medium and Low are your call. Fix a one-file finding yourself; dispatch a `deep` agent when the fix spans more than one file.
-4. **Check the ask, not only the diff, before you call anything done.** Re-read what was asked, item by item, and look at the result its asker will see — the rendered page, the command's output, the live record — because a fix applied is not a fix working, and an item you cannot show that way is reported as not done. For a claim this diff does not contain (a test, a build, a deploy, a subagent's report), run its command now: `skill://verification-before-completion`.
-5. **Summarize** all findings by severity: file and line, a short description, the fix, and who applied it. Add a code example when the fix is longer than one line.
+
+4. **Summarize** all findings by severity: file and line, a short description, the fix, and who applied it. Add a code example when the fix is longer than one line.

@@ -4,7 +4,7 @@ Answer on the channel a message arrived on: `hub send` reaches only agents liste
 
 ## A lane that looks stalled
 
-- Message it before you kill it. A subagent deep in legitimate work loses everything it learned when you kill it: `envoy_send` a status request, give it about 10 minutes (longer when its task involves builds or long test suites), and re-dispatch only on silence or a reply confirming it is wedged. That is for a lane you mean to keep. To REPLACE one, kill it first (`write proc://<id>/kill`) and message afterwards: the ten minutes preserve work you are about to redo, and the lane keeps spending on it meanwhile.
+- Message it before you kill it. A subagent deep in legitimate work loses everything it learned when you kill it: `envoy_send` a status request, give it about 10 minutes (longer when its task involves builds or long test suites), and re-dispatch only on silence or a reply confirming it is wedged.
 - A status of `Running` is not progress evidence. When it would change your next decision, look for fresh tool output or an observed state transition; with neither, use the deadline above instead of reporting liveness as progress. A known long-running job that keeps showing progress needs none of this.
 - To see whether a lane is really working, read `hub ps`, not `pgrep`: a lane running its long operations as hub-supervised processes is invisible to a process-name grep.
 - A supervised process's failure evidence is volatile, so a long-running lane's brief says to copy each attempt's terminal error line into its report as it happens.
