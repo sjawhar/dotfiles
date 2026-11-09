@@ -1,7 +1,7 @@
-// Refuse a method decision the Verified Linux stream lead sends to the stream's slices without a
+// Refuse a method decision the Verified Linux controller sends to the project's slices without a
 // fresh reviewer's PASS verdict.
 //
-// The lead (omp session LEAD_SESSION_ID) owes a fresh reviewer on every method decision, and once
+// The controller (omp session LEAD_SESSION_ID) owes a fresh reviewer on every method decision, and once
 // sent one by Envoy without it. A program cannot judge a decision, but it can check that a method
 // decision sent to the slices carries a reviewer's verdict; this is that check. The commit that
 // added it records the incident.
@@ -39,9 +39,9 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { rootSessionId } from "./experiments/gates";
 
-/** The Verified Linux stream lead's omp session; the gate acts in it and its subagents only. */
+/** The Verified Linux controller's omp session; the gate acts in it and its subagents only. */
 export const LEAD_SESSION_ID = "01a15f9c-6bee-7127-b4f1-907ec8d3176d";
-/** Envoy topics that reach the stream's slices. */
+/** Envoy topics that reach the project's slices. */
 export const METHOD_TOPICS = [
 	"notifications.role.lead-verified-linux",
 	"notifications.role.linux-direct-line",

@@ -438,7 +438,7 @@ describe("compaction-reminder", () => {
 	});
 });
 
-describe("compaction-reminder: a stream lead's goals document", () => {
+describe("compaction-reminder: a project's goals document", () => {
 	const GOALS = "dispatch://OSSV/artifact/goals-md";
 	/** Run `body` with STREAM_GOALS set to `value` (undefined unsets it), restoring the caller's value after. */
 	const withGoals = (value: string | undefined, body: () => void) => {

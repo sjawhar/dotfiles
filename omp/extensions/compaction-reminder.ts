@@ -1,20 +1,20 @@
 // Re-assert what a compaction loses, in three cases: the sdd process contract for
-// a top-level session that invoked the `sdd` skill, a stream lead's goals
+// a top-level session that invoked the `sdd` skill, a project's goals
 // document for a top-level session that names one, and what a subagent was
 // told to do, on its first compaction. Every successful automatic shake also
 // leaves a `compaction-marker` entry recording the context size before and
 // after it.
 //
-// A stream lead loses its stream's goals and Sami's standing rules to a summary
+// A coordinating session loses its project's goals and Sami's standing rules to a summary
 // the same way: they arrive over hours as messages, and the summary paraphrases
-// or drops them. Each stream keeps them in ONE document (a Dispatch artifact such
+// or drops them. Each project keeps them in ONE document (a Dispatch artifact such
 // as dispatch://OSSV/artifact/goals-md, or a file). A session names it in one of
 // two ways: the `STREAM_GOALS` variable in its environment, or an entry for its
 // session id in `~/.config/omp/stream-goals.json`, shaped
 // `{"<session id>": "<dispatch:// URL or file path>"}`. The variable wins when
 // both are set. The map exists because pane launchers did not set the variable,
-// and a restart relaunched every lead without it, so the reminder never fired
-// (measured 2026-10-26: no lead process had it). Both are read at compaction
+// and a restart relaunched every such session without it, so the reminder never fired
+// (measured 2026-10-26: no coordinating process had it). Both are read at compaction
 // time, so an edit to the map takes effect at the next compaction with no
 // restart; a missing, unreadable or malformed map, or no entry, gives no
 // reminder and never throws. Then after every compaction and shake of the
