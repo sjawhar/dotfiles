@@ -74,12 +74,14 @@ pids+=($!)
 (
     shown=" "
     while sleep 2; do
-        while IFS=$'\t' read -r id title path; do
+        # A unit separator, not a tab: tab is IFS whitespace, so `read` merged the empty title of
+        # a just-opened window into one field and printed the link as its name (2026-11-10).
+        while IFS=$'\x1f' read -r id title path; do
             case "$shown" in *" $id "*) continue ;; esac
             shown="$shown$id "
-            echo "Window \"$title\": $CDP$path"
+            echo "Window \"${title:-(no title yet)}\": $CDP$path"
         done < <(curl -sf "$CDP/json/list" |
-            jq -r '.[] | select(.type == "page") | "\(.id)\t\(.title)\t\(.devtoolsFrontendUrl)"' 2>/dev/null)
+            jq -r '.[] | select(.type == "page") | "\(.id)\u001f\(.title)\u001f\(.devtoolsFrontendUrl)"' 2>/dev/null)
     done
 ) &
 pids+=($!)
