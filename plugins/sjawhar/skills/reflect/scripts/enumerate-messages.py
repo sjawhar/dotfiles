@@ -35,6 +35,9 @@ with the reason, so the coverage check can count it and a reader can audit the r
   phase prompt; his words reach a Legion pod as a Dispatch row, counted above.
 - `not-his-machine`: a typed row on a `machcsl-gcp-*` host. No typed row of Sami's is on these
   hosts in the 14 days to 2026-11-07; the human ones there are Nickolai's.
+- `scheduler-item`: a typed row a proof scheduler sent the session it keeps per owner — an item
+  file, the owner's standing brief, or the notice that it resumed a paused step. 233 rows of the
+  11-02..11-08 window, each read as a message of his and holding no finding.
 """
 from __future__ import annotations
 
@@ -61,6 +64,13 @@ LEGION_HOST = re.compile(r"^legion-")
 # /home/nickolai, and the one human voice there names Sami in the third person); recheck if he
 # starts working there.
 OTHER_PEOPLE_HOST = re.compile(r"^machcsl-gcp-")
+# A proof scheduler keeps one session per owner and resumes it for each item, sending the item
+# file, the owner's standing brief, or a notice naming the item it resumed. Matched on that text,
+# not on a host or a path: the scheduler runs on the same hosts Sami types on.
+SCHEDULER_ITEM = re.compile(
+    r"\A\s*(?:<file name=\"[^\"]*\">\s*\n)?#+ (?:Item \d+ for owner |Standing brief of owner )"
+    r"|\A\s*Your item is \S+: read it again if your context no longer holds its header\."
+)
 
 
 def sql_str(s: str) -> str:
@@ -242,6 +252,8 @@ def build(start: str, end: str, actor: str) -> tuple[list[dict], dict[str, dict]
             excluded = "legion-daemon-prompt"
         elif OTHER_PEOPLE_HOST.match(r["host"] or ""):
             excluded = "not-his-machine"
+        elif SCHEDULER_ITEM.match(r["text"] or ""):
+            excluded = "scheduler-item"
         out.append({
             "source": "tq", "kind": "typed", "ts": r["ts"], "host": r["host"], "session_id": r["session_id"],
             "raw_file": r["raw_file"], "raw_line": r["raw_line"], "cwd": r.get("cwd"), "title": r.get("title"),

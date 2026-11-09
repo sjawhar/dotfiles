@@ -24,7 +24,9 @@ python3 $S/enumerate-messages.py --from '<start>' --to '<end>' --legion legion.j
 - Pick the window by his messages, not by active time. A window holding none of them returns tool trivia instead of failures.
 - Print the enumerator's counts before any reading: messages to read, rows excluded per reason, and whether Legion was read.
 - Open five excluded rows per reason and say whether each one should have been excluded; put any real message of his back into `messages.jsonl`. The `agent-sent` and `single-prompt` rules exclude a real message when he writes once to a fresh session.
-- Run `scripts/extract-dispatch-human.py --since <start>` too, and add its events: a comment or ask answer of his that no session received is in Dispatch's API and in no transcript.
+- Run `python3 $S/extract-dispatch-human.py --since '<start>' --out dispatch-events.jsonl --text dispatch-events.md`
+  too, and add its events: a comment or ask answer of his that no session received is in Dispatch's API and in no
+  transcript.
 
 ## 2. Build one record per message
 

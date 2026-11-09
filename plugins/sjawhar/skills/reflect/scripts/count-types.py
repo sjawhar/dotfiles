@@ -12,7 +12,8 @@ findings, records, distinct sessions, how many Sami pushed back on, and example 
 `recurs` when it holds findings from at least 2 sessions; only those may get a fix. With
 --prior, each type also gets last run's rate and this run's, per 100 records, for the
 "did last run's fixes hold" table. Patterns (ids with `~`) are counted the same way, and are
-`enough` only from 6 sessions up.
+`enough` only from 6 sessions up. Both commands read every `records*.jsonl` of RECORDS_DIR, so a
+run that indexed its Dispatch-only records in a second file is counted whole.
 """
 from __future__ import annotations
 
@@ -33,8 +34,26 @@ def load_rows(paths: list[str]) -> dict[str, dict]:
     return rows
 
 
+def record_index(records_dir: str) -> dict[str, dict]:
+    """Every record of the run, by id: `records.jsonl` and any sibling index beside it.
+
+    A run adds records a later step built — the Dispatch-only `M99xxx` ones — as their own
+    `records-*.jsonl`, and a finding of such a record is a KeyError to a reader of the first
+    file alone.
+    """
+    recs: dict[str, dict] = {}
+    for p in sorted(Path(records_dir).glob("records*.jsonl")):
+        for line in open(p):
+            if line.strip():
+                r = json.loads(line)
+                recs.setdefault(r["id"], r)
+    if not recs:
+        sys.exit(f"count-types: no records*.jsonl in {records_dir}")
+    return recs
+
+
 def export(a: argparse.Namespace) -> None:
-    recs = {r["id"]: r for r in map(json.loads, open(Path(a.records_dir) / "records.jsonl"))}
+    recs = record_index(a.records_dir)
     rows = load_rows(a.rows)
     with open(a.out, "w") as f:
         for rid, r in sorted(rows.items()):
@@ -47,7 +66,7 @@ def export(a: argparse.Namespace) -> None:
 
 
 def count(a: argparse.Namespace) -> None:
-    n_records = sum(1 for _ in open(Path(a.records_dir) / "records.jsonl"))
+    n_records = len(record_index(a.records_dir))
     items = {x["id"]: x for x in map(json.loads, open(a.findings))}
     verdict = Path(a.records_dir) / "verdict.json"
     rejected = {r["id"] for r in json.loads(verdict.read_text())["rejected"]} if verdict.is_file() else set()

@@ -43,6 +43,11 @@ ESCAPED = {"\\n": " ", "\\t": " ", "\\r": " ", '\\"': '"', "\\'": "'", "\\\\": "
 
 def norm(s: str) -> str:
     s = s.replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
+    # A quote he or a reader copied carries shapes the record writes differently: a non-breaking
+    # or typographic hyphen, markdown bold around a phrase, a shell-escaped single quote, and a
+    # second round of JSON escaping. 86% of the 2026-11-08 run's 404 flags were these, not misquotes.
+    s = s.replace("\u2011", "-").replace("\u2010", "-").replace("\u2013", "-").replace("\u2014", "-")
+    s = s.replace("**", "").replace("'\\''", "'").replace("\\\\n", " ").replace('\\\\"', '"')
     return re.sub(r"\s+", " ", s).strip().strip('"').strip()
 
 

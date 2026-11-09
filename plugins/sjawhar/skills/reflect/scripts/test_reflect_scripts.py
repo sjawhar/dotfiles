@@ -16,6 +16,16 @@ What each test holds to, with the defect it was written for (reflect run of 2026
     -> test_index_tokens_are_whole_words, test_index_tokens_hold_in_any_containing_text
   enumerate-messages, a window written with a Z, and the rows that are nobody's message
     -> test_window_takes_a_z_suffix, test_legion_and_other_people_hosts_are_excluded
+
+And for the defects the run of 2026-11-08 hit (report.md section 8):
+  check-findings, a quote carrying a hard hyphen, markdown bold, a shell-escaped quote or a
+    second round of JSON escaping -> test_quote_with_a_hard_hyphen_bold_and_a_shell_escape
+  count-types export, a run whose Dispatch-only records are indexed in a sibling file
+    -> test_export_reads_every_records_index
+  enumerate-messages, a proof scheduler's item files and resume notices read as his messages
+    -> test_scheduler_items_are_excluded_and_his_own_attachment_is_not
+  SKILL.md, a command written without the flags its script requires
+    -> test_skill_runs_extract_dispatch_human_with_its_required_flags
 """
 
 from __future__ import annotations
@@ -157,6 +167,16 @@ class CheckFindings(unittest.TestCase):
             self.assertEqual([f["finding"] for f in report["pushback_not_sami"]], [1])
             self.assertEqual((report["findings"], report["patterns"], report["unpushed"]), (2, 1, 0))
 
+    def test_quote_with_a_hard_hyphen_bold_and_a_shell_escape(self) -> None:
+        """86% of the 2026-11-08 run's 404 flags were these shapes, not misquotes."""
+        record = "[L10 11-08 09:00:00] SAMI:\nDon't re-run it: the merge-queue run is the verdict.\n"
+        text = check.variants(record)
+        self.assertTrue(check.found("the merge\u2011queue run is the verdict", text))
+        self.assertTrue(check.found("the **merge-queue run** is the verdict", text))
+        self.assertTrue(check.found("Don'\\''t re-run it", text))
+        self.assertTrue(check.found("Don't re-run it:\\\\nthe merge-queue run", text))
+        self.assertFalse(check.found("the merge-queue run is advisory", text))
+
 
 class EnumerateMessages(unittest.TestCase):
     def test_index_tokens_are_whole_words(self) -> None:
@@ -208,6 +228,67 @@ class EnumerateMessages(unittest.TestCase):
                 unittest.mock.patch.object(enumerate_messages, "dispatch_rows", lambda *a: []):
             out, _ = enumerate_messages.build("2026-11-06 15:00:00", "2026-11-07 15:00:00", "^sami@")
         self.assertEqual([r["excluded"] for r in out], ["legion-daemon-prompt", "not-his-machine", None])
+
+    def test_scheduler_items_are_excluded_and_his_own_attachment_is_not(self) -> None:
+        """A proof scheduler's item file, standing brief and resume notice are its text, not his."""
+        texts = [
+            '<file name="/agents/sched/sessions/owner/iface%3ARtWorld/item-3825.md">\n'
+            "# Item 3825 for owner iface:RtWorld\n\nWrite the contract.\n",
+            '<file name="/agents/sched/records/iface%3ARtWorld/brief.md">\n'
+            "# Standing brief of owner iface:RtWorld\n\nYou own the interface contract.\n",
+            "Your item is /agents/sched/sessions/owner/iface%3ARtWorld/item-178.md: read it again "
+            "if your context no longer holds its header. Then: continue the step.",
+            '<file name="/mnt/nvme/sami/tmp/brief.md">\n# Goal\nRead-only review of the final head.\n',
+        ]
+        rows = [
+            {"session_id": f"s{i}", "host": "sami-devbox", "ts": f"2026-11-06 15:0{i}:00", "raw_file": "f",
+             "raw_line": 5 + i, "text": t, "cwd": None, "title": None}
+            for i, t in enumerate(texts)
+        ]
+        life = {r["session_id"]: (2, 1) for r in rows}
+        with unittest.mock.patch.object(enumerate_messages, "typed_rows", lambda *a: rows), \
+                unittest.mock.patch.object(enumerate_messages, "first_typed_line", lambda *a: life), \
+                unittest.mock.patch.object(enumerate_messages, "agent_sent", lambda *a: set()), \
+                unittest.mock.patch.object(enumerate_messages, "dispatch_rows", lambda *a: []):
+            out, _ = enumerate_messages.build("2026-11-06 15:00:00", "2026-11-07 15:00:00", "^sami@")
+        self.assertEqual([r["excluded"] for r in out],
+                         ["scheduler-item", "scheduler-item", "scheduler-item", None])
+
+
+class CountTypes(unittest.TestCase):
+    def test_export_reads_every_records_index(self) -> None:
+        """A run indexes its Dispatch-only records beside records.jsonl; export must find them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "records.jsonl").write_text(json.dumps({"id": "M0001", "session_id": "s1"}) + "\n")
+            (d / "records-dispatch.jsonl").write_text(json.dumps({"id": "M9001", "session_id": "s2"}) + "\n")
+            rows = d / "rows.jsonl"
+            rows.write_text("".join(
+                json.dumps({"record": rid, "findings": [{"instruction": "i", "action": "a"}]}) + "\n"
+                for rid in ("M0001", "M9001")
+            ))
+            out = d / "findings.jsonl"
+            p = subprocess.run(
+                [sys.executable, str(HERE / "count-types.py"), "export", str(d), str(rows), "--out", str(out)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(p.returncode, 0, p.stderr)
+            got = [json.loads(line) for line in out.read_text().splitlines()]
+            self.assertEqual([(x["id"], x["session_id"]) for x in got], [("M0001#0", "s1"), ("M9001#0", "s2")])
+
+
+class SkillDoc(unittest.TestCase):
+    def test_skill_runs_extract_dispatch_human_with_its_required_flags(self) -> None:
+        """The skill's command must carry every flag its script requires, or step 1 exits on usage."""
+        import re
+
+        line = next(ln for ln in (HERE.parent / "SKILL.md").read_text().splitlines()
+                    if "extract-dispatch-human.py" in ln)
+        required = re.findall(r'add_argument\("(--[a-z-]+)", required=True',
+                              (HERE / "extract-dispatch-human.py").read_text())
+        self.assertTrue(required)
+        for flag in required:
+            self.assertIn(flag, line)
 
 
 if __name__ == "__main__":
