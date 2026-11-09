@@ -489,7 +489,18 @@ if agent_context; then
     # approval already passed, which $_approved_log records. Reads are untouched, and so is every
     # write to an owner the App covers; a push to the user's own fork still works, because this gates
     # gh, not git.
-    if agent_context && gh_shim_is_write "$@" && [[ -z "${_approved_log:-}" ]]; then
+    # A call that carries GH_TOKEN itself is out of scope: the defect this gate was written for is a
+    # write going out on the SILENT personal fallback (gh's own hosts.yml and keyring), which nobody
+    # chose and nothing records. A caller that sets GH_TOKEN has chosen an identity deliberately, and
+    # the only sanctioned way to get one is the credential broker, whose approval card is already the
+    # audit trail this gate exists to create — the refusal below names that route itself. The shim's
+    # own GH_TOKEN-aware handling sits 60 lines further down and was unreachable while this refused
+    # first. Sami, dispatch://INFRA-1475/ask/c23d0d6c, 2026-11-09 21:39-21:40Z: "Activity on repos we
+    # don't own are supposed to be as me, there is no other option" and "I don't author anything. All
+    # activity is by agents. Stop manufacturing a permission boundary here."
+    # This condition can only refuse LESS: a call with no GH_TOKEN is unaffected, and a call that
+    # passes today still passes.
+    if agent_context && gh_shim_is_write "$@" && [[ -z "${_approved_log:-}" ]] && [[ -z "${GH_TOKEN:-}" ]]; then
         gh_shim_target_owner "$@"
         _gate_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" || _gate_profile=""
         [[ -n "$_gate_profile" ]] || _gate_profile=agent
