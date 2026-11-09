@@ -172,7 +172,13 @@ workspaces = "/theorem/knives-ws/lean4"
 
 [repos.rocq]
 upstream = "https://github.com/rocq-prover/rocq.git"
-origin = "https://github.com/theorem-labs/rocq.git"
+# Work branches live on Sami's personal fork, so an upstream pull request's head is never
+# theorem-labs: a maintainer can push to the branch, and reading the upstream PR list does not
+# need a token theorem-labs admits (Sami, dispatch://INFRA-2124/ask/7934f43c and
+# dispatch://INFRA-37/ask/051be055). Releases are cut and consumed on theorem-labs, as for
+# every other fork here.
+origin = "https://github.com/sjawhar/rocq.git"
+release = "https://github.com/theorem-labs/rocq.git"
 base = "v9.3"
 # A consumer whose name names a customer is in the private part, repos.local.toml.
 consumers = ["theorem-labs/grading-tools"]
@@ -185,7 +191,10 @@ consumers = ["theorem-labs/grading-tools"]
 base = "v9.0"
 
 # The 9.2 line (BET-63: the Rocq version is chosen per task). Its base is our frozen 9.2
-# branch on origin, never moved; cuts are release/9.2/YYYY-MM-DD[.N], selected with --series 9.2.
+# branch, never moved; cuts are release/9.2/YYYY-MM-DD[.N], selected with --series 9.2.
+# `base_remote` takes only `upstream` or `origin` (src/config.rs BaseRemote), so when origin
+# moved to sjawhar/rocq on 2026-11-09 the frozen branch was pushed there at the same commit
+# (ca856abb5b14492ac55deefdb2c39c0f519eb9dd); theorem-labs/rocq still carries it as well.
 [repos.rocq.series."9.2"]
 base = "v9.2+typewise-isomorphism"
 base_remote = "origin"
