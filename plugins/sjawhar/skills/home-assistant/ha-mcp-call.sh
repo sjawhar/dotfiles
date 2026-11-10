@@ -61,6 +61,8 @@ else:
     no_answer("the response is empty")
 messages = []
 for document in documents:
+    if not document.strip():
+        continue  # an event with empty data, such as the MCP priming event, carries no message
     try:
         parsed = json.loads(document)
     except json.JSONDecodeError:
