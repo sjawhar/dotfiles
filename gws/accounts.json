@@ -29,7 +29,7 @@
       },
       "send": {
         "command": ["secret-run", "--reason", "gws theorem send", "--wait", "4m", "GWS_THEOREM_SEND_OAUTH", "--"],
-        "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "description": "gmail.send, chat.messages.create and chat.spaces.readonly: +send, post Google Chat messages and list Chat spaces (cannot read mail or Chat messages); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "admin": {
         "command": ["secret-run", "--reason", "gws theorem admin", "--wait", "4m", "GWS_THEOREM_ADMIN_OAUTH", "--"],
