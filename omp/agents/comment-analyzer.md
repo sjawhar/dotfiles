@@ -3,7 +3,7 @@ name: comment-analyzer
 description: |
   Analyze code comments for accuracy, completeness, and long-term maintainability.
   Use after generating documentation, before finalizing changes with comment modifications, or when reviewing existing comments for technical debt.
-  In omp it runs on the @review role (config.yml task.agentModelOverrides): GPT-6.1 Sol through Theorem's model gateway, not Claude.
+  In omp it runs on the @review role (config.yml task.agentModelOverrides): normally GPT-6.1 Sol through Theorem's model gateway, temporarily anthropic/claude-opus-5-5 -- same model family while OpenAI is unfunded (INFRA-2212).
 tools: Read, Glob, Grep, Bash, TodoWrite
 model: opus
 color: green

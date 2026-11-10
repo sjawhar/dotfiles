@@ -315,15 +315,22 @@ task:
     # box cap that night; task making's caught 4 defects in #1967 that tests missed), and a wrong
     # pass there merges a defect. Every other agent type takes `task`, now Opus 5.5 as well.
     reviewer: anthropic/claude-opus-5-5
-    bug-finder: "@review"
+    # 2026-11-10 — @REVIEW TYPES TEMPORARILY ON CLAUDE while the gateway's OpenAI account is at a
+    # zero balance (every OpenAI model fails since 04:54Z, INFRA-2212). @review is gpt-6.1-sol with
+    # no Claude fallback, so an analyze dispatch of these types returns only insufficient_quota --
+    # it fails 3x and teaches the caller nothing. Sami, 2026-11-10 06:35Z: "it's just not available
+    # for now" (dispatch://INFRA-2212/ask/6b6c7051). Repointed to opus-5-5 (the reviewer tier) so
+    # review still runs, same model family. REVERT the four to "@review" when OpenAI credit returns.
+    # Durable fix (clear failure message + analyze step 2): INFRA-2269.
+    bug-finder: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
     code-architect: anthropic/claude-opus-5-5
-    code-reviewer: "@review"
+    code-reviewer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
     code-simplifier: anthropic/claude-fable-5-1
-    comment-analyzer: "@review"
+    comment-analyzer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
     cybersecurity-expert: anthropic/claude-opus-5-5
     performance-engineer: "@slow"
     red-teamer: anthropic/claude-opus-5-5
-    test-analyzer: "@review"
+    test-analyzer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
     type-checker: anthropic/claude-opus-5-5
     ux-designer: "@vision"
     # 2026-11-04 16:25Z — CHORE SUBAGENTS MOVE TO OPUS 5. This carries out Sami's own ruling of
