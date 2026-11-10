@@ -72,28 +72,21 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# SPLIT BY OS on 2026-11-10, and mise honours `os` (measured: a tool pinned os=["macos"]
-# disappears from `mise ls --current` on linux while the same tool is present without it).
-# linux takes v18.18.6-sami.20261110-032522, which advances all 46 release members onto
-# upstream main and carries the fix for the memory leak that was killing long-running sessions
-# (447.6 -> 145.7 KiB per model call, 67.5%, measured in the binary; dispatch://INFRA-1876).
-# Its linux-x64 asset is smoke-tested - `omp --version` gives omp/18.18.6 and `omp --smoke-test`
-# gives `smoke-test: ok`.
+# v18.18.6-sami.20261110-032522 advances all 46 release members onto upstream main and carries
+# the fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
+# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset is
+# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
 #
-# macOS STAYS on 18.16.0 deliberately: that release's darwin-arm64 asset was cross-built and
-# signed on Linux and HAS NEVER BEEN EXECUTED - a darwin Mach-O cannot run on a linux host, so
-# the build had no smoke step for it. Move macOS only after someone runs `bin/omp --version`
-# and `bin/omp --smoke-test` on Apple Silicon. Until then a Mac keeps the leaking build, which
-# is the lesser risk: the leak has a working mitigation (restart) and an unexecuted binary has
-# none.
+# There is NO macOS split here, and do not add one. A darwin-arm64 asset is published but was
+# cross-built on Linux and has never been executed. On 2026-11-10 this file briefly held macOS
+# back on 18.16.0 waiting for someone to run it on Apple Silicon; Sami then said plainly that
+# he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
+# protected nobody and would have rotted into a permanently stale second pin.
 #
 # GitHub disabled Actions on cybermonklabs/oh-my-pi on 2026-11-07, so this release was built by
 # hand from the workflow's own version computation and asset names. The repository setting reads
 # enabled and a dispatch still returns 422; it is a platform-side disable, not a toggle.
-"github:sjawhar/oh-my-pi" = [
-	{ version = "18.18.6-sami.20261110-032522", os = ["linux"] },
-	{ version = "18.16.0-sami.20261105-032528", os = ["macos"] },
-]
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261110-032522"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -157,14 +150,7 @@ agent-browser = "0.39.0"
 # Bump this and "github:sjawhar/oh-my-pi" together. Upstream does not publish this
 # package for every tag: if the exact version is missing from npm, pin the nearest
 # published one after confirming packages/mnemopi is unchanged between the two tags.
-# Split by OS on 2026-11-10 to keep tracking the omp pin above, which is now itself split:
-# a Mac stays on 18.16.0 until its darwin asset is smoke-tested on Apple Silicon. Pairing
-# 18.18.6 with a 18.16.0 runtime would point this CLI at a bank SQLite a different runtime
-# wrote, which is the one thing this entry exists to prevent.
-"npm:@oh-my-pi/pi-mnemopi" = [
-	{ version = "18.18.6", os = ["linux"] },
-	{ version = "18.16.0", os = ["macos"] },
-]
+"npm:@oh-my-pi/pi-mnemopi" = "18.18.6"
 actionlint = "1.7.12"  # was "latest"
 awscli = { version = "2.36.31", symlink_bins = "true" }
 "pipx:azure-cli" = { version = "2.90.0", uvx = "true" }  # `az`: Theorem's Azure credits (per-user resource groups)
