@@ -260,6 +260,7 @@ resolve_monitor() {
     local name
     local unused_only
     local absent
+    local -a absents=()
     local connector
     local model
     local query_lower
@@ -276,11 +277,14 @@ resolve_monitor() {
 
         # 'NAME!ABSENT' matches NAME only while no connected monitor matches ABSENT,
         # for a screen whose role depends on which other screens share the desk.
-        absent=""
+        # 'NAME!A!B' requires every listed monitor to be absent.
+        absents=()
         name="${query%%!*}"
         if [[ "${query}" == *'!'* ]]; then
-            absent="${query#*!}"
-            [[ -n "${absent}" ]] || error "${context}: monitor query has an empty absent-condition: ${query}"
+            IFS='!' read -r -a absents <<< "${query#*!}!"
+            for absent in "${absents[@]}"; do
+                [[ -n "${absent}" ]] || error "${context}: monitor query has an empty absent-condition: ${query}"
+            done
         fi
 
         # A trailing '?' on NAME means "only if this monitor holds no rows from a
@@ -294,9 +298,9 @@ resolve_monitor() {
         fi
         [[ -n "${name}" ]] || error "${context}: monitor fallback list contains an empty query"
 
-        if [[ -n "${absent}" ]] && monitor_present "${absent}"; then
-            continue
-        fi
+        for absent in "${absents[@]}"; do
+            monitor_present "${absent}" && continue 2
+        done
 
         if [[ -n "${monitor_models["${name}"]+x}" ]]; then
             if ((unused_only)) && other_group_rows "${name}" "${fallback_list}"; then
