@@ -19,6 +19,4 @@ dispatch read --issue <KEY> | grep -E '^(Assignee|Claimed)'
 - **Meant for a person who is not the assignee?** The ask will not reach them. Say the name in a comment on the issue instead, or open the ask on an issue that person is assigned.
 - **Meant for the assignee?** Go ahead.
 
-Sami, 2026-11-07 06:18Z on INFRA-1547: "@sre why do I keep getting these?", and at 06:38Z: "Why are there asks being posted?" He is content with agents coordinating on his issues — "I have no problem with that" — it is the asks reaching him that are wrong. One reviewer's ask asking a pull request's author for a fix reached him as a decision.
-
-The defect is `dispatch://INFRA-1576`, P1, where an ask will name its own recipient. Until that lands, this check is the only thing between an agent's ask and a person's inbox.
+The defect is INFRA-1576, P1, where an ask will name its own recipient. Until that lands, this check is the only thing between an agent's ask and a person's inbox.
