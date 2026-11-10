@@ -18,7 +18,7 @@ Read/write access through [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) (
 - The SF Home Assistant on oryx (container `homeassistant-sf`) is a separate instance. Its key, the agent-tier `HA_MCP_URL_BUSH`, is the loopback endpoint `http://127.0.0.1:9584/<secret path>`, so it works only on oryx: its ha-mcp webhook is off. Call it with `secrets HA_MCP_URL_BUSH -- bash -c 'export HA_MCP_URL="$HA_MCP_URL_BUSH"; ~/.dotfiles/plugins/sjawhar/skills/home-assistant/ha-mcp-call.sh <tool> "<json>"'`.
 - The MCP launch runs `~/.dotfiles/scripts/mcp-remote-from-env`. It takes the URL from `HA_MCP_URL`, unsets it, runs `mcp-remote` 0.14.3 in-process, and redacts the URL from stderr.
 - Never expand `$HA_MCP_URL` or a token into command arguments (`curl "$HA_MCP_URL"`, `mcp-remote "$HA_MCP_URL"`, `-H "Authorization: Bearer $TOKEN"`): every user can read `/proc/<pid>/cmdline`, and any agent's `ps` or `pgrep -af` prints the id into its transcript. Pass it through the environment, a config file or stdin.
-- Batch or scripted calls: `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'` ([ha-mcp-call.sh](ha-mcp-call.sh) gives curl the URL with `--config`).
+- Batch or scripted calls: `secrets HA_MCP_URL -- ha-mcp-call.sh <tool> '<json>'` ([ha-mcp-call.sh](ha-mcp-call.sh) gives curl the URL with `--config`). It prints each text content and exits 0; on a curl failure (such as a 401 refusal), a JSON-RPC error, a result with `isError` true, or no answer, it exits non-zero and prints the error on stderr.
 - File/YAML tools (`ha_read_file`, `ha_config_set_yaml`, ...) are beta and not enabled. They need the "HA-MCP File & YAML Tools" entry and feature flags.
 
 ### Webhook in "Sign in with Home Assistant" mode
