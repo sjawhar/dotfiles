@@ -23,9 +23,42 @@ set -euo pipefail
 name="${0##*/}"
 here="$(cd -P -- "${0%/*}" && pwd)"
 
+# A cherry-pick, revert, merge or pull REPLAYS a commit someone else may have authored, and none
+# of them is a rebase, so the rebase-directory test below does not catch them. An outside
+# contributor's commit has no trailer of its own, so `ifexists=addIfDifferent` ADDS ours and the
+# message claims their work was made by this session. Measured 2026-11-10 by TOOLS while
+# cherry-picking Yikai-Liao's 1b394ff1 for oss-verify#176 (dispatch://OSSV-142), and reproduced
+# here: a foreign-author cherry-pick in a clone WITH A REMOTE comes out stamped.
+#
+# Stamp a replayed commit only on positive proof its author is ours. This FAILS CLOSED: when the
+# lookup fails we leave the message alone, because a missing trailer on our own commit is
+# bookkeeping, while a wrong one on someone else's is a false claim of authorship in a public
+# repository. `command git` is deliberate - shims/git prints its own lines, which would otherwise
+# land inside a --format=%ae capture.
+replaying=0
+replayed_author=""
+# Cherry-pick and revert ONLY: they replay another author's commit, preserving its author. A
+# merge or pull writes a NEW commit authored by us, so it is ours to stamp even when what it
+# merges is foreign - including MERGE_HEAD here wrongly silenced merges (measured 2026-11-10).
+for _head in CHERRY_PICK_HEAD REVERT_HEAD; do
+    _p="$(git rev-parse --git-path "$_head" 2> /dev/null)" || continue
+    [[ -f "$_p" ]] || continue
+    replaying=1
+    replayed_author="$(command git log -1 --format=%ae "$(< "$_p")" 2> /dev/null || true)"
+    break
+done
+_mine="$(command git config user.email 2> /dev/null || true)"
+if [[ $replaying -eq 1 ]] &&
+    ! [[ -n "$replayed_author" && -n "$_mine" && "$replayed_author" == "$_mine" ]]; then
+    replay_blocks_trailer=1
+else
+    replay_blocks_trailer=0
+fi
+
 if [[ "$name" == prepare-commit-msg && -n "${1:-}" &&
     "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
     [[ ! -d "$(git rev-parse --git-path rebase-merge)" && ! -d "$(git rev-parse --git-path rebase-apply)" ]] &&
+    [[ $replay_blocks_trailer -eq 0 ]] &&
     "$here/../../scripts/omp-session-trailer" git > /dev/null 2>&1; then
     # git merge writes MERGE_MSG without a final newline, and interpret-trailers
     # would then glue the trailer onto the subject line.
