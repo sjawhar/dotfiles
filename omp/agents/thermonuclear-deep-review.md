@@ -1,6 +1,6 @@
 ---
 name: thermonuclear-deep-review
-description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks. Runs on the @review role (GPT-6.1 Sol through Theorem's model gateway, then Sol on the Codex subscription) and never on Anthropic, so a refusal means no non-Anthropic model was reachable rather than a same-family read wearing a cross-family label.
+description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks. Runs on the @review role: normally GPT-6.1 Sol (cross-family), but anthropic/claude-opus-5-5 while OpenAI is unfunded (INFRA-2212), so while repointed its verdict is same-family as the Claude fleet and a refusal says nothing about model family.
 model: ["@review"]
 ---
 

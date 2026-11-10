@@ -320,7 +320,9 @@ task:
     # no Claude fallback, so an analyze dispatch of these types returns only insufficient_quota --
     # it fails 3x and teaches the caller nothing. Sami, 2026-11-10 06:35Z: "it's just not available
     # for now" (dispatch://INFRA-2212/ask/6b6c7051). Repointed to opus-5-5 (the reviewer tier) so
-    # review still runs, same model family. REVERT the four to "@review" when OpenAI credit returns.
+    # review still runs, same model family. REVERT all six to "@review" when OpenAI credit returns
+    # (the four below to the config value "@review"; the two thermonuclear-* by removing their lines,
+    # since their own frontmatter already carries model: ["@review"]).
     # Durable fix (clear failure message + analyze step 2): INFRA-2269.
     bug-finder: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
     code-architect: anthropic/claude-opus-5-5
@@ -331,6 +333,12 @@ task:
     performance-engineer: "@slow"
     red-teamer: anthropic/claude-opus-5-5
     test-analyzer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
+    # thermonuclear-code-quality and thermonuclear-deep-review carry `model: ["@review"]` in their
+    # own frontmatter and had no entry here, so they resolved to @review and failed identically --
+    # verified by probe 2026-11-10 10:16Z (insufficient_quota on the sol chain). They are the
+    # merge-queue's final review gates, so this repoints them too, under INFRA-2212.
+    thermonuclear-code-quality: anthropic/claude-opus-5-5  # normally @review via frontmatter; INFRA-2212
+    thermonuclear-deep-review: anthropic/claude-opus-5-5  # normally @review via frontmatter; INFRA-2212
     type-checker: anthropic/claude-opus-5-5
     ux-designer: "@vision"
     # 2026-11-04 16:25Z — CHORE SUBAGENTS MOVE TO OPUS 5. This carries out Sami's own ruling of

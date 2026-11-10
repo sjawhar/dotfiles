@@ -1,6 +1,6 @@
 ---
 name: thermonuclear-code-quality
-description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries. Runs on the @review role (GPT-6.1 Sol through Theorem's model gateway, then Sol on the Codex subscription) and never on Anthropic.
+description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries. Runs on the @review role: normally GPT-6.1 Sol (cross-family), but anthropic/claude-opus-5-5 while OpenAI is unfunded (INFRA-2212), so while repointed its verdict is same-family as the Claude fleet and a refusal says nothing about model family.
 model: ["@review"]
 ---
 
