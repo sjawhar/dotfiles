@@ -7,9 +7,9 @@
 # The URL and the token are credentials, so curl reads them from a config file on a /dev/fd path
 # (printf is a builtin) rather than from its arguments, which /proc/<pid>/cmdline shows to every user.
 # --fail makes a refusal (401 without a valid token) print curl's HTTP error and exit non-zero.
-# It prints each text content and exits 0; when curl fails (such as a 401 refusal), the answer has
-# a JSON-RPC error or an isError result, or no answer arrives, it exits non-zero with the error on
-# stderr.
+# The script prints each text content and exits 0; when curl fails (such as a 401 refusal), the
+# answer has a JSON-RPC error or an isError result, or no answer arrives, it exits non-zero with
+# the error on stderr.
 set -euo pipefail
 TOOL="$1"; ARGS="${2:-\{\}}"
 curl_config() {
