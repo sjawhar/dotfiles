@@ -1301,7 +1301,11 @@ def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: dateti
     authors: dict[str, str] = {}
     titles: dict[str, str] = {}  # message id -> the title of the session it was delivered to
     after, head = start_id(cfg, since - DISPATCH_MARGIN, now)
+    backlog_seen = 0  # events delivered in (after, head]: the backlog the feed must replay
     for e in stream_events(cfg, after, head):
+        eid = e.get("id")
+        if head is not None and isinstance(eid, int) and after < eid <= head:
+            backlog_seen += 1
         t = parse_ts(e.get("created_at"))
         if t is None:
             continue
@@ -1320,6 +1324,13 @@ def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: dateti
         row = dispatch_row(e, t)
         if row is not None:
             rows.append(row)
+    if head is not None and head > after and backlog_seen == 0:
+        # The feed reached head without replaying one event in (after, head]: it is only streaming
+        # live events from the head, not paging the backlog, so these rows would be incomplete. Fail
+        # loudly rather than report an empty window (dispatch://INFRA-26; /ws/live ignored resume).
+        raise RuntimeError(f"the Dispatch event feed replayed no backlog: it delivered no event in "
+                           f"({after}, {head}], only live events at or past its head, so its Dispatch "
+                           f"rows would be incomplete")
     for row in rows:
         if row.source == "DISPATCH message" and row.session is not None and not row.session.title:
             row.session.title = titles.get(str(row.dispatch_id), "")
