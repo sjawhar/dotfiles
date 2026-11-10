@@ -90,8 +90,10 @@ for message in messages:
         )
         raise SystemExit(1)
     result = message["result"]
-    content = result.get("content")
-    content = content if isinstance(content, list) else []
+    content = result.get("content", [])
+    if not isinstance(content, list):
+        print(f"ha-mcp-call.sh: {tool} failed: the content of the result is not a list", file=sys.stderr)
+        raise SystemExit(1)
     failed = result.get("isError") is True
     if failed:
         print(f"ha-mcp-call.sh: {tool} failed:", file=sys.stderr)

@@ -269,6 +269,14 @@ class HaMcpCall(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
+    def test_content_that_is_not_a_list_fails(self) -> None:
+        result_message = {"jsonrpc": "2.0", "id": 2, "result": {"content": "tool ran"}}
+        self.set_response(body=sse(result_message))
+        result = self.run_call()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("content of the result is not a list", result.stderr)
+
     def test_empty_event_stream_has_no_answer(self) -> None:
         self.set_response(body=b"")
         result = self.run_call()
