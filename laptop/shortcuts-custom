@@ -3,6 +3,7 @@
     (modifiers: [Ctrl, Shift], key: "apostrophe", description: Some("voxtype paste last")): Spawn("__HOME__/.dotfiles/voxtype/voxtype-history-paste-last"),
     (modifiers: [Ctrl, Shift], key: "slash", description: Some("voxtype cancel")): Spawn("__HOME__/.dotfiles/voxtype/voxtype-record cancel"),
     (modifiers: [Ctrl, Shift], key: "period", description: Some("voxtype retranscribe")): Spawn("__HOME__/.dotfiles/voxtype/voxtype-retranscribe-last"),
+    (modifiers: [Ctrl, Shift], key: "comma", description: Some("voxtype history")): Spawn("cosmic-launcher input 'vt '"),
 
     (modifiers: [Ctrl, Alt], key: "v", description: Some("paste clipboard image on devbox")): Spawn("__HOME__/.dotfiles/scripts/devbox-paste-image"),
 
