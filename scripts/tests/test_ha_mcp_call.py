@@ -102,6 +102,7 @@ class HaMcpCall(unittest.TestCase):
             [str(HA_MCP_CALL), tool, arguments],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             env=call_env,
             timeout=30,
         )
@@ -201,6 +202,72 @@ class HaMcpCall(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn("bad params", result.stderr)
+
+    def test_sse_success_preserves_raw_json_line_separators(self) -> None:
+        for character in ("\u2028", "\u0085", "\u2029"):
+            with self.subTest(character=f"U+{ord(character):04X}"):
+                text = f"before{character}after"
+                result_message = {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"content": [{"type": "text", "text": text}]},
+                }
+                self.set_response(
+                    body=f"data: {json.dumps(result_message, ensure_ascii=False)}\n\n".encode()
+                )
+                result = self.run_call()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f"{text}\n")
+                self.assertEqual(result.stderr, "")
+
+    def test_sse_error_preserves_raw_json_line_separator_in_message(self) -> None:
+        message = "bad\u2028params"
+        error_message = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {"code": -32602, "message": message},
+        }
+        self.set_response(
+            body=f"data: {json.dumps(error_message, ensure_ascii=False)}\n\n".encode()
+        )
+        result = self.run_call()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn(message, result.stderr)
+
+    def test_id_2_without_a_result_or_error_fails(self) -> None:
+        responses = (
+            (
+                "json",
+                "application/json",
+                {"jsonrpc": "2.0", "id": 2},
+            ),
+            (
+                "event stream",
+                "text/event-stream",
+                {"jsonrpc": "2.0", "id": 2, "result": None},
+            ),
+        )
+        for name, content_type, message in responses:
+            with self.subTest(response=name):
+                body = (
+                    json.dumps(message).encode()
+                    if content_type == "application/json"
+                    else sse(message)
+                )
+                self.set_response(content_type=content_type, body=body)
+                result = self.run_call()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("neither result nor error", result.stderr)
+
+    def test_empty_result_succeeds_without_output(self) -> None:
+        result_message = {"jsonrpc": "2.0", "id": 2, "result": {}}
+        self.set_response(body=sse(result_message))
+        result = self.run_call()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
 
     def test_empty_event_stream_has_no_answer(self) -> None:
         self.set_response(body=b"")

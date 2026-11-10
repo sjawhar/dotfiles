@@ -23,6 +23,7 @@ answer=$(curl -sS --fail --max-time 120 -X POST --config <(curl_config) \
   -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$TOOL\",\"arguments\":$ARGS}}")
 printf '%s' "$answer" | python3 -c '
 import json
+import re
 import sys
 
 
@@ -39,7 +40,7 @@ def event_stream_data(stream):
     """The data of each event: its data: values joined by newlines (events end at a blank line)."""
     events = []
     data = []
-    for line in stream.splitlines():
+    for line in re.split(r"\r\n|\r|\n", stream):
         if line == "":
             if data:
                 events.append("\n".join(data))
@@ -82,8 +83,13 @@ for message in messages:
             detail = error
         print(f"ha-mcp-call.sh: {tool} failed: {detail}", file=sys.stderr)
         raise SystemExit(1)
-    result = message.get("result")
-    result = result if isinstance(result, dict) else {}
+    if "result" not in message or not isinstance(message["result"], dict):
+        print(
+            f"ha-mcp-call.sh: {tool} failed: the answer has neither result nor error",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    result = message["result"]
     content = result.get("content")
     content = content if isinstance(content, list) else []
     failed = result.get("isError") is True
