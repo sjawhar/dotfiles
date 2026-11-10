@@ -1,6 +1,6 @@
 {
   "personal": {
-    "description": "sami.n.jawhar@gmail.com, Sami's personal Google account. A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
+    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The read, modify and send tiers use the older External client of a personal project (number 1092431965353); the admin tier uses the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT). A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_PERSONAL_READ_OAUTH", "--"],
@@ -13,6 +13,10 @@
       "send": {
         "command": ["secret-run", "--reason", "gws personal send", "--wait", "4m", "GWS_PERSONAL_SEND_OAUTH", "--"],
         "description": "gmail.send only (+send; cannot read mail); one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+      },
+      "admin": {
+        "command": ["secret-run", "--reason", "gws personal admin", "--wait", "4m", "GWS_PERSONAL_ADMIN_OAUTH", "--"],
+        "description": "Admin SDK Directory (users, groups, org units, domains read-only), Groups Settings and Licensing for thecybermonk.com, consented by sami@thecybermonk.com (a super admin). gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks. One approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       }
     }
   },
