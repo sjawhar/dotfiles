@@ -1078,11 +1078,19 @@ def own_line_for(
 
 def window_for(unit: dict, options: argparse.Namespace) -> float:
     """The last hour, or two periods and the timer's slack when that is longer, so a unit that
-    fires hourly or daily always has a run inside its window."""
+    fires hourly or daily always has a run inside its window. A `max_run` from the expected list
+    widens it to one full run plus a period: a unit whose owner says a run may take that long has
+    no completed run inside a shorter window while it is legitimately still running, so a fixed
+    window reads NO RUN COMPLETED on every long run (box-cleanup, max_run 4h, 17.6 min into a
+    normal run with NRestarts 0)."""
     period = unit.get("period")
     if not period:
         return options.window
-    return max(options.window, 2 * period + unit.get("slack", 0.0) + 60)
+    base = max(options.window, 2 * period + unit.get("slack", 0.0) + 60)
+    max_run = unit.get("max_run")
+    if max_run:
+        return max(base, max_run + period + unit.get("slack", 0.0))
+    return base
 
 
 def overdue_after(unit: dict) -> float:
@@ -2226,9 +2234,9 @@ def run_once(options: argparse.Namespace) -> int:
                 "",
             )
             head = (
-                f"UNIT RUNS NOT COMPLETING on {host}, for the box-health lead: "
+                f"UNIT RUNS NOT COMPLETING on {host}, for the lead-box-health role: "
                 if opened
-                else f"{HEADLINE[first_kind]} on {host}, for the box-health lead: "
+                else f"{HEADLINE[first_kind]} on {host}, for the lead-box-health role: "
             )
             message = fit(head, items + [f"also {line}" for line in cleared], tail)
         else:

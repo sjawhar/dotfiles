@@ -59,7 +59,9 @@ their exit code.)
 
 4. **The window** is the last hour (`--window`), or two periods and the timer's
    `RandomizedDelaySec` + `AccuracySec` when that is longer, so an hourly or daily unit always
-   has a run inside it.
+   has a run inside it. A `max_run=` on the unit's line (below) widens it to one full run plus a
+   period, so a unit whose owner says a run may take that long is not read as NO RUN COMPLETED
+   while a run is legitimately still inside its `max_run` (box-cleanup, `max_run=4h`, caught 17.6 min in).
 
 ## The four conditions judged from a unit
 
@@ -161,7 +163,7 @@ nobody.
 
 All of one run's news is one message of at most 600 characters:
 
-- `UNIT RUNS NOT COMPLETING on <host>, for the box-health lead:` and one item per new condition,
+- `UNIT RUNS NOT COMPLETING on <host>, for the lead-box-health role:` and one item per new condition,
   `<service> <CONDITION> - <why>`; items that do not fit are counted (`N more in the report.`);
   conditions that cleared in the same run follow as `also <service> <CONDITION> cleared after
   <time>`;
@@ -203,7 +205,7 @@ days is said once.
 ## Where notices go
 
 The same route as every box watch here (`load-swap-watch.md`, "Where alerts go"):
-`BOX_HEALTH_OWNER` when the service's environment sets it, else the box-health lead's role
+`BOX_HEALTH_OWNER` when the service's environment sets it, else the `lead-box-health` role
 (`notifications.role.lead-box-health`), else the SRE session
 (`01a18385-f8c8-74a9-b6ff-694fb5fe87a7`). Agent sessions only, never a person.
 

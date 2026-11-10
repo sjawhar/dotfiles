@@ -838,5 +838,20 @@ class Parsing(unittest.TestCase):
         self.assertIsNone(WATCH.parse_when(""))
 
 
+class TheCompletionWindow(unittest.TestCase):
+    def test_max_run_widens_the_no_completion_window(self) -> None:
+        """box-cleanup (max_run 4h) was read as NO RUN COMPLETED 17.6 min into a normal run,
+        because the window was a fixed hour. A run may take up to its owner's max_run, so the
+        window spans at least one full run plus a period."""
+        options = argparse.Namespace(window=3600.0)
+        hourly_4h = {"period": 3600.0, "slack": 0.0, "max_run": 4 * 3600.0}
+        self.assertGreaterEqual(WATCH.window_for(hourly_4h, options), 4 * 3600.0)
+
+    def test_a_unit_without_max_run_keeps_the_two_period_window(self) -> None:
+        options = argparse.Namespace(window=3600.0)
+        hourly = {"period": 3600.0, "slack": 0.0}
+        self.assertEqual(WATCH.window_for(hourly, options), 2 * 3600.0 + 60)
+
+
 if __name__ == "__main__":
     unittest.main()
