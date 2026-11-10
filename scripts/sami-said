@@ -26,11 +26,11 @@ working directory, and the text. Sources:
   DISPATCH ...      with --dispatch: an answer, comment, message, approval or change request that
                     --dispatch-user (default sami@theorem.dev) wrote in Dispatch, read from the
                     Dispatch event feed on its live socket (GET /ws/live). These are not in any
-                    transcript as typed text. The feed is read until it reaches the newest event
-                    known at the start; a subscription that goes silent or ends first is resumed
-                    from its last event. When it cannot be read whole, no Dispatch row prints,
-                    stderr says --dispatch FAILED (also on the last line), and the exit status is
-                    1: zero Dispatch rows with status 0 means none.
+                    transcript as typed text. The live socket replays only its recent tail (about
+                    200 events; the server bounds a resume to 256 events and 1 MiB), so --dispatch
+                    serves a recent window. A window that reaches before the tail, or a feed that
+                    cannot be read whole, prints no Dispatch row, says --dispatch FAILED on stderr
+                    (also on the last line), and exits 1: zero Dispatch rows with status 0 means none.
 
 How a typed message is told apart from text injected into the user role. Structural rules first:
 
@@ -157,6 +157,10 @@ LIVE_IDLE_S = 3.0  # Dispatch's event feed sends no event once it has caught up,
 LIVE_TAIL_S = 1.0  # the same wait once the feed has passed the newest event known at the start
 LIVE_STALL_S = (3.0, 10.0, 30.0)  # how long a subscription may go without an event, after 0, 1, 2 that brought none
 LIVE_ATTEMPTS = 3  # subscriptions in a row that bring nothing before the read is called failed
+LIVE_REPLAY_SAFE = 200  # events back from the head to resume the events feed at. /ws/live replays
+# (resume, head] only when it is at most 256 events and 1 MiB, else nothing (dispatch
+# api/live_events.go maxLiveReplay/maxLiveReplayBytes); kept under 256 so the head advancing between
+# recent_event and the subscription cannot push the range over the bound.
 LIVE_SUB = "sami-said"  # the subscription's name on its socket
 LIVE_FRAME_MAX = 64 << 20  # a larger frame from the server is a fault, not an event
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455's handshake constant
@@ -1204,8 +1208,10 @@ def stream_once(cfg: DispatchConfig, after: int, idle: float, head: int | None):
 
 def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
     """Events with id > after from Dispatch's event feed, an events subscription on its live socket
-    (GET /ws/live), until it has caught up: `head` reached. The feed pages its whole backlog from
-    Postgres on one subscription, but a subscription can go without an event for a while (a slow
+    (GET /ws/live), until it has caught up: `head` reached. The feed replays (after, head] on one
+    subscription only when that span is within its bound (256 events and 1 MiB; dispatch
+    api/live_events.go), so callers resume within the recent tail. A subscription can go without an
+    event for a while (a slow
     page) or end before then (an ended frame when it falls behind, the socket's close at its age or
     at a restart), so one that does is resumed from the last event it gave, with a longer wait
     allowed after each one that brought nothing; after LIVE_ATTEMPTS of those in a row this raises
@@ -1243,16 +1249,6 @@ def stream_events(cfg: DispatchConfig, after: int, head: int | None = None):
             time.sleep(failures)
 
 
-def first_event_after(cfg: DispatchConfig, after: int) -> dict | None:
-    """The first event with id > after, on one subscription; None when none comes within LIVE_IDLE_S.
-    start_id reads a None as "at or past the target", which only starts the read earlier."""
-    it = stream_once(cfg, after, LIVE_IDLE_S, None)
-    try:
-        return next(it, None)
-    finally:
-        it.close()
-
-
 def recent_event(cfg: DispatchConfig, now: datetime) -> dict | None:
     """An event near the head of the log: the newest event of the most recently updated issue."""
     for lookback in (timedelta(hours=2), timedelta(days=3), timedelta(days=60)):
@@ -1266,33 +1262,15 @@ def recent_event(cfg: DispatchConfig, now: datetime) -> dict | None:
     return None
 
 
-def start_id(cfg: DispatchConfig, target: datetime, now: datetime) -> tuple[int, int | None]:
-    """An event id such that the events after it begin at or just before target, and the id of an
-    event near the head of the log."""
+def start_id(cfg: DispatchConfig, now: datetime) -> tuple[int, int | None]:
+    """A resume id at the oldest end of the live socket's replay reach, and the id of an event near
+    the head of the log. The /ws/live events view replays only its recent tail (LIVE_REPLAY_SAFE),
+    so dispatch_rows resumes from there and fails loudly when the window reaches before it."""
     anchor = recent_event(cfg, now)
     if anchor is None:
         return 0, None
     head = int(anchor["id"])
-    if (parse_ts(anchor.get("created_at")) or now) < target:
-        return head, None  # an old anchor: its id says nothing about how much comes after it
-    lo, lo_t = 0, None  # the first event after lo is before target, once a probe moves lo off 0
-    hi, hi_t = int(anchor["id"]) - 1, parse_ts(anchor.get("created_at"))  # the first event after hi is at or after target
-    step = 0
-    while hi - lo > 1:
-        step += 1
-        mid = (lo + hi) // 2
-        if lo_t is not None and hi_t is not None and step % 3 and hi_t > lo_t:
-            frac = (target - lo_t) / (hi_t - lo_t)
-            mid = lo + int(frac * (hi - lo))
-            mid = min(max(mid, lo + 1), hi - 1)
-        event = first_event_after(cfg, mid)
-        t = parse_ts(event.get("created_at")) if event else None
-        if t is None or t >= target:
-            hi, hi_t = mid, t
-        else:
-            lo, lo_t = max(mid, int(event["id"]) - 1), t
-    # lo still 0 was never probed: the log's first event may be at or after target, so read it too.
-    return (0 if lo == 0 else hi), head
+    return max(0, head - LIVE_REPLAY_SAFE), head
 
 
 def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: datetime, now: datetime):
@@ -1300,13 +1278,16 @@ def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: dateti
     rows: list[Message] = []
     authors: dict[str, str] = {}
     titles: dict[str, str] = {}  # message id -> the title of the session it was delivered to
-    after, head = start_id(cfg, since - DISPATCH_MARGIN, now)
-    backlog_seen = 0  # events delivered in (after, head]: the backlog the feed must replay
+    after, head = start_id(cfg, now)
+    backlog_seen = 0     # events delivered in (after, head]: the recent tail the socket replays
+    earliest_t = None    # oldest created_at the replay delivered; how far back the read reached
     for e in stream_events(cfg, after, head):
         eid = e.get("id")
+        t = parse_ts(e.get("created_at"))
         if head is not None and isinstance(eid, int) and after < eid <= head:
             backlog_seen += 1
-        t = parse_ts(e.get("created_at"))
+            if t is not None and (earliest_t is None or t < earliest_t):
+                earliest_t = t
         if t is None:
             continue
         if t >= until + DISPATCH_MARGIN or t >= now:
@@ -1324,13 +1305,21 @@ def dispatch_rows(cfg: DispatchConfig, user: str, since: datetime, until: dateti
         row = dispatch_row(e, t)
         if row is not None:
             rows.append(row)
-    if head is not None and head > after and backlog_seen == 0:
-        # The feed reached head without replaying one event in (after, head]: it is only streaming
-        # live events from the head, not paging the backlog, so these rows would be incomplete. Fail
-        # loudly rather than report an empty window (dispatch://INFRA-26; /ws/live ignored resume).
-        raise RuntimeError(f"the Dispatch event feed replayed no backlog: it delivered no event in "
-                           f"({after}, {head}], only live events at or past its head, so its Dispatch "
-                           f"rows would be incomplete")
+    if head is not None and head > after:
+        # The /ws/live events view replays only its recent tail (~256 events, 1 MiB; dispatch
+        # api/live_events.go). When the window reaches before that tail the rows would be incomplete,
+        # so fail loudly rather than report a short window as the whole of it (dispatch://INFRA-26).
+        if backlog_seen == 0:
+            raise RuntimeError(f"the Dispatch live socket replayed none of its recent events: the window "
+                               f"spans more than its recent tail (~{LIVE_REPLAY_SAFE} events), so its Dispatch "
+                               f"rows would be incomplete -- narrow the window to the last few minutes, or "
+                               f"read older Dispatch history another way")
+        if earliest_t is None or earliest_t > since:
+            reached = iso(earliest_t) if earliest_t is not None else "nothing"
+            raise RuntimeError(f"the Dispatch live socket's replay reached back only to {reached}, after the "
+                               f"window start {iso(since)}: it serves only its recent tail (~{LIVE_REPLAY_SAFE} "
+                               f"events), so these Dispatch rows would be incomplete -- narrow the window, or "
+                               f"read older Dispatch history another way")
     for row in rows:
         if row.source == "DISPATCH message" and row.session is not None and not row.session.title:
             row.session.title = titles.get(str(row.dispatch_id), "")
