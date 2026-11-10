@@ -48,7 +48,10 @@ ledger = "sjawhar/.knives-ledger"
 
 [repos.oh-my-pi]
 upstream = "https://github.com/can1357/oh-my-pi"
-origin = "https://github.com/sjawhar/oh-my-pi"
+# The repository moved from sjawhar to cybermonklabs. The old URL redirected, so every push and
+# fetch kept working and nothing failed — which is why this line stayed wrong for weeks. Found
+# 2026-11-10 while handing the entry to another lane, which would have copied it.
+origin = "https://github.com/cybermonklabs/oh-my-pi"
 release_branch = "sami"
 ledger = "sjawhar/.knives-ledger"
 # installers/knives.sh rewrites this line to the machine's big local disk where it has one; this
