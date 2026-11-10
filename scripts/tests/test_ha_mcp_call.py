@@ -224,6 +224,23 @@ class HaMcpCall(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("no answer", result.stderr)
 
+    def test_priming_event_with_empty_data_is_skipped(self) -> None:
+        # MCP 2025-11-25, Streamable HTTP: a server that opens an SSE stream SHOULD first send an
+        # event with an id and an empty data field, to prime reconnection. It carries no message,
+        # so the answer that follows it is still the answer.
+        result_message = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"content": [{"type": "text", "text": "tool ran"}]},
+        }
+        for priming in (b"id: 0\ndata:\n\n", b"id: 0\ndata: \n\n"):
+            with self.subTest(priming=priming):
+                self.set_response(body=priming + sse(result_message))
+                result = self.run_call()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "tool ran\n")
+                self.assertEqual(result.stderr, "")
+
     def test_bearer_token_reaches_webhook_but_not_curl_argv(self) -> None:
         result_message = {
             "jsonrpc": "2.0",
