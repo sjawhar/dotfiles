@@ -177,9 +177,9 @@ shellcheck = "0.11.0"
 "github:str4d/age-plugin-yubikey" = "0.5.0"  # Hardware-backed age identities (YubiKey PIV); 0.5.1 has no linux release assets
 age = "1.3.1"       # Modern file encryption (for sops)
 sops = "3.13.3"
-# op: the 1Password CLI, which agents use to read secrets through a 1Password
-# service account. Pinned to the newest stable release at least 14 days old: an
-# exact pin skips minimum_release_age, so the pin itself keeps the soak rule.
+# op: the 1Password CLI, which agents use to read secrets. Pinned to the newest
+# stable release that was at least 14 days old when chosen; an exact pin skips
+# minimum_release_age, so check a new version's release date by hand before a bump.
 # The `op` alias in [tool_alias] selects the backend.
 op = "2.41.1"
 
