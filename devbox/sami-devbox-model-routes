@@ -4,15 +4,15 @@
 # Run by devbox/sami-devbox-provision at step install, after install.sh's models.yml build and
 # once mise has installed yq; safe to run again (dispatch://INFRA-993).
 #
-# sami-devbox holds no ChatGPT login: the spec bars a person's login there, and omp's agent.db is
-# not copied. So every openai-codex/<id> that agents and roles name has no credential on it, and a
-# turn on one walks its fallback chain to Claude on the gateway (measured 2026-11-11: a Codex Terra
-# turn answered from Claude). The gateway's openai/ group (dispatch://INFRA-481, agent-infra
-# #1476) serves GPT-6.1 Sol to the dev-box@ ID token (team box), per token. Sami's decision of
-# 2026-11-11 (dispatch://INFRA-2212/ask/7aea7dfe-7b75-48a3-ae31-f2573aaeea2c): the implementation
-# roles use Codex then Claude, never the per-token OpenAI API; only the cross-family agents stay on
-# Sol. From 2026-11-03 20:55Z to then this script put slow and deep on gateway Sol at xhigh too, and
-# that route cost $13,112 of OpenAI on 11-06..11-08. This script:
+# sami-devbox has held Sami's ChatGPT (Codex) login since 2026-11-11 00:53Z, so the implementation
+# roles run on the Codex subscription and fall to Claude on the gateway only when Codex refuses
+# (measured 00:53Z: a fresh deep subagent served by openai-codex/gpt-5.6-terra). Without that
+# login a Codex turn goes straight to Claude. The gateway's openai/ group (dispatch://INFRA-481,
+# agent-infra #1476) serves GPT-6.1 Sol to the dev-box@ ID token (team box), per token. Sami's
+# decision of 2026-11-11 (dispatch://INFRA-2212/ask/7aea7dfe-7b75-48a3-ae31-f2573aaeea2c): the
+# implementation roles use Codex then Claude, never the per-token OpenAI API; only the cross-family
+# agents stay on Sol. From 2026-11-03 20:55Z to then this script put slow and deep on gateway Sol at
+# xhigh too, and that route cost $13,112 of OpenAI on 11-06..11-08. This script:
 #   1. in omp/models.local.yml, declares GPT-6.1 Sol and its Flex tier twice on the same
 #      route: as the provider `model-gateway-openai` (OpenAI Responses at <gateway>/v1),
 #      sami-rocqperf's ids, and as `model-gateway/openai/gpt-6.1-sol[-flex]`, the ids
@@ -22,10 +22,10 @@
 #      `model-gateway/openai/gpt-6.1-sol` (the id a session started before step 1 already knows: a
 #      live session re-reads config.local.yml at each subagent spawn but keeps the models.yml it
 #      started with); removes any slow or deep role and any sami-proxy override, so those take
-#      config.yml's Codex models and fall to Claude; leaves review and oracle to omp/config.yml;
+#      config.yml's Codex models and their Claude fallback; leaves review and oracle to omp/config.yml;
 #      and removes the fallback chains that sent openai-codex/<id> and openai/<id> to gateway models;
 #   3. rebuilds ~/.omp/agent/models.yml with scripts/omp-models-build, so a new omp reads it.
-# sami-rocqperf's overlays are not touched: it keeps the ChatGPT login.
+# sami-rocqperf's overlays are not touched.
 set -euo pipefail
 
 [[ "$(hostname -s)" == sami-devbox ]] || { echo "sami-devbox-model-routes: sami-devbox only" >&2; exit 1; }
