@@ -250,18 +250,24 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # The release is mutable, so each asset's sha256 is pinned: a replaced asset fails to install.
 # From legion-envoy-v3.17.1 on the release also carries a build attestation (release-envoy-listener.yaml
 # on main), which mise verifies on install; check it by hand with
-# `gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion --cert-identity
-# https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main
+# `gh attestation verify agent-secrets-amd64.tar.gz --repo cybermonklabs/legion --cert-identity
+# https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main
 # --source-ref refs/heads/main --deny-self-hosted-runners` (`--repo` alone accepts an attestation
-# from any workflow run in the repository). The digests are the ones
+# from any workflow run in the repository). The owner must be cybermonklabs, not sjawhar: the
+# repository moved and GitHub redirects every READ, so the old name still resolves for the API and
+# for git, but the attestation's own certificate names cybermonklabs. With the old name even
+# `--repo sjawhar/legion` alone fails, and its error ("verifying with issuer sigstore.dev") names
+# neither the owner nor the identity, so it reads as a broken attestation rather than a stale name.
+# Measured 2026-11-11 on legion-envoy-v29.54.0: sjawhar fails, cybermonklabs exits 0.
+# The digests are the ones
 # GitHub recorded at upload; bump them with the version
-# (gh api repos/sjawhar/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
+# (gh api repos/cybermonklabs/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v18.1.0"  # from v17.5.0: the only agent-secrets change between the two is #2224, which adds --github-owner/--github-repo/--github-read-only, so a GitHub App token can be narrowed to named repositories and to read access (INFRA-132). Nothing else in the client or helper changed; without those flags the client behaves as v17.5.0 did. The helper itself moves only at a restart the installer makes with no host session registered
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:f4e373c97c0677fdce1db8dc0cc75422b21938efbaab098de224a06cf0d9a268" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:ef242927ee83f094a7ef020391855c7392052cb1ef5530720e124a9f9ca1d4b2" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:3d5574f6b5ae668cd886e851951dee7a9e607ca524fdd7babaa49fdb11cfe513" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:7d1d88b0d98684aea907b6d2846943cadef085144af75b6960659987e7cef7fc" }
+version = "legion-envoy-v29.54.0"  # from v18.1.0 for the secrets broker's airlock, which v18.1.0 predates: an airlock broker's answers are unreadable to the older client, so agent-secrets refuses to run the command (INFRA-1355, which puts seven production secrets behind the airlock and cannot apply until this pin moves; INFRA-3012). The airlock arrives in merge 46c4162bc50a, first released in legion-envoy-v29.40.0, so every later release of that series carries it; v29.54.0 also carries the GitHub App narrowing fix f3960fa2d181. The helper itself moves only at a restart the installer makes with no host session registered
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:5a689ade0db939ef412b26d8a69f5cf34b3580cb3bb4604f079ede9d81346ea6" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:6a11f897ef56213c4ab832564c1ae44739e8e3ebd889646c9472b730760d1bdc" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:6fb18e36f6248135a582b3ed60b291f9f22e428011bca8b3eeaced22cdf37364" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:7dd69ef8b0ea8b7a7e097c34a513df166a9e8afaf1cfba5e348f860538cedb88" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
