@@ -157,9 +157,11 @@ check_gcloud() {
 
 check_gws() {
     # One row per account in gws-accounts' registry, or one google_workspace row
-    # when the registry is absent, unreadable, not an object, or empty. gws writes
-    # advisories ("Using keyring backend: ...") to stderr, so stdout alone is
-    # parsed and a failure reports stderr's last line.
+    # when the registry is absent, unreadable, not an object, or empty. The probe
+    # is the Gmail profile: every account's read tier holds Gmail read-only, and
+    # some (wren) hold nothing else. gws writes advisories ("Using keyring
+    # backend: ...") to stderr, so stdout alone is parsed and a failure reports
+    # stderr's last line.
     local accounts_file="$HOME/.config/gws/accounts.json" accounts account out rc email err
     if [[ ! -f "$accounts_file" ]]; then
         row google_workspace missing - - "jq keys $accounts_file" "no $accounts_file"
@@ -176,13 +178,13 @@ check_gws() {
     while IFS= read -r account; do
         (
             err="$tmp/gws_${account}.stderr"
-            out="$(GWS_ACCOUNT="$account" timeout "$TIMEOUT_S" gws drive about get --params '{"fields":"user"}' 2>"$err")"
+            out="$(GWS_ACCOUNT="$account" timeout "$TIMEOUT_S" gws gmail users getProfile --params '{"userId":"me"}' 2>"$err")"
             rc=$?
             if ((rc == 0)); then
-                email="$(jq -r '.user.emailAddress // empty' <<<"$out" 2>/dev/null)"
-                row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws drive about get"
+                email="$(jq -r '.emailAddress // empty' <<<"$out" 2>/dev/null)"
+                row "google_workspace_${account}" live "${email:-unknown}" "n/a" "GWS_ACCOUNT=${account} gws gmail users getProfile"
             else
-                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws drive about get" "$(tail -n1 "$err")"
+                row "google_workspace_${account}" missing - - "GWS_ACCOUNT=${account} gws gmail users getProfile" "$(tail -n1 "$err")"
             fi
         ) &
     done <<<"$accounts"

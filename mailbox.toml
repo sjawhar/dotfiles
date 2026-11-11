@@ -5,7 +5,8 @@ default_account = "personal"
 # through `secret-run`: one Dispatch grant per session from the broker, or one YubiKey touch where
 # the broker does not serve the session. The other write and send keys come from secretsd, one
 # YubiKey touch per grant. The broker waits up to 4 minutes for a grant, so the credential
-# timeout is longer than that.
+# timeout is longer than that. The wren account is Wren's own mailbox: its write and send keys are
+# agent tier too, so none of its calls needs an approval.
 credential_timeout_secs = 300
 scrub_env = ["SECRETSD_SESSION_TOKEN_FILE"]
 scrub_env_patterns = ["GWS_*_OAUTH"]
@@ -33,6 +34,13 @@ write_label          = "broker grant on Dispatch (YubiKey touch outside the brok
 send_credential_cmd  = ["secret-run", "--reason", "mailbox trajectory send", "--wait", "4m", "GWS_TRAJECTORY_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_TRAJECTORY_SEND_OAUTH"]
 send_label           = "broker grant on Dispatch (YubiKey touch outside the broker)"
 credential_env_passthrough = ["SECRETSD_SESSION_TOKEN_FILE"]
+
+[accounts.wren]
+read_credential_cmd  = ["secrets", "GWS_WREN_READ_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WREN_READ_OAUTH"]
+write_credential_cmd = ["secrets", "GWS_WREN_MODIFY_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WREN_MODIFY_OAUTH"]
+write_interactive    = false
+send_credential_cmd  = ["secrets", "GWS_WREN_SEND_OAUTH", "--", "mailbox", "__mint", "--env", "GWS_WREN_SEND_OAUTH"]
+send_interactive     = false
 
 [filters.github]
 from = "notifications@github\\.com"

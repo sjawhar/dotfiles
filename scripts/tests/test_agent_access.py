@@ -117,7 +117,9 @@ class AgentAccess(unittest.TestCase):
         write_stub(
             self.stub_dir,
             "gws",
-            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "$GWS_ACCOUNT"',
+            # The probe is the Gmail profile, which every account's read tier can read.
+            '[ "$1 $2 $3" = "gmail users getProfile" ] || { echo "unexpected gws call: $*" >&2; exit 1; }\n'
+            'printf \'{"emailAddress":"%s@example.com"}\' "$GWS_ACCOUNT"',
         )
         result = self.run_access("--json")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -141,7 +143,7 @@ class AgentAccess(unittest.TestCase):
         write_stub(
             self.stub_dir,
             "gws",
-            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "$GWS_ACCOUNT"',
+            'printf \'{"emailAddress":"%s@example.com"}\' "$GWS_ACCOUNT"',
         )
         gws_dir = self.home / ".config" / "gws"
         gws_dir.mkdir(parents=True)
@@ -204,7 +206,7 @@ fi
             "gws",
             # Real gws prints advisories on stderr next to the JSON on stdout.
             'echo "Using keyring backend: keyring" >&2\n'
-            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "${GWS_ACCOUNT:-unknown}"',
+            'printf \'{"emailAddress":"%s@example.com"}\' "${GWS_ACCOUNT:-unknown}"',
         )
         gws_dir = self.home / ".config" / "gws"
         gws_dir.mkdir(parents=True)
