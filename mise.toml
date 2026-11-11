@@ -83,9 +83,16 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # he does not have a Mac and runs Linux (dispatch://INFRA-1876/ask/6ad5d62f). The hold
 # protected nobody and would have rotted into a permanently stale second pin.
 #
-# GitHub disabled Actions on cybermonklabs/oh-my-pi on 2026-11-07, so this release was built by
-# hand from the workflow's own version computation and asset names. The repository setting reads
-# enabled and a dispatch still returns 422; it is a platform-side disable, not a toggle.
+# Actions on cybermonklabs/oh-my-pi have created no run since 2026-11-07T11:44:58Z (that one was
+# cancelled in flight), so this release was built by hand from the workflow's own version
+# computation and asset names. Measured 2026-11-11: every repo field is green (enabled: true,
+# allowed_actions: all, disabled: false, archived: false) and all eleven workflows read active --
+# not disabled_fork, so it is NOT GitHub's fork gate. Both event paths are dead, not just one:
+# ci.yml is on main with workflow_dispatch and still 422s "Actions has been disabled", and the
+# 11-10 push of the sami branch (which sami-build.yml triggers on) created no run. The only field
+# nobody here can read is orgs/cybermonklabs/actions/permissions (403, needs admin:org), and an
+# org-level policy or spending limit fits every observation. Check the ORG settings page, not the
+# repository's Actions tab.
 "github:sjawhar/oh-my-pi" = "18.18.6-sami.20261110-032522"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
