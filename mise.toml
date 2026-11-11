@@ -30,10 +30,8 @@ minimum_release_age_excludes = [
   "github:sjawhar/mailbox",
   "github:sjawhar/oh-my-pi",
   "github:sjawhar/secretsd",  # archived; tags predate the forward merge
-  "github:sjawhar/time-tracker",
   "github:sjawhar/tmux-builds",
   "forward",
-  "tt",
   "agent-secrets",
 ]
 # The global `rust` pin below makes mise export RUSTUP_TOOLCHAIN, which overrides
@@ -192,13 +190,9 @@ gitleaks = "8.30.1"
 opam = { version = "2.5.1", asset_pattern = "opam-*-{gnu_arch}-{os}" }
 pulumi = "3.268.0"
 
-# Time tracker CLI, kept for reading past data (collection is retired). Its
-# release also publishes a tt-watcher asset, so [tool_alias] + a per-platform
-# asset_pattern pick the CLI tarball.
 # `forward` has one release asset, but its alias supplies the short name used by
 # the installer guard and `mise exec -- forward`.
 [tool_alias]
-tt = "github:sjawhar/time-tracker"
 forward = "github:sjawhar/forward"
 secrets = "github:sjawhar/forward"
 agent-secrets = "github:sjawhar/legion"
@@ -207,11 +201,6 @@ mautrix-instagram = "github:mautrix/meta"
 # plain `op` chooses a vfox plugin cloned at unpinned HEAD. This alias keeps `op`,
 # so `mise install op` installs this pin rather than a vfox copy.
 op = "aqua:1password/cli"
-
-[tools.tt]
-version = "0.9.3"  # was "latest"
-platforms.linux-x64   = { asset_pattern = "tt-x86_64-unknown-linux-musl.tar.gz" }
-platforms.linux-arm64 = { asset_pattern = "tt-aarch64-unknown-linux-musl.tar.gz" }
 
 [tools.forward]
 version = "3.8.1"  # filesystem-independent preview health probe

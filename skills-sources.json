@@ -46,9 +46,6 @@
       "root": "vendor/typesafe-ai"
     },
     {
-      "root": "vendor/time-tracker/.opencode"
-    },
-    {
       "root": "vendor/pulumi-agent-skills/pulumi"
     },
     {

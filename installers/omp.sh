@@ -209,7 +209,6 @@ ensure_vendor https://github.com/getsentry/cli.git sentry-cli 33028c2ac93e027ce3
 # API reference its design decisions cite, not whatever the docs say later. Bump:
 # re-pin here and re-check jev-turn-label.py's criteria against the live docs.
 ensure_vendor https://github.com/typesafe-ai/skills.git typesafe-ai 65a39f393687675ce170e6094757de20370365b9
-ensure_vendor https://github.com/sjawhar/time-tracker.git time-tracker
 # Pulumi's own agent skills (vendor skill for tool facts, dispatch://INFRA-26).
 ensure_vendor https://github.com/pulumi/agent-skills.git pulumi-agent-skills 2517e28e4bc029424e9c9ee48016394296be0f6a
 
