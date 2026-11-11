@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
-# sami-devbox-model-routes: (sami-devbox only) send omp's OpenAI roles and agents to GPT-6.1 Sol
-# through the model gateway. Run by devbox/sami-devbox-provision at step install, after
-# install.sh's models.yml build and once mise has installed yq; safe to run again
-# (dispatch://INFRA-993).
+# sami-devbox-model-routes: (sami-devbox only) declare GPT-6.1 Sol through the model gateway for
+# omp's cross-family agents, and keep the implementation roles on config.yml's Codex-then-Claude.
+# Run by devbox/sami-devbox-provision at step install, after install.sh's models.yml build and
+# once mise has installed yq; safe to run again (dispatch://INFRA-993).
 #
 # sami-devbox holds no ChatGPT login: the spec bars a person's login there, and omp's agent.db is
-# not copied. So every openai-codex/<id> that agents and roles name has no credential on it. The
-# gateway's openai/ group (dispatch://INFRA-481, agent-infra #1476) serves OpenAI models to the
-# dev-box@ ID token (team box). Of them this box uses GPT-6.1 Sol only, as omp/config.yml's
-# @review and @oracle do: until 2026-11-03 20:55Z this script put slow, deep, review and oracle on
-# gateway GPT-6.1 Terra and the astra and sami-proxy agents on gateway GPT-6 Astra, about $56/h of
-# OpenAI spend (INFRA cost lead). This script:
+# not copied. So every openai-codex/<id> that agents and roles name has no credential on it, and a
+# turn on one walks its fallback chain to Claude on the gateway (measured 2026-11-11: a Codex Terra
+# turn answered from Claude). The gateway's openai/ group (dispatch://INFRA-481, agent-infra
+# #1476) serves GPT-6.1 Sol to the dev-box@ ID token (team box), per token. Sami's decision of
+# 2026-11-11 (dispatch://INFRA-2212/ask/7aea7dfe-7b75-48a3-ae31-f2573aaeea2c): the implementation
+# roles use Codex then Claude, never the per-token OpenAI API; only the cross-family agents stay on
+# Sol. From 2026-11-03 20:55Z to then this script put slow and deep on gateway Sol at xhigh too, and
+# that route cost $13,112 of OpenAI on 11-06..11-08. This script:
 #   1. in omp/models.local.yml, declares GPT-6.1 Sol and its Flex tier twice on the same
 #      route: as the provider `model-gateway-openai` (OpenAI Responses at <gateway>/v1),
 #      sami-rocqperf's ids, and as `model-gateway/openai/gpt-6.1-sol[-flex]`, the ids
 #      omp/config.yml's Sol chains name second. It removes every other `openai/` model from
 #      `model-gateway`, so nothing here reaches Terra, Astra or Luna;
-#   2. in omp/config.local.yml, points the slow and deep roles and the astra, sami-proxy, astra-api
-#      and gpt-api agents at `model-gateway/openai/gpt-6.1-sol` (the id a session started before
-#      step 1 already knows: a live session re-reads config.local.yml at each subagent spawn but
-#      keeps the models.yml it started with), leaves review and oracle to omp/config.yml, and
-#      removes the fallback chains that sent openai-codex/<id> and openai/<id> to gateway models;
+#   2. in omp/config.local.yml, points the cross-family astra, astra-api and gpt-api agents at
+#      `model-gateway/openai/gpt-6.1-sol` (the id a session started before step 1 already knows: a
+#      live session re-reads config.local.yml at each subagent spawn but keeps the models.yml it
+#      started with); removes any slow or deep role and any sami-proxy override, so those take
+#      config.yml's Codex models and fall to Claude; leaves review and oracle to omp/config.yml;
+#      and removes the fallback chains that sent openai-codex/<id> and openai/<id> to gateway models;
 #   3. rebuilds ~/.omp/agent/models.yml with scripts/omp-models-build, so a new omp reads it.
 # sami-rocqperf's overlays are not touched: it keeps the ChatGPT login.
 set -euo pipefail
@@ -75,11 +78,10 @@ ID="$SOL" FLEXID="$FLEX" URL="$url/v1" KEY="$key" yq -i '
 ' "$tmp/models.yml"
 
 ROUTE="$ROUTE" yq -i '
-    .modelRoles.slow = strenv(ROUTE) + ":xhigh" |
-    .modelRoles.deep = strenv(ROUTE) + ":xhigh" |
+    del(.modelRoles.slow) | del(.modelRoles.deep) |
     del(.modelRoles.review) | del(.modelRoles.oracle) |
+    del(.task.agentModelOverrides["sami-proxy"]) |
     .task.agentModelOverrides.astra = strenv(ROUTE) + ":xhigh" |
-    .task.agentModelOverrides["sami-proxy"] = strenv(ROUTE) + ":high" |
     .task.agentModelOverrides["astra-api"] = strenv(ROUTE) + ":xhigh" |
     .task.agentModelOverrides["gpt-api"] = strenv(ROUTE) + ":xhigh" |
     .retry.fallbackChains |= ((. // {}) | with_entries(select(
@@ -95,4 +97,4 @@ DOTFILES_DIR="$DOTFILES_DIR" "$DOTFILES_DIR/scripts/omp-models-build"
 
 out="${OMP_AGENT_DIR:-$HOME/.omp/agent}/models.yml"
 echo "sami-devbox-model-routes: model-gateway-openai: $(yq -r '[.providers["model-gateway-openai"].models[].id] | join(" ")' "$out"); model-gateway openai/: $(yq -r '[.providers["model-gateway"].models[].id | select(test("^openai/"))] | join(" ")' "$out") at $url/v1"
-yq -r '"slow=" + .modelRoles.slow + " deep=" + .modelRoles.deep + " astra=" + .task.agentModelOverrides.astra + " sami-proxy=" + .task.agentModelOverrides["sami-proxy"]' "$config"
+yq -r '"slow=" + (.modelRoles.slow // "config.yml") + " deep=" + (.modelRoles.deep // "config.yml") + " astra=" + .task.agentModelOverrides.astra + " sami-proxy=" + (.task.agentModelOverrides["sami-proxy"] // "config.yml")' "$config"
