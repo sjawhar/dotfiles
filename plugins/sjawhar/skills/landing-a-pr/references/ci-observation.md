@@ -42,7 +42,7 @@ gh run rerun <run-id> -R <owner>/<repo> --failed
 - Classify by mechanism, not step name, error string or color. Before "all failures are X", read every not-X row, and account for every category in the terminal summary.
 - Write the predicted failure signature, and what refutes it, before the next run. Keep setup, timeout and assertion failures apart. A crash is not a passing negative control.
 - When a second defect comes from the same test driver (the harness code that feeds inputs to the system under test), audit that whole driver ([proof design](proof-design.md)).
-- Rerun only failed jobs, once, for a diagnosed external failure on a run that tested the current head. A green retry does not prove flakiness.
+- Rerun only failed jobs, once, for a diagnosed failure outside every test (a lost runner, a failed download) on a run that tested the current head. A test that fails at random is fixed at its cause, never rerun: a green retry does not prove flakiness, and it hides the flake from the next run.
 
 ## Cached merges and missing runs
 

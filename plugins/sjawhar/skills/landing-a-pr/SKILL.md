@@ -61,7 +61,7 @@ Read [review and readiness](references/review-and-readiness.md) to find every fi
 
 CI and the push:
 
-- Read a red check's log before you rerun it. Call it flaky only when you can name the mechanism; reproduce a suspected regression and fix real defects. Rerun only a diagnosed failure from outside the diff, once, as failed jobs on a run that tested the current head; never the whole graph.
+- Read a red check's log before you act on it. Call a test flaky only when you can name the mechanism; reproduce a suspected regression and fix real defects. Fix a test that fails at random at its cause: never rerun, quarantine or narrow lanes past it, nor ask the owner which tests run, since the skipped flake fails the next PR. Rerun only a failure outside every test, once, as failed jobs on a run that tested the current head; never the whole graph.
 - At `check_recur_max >= 2`, `heads_since_progress >= 2` or `stream_alternations >= 3` (the babysitter's counters), name the invariant the next fix restores, or return `needs-human`, because more guesses only loop.
 
 Read [CI observation](references/ci-observation.md) for which tests to run before a push, and [proof design](references/proof-design.md) before you claim coverage, a guard, no regression or "cannot happen".
