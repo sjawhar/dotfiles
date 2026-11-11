@@ -341,7 +341,7 @@ task:
     thermonuclear-deep-review: anthropic/claude-opus-5-5  # normally @review via frontmatter; INFRA-2212
     type-checker: anthropic/claude-opus-5-5
     ux-designer: "@vision"
-    # 2026-11-04 16:25Z — CHORE SUBAGENTS MOVE TO OPUS 5. This carries out Sami's own ruling of
+    # 2026-11-04 16:25Z — CHORE SUBAGENTS MOVE TO OPUS 5. This carries out Sami's own decision of
     # 11-03 (dispatch://INFRA-481/ask/8af1836c): "Opus 5.5 only where the model is the point",
     # with checks, bookkeeping, producers, routine ports and subagent chores on Opus 5 / 4.8.
     # It is not a new decision and needed no new ask.
@@ -358,7 +358,7 @@ task:
     scout: anthropic/claude-opus-5
     sonic: anthropic/claude-opus-5
     # planner is listed ONLY to hold it where it was. Without this line it would inherit `task`
-    # and silently drop to Opus 5, which is not what the ruling says: a plan is one of the places
+    # and silently drop to Opus 5, which is not what the decision says: a plan is one of the places
     # the model is the point. Anything else added to this file that must stay on 5.5 needs its
     # own line for the same reason.
     planner: anthropic/claude-opus-5-5

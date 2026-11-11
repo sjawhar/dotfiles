@@ -2,7 +2,7 @@
 name: prover
 description: |
   Hard proof writing on the strongest Anthropic model. Use for OSS Verify's hard proofs and
-  Verified Linux's statements — the work Sami's 2026-11-03 ruling names as "where the model is
+  Verified Linux's statements — the work Sami's 2026-11-03 decision names as "where the model is
   the point" (dispatch://INFRA-481/ask/8af1836c-7367-4dbf-a291-70ed2258c7a5). Everything else a
   proof lane does — checks, bookkeeping, producers, routine ports, batch chores — goes to the
   general `task` agent, which is deliberately on a cheaper model. Dispatching a chore here

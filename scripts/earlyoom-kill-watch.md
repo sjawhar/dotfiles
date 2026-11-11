@@ -9,7 +9,7 @@ On 2026-11-02 the host's earlyoom on sami-rocqperf (`earlyoom -m 10,5 -s 100,100
 --sort-by-rss --ignore <omp, tmux, sshd, ...>`, from agent-infra's guard) sent SIGTERM 51 times by
 15:23Z, 15 of them in the 15:00Z hour. Each time the host's available memory had fallen to 10%.
 The kills are by design: they keep the omp sessions alive. But a killed tool exits 143 with no
-message, so its session cannot tell why. RULING (`01a199e0`) spent time on that at 15:21Z, after
+message, so its session cannot tell why. One session (`01a199e0`) spent time on that at 15:21Z, after
 its box's `simsci` was killed at 15:03:43Z, 15:04:30Z, 15:10:59Z, 15:11:50Z and 15:20:57Z.
 
 ## What it does

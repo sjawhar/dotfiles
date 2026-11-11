@@ -134,7 +134,7 @@
 // parent-irc template only shapes its text, so when the text still carries that
 // wrapper it is unwrapped, and otherwise — a reworded template, or an `<irc>`
 // block a shake already swapped for a placeholder — it is restated as it stands.
-// The budget notice is a runtime warning, not a ruling on the task, and the
+// The budget notice is a runtime warning, not a decision on the task, and the
 // executor enforces the budget itself; persisted, it carries the same role,
 // `steering` flag and attribution as a parent's IRC steer, so it is told apart
 // by the fork's `[budget notice] ` prefix. A reworded notice would only be
@@ -143,7 +143,7 @@
 // `goal-budget-limit`, and this skip goes.
 // The lead says a later instruction wins where the two conflict. Only the latest
 // one is restated: earlier follow-ups survive through the summary, so an
-// intermediate ruling that changed a spawn constraint is recalled only as well
+// intermediate decision that changed a spawn constraint is recalled only as well
 // as the summary keeps it, though the lead still ranks it above the original.
 //
 // A `/tan` clone's committed compaction is restated here and, when the summary

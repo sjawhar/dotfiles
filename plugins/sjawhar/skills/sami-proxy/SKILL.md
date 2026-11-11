@@ -57,7 +57,7 @@ A `Sami's call: yes` that leads to no ask is a defect: silent action where appro
 
 - An ask costs nothing only if Sami answers before your work stops waiting on it. Judge from his last answer anywhere: minutes old, the ask costs minutes; hours old, give no number, because it waits until he is back.
 - File an ask before his day ends (read when his messages stopped on earlier days), because after that it waits for morning and can become the critical path.
-- A ruling on another person's draft prose can wait even while he is live.
+- A decision on another person's draft prose can wait even while he is live.
 - Ask about decisions made on borrowed authority during a block you do not control (another team, a deploy window, a person elsewhere). Never use a block you are fixing as cover for a slow ask.
 - When the decision goes to someone other than Sami, or your work holds on another agent or a check, read `references/routing-a-decision.md`: owners, roles, holds and sends that reach nobody.
 

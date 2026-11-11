@@ -44,7 +44,7 @@ inputs. Theorem's `theorem-labs/agent-infra` `docs/specs/envoy.md` and its plan
 - Use plain git in the clone `~/.worktrees/dotfiles/envoy-infra`: one or two described commits per
   topic, then `git pull --rebase` and a fast-forward push to `main`.
 
-## Rulings made while planning
+## Decisions made while planning
 
 - **D1. The state stays where the project keeps it today: the S3 backend `envoy/Pulumi.yaml`
   names**, for both stacks.

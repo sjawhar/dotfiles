@@ -8,7 +8,7 @@
 Why this exists: on 2026-11-02 the host's earlyoom (`earlyoom -m 10,5 -s 100,100 --sort-by-rss
 --ignore <omp, tmux, sshd, ...>`) sent SIGTERM 51 times by 15:23Z, 15 of them in the 15:00Z
 hour, each time available memory fell to 10%. The kills are by design: they keep the sessions
-alive. But a killed tool exits 143 with no message, so its session cannot tell why. RULING
+alive. But a killed tool exits 143 with no message, so its session cannot tell why. One session
 (01a199e0) spent time on that at 15:21Z after its box's `simsci` died four times.
 
 What it does, as one long-running user service (`omp/earlyoom-kill-watch.service`):

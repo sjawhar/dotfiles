@@ -104,7 +104,7 @@ configuration, infrastructure, or fork-branch PR on our side.
   that no text in the call answers (#11357's `hawk delete` PR read exactly
   like this); you do not judge it, and knives' `notch`/`start -m` ledger is
   where that record lives.
-- An upstream PR the body says Sami asked for, or that quotes his ruling.
+- An upstream PR the body says Sami asked for, or that quotes his decision.
 - Draft PRs, `--fill`, a missing template section, a wrong label, a typo in the
   title.
 - Anything about release naming, pin bumps to our own repos, or whether a

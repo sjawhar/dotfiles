@@ -812,7 +812,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         # SSH_CONFIG resolves each to github.com (`ssh -G`, with the URL's user, so the Match on the user applies), and
         # theorem-labs/rocq there is public, so the checkout is guarded. setUp sets GIT_SSH_COMMAND, so git's own ssh
         # command may resolve an alias otherwise: since leak-check-v10 the check refuses such a target unread (README:
-        # "An ssh alias has unreadable visibility whenever ... GIT_SSH_COMMAND ... is set"; FRAC's ruling), where v4
+        # "An ssh alias has unreadable visibility whenever ... GIT_SSH_COMMAND ... is set"; FRAC's decision), where v4
         # to v9 refused the leaked content. Either refusal is accepted; the push must fail and the receiver stay empty.
         c = self.leak()
         for url in ("git@alias-xf:theorem-labs/rocq.git", "git@UPPERALIAS:theorem-labs/rocq.git", "git@useralias:theorem-labs/rocq.git"):

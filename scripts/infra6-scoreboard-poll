@@ -24,7 +24,7 @@
 # the omp job it used to be died with every session restart, and the last reading before this
 # was the window ending 2026-11-04 13:00Z. The runner passes every 5 minutes and runs `cron`,
 # which fires whichever of the tick's two marks is due. No systemd unit of its own: the chief of
-# staff's ruling of 2026-11-01, dispatch://INFRA-26/comment/615d0105.
+# staff's decision of 2026-11-01, dispatch://INFRA-26/comment/615d0105.
 #
 #   infra6-scoreboard-poll cron       fire the marks that are due; what the stream job runs
 #   infra6-scoreboard-poll            the loop, for a session that holds the job itself

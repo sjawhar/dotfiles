@@ -25,7 +25,7 @@ LOADER.exec_module(WATCH)
 
 FIXTURE = [json.loads(line) for line in (HERE / "earlyoom-2026-11-02.jsonl").read_text().splitlines() if line]
 
-RULING = "01a199e0-ca54-76a0-9f96-960779b2cf44"
+KILLED_SESSION = "01a199e0-ca54-76a0-9f96-960779b2cf44"
 HOST_SESSION = "01a19111-2222-7333-8444-555555555555"
 RUNNER_SESSION = "01a17777-2222-7333-8444-666666666666"
 SRE = "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"
@@ -452,12 +452,12 @@ class KillWatchTest(unittest.TestCase):
 
     # -- the tree each kill came from ----------------------------------------------------------
 
-    def ruling_box(self) -> None:
-        """RULING's box: containerd-shim > docker-init > bun (agentbox-run.ts) > omp > bash."""
+    def killed_session_box(self) -> None:
+        """The killed session's box: containerd-shim > docker-init > bun (agentbox-run.ts) > omp > bash."""
         self.proc.add(3676141, "containerd-shim", 1, ["containerd-shim-runc-v2"], "/system.slice/containerd.service")
         self.proc.add(3676577, "docker-init", 3676141, ["/sbin/docker-init", "--"], BOX_SCOPE, uid_readable=False)
         self.proc.add(3681848, "bun", 3676577, ["bun", "agentbox-run.ts"], BOX_SCOPE, uid_readable=False)
-        self.proc.add(3693878, "omp", 3681848, ["/home/sami/.mise/installs/x/bin/omp", "--resume", RULING],
+        self.proc.add(3693878, "omp", 3681848, ["/home/sami/.mise/installs/x/bin/omp", "--resume", KILLED_SESSION],
                       BOX_SCOPE, rss_mib=900, uid_readable=False)
         self.proc.add(3800900, "bash", 3693878, ["/bin/bash", "-c", "simsci baseline"], BOX_SCOPE, uid_readable=False)
 
@@ -508,8 +508,8 @@ class KillWatchTest(unittest.TestCase):
             self.assertIn(needle, report)
 
     def test_two_box_kills_in_one_minute_are_one_notice_and_the_next_is_another(self) -> None:
-        """15:10:59Z and 15:11:50Z: simsci in RULING's box (uid 166536); 15:20:57Z: one more."""
-        self.ruling_box()
+        """15:10:59Z and 15:11:50Z: simsci in the killed session's box (uid 166536); 15:20:57Z: one more."""
+        self.killed_session_box()
         self.simsci(3458528, 5000)
         w = self.watch()
         w.sample(at("15:10:55"))
@@ -526,7 +526,7 @@ class KillWatchTest(unittest.TestCase):
         w.flush(at("15:12:00"))
         self.assertEqual(len(self.sent), 1)
         target, text = self.sent[0]
-        self.assertEqual(target, RULING)
+        self.assertEqual(target, KILLED_SESSION)
         self.assertIn("2 of your processes", text)
         for needle in ("2026-11-02T15:10:59Z", "3458528", "5966 MiB",
                        "2026-11-02T15:11:50Z", "3731783", "5936 MiB", '"simsci"'):
@@ -543,13 +543,13 @@ class KillWatchTest(unittest.TestCase):
             w.on_entry(e, at("15:20:58"))
         w.flush(at("15:22:00"))
         self.assertEqual(len(self.sent), 2)
-        self.assertEqual(self.sent[1][0], RULING)
+        self.assertEqual(self.sent[1][0], KILLED_SESSION)
         self.assertIn("1 of your processes", self.sent[1][1])
         self.assertIn("5481 MiB", self.sent[1][1])
         self.assertIn("9.91%", report_of(self, self.sent[1][1]))
 
     def test_a_process_reparented_out_of_the_tree_is_matched_by_its_box(self) -> None:
-        self.ruling_box()
+        self.killed_session_box()
         self.proc.add(3458528, "simsci", 3676577, ["simsci"], BOX_SCOPE, rss_mib=5900, uid_readable=False)
         w = self.watch()
         w.sample(at("15:10:55"))
@@ -557,7 +557,7 @@ class KillWatchTest(unittest.TestCase):
         for e in entries("15:10:59", "15:10:00"):
             w.on_entry(e, at("15:11:00"))
         w.flush(at("15:12:00"))
-        self.assertEqual([t for t, _ in self.sent], [RULING])
+        self.assertEqual([t for t, _ in self.sent], [KILLED_SESSION])
         self.assertIn("same agent box", report_of(self, self.sent[0][1]))
 
     def test_session_tmp_path_names_the_omp_when_the_process_was_never_sampled(self) -> None:
@@ -584,7 +584,7 @@ class KillWatchTest(unittest.TestCase):
         self.assertIn("unmatched_this_hour=1", line)
 
     def test_hour_count_and_no_repeat_after_restart(self) -> None:
-        self.ruling_box()
+        self.killed_session_box()
         self.host_session()
         w = self.watch()
         w.sample(at("15:09:00"))
@@ -606,7 +606,7 @@ class KillWatchTest(unittest.TestCase):
                       again.counts_line(at("16:00:05")))
 
     def test_drill_route_sends_every_notice_to_one_session(self) -> None:
-        self.ruling_box()
+        self.killed_session_box()
         self.simsci(3458528, 5000)
         w = self.watch(to=SRE)
         w.sample(at("15:10:55"))
@@ -615,7 +615,7 @@ class KillWatchTest(unittest.TestCase):
             w.on_entry(e, at("15:11:00"))
         w.flush(at("15:12:00"))
         self.assertEqual([t for t, _ in self.sent], [SRE])
-        self.assertIn(RULING, self.sent[0][1], "the drill copy names the session it would have reached")
+        self.assertIn(KILLED_SESSION, self.sent[0][1], "the drill copy names the session it would have reached")
 
     def test_first_start_counts_old_kills_but_notifies_none(self) -> None:
         """With no cursor the watch reads from the hour's start for the count; a kill from before

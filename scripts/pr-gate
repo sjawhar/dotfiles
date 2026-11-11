@@ -159,7 +159,7 @@ fi
 # `Verdict: CHANGES|FAIL` (Legion's and the thermonuclear reviewers' negative form) was missing, so an approve
 # followed by a later `Verdict: CHANGES` read GREEN (2026-09-26). `\**` admits a bold verdict line. `Verdict: PASS` is
 # deliberately NOT positive here: it is a review half or a tester run, and every lane posts as the same bot, so
-# a tester's PASS must not supersede a reviewer's rejection (the queue's ruling, #20200).
+# a tester's PASS must not supersede a reviewer's rejection (the queue's decision, #20200).
 # A bare `MERGE <sha>` / `ACCEPT <sha>` / `APPROVE <sha>` counts only as the artifact's FIRST line (jq's ^ is string start): the packet
 # convention, and what keeps "ready to merge <sha> once CI settles" in prose from reading as a verdict (agent-c#20296, 2026-09-26).
 # ACCEPTED EXPOSURE, named on purpose: a brief whose FIRST line is an unquoted 'MERGE <sha> - please post this as your
@@ -175,7 +175,7 @@ POS='(?i)approve|accept(ed)? +at +[0-9a-f]|merge +at|lgtm|verdict:? *\**(approve
 # queue's own #20293 body, 2026-09-26). Same rule as the sha: the verdict comes first, history later. An artifact is
 # negative if its first NEG hit precedes its first POS hit (or POS is absent), positive the other way round.
 PL='def pol($pos; $neg): (. as $v | ([$v|match($pos; "i")][0].offset // null) as $p | ([$v|match($neg; "i")][0].offset // null) as $n | if $n != null and ($p == null or $n < $p) then "neg" elif $p != null then "pos" else "none" end);'
-# SUPERSESSION BY THE SAME AUTHOR AT THE SAME HEAD (the queue's ruling on agent-c#20410, logged on AGENTC-1070, 2026-09-28).
+# SUPERSESSION BY THE SAME AUTHOR AT THE SAME HEAD (the queue's decision on agent-c#20410, logged on AGENTC-1070, 2026-09-28).
 # The queue's oracle posts `Verdict: BLOCKS at <sha>` and, after re-judging the SAME head, `Verdict: DOES NOT BLOCK at <sha>`.
 # The second is verdict-bearing (it starts "Verdict:") but was in NEITHER polarity set, so the BLOCKS stood as the latest
 # negative and a PR every other verdict had cleared read NOT GREEN until a human read it. Rule: a later DOES NOT BLOCK
@@ -221,7 +221,7 @@ if [ -n "$last" ] && [[ "$head" != "$last"* ]]; then
   rm -rf "$w"
 fi
 # A head no artifact names is covered only by an IDENTICAL carry from the newest verdict (the queue's
-# carry ruling, 2026-09-25); requiring both made a valid carry read NOT GREEN and forced a confirmation review.
+# carry decision, 2026-09-25); requiring both made a valid carry read NOT GREEN and forced a confirmation review.
 if [ "$nohead" = 1 ] && [ "$carry" != 1 ]; then echo "  !! no verdict artifact names $h8 and no IDENTICAL carry covers it"; fail=1; fi
 echo "owner trailers: $(api "repos/$repo/pulls/$n/commits" --paginate --jq '[.[]|.commit.message|capture("Omp-Session: (?<s>[0-9a-f-]+)")|.s]|unique|join(",")')"
 echo "e2e line: (not readable from GitHub - state surface, run/log id, head it ran at, what was observed, negative controls; the queue's oracle red-teams it)"

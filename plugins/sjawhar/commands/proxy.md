@@ -16,21 +16,21 @@ Shadow mode: do not act on the proxy's verdict until Sami rules.
    ## Proxy verdict — <TYPE>
    ```
 
-4. **Record the ruling.** Sami's next message is the ruling. Echo it under exactly one of these headings:
+4. **Record the decision.** Sami's next message is the decision. Echo it under exactly one of these headings:
 
    ```
-   ## Proxy ruling — AGREE
-   ## Proxy ruling — DISAGREE
-   ## Proxy ruling — PARTIAL
+   ## Proxy decision — AGREE
+   ## Proxy decision — DISAGREE
+   ## Proxy decision — PARTIAL
    ```
 
-   | Ruling | Meaning | Then |
+   | Decision | Meaning | Then |
    |---|---|---|
    | AGREE | Sami accepted the proxy's answer | Proceed on it. |
    | DISAGREE | Sami overruled it. His message is the answer. | Proceed on his answer. |
    | PARTIAL | Sami kept the direction, changed the substance | State in one line what changed, then proceed on his version. |
 
    - Directly under the heading, add one line: `Sami's call: right|wrong`. It says if the proxy was right that the question needed Sami at all. It is `wrong` if the proxy said yes (ask Sami) and Sami said it was not his question. It is also `wrong` if the proxy said no and Sami wanted to be asked.
-   - If his message does not make the ruling clear, ask which of the three it is. Ask only that one question.
+   - If his message does not make the decision clear, ask which of the three it is. Ask only that one question.
 
 A later retro counts these headings to measure how often the proxy and Sami agree. Never omit or paraphrase them. Never write them when this command was not invoked.

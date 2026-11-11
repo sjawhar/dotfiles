@@ -1,19 +1,19 @@
 # Authority, sequencing and shared stacks
 
-Read the current queue ruling record first. Nothing here creates holds, merge windows, credentials or permission.
+Read the current queue decision record first. Nothing here creates holds, merge windows, credentials or permission.
 
 ## Priority and holds
 
 - Equally ready same-file siblings with no stronger priority or dependency: the oldest approved PR goes first. Serialize only the shared boundary. When one owner is already repairing a collision, that owner resolves it, so two owners do not fix the same conflict.
 - A hold that needs a conflict check needs the actual three-way composition, not overlap guessed from filenames.
 - A lifted hold ends at once. On the next wake, re-read the live head, verdicts and mergeability. An old "held" label is not an observation.
-- When you see the same "escalate next time" note a second time, read the ruling it refers to and send the escalation now, on the existing Dispatch issue.
+- When you see the same "escalate next time" note a second time, read the decision it refers to and send the escalation now, on the existing Dispatch issue.
 - For a defined coordinated migration batch, record the intended published parent order once, when the batch is packet-ready, before re-parenting and re-gating. A later sibling does not reopen it. This order applies only to that batch; other PRs keep merging in parallel.
 
 ## Answers and owner identity
 
 - Read a Dispatch answer from its ask and replies, not a GitHub substitute: `dispatch read --ref 'dispatch://<KEY>/ask/<id>'`. If the answer was on GitHub, read that thread.
-- Find the originating owner from the linked PR and current role record. If it has not acted, relay the pending ruling once, with source and exact scope. Owners ask their own questions.
+- Find the originating owner from the linked PR and current role record. If it has not acted, relay the pending decision once, with source and exact scope. Owners ask their own questions.
 - Find a recipient from the PR's `Omp-Session:` commit trailer and the ownership record, never a remembered prefix: `gh api --paginate repos/O/R/pulls/N/commits --jq '.[].commit.message'`.
 
 ## Ordinary stacks and squash parents

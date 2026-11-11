@@ -123,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("retry_fallback_applied", async (event, ctx) => {
 		if (event.role === "fireworks-fast") return undefined;
 		// A fallback off a model gateway is not a refusal and must not cost an hour. The gateway
-		// lead's ruling, 2026-11-08: a 401 of class auth_error is a credential fault that re-minting
+		// lead's decision, 2026-11-08: a 401 of class auth_error is a credential fault that re-minting
 		// fixes, so it should start no cooldown at all; other gateway refusals (429, 5xx, overloaded)
 		// want five minutes, which is what omp's own selector suppression already applies. Declining
 		// to arm leaves exactly that, so both halves are right without this extension guessing which

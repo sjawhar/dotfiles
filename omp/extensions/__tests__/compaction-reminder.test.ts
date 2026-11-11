@@ -634,13 +634,13 @@ describe("compaction-reminder: a project's goals document", () => {
 					const session = bind();
 					const branch = [user("lead the stream"), compaction];
 					session.compact("main", branch, true);
-					writeFileSync(DOC, "# Decisions\n\n- A later ruling.\n");
+					writeFileSync(DOC, "# Decisions\n\n- A later decision.\n");
 					session.turnEnd(1);
 					session.shakeEnd("main", branch, false, { skipped: false });
 
 					expect(session.sent.map(s => s.options.deliverAs)).toEqual(["nextTurn", "aside"]);
 					expect(session.sent[0].message.content).toContain("No restart of the 343 owners.");
-					expect(session.sent[1].message.content).toContain("- A later ruling.\n</STREAM_GOALS_DOCUMENT>");
+					expect(session.sent[1].message.content).toContain("- A later decision.\n</STREAM_GOALS_DOCUMENT>");
 					expect(session.sent[1].message.content).not.toContain("No restart of the 343 owners.");
 				})
 			);

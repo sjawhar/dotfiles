@@ -38,7 +38,7 @@ gh pr merge N --repo O/R --squash --match-head-commit <verified-sha> \
 ## Credentials and borrowed terminals
 
 - Check routing and the actual account for each write path. One tool can post as different identities in different environments.
-- Use a repository's one-time exemption only when you can link the ruling that grants it for this PR; it is not a general bypass.
+- Use a repository's one-time exemption only when you can link the decision that grants it for this PR; it is not a general bypass.
 - A missing credential, self-approval restriction or absent CODEOWNER review is a blocker. It is never permission to disable protection or reuse a token from a prior session.
 - If Sami explicitly supplies a tmux pane for an authorized action, find it each time by its current content, cwd and command. Never use a remembered index: `tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_command} #{pane_current_path}'`.
 - A missing or ambiguous pane needs a fresh authorized route. Never type into a pane you have not just identified. A one-command credential grant is not standing queue authority.

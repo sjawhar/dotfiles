@@ -15,7 +15,7 @@ unreadable fact is its own alert, because the one failure a liveness check must 
 reporting "all alive" when it could not see.
 
 The cluster CronJob's transport is checked too (`devbox-offbox-act --forced probe`), since the
-sami-rocqperf timer may end under the same ruling and the pod is then the only caller.
+sami-rocqperf timer may end under the same decision and the pod is then the only caller.
 """
 
 from __future__ import annotations

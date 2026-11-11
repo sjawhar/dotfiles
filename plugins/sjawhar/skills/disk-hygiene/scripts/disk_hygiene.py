@@ -1636,7 +1636,7 @@ def cmd_containers(_args: argparse.Namespace) -> None:
     # A fixture's lifecycle is its ryuk's (testcontainers' only reaper; started first, lives while a
     # client holds its socket, reaps on disconnect). Stranded ryuk -> its fixtures go with it. Ryuk
     # ABSENT -> the lifecycle is structurally broken: no live owner can exist and self-reap never
-    # comes; leaked once past a 15 min startup grace with no clients (e2e owner ruling, 2026-09-20).
+    # comes; leaked once past a 15 min startup grace with no clients (e2e owner decision, 2026-09-20).
     # Ryuk PRESENT -> never reap the fixture on its own; racing an intact ryuk kills a live database.
     ryuk_verdict = {r["session_id"]: r["verdict"] for r in result if r["family"] == "ryuk"}
     for r in result:

@@ -18,8 +18,8 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 ## 1. Read current authority and priorities
 
 - Use the queue record named in Sami's request or in the notes your role started with. With none, keep evidence on the existing PR or issue. Never create another tracker or queue issue: a second record splits the history.
-- Record each ruling's source, time and scope: standing approvals (kept through handoffs until superseded), holds, release conditions, priorities, approved windows. Read the record again at each wake and before each merge, because rulings change while you wait.
-- Never restore a lifted hold or infer a quiet window from history: only a current ruling sets them.
+- Record each decision's source, time and scope: standing approvals (kept through handoffs until superseded), holds, release conditions, priorities, approved windows. Read the record again at each wake and before each merge, because decisions change while you wait.
+- Never restore a lifted hold or infer a quiet window from history: only a current decision sets them.
 - Merge only by an ordinary protected squash merge, never under a permission inferred from earlier use. A grant given to this queue session stays live for it: keep merging under it, and ask Sami once for a merge window: a span to merge READY PRs without asking per PR.
 - At registration, check the author, the account this session writes as (`gh api user --jq .login`), required reviews and CODEOWNERS. An approval it cannot give is unmet until `landing-a-pr`'s repo merge rules name who gives it.
 - With no explicit priority, merge first what Sami's stated goal needs, then parents before children, and a large corpus change before PRs that would have to integrate with it. Never by READY arrival order, which rewards speed over value.
@@ -30,7 +30,7 @@ Owners drive their PRs. You, the controller, check the gates and merge under the
 
 - Register each PR when it opens: owner, purpose, intended published parent, file scope, required gates, the end-to-end scenarios the owner will run before merge. Give the owner the gate list then, so the packet arrives complete.
 - Act on packets and on CI events for PRs that have one. Do not sweep all owners.
-- Owners drive their PRs while they are live. Every 30 minutes, find orphans: PRs whose owner is gone and that nobody will packet. Close an orphan or give it a new owner only under a current ruling from Sami that names it. Until then it stays yours: keep it registered and report it in each queue status, so it is not lost.
+- Owners drive their PRs while they are live. Every 30 minutes, find orphans: PRs whose owner is gone and that nobody will packet. Close an orphan or give it a new owner only under a current decision from Sami that names it. Until then it stays yours: keep it registered and report it in each queue status, so it is not lost.
 - A gate session is the session a coordinator (the `sdd` lead for the issue) assigned to check this PR's gates. Who sends the packet:
 
 | PR | Packet |

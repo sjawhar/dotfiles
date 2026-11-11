@@ -11,7 +11,7 @@ Read when a packet reports no findings, no checks, missing content, an expected 
 |---|---|
 | Flake | Rerun the failed job |
 | Runner lost or run incomplete | Check that the run belongs to the current head, then rerun that attempt |
-| Red explained only by a newer main-side fix | Wait until the owner pushes a content change, or Sami gives a new ruling |
+| Red explained only by a newer main-side fix | Wait until the owner pushes a content change, or Sami gives a new decision |
 | Failure that fix does not cover | The owner diagnoses it |
 
 - Required red CI is not mergeable. If a main-red class needs a different queue-wide action, ask Sami once on the existing tracking issue and continue other work.

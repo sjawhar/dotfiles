@@ -30,12 +30,12 @@
 # for a timer nobody wants makes an alert every 5 minutes.
 
 # --- box health: the watches the box-health lead (the SRE) owns ---
-# disk-fill-watch.timer was retired on 2026-11-09, with the four below. Same ruling as
+# disk-fill-watch.timer was retired on 2026-11-09, with the four below. Same decision as
 # load-swap-watch (dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c): dotfiles
 # presence is not authorization, and a dev box is monitored by the standard agent. Its owner,
 # the omp lead, decided all six at 03:40Z and declined the replacement-before-removal this role
 # offered, on the grounds that keeping an unauthorized timer because it is useful is the move
-# the ruling names. What it caught that a host agent structurally cannot see is recorded as
+# the decision names. What it caught that a host agent structurally cannot see is recorded as
 # requirements on the replacement, with the instance each: a box at 85% of its memory cap while
 # the host had 979 GiB free; an 8-core box throttled while host load.norm.1 read 1.6; three box
 # disks at 90-94% against 12 TiB free; and a box at 76% resolving to one omp --resume holding
@@ -50,7 +50,7 @@
 # "Process killed (kernel OOM)"; it was a service rather than a timer, so it never had a line here.
 unit-health-watch.timer            # owner: box-health lead. This list, and every timer's runs.
 # envoy-role-holder-watch.timer, omp-dup-watch.timer and omp-login-watch.timer were retired on
-# 2026-11-09 with disk-fill-watch, under the same ruling and the same owner's decision.
+# 2026-11-09 with disk-fill-watch, under the same decision of Sami's and the same owner's choice.
 # Two of them watched things that are not cgroup-shaped, so the standard agent will not cover
 # them either and their loss is recorded with the rest: one omp session id running in two live
 # omps is a correctness hazard rather than a resource one, and src-symlink-watch (never in this
@@ -69,7 +69,7 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 #   An unarmed linked service is unwanted box clutter. Its script, installer and units are
 #   removed with no replacement. This line does not come back.
 # omp-root-hang-watch.timer was retired on 2026-11-09 with the four above. Its owner called it
-# the clearest case the ruling covers: a bespoke watch for one named lead's session.
+# the clearest case the decision covers: a bespoke watch for one named lead's session.
 # session-cpu-record.timer was here, then became the stream job of the same name. Both are now
 # gone: the job was released on 2026-11-09 with authorized-keys-watch, and stream-job.timer with
 # them, because it had no rows left to run. The INFRA lead removed the last of its own four
@@ -80,7 +80,7 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 # report, measured at 240 points over 2 h. authorized-keys-watch's is NOT - no Datadog monitor
 # matches "authorized" or "SSH key" - so a change to ~/.ssh/authorized_keys is now noticed by
 # nobody, recorded at dispatch://INFRA-2022/artifact/timer-decisions-md v5 rather than dropped
-# quietly. Under Sami's ruling, dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c.
+# quietly. Under Sami's decision, dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c.
 
 # --- the box's own housekeeping (devbox/) ---
 dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
@@ -116,7 +116,7 @@ box-cleanup.timer  max_run=4h        # owner: box-health lead. Cache caps every 
 #   was stopped. Both unit files were removed. If runif runs again its reader comes back as a
 #   stream job, not a hand-written timer, so this line does not come back with it.
 # verified-linux-drift-check.timer  owner: the Verified Linux lead (ORCH). Retired by its owner
-#   at 19:42Z on 2026-11-05, with its run-monitor loop, under Sami's ruling that a dev box stops
+#   at 19:42Z on 2026-11-05, with its run-monitor loop, under Sami's decision that a dev box stops
 #   running shared services: "I've cut the dev-box compute that doesn't serve it ... starting
 #   with the drift checker that's been driving the chain". unit-health-watch reported the timer
 #   missing at 19:41:13Z, which is the check doing its job; this line is why it stops saying so.
