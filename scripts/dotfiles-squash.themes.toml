@@ -16,7 +16,7 @@ paths = [
 [[theme]]
 name = "agentbox-credentials"
 paths = [
-  "agentbox/", "devbox/", "agent-secrets/", "secrets.env", "secrets.human.d/", ".sops.yaml",
+  "agentbox/", "devbox/", "agent-secrets/", "secrets.env", "secrets.human.d/", ".sops.yaml", "leak-terms.sops.yaml",
   "installers/agent-secrets.sh", "installers/secretsd.sh",
   "scripts/agentbox", "scripts/agentbox-run.ts", "scripts/agentbox-run.test.ts",
   "scripts/agent-secrets-login", "scripts/agent-secrets-session", "scripts/agent-session",
