@@ -58,6 +58,25 @@
 # DOCKER_CAP_IMAGE_AGES override the defaults.
 set -euo pipefail
 
+# ONE docker-cap at a time. Two ran unlocked against one daemon at 00:1xZ on 2026-11-12 — one
+# under box-cleanup's `timeout 30m`, one from somewhere else with no wrapper — and this file's own
+# note records what concurrent pruning costs: "a prune racing a lane's pull is how four digest
+# pulls died that afternoon." The daemon is shared by every agent box on the machine, so a second
+# run is never useful: it contends with the first and makes both slower, which is how a step that
+# needs more than its timeout never finishes and never records a success. A non-blocking flock,
+# because the caller is a timer step that will run again within the hour: waiting would just hold a
+# second slot open for the same work.
+# The path must NOT come from the environment: TMPDIR is /mnt/scratch/<user>/tmp in one caller and
+# /tmp in another, so an inherited path gives two locks and excludes nothing — which is the exact
+# case this exists for. XDG_RUNTIME_DIR is per-user and per-boot, and every caller on this box is
+# the same user, so it is the one place both a timer step and a hand-run agree on.
+_lock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker-cap.lock"
+exec 9>"$_lock"
+if ! flock -n 9; then
+    echo "docker-cap: another run holds $_lock; this one exits without pruning" >&2
+    exit 0
+fi
+
 high="${DOCKER_CAP_HIGH_PCT:-80}"
 cache_cap="${DOCKER_CAP_BUILD_CACHE:-50GB}"
 cache_ages="${DOCKER_CAP_CACHE_AGES:-48h 24h 12h 6h}"
