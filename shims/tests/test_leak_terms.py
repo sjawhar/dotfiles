@@ -8,6 +8,9 @@ import importlib.util
 import json
 import os
 import shlex
+import re
+import stat
+import threading
 import shutil
 import subprocess
 import sys
@@ -23,6 +26,171 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "scripts" / "leak-terms-check"
 
 
+def parse_strace(capture: bytes) -> tuple[list[tuple[bytes, ...]], dict[str, bytes]]:
+    """Read the strace forms used by the secrecy test, failing closed on uncertainty."""
+    if not capture:
+        raise AssertionError("strace capture is empty (UNKNOWN)")
+    text = capture.decode("utf-8", errors="surrogateescape")
+    if re.search(r'"(?:\\.|[^"\\])*"\.\.\.', text):
+        raise AssertionError("strace capture has a cut string")
+
+    def quoted(source: str, start: int) -> tuple[bytes, int]:
+        if start >= len(source) or source[start] != '"':
+            raise AssertionError("strace string is malformed")
+        value = bytearray()
+        index = start + 1
+        simple = {"a": b"\a", "b": b"\b", "f": b"\f", "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v"}
+        while index < len(source):
+            character = source[index]
+            if character == '"':
+                return bytes(value), index + 1
+            if character != "\\":
+                value.extend(character.encode("utf-8", errors="surrogateescape"))
+                index += 1
+                continue
+            index += 1
+            if index >= len(source):
+                break
+            escaped = source[index]
+            if escaped == "x" and index + 2 < len(source) and all(
+                digit in "0123456789abcdefABCDEF" for digit in source[index + 1:index + 3]
+            ):
+                value.append(int(source[index + 1:index + 3], 16))
+                index += 3
+            elif escaped in "01234567":
+                digits = escaped
+                index += 1
+                while len(digits) < 3 and index < len(source) and source[index] in "01234567":
+                    digits += source[index]
+                    index += 1
+                value.append(int(digits, 8))
+            elif escaped in simple:
+                value.extend(simple[escaped])
+                index += 1
+            else:
+                value.extend(escaped.encode("utf-8", errors="surrogateescape"))
+                index += 1
+        raise AssertionError("strace string is unterminated")
+
+    def closing(source: str, start: int, opener: str, closer: str) -> int:
+        depth = 0
+        index = start
+        while index < len(source):
+            if source[index] == '"':
+                _, index = quoted(source, index)
+                continue
+            if source[index] == opener:
+                depth += 1
+            elif source[index] == closer:
+                depth -= 1
+                if depth == 0:
+                    return index
+            index += 1
+        raise AssertionError("strace syscall is unterminated")
+
+    def arguments(source: str) -> list[str]:
+        result: list[str] = []
+        start = 0
+        depth = 0
+        index = 0
+        while index < len(source):
+            if source[index] == '"':
+                _, index = quoted(source, index)
+                continue
+            if source[index] in "([{":
+                depth += 1
+            elif source[index] in ")]}":
+                depth -= 1
+            elif source[index] == "," and depth == 0:
+                result.append(source[start:index].strip())
+                start = index + 1
+            index += 1
+        result.append(source[start:].strip())
+        return result
+
+    pending: dict[str, str] = {}
+    calls: list[str] = []
+    for raw_line in text.splitlines():
+        match = re.match(r"(?:\[pid\s+(\d+)\]\s+|(\d+)\s+)?(.*)", raw_line)
+        assert match is not None
+        pid = match.group(1) or match.group(2) or "main"
+        line = match.group(3)
+        if "<unfinished ...>" in line:
+            if pid in pending or not line.endswith("<unfinished ...>"):
+                raise AssertionError("strace unfinished syscall is malformed")
+            pending[pid] = line.removesuffix("<unfinished ...>")
+            continue
+        resumed = re.fullmatch(r"<\.\.\. ([a-z0-9_]+) resumed>(.*)", line)
+        if resumed:
+            original = pending.pop(pid, None)
+            if original is None:
+                matches = [key for key, value in pending.items() if value.startswith(f"{resumed.group(1)}(")]
+                if len(matches) == 1:
+                    original = pending.pop(matches[0])
+            if original is None or not original.startswith(f"{resumed.group(1)}("):
+                raise AssertionError("strace resumed syscall has no matching start")
+            line = original + resumed.group(2)
+        elif "<... " in line:
+            raise AssertionError("strace resumed syscall is malformed")
+        calls.append(line)
+    if pending:
+        raise AssertionError("strace capture ends in an unfinished syscall")
+
+    argv: list[tuple[bytes, ...]] = []
+    writes: dict[str, bytearray] = {}
+    allowed_targets = ("pipe:[", "socket:[", "anon_inode:")
+    for line in calls:
+        name = next((candidate for candidate in ("execve", "write", "pwrite64", "writev") if line.startswith(f"{candidate}(")), None)
+        if name is None:
+            continue
+        end = closing(line, len(name), "(", ")")
+        fields = arguments(line[len(name) + 1:end])
+        if name == "execve":
+            if len(fields) < 2 or not fields[1].startswith("["):
+                raise AssertionError("strace execve argv is malformed")
+            argv_end = closing(fields[1], 0, "[", "]")
+            values: list[bytes] = []
+            index = 1
+            while index < argv_end:
+                if fields[1][index] == '"':
+                    value, index = quoted(fields[1], index)
+                    values.append(value)
+                else:
+                    index += 1
+            argv.append(tuple(values))
+            continue
+        if len(fields) < 2:
+            raise AssertionError("strace write has no payload")
+        target = re.fullmatch(r"\d+<(.*)>", fields[0])
+        if target is None:
+            raise AssertionError("strace write has no -yy file target")
+        return_value = re.match(r"\s*=\s*(-?\d+)", line[end + 1:])
+        if return_value is None or int(return_value.group(1)) <= 0:
+            continue
+        payload: list[bytes] = []
+        if name == "writev":
+            index = 0
+            while index < len(fields[1]):
+                iovec = fields[1].find("iov_base=", index)
+                if iovec < 0:
+                    break
+                value_start = iovec + len("iov_base=")
+                value, index = quoted(fields[1], value_start)
+                payload.append(value)
+            if not payload:
+                raise AssertionError("strace writev has no readable iovec")
+        else:
+            payload.append(quoted(fields[1], 0)[0])
+        path = quoted(f'"{target.group(1)}"', 0)[0].decode("utf-8", errors="surrogateescape")
+        if path.startswith(allowed_targets) or path == "/dev/null" or path == "/dev/tty" or path.startswith("/dev/pts/"):
+            continue
+        if not path.startswith("/"):
+            raise AssertionError(f"strace write target is not a regular-file path: {path}")
+        writes.setdefault(path, bytearray()).extend(b"".join(payload)[:int(return_value.group(1))])
+    if not argv:
+        raise AssertionError("strace capture has no execve (UNKNOWN)")
+    return argv, {path: bytes(data) for path, data in writes.items()}
+
 def real_jj() -> str:
     located = subprocess.run(["mise", "which", "jj"], capture_output=True, text=True, check=False)
     if located.returncode == 0 and located.stdout.strip():
@@ -34,7 +202,7 @@ def real_jj() -> str:
     raise RuntimeError("jj is required for scanner tests")
 
 
-class ScannerTests(unittest.TestCase):
+class ScanModes(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -2011,5 +2179,313 @@ class OutgoingLeaks(unittest.TestCase):
                     self.assertNotEqual(jj_result.returncode, 0, jj_result.stderr)
                     self.assertIn(correction, jj_result.stderr)
                     self.assertFalse(self.received(commit, self.public_url))
+
+
+class SecrecyTrace(unittest.TestCase):
+    """Trace refusals so that a listed term never reaches a persistent surface."""
+
+    public_url = "https://github.com/theorem-labs/rocq.git"
+    marker_names = (
+        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
+        "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
+        "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
+    )
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.xdg = self.root / "xdg"
+        self.tmpdir = self.root / "tmp"
+        self.fake = self.root / "fake"
+        self.sinks = self.root / "sinks"
+        for directory in (self.home, self.xdg, self.tmpdir, self.fake, self.sinks):
+            directory.mkdir()
+        cache = self.home / ".cache" / "public-leak-check"
+        cache.mkdir(parents=True)
+        (cache / "theorem-labs_rocq").write_text("public", encoding="utf-8")
+        self.write_executable("gh", "#!/bin/sh\nexit 1\n")
+        self.write_executable(
+            "git-remote-sink",
+            "#!/bin/sh\n"
+            "key=$(printf '%s' \"$2\" | sha1sum | cut -c1-16)\n"
+            f"sink={shlex.quote(str(self.sinks))}/$key.git\n"
+            "[[ -d \"$sink\" ]] || /usr/bin/git init -q --bare \"$sink\"\n"
+            "while IFS= read -r line; do\n"
+            "    case \"$line\" in\n"
+            "        capabilities) printf 'connect\\n\\n' ;;\n"
+            "        'connect git-receive-pack'|'connect git-upload-pack')\n"
+            "            printf '\\n'\n"
+            "            exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR "
+            "-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT /usr/bin/git \"${line#connect git-}\" \"$sink\"\n"
+            "            ;;\n"
+            "        '') exit 0 ;;\n"
+            "        *) exit 1 ;;\n"
+            "    esac\n"
+            "done\n",
+        )
+        self.public_check = self.root / "public-leak-check"
+        self.public_check.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.public_check.chmod(0o755)
+        self.jj_config = self.root / "jj.toml"
+        self.jj_config.write_text(
+            '[user]\nname = "Hidden Test"\nemail = "hidden-test@example.invalid"\n[signing]\nbehavior = "drop"\n',
+            encoding="utf-8",
+        )
+        base = {
+            key: value for key, value in os.environ.items()
+            if key not in self.marker_names and not key.startswith(("GIT_CONFIG_", "LEGION_", "PI_"))
+        }
+        self.environment = {
+            **base,
+            **fixture_environment(),
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.xdg),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "TMPDIR": str(self.tmpdir),
+            "PATH": os.pathsep.join([str(self.fake), str(ROOT / "shims"), str(Path(real_jj()).parent), os.environ["PATH"]]),
+            "PUBLIC_LEAK_CHECK": str(self.public_check),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_ALLOW_PROTOCOL": "sink",
+            "JJ_CONFIG": str(self.jj_config),
+        }
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.real_git("init", "-q", "-b", "main")
+        self.real_git("config", "user.name", "Hidden Test")
+        self.real_git("config", "user.email", "hidden-test@example.invalid")
+        self.real_git("commit", "-q", "--allow-empty", "-m", "base")
+        self.real_git("remote", "add", "origin", self.public_url)
+        self.real_git("config", "remote.origin.vcs", "sink")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_executable(self, name: str, content: str) -> Path:
+        path = self.fake / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def command(self, command: list[str], environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(command, cwd=self.repo, env=environment or self.environment, capture_output=True, text=True, check=False)
+
+    def real_git(self, *arguments: str) -> str:
+        result = self.command(["/usr/bin/git", *arguments])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def traced(
+        self, command: list[str], *, string_limit: int = 1_048_576, environment: dict[str, str] | None = None
+    ) -> tuple[subprocess.CompletedProcess[bytes], bytes]:
+        read_fd, write_fd = os.pipe()
+        captured: list[bytes] = []
+
+        def read_trace() -> None:
+            with os.fdopen(read_fd, "rb") as stream:
+                captured.append(stream.read())
+
+        reader = threading.Thread(target=read_trace, daemon=True)
+        reader.start()
+        try:
+            process = subprocess.Popen(
+                [
+                    "strace", "-f", "-yy", "-xx", "-s", str(string_limit),
+                    "-e", "trace=execve,write,pwrite64,writev", "-o", f"/dev/fd/{write_fd}", "--", *command,
+                ],
+                cwd=self.repo,
+                env=environment or self.environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(write_fd,),
+            )
+        finally:
+            os.close(write_fd)
+        try:
+            stdout, stderr = process.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            self.fail(f"strace timed out: {stderr.decode('utf-8', errors='replace')}")
+        reader.join(timeout=10)
+        self.assertFalse(reader.is_alive(), "strace capture pipe did not close")
+        self.assertEqual(len(captured), 1, "strace capture was not read")
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), captured[0]
+
+    def assert_refusal(
+        self, result: subprocess.CompletedProcess[bytes], capture: bytes, allowed_files: set[str] | None = None
+    ) -> dict[str, bytes]:
+        allowed_files = allowed_files or set()
+        self.assertNotEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertIn(b"listed leak term", result.stderr.lower())
+        terms = tuple(term.encode() for term in TEST_TERMS)
+        for stream in (result.stdout, result.stderr):
+            for term in terms:
+                self.assertNotIn(term.lower(), stream.lower())
+        argv, writes = parse_strace(capture)
+        for values in argv:
+            joined = b"\0".join(values).lower()
+            for term in terms:
+                self.assertNotIn(term.lower(), joined)
+        for path, data in writes.items():
+            self.assertNotIn(terms[-1], data, path)
+            if path not in allowed_files:
+                for term in terms:
+                    self.assertNotIn(term, data, path)
+        return writes
+
+    def assert_no_canary(self) -> None:
+        canary = TEST_TERMS[-1].encode()
+        for root in (self.home, self.tmpdir, self.repo):
+            for directory, names, files in os.walk(root):
+                names[:] = [name for name in names if not (Path(directory) / name).is_symlink()]
+                for name in files:
+                    path = Path(directory) / name
+                    if not stat.S_ISREG(path.lstat().st_mode):
+                        continue
+                    self.assertNotIn(canary, path.read_bytes(), str(path))
+        git_directories = {Path(self.real_git("rev-parse", "--absolute-git-dir"))}
+        target_file = self.repo / ".jj" / "repo" / "store" / "git_target"
+        if target_file.is_file():
+            target = Path(target_file.read_text(encoding="utf-8").strip())
+            git_directories.add(target if target.is_absolute() else target_file.parent / target)
+        for git_directory in git_directories:
+            result = subprocess.run(
+                ["/usr/bin/git", f"--git-dir={git_directory}", "cat-file", "--batch-all-objects", "--batch"],
+                cwd=self.repo,
+                env=self.environment,
+                input=b"",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+            self.assertNotIn(canary, result.stdout, str(git_directory))
+
+    def initialize_jj(self) -> None:
+        result = self.command(["jj", "git", "init", "--colocate"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def leaky_commit(self, name: str) -> str:
+        (self.repo / name).write_text(TEST_TERMS[0] + "\n", encoding="utf-8")
+        self.real_git("add", name)
+        self.real_git("commit", "--no-verify", "-m", "clean")
+        return self.real_git("rev-parse", "HEAD")
+
+    def control_writer(self) -> tuple[Path, Path, Path]:
+        canary_file = self.tmpdir / "hidden-canary"
+        term_file = self.tmpdir / "hidden-term"
+        script = self.root / "hidden-control.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            "canary=$CANARY\n"
+            "length=${#canary}\n"
+            "half=$((length / 2))\n"
+            "first=$(printf '%s' \"$canary\" | cut -c \"1-$half\")\n"
+            "second=$(printf '%s' \"$canary\" | cut -c \"$((half + 1))-\")\n"
+            f"printf '%s' \"$first\" > {shlex.quote(str(canary_file))}\n"
+            f"printf '%s' \"$second\" >> {shlex.quote(str(canary_file))}\n"
+            f"printf '%s' \"$TEST_TERM\" > {shlex.quote(str(term_file))}\n"
+            f"rm -- {shlex.quote(str(canary_file))} {shlex.quote(str(term_file))}\n"
+            "exec /usr/bin/true \"$canary\"\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return script, canary_file, term_file
+
+    def test_hidden_git_commit(self) -> None:
+        (self.repo / "git-content.txt").write_text(TEST_TERMS[0] + "\n", encoding="utf-8")
+        self.real_git("add", "git-content.txt")
+        result, capture = self.traced(["git", "commit", "-m", "ok"])
+        self.assert_refusal(result, capture)
+        self.assert_no_canary()
+
+    def test_hidden_jj_commit(self) -> None:
+        self.initialize_jj()
+        (self.repo / "jj-content.txt").write_text(TEST_TERMS[0] + "\n", encoding="utf-8")
+        result, capture = self.traced(["jj", "commit", "-m", "ok"])
+        self.assert_refusal(result, capture)
+        self.assert_no_canary()
+
+    def test_hidden_jj_describe_editor(self) -> None:
+        self.initialize_jj()
+        editor = self.root / "hidden-editor.sh"
+        description = self.root / "hidden-description"
+        editor.write_text(
+            "#!/bin/sh\n"
+            "for argument in \"$@\"; do\n"
+            "    [ -f \"$argument\" ] && file=$argument\n"
+            "done\n"
+            f"printf '%s' \"$file\" > {shlex.quote(str(description))}\n"
+            f"printf '%s' {shlex.quote(TEST_TERMS[0])} > \"$file\"\n",
+            encoding="utf-8",
+        )
+        editor.chmod(0o755)
+        result, capture = self.traced(["jj", "describe"], environment=self.environment | {"JJ_EDITOR": str(editor)})
+        description_file = description.read_text(encoding="utf-8")
+        writes = self.assert_refusal(result, capture, {description_file})
+        self.assertIn(description_file, writes)
+        self.assertIn(TEST_TERMS[0].encode(), writes[description_file])
+        self.assert_no_canary()
+
+    def test_hidden_git_push(self) -> None:
+        commit = self.leaky_commit("git-push-content.txt")
+        result, capture = self.traced(["git", "push", "origin", f"{commit}:refs/heads/hidden-git"])
+        self.assert_refusal(result, capture)
+        self.assert_no_canary()
+
+    def test_hidden_jj_push(self) -> None:
+        commit = self.leaky_commit("jj-push-content.txt")
+        self.initialize_jj()
+        imported = self.command(["jj", "git", "import"])
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        marked = self.command(["jj", "bookmark", "set", "--allow-backwards", "hidden-jj", "-r", commit])
+        self.assertEqual(marked.returncode, 0, marked.stderr)
+        result, capture = self.traced(
+            ["jj", "git", "push", "--bookmark", "hidden-jj"],
+            environment=self.environment | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"},
+        )
+        self.assert_refusal(result, capture)
+        self.assert_no_canary()
+
+    def test_hidden_negative_control_finds_file_writes_and_argv(self) -> None:
+        script, canary_file, term_file = self.control_writer()
+        canary = TEST_TERMS[-1].encode()
+        term = TEST_TERMS[0].encode()
+        result, capture = self.traced(
+            [str(script)], environment=self.environment | {"CANARY": canary.decode(), "TEST_TERM": term.decode()}
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        argv, writes = parse_strace(capture)
+        self.assertTrue(any(canary in values for values in argv))
+        self.assertEqual(writes[str(canary_file)], canary)
+        self.assertIn(term, writes[str(term_file)])
+
+    def test_hidden_negative_control_rejects_cut_capture(self) -> None:
+        script, _, _ = self.control_writer()
+        result, capture = self.traced(
+            [str(script)],
+            string_limit=8,
+            environment=self.environment | {"CANARY": TEST_TERMS[-1], "TEST_TERM": TEST_TERMS[0]},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        with self.assertRaisesRegex(AssertionError, "cut string"):
+            parse_strace(capture)
+
+    def test_hidden_trace_parser_rejects_unknown_captures(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "empty.*UNKNOWN"):
+            parse_strace(b"")
+        with self.assertRaisesRegex(AssertionError, "no execve.*UNKNOWN"):
+            parse_strace(b'write(1<pipe:[1]>, "\\x78", 1) = 1\n')
+        payload = "".join(f"\\x{byte:02x}" for byte in TEST_TERMS[0].encode()).encode()
+        capture = (
+            b'1 execve("/usr/bin/true", ["/usr/bin/true"], 0x0) = 0\n'
+            b'[pid 2] write(3</tmp/hidden-output>, "' + payload + b'" <unfinished ...>\n'
+            b'[pid 2] <... write resumed> , ' + str(len(TEST_TERMS[0])).encode() + b') = ' + str(len(TEST_TERMS[0])).encode() + b'\n'
+        )
+        _, writes = parse_strace(capture)
+        self.assertEqual(writes["/tmp/hidden-output"], TEST_TERMS[0].encode())
+
+
 if __name__ == "__main__":
     unittest.main()
