@@ -203,7 +203,8 @@ mirror_links() { # mirror_links SRC DST [copy-files]
 # A profile whose agent/ holds models.overlay.yml is the default profile with other provider keys,
 # not a separate install (dispatch://BET-59, 2026-10-30: the verified-grader sessions bill Anthropic
 # to another account). It shares every piece of state with the default: each entry of ~/.omp (but
-# agent/, profiles/ and run/) and of ~/.omp/agent (but models.yml, models.overlay.yml and SQLite's
+# agent/, profiles/, run/ and .no-shared-setup, since an old shim moved one there and a link to it
+# would opt the profile out) and of ~/.omp/agent (but models.yml, models.overlay.yml and SQLite's
 # -wal/-shm, which SQLite places beside the link's target) is a link to the default's, re-made on
 # every launch, so an entry a newer omp adds is shared too; dotfiles included, since omp reads an
 # agent/.env. An entry omp created in the profile first, with no default counterpart, is moved into
@@ -306,14 +307,14 @@ if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
             echo "omp: waited 30 s for $root/profiles/$profile/.share.lock; profile $profile not started" >&2
             exit 1
         fi
-        # Never .no-shared-setup: an old shim moved one to ~/.omp; a link to it opts a profile out.
         share_links "$root" "$root/profiles/$profile" agent profiles run .share.lock .no-shared-setup
         share_links "$root/agent" "$root/profiles/$profile/agent" \
             models.yml models.overlay.yml 'models.yml.new.*' '*-wal' '*-shm'
         # pi-envoy reads a named profile's agent/envoy.json instead of ~/.config/legion/envoy.json.
         # A link to a missing file counts too: `ln` would refuse every later launch.
-        [[ -e "$root/profiles/$profile/agent/envoy.json" || -L "$root/profiles/$profile/agent/envoy.json" ]] ||
-            ln -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" "$root/profiles/$profile/agent/envoy.json"
+        envoy_json="$root/profiles/$profile/agent/envoy.json"
+        [[ -e "$envoy_json" || -L "$envoy_json" ]] ||
+            ln -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" "$envoy_json"
         exec 9>&-
         models_out="$root/profiles/$profile/agent/models.yml"
         # 0600: the default's models.yml can hold literal keys (scripts/omp-models-build, `apiKeyFile`).
