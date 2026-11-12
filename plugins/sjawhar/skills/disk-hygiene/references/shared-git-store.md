@@ -30,10 +30,24 @@ Read this before you forget a jj workspace, remove a git worktree, or repair one
 - **To decide an orphan whose entry is gone, read its tree into a throwaway index.** This touches nothing shared:
 
   ```
-  export GIT_INDEX_FILE=$(mktemp -u); g="git --git-dir=<repo>/.git --work-tree=<orphan>"
-  $g read-tree <commit>; $g update-index -q --refresh
-  $g diff-files --name-only; $g ls-files --others --exclude-standard
+  i=$(mktemp -u); g="git --git-dir=<repo>/.git --work-tree=<orphan>"
+  GIT_INDEX_FILE=$i $g read-tree <commit>
+  GIT_INDEX_FILE=$i $g update-index -q --refresh
+  GIT_INDEX_FILE=$i $g diff-files --name-only
+  GIT_INDEX_FILE=$i $g ls-files --others --exclude-standard
   ```
+
+
+  **NEVER `export GIT_INDEX_FILE`.** Set it per command, as above. An agent shell is one
+  persistent shell, so an exported value silently applies to every later git command in the
+  session, in every repository: `git status` then reports nearly every tracked file as a
+  staged deletion, and a commit made in that state commits those deletions. Measured
+  2026-11-12: a recipe beginning with that export went to 84 sessions and contaminated at
+  least one shell. It applies equally to any shell where someone exported it by hand, for
+  instance to build a tree with `commit-tree`. To clear and check one: `unset
+  GIT_INDEX_FILE`, then `git log --stat` over every commit the session made and look for a
+  file count far larger than the change described. `git status` alone does not find a bad
+  commit that was already made.
 
   Both lists empty and `<commit>` on a remote means the orphan holds nothing unsaved: remove it and write one ledger line. **Find `<commit>` by the worktree's own name first** (`git for-each-ref | grep <name>`), then confirm with `git ls-remote`. **A non-empty result is NOT evidence of lost work unless the base is the commit that tree was actually at**: measured the same night, one tree read 159 modified against a later bookmark and another read 50,861 modified and 255 untracked against `origin/main` while being clean at its own head `f3937ac0`. **Nobody deletes on a non-empty result, and nobody reports one as unsaved work either.**
 - **Orphans are the normal state here, not an incident, so expect them in bulk.** Measured on sami-devbox 2026-11-12 05:05Z: **455 orphaned checkouts against 894 live, 299.9 GiB across the 392 that were sized.** Age is a usable first filter because live work is young: live worktrees ran a median of 6.6 days old with a **maximum of 8.4** (n=131), while 407 of the orphans were older than 7 days. **An orphan older than every live worktree is still not proof** — it is the cheap sort before the read-tree test.
