@@ -316,8 +316,13 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assertIn(
             f"systemctl --user enable --now {UNIT_NAME}", self.calls()
         )
-        self.assertIn(f"systemctl --user try-restart {UNIT_NAME}", self.calls())
+        # The first run started the helper itself, so it records the installed files without a
+        # `sessions` call or a restart.
+        for verb in ("restart", "try-restart"):
+            self.assertEqual(self.systemctl_verb(self.calls(), verb), [], self.calls())
+        self.assertNotIn("helper sessions", self.calls())
         self.assertTrue(self.marker.is_file())
+        self.assertIn("legion-envoy-v1.0.0", self.marker.read_text(encoding="utf-8"))
         self.assertNotIn(url, result.stdout)
         self.assertNotIn(url, result.stderr)
         self.assert_positive_log()
@@ -481,6 +486,36 @@ class AgentSecretsLocal(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_no_lifecycle_calls(self.calls()[before:])
+        self.assert_positive_log()
+
+    def test_h3_active_but_disabled_helper_on_a_new_pin_still_follows_the_restart_rules(
+        self,
+    ) -> None:
+        # `enable --now` on an active but disabled helper enables it without restarting it, so
+        # the helper still runs the old pin: the run did not start it, and the new pin is
+        # recorded only through the sessions check and a restart.
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        self.assertEqual(self.run_local().returncode, 0)
+        (self.state / "enabled").unlink()
+        self.change_pin()
+        before = len(self.calls())
+
+        result = self.run_local()
+        new_calls = self.calls()[before:]
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.systemctl_verb(new_calls, "enable"),
+            [f"systemctl --user enable --now {UNIT_NAME}"],
+        )
+        self.assertIn("helper sessions", new_calls)
+        self.assertEqual(
+            self.systemctl_verb(new_calls, "try-restart"),
+            [f"systemctl --user try-restart {UNIT_NAME}"],
+        )
+        for verb in ("start", "restart"):
+            self.assertEqual(self.systemctl_verb(new_calls, verb), [], new_calls)
+        self.assertIn("legion-envoy-v2.0.0", self.marker.read_text(encoding="utf-8"))
         self.assert_positive_log()
 
     def test_i_env_local_url_change_does_not_restart_the_helper(self) -> None:
