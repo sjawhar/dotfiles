@@ -157,7 +157,8 @@ before handing the call to the real one.
   after `JJ: ignore-rest`. One description is read whole. For several, each
   `JJ: describe <12-hex id> -------` section is read on its own; a header whose id the shim did
   not expect, or text before the first header, refuses without printing the header. It rejects
-  an editor that is the wrapper itself, and its active guard rejects a recursive wrapper run. The
+  an editor that is the wrapper itself, and names an editor configuration it cannot read as such;
+  its active guard rejects a recursive wrapper run. The
   `--deleted` refusal and trailer handling stay as they were.
   Every `jj git push` first dry-runs its resolved destination plan and, for every public or
   unreadable GitHub URL, scans the outgoing commits that destination does not advertise. This
@@ -219,8 +220,9 @@ before handing the call to the real one.
   strip with the editor and whitespace without, and beats `commit.cleanup`), the effective
   `core.commentChar`, and scissors handling. For `core.commentChar=auto`, the character is taken
   only from what Git wrote into the prepared message: without the editor or the status, Git's own
-  choice from that text; else Git's cut line when Git wrote one (scissors or verbose) and the file
-  holds no other, or the one candidate that starts Git's comment block after the message. When
+  choice from that text; else the character of Git's cut lines when Git wrote them (scissors or
+  verbose, a line for each) and every cut line in the file has that one character, or the one
+  candidate that starts Git's comment block after the message. When
   that is not certain, every line is read. A comment or text after scissors that Git removes is
   not read; the same text is read when Git keeps it. These commit scans do not cover
   `git commit --no-verify`, a caller's `-c core.hooksPath`, `merge`, `pull`,
@@ -277,6 +279,8 @@ before handing the call to the real one.
   hook directory; after a clean term check and public check where it is enabled, the gate runs
   that own pre-push with the same arguments and update input, without the shim's `-c` or that
   variable. Where the wrapper or dispatcher is effective, the public check runs once through it.
+  `GIT_SHIM_JJ_PUSH=1` tells the gate that jj ran the push, so its refusals say `jj push`, else
+  `push`.
   The existing public-gate decisions remain: only the existing agent jj and verified plain-push
   paths set `GIT_SHIM_PUBLIC_CHECK`; the term gate is separate, so it also runs for a person's
   push and wherever the existing public gate would not. A Git executable run by its full path,

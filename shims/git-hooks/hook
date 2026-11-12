@@ -5,8 +5,9 @@
 # Every hook name here is a link to this file.
 #
 # For the scanned commit, prepare-commit-msg records Git's auto comment character before the
-# editor runs; pre-commit runs the repository hook then scans the staged diff; commit-msg runs
-# the repository hook then scans the message as Git will clean it. For the agent-session commands
+# editor runs (not under --no-verify, which skips commit-msg, its reader); pre-commit runs the
+# repository hook then scans the staged diff; commit-msg runs the repository hook then scans the
+# message as Git will clean it. For the agent-session commands
 # that take no --trailer, prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` unless the same
 # line is there already, the id is malformed, scripts/omp-session-trailer says no, or a rebase is
 # replaying commits (`pull --rebase`, a rebase started from a hook): a replayed commit keeps the
@@ -38,24 +39,26 @@ here="$(cd -P -- "${0%/*}" && pwd)"
 # bookkeeping, while a wrong one on someone else's is a false claim of authorship in a public
 # repository. `command git` is deliberate - shims/git prints its own lines, which would otherwise
 # land inside a --format=%ae capture.
-replaying=0
-replayed_author=""
-# Cherry-pick and revert ONLY: they replay another author's commit, preserving its author. A
-# merge or pull writes a NEW commit authored by us, so it is ours to stamp even when what it
-# merges is foreign - including MERGE_HEAD here wrongly silenced merges (measured 2026-11-10).
-for _head in CHERRY_PICK_HEAD REVERT_HEAD; do
-    _p="$(git rev-parse --git-path "$_head" 2> /dev/null)" || continue
-    [[ -f "$_p" ]] || continue
-    replaying=1
-    replayed_author="$(command git log -1 --format=%ae "$(< "$_p")" 2> /dev/null || true)"
-    break
-done
-_mine="$(command git config user.email 2> /dev/null || true)"
-if [[ $replaying -eq 1 ]] &&
-    ! [[ -n "$replayed_author" && -n "$_mine" && "$replayed_author" == "$_mine" ]]; then
-    replay_blocks_trailer=1
-else
-    replay_blocks_trailer=0
+replay_blocks_trailer=0
+# Only the trailer below reads this, and only for a prepare-commit-msg outside the leak-term commit scan.
+if [[ -z "${DOTFILES_GIT_COMMIT_SCAN:-}" && "$name" == prepare-commit-msg ]]; then
+    replaying=0
+    replayed_author=""
+    # Cherry-pick and revert ONLY: they replay another author's commit, preserving its author. A
+    # merge or pull writes a NEW commit authored by us, so it is ours to stamp even when what it
+    # merges is foreign - including MERGE_HEAD here wrongly silenced merges (measured 2026-11-10).
+    for _head in CHERRY_PICK_HEAD REVERT_HEAD; do
+        _p="$(git rev-parse --git-path "$_head" 2> /dev/null)" || continue
+        [[ -f "$_p" ]] || continue
+        replaying=1
+        replayed_author="$(command git log -1 --format=%ae "$(< "$_p")" 2> /dev/null || true)"
+        break
+    done
+    _mine="$(command git config user.email 2> /dev/null || true)"
+    if [[ $replaying -eq 1 ]] &&
+        ! [[ -n "$replayed_author" && -n "$_mine" && "$replayed_author" == "$_mine" ]]; then
+        replay_blocks_trailer=1
+    fi
 fi
 
 if [[ -z "${DOTFILES_GIT_COMMIT_SCAN:-}" && "$name" == prepare-commit-msg && -n "${1:-}" &&
@@ -84,12 +87,8 @@ if [[ "$p" == *"$mine"* ]]; then
 fi
 own="$(git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
 
-run_own_hook() {
-    if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
-        "$own/$name" "$@"
-        return
-    fi
-    return 0
+own_hook_present() {
+    [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]
 }
 
 scan_field() {
@@ -104,14 +103,11 @@ scan_field() {
 }
 
 commit_status() {
-    local configured code
+    local configured code=0
     case "$(scan_field status)" in
         0 | 1) scan_field status ;;
         config)
-            set +e
-            configured="$(git config --type=bool --get commit.status 2> /dev/null)"
-            code=$?
-            set -e
+            configured="$(git config --type=bool --get commit.status 2> /dev/null)" || code=$?
             case "$code:$configured" in
                 1:*) printf 1 ;;
                 0:true) printf 1 ;;
@@ -128,25 +124,20 @@ commit_status() {
 # (strip with the editor, whitespace without) and beats commit.cleanup; an absent one takes
 # commit.cleanup, whose `default` resolves the same way.
 resolve_cleanup_and_verbose() {
-    local configured code
+    local configured code=0
     read_every_line=0
     cleanup="$(scan_field cleanup)"
+    if [[ "$cleanup" == absent ]]; then
+        configured="$(git config --get commit.cleanup 2> /dev/null)" || code=$?
+        case "$code:$configured" in
+            0:verbatim | 0:whitespace | 0:strip | 0:scissors) cleanup="$configured" ;;
+            0:default | 1:*) cleanup=default ;;
+            *) cleanup=unknown ;;
+        esac
+    fi
     case "$cleanup" in
         default)
             if [[ "${GIT_EDITOR:-}" == : ]]; then cleanup=whitespace; else cleanup="strip"; fi
-            ;;
-        absent)
-            set +e
-            configured="$(git config --get commit.cleanup 2> /dev/null)"
-            code=$?
-            set -e
-            case "$code:$configured" in
-                0:verbatim | 0:whitespace | 0:strip | 0:scissors) cleanup="$configured" ;;
-                0:default | 1:*)
-                    if [[ "${GIT_EDITOR:-}" == : ]]; then cleanup=whitespace; else cleanup="strip"; fi
-                    ;;
-                *) cleanup=verbatim; read_every_line=1 ;;
-            esac
             ;;
         verbatim | whitespace | strip | scissors) ;;
         *) cleanup=verbatim; read_every_line=1 ;;
@@ -159,10 +150,8 @@ resolve_cleanup_and_verbose() {
     if [[ "$verbose" == unknown ]]; then
         read_every_line=1
     elif [[ "$verbose" == config ]]; then
-        set +e
-        configured="$(git config --type=bool --get commit.verbose 2> /dev/null)"
-        code=$?
-        set -e
+        code=0
+        configured="$(git config --type=bool --get commit.verbose 2> /dev/null)" || code=$?
         case "$code:$configured" in
             0:true) verbose=1 ;;
             0:false | 1:*) verbose=0 ;;
@@ -172,14 +161,18 @@ resolve_cleanup_and_verbose() {
 }
 
 # git writes its cut line into the file only when the editor runs with the status shown,
-# and then only for `scissors` or verbose; the scanner trusts a cut line only in that case.
+# and then only for `scissors` or verbose (a line for each); the scanner trusts cut lines only in
+# that case.
 prepare_auto_comment_char() {
-    local configured code editor status character comment_path cleanup verbose read_every_line cut=0
-    set +e
-    configured="$(git config --get core.commentChar 2> /dev/null)"
-    code=$?
-    set -e
+    local configured code=0 editor status character comment_path cleanup verbose read_every_line cut=0
+    configured="$(git config --get core.commentChar 2> /dev/null)" || code=$?
     [[ "$code:$configured" == 0:auto ]] || return 0
+    # A file an earlier commit left, its git process of this pid stopped after this hook, must not give this
+    # commit its character: it goes before any return below.
+    comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
+    rm -f -- "$comment_path"
+    # Under --no-verify commit-msg, the file's only reader, does not run.
+    [[ "$(scan_field verify)" != 0 ]] || return 0
     if [[ "${GIT_EDITOR:-}" == : ]]; then editor=0; else editor=1; fi
     status="$(commit_status)"
     [[ "$status" == 0 || "$status" == 1 ]] || return 0
@@ -196,30 +189,26 @@ prepare_auto_comment_char() {
     # No character (git's choice is not certain) leaves no file, so commit-msg reads every line.
     [[ -n "$character" ]] || return 0
     [[ "$character" =~ ^[\#\;\@\!\$\%\^\&\|\:]$ ]] || exit 1
-    comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
     printf '%s' "$character" > "$comment_path"
 }
 
 message_scan_args() {
-    local cleanup verbose configured code comment_path read_every_line
+    local cleanup verbose configured code=0 comment_path read_every_line
     resolve_cleanup_and_verbose
     if ((read_every_line)); then
         scanner_args=(message --cleanup verbatim --place "commit message")
         return 0
     fi
-    set +e
-    configured="$(git config --get core.commentChar 2> /dev/null)"
-    code=$?
-    set -e
+    configured="$(git config --get core.commentChar 2> /dev/null)" || code=$?
     case "$code:$configured" in
         1:*) comment_char="#" ;;
         0:auto)
             comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
-            if [[ -f "$comment_path" ]]; then
-                comment_char="$(< "$comment_path")"
+            # Read directly: under errexit a `$(< file)` of a missing file ends this hook. The file holds one
+            # character and no newline, so read reports end of file after taking it.
+            comment_char=""
+            if { IFS= read -r comment_char || [[ -n "$comment_char" ]]; } 2> /dev/null < "$comment_path"; then
                 rm -f -- "$comment_path"
-            else
-                comment_char=""
             fi
             ;;
         0:?) comment_char="$configured" ;;
@@ -241,11 +230,9 @@ if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
         prepare_auto_comment_char "$1"
     fi
 
-    set +e
-    run_own_hook "$@"
-    own_status=$?
-    set -e
-    ((own_status == 0)) || exit "$own_status"
+    if own_hook_present; then
+        "$own/$name" "$@" || exit
+    fi
 
     case "$name" in
         pre-commit)
@@ -259,17 +246,13 @@ if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
             ;;
         commit-msg)
             message_scan_args
-            set +e
-            cat -- "$1" | "$here/../../scripts/leak-terms-check" "${scanner_args[@]}"
-            pipe_status=("${PIPESTATUS[@]}")
-            set -e
-            ((pipe_status[0] == 0 && pipe_status[1] == 0)) || exit 1
+            "$here/../../scripts/leak-terms-check" "${scanner_args[@]}" < "$1" || exit 1
             ;;
     esac
     exit 0
 fi
 
-if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
+if own_hook_present; then
     exec "$own/$name" "$@"
 fi
 exit 0

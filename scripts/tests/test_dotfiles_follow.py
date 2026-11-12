@@ -26,6 +26,9 @@ import unittest.mock
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(DOTFILES / "shims" / "tests"))
+from leak_terms_fixture import fixture_environment  # noqa: E402 - found through the path above
+
 SCRIPT = DOTFILES / "scripts" / "dotfiles-follow"
 LOADER = importlib.machinery.SourceFileLoader("dotfiles_follow", str(SCRIPT))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
@@ -128,12 +131,9 @@ class Harness(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if key in (
-                "DOTFILES_LEAK_TERMS_FILE",
-                "SOPS_AGE_KEY_FILE",
-                "DOTFILES_LEAK_TERMS_SOPS_HOME",
-            ) or not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_STATE"))
+            if not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_STATE"))
         }
+        env.update(fixture_environment())
         env.update(
             HOME=str(self.home),
             PATH=f"{fakebin}:{os.environ['PATH']}",

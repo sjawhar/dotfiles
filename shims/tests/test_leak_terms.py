@@ -112,7 +112,8 @@ def unreadable_lists(root: Path, path: str) -> tuple[tuple[str, dict[str, str], 
         (
             "key",
             {"SOPS_AGE_KEY_FILE": str(unrelated_key_file()), "DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)},
-            "add this machine's age key to .sops.yaml above the YubiKey line and run sops updatekeys leak-terms.sops.yaml",
+            "add this machine's age key to .sops.yaml above the YubiKey line and run sops updatekeys leak-terms.sops.yaml"
+            " on a machine that can decrypt the list",
         ),
         ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
         ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
@@ -134,6 +135,16 @@ class LeakTestCase(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
+    def private_home(self) -> None:
+        """self.home, self.xdg and self.tmpdir: a HOME, XDG_CONFIG_HOME and TMPDIR of the test's own."""
+        self.home, self.xdg, self.tmpdir = (self.root / name for name in ("home", "xdg", "tmp"))
+        for directory in (self.home, self.xdg, self.tmpdir):
+            directory.mkdir()
+
+    def environment(self, agent: bool, **extra: str) -> dict[str, str]:
+        """The test's agent or person environment (self.agent, self.person) with EXTRA."""
+        return {**(self.agent if agent else self.person), **extra}
+
     def launch(
         self,
         argv: list[str],
@@ -144,10 +155,11 @@ class LeakTestCase(unittest.TestCase):
         text: bool = True,
         timeout: float = LAUNCH_TIMEOUT,
         pass_fds: tuple[int, ...] = (),
+        stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
         """ARGV in a session and process group of its own, its tasks capped at self.task_limit (RLIMIT_NPROC), stdin
-        /dev/null unless INPUT is given. A command that outlives TIMEOUT fails the test after its whole process
-        group is killed, descendants holding its pipes included."""
+        the descriptor STDIN, else /dev/null unless INPUT is given. A command that outlives TIMEOUT fails the test
+        after its whole process group is killed, descendants holding its pipes included."""
         _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
         limit = self.task_limit if hard == resource.RLIM_INFINITY else min(self.task_limit, hard)
 
@@ -158,7 +170,7 @@ class LeakTestCase(unittest.TestCase):
             argv,
             cwd=cwd,
             env=env,
-            stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
+            stdin=stdin if stdin is not None else subprocess.DEVNULL if input is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=text,
@@ -381,14 +393,36 @@ def parse_strace(capture: bytes) -> tuple[list[tuple[bytes, ...]], dict[str, byt
 
 @lru_cache(maxsize=1)
 def real_jj() -> str:
-    located = subprocess.run(["mise", "which", "jj"], capture_output=True, text=True, check=False)
-    if located.returncode == 0 and located.stdout.strip():
+    """The jj binary: the one `mise which jj` names, else the first jj on PATH that is neither a copy of shims/jj (its
+    marker in the first 512 bytes) nor a mise shim (a link to mise), as test_jj_lock_shim.real_jj judges them. These
+    tests must run, so finding none raises, never skips."""
+    try:
+        located = subprocess.run(["mise", "which", "jj"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        located = None
+    if located is not None and located.returncode == 0 and located.stdout.strip():
         return located.stdout.strip()
     for directory in os.environ["PATH"].split(os.pathsep):
         candidate = Path(directory) / "jj"
-        if candidate.is_file() and os.access(candidate, os.X_OK) and candidate.resolve() != ROOT / "shims" / "jj":
-            return str(candidate)
+        if not (candidate.is_file() and os.access(candidate, os.X_OK)) or candidate.resolve().name == "mise":
+            continue
+        with candidate.open("rb") as handle:
+            if b"jj-lock-shim" in handle.read(512):
+                continue
+        return str(candidate)
     raise RuntimeError("jj is required for scanner tests")
+
+
+@lru_cache(maxsize=1)
+def scanner_module():
+    """scripts/leak-terms-check loaded once as a module, for the tests that call its functions."""
+    loader = importlib.machinery.SourceFileLoader("leak_terms_check", str(CHECK))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
 
 
 class ScanModes(LeakTestCase):
@@ -536,6 +570,32 @@ rename to zorbleplex.txt
             self.assert_hidden(result)
         self.assert_found(self.check("diff", renamed_to), "<listed term>.txt")
 
+    def test_scanner_reads_every_extended_header_as_metadata(self) -> None:
+        # git's extended header lines between `diff --git` and the hunk: a mode change (git and jj print `old mode` and
+        # `new mode` before `index`) and a break rewrite's `dissimilarity index` are metadata, never part of a path.
+        def diff(path: str, header: str, hunk: str = "") -> str:
+            return f"diff --git a/{path} b/{path}\n{header}{hunk}"
+
+        mode = "old mode 100644\nnew mode 100755\n"
+        added = "index 1111111..2222222\n--- a/run.sh\n+++ b/run.sh\n@@ -1,0 +2 @@\n+{}\n"
+        rewrite = "dissimilarity index 100%\nindex 1111111..2222222 100644\n--- a/run.sh\n+++ b/run.sh\n@@ -1 +1 @@\n-old\n+{}\n"
+        for label, text in (
+            ("mode-only", diff("run.sh", mode)),
+            ("mode-and-content", diff("run.sh", mode, added.format("echo clean"))),
+            ("rewrite", diff("run.sh", "", rewrite.format("echo clean"))),
+        ):
+            with self.subTest(case=label, refused=False):
+                result = self.check("diff", text)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_hidden(result)
+        for label, text, place in (
+            ("mode-only", diff("zorbleplex.sh", mode), "<listed term>.sh"),
+            ("mode-and-content", diff("run.sh", mode, added.format("Quillfeather Lane 9")), "run.sh:2"),
+            ("rewrite", diff("run.sh", "", rewrite.format("Quillfeather Lane 9")), "run.sh:1"),
+        ):
+            with self.subTest(case=label, refused=True):
+                self.assert_found(self.check("diff", text), place)
+
     def test_scanner_reads_binary_paths_not_binary_payloads(self) -> None:
         binary_path = """diff --git a/zorbleplex.bin b/zorbleplex.bin
 Binary files a/zorbleplex.bin and b/zorbleplex.bin differ
@@ -671,7 +731,11 @@ index 0000000,0000000,0000000..1111111
         empty = {**self.env, "DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml("terms: |\n  # only comments\n\n"))}
         cases = (
             (missing_sops, "install sops with mise"),
-            (unrelated, "add this machine's age key to .sops.yaml above the YubiKey line and run sops updatekeys leak-terms.sops.yaml"),
+            (
+                unrelated,
+                "add this machine's age key to .sops.yaml above the YubiKey line and run sops updatekeys "
+                "leak-terms.sops.yaml on a machine that can decrypt the list",
+            ),
             (missing, "run scripts/dotfiles-sync local"),
             (invalid, "fix it with sops edit leak-terms.sops.yaml"),
             (empty, "add a term with sops edit leak-terms.sops.yaml"),
@@ -687,12 +751,7 @@ index 0000000,0000000,0000000..1111111
             self.assert_no_key_material(result)
 
     def test_scanner_uses_passwd_key_fallback_when_the_callers_home_moved(self) -> None:
-        loader = importlib.machinery.SourceFileLoader("leak_terms_check_test", str(CHECK))
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        self.assertIsNotNone(spec)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[loader.name] = module
-        loader.exec_module(module)
+        module = scanner_module()
 
         passwd_home = self.root / "passwd-home"
         key_dir = passwd_home / ".config" / "sops" / "age"
@@ -827,7 +886,11 @@ index 0000000,0000000,0000000..1111111
             # Many `@` lines in the message outnumber git's `;` block lines.
             ("many-at-lines", "# keep\n" + "@ line\n" * 40 + "\n" + block, "1", "1", "0", ";\n"),
             ("git-cut-line", f"# keep\n\n; {cut}\n; Do not modify or remove the line above.\n;\n", "1", "1", "1", ";\n"),
+            # git's two cut lines (--cleanup=scissors with -v) name one character.
+            ("two-git-cut-lines", f"x\n\n# {cut}\n# Do not modify or remove the line above.\n#\n# {cut}\n#\n", "1", "1", "1", "#\n"),
+            # A caller's cut line in another character beside git's makes it unknown.
             ("two-cut-lines", f"# {cut}\n\n; {cut}\n;\n", "1", "1", "1", ""),
+            ("caller-cut-line-and-two-git-cut-lines", f"# {cut}\n\n; {cut}\n;\n; {cut}\n", "1", "1", "1", ""),
             ("no-git-block", f"# {cut}\n", "1", "1", "0", ""),
             ("no-editor-caller-cut-line", f"@ {cut}\n# x\n", "0", "1", "0", ";\n"),
             ("no-hash", "plain text\n", "0", "0", "0", "#\n"),
@@ -847,26 +910,38 @@ index 0000000,0000000,0000000..1111111
                 )
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, ""))
 
-    def test_scanner_stream_parser_reads_a_16_mib_record_linearly(self) -> None:
-        loader = importlib.machinery.SourceFileLoader("leak_terms_check_stream_test", str(CHECK))
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        self.assertIsNotNone(spec)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[loader.name] = module
-        loader.exec_module(module)
+    def test_scanner_stream_parser_reads_a_16_mib_record_split_over_chunks(self) -> None:
+        module = scanner_module()
         payload = b"x" * (16 * 1024 * 1024)
         chunks = [payload[index:index + 65536] for index in range(0, len(payload), 65536)]
         self.assertEqual(list(module.nul_records([*chunks, b"\0"])), [payload])
 
     def test_scanner_reproduces_jj_command_comments_and_escapes(self) -> None:
-        loader = importlib.machinery.SourceFileLoader("leak_terms_check_command_test", str(CHECK))
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        self.assertIsNotNone(spec)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[loader.name] = module
-        loader.exec_module(module)
+        module = scanner_module()
         command, _ = module.jj_editor_command(json.dumps('"/editor path" # ignored comment'), "/message", 1)
         self.assertEqual(command, ["/editor path", "/message"])
+
+    def test_scanner_jj_editor_preflight_reads_the_listing_and_names_each_cause(self) -> None:
+        # The argument is `jj config list --include-defaults ui.editor -T 'name ++ "\t" ++ json(value)'`: one
+        # `ui.editor` line, or a table's `ui.editor.command` and `ui.editor.env.<NAME>` lines.
+        wrapper = "ui.editor=" + json.dumps([str(CHECK.resolve()), "jj-editor"])
+        cases = (
+            ("string", 'ui.editor\t"vim -f"', 0, f'{wrapper}\n"vim -f"\n'),
+            (
+                "table",
+                'ui.editor.command\t["vim","-f"]\nui.editor.env.EDITOR_MODE\t"plain"\n',
+                0,
+                f'{wrapper}\n{{"env":{{"EDITOR_MODE":"plain"}},"command":["vim","-f"]}}\n',
+            ),
+            ("empty-array", "ui.editor\t[]", 5, ""),
+            ("env-without-command", 'ui.editor.env.EDITOR_MODE\t"plain"', 5, ""),
+            ("not-json", "ui.editor\tvim", 5, ""),
+            ("wrapper", "ui.editor\t" + json.dumps([str(CHECK), "jj-editor"]), 6, ""),
+        )
+        for label, listing, status, output in cases:
+            with self.subTest(case=label):
+                result = self.launch([str(CHECK), "jj-editor-preflight", listing], env=self.env, cwd=ROOT)
+                self.assertEqual((result.returncode, result.stdout), (status, output), result.stderr)
 
     def test_scanner_jj_editor_single_and_bulk_modes_fail_closed(self) -> None:
         single = self.root / "single.jjdescription"
@@ -933,17 +1008,36 @@ index 0000000,0000000,0000000..1111111
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(int(result.stdout), 400, "the task budget did not stop the forks")
 
+    def test_harness_real_jj_skips_shim_copies_and_mise_shims(self) -> None:
+        # With `mise which jj` failing or mise missing, the PATH lookup passes over another copy of shims/jj (its
+        # marker in the first 512 bytes) and a mise shim (a link to mise), and raises, never skips, when nothing is
+        # left.
+        shim_copy = self.root / "shim-copy" / "jj"
+        shim_copy.parent.mkdir()
+        shutil.copyfile(ROOT / "shims" / "jj", shim_copy)
+        shim_copy.chmod(0o755)
+        mise_shim = self.root / "mise-shims" / "jj"
+        mise_shim.parent.mkdir()
+        mise_shim.symlink_to(write_executable(self.root / "mise-bin" / "mise", "#!/bin/sh\nexit 1\n"))
+        binary = write_executable(self.root / "binary" / "jj", "#!/bin/sh\nexit 0\n")
+        without_binary = os.pathsep.join(str(path.parent) for path in (shim_copy, mise_shim))
+        failed = subprocess.CompletedProcess(["mise", "which", "jj"], 1, "", "")
+        for label, mise in (("mise-fails", {"return_value": failed}), ("no-mise", {"side_effect": FileNotFoundError("mise")})):
+            with self.subTest(case=label):
+                with mock.patch.object(subprocess, "run", **mise):
+                    with mock.patch.dict(os.environ, {"PATH": f"{without_binary}{os.pathsep}{binary.parent}"}):
+                        self.assertEqual(real_jj.__wrapped__(), str(binary))
+                    with mock.patch.dict(os.environ, {"PATH": without_binary}):
+                        with self.assertRaises(RuntimeError):
+                            real_jj.__wrapped__()
+
 
 class GitLeaks(LeakTestCase):
     session = SESSION
 
     def setUp(self) -> None:
         super().setUp()
-        self.home = self.root / "home"
-        self.xdg = self.root / "xdg"
-        self.tmpdir = self.root / "tmp"
-        for directory in (self.home, self.xdg, self.tmpdir):
-            directory.mkdir()
+        self.private_home()
         self.config = self.root / "gitconfig"
         self.config.write_text(
             "[user]\n\tname = Leak Test\n\temail = leak-test@example.invalid\n"
@@ -964,9 +1058,6 @@ class GitLeaks(LeakTestCase):
         self.agent = {**self.person, "OMP_SESSION_ID": self.session}
         self.repositories = 0
         self.editors = 0
-
-    def environment(self, agent: bool, **extra: str) -> dict[str, str]:
-        return {**(self.agent if agent else self.person), **extra}
 
     def git_run(self, repository: Path, *arguments: str, agent: bool, real: bool = False,
             extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1139,6 +1230,28 @@ class GitLeaks(LeakTestCase):
         body = self.git_run(throwaway, "log", "-1", "--format=%B", agent=False, real=True)
         self.assertNotIn("Omp-Session:", body.stdout)
 
+    def test_git_term_reads_a_mode_change_as_metadata(self) -> None:
+        # git prints `old mode` and `new mode` between the header and `index`: a mode-only change commits, and a term
+        # the same change adds is refused at its line.
+        for agent in (False, True):
+            for content, place in ((None, None), ("echo clean\necho more\n", None), ("echo clean\nQuillfeather Lane 9\n", "run.sh:2")):
+                with self.subTest(agent=agent, content=content, refused=place is not None):
+                    repository = self.repository(agent)
+                    self.stage(repository, "run.sh", "echo clean\n", agent)
+                    made = self.git_run(repository, "commit", "-q", "-m", "base", agent=agent, real=True)
+                    self.assertEqual(made.returncode, 0, made.stderr)
+                    if content is not None:
+                        (repository / "run.sh").write_text(content, encoding="utf-8")
+                    (repository / "run.sh").chmod(0o755)
+                    added = self.git_run(repository, "add", "run.sh", agent=agent)
+                    self.assertEqual(added.returncode, 0, added.stderr)
+                    if place is not None:
+                        self.assert_refused(repository, agent, place, "commit", "-m", "mode")
+                        continue
+                    self.assert_clean(repository, agent, "commit", "-m", "mode")
+                    tree = self.git_run(repository, "ls-tree", "HEAD", "run.sh", agent=agent, real=True)
+                    self.assertTrue(tree.stdout.startswith("100755 "), tree.stdout)
+
     def message_case(self, agent: bool, config: tuple[tuple[str, str], ...], arguments: tuple[str, ...],
                      editor_text: str | None, hook_lines: tuple[str, ...] | None, place: str | None, *,
                      remote: bool = False, environment: dict[str, str] | None = None) -> None:
@@ -1305,6 +1418,65 @@ class GitLeaks(LeakTestCase):
             with self.subTest(case="session-trailer", refused=place is not None):
                 self.message_case(True, auto, keep, edited, None, place, remote=True)
 
+    def comment_char_files(self, repository: Path) -> list[str]:
+        """The comment-character files prepare-commit-msg left in REPOSITORY's git directory."""
+        return sorted(path.name for path in (repository / ".git").glob("dotfiles-leak-terms-comment-char.*"))
+
+    def test_git_message_auto_comment_char_leaves_no_file_and_reads_no_stale_one(self) -> None:
+        cut = "------------------------ >8 ------------------------"
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="no-verify"):
+                # commit-msg, which reads and removes the file, does not run under --no-verify.
+                repository = self.repository(agent)
+                configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
+                self.assertEqual(configured.returncode, 0, configured.stderr)
+                self.assert_clean(repository, agent, "commit", "--no-verify", "-m", "clean")
+                self.assertEqual(self.comment_char_files(repository), [])
+
+            with self.subTest(agent=agent, case="stale-file"):
+                # git picks `#`, which the message does not hold, and under -v writes its cut line in it; the message's
+                # own `;` cut line makes two, so git's choice is not certain and every line is read, as git keeps the
+                # term line. A file left for an earlier git process of the same pid names `;`: read, it would cut the
+                # message at the `;` line and drop the term. The exec keeps the pid that names the file.
+                repository = self.repository(agent)
+                configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
+                self.assertEqual(configured.returncode, 0, configured.stderr)
+                before = self.head(repository, agent)
+                result = self.launch(
+                    [
+                        "bash", "-c",
+                        'printf ";" > ".git/dotfiles-leak-terms-comment-char.$$" && exec git commit --allow-empty -v -e -m "$1"',
+                        "commit", f"subject\n\n; {cut}\n; Quillfeather Lane 9",
+                    ],
+                    cwd=repository,
+                    env=self.environment(agent, GIT_EDITOR="true"),
+                )
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("leak terms: commit message line 4: listed leak term", result.stderr)
+                self.assertEqual(self.head(repository, agent), before)
+                self.assertEqual(self.comment_char_files(repository), [])
+                self.assert_hidden(result)
+
+    def test_git_message_auto_comment_char_reads_every_cut_line_git_wrote(self) -> None:
+        # With --cleanup=scissors and -v git 2.43 writes two cut lines, both in its character; a caller's cut line in
+        # another character makes the character not certain, so every line is read.
+        cut = "------------------------ >8 ------------------------"
+        auto = (("core.commentChar", "auto"),)
+        scissors = ("--cleanup=scissors", "-v")
+        cases = (
+            # git picks `#`: a term only below its cut line goes on, one on a kept line above it is refused.
+            ("below-the-cut", scissors, f"clean\n# {cut}\nQuillfeather Lane 9\n", None),
+            ("above-the-cut", scissors, f"clean\nQuillfeather Lane 9\n# {cut}\nclean\n", "commit message line 2"),
+            # The caller's `#` cut line makes git pick `;` and write its two cut lines in it: two characters, so every
+            # line is read, the term below git's cut line included.
+            ("caller-cut-line", ("-e", "-m", f"# {cut}", *scissors), f"# {cut}\nclean\n; {cut}\nQuillfeather Lane 9\n",
+             "commit message line 4"),
+        )
+        for agent in (False, True):
+            for label, arguments, edited, place in cases:
+                with self.subTest(agent=agent, case=label, refused=place is not None):
+                    self.message_case(agent, auto, arguments, edited, None, place)
+
     def recording_hooks(self, directory: Path, label: str) -> None:
         """pre-commit and commit-msg in DIRECTORY, each writing its argv and its stdin bytes to files named after
         LABEL and itself in $HOOK_MARKERS."""
@@ -1409,11 +1581,7 @@ class JjLeaks(LeakTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.home = self.root / "home"
-        self.xdg = self.root / "xdg"
-        self.tmpdir = self.root / "tmp"
-        for directory in (self.home, self.xdg, self.tmpdir):
-            directory.mkdir()
+        self.private_home()
         self.config = self.root / "jjconfig.toml"
         self.config.write_text("[user]\nname = \"Leak Test\"\nemail = \"leak-test@example.invalid\"\n", encoding="utf-8")
         self.person = {
@@ -1434,9 +1602,6 @@ class JjLeaks(LeakTestCase):
         self.repositories = 0
         self.editors = 0
         self.copies = 0
-
-    def environment(self, agent: bool, **extra: str) -> dict[str, str]:
-        return {**(self.agent if agent else self.person), **extra}
 
     def jj(self, repository: Path, *arguments: str, agent: bool, real: bool = False, input: str | bytes | None = None,
            extra: dict[str, str] | None = None, text: bool = True) -> subprocess.CompletedProcess[str]:
@@ -1695,6 +1860,25 @@ class JjLeaks(LeakTestCase):
                 self.write(clean, "note.txt", "clean\n")
                 self.assert_clean(clean, agent, "c", "-m", "ok")
                 self.assertEqual(self.description(clean, agent, "@-"), "ok\n")
+
+    def test_jj_term_reads_a_mode_change_as_metadata(self) -> None:
+        # jj prints `old mode` and `new mode` after the header too: a mode-only change commits, and a term the same
+        # change adds is refused at its line.
+        for agent in (False, True):
+            for content, place in ((None, None), ("echo clean\necho more\n", None), ("echo clean\nQuillfeather Lane 9\n", "run.sh:2")):
+                with self.subTest(agent=agent, content=content, refused=place is not None):
+                    repository = self.repository(agent)
+                    self.write(repository, "run.sh", "echo clean\n")
+                    made = self.jj(repository, "commit", "-m", "base", agent=agent, real=True)
+                    self.assertEqual(made.returncode, 0, made.stderr)
+                    if content is not None:
+                        self.write(repository, "run.sh", content)
+                    (repository / "run.sh").chmod(0o755)
+                    if place is not None:
+                        self.assert_refused(repository, agent, place, "commit", "-m", "ok")
+                        continue
+                    self.assert_clean(repository, agent, "commit", "-m", "ok")
+                    self.assertEqual((self.changed_paths(repository, agent, "@-"), self.description(repository, agent, "@-")), (["run.sh"], "ok\n"))
 
     def test_jj_message_refuses_forms_and_keeps_stored_messages(self) -> None:
         commands = (("describe",), ("commit",), ("new",))
@@ -2083,6 +2267,22 @@ class JjLeaks(LeakTestCase):
                 self.assertFalse(ran.exists())
                 self.assert_hidden(result)
 
+    def test_jj_message_editor_preflight_names_an_unreadable_editor(self) -> None:
+        # An editor jj's configuration cannot give (an empty array) is a configuration the check cannot read, not the
+        # wrapper itself.
+        for agent in (False, True):
+            with self.subTest(agent=agent):
+                self.set_user_editor("[]")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                expected = self.expected_state(repository, agent)
+                result = self.jj(repository, "describe", agent=agent)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("jj shim: cannot read jj's configured editor for the leak-term check; nothing changed", result.stderr)
+                self.assertNotIn("resolves to leak-terms-check", result.stderr)
+                self.assertEqual(self.state(repository, agent), expected)
+                self.assert_hidden(result)
+
     def test_jj_without_a_real_binary_refuses_without_recursing(self) -> None:
         result = self.launch(
             [str(ROOT / "shims" / "jj"), "status"],
@@ -2117,22 +2317,20 @@ class JjLeaks(LeakTestCase):
                     self.assertEqual(self.state(repository, agent), expected)
 
 
-class OutgoingLeaks(LeakTestCase):
-    """Outgoing Git and JJ commits are scanned independently of the public-leak gate."""
+class SinkRepositoryCase(LeakTestCase):
+    """self.repo, whose origin is PUBLIC_URL, which git reaches through the test sink helper (remote.origin.vcs=sink), in
+    a HOME of its own with a fresh visibility cache, a gh that answers nothing and a stub public leak check that logs
+    each call to self.public_log; its commits and jj's are IDENTITY's."""
 
     public_url = "https://github.com/theorem-labs/rocq.git"
-    unknown_url = "https://github.com/theorem-labs/unreadable-fixture.git"
-    private_url = "https://github.com/theorem-labs/private-fixture.git"
-    term = TEST_TERMS[0]
+    identity = "Sink Test"
 
     def setUp(self) -> None:
         super().setUp()
-        self.home = self.root / "home"
-        self.xdg = self.root / "xdg"
-        self.tmpdir = self.root / "tmp"
+        self.private_home()
         self.fake = self.root / "fake"
         self.sinks = self.root / "sinks"
-        for directory in (self.home, self.xdg, self.tmpdir, self.fake, self.sinks):
+        for directory in (self.fake, self.sinks):
             directory.mkdir()
         self.cache = self.home / ".cache" / "public-leak-check"
         self.cache.mkdir(parents=True)
@@ -2145,10 +2343,10 @@ class OutgoingLeaks(LeakTestCase):
             self.root / "public-leak-check",
             f"#!/bin/bash\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(self.public_log))}\nexit 0\n",
         )
+        email = f"{self.identity.lower().replace(' ', '-')}@example.invalid"
         self.jj_config = self.root / "jj.toml"
         self.jj_config.write_text(
-            '[user]\nname = "Push Test"\nemail = "push-test@example.invalid"\n[signing]\nbehavior = "drop"\n',
-            encoding="utf-8",
+            f'[user]\nname = "{self.identity}"\nemail = "{email}"\n[signing]\nbehavior = "drop"\n', encoding="utf-8"
         )
         self.person = {
             **base_environment(),
@@ -2166,12 +2364,28 @@ class OutgoingLeaks(LeakTestCase):
         self.agent = {**self.person, "OMP_SESSION_ID": SESSION}
         self.repo = self.root / "repo"
         self.repo.mkdir()
-        self.real("init", "-q", "-b", "main")
-        self.real("config", "user.name", "Push Test")
-        self.real("config", "user.email", "push-test@example.invalid")
-        self.real("commit", "-q", "--allow-empty", "-m", "base")
-        self.real("remote", "add", "origin", self.public_url)
-        self.real("config", "remote.origin.vcs", "sink")
+        for arguments in (
+            ("init", "-q", "-b", "main"),
+            ("config", "user.name", self.identity),
+            ("config", "user.email", email),
+            ("commit", "-q", "--allow-empty", "-m", "base"),
+            ("remote", "add", "origin", self.public_url),
+            ("config", "remote.origin.vcs", "sink"),
+        ):
+            made = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person)
+            self.assertEqual(made.returncode, 0, made.stderr)
+
+
+class OutgoingLeaks(SinkRepositoryCase):
+    """Outgoing Git and JJ commits are scanned independently of the public-leak gate."""
+
+    unknown_url = "https://github.com/theorem-labs/unreadable-fixture.git"
+    private_url = "https://github.com/theorem-labs/private-fixture.git"
+    term = TEST_TERMS[0]
+    identity = "Push Test"
+
+    def setUp(self) -> None:
+        super().setUp()
         self.base = self.real("rev-parse", "HEAD")
         self.made = 0
 
@@ -2705,6 +2919,34 @@ class OutgoingLeaks(LeakTestCase):
                     commit = self.commit(f"{self.unique(f'{kind}-path')}/clean-name.txt", "clean", "clean", parent=self.base)
                     self.assert_pushed(push(kind, commit, self.unique("clean"), environment), self.public_url, commit)
 
+    def test_push_reads_a_mode_change_as_metadata(self) -> None:
+        # `git log --cc` prints `old mode` and `new mode` for a commit that changes a mode: a commit that only makes a
+        # file executable goes out, and the same change with a term line is refused at that line.
+        self.init_jj()
+
+        def push(kind: str, commit: str, ref: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            return self.git_push("origin", commit, ref, environment) if kind == "git" else self.jj_push(commit, ref, environment)
+
+        def mode_commit(content: str) -> tuple[str, str]:
+            """A clean base adding a script, then a commit that writes CONTENT to it and makes it executable."""
+            name = f"{self.unique('mode')}.sh"
+            self.commit(name, "echo clean", "base", parent=self.base)
+            (self.repo / name).write_text(content + "\n", encoding="utf-8")
+            (self.repo / name).chmod(0o755)
+            self.real("add", name)
+            self.real("commit", "--no-verify", "-m", "mode")
+            return name, self.real("rev-parse", "HEAD")
+
+        for agent, environment, url in self.combinations():
+            for kind in ("git", "jj"):
+                with self.subTest(kind=kind, agent=agent, url=url):
+                    self.set_url(url)
+                    name, leaky = mode_commit(f"echo clean\n{self.term}")
+                    ref = self.unique("refused")
+                    self.assert_push_refused(lambda: push(kind, leaky, ref, environment), leaky, f"{name}:2", url, kind)
+                    _, clean = mode_commit("echo clean")
+                    self.assert_pushed(push(kind, clean, self.unique("mode-only"), environment), url, clean)
+
     def merge(self, label: str, resolution: str) -> str:
         """A merge of two clean parents whose conflict resolution writes RESOLUTION."""
         self.real("checkout", "-q", "-B", f"{label}-side", self.base)
@@ -2884,11 +3126,34 @@ class OutgoingLeaks(LeakTestCase):
         before = self.sink_state(self.public_url)
         result = self.git_push("origin", leaky, "failed", self.person | {"GIT_ALLOW_PROTOCOL": "sink:fail"})
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn("cannot read text to check: git could not read outgoing commits", result.stderr)
+        self.assertIn("cannot read text to check: git could not read the destination's advertised refs", result.stderr)
         # No term was found, so the refusal must not say the push holds one.
         self.assertNotIn("holds a listed leak term", result.stderr)
         self.assertEqual(self.sink_state(self.public_url), before)
         self.assertFalse(self.received(leaky, self.public_url))
+
+    def test_push_gate_refusal_names_a_plain_push_or_a_jj_push(self) -> None:
+        # shims/git tells the gate's hook whether jj ran the push. Here the hook cannot read git's update lines (its
+        # standard input is open only for writing), so it refuses, naming what it refused, before any check runs.
+        hook = ROOT / "shims" / "jj-push-hooks" / "pre-push"
+        for extra, what in (({}, "push"), ({"GIT_SHIM_JJ_PUSH": "1"}, "jj push")):
+            with self.subTest(what=what):
+                read_end, write_end = os.pipe()
+                try:
+                    result = self.launch(
+                        [str(hook), "origin", self.public_url],
+                        cwd=self.repo,
+                        env=self.person | {"GIT_SHIM_PUBLIC_CHECK": "0"} | extra,
+                        stdin=write_end,
+                    )
+                finally:
+                    os.close(read_end)
+                    os.close(write_end)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(
+                    f"error: git shim: cannot read the updates git gave the pre-push hook, so this {what} to {self.public_url} is refused.",
+                    result.stderr,
+                )
 
     def test_push_sink_reader_fails_on_an_unreadable_sink(self) -> None:
         # B9's instrument, made to fail: a sink not made yet reads as empty, one that holds a push lists its ref and
@@ -2935,55 +3200,13 @@ class OutgoingLeaks(LeakTestCase):
                         self.assertEqual(self.sink_state(self.public_url), before, "a refused push changed the sink")
 
 
-class SecrecyTrace(LeakTestCase):
+class SecrecyTrace(SinkRepositoryCase):
     """Trace refusals so that a listed term never reaches a persistent surface."""
 
-    public_url = "https://github.com/theorem-labs/rocq.git"
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.home = self.root / "home"
-        self.xdg = self.root / "xdg"
-        self.tmpdir = self.root / "tmp"
-        self.fake = self.root / "fake"
-        self.sinks = self.root / "sinks"
-        for directory in (self.home, self.xdg, self.tmpdir, self.fake, self.sinks):
-            directory.mkdir()
-        cache = self.home / ".cache" / "public-leak-check"
-        cache.mkdir(parents=True)
-        (cache / "theorem-labs_rocq").write_text("public", encoding="utf-8")
-        write_executable(self.fake / "gh", "#!/bin/sh\nexit 1\n")
-        write_executable(self.fake / "git-remote-sink", SINK_HELPER.replace("@SINKS@", str(self.sinks)))
-        self.public_check = write_executable(self.root / "public-leak-check", "#!/bin/sh\nexit 0\n")
-        self.jj_config = self.root / "jj.toml"
-        self.jj_config.write_text(
-            '[user]\nname = "Hidden Test"\nemail = "hidden-test@example.invalid"\n[signing]\nbehavior = "drop"\n',
-            encoding="utf-8",
-        )
-        self.environment = {
-            **base_environment(),
-            **fixture_environment(),
-            "HOME": str(self.home),
-            "XDG_CONFIG_HOME": str(self.xdg),
-            "XDG_CACHE_HOME": str(self.home / ".cache"),
-            "TMPDIR": str(self.tmpdir),
-            "PATH": os.pathsep.join([str(self.fake), str(ROOT / "shims"), str(Path(real_jj()).parent), os.environ["PATH"]]),
-            "PUBLIC_LEAK_CHECK": str(self.public_check),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_ALLOW_PROTOCOL": "sink",
-            "JJ_CONFIG": str(self.jj_config),
-        }
-        self.repo = self.root / "repo"
-        self.repo.mkdir()
-        self.real_git("init", "-q", "-b", "main")
-        self.real_git("config", "user.name", "Hidden Test")
-        self.real_git("config", "user.email", "hidden-test@example.invalid")
-        self.real_git("commit", "-q", "--allow-empty", "-m", "base")
-        self.real_git("remote", "add", "origin", self.public_url)
-        self.real_git("config", "remote.origin.vcs", "sink")
+    identity = "Hidden Test"
 
     def command(self, command: list[str], environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        return self.launch(command, cwd=self.repo, env=environment or self.environment)
+        return self.launch(command, cwd=self.repo, env=environment or self.person)
 
     def real_git(self, *arguments: str) -> str:
         result = self.command(["/usr/bin/git", *arguments])
@@ -3009,7 +3232,7 @@ class SecrecyTrace(LeakTestCase):
                     "-e", "trace=execve,write,pwrite64,writev", "-o", f"/dev/fd/{write_fd}", "--", *command,
                 ],
                 cwd=self.repo,
-                env=environment or self.environment,
+                env=environment or self.person,
                 text=False,
                 pass_fds=(write_fd,),
             )
@@ -3061,7 +3284,7 @@ class SecrecyTrace(LeakTestCase):
             objects = self.launch(
                 ["/usr/bin/git", f"--git-dir={git_directory}", "cat-file", "--batch-all-objects", "--batch"],
                 cwd=self.repo,
-                env=self.environment,
+                env=self.person,
                 text=False,
             )
             self.assertEqual(objects.returncode, 0, objects.stderr.decode("utf-8", errors="replace"))
@@ -3132,7 +3355,7 @@ class SecrecyTrace(LeakTestCase):
             encoding="utf-8",
         )
         editor.chmod(0o755)
-        result, capture = self.traced(["jj", "describe"], environment=self.environment | {"JJ_EDITOR": str(editor)})
+        result, capture = self.traced(["jj", "describe"], environment=self.person | {"JJ_EDITOR": str(editor)})
         description_file = description.read_text(encoding="utf-8")
         writes = self.assert_refusal(result, capture, {description_file})
         self.assertIn(description_file, writes)
@@ -3154,7 +3377,7 @@ class SecrecyTrace(LeakTestCase):
         self.assertEqual(marked.returncode, 0, marked.stderr)
         result, capture = self.traced(
             ["jj", "git", "push", "--bookmark", "hidden-jj"],
-            environment=self.environment | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"},
+            environment=self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"},
         )
         self.assert_refusal(result, capture)
         self.assert_no_canary()
@@ -3165,7 +3388,7 @@ class SecrecyTrace(LeakTestCase):
         self.initialize_jj()
         self.assert_no_canary()
         seeded = self.launch(
-            ["/usr/bin/git", "hash-object", "-w", "--stdin"], cwd=self.repo, env=self.environment, input=f"{TEST_TERMS[-1]}\n"
+            ["/usr/bin/git", "hash-object", "-w", "--stdin"], cwd=self.repo, env=self.person, input=f"{TEST_TERMS[-1]}\n"
         )
         self.assertEqual(seeded.returncode, 0, seeded.stderr)
         git_directory = Path(self.real_git("rev-parse", "--absolute-git-dir")).resolve()
@@ -3192,11 +3415,11 @@ class SecrecyTrace(LeakTestCase):
         for mode in ("output", "file", "argv"):
             with self.subTest(mode=mode):
                 result, capture = self.traced(
-                    [str(script)], environment=self.environment | {"MODE": mode, "ECHOED": "quillfeather   LANE 9"}
+                    [str(script)], environment=self.person | {"MODE": mode, "ECHOED": "quillfeather   LANE 9"}
                 )
                 with self.assertRaises(AssertionError):
                     self.assert_refusal(result, capture)
-        result, capture = self.traced([str(script)], environment=self.environment | {"MODE": "none", "ECHOED": ""})
+        result, capture = self.traced([str(script)], environment=self.person | {"MODE": "none", "ECHOED": ""})
         self.assert_refusal(result, capture)
 
     def test_hidden_negative_control_finds_file_writes_and_argv(self) -> None:
@@ -3204,7 +3427,7 @@ class SecrecyTrace(LeakTestCase):
         canary = TEST_TERMS[-1].encode()
         term = TEST_TERMS[0].encode()
         result, capture = self.traced(
-            [str(script)], environment=self.environment | {"CANARY": canary.decode(), "TEST_TERM": term.decode()}
+            [str(script)], environment=self.person | {"CANARY": canary.decode(), "TEST_TERM": term.decode()}
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
         argv, writes = parse_strace(capture)
@@ -3217,7 +3440,7 @@ class SecrecyTrace(LeakTestCase):
         result, capture = self.traced(
             [str(script)],
             string_limit=8,
-            environment=self.environment | {"CANARY": TEST_TERMS[-1], "TEST_TERM": TEST_TERMS[0]},
+            environment=self.person | {"CANARY": TEST_TERMS[-1], "TEST_TERM": TEST_TERMS[0]},
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
         with self.assertRaisesRegex(AssertionError, "cut string"):

@@ -1,20 +1,23 @@
 #!/bin/bash
-# jj-push-gate: the pre-push hook of a `git push` shims/git directs through this
-# gate: a guarded checkout, or a direct push to a public or unreadable GitHub
-# URL. jj runs git with --no-verify, so the checkout's own pre-push hook, which
-# runs the shared public leak check, never runs for a jj push; a repository's
-# own hooks path overrides the global hooks dispatcher. shims/git drops jj's
-# flag and points core.hooksPath here (shims/AGENTS.md).
-# This makes the call the hook that install-prepush-hook.sh installs makes: the
-# encrypted term check first, with the same `$PUBLIC_LEAK_CHECK`, PATH, then
-# `${XDG_CONFIG_HOME:-~/.config}/public-leak-check/path` lookup for the shared
-# check when GIT_SHIM_PUBLIC_CHECK=1. It runs the term scanner as
+# jj-push-gate: the pre-push hook of every `git push` shims/git directs through
+# this gate: every push but one from a checkout that is not guarded to one of its
+# configured remotes. jj runs git with --no-verify, so the checkout's own pre-push
+# hook, which runs the shared public leak check, never runs for a jj push; a
+# repository's own hooks path overrides the global hooks dispatcher. shims/git
+# drops every --no-verify and points core.hooksPath here (shims/AGENTS.md).
+# First, when the URL git pushes to is a public or unreadable GitHub repository,
+# it runs the encrypted term check as
 # `leak-terms-check push --remote <remote> --url <url>` with git's own update
 # lines on stdin. So the URL is the one git is pushing to, and the updates are
-# the ones it is about to send: an up-to-date ref is not among them. The public
-# check alone still decides where it is enabled, for every target,
-# sjawhar/dotfiles included since its scrub (dispatch://INFRA-974). The
-# differences:
+# the ones it is about to send: an up-to-date ref is not among them. Then, when
+# GIT_SHIM_PUBLIC_CHECK=1, it makes the call the hook that install-prepush-hook.sh
+# installs makes (a hook that runs no term check), with the same
+# `$PUBLIC_LEAK_CHECK`, PATH, then
+# `${XDG_CONFIG_HOME:-~/.config}/public-leak-check/path` lookup for the shared
+# check. The public check alone still decides where it is enabled, for every
+# target, sjawhar/dotfiles included since its scrub (dispatch://INFRA-974).
+# GIT_SHIM_JJ_PUSH=1 says jj ran the push, so a refusal names a jj push, else a
+# push. The differences:
 # - for a jj push, the checkout's own pre-push (pre-push.local included) does
 #   not run, as it did not before this gate; for a plain verified push,
 #   shims/git names the repository's own hooks directory in
@@ -30,9 +33,9 @@
 set -uo pipefail
 own="${GIT_SHIM_OWN_HOOKS-}"
 public="${GIT_SHIM_PUBLIC_CHECK:-0}"
-unset GIT_SHIM_OWN_HOOKS GIT_SHIM_PUBLIC_CHECK
-what="jj push"
-[[ -z "$own" ]] || what="push"
+what="push"
+[[ "${GIT_SHIM_JJ_PUSH:-0}" != 1 ]] || what="jj push"
+unset GIT_SHIM_OWN_HOOKS GIT_SHIM_PUBLIC_CHECK GIT_SHIM_JJ_PUSH
 refuse() {
     printf 'error: git shim: %s\n' "$@" >&2
     exit 1
@@ -60,7 +63,7 @@ case "$visibility" in
         fi
         ;;
 esac
-run_own_hook() {
+exec_own_hook() {
     [[ -n "$own" && -x "$own/pre-push" ]] || exit 0
     # The shim's entry comes back out of GIT_CONFIG_PARAMETERS, as ./hook takes it out (the last one equal to it).
     mine="${0%/*}"
@@ -79,7 +82,7 @@ run_own_hook() {
     if [[ -n "$in" ]]; then exec "$own/pre-push" "$@" <<< "$in"; fi
     exec "$own/pre-push" "$@" < /dev/null
 }
-[[ "$public" == 1 ]] || run_own_hook "$@"
+[[ "$public" == 1 ]] || exec_own_hook "$@"
 chk="${PUBLIC_LEAK_CHECK:-}"
 [[ -n "$chk" ]] || chk="$(command -v public-leak-check.sh 2> /dev/null || true)"
 pointer="${XDG_CONFIG_HOME:-$HOME/.config}/public-leak-check/path"
@@ -91,7 +94,7 @@ crc=0
 out="$(bash "$chk" "$@" 2>&1 <<< "$in")" || crc=$?
 if ((crc == 0)); then
     [[ -z "$out" ]] || printf '%s\n' "$out" >&2
-    run_own_hook "$@"
+    exec_own_hook "$@"
 fi
 while IFS= read -r line; do printf 'error: %s\n' "$line"; done <<< "$out" >&2
 # The check's own decisive line, lifted into the refusal. Its output can be dozens of advisory
