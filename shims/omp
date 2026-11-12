@@ -64,13 +64,20 @@ if [[ -z "${MNEMOPI_EMBEDDING_API_URL:-}" && -r "$embed_file" ]]; then
     fi
 fi
 
-# A named profile gets the shared setup: its symlinks track installers/omp.sh's in ~/.omp and
-# ~/.omp/agent (created, re-pointed, retired), and its real files are its own, as is a link it holds
-# where the default has a real entry (legion's agent.db, a link to the personal profile's). config.yml comes
-# from the overlay above; models.yml (provider routes and keys) and envoy.json are the profile's
-# own, so neither is mirrored or pruned. The profile is the last --profile before a `--`, else
-# OMP_PROFILE when it is defined, else PI_PROFILE when it is defined, else the machine's own
-# default below; a misread costs only these links.
+# A named profile gets the shared setup unless it opts out (below): its symlinks track
+# installers/omp.sh's in ~/.omp and ~/.omp/agent (created, re-pointed, retired), and its real
+# files are its own, as is a link it holds where the default has a real entry (legion's agent.db,
+# a link to the personal profile's). config.yml comes from the overlay above; models.yml (provider
+# routes and keys) and envoy.json are the profile's own, so neither is mirrored or pruned. A
+# profile opts out when its directory, $root/profiles/NAME/ (the profile's top directory, since
+# the setup writes there too), holds .no-shared-setup, a file or a directory; a link counts only
+# while its target exists (`-e`). The profile's owner writes it: the Legion deployment's "Set up"
+# writes it in legion. The shim's mirror into legion linked the default's agents into it: the
+# Legion daemon's boot check refused on the dotfiles `oracle` agent on 2026-11-09, and `oracle`
+# subagents failed in Legion panes on 2026-11-11 and 2026-11-12 (dispatch://HOME-163). The
+# marker stops the shim's writes, not omp's own (sessions, logs, SQLite). The profile is the last
+# --profile before a `--`, else OMP_PROFILE when it is defined, else PI_PROFILE when it is
+# defined, else the machine's own default below; a misread costs only these links.
 #
 # A machine whose bare `omp` starts a named profile says so in a file of its own, outside this
 # repo: ${XDG_CONFIG_HOME:-$HOME/.config}/omp/profile, holding the profile's name. Sami's personal
@@ -196,7 +203,8 @@ mirror_links() { # mirror_links SRC DST [copy-files]
 # A profile whose agent/ holds models.overlay.yml is the default profile with other provider keys,
 # not a separate install (dispatch://BET-59, 2026-10-30: the verified-grader sessions bill Anthropic
 # to another account). It shares every piece of state with the default: each entry of ~/.omp (but
-# agent/, profiles/ and run/) and of ~/.omp/agent (but models.yml, models.overlay.yml and SQLite's
+# agent/, profiles/, run/ and .no-shared-setup, since an old shim moved one there and a link to it
+# would opt the profile out) and of ~/.omp/agent (but models.yml, models.overlay.yml and SQLite's
 # -wal/-shm, which SQLite places beside the link's target) is a link to the default's, re-made on
 # every launch, so an entry a newer omp adds is shared too; dotfiles included, since omp reads an
 # agent/.env. An entry omp created in the profile first, with no default counterpart, is moved into
@@ -284,8 +292,8 @@ share_links() { # share_links SRC DST KEEP_NAME...
     done
     [[ -n "$dotglob_was" ]] || shopt -u dotglob
 }
-if [[ -n "$profile" ]]; then
-    root="$HOME/${PI_CONFIG_DIR:-.omp}"
+root="$HOME/${PI_CONFIG_DIR:-.omp}"
+if [[ -n "$profile" && ! -e "$root/profiles/$profile/.no-shared-setup" ]]; then
     overlay_models="$root/profiles/$profile/agent/models.overlay.yml"
     if [[ -f "$overlay_models" ]]; then
         # Fail before changing profile state: a stale key may bill the wrong account, and a
@@ -299,12 +307,14 @@ if [[ -n "$profile" ]]; then
             echo "omp: waited 30 s for $root/profiles/$profile/.share.lock; profile $profile not started" >&2
             exit 1
         fi
-        share_links "$root" "$root/profiles/$profile" agent profiles run .share.lock
+        share_links "$root" "$root/profiles/$profile" agent profiles run .share.lock .no-shared-setup
         share_links "$root/agent" "$root/profiles/$profile/agent" \
             models.yml models.overlay.yml 'models.yml.new.*' '*-wal' '*-shm'
         # pi-envoy reads a named profile's agent/envoy.json instead of ~/.config/legion/envoy.json.
-        [[ -e "$root/profiles/$profile/agent/envoy.json" ]] ||
-            ln -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" "$root/profiles/$profile/agent/envoy.json"
+        # A link to a missing file counts too: `ln` would refuse every later launch.
+        envoy_json="$root/profiles/$profile/agent/envoy.json"
+        [[ -e "$envoy_json" || -L "$envoy_json" ]] ||
+            ln -s "${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json" "$envoy_json"
         exec 9>&-
         models_out="$root/profiles/$profile/agent/models.yml"
         # 0600: the default's models.yml can hold literal keys (scripts/omp-models-build, `apiKeyFile`).

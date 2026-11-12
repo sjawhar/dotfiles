@@ -257,7 +257,8 @@ before handing the call to the real one.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
-  profile's links, then execs omp through `scripts/agent-session` (below). It sets no
+  profile's links (unless it holds `.no-shared-setup`, below), then execs omp through
+  `scripts/agent-session` (below). It sets no
   Envoy or Dispatch connection/credential override and no provider key. The plugin reads
   `envoy.json`, and keys come from the profile's `models.yml` (`omp/AGENTS.md`). AgentBox's
   inherited `ENVOY_MACHINE_ID` identifies the physical host, not a profile connection.
@@ -290,6 +291,9 @@ before handing the call to the real one.
   all of the default's state into it and rebuilds its `models.yml` as the default's merged with the
   overlay, on every launch, under a 30 s lock; a real entry on both sides stops the launch
   (`omp/AGENTS.md`, "A shared profile").
+  A named profile whose directory holds `.no-shared-setup` gets neither the mirrored links nor a
+  shared profile's setup: the shim writes nothing there and runs no `omp-models-check`
+  (`omp/AGENTS.md`, "An opted-out profile"; `scripts/tests/test_omp_profile_links.py`).
   The profile is the last `--profile`, else a defined `OMP_PROFILE`, else a defined `PI_PROFILE`,
   else the machine's own default: `${XDG_CONFIG_HOME:-$HOME/.config}/omp/profile`, outside this
   repo, holding a profile name. Oryx, Sami's personal machine, holds `personal`; the dev boxes
