@@ -313,7 +313,7 @@ gh_shim_refused_by_github() {
         admin="If this is a GitHub admin action that work Sami already asked for needs (an App permission or installation, a CODEOWNERS approval in his name, an admin merge, a repository or branch setting), do it yourself with his admin token from the credential broker; never ask Sami to do it (dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a). For a theorem-labs repository run \`secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=\$GITHUB_ADMIN_PAT exec gh \"\$@\"' $(gh_shim_quote "$@")\`; for a repository of sjawhar's own, the same with GITHUB_PERSONAL_ADMIN_PAT in both places. The broker puts the token in the variable of its own name, which gh does not read, so the sh -c line gives it to gh as GH_TOKEN. Sami approves the grant once per session from the broker's card in Dispatch; that card is not an ask. \`--register\` makes the route work in a session that has no broker identity (one launched past shims/omp, so it never registered): it registers this one command as a broker session of its own, and in a session that has one it changes nothing. Without it such a session reads secretsd, which does not hold this key, and gets \"not found\"."
     fi
     if [[ -n "$pr" ]]; then
-        instead="where a repository requires an approval your own identity cannot give, ask the INFRA Legion controller for a review issue. Where a comment is enough, post the verdict as a pull-request comment: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765).${admin:+ $admin}"
+        instead="where a repository requires an approval your own identity cannot give, post your own cross-family reviewer's verdict yourself with the identity that repository's row in landing-a-pr's references/repo-merge-rules.md names; never send the pull request to another session for review. Where a comment is enough, post the verdict as a pull-request comment: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765).${admin:+ $admin}"
     elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" ]]; then
         instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; an owner with no App installation gets his own upstream token, so the post goes out as him (shims/AGENTS.md).${admin:+ $admin} Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     elif [[ -n "$admin" ]]; then
@@ -324,7 +324,11 @@ gh_shim_refused_by_github() {
     {
         echo "gh shim: REFUSED by GitHub: \`$(gh_shim_quote "$@")\` (exit $rc; GitHub's error is above)."
         echo "  Identity: it ran as $who. Do not retry with a token or gh binary you found yourself: every other credential to use is named below."
-        echo "  Why: GitHub does not let that identity make this call (an App cannot approve or request changes on a pull request it opened, and an App installation or a token cannot use a permission or a repository it was not given)."
+        if grep -q "HTTP 401" "$err"; then
+            echo "  Why: GitHub did not accept the credential at all (HTTP 401): it is not a token, is malformed or has expired. A broker grant can be JSON rather than a bare token; landing-a-pr's references/repo-merge-rules.md shows how to pass one."
+        else
+            echo "  Why: GitHub does not let that identity make this call (an App cannot approve or request changes on a pull request it opened, and an App installation or a token cannot use a permission or a repository it was not given)."
+        fi
         echo "  Instead: $instead"
     } >&2
     exit "$rc"
