@@ -128,7 +128,11 @@ class Harness(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_STATE"))
+            if key in (
+                "DOTFILES_LEAK_TERMS_FILE",
+                "SOPS_AGE_KEY_FILE",
+                "DOTFILES_LEAK_TERMS_SOPS_HOME",
+            ) or not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_STATE"))
         }
         env.update(
             HOME=str(self.home),
@@ -158,6 +162,9 @@ class Harness(unittest.TestCase):
         (self.upstream / "secrets.env").write_text("COMMITTED=1\n")
         (self.upstream / "scripts").mkdir()
         (self.upstream / "scripts" / "tool").write_text("v1\n")
+        linker = self.upstream / "scripts" / "omp-link-rules"
+        linker.write_text("#!/bin/sh\nexit 0\n")
+        linker.chmod(0o755)
         (self.upstream / ".gitignore").write_text(".secrets/\nomp/*.local.yml\nomp/plugins/node_modules/\n")
         (self.upstream / "omp" / "plugins").mkdir(parents=True)
         (self.upstream / "omp" / "plugins" / "package.json").write_text(PLUGINS_V1)
