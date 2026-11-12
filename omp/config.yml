@@ -108,6 +108,9 @@ retry:
   modelFallback: true
   usageAwareFallback: true
   fallbackChains:
+    # 2026-11-12: every Opus 4.x entry names :high. Roles now run Opus 5.5 at :xhigh, and a fallback keeps the
+    # effort it walked from; Opus 4.6 refuses xhigh with a 400 and no further fallback (S2 on pbc/claude-opus-4-6,
+    # 2026-11-12 06:09-06:23Z, stuck until its effort was set by hand), so a walk past Opus 5 must drop to high.
     # Every chain runs past claude-opus-4-8 to 4.7 and 4.6. A classifier refusal
     # walks the chain, and in the 21 days to 2026-10-07 four of the six subagent
     # turns that died stopped at 4.8 with nothing below it tried, though both
@@ -117,25 +120,25 @@ retry:
     anthropic/claude-fable-5:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     anthropic/claude-fable-5-1:
       - anthropic/claude-fable-5
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     anthropic/claude-opus-5-5:
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     anthropic/claude-opus-5:
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. Model keys beat every
     # role chain, a subagent's own included, and an effort-suffixed key matches
@@ -260,37 +263,37 @@ retry:
     openai-codex/gpt-5.6-sol:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     openai-codex/gpt-5.6-terra:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
       - anthropic/claude-sonnet-5-5
     openai-codex/gpt-5.6-luna:
       - anthropic/claude-sonnet-5-5
     openai-codex/*:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
       - opencode-zen/*
     default:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     plan:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
 task:
   maxRecursionDepth: 3
   # task.softRequestBudget is deliberately ABSENT: the shipped default of 200 stands.
@@ -550,7 +553,7 @@ providers:
     # claude-opus-5-5 is not a valid target. At most three entries; order = preference.
     serverSideFallbackModels:
       - claude-opus-5
-      - claude-opus-4-8
+      - claude-opus-4-8:high
 composer:
   shape: box
 isolation:
