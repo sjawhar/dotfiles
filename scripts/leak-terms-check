@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""Check a diff or commit message against the encrypted leak-term list."""
+from __future__ import annotations
+
+import argparse
+import os
+import pwd
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Sequence
+
+
+LIST_EXIT = 2
+FOUND_EXIT = 3
+TEXT_EXIT = 4
+SCISSORS = "------------------------ >8 ------------------------"
+
+
+class ListError(Exception):
+    """The encrypted term list could not be read."""
+
+
+class TextError(Exception):
+    """The caller's diff or message could not be read."""
+
+def newline_lines(text: str) -> list[str]:
+    """Split only on the newline byte used by git and jj diff formats."""
+    lines = text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def passwd_home() -> Path:
+    """Return the home directory from passwd, independent of a caller's HOME."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def term_file(environment: Mapping[str, str]) -> Path:
+    configured = environment.get("DOTFILES_LEAK_TERMS_FILE")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent.parent / "leak-terms.sops.yaml"
+
+
+def sops_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Prepare sops's environment without changing the caller's process environment."""
+    result = dict(environment)
+    sops_home = result.get("DOTFILES_LEAK_TERMS_SOPS_HOME")
+    if sops_home:
+        result["HOME"] = sops_home
+        result["XDG_CONFIG_HOME"] = sops_home
+        return result
+
+    key_variables = ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD")
+    if any(result.get(name) for name in key_variables):
+        return result
+
+    home = Path(result.get("HOME", str(passwd_home())))
+    config_home = Path(result.get("XDG_CONFIG_HOME", str(home / ".config")))
+    configured_key = config_home / "sops" / "age" / "keys.txt"
+    fallback_key = passwd_home() / ".config" / "sops" / "age" / "keys.txt"
+    if not configured_key.exists() and fallback_key.exists():
+        result["SOPS_AGE_KEY_FILE"] = str(fallback_key)
+    return result
+
+
+def list_error(message: str) -> ListError:
+    return ListError(f"leak terms: {message}")
+
+
+def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
+    """Decrypt and parse the list, retaining every term only in process memory."""
+    environment = dict(os.environ if environment is None else environment)
+    source = term_file(environment)
+    if not source.is_file():
+        raise list_error("the term list is missing; run scripts/dotfiles-sync local")
+
+    try:
+        completed = subprocess.run(
+            ["sops", "--decrypt", "--extract", '["terms"]', str(source)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=sops_environment(environment),
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise list_error("sops is not on PATH; install sops with mise") from error
+    except subprocess.TimeoutExpired as error:
+        raise list_error("sops timed out while reading the term list; fix it with sops edit leak-terms.sops.yaml") from error
+    except OSError as error:
+        raise list_error("sops could not read the term list; fix it with sops edit leak-terms.sops.yaml") from error
+
+    if completed.returncode == 128:
+        raise list_error(
+            "no age key can decrypt the term list; add this machine's age key to .sops.yaml "
+            "above the YubiKey line and run sops updatekeys leak-terms.sops.yaml"
+        )
+    if completed.returncode != 0:
+        raise list_error("the term list is not valid sops; fix it with sops edit leak-terms.sops.yaml")
+
+    decoded = completed.stdout.decode("utf-8", errors="surrogateescape")
+    terms = [line.strip() for line in decoded.splitlines()]
+    terms = [line for line in terms if line and not line.startswith("#")]
+    if not terms:
+        raise list_error("the term list holds no term; add a term with sops edit leak-terms.sops.yaml")
+    return TermMatcher(terms)
+
+
+@dataclass(frozen=True)
+class Span:
+    start: int
+    end: int
+
+
+class TermMatcher:
+    """Case-folded, whitespace-flexible matching while keeping source-string positions."""
+
+    def __init__(self, terms: Sequence[str]):
+        patterns: list[re.Pattern[str]] = []
+        seen: set[str] = set()
+        for term in terms:
+            pieces = re.split(r"[ \t]+", term.casefold())
+            pattern = r"[ \t]+".join(re.escape(piece) for piece in pieces)
+            if pattern and pattern not in seen:
+                patterns.append(re.compile(pattern))
+                seen.add(pattern)
+        self._patterns = patterns
+
+    @staticmethod
+    def _folded_with_origins(text: str) -> tuple[str, list[int]]:
+        folded: list[str] = []
+        origins: list[int] = []
+        for index, character in enumerate(text):
+            value = character.casefold()
+            folded.append(value)
+            origins.extend([index] * len(value))
+        return "".join(folded), origins
+
+    def spans(self, text: str) -> list[Span]:
+        folded, origins = self._folded_with_origins(text)
+        found: list[Span] = []
+        for pattern in self._patterns:
+            for match in pattern.finditer(folded):
+                if match.start() == match.end():
+                    continue
+                found.append(Span(origins[match.start()], origins[match.end() - 1] + 1))
+        return sorted(found, key=lambda span: (span.start, span.end))
+
+
+def c_escape(text: str) -> str:
+    escaped: list[str] = []
+    for character in text:
+        if character == "\\":
+            escaped.append("\\\\")
+        elif character == "\n":
+            escaped.append("\\n")
+        elif character == "\r":
+            escaped.append("\\r")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif ord(character) < 32 or ord(character) == 127:
+            escaped.append(f"\\x{ord(character):02x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
+
+
+def mask_path(path: str, spans: Sequence[Span]) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    for span in spans:
+        if span.start < cursor:
+            continue
+        pieces.append(path[cursor:span.start])
+        pieces.append("<listed term>")
+        cursor = span.end
+    pieces.append(path[cursor:])
+    return c_escape("".join(pieces))
+
+
+def decode_c_quoted(value: str, start: int = 0) -> tuple[str, int] | None:
+    """Decode Git's C-style quoted filename and return the next character index."""
+    if start >= len(value) or value[start] != '"':
+        return None
+    raw = bytearray()
+    index = start + 1
+    while index < len(value):
+        character = value[index]
+        if character == '"':
+            return raw.decode("utf-8", errors="surrogateescape"), index + 1
+        if character != "\\":
+            raw.extend(character.encode("utf-8", errors="surrogateescape"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(value):
+            return None
+        escaped = value[index]
+        simple = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+        if escaped in simple:
+            raw.extend(simple[escaped].encode())
+            index += 1
+        elif escaped in {'"', "\\"}:
+            raw.extend(escaped.encode())
+            index += 1
+        elif escaped in "01234567":
+            digits = escaped
+            index += 1
+            for _ in range(2):
+                if index < len(value) and value[index] in "01234567":
+                    digits += value[index]
+                    index += 1
+                else:
+                    break
+            raw.append(int(digits, 8))
+        else:
+            raw.extend(escaped.encode("utf-8", errors="surrogateescape"))
+            index += 1
+    return None
+
+
+def parse_git_header(header: str) -> str | None:
+    """Extract an unchanged path from a git-style diff header."""
+    value = header.removeprefix("diff --git ")
+    first = decode_c_quoted(value)
+    if first:
+        old_path, index = first
+        if index >= len(value) or value[index] != " ":
+            return None
+        second = decode_c_quoted(value, index + 1)
+        if not second or second[1] != len(value):
+            return None
+        new_path, _ = second
+        if not old_path.startswith("a/") or not new_path.startswith("b/"):
+            return None
+        old_path, new_path = old_path[2:], new_path[2:]
+        return new_path if old_path == new_path else None
+
+    if not value.startswith("a/"):
+        return None
+    for delimiter in range(2, len(value)):
+        if not value.startswith(" b/", delimiter):
+            continue
+        old_path = value[2:delimiter]
+        new_path = value[delimiter + 3:]
+        if old_path == new_path:
+            return new_path
+    return None
+
+
+def parse_result_path(value: str) -> str | None:
+    """Read a result-side path from a +++ line without accepting its timestamp."""
+    if value == "/dev/null":
+        return None
+    quoted = decode_c_quoted(value)
+    if quoted:
+        path, index = quoted
+        if index != len(value) and not value[index:].startswith("\t"):
+            return None
+    else:
+        path = value.split("\t", 1)[0]
+    if not path.startswith("b/"):
+        return None
+    return path[2:]
+
+
+def parse_extended_path(value: str) -> str | None:
+    """Read a path in a rename or copy extended header."""
+    quoted = decode_c_quoted(value)
+    if quoted:
+        path, index = quoted
+        return path if index == len(value) else None
+    return value or None
+
+
+def parse_combined_header(header: str) -> str | None:
+    """Extract the sole path reported by diff --cc and diff --combined."""
+    if header.startswith("diff --cc "):
+        value = header.removeprefix("diff --cc ")
+    elif header.startswith("diff --combined "):
+        value = header.removeprefix("diff --combined ")
+    else:
+        return None
+    quoted = decode_c_quoted(value)
+    if quoted:
+        path, index = quoted
+        return path if index == len(value) else None
+    return value or None
+
+
+def parse_range(value: str) -> tuple[int, int] | None:
+    matched = re.fullmatch(r"(\d+)(?:,(\d+))?", value)
+    if not matched:
+        return None
+    return int(matched.group(1)), int(matched.group(2) or "1")
+
+
+def parse_unified_hunk(line: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    matched = re.fullmatch(r"@@ -([^ ]+) \+([^ ]+) @@(?:.*)", line)
+    if not matched:
+        return None
+    old_range = parse_range(matched.group(1))
+    new_range = parse_range(matched.group(2))
+    if old_range is None or new_range is None:
+        return None
+    return old_range, new_range
+
+
+def parse_combined_hunk(line: str) -> tuple[list[tuple[int, int]], tuple[int, int]] | None:
+    matched = re.fullmatch(r"(@{3,}) (.+) \1(?:.*)", line)
+    if not matched:
+        return None
+    prefix = matched.group(1)
+    values = matched.group(2).split()
+    parent_values = [value[1:] for value in values if value.startswith("-")]
+    result_values = [value[1:] for value in values if value.startswith("+")]
+    if len(prefix) - 1 != len(parent_values) or len(result_values) != 1:
+        return None
+    parents = [parse_range(value) for value in parent_values]
+    result = parse_range(result_values[0])
+    if result is None or any(value is None for value in parents):
+        return None
+    return [value for value in parents if value is not None], result
+
+
+def header_end(lines: Sequence[str], start: int) -> int:
+    """Find the next metadata line after a raw jj diff header.
+
+    jj leaves filenames raw in ``diff --git`` headers, including literal newlines.
+    """
+    markers = ("diff --git ", "diff --cc ", "diff --combined ", "index ", "new file mode ", "deleted file mode ",
+               "similarity index ", "rename from ", "rename to ", "copy from ", "copy to ", "--- ", "+++ ",
+               "Binary files ", "GIT binary patch", "@@ ", "@@@ ")
+    index = start + 1
+    while index < len(lines) and not lines[index].startswith(markers):
+        index += 1
+    return index
+
+
+def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
+    lines = newline_lines(text)
+    findings: list[str] = []
+    current: dict[str, object] | None = None
+
+    def display_path(record: dict[str, object]) -> str:
+        path = record["path"]
+        if isinstance(path, str):
+            return mask_path(path, matcher.spans(path))
+        return "<path the check cannot show>"
+
+    def path_spans(record: dict[str, object]) -> list[Span]:
+        path = record["path"]
+        if isinstance(path, str):
+            return matcher.spans(path)
+        return matcher.spans(str(record["header"]))
+
+    def finish(record: dict[str, object] | None) -> None:
+        if record is None or record["deleted"]:
+            return
+        place = place_prefix + display_path(record)
+        for _ in path_spans(record):
+            findings.append(place)
+
+    def begin(header: str, kind: str) -> dict[str, object]:
+        path = parse_git_header(header) if kind == "git" else parse_combined_header(header)
+        return {"path": path, "header": header, "deleted": False}
+
+    def add_content(record: dict[str, object], line_number: int, content: str) -> None:
+        place = f"{place_prefix}{display_path(record)}:{line_number}"
+        findings.extend(place for _ in matcher.spans(content))
+
+    def consume_unified(start: int, record: dict[str, object]) -> int:
+        parsed = parse_unified_hunk(lines[start])
+        if parsed is None:
+            raise TextError("malformed unified hunk")
+        (old_line, old_count), (new_line, new_count) = parsed
+        old_seen = new_seen = 0
+        index = start + 1
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith(("diff --git ", "diff --cc ", "diff --combined ", "@@ ", "@@@ ")):
+                break
+            if line.startswith("\\ No newline at end of file"):
+                index += 1
+                continue
+            if not line or line[0] not in "+- ":
+                break
+            marker, content = line[0], line[1:]
+            if marker in "- ":
+                old_seen += 1
+            if marker in "+ ":
+                new_seen += 1
+                if marker == "+":
+                    add_content(record, new_line, content)
+                new_line += 1
+            if old_seen > old_count or new_seen > new_count:
+                raise TextError("malformed unified hunk count")
+            index += 1
+        if old_seen != old_count or new_seen != new_count:
+            raise TextError("malformed unified hunk count")
+        return index
+
+    def consume_combined(start: int, record: dict[str, object]) -> int:
+        parsed = parse_combined_hunk(lines[start])
+        if parsed is None:
+            raise TextError("malformed combined hunk")
+        parents, (new_line, new_count) = parsed
+        seen = [0] * len(parents)
+        new_seen = 0
+        index = start + 1
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith(("diff --git ", "diff --cc ", "diff --combined ", "@@ ", "@@@ ")):
+                break
+            if line.startswith("\\ No newline at end of file"):
+                index += 1
+                continue
+            if len(line) < len(parents) or any(marker not in "+- " for marker in line[:len(parents)]):
+                break
+            marks, content = line[:len(parents)], line[len(parents):]
+            for parent, marker in enumerate(marks):
+                if marker != "+":
+                    seen[parent] += 1
+            result_present = "-" not in marks
+            if result_present:
+                new_seen += 1
+                if all(marker == "+" for marker in marks):
+                    add_content(record, new_line, content)
+                new_line += 1
+            if any(seen[index] > parents[index][1] for index in range(len(parents))) or new_seen > new_count:
+                raise TextError("malformed combined hunk count")
+            index += 1
+        if any(seen[index] != parents[index][1] for index in range(len(parents))) or new_seen != new_count:
+            raise TextError("malformed combined hunk count")
+        return index
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("diff --git "):
+            finish(current)
+            end = header_end(lines, index)
+            current = begin("\n".join(lines[index:end]), "git")
+            index = end
+            continue
+        if line.startswith(("diff --cc ", "diff --combined ")):
+            finish(current)
+            end = header_end(lines, index)
+            current = begin("\n".join(lines[index:end]), "combined")
+            index = end
+            continue
+        if current is None:
+            if line.startswith("@@"):
+                raise TextError("hunk has no file header")
+            index += 1
+            continue
+        if line.startswith("deleted file mode "):
+            current["deleted"] = True
+        elif line.startswith("rename to "):
+            current["path"] = parse_extended_path(line.removeprefix("rename to "))
+        elif line.startswith("copy to "):
+            current["path"] = parse_extended_path(line.removeprefix("copy to "))
+        elif line == "+++ /dev/null":
+            current["deleted"] = True
+        elif line.startswith("+++ ") and current["path"] is None:
+            path = parse_result_path(line.removeprefix("+++ "))
+            if path is not None:
+                current["path"] = path
+        elif line.startswith("@@@"):
+            index = consume_combined(index, current)
+            continue
+        elif line.startswith("@@"):
+            index = consume_unified(index, current)
+            continue
+        index += 1
+    finish(current)
+    return findings
+
+
+def cleaned_message(text: str, cleanup: str, comment_char: str | None, cut_at_scissors: bool) -> list[str]:
+    lines = newline_lines(text)
+    needs_cut = bool(comment_char) and (cut_at_scissors or cleanup == "scissors")
+    if needs_cut:
+        cut_line = f"{comment_char} {SCISSORS}"
+        for index, line in enumerate(lines):
+            if line == cut_line:
+                lines = lines[:index]
+                break
+    if cleanup == "verbatim":
+        return lines
+
+    stripped: list[str] = []
+    for line in lines:
+        value = line.rstrip(" \t\v\f\r")
+        if cleanup == "strip" and comment_char and value.startswith(comment_char):
+            continue
+        stripped.append(value)
+
+    while stripped and not stripped[0]:
+        stripped.pop(0)
+    while stripped and not stripped[-1]:
+        stripped.pop()
+
+    collapsed: list[str] = []
+    previous_blank = False
+    for line in stripped:
+        blank = not line
+        if blank and previous_blank:
+            continue
+        collapsed.append(line)
+        previous_blank = blank
+    return collapsed
+
+
+def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: str | None, cut_at_scissors: bool, place: str) -> list[str]:
+    lines = cleaned_message(text, cleanup, comment_char, cut_at_scissors)
+    findings: list[str] = []
+    for line_number, line in enumerate(lines, start=1):
+        findings.extend(f"{place} line {line_number}" for _ in matcher.spans(line))
+    return findings
+
+
+def read_stdin() -> str:
+    try:
+        return sys.stdin.buffer.read().decode("utf-8", errors="surrogateescape")
+    except OSError as error:
+        raise TextError("could not read standard input") from error
+
+
+def parser() -> argparse.ArgumentParser:
+    argument_parser = argparse.ArgumentParser(prog="leak-terms-check")
+    modes = argument_parser.add_subparsers(dest="mode", required=True)
+    diff = modes.add_parser("diff")
+    diff.add_argument("--place-prefix", default="")
+    message = modes.add_parser("message")
+    message.add_argument("--cleanup", choices=("verbatim", "whitespace", "strip", "scissors"), default="verbatim")
+    message.add_argument("--comment-char")
+    message.add_argument("--cut-at-scissors", action="store_true")
+    message.add_argument("--place", default="commit message")
+    return argument_parser
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    args = parser().parse_args(arguments)
+    try:
+        matcher = load_terms()
+    except ListError as error:
+        print(error, file=sys.stderr)
+        return LIST_EXIT
+
+    try:
+        text = read_stdin()
+        if args.mode == "diff":
+            findings = scan_diff(text, matcher, args.place_prefix)
+        else:
+            findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors, args.place)
+    except TextError as error:
+        print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
+        return TEXT_EXIT
+
+    if not findings:
+        return 0
+    for place in findings:
+        print(f"leak terms: {place}: listed leak term", file=sys.stderr)
+    print(
+        "leak terms: remove the term from the text, or if it is not private remove it from the list with "
+        "sops edit leak-terms.sops.yaml",
+        file=sys.stderr,
+    )
+    return FOUND_EXIT
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
