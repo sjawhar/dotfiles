@@ -1,0 +1,60 @@
+output "eDP-1" enabled=#true {
+  description model=""
+  physical 340 220
+  position 0 0
+  scale 1.00
+  transform "normal"
+  modes {
+    mode 1920 1200 60003 current=#true preferred=#true
+    mode 1920 1080 60003
+  }
+}
+output "DP-4" enabled=#true {
+  description make="Dell Inc." model="DELL U3225QE"
+  physical 700 390
+  position 1920 0
+  scale 2.00
+  transform "normal"
+  serial_number "BC7Z784"
+  modes {
+    mode 3840 2160 60000 current=#true preferred=#true
+    mode 3840 2160 59940
+    mode 3840 2160 30000
+  }
+}
+output "DP-11" enabled=#true {
+  description make="LG Electronics" model="LG HDR WQHD+"
+  physical 880 370
+  position 3840 0
+  scale 1.00
+  transform "normal"
+  serial_number "Unknown"
+  modes {
+    mode 3840 1600 59994 current=#true preferred=#true
+    mode 3840 1600 119982
+    mode 3840 1600 74977
+  }
+}
+output "DP-10" enabled=#true {
+  description make="Dell Inc." model="DELL U3225QE"
+  physical 700 390
+  position 7680 0
+  scale 2.00
+  transform "normal"
+  serial_number "FD7Z784"
+  modes {
+    mode 3840 2160 59997 current=#true preferred=#true
+    mode 3840 2160 30000
+  }
+}
+output "DVI-I-1" enabled=#true {
+  description make="ASUSTek COMPUTER INC" model="ASUS MB16AC"
+  physical 350 200
+  position 9600 0
+  scale 1.00
+  transform "normal"
+  serial_number "HCLMTF089038"
+  modes {
+    mode 1920 1080 60000 current=#true preferred=#true
+  }
+}

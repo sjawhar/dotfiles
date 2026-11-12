@@ -1,0 +1,210 @@
+output "DVI-I-3" enabled=#true {
+  description make="PNP(YCT)" model="InnoView"
+  physical 350 200
+  position 4802 2573
+  scale 1.25
+  transform "normal"
+  adaptive_sync_support #false
+  adaptive_sync #false
+  xwayland_primary #false
+  modes {
+    mode 2560 1440 60000 current=#true preferred=#true
+    mode 2560 1440 59951
+    mode 2048 1152 60000
+    mode 1920 1440 60000
+    mode 1920 1200 59950
+    mode 1920 1080 60000
+    mode 1920 1080 59940
+    mode 1856 1392 59995
+    mode 1792 1344 60000
+    mode 1680 1050 59883
+    mode 1680 945 60017
+    mode 1600 1200 60000
+    mode 1600 900 60000
+    mode 1440 900 59901
+    mode 1400 1050 59948
+    mode 1366 768 59790
+    mode 1360 768 60015
+    mode 1280 1024 60020
+    mode 1280 960 60000
+    mode 1280 800 59910
+    mode 1280 768 59995
+    mode 1280 720 60000
+    mode 1280 720 59940
+    mode 1280 720 50000
+    mode 1024 768 60004
+    mode 1024 576 59967
+    mode 848 480 60000
+    mode 800 600 60317
+    mode 800 600 56250
+    mode 720 480 60000
+    mode 720 480 59940
+    mode 640 480 60000
+    mode 640 480 59940
+  }
+}
+output "DVI-I-2" enabled=#true {
+  description make="Samsung Electric Company" model="U32J59x"
+  physical 700 390
+  position 7520 63
+  scale 1.00
+  transform "rotate270"
+  adaptive_sync_support #false
+  adaptive_sync #false
+  xwayland_primary #false
+  serial_number "HCHN700631"
+  modes {
+    mode 3840 2160 30000 current=#true preferred=#true
+    mode 3840 2160 29970
+    mode 3840 2160 25000
+    mode 3840 2160 24000
+    mode 3840 2160 23976
+    mode 2560 1440 59951
+    mode 1920 1080 60000
+    mode 1920 1080 59940
+    mode 1920 1080 50000
+    mode 1920 1080 30000
+    mode 1920 1080 29970
+    mode 1920 1080 24000
+    mode 1920 1080 23976
+    mode 1680 1050 59883
+    mode 1600 900 60000
+    mode 1440 900 59901
+    mode 1280 1024 75025
+    mode 1280 1024 60020
+    mode 1280 800 59910
+    mode 1280 720 60000
+    mode 1280 720 59940
+    mode 1280 720 50000
+    mode 1152 864 75000
+    mode 1024 768 75029
+    mode 1024 768 70069
+    mode 1024 768 60004
+    mode 832 624 74551
+    mode 800 600 75000
+    mode 800 600 72188
+    mode 800 600 60317
+    mode 800 600 56250
+    mode 720 576 50000
+    mode 720 480 60000
+    mode 720 480 59940
+    mode 720 400 70082
+    mode 640 480 75000
+    mode 640 480 72809
+    mode 640 480 66667
+    mode 640 480 60000
+    mode 640 480 59940
+  }
+}
+output "DP-14" enabled=#true {
+  description make="PNP(BNQ)" model="BenQ LCD"
+  physical 710 400
+  position 1920 0
+  scale 1.00
+  transform "rotate270"
+  adaptive_sync_support #false
+  adaptive_sync #false
+  xwayland_primary #false
+  serial_number "M9F05041SL0"
+  modes {
+    mode 3840 2160 59997 current=#true preferred=#true
+    mode 3840 2160 30000
+    mode 2560 1440 59951
+    mode 1920 1080 60000
+    mode 1920 1080 59940
+    mode 1920 1080 50000
+    mode 1680 1050 59954
+    mode 1600 900 60000
+    mode 1280 1024 75025
+    mode 1280 1024 60020
+    mode 1280 800 59810
+    mode 1280 720 60000
+    mode 1280 720 59940
+    mode 1280 720 50000
+    mode 1152 864 75000
+    mode 1024 768 75029
+    mode 1024 768 60004
+    mode 832 624 74551
+    mode 800 600 75000
+    mode 800 600 60317
+    mode 720 576 50000
+    mode 720 480 60000
+    mode 720 480 59940
+    mode 720 400 70082
+    mode 640 480 75000
+    mode 640 480 60000
+    mode 640 480 59940
+  }
+}
+output "DP-12" enabled=#true {
+  description make="LG Electronics" model="LG ULTRAWIDE"
+  physical 800 340
+  position 4080 1133
+  scale 1.00
+  transform "normal"
+  adaptive_sync_support #false
+  adaptive_sync #false
+  xwayland_primary #false
+  serial_number "0x0000A9F2"
+  modes {
+    mode 3440 1440 99997 current=#true
+    mode 3440 1440 59973 preferred=#true
+    mode 3440 1440 49987
+    mode 3440 1440 29993
+    mode 2560 1080 60000
+    mode 2560 1080 59940
+    mode 2560 1080 50000
+    mode 1920 1080 60000
+    mode 1920 1080 59940
+    mode 1920 1080 50000
+    mode 1680 1050 59954
+    mode 1600 900 60000
+    mode 1280 1024 60020
+    mode 1280 800 59810
+    mode 1280 720 60000
+    mode 1280 720 59940
+    mode 1280 720 50000
+    mode 1152 864 59967
+    mode 1024 768 60004
+    mode 800 600 60317
+    mode 720 576 50000
+    mode 720 480 60000
+    mode 720 480 59940
+    mode 640 480 60000
+    mode 640 480 59940
+  }
+}
+output "eDP-1" enabled=#true {
+  description model=""
+  physical 340 220
+  position 0 1774
+  scale 1.00
+  transform "normal"
+  adaptive_sync_support #true
+  adaptive_sync "automatic"
+  xwayland_primary #true
+  modes {
+    mode 1920 1200 60003 current=#true preferred=#true
+    mode 1920 1080 60003
+    mode 1680 1050 60003
+    mode 1600 1200 60000
+    mode 1440 900 60003
+    mode 1280 1024 60003
+    mode 1280 800 60003
+    mode 1280 720 60003
+    mode 1024 768 60003
+    mode 800 600 60003
+    mode 640 480 60003
+  }
+}
+output "DVI-I-9" enabled=#true {
+  description make="ASUSTek COMPUTER INC" model="ASUS MB16AC"
+  physical 350 200
+  position 9600 0
+  scale 1.00
+  transform "normal"
+  serial_number "HCLMTF089038"
+  modes {
+    mode 1920 1080 60000 current=#true preferred=#true
+  }
+}

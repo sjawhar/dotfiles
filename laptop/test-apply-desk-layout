@@ -1,0 +1,183 @@
+#!/bin/bash
+set -euo pipefail
+
+LAPTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="${LAPTOP_DIR}/apply-desk-layout"
+FIXTURES="${LAPTOP_DIR}/testdata/apply-desk-layout"
+HOME_KDL="${FIXTURES}/home.kdl"
+HOME_RECONNECTED_KDL="${FIXTURES}/home-reconnected.kdl"
+OFFICE_RECONNECTED_KDL="${FIXTURES}/office-reconnected.kdl"
+HOME_ASUS_KDL="${FIXTURES}/home-asus.kdl"
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+# The kdl block for one output in a plan: its lines from `output "NAME"` to `}`.
+geometry_of() {
+    awk -v name="$2" '$0 == "output \"" name "\" enabled=#true {" { on = 1 } on { print } on && $0 == "}" { exit }' "$1"
+}
+
+# --apply runs against a stub cosmic-randr, never the live compositor: `list --kdl`
+# prints STUB_KDL, every other call is logged to STUB_LOG and exits STUB_RC.
+mkdir -p "${TMPDIR}/bin"
+cat > "${TMPDIR}/bin/cosmic-randr" <<'STUB'
+#!/bin/bash
+if [[ "$1" == "list" && "${2:-}" == "--kdl" ]]; then
+    cat "${STUB_KDL}"
+    exit 0
+fi
+printf '%s\n' "$*" >> "${STUB_LOG}"
+[[ "$1" != "kdl" ]] || cat > /dev/null
+exit "${STUB_RC:-0}"
+STUB
+chmod +x "${TMPDIR}/bin/cosmic-randr"
+stub_apply() {
+    PATH="${TMPDIR}/bin:${PATH}" STUB_KDL="$1" STUB_LOG="${TMPDIR}/calls" STUB_RC="$2" \
+        "${TOOL}" --state "${TMPDIR}/state" --apply --if-changed
+}
+
+# Home desk after a reconnect: the dock renumbered every connector, and cosmic-comp
+# fell back to its defaults (portraits at 200% and landscape, ultrawide at its
+# preferred 60Hz). Serials find each screen on its new connector.
+plan="${TMPDIR}/home-reconnected.plan"
+"${TOOL}" --kdl "${HOME_RECONNECTED_KDL}" > "${plan}"
+grep -Fxq 'desk: home' "${plan}" || fail 'reconnected home outputs must select the home desk'
+geometry_of "${plan}" DP-16 | grep -Fx '  transform "rotate270"' > /dev/null \
+    || fail 'the BenQ, found by serial on its new connector, must be rotated to portrait'
+geometry_of "${plan}" DP-16 | grep -Fx '  scale 1.00' > /dev/null \
+    || fail 'the BenQ must go back to 100% scale'
+geometry_of "${plan}" DP-16 | grep -Fx '  position 1920 0' > /dev/null \
+    || fail 'the BenQ must sit right of the laptop'
+geometry_of "${plan}" DVI-I-5 | grep -Fx '  position 7520 63' > /dev/null \
+    || fail 'the Samsung, found by serial, must sit right of the ultrawide'
+grep -Fxq 'run: cosmic-randr mode DP-15 3440 1440 --refresh 99.997' "${plan}" \
+    || fail 'a bare WIDTHxHEIGHT mode must pick that size at its highest refresh rate'
+! grep -q 'run: cosmic-randr mode DP-16 ' "${plan}" \
+    || fail 'an output already in the right mode must get no mode command'
+
+# The same desk already in place: nothing to run.
+plan="${TMPDIR}/home.plan"
+"${TOOL}" --kdl "${HOME_KDL}" > "${plan}"
+grep -Fxq 'layout already in place' "${plan}" || fail 'a desk already in place must report it'
+! grep -q '^run:' "${plan}" || fail 'a desk already in place must run nothing'
+
+# Office desk: the twin U3225QEs swapped connectors since the last session. Each gets
+# the side its serial names, and a serial cosmic-comp reports as "Unknown" is ignored.
+plan="${TMPDIR}/office.plan"
+"${TOOL}" --kdl "${OFFICE_RECONNECTED_KDL}" > "${plan}"
+grep -Fxq 'desk: office' "${plan}" || fail 'office outputs must select the office desk'
+geometry_of "${plan}" DP-4 | grep -Fx '  position 0 0' > /dev/null \
+    || fail 'the left U3225QE (BC7Z784) must go left whatever its connector'
+geometry_of "${plan}" DP-4 | grep -Fx '  transform "rotate270"' > /dev/null \
+    || fail 'the left U3225QE must keep its own rotation'
+geometry_of "${plan}" DP-10 | grep -Fx '  transform "rotate90"' > /dev/null \
+    || fail 'the right U3225QE (FD7Z784) must keep its own rotation'
+grep -Fxq 'run: cosmic-randr mode DP-11 3840 1600 --refresh 119.982' "${plan}" \
+    || fail 'the office ultrawide must go to its highest refresh rate'
+
+if "${TOOL}" --kdl "${HOME_KDL}" --apply > /dev/null 2>&1; then
+    fail '--apply with a --kdl fixture must be refused: it would move the live screens'
+fi
+
+# --if-changed applies once per output set, so a layout dragged by hand afterwards holds.
+stub_apply "${HOME_KDL}" 0 > "${TMPDIR}/first"
+grep -Fxq 'desk: home' "${TMPDIR}/first" || fail 'the first --if-changed run must evaluate the desk'
+stub_apply "${HOME_KDL}" 0 > "${TMPDIR}/second"
+grep -Fxq 'outputs unchanged since the last run; leaving the layout alone' "${TMPDIR}/second" \
+    || fail 'a second --if-changed run with the same outputs must leave the layout alone'
+
+# A failed apply is retried on the next trigger, three times at most, and the output
+# set counts as handled only once an apply succeeds.
+: > "${TMPDIR}/calls"
+for attempt in 1 2 3; do
+    if stub_apply "${HOME_RECONNECTED_KDL}" 1 > /dev/null 2>&1; then
+        fail "a failing cosmic-randr must make attempt ${attempt} fail"
+    fi
+done
+[[ "$(grep -c '^kdl$' "${TMPDIR}/calls")" -eq 3 ]] \
+    || fail 'each failed attempt must try the layout again'
+! grep -Fq 'DP-16|' "${TMPDIR}/state" || fail 'a failed apply must not mark the output set as handled'
+stub_apply "${HOME_RECONNECTED_KDL}" 1 > "${TMPDIR}/gave-up"
+grep -Fq 'failed 3 times' "${TMPDIR}/gave-up" || fail 'a fourth attempt for the same outputs must give up'
+[[ "$(grep -c '^kdl$' "${TMPDIR}/calls")" -eq 3 ]] || fail 'giving up must not call cosmic-randr'
+stub_apply "${HOME_ASUS_KDL}" 0 > /dev/null
+grep -Fq 'DVI-I-9|' "${TMPDIR}/state" || fail 'a new output set must be applied and remembered'
+
+# Capture round trip: rows captured from a layout describe that layout exactly.
+captured="${TMPDIR}/captured.conf"
+"${TOOL}" --capture desk --kdl "${HOME_KDL}" > "${captured}"
+grep -Fxq 'desk  M9F05041SL0  required  3840x2160  1  rotate270  1920  0' "${captured}" \
+    || fail 'capture must name a monitor by serial, as required, and record its layout'
+grep -Fxq 'desk  InnoView  optional  2560x1440  1.25  normal  4802  2573' "${captured}" \
+    || fail 'capture must mark a screen without a serial optional, by its model'
+grep -Fxq 'desk  eDP-1  optional  1920x1200  1  normal  0  1774' "${captured}" \
+    || fail 'capture must keep the laptop panel optional, by connector'
+"${TOOL}" --kdl "${HOME_KDL}" --conf "${captured}" | grep -Fx 'layout already in place' > /dev/null \
+    || fail 'captured rows must match the layout they were captured from'
+
+# With the ASUS connected at home, the home-asus desk wins and the portables do not overlap.
+plan="${TMPDIR}/home-asus.plan"
+"${TOOL}" --kdl "${HOME_ASUS_KDL}" > "${plan}"
+grep -Fxq 'desk: home-asus' "${plan}" || fail 'the ASUS at home must select the home-asus desk'
+geometry_of "${plan}" DVI-I-9 | grep -Fx '  position 4080 2573' > /dev/null \
+    || fail 'the ASUS must sit under the ultrawide'
+geometry_of "${plan}" DVI-I-3 | grep -Fx '  position 4080 3653' > /dev/null \
+    || fail 'the InnoView must move below the ASUS'
+
+# WIDTHxHEIGHT@HZ picks the closest refresh; lowering changes run before raising ones.
+conf="${TMPDIR}/refresh.conf"
+printf '%s\n' \
+    'd  M9F05041SL0  required  3840x2160@30  1  rotate270  1920  0' \
+    'd  0x0000A9F2   required  3440x1440@50  1  normal     4080  1133' \
+    'd  HCHN700631   required  3840x2160     1  rotate270  7520  63' > "${conf}"
+plan="${TMPDIR}/refresh.plan"
+"${TOOL}" --kdl "${HOME_RECONNECTED_KDL}" --conf "${conf}" > "${plan}"
+grep -Fxq 'run: cosmic-randr mode DP-15 3440 1440 --refresh 49.987' "${plan}" \
+    || fail 'WIDTHxHEIGHT@HZ must pick the refresh rate closest to HZ'
+printf '%s\n' \
+    'd  M9F05041SL0  required  3840x2160@30  1  rotate270  1920  0' \
+    'd  0x0000A9F2   required  3440x1440     1  normal     4080  1133' > "${conf}"
+"${TOOL}" --kdl "${HOME_RECONNECTED_KDL}" --conf "${conf}" > "${plan}"
+[[ "$(grep '^run: cosmic-randr mode' "${plan}" | cut -d' ' -f4)" == $'DP-16\nDP-15' ]] \
+    || fail 'a mode change that lowers bandwidth must run before one that raises it'
+
+# The desk with more required monitors wins; an exact tie is refused.
+printf '%s\n' \
+    'big    M9F05041SL0  required  3840x2160  1  rotate270  1920  0' \
+    'big    0x0000A9F2   required  3440x1440  1  normal     4080  1133' \
+    'small  M9F05041SL0  required  3840x2160  1  normal     0     0' > "${conf}"
+"${TOOL}" --kdl "${HOME_KDL}" --conf "${conf}" | grep -Fx 'desk: big' > /dev/null \
+    || fail 'the desk with more required monitors must win'
+printf '%s\n' \
+    'one  M9F05041SL0  required  3840x2160  1  rotate270  1920  0' \
+    'two  0x0000A9F2   required  3440x1440  1  normal     4080  1133' > "${conf}"
+if "${TOOL}" --kdl "${HOME_KDL}" --conf "${conf}" > /dev/null 2>&1; then
+    fail 'two desks matching with the same number of required monitors must be refused'
+fi
+
+# A model query that matches two screens says so instead of silently not matching.
+printf '%s\n' 'vague  U  required  3840x2160  1  normal  0  0' > "${conf}"
+"${TOOL}" --kdl "${HOME_KDL}" --conf "${conf}" > /dev/null 2> "${TMPDIR}/vague.err"
+grep -Fq 'U matches several outputs' "${TMPDIR}/vague.err" \
+    || fail 'an ambiguous model query must be reported'
+
+# A required monitor that is not connected keeps its desk from matching.
+printf '%s\n' 'away  ABSENTSERIAL  required  1920x1080  1  normal  0  0' > "${conf}"
+"${TOOL}" --kdl "${HOME_KDL}" --conf "${conf}" \
+    | grep -Fx 'no desk in desks.conf matches the connected monitors; leaving the layout alone' > /dev/null \
+    || fail 'a desk missing a required monitor must not match'
+
+printf '%s\n' 'bad  M9F05041SL0  required  3840x2160  1  sideways  0  0' > "${conf}"
+if "${TOOL}" --kdl "${HOME_KDL}" --conf "${conf}" > /dev/null 2>&1; then
+    fail 'an unknown transform must be refused'
+fi
+
+# The shipped desks.conf parses and matches its own home fixture.
+"${TOOL}" --kdl "${HOME_KDL}" | grep -Fx 'desk: home' > /dev/null \
+    || fail 'desks.conf must select the home desk for the home fixture'
+
+echo 'PASS: apply-desk-layout'

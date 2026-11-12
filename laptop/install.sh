@@ -211,9 +211,11 @@ ensure_link "${DOTFILES_DIR}/pipewire/10-video-quality.conf" ~/.config/pipewire/
 mkdir -p ~/.config/wireplumber/wireplumber.conf.d
 ensure_link "${DOTFILES_DIR}/wireplumber/51-camera-mjpg.conf" ~/.config/wireplumber/wireplumber.conf.d/51-camera-mjpg.conf
 
-# --- COSMIC custom shortcuts ---
-chmod +x "${LAPTOP_DIR}/generate-shortcuts"
+# --- COSMIC desk layouts and custom shortcuts ---
+chmod +x "${LAPTOP_DIR}/generate-shortcuts" "${LAPTOP_DIR}/apply-desk-layout"
 "${LAPTOP_DIR}/generate-shortcuts" --apply
+# Docks renumber connectors, so cosmic-comp's own per-connector layout memory misses;
+# workspace-shortcuts.service re-applies laptop/desks.conf when the outputs change.
 # Regenerate automatically on output changes: cosmic-comp rewrites outputs.ron
 # on every connect/disconnect/rotate/rescale, and the path unit reacts to it.
 mkdir -p ~/.config/systemd/user
