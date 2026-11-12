@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -173,6 +174,67 @@ class AgentSecretsLocal(unittest.TestCase):
         for verb in ("enable", "start", "restart", "try-restart"):
             self.assertEqual(self.systemctl_verb(lines, verb), [], lines)
 
+    def append_harmless_change(self, path: Path) -> None:
+        path.write_text(path.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+        if path.name == "agent-secrets-helper":
+            self.assertTrue(os.access(path, os.X_OK))
+
+    def change_pin(self) -> None:
+        self.env["STUB_MISE_WHERE"] = str(self.make_mise_install("legion-envoy-v2.0.0"))
+
+    def change_unit(self) -> None:
+        self.append_harmless_change(self.agent_secrets / "agent-secrets-helper.service")
+
+    def change_wrapper(self) -> None:
+        self.append_harmless_change(self.agent_secrets / "agent-secrets-helper")
+
+    def change_broker_env(self) -> None:
+        self.append_harmless_change(self.agent_secrets / "broker.env")
+
+    def assert_restarts_after_change(
+        self, change: Callable[[], None], expected_marker_fragment: str | None = None
+    ) -> None:
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        first_result = self.run_local()
+        self.assertEqual(first_result.returncode, 0, first_result.stderr)
+        original_marker = self.marker.read_text(encoding="utf-8")
+        before = len(self.calls())
+        change()
+
+        result = self.run_local()
+        new_calls = self.calls()[before:]
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.systemctl_verb(new_calls, "try-restart"),
+            [f"systemctl --user try-restart {UNIT_NAME}"],
+        )
+        for verb in ("enable", "start", "restart"):
+            self.assertEqual(self.systemctl_verb(new_calls, verb), [], new_calls)
+        marker = self.marker.read_text(encoding="utf-8")
+        self.assertNotEqual(marker, original_marker)
+        if expected_marker_fragment is not None:
+            self.assertIn(expected_marker_fragment, marker)
+        self.assert_positive_log()
+
+    def assert_defers_restart_after_change(self, change: Callable[[], None]) -> None:
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        first_result = self.run_local()
+        self.assertEqual(first_result.returncode, 0, first_result.stderr)
+        original_marker = self.marker.read_text(encoding="utf-8")
+        before = len(self.calls())
+        change()
+        self.env["STUB_SESSIONS"] = "registered-session\n"
+
+        result = self.run_local()
+        new_calls = self.calls()[before:]
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_lifecycle_calls(new_calls)
+        self.assertIn("NOT restarted", result.stderr)
+        self.assertEqual(self.marker.read_text(encoding="utf-8"), original_marker)
+        self.assert_positive_log()
+
     def prepare_root_installer(self) -> Path:
         root_installer = self.fixture / "install.sh"
         shutil.copy2(ROOT_INSTALLER, root_installer)
@@ -264,41 +326,31 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assert_no_lifecycle_calls(self.calls()[before:])
         self.assert_positive_log()
 
-    def test_f_pin_bump_restarts_without_sessions(self) -> None:
-        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
-        self.assertEqual(self.run_local().returncode, 0)
-        before = len(self.calls())
-        mise_v2 = self.make_mise_install("legion-envoy-v2.0.0")
-        self.env["STUB_MISE_WHERE"] = str(mise_v2)
-
-        result = self.run_local()
-        new_calls = self.calls()[before:]
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            self.systemctl_verb(new_calls, "try-restart"),
-            [f"systemctl --user try-restart {UNIT_NAME}"],
+    def test_f_pin_change_restarts_without_sessions(self) -> None:
+        self.assert_restarts_after_change(
+            self.change_pin, expected_marker_fragment="legion-envoy-v2.0.0"
         )
-        self.assertEqual(self.systemctl_verb(new_calls, "enable"), [])
-        self.assertIn("legion-envoy-v2.0.0", self.marker.read_text(encoding="utf-8"))
-        self.assert_positive_log()
 
-    def test_g_pin_bump_with_sessions_does_not_restart(self) -> None:
-        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
-        self.assertEqual(self.run_local().returncode, 0)
-        original_marker = self.marker.read_text(encoding="utf-8")
-        before = len(self.calls())
-        self.env["STUB_MISE_WHERE"] = str(self.make_mise_install("legion-envoy-v2.0.0"))
-        self.env["STUB_SESSIONS"] = "registered-session\n"
+    def test_f_unit_change_restarts_without_sessions(self) -> None:
+        self.assert_restarts_after_change(self.change_unit)
 
-        result = self.run_local()
-        new_calls = self.calls()[before:]
+    def test_f_wrapper_change_restarts_without_sessions(self) -> None:
+        self.assert_restarts_after_change(self.change_wrapper)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assert_no_lifecycle_calls(new_calls)
-        self.assertIn("NOT restarted", result.stderr)
-        self.assertEqual(self.marker.read_text(encoding="utf-8"), original_marker)
-        self.assert_positive_log()
+    def test_f_broker_env_change_restarts_without_sessions(self) -> None:
+        self.assert_restarts_after_change(self.change_broker_env)
+
+    def test_g_pin_change_with_sessions_does_not_restart(self) -> None:
+        self.assert_defers_restart_after_change(self.change_pin)
+
+    def test_g_unit_change_with_sessions_does_not_restart(self) -> None:
+        self.assert_defers_restart_after_change(self.change_unit)
+
+    def test_g_wrapper_change_with_sessions_does_not_restart(self) -> None:
+        self.assert_defers_restart_after_change(self.change_wrapper)
+
+    def test_g_broker_env_change_with_sessions_does_not_restart(self) -> None:
+        self.assert_defers_restart_after_change(self.change_broker_env)
 
     def test_g2_local_installer_drops_session_restart_override(self) -> None:
         self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
