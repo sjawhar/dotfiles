@@ -45,7 +45,17 @@ set -uo pipefail
 here="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 state_file="${BOX_CLEANUP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/state.json}"
 log_file="${BOX_CLEANUP_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/log.jsonl}"
-envoy_url="${BOX_CLEANUP_ENVOY_URL:-http://127.0.0.1:9020}"
+# Where Envoy actually is, read from the same file the `envoy` CLI reads, so the two cannot drift.
+# The old default, http://127.0.0.1:9020, has nothing listening on it: measured 2026-11-12, curl
+# to it failed with "Couldn't connect" from a user unit AND from a plain shell, while `envoy.url`
+# from this config answered 200 on /healthz from a user unit. So every alert this script tried to
+# send went nowhere, including "A CLEANER HAS STOPPED WORKING: docker-cap (7 runs, last exit 124)"
+# -- a real fault, found only because a person asked why the unit kept failing. A notifier that
+# cannot notify is the box-exit-watch shape in scripts/AGENTS.md; this one at least says
+# COULD NOT SEND on stderr, which is how it was caught.
+_envoy_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json"
+envoy_url="${BOX_CLEANUP_ENVOY_URL:-$([[ -r "$_envoy_cfg" ]] && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("envoy",{}).get("url",""))' "$_envoy_cfg" 2>/dev/null)}"
+envoy_url="${envoy_url:-http://envoy-hub.tail12ec1c.ts.net:9020}"
 step_timeout="${BOX_CLEANUP_STEP_TIMEOUT:-30m}"
 
 # Where a box-health notice goes. `lead-box-health` is an Envoy TOPIC NAME, not a standing lead:
