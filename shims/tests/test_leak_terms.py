@@ -1193,6 +1193,58 @@ class GitLeaks(LeakTestCase):
                     else:
                         self.assert_clean(repository, agent, "commit", "-a", "-m", "clean")
 
+    def test_git_term_refuses_through_global_options_that_take_a_separate_value(self) -> None:
+        # Git 2.43 reads `--attr-source <tree-ish>` and `--shallow-file <path>` with the value in the next argument, so
+        # the subcommand comes after that value. A shim that reads the value as the subcommand runs the commit unchecked.
+        for agent in (False, True):
+            for label, options in (("attr-source", ("--attr-source", "HEAD")), ("shallow-file", ("--shallow-file", ""))):
+                with self.subTest(agent=agent, option=label):
+                    repository = self.repository(agent)
+                    self.stage(repository, "base.txt", "clean\n", agent)
+                    self.assert_clean(repository, agent, "commit", "-m", "base")
+                    self.stage(repository, "global.txt", "Quillfeather Lane 9\n", agent)
+                    self.assert_refused(repository, agent, "global.txt:1", *options, "commit", "-m", "blocked")
+                    self.stage(repository, "global.txt", "clean\n", agent)
+                    self.assert_clean(repository, agent, *options, "commit", "-m", "clean")
+
+    def test_git_term_refuses_a_commit_run_through_a_git_alias(self) -> None:
+        # `git ci` with `alias.ci=commit` runs git's own commit: the alias is the same command, as for jj's aliases.
+        for agent in (False, True):
+            for label, configure, options in (
+                ("repository-config", True, ()),
+                ("command-line-config", False, ("-c", "alias.ci=commit")),
+            ):
+                with self.subTest(agent=agent, alias=label):
+                    repository = self.repository(agent)
+                    if configure:
+                        configured = self.git_run(repository, "config", "alias.ci", "commit", agent=agent, real=True)
+                        self.assertEqual(configured.returncode, 0, configured.stderr)
+                    self.stage(repository, "alias.txt", "Quillfeather Lane 9\n", agent)
+                    self.assert_refused(repository, agent, "alias.txt:1", *options, "ci", "-m", "blocked")
+                    self.stage(repository, "alias.txt", "clean\n", agent)
+                    self.assert_clean(repository, agent, *options, "ci", "-m", "clean")
+
+    def test_git_term_reads_text_files_the_repository_marks_binary(self) -> None:
+        # A text file is still text when the repository's attributes tell `git diff` to show it as binary; the spec
+        # leaves out binary files, not text files that an attribute hides.
+        for agent in (False, True):
+            for label, attributes, config in (
+                ("minus-diff", "*.txt -diff\n", ()),
+                ("binary-macro", "*.txt binary\n", ()),
+                ("binary-driver", "*.txt diff=opaque\n", (("diff.opaque.binary", "true"),)),
+            ):
+                with self.subTest(agent=agent, attributes=label):
+                    repository = self.repository(agent)
+                    for name, value in config:
+                        configured = self.git_run(repository, "config", name, value, agent=agent, real=True)
+                        self.assertEqual(configured.returncode, 0, configured.stderr)
+                    self.stage(repository, ".gitattributes", attributes, agent)
+                    self.assert_clean(repository, agent, "commit", "-m", "attributes")
+                    self.stage(repository, "hidden.txt", "clean\nQuillfeather Lane 9\n", agent)
+                    self.assert_refused(repository, agent, "hidden.txt:2", "commit", "-m", "blocked")
+                    self.stage(repository, "hidden.txt", "clean\n", agent)
+                    self.assert_clean(repository, agent, "commit", "-m", "clean")
+
     def test_git_term_refuses_a_gitlink_when_submodules_are_ignored_in_config(self) -> None:
         for agent in (False, True):
             for path, refused in (("zorbleplex", True), ("clean-module", False)):
@@ -2600,6 +2652,46 @@ class OutgoingLeaks(SinkRepositoryCase):
             "replace-leaky.txt:1",
             destination,
         )
+
+    def test_push_refuses_through_global_options_aliases_and_binary_attributes(self) -> None:
+        # Git 2.43 reads `--attr-source <tree-ish>` and `--shallow-file <path>` with the value in the next argument;
+        # `git p` with `alias.p=push` runs git's own push; and a text file that `.gitattributes` marks `-diff` is still
+        # text. Each of these pushes reaches the public sink unchecked when the shim misreads it.
+        self.real("config", "alias.p", "push")
+        cases = (
+            ("attr-source", ("--attr-source", "HEAD", "push"), None),
+            ("shallow-file", ("--shallow-file", "", "push"), None),
+            ("alias", ("p",), None),
+            ("minus-diff", ("push",), "*.txt -diff\n"),
+        )
+
+        def make(path: str, content: str, attributes: str | None) -> str:
+            """A commit on the base holding PATH with CONTENT and, with ATTRIBUTES, the `.gitattributes` beside it."""
+            if attributes is None:
+                return self.commit(path, content, "clean", parent=self.base)
+            self.real("checkout", "-q", "--detach", self.base)
+            (self.repo / ".gitattributes").write_text(attributes, encoding="utf-8")
+            self.real("add", ".gitattributes")
+            return self.commit(path, content, "clean")
+
+        for agent, environment in self.callers():
+            for label, arguments, attributes in cases:
+                with self.subTest(agent=agent, case=label):
+                    path = f"{self.unique(label)}.txt"
+                    leaky = make(path, self.term, attributes)
+                    ref = self.unique("refused")
+                    self.refresh_visibility()
+                    self.assert_push_refused(
+                        lambda: self.command(["git", *arguments, "origin", f"{leaky}:refs/heads/{ref}"], environment),
+                        leaky,
+                        f"{path}:1",
+                        self.public_url,
+                    )
+                    # The negative control: the same push of a commit with no term goes on.
+                    clean = make(f"{self.unique(label)}.txt", "clean", attributes)
+                    self.refresh_visibility()
+                    pushed = self.command(["git", *arguments, "origin", f"{clean}:refs/heads/{self.unique('clean')}"], environment)
+                    self.assert_pushed(pushed, self.public_url, clean)
 
     def test_push_term_gate_parses_negations_end_of_options_and_short_values(self) -> None:
         # Each case pushes its own leaky commit, so one that leaks cannot hide the next.
