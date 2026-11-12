@@ -2899,6 +2899,33 @@ class OutgoingLeaks(SinkRepositoryCase):
                 clean = self.squash_commit(f"{self.unique('squash-clean')}.txt", "clean", environment)
                 self.assert_pushed(self.jj_push(clean, self.unique("clean"), environment, executable), self.public_url, clean)
 
+    def test_push_refuses_a_jj_push_of_a_text_file_the_repository_marks_binary(self) -> None:
+        # `jj git push` reads the outgoing commits with git, which shows a text file that `.gitattributes` marks `-diff`
+        # as binary; the file is still text, and its term must be read.
+        def make(path: str, content: str) -> str:
+            """A commit on the base holding PATH with CONTENT and the `.gitattributes`, kept by a branch so jj imports it."""
+            self.real("checkout", "-q", "--detach", self.base)
+            (self.repo / ".gitattributes").write_text("*.txt -diff\n", encoding="utf-8")
+            self.real("add", ".gitattributes")
+            commit = self.commit(path, content, "clean")
+            self.real("branch", "-f", path.removesuffix(".txt"), commit)
+            return commit
+
+        leaky = make("jj-attributes.txt", self.term)
+        clean = make("jj-attributes-clean.txt", "clean")
+        self.init_jj()
+        for agent, environment in self.callers():
+            with self.subTest(agent=agent):
+                self.assert_push_refused(
+                    lambda: self.jj_push(leaky, self.unique("refused"), environment),
+                    leaky,
+                    "jj-attributes.txt:1",
+                    self.public_url,
+                    "jj",
+                )
+            with self.subTest(agent=agent, control="clean"):
+                self.assert_pushed(self.jj_push(clean, self.unique("clean"), environment), self.public_url, clean)
+
     def test_push_refuses_a_persons_terms_with_no_public_check_installed(self) -> None:
         # (9): cases (1) and (6) as a person on a machine with no public leak check.
         planted = write_executable(self.root / "planted-check" / "public-leak-check.sh", "#!/bin/sh\nexit 0\n")
