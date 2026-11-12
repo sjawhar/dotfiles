@@ -37,8 +37,13 @@
     },
     "retell": {
       "lazy": true,
-      "command": "secrets",
+      "timeout": 300000,
+      "command": "secret-run",
       "args": [
+        "--reason",
+        "Retell MCP server (omp/mcp.json)",
+        "--wait",
+        "4m",
         "RETELL_API_KEY",
         "--",
         "npx",
