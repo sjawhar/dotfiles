@@ -244,8 +244,9 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # its darwin ones bin/agent-secrets alone (the helper builds for Linux only), and
 # the alias keeps it apart from the plain "github:sjawhar/legion" CLI entry above (a different
 # tag series and install dir; both measured side by side on mise 2026.8.10). The helper runs
-# this pin from its user unit (only where installers/agent-secrets.sh set it up: devbox/install.sh),
-# and installers/agent-secrets.sh restarts it on a bump only when no host session is registered:
+# this pin from its user unit (only where installers/agent-secrets.sh set it up: devbox/install.sh,
+# or the root install.sh where env.local names a broker), and installers/agent-secrets.sh restarts it
+# on a bump only when no host session is registered:
 # a restart re-pins every live session and revokes its grants.
 # The release is mutable, so each asset's sha256 is pinned: a replaced asset fails to install.
 # From legion-envoy-v3.17.1 on the release also carries a build attestation (release-envoy-listener.yaml

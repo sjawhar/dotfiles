@@ -18,6 +18,9 @@ source "${DOTFILES_DIR}/installers/nvim.sh"
 source "${DOTFILES_DIR}/installers/claude.sh"
 source "${DOTFILES_DIR}/installers/omp.sh"
 source "${DOTFILES_DIR}/installers/secretsd.sh"
+# The secrets broker's host helper runs only where env.local names a broker; run it as a command,
+# not source, because it and agent-secrets.sh can exit early.
+bash "${DOTFILES_DIR}/installers/agent-secrets-local.sh"
 source "${DOTFILES_DIR}/installers/agent-spend.sh"
 source "${DOTFILES_DIR}/installers/ctx-memory.sh"
 
