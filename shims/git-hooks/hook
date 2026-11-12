@@ -123,52 +123,31 @@ commit_status() {
     esac
 }
 
-prepare_auto_comment_char() {
-    local configured code editor status character comment_path
-    set +e
-    configured="$(git config --get core.commentChar 2> /dev/null)"
-    code=$?
-    set -e
-    [[ "$code:$configured" == 0:auto ]] || return 0
-    if [[ "${GIT_EDITOR:-}" == : ]]; then editor=0; else editor=1; fi
-    status="$(commit_status)"
-    [[ "$status" == 0 || "$status" == 1 ]] || return 0
-
-    set +e
-    character="$(cat -- "$1" | "$here/../../scripts/leak-terms-check" git-comment-char \
-        --editor-ran "$editor" --status-shown "$status")"
-    pipe_status=("${PIPESTATUS[@]}")
-    set -e
-    ((pipe_status[0] == 0 && pipe_status[1] == 0)) || exit 1
-    [[ "$character" =~ ^[\#\;\@\!\$\%\^\&\|\:]$ ]] || exit 1
-    comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
-    printf '%s' "$character" > "$comment_path"
-}
-
-message_scan_args() {
-    local cleanup verbose configured code comment_path read_every_line=0
+# Sets cleanup (the mode git applies), verbose (0, a count, or unknown) and read_every_line
+# (1 when either cannot be read). An explicit `--cleanup=default` resolves as git does
+# (strip with the editor, whitespace without) and beats commit.cleanup; an absent one takes
+# commit.cleanup, whose `default` resolves the same way.
+resolve_cleanup_and_verbose() {
+    local configured code
+    read_every_line=0
     cleanup="$(scan_field cleanup)"
-    if [[ "$cleanup" == unknown ]]; then
-        cleanup=verbatim
-        read_every_line=1
-    elif [[ "$cleanup" == default ]]; then
-        set +e
-        configured="$(git config --get commit.cleanup 2> /dev/null)"
-        code=$?
-        set -e
-        case "$code:$configured" in
-            0:verbatim | 0:whitespace | 0:strip | 0:scissors) cleanup="$configured" ;;
-            1:*)
-                if [[ "${GIT_EDITOR:-}" == : ]]; then
-                    cleanup="whitespace"
-                else
-                    cleanup="strip"
-                fi
-                ;;
-            *) cleanup=verbatim; read_every_line=1 ;;
-        esac
-    fi
     case "$cleanup" in
+        default)
+            if [[ "${GIT_EDITOR:-}" == : ]]; then cleanup=whitespace; else cleanup="strip"; fi
+            ;;
+        absent)
+            set +e
+            configured="$(git config --get commit.cleanup 2> /dev/null)"
+            code=$?
+            set -e
+            case "$code:$configured" in
+                0:verbatim | 0:whitespace | 0:strip | 0:scissors) cleanup="$configured" ;;
+                0:default | 1:*)
+                    if [[ "${GIT_EDITOR:-}" == : ]]; then cleanup=whitespace; else cleanup="strip"; fi
+                    ;;
+                *) cleanup=verbatim; read_every_line=1 ;;
+            esac
+            ;;
         verbatim | whitespace | strip | scissors) ;;
         *) cleanup=verbatim; read_every_line=1 ;;
     esac
@@ -187,15 +166,47 @@ message_scan_args() {
         case "$code:$configured" in
             0:true) verbose=1 ;;
             0:false | 1:*) verbose=0 ;;
-            *) read_every_line=1 ;;
+            *) verbose=unknown; read_every_line=1 ;;
         esac
     fi
+}
 
+# git writes its cut line into the file only when the editor runs with the status shown,
+# and then only for `scissors` or verbose; the scanner trusts a cut line only in that case.
+prepare_auto_comment_char() {
+    local configured code editor status character comment_path cleanup verbose read_every_line cut=0
+    set +e
+    configured="$(git config --get core.commentChar 2> /dev/null)"
+    code=$?
+    set -e
+    [[ "$code:$configured" == 0:auto ]] || return 0
+    if [[ "${GIT_EDITOR:-}" == : ]]; then editor=0; else editor=1; fi
+    status="$(commit_status)"
+    [[ "$status" == 0 || "$status" == 1 ]] || return 0
+    resolve_cleanup_and_verbose
+    ((!read_every_line)) || return 0
+    if ((editor && status)) && [[ "$cleanup" == scissors || "$verbose" =~ ^[1-9][0-9]*$ ]]; then
+        cut=1
+    fi
+
+    if ! character="$("$here/../../scripts/leak-terms-check" git-comment-char \
+        --editor-ran "$editor" --status-shown "$status" --cut-line-written "$cut" < "$1")"; then
+        exit 1
+    fi
+    # No character (git's choice is not certain) leaves no file, so commit-msg reads every line.
+    [[ -n "$character" ]] || return 0
+    [[ "$character" =~ ^[\#\;\@\!\$\%\^\&\|\:]$ ]] || exit 1
+    comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
+    printf '%s' "$character" > "$comment_path"
+}
+
+message_scan_args() {
+    local cleanup verbose configured code comment_path read_every_line
+    resolve_cleanup_and_verbose
     if ((read_every_line)); then
         scanner_args=(message --cleanup verbatim --place "commit message")
         return 0
     fi
-
     set +e
     configured="$(git config --get core.commentChar 2> /dev/null)"
     code=$?
@@ -239,7 +250,7 @@ if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
     case "$name" in
         pre-commit)
             set +e
-            git -c core.quotePath=false diff --cached -U0 --no-ext-diff --no-textconv --no-color --no-renames \
+            GIT_NO_REPLACE_OBJECTS=1 git -c core.quotePath=false diff --cached --ignore-submodules=none -U0 --no-ext-diff --no-textconv --no-color --no-renames \
                 --no-relative --src-prefix=a/ --dst-prefix=b/ --submodule=short --diff-algorithm=myers |
                 "$here/../../scripts/leak-terms-check" diff
             pipe_status=("${PIPESTATUS[@]}")

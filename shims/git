@@ -4,7 +4,8 @@
 # lock of ours and no further, give every `git commit` without a command-line hooks path
 # the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
 # it does now, run the shared public leak check under its existing conditions, run the
-# encrypted leak-term check on every guarded `git push` and direct public/unknown URL push,
+# encrypted leak-term check on every `git push` but one from an unguarded checkout to a
+# configured remote (its hook scans a public or unknown GitHub URL),
 # and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
@@ -110,8 +111,12 @@ shopt -s nocasematch
 [[ " ${args[*]:0:i} " == *core.hookspath=* ]] && caller_hooks_path=1
 shopt -u nocasematch
 
+# Prints DOTFILES_GIT_COMMIT_SCAN, `cleanup=<mode> verbose=<n|config|unknown>
+# status=<1|0|config|unknown>`: the mode is `absent` when the argv names no --cleanup (the
+# hook then reads commit.cleanup), `default` for an explicit --cleanup=default, a named mode,
+# or `unknown` when the argv cannot be read.
 commit_scan_state() {
-    local cleanup=default verbose=config status=config option canonical value short character j index
+    local cleanup=absent verbose=config status=config option canonical value short character j index
     local -a long_options=(
         all interactive patch include only quiet verbose no-verbose amend no-post-rewrite post-rewrite dry-run
         short branch ahead-behind porcelain long null allow-empty allow-empty-message no-verify verify author date
@@ -158,7 +163,7 @@ commit_scan_state() {
                         return
                     fi
                     case "$value" in
-                        verbatim | whitespace | strip | scissors) cleanup="$value" ;;
+                        default | verbatim | whitespace | strip | scissors) cleanup="$value" ;;
                         *) printf 'cleanup=unknown verbose=unknown status=unknown'; return ;;
                     esac
                     ;;
@@ -330,10 +335,12 @@ fi
 # a git checkout runs the shared public leak check never runs for a jj push, and
 # theorem-labs/rocq alone has fourteen jj checkouts here (dispatch://BET-214/ask/19a77b7a;
 # Sami, dispatch://BET-214/ask/3f2020ba: "Some reasonable check makes sense").
-# This block gives every guarded jj push, and every guarded plain push, the leak
-# gate's pre-push hook: it drops jj's --no-verify and points core.hooksPath at
-# jj-push-hooks/. That hook first scans listed leak terms, then runs the shared
-# public check exactly where the old decision required it. git itself hands the
+# This block gives every push but one the leak gate's pre-push hook: it drops every
+# verification option of the caller (jj's --no-verify included), adds --verify and points
+# core.hooksPath at jj-push-hooks/. That hook scans listed leak terms when the URL git hands
+# it is a public or unreadable GitHub repository, then runs the shared public check exactly
+# where the old decision required it. The one push git runs untouched is from a checkout
+# that is not guarded to one of its configured remotes. git itself hands the
 # hook the URL it is pushing to and the updates it is about to send, so nothing
 # about the push is guessed here: an up-to-date ref is not scanned, a bookmark
 # moved meanwhile does not change what goes out, and a remote changed meanwhile
@@ -363,10 +370,11 @@ fi
 # PUBLIC-LEAK-CHECK-DISPATCHER. Neither reaches a fresh clone on a machine or in an agent box without the dispatcher
 # (a box made before 2026-11-05 has its ~/.gitconfig bound to a deleted file, so it never saw the include, and has no
 # hooks directory), nor a repository whose own core.hooksPath (local or worktree, an empty value included, which git
-# 2.43 reads as `/`: husky, the pre-commit framework) overrides the dispatcher. The encrypted term gate always adds
-# its last -c core.hooksPath=jj-push-hooks/ for a guarded push or a direct public or unreadable GitHub URL, then names
-# the plain verified push's original directory in GIT_SHIM_OWN_HOOKS so it runs after a clean scan. A wrapper or
-# dispatcher still runs once there; it only keeps GIT_SHIM_PUBLIC_CHECK=0 because that original hook performs it.
+# 2.43 reads as `/`: husky, the pre-commit framework) overrides the dispatcher. The encrypted term gate adds its last
+# -c core.hooksPath=jj-push-hooks/ to every push but a push from a checkout that is not guarded to a configured
+# remote, then names the plain verified push's original directory in GIT_SHIM_OWN_HOOKS so it runs after a clean scan.
+# A wrapper or dispatcher still runs once there; it only keeps GIT_SHIM_PUBLIC_CHECK=0 because that original hook
+# performs it.
 # The public check, but not the term scan, remains unseen by `git push --no-verify`, a hooks path set on the command
 # line or in the environment (the caller's own choice), a jj told to run another git (`git.executable-path`) or copied
 # under another name, and a remote changed between this decision and git reading its config.
@@ -426,21 +434,171 @@ jj_push_guarded() {
     done <<< "$1"
     return 1
 }
-# Every guarded push, and every direct push to a public or unreadable GitHub URL, takes this hooks path so the
-# leak-term scan cannot be skipped with --no-verify, a caller-selected hooks path, or a pre-push wrapper. The existing
-# public-check decisions stay separate: agent jj pushes and the old agent plain-push conditions set
-# GIT_SHIM_PUBLIC_CHECK=1; all other term-gated pushes set it to 0. For a plain verified push, the hook receives the
-# pre-push directory Git would otherwise run in GIT_SHIM_OWN_HOOKS and invokes it after a clean scan.
-push_is_verified() {
-    local a verify=1
-    for a in "${args[@]:i+1}"; do
-        case "$a" in
-            --) break ;;
-            --no-verify) verify=0 ;;
-            --verify) verify=1 ;;
+# A push takes this hooks path unless the checkout is not guarded and the destination git uses is one of its configured
+# remotes: a URL, a name that is not a configured remote (an insteadOf alias included), and every push from a guarded
+# checkout take it, so the leak-term scan cannot be skipped with --no-verify, a caller-selected hooks path, or a
+# pre-push wrapper. Its pre-push scans by the URL git gives it, after insteadOf. The existing public-check decisions
+# stay separate: agent jj pushes and the old agent plain-push conditions set GIT_SHIM_PUBLIC_CHECK=1; all other
+# term-gated pushes set it to 0. For a plain verified push, the hook receives the pre-push directory Git would
+# otherwise run in GIT_SHIM_OWN_HOOKS and invokes it after a clean scan.
+push_cannot_read() {
+    jj_push_refuse "cannot read option $1, so the leak-term check cannot run. Nothing was pushed."
+}
+# The long options of builtin/push.c at git v2.43.0, as name:kind:noneg. Kind n takes no
+# value, r takes a required value (`--x=v` or `--x v`), o takes an optional value only as
+# `--x=v`. noneg N is PARSE_OPT_NONEG. `branches` is OPT_ALIAS of `all`.
+PUSH_LONG_OPTIONS=(
+    verbose:n: quiet:n: repo:r: all:n: branches:n: mirror:n: delete:n: tags:n: dry-run:n:
+    porcelain:n: force:n: force-with-lease:o: force-if-includes:n: recurse-submodules:r:
+    thin:n: receive-pack:r: exec:r: set-upstream:n: progress:n: prune:n: no-verify:n:
+    follow-tags:n: signed:o: atomic:n: push-option:r: ipv4:n:N ipv6:n:N
+)
+# push_long_parse ARG: ARG is a long option without its leading `--`. This is
+# parse_long_opt of parse-options.c at git v2.43.0: an exact name (or `no-` and an exact
+# name, or a `no-` name without its `no-`) wins, else the one unique abbreviation of a name
+# or of its negation. Sets PUSH_OPTION, PUSH_KIND, PUSH_UNSET, PUSH_ATTACHED and
+# PUSH_VALUE; returns 1 for an unknown option and 2 for an ambiguous one.
+push_long_parse() {
+    local arg=$1 name_part entry long kind noneg name rest state unset opt_unset
+    local abbrev="" abbrev_kind="" abbrev_unset=0 ambiguous=0
+    name_part="${arg%%=*}"
+    PUSH_OPTION="" PUSH_KIND="" PUSH_UNSET=0 PUSH_ATTACHED=0 PUSH_VALUE=""
+    for entry in "${PUSH_LONG_OPTIONS[@]}"; do
+        IFS=: read -r long kind noneg <<< "$entry"
+        name=$long unset=0 opt_unset=0 rest="" state=skip
+        while :; do
+            if [[ "$arg" == "$name"* ]]; then
+                rest="${arg:${#name}}" state=exact
+                break
+            fi
+            if [[ "$name" == "$name_part"* ]]; then
+                state=abbrev
+                break
+            fi
+            [[ "$noneg" != N ]] || break
+            if [[ "no-" == "$arg"* ]]; then
+                unset=1 state=abbrev
+                break
+            fi
+            if [[ "$arg" != no-* ]]; then
+                if [[ "$name" == no-* ]]; then
+                    name="${name#no-}" opt_unset=1
+                    continue
+                fi
+                break
+            fi
+            unset=1
+            if [[ "${arg:3}" == "$name"* ]]; then
+                rest="${arg:3+${#name}}" state=exact
+            elif [[ "$name" == "${arg:3}"* ]]; then
+                state=abbrev
+            fi
+            break
+        done
+        case "$state" in
+            skip) continue ;;
+            abbrev)
+                [[ -z "$abbrev" ]] || ambiguous=1
+                abbrev=$long abbrev_kind=$kind abbrev_unset=$((unset ^ opt_unset))
+                continue
+                ;;
         esac
+        if [[ -n "$rest" ]]; then
+            [[ "$rest" == =* ]] || continue
+            PUSH_ATTACHED=1 PUSH_VALUE="${rest#=}"
+        fi
+        PUSH_OPTION=$long PUSH_KIND=$kind PUSH_UNSET=$((unset ^ opt_unset))
+        return 0
     done
-    ((verify))
+    ((!ambiguous)) || return 2
+    [[ -n "$abbrev" ]] || return 1
+    PUSH_OPTION=$abbrev PUSH_KIND=$abbrev_kind PUSH_UNSET=$abbrev_unset
+    # An abbreviation keeps the value after `=`; a negated one cannot carry `=`.
+    if [[ "$arg" == *=* ]]; then PUSH_ATTACHED=1 PUSH_VALUE="${arg#*=}"; fi
+    return 0
+}
+# Parse the push argv as git 2.43's parse_options with builtin/push.c's options does.
+# PUSH_REBUILT keeps every caller argument byte for byte, in order, except the options that
+# set or clear --no-verify; push_with_gate puts back one --verify before them. The
+# repository is the first non-option argument, else the last --repo. An option git does not
+# know, an ambiguous abbreviation, or a value git would reject refuses the push; a help
+# request runs git unchanged, since git then pushes nothing.
+push_parse() {
+    local a position short index character options_done=0 positional_set=0 repo_set=0 repo=""
+    local -a taken
+    PUSH_REPOSITORY="" PUSH_REPOSITORY_SET=0 PUSH_VERIFIED=1 PUSH_REBUILT=()
+    for ((position = i + 1; position < ${#args[@]}; position++)); do
+        a="${args[position]}"
+        if ((options_done)) || [[ "$a" != -?* ]]; then
+            if ((!positional_set)); then
+                positional_set=1 PUSH_REPOSITORY="$a"
+            fi
+            PUSH_REBUILT+=("$a")
+            continue
+        fi
+        if [[ "$a" == -- || "$a" == --end-of-options ]]; then
+            options_done=1
+            PUSH_REBUILT+=("$a")
+            continue
+        fi
+        if [[ "$a" == --help || "$a" == --help-all ]] ||
+            [[ $((${#args[@]} - i - 1)) -eq 1 && ("$a" == --git-completion-helper || "$a" == --git-completion-helper-all) ]]; then
+            exec "$_real" "${args[@]}"
+        fi
+        taken=("$a")
+        if [[ "$a" == --* ]]; then
+            push_long_parse "${a#--}" || push_cannot_read "$a"
+            if ((PUSH_UNSET)) && ((PUSH_ATTACHED)); then push_cannot_read "$a"; fi
+            case "$PUSH_KIND" in
+                n) ((!PUSH_ATTACHED)) || push_cannot_read "$a" ;;
+                r)
+                    if ((!PUSH_UNSET && !PUSH_ATTACHED)); then
+                        ((position + 1 < ${#args[@]})) || push_cannot_read "$a"
+                        ((++position))
+                        PUSH_VALUE="${args[position]}"
+                        taken+=("$PUSH_VALUE")
+                    fi
+                    ;;
+            esac
+            case "$PUSH_OPTION" in
+                no-verify)
+                    PUSH_VERIFIED=$PUSH_UNSET
+                    continue
+                    ;;
+                repo)
+                    if ((PUSH_UNSET)); then repo_set=0 repo=""; else repo_set=1 repo="$PUSH_VALUE"; fi
+                    ;;
+            esac
+            PUSH_REBUILT+=("${taken[@]}")
+            continue
+        fi
+        short="${a#-}"
+        for ((index = 0; index < ${#short}; index++)); do
+            character="${short:index:1}"
+            case "$character" in
+                v | q | d | n | f | u | 4 | 6) ;;
+                o)
+                    if ((index + 1 == ${#short})); then
+                        ((position + 1 < ${#args[@]})) || push_cannot_read "$a"
+                        ((++position))
+                        taken+=("${args[position]}")
+                    fi
+                    break
+                    ;;
+                h) exec "$_real" "${args[@]}" ;;
+                *) push_cannot_read "$a" ;;
+            esac
+        done
+        PUSH_REBUILT+=("${taken[@]}")
+    done
+    if ((!positional_set && repo_set)); then
+        PUSH_REPOSITORY="$repo"
+        PUSH_REPOSITORY_SET=1
+    fi
+    ((!positional_set)) || PUSH_REPOSITORY_SET=1
+}
+push_is_verified() {
+    ((PUSH_VERIFIED))
 }
 # Read the exact hooks directory Git would run for a plain verified push. `--type=path`
 # expands `~` without involving the shell. An unset core.hooksPath takes the common
@@ -456,7 +614,7 @@ push_is_verified() {
 # bytes only name `dispatch`. A missing directory, hook or dispatcher is normal.
 # This one `git config` call sees `-c core.hooksPath` as well as config files, and
 # its scope tells the public check to leave a caller's command-line hook alone.
-# `git -c core.hooksPath=… push` puts the last matching pair first in
+# `git -c core.hooksPath=… push` appends the last matching pair to
 # GIT_CONFIG_PARAMETERS, so jj-push-hooks/pre-push removes its own exact pair
 # before it invokes this hook.
 push_own_hooks() {
@@ -483,28 +641,6 @@ push_own_hooks_run_public_check() {
     [[ -x "$PUSH_OWN_HOOKS/dispatch" ]] &&
         grep -qs PUBLIC-LEAK-CHECK-DISPATCHER -- "$PUSH_OWN_HOOKS/dispatch"
 }
-push_repository() {
-    local a take_value=0
-    for a in "${args[@]:i+1}"; do
-        if ((take_value == 1)); then
-            printf '%s\n' "$a"
-            return
-        fi
-        if ((take_value == 2)); then
-            take_value=0
-            continue
-        fi
-        case "$a" in
-            --) take_value=1 ;;
-            --repo) take_value=1 ;;
-            --repo=*) printf '%s\n' "${a#*=}"; return ;;
-            --receive-pack | --exec | --push-option | -o) take_value=2 ;;
-            --receive-pack=* | --exec=* | --push-option=*) ;;
-            -*) ;;
-            *) printf '%s\n' "$a"; return ;;
-        esac
-    done
-}
 push_is_named_remote() {
     local remote=$1 out name
     out="$("$_real" "${args[@]:0:i}" remote 2> /dev/null)" || return 1
@@ -513,19 +649,45 @@ push_is_named_remote() {
     done <<< "$out"
     return 1
 }
-push_url_is_guarded() {
-    local url=$1 sshcmd visibility
-    sshcmd="$("$_real" "${args[@]:0:i}" config --get core.sshCommand 2> /dev/null)" || sshcmd=""
-    visibility="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$jj_gate_visibility" "$url" 2> /dev/null)" || visibility=unknown
-    case "$visibility" in private | internal | not-github) return 1 ;; *) return 0 ;; esac
+# The destination git 2.43 uses when the push names none (pushremote_for_branch in
+# remote.c): branch.<current>.pushRemote, remote.pushDefault, branch.<current>.remote,
+# else origin. The current branch is HEAD's symbolic target under refs/heads/.
+push_effective_repository() {
+    local branch="" candidate
+    if ((PUSH_REPOSITORY_SET)); then
+        printf '%s\n' "$PUSH_REPOSITORY"
+        return
+    fi
+    candidate="$("$_real" "${args[@]:0:i}" symbolic-ref --quiet HEAD 2> /dev/null)" || candidate=""
+    [[ "$candidate" != refs/heads/* ]] || branch="${candidate#refs/heads/}"
+    if [[ -n "$branch" ]]; then
+        candidate="$("$_real" "${args[@]:0:i}" config --get "branch.$branch.pushRemote" 2> /dev/null)" || candidate=""
+        [[ -n "$candidate" ]] && {
+            printf '%s\n' "$candidate"
+            return
+        }
+    fi
+    candidate="$("$_real" "${args[@]:0:i}" config --get remote.pushDefault 2> /dev/null)" || candidate=""
+    [[ -n "$candidate" ]] && {
+        printf '%s\n' "$candidate"
+        return
+    }
+    if [[ -n "$branch" ]]; then
+        candidate="$("$_real" "${args[@]:0:i}" config --get "branch.$branch.remote" 2> /dev/null)" || candidate=""
+        [[ -n "$candidate" ]] && {
+            printf '%s\n' "$candidate"
+            return
+        }
+    fi
+    printf '%s\n' origin
 }
-# `push_with_gate`: for a term-gated jj push, runs this push with git's hooks
-# on and a last -c core.hooksPath=jj-push-hooks/, which beats jj's own
-# core.hooksPath and every earlier one, so the gate's pre-push runs;
+# `push_with_gate`: runs this push with git's hooks on and a last
+# -c core.hooksPath=jj-push-hooks/, which beats jj's own core.hooksPath, the
+# caller's and every earlier one, so the gate's pre-push runs;
 # jj-push-hooks/hook, which every other hook name there links to, takes that
 # one -c back out and runs the hook git would have run without it. A plain
-# term-gated push uses the same last -c and receives its own pre-push after a
-# clean term scan (and its old public check where applicable).
+# push receives its own pre-push after a clean term scan (and its old public
+# check where applicable).
 # When git's stderr carries git's own "failed to push some refs", jj 0.46 reads
 # only git's stdout, which is empty when a pre-push hook refused, and drops the
 # stderr: the person sees "Git push output unfamiliar" and nothing else
@@ -538,36 +700,27 @@ push_url_is_guarded() {
 # porcelain and drops the stderr, the gate's refusal with it. The push is
 # refused either way: git exits 1. A plain push needs no filter: Git is the
 # final reader of its stderr.
-# `push_with_gate` removes every caller --no-verify/--verify before adding
-# --verify and the last core.hooksPath, so the term gate cannot be bypassed
-# while every other push argument keeps its original order.
+# The argv is --verify and then PUSH_REBUILT: every argument of the caller, in
+# order and byte for byte, except the options push_parse read as --no-verify or
+# its negation, so no spelling of --no-verify can turn the gate's hook off.
 push_with_gate() {
-    local is_jj=$1 a seen=0
-    local -a rest=()
-    for a in "${args[@]:i+1}"; do
-        if ((!seen)); then
-            [[ "$a" == -- ]] && seen=1
-            case "$a" in --no-verify | --verify) continue ;; esac
-        fi
-        rest+=("$a")
-    done
+    local is_jj=$1
     if ((is_jj)); then
-        exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$PUSH_GATE_HOOKS" push --verify "${rest[@]}" \
+        exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$PUSH_GATE_HOOKS" push --verify "${PUSH_REBUILT[@]}" \
             2> >(awk '/^error: git shim: /{ gate = 1; print; fflush(); next }
                       gate && /^error: failed to push some refs to /{ gate = 0; next }
                       { gate = 0; print; fflush() }' >&2)
     fi
-    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$PUSH_GATE_HOOKS" push --verify "${rest[@]}"
+    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$PUSH_GATE_HOOKS" push --verify "${PUSH_REBUILT[@]}"
 }
 if [[ "${args[i]}" == push ]]; then
     unset GIT_SHIM_PUBLIC_CHECK GIT_SHIM_OWN_HOOKS
+    push_parse
     is_jj=0
     from_jj && is_jj=1
-    repository="$(push_repository)"
+    repository="$(push_effective_repository)"
     named_remote=0
-    if [[ -z "$repository" ]] || push_is_named_remote "$repository"; then
-        named_remote=1
-    fi
+    push_is_named_remote "$repository" && named_remote=1
     listing=""
     listed=0
     if listing="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)"; then listed=1; fi
@@ -577,12 +730,11 @@ if [[ "${args[i]}" == push ]]; then
     else
         guarded=1
     fi
-    term_gate=0
-    if [[ -z "$repository" || $named_remote -eq 1 ]]; then
-        term_gate=$guarded
-    elif push_url_is_guarded "$repository"; then
-        term_gate=1
-    fi
+    # Only a human checkout pushing to one of its configured remotes preserves
+    # Git's unmodified route. All other destinations reach the gate, where Git
+    # supplies the rewritten URL to the hook as its second argument.
+    term_gate=1
+    ((!guarded && named_remote)) && term_gate=0
 
     public_check=0
     PUSH_OWN_HOOKS=""
@@ -600,11 +752,11 @@ if [[ "${args[i]}" == push ]]; then
             ((guarded)) && public_check=1
         fi
     fi
-    ((term_gate)) || exec "$_real" "$@"
+    ((term_gate || public_check)) || exec "$_real" "$@"
 
     PUSH_GATE_HOOKS="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
     [[ -x "$PUSH_GATE_HOOKS/pre-push" ]] ||
-        jj_push_refuse "the leak gate's hook $PUSH_GATE_HOOKS/pre-push is missing, so this push to a public or unreadable GitHub repository is refused." \
+        jj_push_refuse "the leak gate's hook $PUSH_GATE_HOOKS/pre-push is missing, so this push is refused." \
             "$JJ_PUSH_UNREAD"
     export GIT_SHIM_PUBLIC_CHECK="$public_check"
     if ((!is_jj)) && push_is_verified && { [[ -n "$PUSH_OWN_HOOKS" ]] || push_own_hooks; }; then

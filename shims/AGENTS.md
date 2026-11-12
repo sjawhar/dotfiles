@@ -148,12 +148,17 @@ before handing the call to the real one.
   `commit` and `ci` scan the working-copy diff, limited to their named paths unless an
   interactive or tool-driven commit selects all of it; `describe` and `desc` scan every selected
   revision (or `@`); and `new` scans the working-copy diff before it creates its new revision.
-  Each scans its explicit `-m` or `--message` text, and `describe`/`desc` also scan `--stdin`.
+  Each scans its explicit `-m` or `--message` text, and `describe`/`desc` also scan `--stdin`;
+  with `--editor`, only the edited text is scanned, as jj stores only that.
   Where `commit`, `ci`, `describe` or `desc` opens an editor, the shim replaces `ui.editor` with
-  `leak-terms-check jj-editor`; the wrapper runs jj's selected editor and scans the descriptions
-  after jj removes `JJ:` lines and text after `JJ: ignore-rest`. It rejects an editor that is the
-  wrapper itself, and its active guard rejects a recursive wrapper run. The `--deleted` refusal
-  and trailer handling stay as they were.
+  `leak-terms-check jj-editor`; the wrapper runs jj's selected editor with the argv jj would give
+  it (a string is split as jj 0.46 splits it: by the shlex 2.0.1 crate's rules when it holds a
+  quote, else at each space) and scans the descriptions after jj removes `JJ:` lines and text
+  after `JJ: ignore-rest`. One description is read whole. For several, each
+  `JJ: describe <12-hex id> -------` section is read on its own; a header whose id the shim did
+  not expect, or text before the first header, refuses without printing the header. It rejects
+  an editor that is the wrapper itself, and its active guard rejects a recursive wrapper run. The
+  `--deleted` refusal and trailer handling stay as they were.
   Every `jj git push` first dry-runs its resolved destination plan and, for every public or
   unreadable GitHub URL, scans the outgoing commits that destination does not advertise. This
   encrypted-term check runs for every caller before the shared public leak check, and fails closed
@@ -208,24 +213,37 @@ before handing the call to the real one.
   `core.hooksPath=git-hooks/` and scans after Git runs the repository's own hooks. The hook first
   runs the repository's `pre-commit` or `commit-msg`, with Git's same arguments and standard
   input; only a successful hook is followed by the scan. The pre-commit scan reads added lines
-  and result-side paths from the staged diff. The commit-message scan reads the message as Git
-  stores it: it applies the effective `--cleanup`/`commit.cleanup` mode, the effective
-  `core.commentChar` (including `auto`), and scissors handling. A comment or text after scissors
-  that Git removes is not read; the same text is read when Git keeps it. These commit scans do
-  not cover `git commit --no-verify`, a caller's `-c core.hooksPath`, `merge`, `pull`,
+  and result-side paths from the staged diff, submodule changes included whatever
+  `diff.ignoreSubmodules` says. The commit-message scan reads the message as Git stores it: it
+  applies the effective cleanup mode (an explicit `--cleanup=default` resolves as Git resolves it,
+  strip with the editor and whitespace without, and beats `commit.cleanup`), the effective
+  `core.commentChar`, and scissors handling. For `core.commentChar=auto`, the character is taken
+  only from what Git wrote into the prepared message: without the editor or the status, Git's own
+  choice from that text; else Git's cut line when Git wrote one (scissors or verbose) and the file
+  holds no other, or the one candidate that starts Git's comment block after the message. When
+  that is not certain, every line is read. A comment or text after scissors that Git removes is
+  not read; the same text is read when Git keeps it. These commit scans do not cover
+  `git commit --no-verify`, a caller's `-c core.hooksPath`, `merge`, `pull`,
   `cherry-pick`, `revert`, `rebase`, `am`, `commit-tree`, or Git run by its full path.
   A `git fetch <remote> <src>:<dst>` whose source is not a full ref name runs with `--no-prune`
   when no refspec has a `*`, since git's pruning deletes such a destination that already exists
   (`b:refs/remotes/origin/b` left it missing every second run on git 2.43.0) and prunes nothing
   else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
   Every `git push` through this shim, for every caller, gets the encrypted-term pre-push gate
-  when its configured destination or direct destination URL is a public or unreadable GitHub
-  repository. A push to a URL that is not a configured remote gets its visibility directly from
-  `scripts/github-repo-visibility`. The gate reads Git's update lines and the destination's live
-  advertisement, then scans only the commits the updates send that the destination does not hold:
-  their added result-side lines and paths and their messages. jj runs
+  except a push from a checkout that is not guarded to one of its configured remotes. The
+  destination is the one Git uses: the first non-option argument, else the last `--repo`, else
+  `branch.<current>.pushRemote`, `remote.pushDefault`, `branch.<current>.remote`, `origin`. A URL,
+  an `insteadOf` alias and any other name that is not a configured remote take the gate. The shim
+  reads the push argv as Git 2.43 parses it (unique abbreviations and `--no-` forms of long
+  options, bundled short options, required and optional values, `--` and `--end-of-options`); an
+  option it cannot read or an ambiguous abbreviation refuses. The gate's pre-push scans when the
+  URL Git gives it, after `insteadOf`, is a public or unreadable GitHub repository
+  (`scripts/github-repo-visibility`). It reads Git's update lines and the destination's live
+  advertisement, then scans only the commits the updates send that the destination does not
+  hold: their added result-side lines and paths and their messages, read as UTF-8 and with
+  replacement objects ignored. jj runs
   `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote, so no hook
-  runs for that push; the shim directs its guarded pushes through this gate too.
+  runs for that push; the shim directs those pushes through this gate by the same rule.
   The checkout is guarded when a URL `git remote -v` prints (read whole after the tab: a push line
   without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial clone's
   filter, which may hold anything, follows that; a remote listed with a blank URL, its name and a
@@ -251,9 +269,11 @@ before handing the call to the real one.
   `devbox/sami-devbox-provision` installed it; dispatch://BET-706 R6). Neither reaches a fresh
   clone without the dispatcher, or a repository whose own `core.hooksPath` (husky, the pre-commit
   framework, or an empty value Git reads as `/`) overrides the dispatcher.
-  The gate removes `--no-verify`, adds `--verify` and its last `-c core.hooksPath=jj-push-hooks/`,
-  so `--no-verify`, a caller's hooks path, the public-check wrapper and the global dispatcher
-  cannot skip the term scan. For a verified plain push, `GIT_SHIM_OWN_HOOKS` names the repository
+  The gate drops every option Git reads as `--no-verify` or its negation, keeps every other
+  argument byte for byte and in order, and adds `--verify` ahead of them and its last
+  `-c core.hooksPath=jj-push-hooks/`, so `--no-verify` in any spelling, a caller's hooks path, the
+  public-check wrapper and the global dispatcher cannot skip the term scan. For a verified plain
+  push, `GIT_SHIM_OWN_HOOKS` names the repository
   hook directory; after a clean term check and public check where it is enabled, the gate runs
   that own pre-push with the same arguments and update input, without the shim's `-c` or that
   variable. Where the wrapper or dispatcher is effective, the public check runs once through it.

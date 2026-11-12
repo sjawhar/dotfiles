@@ -455,6 +455,8 @@ _jj_global=()
 _jj_positions=()
 _jj_revisions=()
 _jj_messages=()
+_jj_editor_mode=single
+_jj_editor_ids=()
 
 jj_option_refuse() {
     printf 'jj shim: cannot read option %s, so the leak-term check cannot run; nothing changed\n' "$1" >&2
@@ -509,39 +511,9 @@ jj_join_messages() {
         completed=1
     done
 }
-jj_editor_is_not_wrapper() {
-    python3 -c '
-import json
-import os
-from pathlib import Path
-import shlex
-import shutil
-import sys
-
-value = json.loads(sys.argv[1])
-if isinstance(value, str):
-    try:
-        command = shlex.split(value) if ("\"" in value or "'"'"'" in value) else value.split(" ")
-    except ValueError:
-        command = value.split(" ")
-elif isinstance(value, list) and value and all(isinstance(item, str) for item in value):
-    command = value
-elif isinstance(value, dict) and isinstance(value.get("command"), list) and value["command"] and all(
-    isinstance(item, str) for item in value["command"]
-):
-    command = value["command"]
-else:
-    raise ValueError("invalid ui.editor")
-if not command:
-    raise ValueError("empty ui.editor")
-candidate = Path(command[0]) if os.path.sep in command[0] else shutil.which(command[0])
-if candidate is not None and Path(candidate).resolve() == Path(sys.argv[2]).resolve():
-    raise ValueError("leak-terms-check is ui.editor")
-' "$1" "$_jj_scanner"
-}
 
 jj_enable_editor() {
-    local selected named wrapper
+    local selected named wrapper ids
     if ! selected="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" "${_jj_global[@]}" --no-pager --color=never config list --include-defaults ui.editor -T 'json(value) ++ "\n"')"; then
         jj_scan_refuse "cannot read jj's configured editor for the leak-term check"
     fi
@@ -569,13 +541,16 @@ print(json.dumps({"env": env, "command": command}, separators=(",", ":")))
             jj_scan_refuse "cannot read jj's configured editor for the leak-term check"
         fi
     fi
-    if ! jj_editor_is_not_wrapper "$selected" 2>/dev/null; then
+    if ! "$_jj_scanner" jj-editor-preflight "$selected"; then
         jj_scan_refuse "configured jj editor resolves to leak-terms-check"
     fi
     if ! wrapper="$(python3 -c 'import json, sys; print("ui.editor=" + json.dumps([sys.argv[1], "jj-editor"]))' "$_jj_scanner")"; then
         jj_scan_refuse "cannot set the jj editor wrapper for the leak-term check"
     fi
-    export DOTFILES_JJ_EDITOR="$selected"
+    if ((${#_jj_editor_ids[@]} > 1)); then _jj_editor_mode=bulk; else _jj_editor_mode=single; fi
+    local IFS=,
+    ids="${_jj_editor_ids[*]}"
+    export DOTFILES_JJ_EDITOR="$selected" DOTFILES_JJ_EDITOR_MODE="$_jj_editor_mode" DOTFILES_JJ_EDITOR_IDS="$ids"
     _jj_final_config=(--config "$wrapper")
 }
 jj_parse_protected() {
@@ -626,6 +601,17 @@ jj_parse_protected() {
         if ((index < _pi)); then
             jj_option_refuse "$token"
         fi
+        case "$token" in
+            -m | --message)
+                ((index + 1 < ${#_pargs[@]})) || jj_option_refuse "$token"
+                _jj_messages+=("${_pargs[index + 1]}")
+                _jj_has_message=1
+                ((index += 2))
+                continue
+                ;;
+            -m?*) _jj_messages+=("${token:2}"); _jj_has_message=1; ((index += 1)); continue ;;
+            --message=*) _jj_messages+=("${token#*=}"); _jj_has_message=1; ((index += 1)); continue ;;
+        esac
         case "$_jj_command" in
             commit | ci)
                 case "$token" in
@@ -637,15 +623,6 @@ jj_parse_protected() {
                         continue
                         ;;
                     --tool=*) _jj_interactive=1 ;;
-                    -m | --message)
-                        ((index + 1 < ${#_pargs[@]})) || jj_option_refuse "$token"
-                        _jj_messages+=("${_pargs[index + 1]}")
-                        _jj_has_message=1
-                        ((index += 2))
-                        continue
-                        ;;
-                    -m?*) _jj_messages+=("${token:2}"); _jj_has_message=1 ;;
-                    --message=*) _jj_messages+=("${token#*=}"); _jj_has_message=1 ;;
                     --editor) _jj_editor=1 ;;
                     -*) jj_option_refuse "$token" ;;
                     *) _jj_positions+=("$token") ;;
@@ -661,15 +638,6 @@ jj_parse_protected() {
                         ;;
                     -r?*) _jj_revisions+=("${token:2}") ;;
                     --revision=*) _jj_revisions+=("${token#*=}") ;;
-                    -m | --message)
-                        ((index + 1 < ${#_pargs[@]})) || jj_option_refuse "$token"
-                        _jj_messages+=("${_pargs[index + 1]}")
-                        _jj_has_message=1
-                        ((index += 2))
-                        continue
-                        ;;
-                    -m?*) _jj_messages+=("${token:2}"); _jj_has_message=1 ;;
-                    --message=*) _jj_messages+=("${token#*=}"); _jj_has_message=1 ;;
                     --stdin) _jj_stdin=1 ;;
                     --editor) _jj_editor=1 ;;
                     -*) jj_option_refuse "$token" ;;
@@ -678,15 +646,6 @@ jj_parse_protected() {
                 ;;
             new)
                 case "$token" in
-                    -m | --message)
-                        ((index + 1 < ${#_pargs[@]})) || jj_option_refuse "$token"
-                        _jj_messages+=("${_pargs[index + 1]}")
-                        _jj_has_message=1
-                        ((index += 2))
-                        continue
-                        ;;
-                    -m?*) _jj_messages+=("${token:2}"); _jj_has_message=1 ;;
-                    --message=*) _jj_messages+=("${token#*=}"); _jj_has_message=1 ;;
                     --no-edit) ;;
                     -A | -B | -o | -r | --insert-after | --after | --insert-before | --before)
                         ((index + 1 < ${#_pargs[@]})) || jj_option_refuse "$token"
@@ -711,7 +670,7 @@ if [[ -n "$_jj_command" ]] && ((_jj_help == 0)); then
             else
                 jj_scan_diff @ "" "${_jj_positions[@]}"
             fi
-            if ((_jj_has_message)); then
+            if ((_jj_has_message && !_jj_editor)); then
                 jj_join_messages
                 jj_scan_message "$_jj_joined" "commit message"
             fi
@@ -727,6 +686,11 @@ if [[ -n "$_jj_command" ]] && ((_jj_help == 0)); then
                 for _jj_id in "${_jj_id_list[@]}"; do
                     [[ -n "$_jj_id" ]] || continue
                     jj_scan_diff "$_jj_id" "commit ${_jj_id:0:12} "
+                    _jj_known=0
+                    for _jj_expected in "${_jj_editor_ids[@]}"; do
+                        [[ "$_jj_expected" == "${_jj_id:0:12}" ]] && _jj_known=1
+                    done
+                    ((_jj_known)) || _jj_editor_ids+=("${_jj_id:0:12}")
                 done
             done
             if ((_jj_stdin)); then
