@@ -1,13 +1,16 @@
 #!/bin/bash
-# git-trailer-hooks: the hooks directory shims/git points `core.hooksPath` at for the one
-# `git merge`, `git pull`, `git cherry-pick` or `git revert` an omp session runs, so the
-# commit that command makes carries the session's Omp-Session trailer, as a `git commit`
-# does through its `--trailer`. Every hook name here is a link to this file.
+# git-trailer-and-leak-hooks: shims/git points `core.hooksPath` here for every ordinary
+# `git commit` to scan its staged diff and cleaned message, and for the agent-session
+# `git merge`, `git pull`, `git cherry-pick` or `git revert` that needs an Omp-Session trailer.
+# Every hook name here is a link to this file.
 #
-# prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` to the message unless the same
-# line is there already, the id is malformed, scripts/omp-session-trailer says no, or a
-# rebase is replaying commits (`pull --rebase`, a rebase started from a hook): a replayed
-# commit keeps the trailer of the session that made it.
+# For the scanned commit, prepare-commit-msg records Git's auto comment character before the
+# editor runs; pre-commit runs the repository hook then scans the staged diff; commit-msg runs
+# the repository hook then scans the message as Git will clean it. For the agent-session commands
+# that take no --trailer, prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` unless the same
+# line is there already, the id is malformed, scripts/omp-session-trailer says no, or a rebase is
+# replaying commits (`pull --rebase`, a rebase started from a hook): a replayed commit keeps the
+# trailer of the session that made it.
 #
 # Then every hook, prepare-commit-msg included, runs the hook git would have run without
 # shims/git's override, if there is one, with the same arguments and stdin, and exits with
@@ -55,7 +58,7 @@ else
     replay_blocks_trailer=0
 fi
 
-if [[ "$name" == prepare-commit-msg && -n "${1:-}" &&
+if [[ -z "${DOTFILES_GIT_COMMIT_SCAN:-}" && "$name" == prepare-commit-msg && -n "${1:-}" &&
     "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
     [[ ! -d "$(git rev-parse --git-path rebase-merge)" && ! -d "$(git rev-parse --git-path rebase-apply)" ]] &&
     [[ $replay_blocks_trailer -eq 0 ]] &&
@@ -80,6 +83,181 @@ if [[ "$p" == *"$mine"* ]]; then
     if [[ -n "$p" ]]; then export GIT_CONFIG_PARAMETERS="$p"; else unset GIT_CONFIG_PARAMETERS; fi
 fi
 own="$(git rev-parse --path-format=absolute --git-path hooks 2> /dev/null || true)"
+
+run_own_hook() {
+    if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
+        "$own/$name" "$@"
+        return
+    fi
+    return 0
+}
+
+scan_field() {
+    local wanted="$1" field
+    for field in ${DOTFILES_GIT_COMMIT_SCAN:-}; do
+        if [[ "$field" == "$wanted="* ]]; then
+            printf '%s' "${field#*=}"
+            return
+        fi
+    done
+    printf unknown
+}
+
+commit_status() {
+    local configured code
+    case "$(scan_field status)" in
+        0 | 1) scan_field status ;;
+        config)
+            set +e
+            configured="$(git config --type=bool --get commit.status 2> /dev/null)"
+            code=$?
+            set -e
+            case "$code:$configured" in
+                1:*) printf 1 ;;
+                0:true) printf 1 ;;
+                0:false) printf 0 ;;
+                *) printf unknown ;;
+            esac
+            ;;
+        *) printf unknown ;;
+    esac
+}
+
+prepare_auto_comment_char() {
+    local configured code editor status character comment_path
+    set +e
+    configured="$(git config --get core.commentChar 2> /dev/null)"
+    code=$?
+    set -e
+    [[ "$code:$configured" == 0:auto ]] || return 0
+    if [[ "${GIT_EDITOR:-}" == : ]]; then editor=0; else editor=1; fi
+    status="$(commit_status)"
+    [[ "$status" == 0 || "$status" == 1 ]] || return 0
+
+    set +e
+    character="$(cat -- "$1" | "$here/../../scripts/leak-terms-check" git-comment-char \
+        --editor-ran "$editor" --status-shown "$status")"
+    pipe_status=("${PIPESTATUS[@]}")
+    set -e
+    ((pipe_status[0] == 0 && pipe_status[1] == 0)) || exit 1
+    [[ "$character" =~ ^[\#\;\@\!\$\%\^\&\|\:]$ ]] || exit 1
+    comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
+    printf '%s' "$character" > "$comment_path"
+}
+
+message_scan_args() {
+    local cleanup verbose configured code comment_path read_every_line=0
+    cleanup="$(scan_field cleanup)"
+    if [[ "$cleanup" == unknown ]]; then
+        cleanup=verbatim
+        read_every_line=1
+    elif [[ "$cleanup" == default ]]; then
+        set +e
+        configured="$(git config --get commit.cleanup 2> /dev/null)"
+        code=$?
+        set -e
+        case "$code:$configured" in
+            0:verbatim | 0:whitespace | 0:strip | 0:scissors) cleanup="$configured" ;;
+            1:*)
+                if [[ "${GIT_EDITOR:-}" == : ]]; then
+                    cleanup="whitespace"
+                else
+                    cleanup="strip"
+                fi
+                ;;
+            *) cleanup=verbatim; read_every_line=1 ;;
+        esac
+    fi
+    case "$cleanup" in
+        verbatim | whitespace | strip | scissors) ;;
+        *) cleanup=verbatim; read_every_line=1 ;;
+    esac
+    if [[ "$cleanup" == scissors && "${GIT_EDITOR:-}" == : ]]; then
+        cleanup=whitespace
+    fi
+
+    verbose="$(scan_field verbose)"
+    if [[ "$verbose" == unknown ]]; then
+        read_every_line=1
+    elif [[ "$verbose" == config ]]; then
+        set +e
+        configured="$(git config --type=bool --get commit.verbose 2> /dev/null)"
+        code=$?
+        set -e
+        case "$code:$configured" in
+            0:true) verbose=1 ;;
+            0:false | 1:*) verbose=0 ;;
+            *) read_every_line=1 ;;
+        esac
+    fi
+
+    if ((read_every_line)); then
+        scanner_args=(message --cleanup verbatim --place "commit message")
+        return 0
+    fi
+
+    set +e
+    configured="$(git config --get core.commentChar 2> /dev/null)"
+    code=$?
+    set -e
+    case "$code:$configured" in
+        1:*) comment_char="#" ;;
+        0:auto)
+            comment_path="$(git rev-parse --git-path "dotfiles-leak-terms-comment-char.$PPID")"
+            if [[ -f "$comment_path" ]]; then
+                comment_char="$(< "$comment_path")"
+                rm -f -- "$comment_path"
+            else
+                comment_char=""
+            fi
+            ;;
+        0:?) comment_char="$configured" ;;
+        *) comment_char="" ;;
+    esac
+
+    scanner_args=(message --cleanup "$cleanup" --place "commit message")
+    if [[ -n "$comment_char" ]]; then
+        scanner_args+=(--comment-char "$comment_char")
+    fi
+    if [[ "$cleanup" == scissors || "$verbose" =~ ^[1-9][0-9]*$ ]]; then
+        scanner_args+=(--cut-at-scissors)
+    fi
+    return 0
+}
+
+if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
+    if [[ "$name" == prepare-commit-msg && -n "${1:-}" ]]; then
+        prepare_auto_comment_char "$1"
+    fi
+
+    set +e
+    run_own_hook "$@"
+    own_status=$?
+    set -e
+    ((own_status == 0)) || exit "$own_status"
+
+    case "$name" in
+        pre-commit)
+            set +e
+            git -c core.quotePath=false diff --cached -U0 --no-ext-diff --no-textconv --no-color --no-renames \
+                --no-relative --src-prefix=a/ --dst-prefix=b/ --submodule=short --diff-algorithm=myers |
+                "$here/../../scripts/leak-terms-check" diff
+            pipe_status=("${PIPESTATUS[@]}")
+            set -e
+            ((pipe_status[0] == 0 && pipe_status[1] == 0)) || exit 1
+            ;;
+        commit-msg)
+            message_scan_args
+            set +e
+            cat -- "$1" | "$here/../../scripts/leak-terms-check" "${scanner_args[@]}"
+            pipe_status=("${PIPESTATUS[@]}")
+            set -e
+            ((pipe_status[0] == 0 && pipe_status[1] == 0)) || exit 1
+            ;;
+    esac
+    exit 0
+fi
+
 if [[ -n "$own" && -x "$own/$name" && ! "$own" -ef "$here" ]]; then
     exec "$own/$name" "$@"
 fi

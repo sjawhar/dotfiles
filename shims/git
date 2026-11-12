@@ -1,10 +1,10 @@
 #!/bin/bash
 # git-worktree-shim: in an agent session, refuse a bare `git worktree prune` outside a
 # throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
-# lock of ours and no further, give every commit an omp session makes with
-# `git commit`, `merge`, `pull`, `cherry-pick` or `revert` its Omp-Session trailer, and
-# run the shared public leak check on every `git push` jj runs where the pre-push hook
-# would and on every plain `git push` whose hooks directory holds neither the leak check's
+# lock of ours and no further, give every `git commit` without a command-line hooks path
+# the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
+# it does now, run the shared public leak check on every `git push` jj runs where the pre-push
+# hook would and on every plain `git push` whose hooks directory holds neither the leak check's
 # wrapper nor its dispatcher, and keep a pruning `git fetch` from deleting the destination
 # of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
@@ -92,15 +92,8 @@ agent_context() {
     fi
     return 1
 }
-agent_context || exec "$_real" "$@"
-# Say so when the SSH rule, and not a session marker, made this an agent's call: the agent-session
-# rules below (the worktree lock, the prune refusal, the session trailer) are otherwise silent
-# about why, and a person whose own non-interactive ssh command this is needs the escape named.
-if [[ -n "${AGENT_CONTEXT_VIA_SSH:-}" ]]; then
-    echo "git shim: non-interactive SSH, so an agent's call, under the agent-session rules (set AGENT_SHIM_PERSON=1 for your own)" >&2
-fi
-
-# Locate the subcommand past git's global options.
+# Locate the subcommand past git's global options before distinguishing an agent from a person:
+# every caller's ordinary `git commit` uses the leak-term hooks.
 args=("$@")
 i=0
 while ((i < ${#args[@]})); do
@@ -110,6 +103,149 @@ while ((i < ${#args[@]})); do
         *) break ;;
     esac
 done
+
+# Keep the existing case-insensitive command-line override test: a caller who selects a hooks
+# path owns that command, and the scanner does not run.
+caller_hooks_path=0
+shopt -s nocasematch
+[[ " ${args[*]:0:i} " == *core.hookspath=* ]] && caller_hooks_path=1
+shopt -u nocasematch
+
+commit_scan_state() {
+    local cleanup=default verbose=config status=config option canonical value short character j index
+    local -a long_options=(
+        all interactive patch include only quiet verbose no-verbose amend no-post-rewrite post-rewrite dry-run
+        short branch ahead-behind porcelain long null allow-empty allow-empty-message no-verify verify author date
+        cleanup status no-status reset-author file message reuse-message reedit-message template fixup squash trailer
+        gpg-sign no-gpg-sign signoff no-signoff edit no-edit untracked-files pathspec-from-file pathspec-file-nul
+    )
+
+    index=$((i + 1))
+    while ((index < ${#args[@]})); do
+        option="${args[index]}"
+        if [[ "$option" == -- ]]; then
+            break
+        fi
+        if [[ "$option" == --* ]]; then
+            value="${option#--}"
+            value="${value%%=*}"
+            canonical=""
+            for character in "${long_options[@]}"; do
+                if [[ "$character" == "$value" ]]; then
+                    canonical="$character"
+                    break
+                fi
+                if [[ "$character" == "$value"* ]]; then
+                    if [[ -n "$canonical" ]]; then
+                        printf 'cleanup=unknown verbose=unknown status=unknown'
+                        return
+                    fi
+                    canonical="$character"
+                fi
+            done
+            if [[ -z "$canonical" ]]; then
+                printf 'cleanup=unknown verbose=unknown status=unknown'
+                return
+            fi
+            case "$canonical" in
+                cleanup)
+                    if [[ "$option" == *=* ]]; then
+                        value="${option#*=}"
+                    elif ((index + 1 < ${#args[@]})); then
+                        index=$((index + 1))
+                        value="${args[index]}"
+                    else
+                        printf 'cleanup=unknown verbose=unknown status=unknown'
+                        return
+                    fi
+                    case "$value" in
+                        verbatim | whitespace | strip | scissors) cleanup="$value" ;;
+                        *) printf 'cleanup=unknown verbose=unknown status=unknown'; return ;;
+                    esac
+                    ;;
+                verbose)
+                    [[ "$option" == *=* ]] && { printf 'cleanup=unknown verbose=unknown status=unknown'; return; }
+                    if [[ "$verbose" == config ]]; then verbose=1; else verbose=$((verbose + 1)); fi
+                    ;;
+                no-verbose) [[ "$option" == *=* ]] && { printf 'cleanup=unknown verbose=unknown status=unknown'; return; }; verbose=0 ;;
+                status) [[ "$option" == *=* ]] && { printf 'cleanup=unknown verbose=unknown status=unknown'; return; }; status=1 ;;
+                no-status) [[ "$option" == *=* ]] && { printf 'cleanup=unknown verbose=unknown status=unknown'; return; }; status=0 ;;
+                message | file | reuse-message | reedit-message | template | author | date | fixup | squash | trailer | pathspec-from-file)
+                    if [[ "$option" != *=* ]]; then
+                        ((index + 1 < ${#args[@]})) || { printf 'cleanup=unknown verbose=unknown status=unknown'; return; }
+                        index=$((index + 1))
+                    fi
+                    ;;
+                gpg-sign | untracked-files)
+                    ;;
+                *)
+                    if [[ "$option" == *=* ]]; then
+                        printf 'cleanup=unknown verbose=unknown status=unknown'
+                        return
+                    fi
+                    ;;
+            esac
+        elif [[ "$option" == -?* ]]; then
+            short="${option#-}"
+            j=0
+            while ((j < ${#short})); do
+                character="${short:j:1}"
+                case "$character" in
+                    v)
+                        if [[ "$verbose" == config ]]; then verbose=1; else verbose=$((verbose + 1)); fi
+                        ;;
+                    a | i | n | p | o | q | e | s | z) ;;
+                    m | F | c | C | t)
+                        if ((j + 1 < ${#short})); then
+                            j=${#short}
+                            continue
+                        fi
+                        ((index + 1 < ${#args[@]})) || { printf 'cleanup=unknown verbose=unknown status=unknown'; return; }
+                        index=$((index + 1))
+                        ;;
+                    S | u)
+                        j=${#short}
+                        continue
+                        ;;
+                    *) printf 'cleanup=unknown verbose=unknown status=unknown'; return ;;
+                esac
+                j=$((j + 1))
+            done
+        fi
+        index=$((index + 1))
+    done
+    printf 'cleanup=%s verbose=%s status=%s' "$cleanup" "$verbose" "$status"
+}
+
+scan_commit=0
+unset DOTFILES_GIT_COMMIT_SCAN
+if [[ "${args[i]:-}" == commit && $caller_hooks_path -eq 0 ]]; then
+    scan_commit=1
+    DOTFILES_GIT_COMMIT_SCAN="$(commit_scan_state)"
+    export DOTFILES_GIT_COMMIT_SCAN
+fi
+
+is_agent=0
+if agent_context; then
+    is_agent=1
+fi
+if ((scan_commit)); then
+    hook_dir="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks"
+    if ((is_agent)) && [[ "${OMP_SESSION_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] &&
+        "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
+        exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent -c "core.hooksPath=$hook_dir" \
+            commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
+    fi
+    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$hook_dir" "${args[@]:i}"
+fi
+
+((is_agent)) || exec "$_real" "$@"
+# Say so when the SSH rule, and not a session marker, made this an agent's call: the agent-session
+# rules below (the worktree lock, the prune refusal, the session trailer) are otherwise silent
+# about why, and a person whose own non-interactive ssh command this is needs the escape named.
+if [[ -n "${AGENT_CONTEXT_VIA_SSH:-}" ]]; then
+    echo "git shim: non-interactive SSH, so an agent's call, under the agent-session rules (set AGENT_SHIM_PERSON=1 for your own)" >&2
+fi
 
 # A commit made from an omp session carries `Omp-Session: <id>`, the trailer
 # session attribution reads; omp/extensions/session-env.ts exports the id, and
@@ -137,9 +273,7 @@ case "${args[i]:-}" in
             if [[ "${args[i]}" == commit ]]; then
                 exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
             fi
-            shopt -s nocasematch
-            [[ " ${args[*]:0:i} " == *core.hookspath=* ]] || exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks" "${args[@]:i}"
-            shopt -u nocasematch
+            [[ $caller_hooks_path -eq 1 ]] || exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks" "${args[@]:i}"
         fi
         ;;
 esac

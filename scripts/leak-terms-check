@@ -525,6 +525,29 @@ def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: st
         findings.extend(f"{place} line {line_number}" for _ in matcher.spans(line))
     return findings
 
+def git_comment_char(text: str, editor_ran: bool, status_shown: bool) -> str | None:
+    """Return Git 2.43's auto comment character from its pre-editor message."""
+    # builtin/commit.c adjust_comment_line_char checks candidates in this order.
+    candidates = "#;@!$%^&|:"
+    lines = newline_lines(text)
+    for line in lines:
+        if len(line) > 2 and line[0] in candidates and line[1:] == f" {SCISSORS}":
+            return line[0]
+
+    trailer = re.compile(r"^[^ \t:]+:.*$")
+    if editor_ran and status_shown:
+        for candidate in candidates:
+            first = next((index for index, line in enumerate(lines) if line.startswith(candidate)), None)
+            if first is None:
+                continue
+            if all(line.startswith(candidate) or not line or trailer.fullmatch(line) for line in lines[first:]):
+                return candidate
+
+    for candidate in candidates:
+        if not any(line.startswith(candidate) for line in lines):
+            return candidate
+    return None
+
 
 def read_stdin() -> str:
     try:
@@ -543,11 +566,26 @@ def parser() -> argparse.ArgumentParser:
     message.add_argument("--comment-char")
     message.add_argument("--cut-at-scissors", action="store_true")
     message.add_argument("--place", default="commit message")
+    comment_char = modes.add_parser("git-comment-char")
+    comment_char.add_argument("--editor-ran", choices=("0", "1"), required=True)
+    comment_char.add_argument("--status-shown", choices=("0", "1"), required=True)
     return argument_parser
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = parser().parse_args(arguments)
+    try:
+        text = read_stdin()
+    except TextError as error:
+        print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
+        return TEXT_EXIT
+
+    if args.mode == "git-comment-char":
+        character = git_comment_char(text, args.editor_ran == "1", args.status_shown == "1")
+        if character is not None:
+            print(character)
+        return 0
+
     try:
         matcher = load_terms()
     except ListError as error:
@@ -555,7 +593,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return LIST_EXIT
 
     try:
-        text = read_stdin()
         if args.mode == "diff":
             findings = scan_diff(text, matcher, args.place_prefix)
         else:
