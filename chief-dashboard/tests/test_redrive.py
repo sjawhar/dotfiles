@@ -29,10 +29,10 @@ class Sent(list):
         return {"recipient": sid}
 
 
-def driver(tmp_path, sent=None, *, dry_run=False, ack_minutes=60, panes=None, screen="") -> redrive.Driver:
+def driver(tmp_path, sent=None, *, dry_run=False, ack_minutes=60, panes=None, screen="", roles=None) -> redrive.Driver:
     return redrive.Driver(redrive.Ledger.load(tmp_path / "redrive.json"), send=sent if sent is not None else Sent(),
                           ack_minutes=ack_minutes, dry_run=dry_run,
-                          locate=(panes or {}).get, tmux=lambda *a, **k: screen)
+                          locate=(panes or {}).get, tmux=lambda *a, **k: screen, role=(roles or {}).get)
 
 
 def answered(key: str = "BET-1", ask_id: str = "q1", hours: float = 60, author=None, live=(LIVE,), extra=(),
@@ -226,6 +226,22 @@ def test_a_legion_labelled_issue_takes_the_controller_even_when_a_session_opened
                "BET-83": {"project": "BET", "lead": {"title": "Legion controller · BET", "session": controller}}}
     run(api, driver(tmp_path, sent), streams=streams)
     assert [s["to"] for s in sent] == [controller]
+
+
+def test_a_legion_controller_is_its_role_s_live_holder_not_the_session_a_scoreboard_still_names(tmp_path):
+    """A scoreboard keeps the controller session it was written with; the role has moved on to a live holder since.
+    The holder is the controller (INFRA-1481, where the scoreboard's old session left the row with no executor)."""
+    sent = Sent()
+    old, holder = "01a1oldc-0000-0000-0000-000000000000", "01a1hold-0000-0000-0000-000000000000"
+    api = answered(author=session(DEAD, "Legion architect · BET-1"), labels=["legion"], live=(holder,))
+    streams = {"BET-83": {"project": "BET", "lead": {"title": "Legion controller · BET", "session": old}}}
+    roles = {"legion-bet-controller": {"role": "legion-bet-controller", "holder": holder,
+                                       "title": "Legion controller · BET"}}
+    lines = run(api, driver(tmp_path, sent, panes={}, roles=roles), streams=streams)
+
+    assert found(lines, "NO-EXECUTOR") == []
+    assert [s["to"] for s in sent] == [holder]
+    assert "you hold the role legion-bet-controller" in sent[0]["message"]
 
 
 def test_a_paused_session_keeps_its_row_and_the_registry_alone_never_decides(tmp_path):
