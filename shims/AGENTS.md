@@ -142,28 +142,36 @@ before handing the call to the real one.
   another session's unpushed commits in such a repository can be rewritten without
   `--ignore-immutable`. Read-only commands (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`,
   …) skip the check.
-  `jj git push` also runs the shared public leak check before sending anything: in an agent
-  session always, and outside one (a person's own terminal, which no git hook reaches, since
-  jj runs git with `--no-verify`) wherever this machine has the check installed, found as
-  below (`PUBLIC_LEAK_CHECK`, `public-leak-check.sh` on PATH, then
-  `~/.config/public-leak-check/path`; dispatch://BET-706). Outside an agent session a machine
-  without the check is unchanged, and `DOTFILES_JJ_NO_LEAK_CHECK=1` skips the check for that one
-  command, as `git push --no-verify` does for git; a refusal there ends with a line naming that
-  variable. In an agent session the variable is ignored. The `--deleted` refusal and the
-  trailer handling stay as they were. The shim resolves push aliases in jj's startup invocation
-  context: up to eight levels in an agent session, up to 64 outside one. A command whose first word
-  is a builtin other than `git` needs no alias lookup. Lookup/decoding failures and deeper
-  expansions refuse (a person's refusal names `DOTFILES_JJ_NO_LEAK_CHECK=1`), since an alias the
-  shim cannot resolve may be a push; outside an agent session a cyclic alias is left to jj, which
-  refuses it itself and runs nothing. The checked expanded argv is the actual push argv. jj's dry-run resolves
-  remote patterns and bookmark/tag selectors; each GitHub destination's full
-  old/new ref updates go to the check's pre-push interface. Every destination must
-  pass before any actual push. A failed dry-run, unreadable plan or nonzero check
-  refuses; without a check, only a destination confirmed private passes (an agent session
-  only: outside one, no check means no gate).
-  Non-GitHub destinations pass unchanged. `--quiet` needs a second dry-run with
-  only that rendering flag removed to read the plan. The gate does not depend on
-  jj's git executable or git's hooks, and aliases cannot bypass `--deleted` refusal.
+  For every caller, the shim resolves aliases before it handles `jj commit`, `ci`, `describe`,
+  `desc` or `new`; an alias therefore gets the same check as the command it expands to. An
+  unknown option to one of those commands refuses, rather than risk reading the wrong revision.
+  `commit` and `ci` scan the working-copy diff, limited to their named paths unless an
+  interactive or tool-driven commit selects all of it; `describe` and `desc` scan every selected
+  revision (or `@`); and `new` scans the working-copy diff before it creates its new revision.
+  Each scans its explicit `-m` or `--message` text, and `describe`/`desc` also scan `--stdin`.
+  Where `commit`, `ci`, `describe` or `desc` opens an editor, the shim replaces `ui.editor` with
+  `leak-terms-check jj-editor`; the wrapper runs jj's selected editor and scans the descriptions
+  after jj removes `JJ:` lines and text after `JJ: ignore-rest`. It rejects an editor that is the
+  wrapper itself, and its active guard rejects a recursive wrapper run. The `--deleted` refusal
+  and trailer handling stay as they were.
+  Every `jj git push` first dry-runs its resolved destination plan and, for every public or
+  unreadable GitHub URL, scans the outgoing commits that destination does not advertise. This
+  encrypted-term check runs for every caller before the shared public leak check, and fails closed
+  when it cannot read the plan, destination or term list. The shared public check remains an agent
+  check, or a person's check where it is installed; `DOTFILES_JJ_NO_LEAK_CHECK=1` skips only that
+  public check for a person's one command, never the encrypted-term check. In an agent session the
+  variable is ignored. Every destination must pass before any actual push. A failed dry-run,
+  unreadable plan or nonzero check refuses; without a check, only a destination confirmed private
+  passes in an agent session (outside one, no check means no public gate).
+  The shim resolves push aliases in jj's startup invocation context: up to eight levels in an
+  agent session, up to 64 outside one. A command whose first word is a builtin other than `git`
+  needs no alias lookup. Lookup/decoding failures and deeper expansions refuse (a person's
+  refusal names `DOTFILES_JJ_NO_LEAK_CHECK=1`), since an alias the shim cannot resolve may be a
+  push; outside an agent session a cyclic alias is left to jj, which refuses it itself and runs
+  nothing. The checked expanded argv is the actual push argv. Non-GitHub destinations pass
+  unchanged. `--quiet` needs a second dry-run with only that rendering flag removed to read the
+  plan. The gate does not depend on jj's git executable or git's hooks, and aliases cannot bypass
+  `--deleted` refusal.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration. The prune runs
   when the repository's common directory, resolved through symlinks, lies under a temporary
@@ -196,64 +204,74 @@ before handing the call to the real one.
   an alias, `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
   library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
   `omp/extensions/session-env.ts` sets to the session's line.
+  Every caller's `git commit` without a command-line `-c core.hooksPath` gets
+  `core.hooksPath=git-hooks/` and scans after Git runs the repository's own hooks. The hook first
+  runs the repository's `pre-commit` or `commit-msg`, with Git's same arguments and standard
+  input; only a successful hook is followed by the scan. The pre-commit scan reads added lines
+  and result-side paths from the staged diff. The commit-message scan reads the message as Git
+  stores it: it applies the effective `--cleanup`/`commit.cleanup` mode, the effective
+  `core.commentChar` (including `auto`), and scissors handling. A comment or text after scissors
+  that Git removes is not read; the same text is read when Git keeps it. These commit scans do
+  not cover `git commit --no-verify`, a caller's `-c core.hooksPath`, `merge`, `pull`,
+  `cherry-pick`, `revert`, `rebase`, `am`, `commit-tree`, or Git run by its full path.
   A `git fetch <remote> <src>:<dst>` whose source is not a full ref name runs with `--no-prune`
   when no refspec has a `*`, since git's pruning deletes such a destination that already exists
   (`b:refs/remotes/origin/b` left it missing every second run on git 2.43.0) and prunes nothing
   else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
-  It also gives a `git push` that jj runs the pre-push leak check that a git push from the same
-  checkout gets. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once
-  per remote, so no hook runs for it. When the process that ran git is jj and the checkout is
-  guarded, the shim drops `--no-verify` and adds a last `-c core.hooksPath=jj-push-hooks/`. A
-  checkout is guarded when some URL its `git remote -v` prints (read whole after the tab: a push
-  line without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial
-  clone's filter, which may hold anything, follows that; a remote listed with a blank URL, its
-  name and a tab only, has no url in its config, and git pushes to its name after
-  `url.<base>.insteadOf` and `pushInsteadOf` rewrite it, so its URLs are those
-  `git remote get-url --push --all <name>` and `git remote get-url --all <name>` print, and a
-  failure of either is unknown) is a
-  GitHub repository that is public or whose visibility cannot be read, or has a host part that
-  cannot be parsed, as `scripts/github-repo-visibility` reads it: a leading `<transport>::` and
-  `git+` stripped, github.com, www.github.com or ssh.github.com (one trailing dot allowed)
-  directly or through an ssh alias (`ssh -G [-p PORT]` with the URL's user; an alias is unknown
-  when git would run its own ssh command: the checkout's `core.sshCommand`, `GIT_SSH_COMMAND` or
-  `GIT_SSH`), the leak check's fresh cache entry, then gh. A private or internal repository,
-  a local path and another host are not GUARD (dispatch://BET-706). The hook sweep
-  (`sweep-hooks.sh`, beside the check) installs the hook by the same rule with its own reader.
+  Every `git push` through this shim, for every caller, gets the encrypted-term pre-push gate
+  when its configured destination or direct destination URL is a public or unreadable GitHub
+  repository. A push to a URL that is not a configured remote gets its visibility directly from
+  `scripts/github-repo-visibility`. The gate reads Git's update lines and the destination's live
+  advertisement, then scans only the commits the updates send that the destination does not hold:
+  their added result-side lines and paths and their messages. jj runs
+  `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote, so no hook
+  runs for that push; the shim directs its guarded pushes through this gate too.
+  The checkout is guarded when a URL `git remote -v` prints (read whole after the tab: a push line
+  without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial clone's
+  filter, which may hold anything, follows that; a remote listed with a blank URL, its name and a
+  tab only, has no URL in its config, and git pushes to its name after `url.<base>.insteadOf` and
+  `pushInsteadOf` rewrite it, so its URLs are those `git remote get-url --push --all <name>` and
+  `git remote get-url --all <name>` print, and a failure of either is unknown) is a GitHub
+  repository that is public or whose visibility cannot be read, or has a host part that cannot be
+  parsed, as `scripts/github-repo-visibility` reads it: a leading `<transport>::` and `git+`
+  stripped, github.com, www.github.com or ssh.github.com (one trailing dot allowed) directly or
+  through an ssh alias (`ssh -G [-p PORT]` with the URL's user; an alias is unknown when git would
+  run its own ssh command: the checkout's `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH`), the
+  leak check's fresh cache entry, then gh. A private or internal repository, a local path and
+  another host are not guarded (dispatch://BET-706).
   `jj-push-hooks/pre-push` makes the installed hook's call, `<check> <remote> <url>`, with the URL
-  git is pushing to and the update lines git is about to send; the check, found the way the hook
-  finds it, alone decides, for every target. Every other hook name there links to
-  `jj-push-hooks/hook`, which takes the shim's `-c` back out of `GIT_CONFIG_PARAMETERS` and runs
-  the hook git would have run without it, so the override changes only which pre-push runs.
+  git is pushing to and the update lines it is about to send; the check alone decides where it
+  runs for every target. Every other hook name there links to `jj-push-hooks/hook`, which takes
+  the shim's `-c` back out of `GIT_CONFIG_PARAMETERS` and runs the hook git would have run without
+  it. A plain `git push` runs the pre-push hook of Git's effective hooks directory
+  (`core.hooksPath`, else the common hooks directory). The shared public check reaches it there
+  only through the leak-check wrapper (`PUBLIC-LEAK-CHECK-WRAPPER`) or the global hooks dispatcher
+  (`~/.local/share/public-leak-check-hooks/global`, whose `dispatch` carries
+  `PUBLIC-LEAK-CHECK-DISPATCHER`; `.gitconfig` includes it where step prepush of
+  `devbox/sami-devbox-provision` installed it; dispatch://BET-706 R6). Neither reaches a fresh
+  clone without the dispatcher, or a repository whose own `core.hooksPath` (husky, the pre-commit
+  framework, or an empty value Git reads as `/`) overrides the dispatcher.
+  The gate removes `--no-verify`, adds `--verify` and its last `-c core.hooksPath=jj-push-hooks/`,
+  so `--no-verify`, a caller's hooks path, the public-check wrapper and the global dispatcher
+  cannot skip the term scan. For a verified plain push, `GIT_SHIM_OWN_HOOKS` names the repository
+  hook directory; after a clean term check and public check where it is enabled, the gate runs
+  that own pre-push with the same arguments and update input, without the shim's `-c` or that
+  variable. Where the wrapper or dispatcher is effective, the public check runs once through it.
+  The existing public-gate decisions remain: only the existing agent jj and verified plain-push
+  paths set `GIT_SHIM_PUBLIC_CHECK`; the term gate is separate, so it also runs for a person's
+  push and wherever the existing public gate would not. A Git executable run by its full path,
+  or a remote changed between the shim's decision and Git reading its configuration, remains
+  outside both shim checks.
   Unknown counts as public: a cache that cannot be reached or read, an entry that is empty or
   holds another word, gh that fails or gives no answer within 5 s, guards the checkout, and the
   check then refuses a push to a theorem-labs repository whose visibility it cannot read either.
   Each refusal line starts with `error: `, and the shim leaves out the one "failed to push some
-  refs" line git writes right after the gate's refusal, so jj shows the commit and the matched
-  text even under `--quiet`; another destination's failure keeps its line. Not seen, as `git push
-  --no-verify` is not: a jj told to run another git (`git.executable-path`) or copied under
-  another name, and a remote changed between the shim's decision and git reading its config.
-  A plain `git push` runs the pre-push hook of git's effective hooks directory (`core.hooksPath`,
-  else the common hooks directory). The check reaches it there only through the leak-check wrapper
-  (marker `PUBLIC-LEAK-CHECK-WRAPPER`) or the global hooks dispatcher
-  (`~/.local/share/public-leak-check-hooks/global`, whose `dispatch` carries
-  `PUBLIC-LEAK-CHECK-DISPATCHER`; `.gitconfig` includes it where step prepush of
-  `devbox/sami-devbox-provision` installed it; dispatch://BET-706 R6). Neither reaches a fresh
-  clone where the dispatcher is missing: an agent box made before 2026-11-05 has its `~/.gitconfig`
-  bound to a deleted file and no hooks directory, and sees only these shims and the installed check.
-  Nor does either reach a repository whose own `core.hooksPath` (husky, the pre-commit framework; an
-  empty value too, which git 2.43 reads as `/`) overrides the dispatcher. So for every plain push in
-  an agent session from a guarded checkout, with no `--no-verify`, whose effective hooks directory
-  has no executable `pre-push` that is the wrapper or the dispatcher's entry (git ignores a hook that
-  is not executable), the shim adds the same last `-c core.hooksPath=jj-push-hooks/` and names that
-  directory in `GIT_SHIM_OWN_HOOKS`; the gate's `pre-push` then runs the check, and after a clean
-  check that directory's `pre-push` with the same arguments and stdin, without the shim's `-c` or the
-  variable. A hooks path the caller sets on the command line or in the environment is left alone.
-  Where the wrapper or the dispatcher is effective the shim adds nothing, so each push is checked
-  once: by the wrapper, the dispatcher or the gate.
-  `tests/test_jj_push_leak_gate.py` is the contract; when the sweep is beside the check it runs
-  the sweep's own code on the same checkouts, and fails when its decision and the shim's differ.
-  Its dispatcher cases run the tag's `install-global-hooks.sh` from `LEAK_CHECK_HOOKS_SOURCE`, else
-  from `~/.local/share/public-leak-check-hooks`, and are skipped without one.
+  refs" line git writes right after the gate's refusal, so jj shows the commit and the diagnostic
+  even under `--quiet`; another destination's failure keeps its line. `tests/test_jj_push_leak_gate.py`
+  is the contract; when the sweep is beside the check it runs the sweep's own code on the same
+  checkouts, and fails when its decision and the shim's differ. Its dispatcher cases run the tag's
+  `install-global-hooks.sh` from `LEAK_CHECK_HOOKS_SOURCE`, else from
+  `~/.local/share/public-leak-check-hooks`, and are skipped without one.
 - **`omp`** applies mise's environment, the committed config overlay, mnemopi's recall weights,
   a `PI_SHELL_PREFIX` that turns errexit, nounset and pipefail off before each bash call (so
   one call's `set -euo pipefail` does not break later calls in the persistent shell) and a named
@@ -549,6 +567,38 @@ before handing the call to the real one.
   (`omp/plugins/package.json`). Its marker lets the package wrapper skip the shim while finding real
   gws; if the package is absent, the shim fails loudly and directs `bun install` in `omp/plugins`.
 
+## Leak-term list
+
+`leak-terms.sops.yaml` at the repository root is encrypted to the default creation rule of
+`.sops.yaml`. Edit it only with `sops edit leak-terms.sops.yaml`. `leak-terms-check` decrypts its
+`terms` value with sops through a pipe; terms remain only in the scanner's memory, never in a
+file, command argument or environment variable. `DOTFILES_LEAK_TERMS_FILE` selects a different
+encrypted list for a run.
+
+For tests, `DOTFILES_LEAK_TERMS_SOPS_HOME` makes sops use that directory as both `HOME` and
+`XDG_CONFIG_HOME`. Otherwise, when no `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE` or `SOPS_AGE_KEY_CMD`
+is set and the configured age key does not exist, the scanner gives sops the passwd-home
+`~/.config/sops/age/keys.txt` when it exists. A match ignores case, treats each run of spaces in a
+term as matching one or more spaces or tabs in one line, and ignores blank list lines and lines
+that start with `#`.
+
+The `diff`, `message` and `push` modes print one stderr line per match with a place and
+`listed leak term`, never the matching text, then name how to remove it. They exit 0 when clean,
+3 on a match, 2 when the list cannot be read and 4 when the text to scan cannot be read;
+`jj-editor` returns a nonzero status to stop jj after a match or other failure. Every shim treats
+any nonzero scan result as a refusal. A missing list or sops, an undecryptable or invalid list, an
+empty list, a malformed diff or an unreadable push advertisement therefore fails closed.
+
+A machine whose age key is not a recipient refuses commits and guarded pushes. Add that key above
+the YubiKey line of `.sops.yaml`, then run `sops updatekeys leak-terms.sops.yaml` on a machine
+that can decrypt the list.
+
+Tests that commit or push through the shims get their isolated list from
+`shims/tests/leak_terms_fixture.py`. The `shims/tests` and `scripts/tests` conftests put its
+three variables in `os.environ` for pytest; a fixture that builds an environment from scratch
+must retain `DOTFILES_LEAK_TERMS_FILE`, `SOPS_AGE_KEY_FILE` and
+`DOTFILES_LEAK_TERMS_SOPS_HOME`.
+
 ## Who is an agent
 
 `az`, `gcloud`, `gh`, `git`, `jj` and `tmux` each hold a copy of one `agent_context` function,
@@ -709,8 +759,8 @@ only while nothing puts a gh wrapper above it. `shims/gcloud` does too, under th
 condition, and its routing tests depend on it: they put a stub `gcloud` above this dir and
 expect the shim to hand the call to the stub. It skips a copy of itself (same bytes, or its
 marker line), since two copies on PATH called each other until an agent box's 8192 processes
-were used up on 2026-11-03 (`GcloudShimCopiesOnPath`). `shims/jj` and `shims/tmux` also search from the
-top, and hand the binary they find the whole PATH: jj's own `git` calls must still reach
+were used up on 2026-11-03 (`GcloudShimCopiesOnPath`). `shims/jj` and `shims/tmux` also search
+from the top, and hand the binary they find the whole PATH: jj's own `git` calls must still reach
 `shims/git`, and a tmux server started through the shim gives its PATH to every pane. The first
 jj or tmux they find is usually mise's shim, which hands the call back to the first one on PATH
 whenever mise has no version of it for the directory (a relocated `HOME` or `XDG_CONFIG_HOME`
@@ -718,6 +768,13 @@ hides mise's global config). So `DOTFILES_JJ_SHIM` and `DOTFILES_TMUX_SHIM` name
 the shim has handed the call to in that pid, and a re-entry in the same pid skips each one (and
 every path to the same file), taking the next one on PATH or failing with exit 127 instead of
 looping.
+
+A shim that finds its real binary by a marker in its first 512 bytes must keep that marker in its
+header: `git-worktree-shim` for `shims/git` and `jj-lock-shim` for `shims/jj`. On 2026-11-12 a
+draft of the leak-term check (dispatch://HOME-131) rewrote the header of `shims/jj` without
+`jj-lock-shim`; the shim found itself as the real jj, and its editor wrapper started copies of
+itself until the machine ran out of memory. A test that runs a shim, jj or an editor runs under a
+process cap (`ulimit -u`) and a timeout.
 
 ## How `shims/omp` resolves omp
 
