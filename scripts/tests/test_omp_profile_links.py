@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""shims/omp under a named profile: the profile's symlinks track the installer's in ~/.omp."""
+"""shims/omp under a named profile: the profile's symlinks track the installer's in ~/.omp, unless
+the profile holds .no-shared-setup."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -20,51 +23,150 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+@dataclass
+class Scratch:
+    """A scratch HOME holding the installer's default omp layout, and the shim's environment."""
+
+    home: Path
+    targets: Path
+    omp: Path
+    stubs: Path
+    env: dict[str, str]
+
+    def run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(SHIM), *args], capture_output=True, text=True, env={**self.env, **extra}, check=False, timeout=60
+        )
+
+
+def default_layout(root: Path, config_dir: str = ".omp") -> Scratch:
+    """ROOT/home/CONFIG_DIR as installers/omp.sh leaves it, its links into ROOT/dotfiles-omp."""
+    home = root / "home"
+    (home / ".config").mkdir(parents=True)
+    targets = root / "dotfiles-omp"
+    for name in ("plugins", "agents", "hooks", "prompts"):
+        (targets / name).mkdir(parents=True)
+    for name in ("mcp.json", "viewport.ts"):
+        (targets / name).write_text("", encoding="utf-8")
+    omp = home / config_dir
+    agent = omp / "agent"
+    (agent / "extensions").mkdir(parents=True)
+    (omp / "plugins").symlink_to(targets / "plugins")
+    for name in ("agents", "hooks", "prompts", "mcp.json"):
+        (agent / name).symlink_to(targets / name)
+    (agent / "extensions" / "viewport.ts").symlink_to(targets / "viewport.ts")
+    for name in ("config.yml", "models.yml", "agent.db"):
+        (agent / name).write_text("{}", encoding="utf-8")
+    stubs = root / "bin"
+    stubs.mkdir()
+    # `mise env -s bash` puts the pinned release's install dir on PATH.
+    tool = home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
+    tool.mkdir(parents=True)
+    # The stub omp prints its arguments and the profile variables it was started with.
+    write_stub(
+        tool,
+        "omp",
+        'echo "AGENT omp $*"\necho "PROFILE ${OMP_PROFILE-unset} ${OMP_IN_DEFAULT_PROFILE-unset}"\n'
+        'echo "PI ${PI_PROFILE-unset}"',
+    )
+    write_stub(stubs, "mise", f"echo 'export PATH=\"{tool}:$PATH\"'")
+    env = {
+        "DOTFILES_DIR": str(DOTFILES),
+        "HOME": str(home),
+        "PATH": f"{stubs}:/usr/bin:/bin",
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        # No memory scope: with no user manager here each launch would wait out the shim's
+        # 10 s scope retry, and the memory ceiling has its own test.
+        "OMP_MEMORY_SCOPE": "off",
+        # scripts/agent-session makes directories under /mnt/nvme/<user> (or /mnt/scratch/<user>)
+        # and /mnt/durable/<user> where they exist. A big-disk home that does not exist and no
+        # durable disk keep every launch's writes inside ROOT.
+        "AGENT_SESSION_NVME_HOME": str(root / "no-nvme"),
+        "AGENTBOX_DURABLE": "none",
+    }
+    if config_dir != ".omp":
+        env["PI_CONFIG_DIR"] = config_dir
+    return Scratch(home, targets, omp, stubs, env)
+
+
+# The ways a launch names its profile; the machine file is $XDG_CONFIG_HOME/omp/profile.
+NAMINGS = ("--profile NAME", "--profile=NAME", "OMP_PROFILE=NAME", "PI_PROFILE=NAME", "machine file")
+
+
+def mark(scratch: Scratch, overlay: bool) -> Path:
+    """Profile p, opted out, holding an entry for each kind of write the shared setup makes."""
+    profile = scratch.omp / "profiles" / "p"
+    agent = profile / "agent"
+    (agent / ".mirror-src").mkdir(parents=True)
+    (profile / ".no-shared-setup").touch()
+    # The overlay setup opens the lock for writing, which empties it.
+    (profile / ".share.lock").write_text("held", encoding="utf-8")
+    # The mirror prunes a link the default lacks and re-points one the default holds.
+    (agent / "retired").symlink_to(scratch.targets / "retired")
+    (agent / "agents").symlink_to(scratch.targets / "old-agents")
+    # The overlay setup moves a real file into the default and links to it there.
+    (agent / "own.txt").write_text("the profile's own", encoding="utf-8")
+    # A copy as last copied, which the mirror refreshes when the shared file changes. The overlay
+    # setup refuses a real mcp.json beside the default's link and fails the launch, which would hide
+    # what it wrote, so the overlay profile's copy is lsp.json, which the default lacks and it moves.
+    copy = "lsp.json" if overlay else "mcp.json"
+    for path in (agent / copy, agent / ".mirror-src" / copy):
+        path.write_text("old copy", encoding="utf-8")
+    if overlay:
+        (agent / "models.overlay.yml").write_text("providers: {}\n", encoding="utf-8")
+        (agent / "models.yml").write_text("old: models\n", encoding="utf-8")
+    else:
+        (scratch.targets / "mcp.json").write_text("new shared", encoding="utf-8")
+    return profile
+
+
+def shared_profile(scratch: Scratch, name: str) -> Path:
+    """Profile NAME, unmarked, with a models overlay: the shared setup's profile. Its agent dir."""
+    agent = scratch.omp / "profiles" / name / "agent"
+    agent.mkdir(parents=True)
+    (agent / "models.overlay.yml").write_text("providers: {}\n", encoding="utf-8")
+    return agent
+
+
+def record(top: Path) -> list[tuple[str, str, str, str | None, str | None]]:
+    """Each entry under TOP, dot entries included and links not followed: its path, type, mode,
+    link target, and a regular file's SHA-256."""
+    entries = []
+    for directory, dirs, files in os.walk(top):
+        for name in (*dirs, *files):
+            path = Path(directory) / name
+            mode = stat.filemode(path.lstat().st_mode)
+            entries.append((
+                str(path.relative_to(top)),
+                mode[0],
+                mode[1:],
+                link_target(path),
+                hashlib.sha256(path.read_bytes()).hexdigest() if mode[0] == "-" else None,
+            ))
+    return sorted(entries)
+
+
+def link_target(path: Path) -> str | None:
+    """Where the link PATH points, or None when PATH is no link."""
+    return os.readlink(path) if path.is_symlink() else None
+
+
+def calls(log: Path) -> list[str]:
+    """The calls of the logging stubs, one `NAME ARGS` line each."""
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
 class OmpProfileLinks(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        root = Path(self.temp_dir.name)
-        self.home = root / "home"
-        (self.home / ".config").mkdir(parents=True)
-        self.targets = root / "dotfiles-omp"
-        for name in ("plugins", "agents", "hooks", "prompts"):
-            (self.targets / name).mkdir(parents=True)
-        for name in ("mcp.json", "viewport.ts"):
-            (self.targets / name).write_text("", encoding="utf-8")
-        self.omp = self.home / ".omp"
-        agent = self.omp / "agent"
-        (agent / "extensions").mkdir(parents=True)
-        (self.omp / "plugins").symlink_to(self.targets / "plugins")
-        for name in ("agents", "hooks", "prompts", "mcp.json"):
-            (agent / name).symlink_to(self.targets / name)
-        (agent / "extensions" / "viewport.ts").symlink_to(self.targets / "viewport.ts")
-        for name in ("config.yml", "models.yml", "agent.db"):
-            (agent / name).write_text("{}", encoding="utf-8")
-        stubs = root / "bin"
-        stubs.mkdir()
-        # `mise env -s bash` puts the pinned release's install dir on PATH.
-        tool = self.home / ".mise" / "installs" / "github-sjawhar-oh-my-pi" / "1.0.0" / "bin"
-        tool.mkdir(parents=True)
-        # The stub omp prints the profile variables it was started with.
-        write_stub(tool, "omp", 'echo "AGENT omp $*"\necho "PROFILE ${OMP_PROFILE-unset} ${OMP_IN_DEFAULT_PROFILE-unset}"')
-        write_stub(stubs, "mise", f"echo 'export PATH=\"{tool}:$PATH\"'")
-        self.env = {
-            "DOTFILES_DIR": str(DOTFILES),
-            "HOME": str(self.home),
-            "PATH": f"{stubs}:/usr/bin:/bin",
-            "XDG_CONFIG_HOME": str(self.home / ".config"),
-            # No memory scope: with no user manager here each launch would wait out the shim's
-            # 10 s scope retry, and the memory ceiling has its own test.
-            "OMP_MEMORY_SCOPE": "off",
-        }
+        self.scratch = default_layout(Path(self.temp_dir.name))
+        self.home, self.targets, self.omp = self.scratch.home, self.scratch.targets, self.scratch.omp
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
     def omp_run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(SHIM), *args], capture_output=True, text=True, env={**self.env, **extra}, check=False, timeout=60
-        )
+        return self.scratch.run(*args, **extra)
 
     def assert_launched(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -87,6 +189,64 @@ class OmpProfileLinks(unittest.TestCase):
         self.assertEqual((profile / "agent" / "mcp.json").read_bytes(), (self.targets / "mcp.json").read_bytes())
         # Extension code stays linked: a copy would resolve its imports from the profile.
         self.assertEqual(os.readlink(profile / "agent/extensions/viewport.ts"), str(self.targets / "viewport.ts"))
+
+    def marker_home(self, config_dir: str = ".omp") -> tuple[Scratch, Path]:
+        """A fresh tree for each case: a shim that ignores the marker moves an overlay profile's
+        entries, the marker too, into the default, where the next case would find them. Its
+        DOTFILES_DIR links the repository's entries but for a logging omp-models-check, and flock
+        and yq log too, each a `NAME ARGS` line in the returned log."""
+        root = Path(tempfile.mkdtemp(dir=self.temp_dir.name))
+        scratch = default_layout(root, config_dir)
+        log = root / "calls.log"
+        dotfiles = root / "dotfiles"
+        (dotfiles / "scripts").mkdir(parents=True)
+        # A link per entry, not one into the repository's scripts/, where the stub would replace the checker.
+        for entry in DOTFILES.iterdir():
+            if entry.name != "scripts":
+                (dotfiles / entry.name).symlink_to(entry)
+        for entry in (DOTFILES / "scripts").iterdir():
+            if entry.name != "omp-models-check":
+                (dotfiles / "scripts" / entry.name).symlink_to(entry)
+        write_stub(dotfiles / "scripts", "omp-models-check", f'echo "omp-models-check $*" >>"{log}"')
+        write_stub(scratch.stubs, "flock", f'echo "flock $*" >>"{log}"')
+        write_stub(scratch.stubs, "yq", f'echo "yq $*" >>"{log}"\necho "a: 1"')
+        scratch.env["DOTFILES_DIR"] = str(dotfiles)
+        return scratch, log
+
+    def launch(self, scratch: Scratch, how: str, name: str) -> None:
+        """Start the shim on profile NAME, named HOW (one of NAMINGS), and check omp started on it."""
+        args: tuple[str, ...] = ()
+        extra: dict[str, str] = {}
+        if how == "--profile NAME":
+            args, started = ("--profile", name), f"AGENT omp --profile {name}"
+        elif how == "--profile=NAME":
+            args, started = (f"--profile={name}",), f"AGENT omp --profile={name}"
+        elif how == "OMP_PROFILE=NAME":
+            extra, started = {"OMP_PROFILE": name}, f"PROFILE {name} unset"
+        elif how == "PI_PROFILE=NAME":
+            extra, started = {"PI_PROFILE": name}, f"PI {name}"
+        else:
+            (scratch.home / ".config" / "omp").mkdir(exist_ok=True)
+            (scratch.home / ".config" / "omp" / "profile").write_text(f"{name}\n", encoding="utf-8")
+            # The shim exports the file's name as OMP_PROFILE.
+            started = f"PROFILE {name} unset"
+        result = scratch.run(*args, **extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(started, result.stdout.splitlines())
+
+    def assert_shared_setup_runs(self, scratch: Scratch, log: Path, how: str) -> None:
+        """Unmarked profiles beside a marked one, launched HOW, still get the shared setup."""
+        agent = scratch.omp / "profiles" / "q" / "agent"
+        self.launch(scratch, how, "q")
+        for name in ("agents", "hooks", "prompts"):
+            self.assertEqual(link_target(agent / name), str(scratch.targets / name), f"q's agent/{name}")
+        agent = shared_profile(scratch, "o")
+        seen = len(calls(log))
+        self.launch(scratch, how, "o")
+        self.assertEqual(link_target(agent / "agents"), str(scratch.omp / "agent" / "agents"), "o's agent/agents")
+        self.assertTrue((agent / "models.yml").is_file(), "o's agent/models.yml")
+        self.assertEqual({call.split()[0] for call in calls(log)[seen:]}, {"omp-models-check", "flock", "yq"},
+                         "the overlay setup's tools for o")
 
     def test_named_profile_gets_every_installer_link(self) -> None:
         for args, extra in ((("--profile", "theorem"), {}), ((), {"OMP_PROFILE": "theorem"})):
@@ -171,6 +331,19 @@ class OmpProfileLinks(unittest.TestCase):
         self.assert_launched(self.omp_run("--profile", "theorem"))
         self.assertFalse(os.path.lexists(self.omp / "profiles" / "theorem" / "agent" / "envoy.json"))
 
+    def test_a_shared_profile_starts_again_while_legions_envoy_json_is_missing(self) -> None:
+        """The shared setup links agent/envoy.json to $XDG_CONFIG_HOME/legion/envoy.json, which a
+        machine may not have. That link points at nothing, so a test with `-e` called it absent and
+        `ln` refused every later launch of the profile ("File exists")."""
+        scratch, _ = self.marker_home()
+        agent = shared_profile(scratch, "o")
+        neutral = scratch.home / ".config" / "legion" / "envoy.json"
+        self.assertFalse(os.path.lexists(neutral))
+        for launch in ("first", "second"):
+            self.launch(scratch, "--profile NAME", "o")
+            self.assertEqual(link_target(agent / "envoy.json"), str(neutral),
+                             f"o's envoy.json after the {launch} launch")
+
     def test_a_profiles_link_beside_a_real_default_entry_is_its_own(self) -> None:
         """2026-11-09 ~07:46Z on oryx: the legion profile's agent/agent.db, a link to the personal
         profile's agent.db that holds every Legion pane's provider logins, was pruned because the
@@ -187,6 +360,89 @@ class OmpProfileLinks(unittest.TestCase):
         self.assert_launched(self.omp_run("--profile", "legion"))
         self.assertEqual(os.readlink(agent / "agent.db"), str(logins))
         self.assertFalse(os.path.lexists(agent / "retired"))
+
+    def test_a_marked_profile_gets_no_shared_setup(self) -> None:
+        """The shim's mirror linked the default's agents into the legion profile, and on 2026-11-09
+        the Legion daemon's boot check refused on the dotfiles `oracle` agent (dispatch://HOME-163).
+        A profile that holds .no-shared-setup is its owner's: however a launch names it, with a
+        models overlay or without, the shim writes nothing in it and runs none of the overlay's tools."""
+        for how in NAMINGS:
+            for overlay in (False, True):
+                with self.subTest(how=how, overlay=overlay):
+                    scratch, log = self.marker_home()
+                    profile = mark(scratch, overlay)
+                    before = record(profile)
+                    # The launch first, so a shim that ignores the marker fails on what it did.
+                    self.launch(scratch, how, "p")
+                    self.assertEqual(record(profile), before, "the shim wrote in a marked profile")
+                    self.assertEqual(calls(log), [], "the shim ran the overlay's tools for a marked profile")
+
+    def test_profiles_beside_a_marked_one_still_get_the_shared_setup(self) -> None:
+        """The controls of the test above, in its trees after its launch: a guard that skipped
+        every profile, or every profile one naming reaches, fails here."""
+        for how in NAMINGS:
+            for overlay in (False, True):
+                with self.subTest(how=how, overlay=overlay):
+                    scratch, log = self.marker_home()
+                    mark(scratch, overlay)
+                    self.launch(scratch, how, "p")
+                    self.assert_shared_setup_runs(scratch, log, how)
+
+    def test_the_marker_is_read_under_the_launchs_config_dir(self) -> None:
+        """omp and the shim's setup keep a launch's state under $HOME/$PI_CONFIG_DIR, so the marker
+        is read there too. A guard that looked under ~/.omp fails the marked case, and a setup that
+        did fails the unmarked one."""
+        scratch, log = self.marker_home(".omp-alt")
+        profile = mark(scratch, overlay=True)
+        before = record(profile)
+        with self.subTest(profile="marked"):
+            self.launch(scratch, "--profile NAME", "p")
+            self.assertEqual(record(profile), before, "the shim wrote in a marked profile")
+            self.assertEqual(calls(log), [], "the shim ran the overlay's tools for a marked profile")
+        with self.subTest(profile="unmarked"):
+            self.assert_shared_setup_runs(scratch, log, "--profile NAME")
+
+    def test_the_marker_is_read_with_e(self) -> None:
+        """`-e` follows a link: a directory named .no-shared-setup opts a profile out as the file
+        does, and a link counts only while its target exists. A guard that took only a regular
+        file (`-f`) fails the directory case, and one that took any link (`-e || -L`) the other."""
+        for overlay in (False, True):
+            with self.subTest(marker="directory", overlay=overlay):
+                scratch, log = self.marker_home()
+                profile = mark(scratch, overlay)
+                (profile / ".no-shared-setup").unlink()
+                (profile / ".no-shared-setup").mkdir()
+                before = record(profile)
+                self.launch(scratch, "--profile NAME", "p")
+                self.assertEqual(record(profile), before, "the shim wrote in a marked profile")
+                self.assertEqual(calls(log), [], "the shim ran the overlay's tools for a marked profile")
+            with self.subTest(marker="link to nothing", overlay=overlay):
+                scratch, log = self.marker_home()
+                profile = mark(scratch, overlay)
+                (profile / ".no-shared-setup").unlink()
+                (profile / ".no-shared-setup").symlink_to(profile / "gone")
+                self.launch(scratch, "--profile NAME", "p")
+                agents = scratch.omp / "agent" / "agents" if overlay else scratch.targets / "agents"
+                self.assertEqual(link_target(profile / "agent" / "agents"), str(agents), "p's agent/agents")
+                self.assertEqual({call.split()[0] for call in calls(log)},
+                                 {"omp-models-check", "flock", "yq"} if overlay else set(),
+                                 "the overlay setup's tools for p")
+
+    def test_a_marker_in_the_default_never_reaches_a_shared_profile(self) -> None:
+        """A shim from before the guard moved a shared profile's real entries into ~/.omp and linked
+        them back, so it moved a marked shared profile's .no-shared-setup there. The shared setup
+        links none of ~/.omp's into a profile: that link would opt the profile out from its next
+        launch on."""
+        scratch, log = self.marker_home()
+        (scratch.omp / ".no-shared-setup").touch()
+        agent = shared_profile(scratch, "o")
+        for launch in ("first", "second"):
+            seen = len(calls(log))
+            self.launch(scratch, "--profile NAME", "o")
+            self.assertFalse(os.path.lexists(agent.parent / ".no-shared-setup"),
+                             f"o's .no-shared-setup after the {launch} launch")
+            self.assertEqual({call.split()[0] for call in calls(log)[seen:]}, {"omp-models-check", "flock", "yq"},
+                             f"the overlay setup's tools for o on the {launch} launch")
 
     def test_default_profile_creates_nothing(self) -> None:
         for args, extra in (((), {}), (("--profile", "default"), {}), ((), {"OMP_PROFILE": ""})):
