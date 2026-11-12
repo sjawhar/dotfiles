@@ -653,7 +653,20 @@ if [[ "$no_alert" == no ]] && ((${#said_now[@]})); then
     fi
 elif [[ "$no_alert" == no && "$zero_counted" == yes ]] && ((${#streak_said[@]} == 0)) && ((zero_days >= ZERO_DAYS)) &&
     ((alerted_at == 0 || zero_days >= alerted_at * 2)); then
-    if tell "THE DAILY CLEANUP HAS FREED NOTHING FOR $zero_days RUNS on $(hostname -s): not one byte came back from any of its ${#run_steps[@]} cleaners, and none of them failed. Either the box is genuinely quiet, or the cleaning has stopped working while the disks fill. Read $log_file; run box-cleanup --only <step> by hand to see one."; then
+    # Name the filesystems the cleaners actually watch, with how full each is. Without this the
+    # alert reads as "the cleaning has stopped working" when every step is correct to free nothing:
+    # on sami-rocqperf, 2026-11-12, five of seven steps watch /mnt/nvme at 6% used while / sat at
+    # 90% and /mnt/durable at 93%, because the step paths were written for a box where /mnt/nvme is
+    # the durable disk and copied to one where it is the throwaway. A reader who sees "freed
+    # nothing from a 6% disk" asks the right question; one who sees only "freed nothing" goes
+    # looking for a broken cleaner.
+    watched=""
+    for mount in $(mounts_sorted); do
+        pct="?"
+        ((TOTAL[$mount] > 0)) && pct="$(((TOTAL[$mount] - AVAIL[$mount]) * 100 / TOTAL[$mount]))%"
+        watched+="${watched:+, }$mount $pct used"
+    done
+    if tell "THE DAILY CLEANUP HAS FREED NOTHING FOR $zero_days RUNS on $(hostname -s): not one byte came back from any of its ${#run_steps[@]} cleaners, and none of them failed. Its cleaners watch ${watched:-no mount it could read}. A cleaner that caps a filesystem with room to spare is RIGHT to free nothing, so before reading this as a fault, check whether the disk that is filling is one of those. Read $log_file; run box-cleanup --only <step> by hand to see one."; then
         alerted_at=$zero_days
     fi
 fi
