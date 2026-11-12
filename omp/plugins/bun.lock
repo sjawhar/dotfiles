@@ -7,8 +7,8 @@
       "dependencies": {
         "@bopstack/pi-codegraph": "^0.1.1",
         "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.2.3",
-        "@sjawhar/pi-envoy": "16.3.1",
-        "@sjawhar/pi-legion": "16.3.0",
+        "@sjawhar/pi-envoy": "16.51.1",
+        "@sjawhar/pi-legion": "18.52.2",
         "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
         "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
         "secretsd": "github:sjawhar/forward#v3.7.3",
@@ -18,7 +18,6 @@
   },
   "patchedDependencies": {
     "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch",
-    "@sjawhar/pi-envoy@16.3.1": "patches/@sjawhar%2Fpi-envoy@16.3.1.patch",
   },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],
@@ -155,9 +154,9 @@
 
     "@sjawhar/opencode-knives": ["@sjawhar/opencode-knives@github:sjawhar/knives#19f80ce", {}, "sjawhar-knives-19f80ce", "sha512-s6t1TO05p2BhVzm8CZIOM0KsMwrTBKblnDcG9lzZai2YCiA2QweC2O2+qwbVYcDkPgdxIKEWEdSVo5DfrXwRLg=="],
 
-    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@16.3.1", "", {}, "sha512-iltLcHmEsZQ5Ztp/iq9krIkymlEi7BwXMMbdswH/AjpYezia28CmSO5eYIvlB4jSgIQz68WZLxS5ie44t/k2HA=="],
+    "@sjawhar/pi-envoy": ["@sjawhar/pi-envoy@16.51.1", "", {}, "sha512-1CNcg9cwWC0As/bmnNfyKd0/eLhlc15FfjZOPsHjCdyfj0EkNw5Z1AAyQxEIRgAmvEdcahiLMRxBihOCQX7ulQ=="],
 
-    "@sjawhar/pi-legion": ["@sjawhar/pi-legion@16.3.0", "", {}, "sha512-lkL/PKmAl+n8dQnFNTou26wha+d+spME945KLt1Vg/EH8sdazk4PJvGqNMY7AM0FZyVP0vEk/Es/ilDbWW0vPA=="],
+    "@sjawhar/pi-legion": ["@sjawhar/pi-legion@18.52.2", "", {}, "sha512-r0WanRu4usjq60B6jvO2AEWHJIwB0KN5yY/Pit0c1n4bQR5DuUrKWAd2iuqNkdGfNZqqWO19pcOblmeSZnovEA=="],
 
     "@smithy/core": ["@smithy/core@3.33.2", "", { "dependencies": { "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-CUGXpnPkVdjUCbix+83sWLW9VFgQOm44MDOx/ihITJMAnOZKvL8YYIc7DR9pP/tZ8CIRvMiON/TucvygqbHO3w=="],
 

@@ -4,11 +4,11 @@ modelRoles:
   # his 2026-10-29 ~03:15Z direction to run on Opus 5 instead of 5.5 to balance load across the
   # accounts. A brief cannot pin a model (the task tool takes one only for seance agents), so these
   # roles are the lever; running sessions were moved with `/switch` the same night.
-  default: anthropic/claude-opus-5-5
+  default: anthropic/claude-opus-5-5:xhigh
   plan: anthropic/claude-fable-5-1:max
   smol: anthropic/claude-sonnet-5-5
   slow: openai-codex/gpt-5.6-terra:xhigh
-  task: anthropic/claude-opus-5-5
+  task: anthropic/claude-opus-5-5:xhigh
   vision: google/gemini-3.7-flash:medium
   # The review gates and the oracle advisors run cross-family on GPT-6.1 Sol
   # through Theorem's model gateway (team `box`; no OpenAI key sits on the box,
@@ -108,6 +108,9 @@ retry:
   modelFallback: true
   usageAwareFallback: true
   fallbackChains:
+    # 2026-11-12: every Opus 4.x entry names :high. Roles now run Opus 5.5 at :xhigh, and a fallback keeps the
+    # effort it walked from; Opus 4.6 refuses xhigh with a 400 and no further fallback (S2 on pbc/claude-opus-4-6,
+    # 2026-11-12 06:09-06:23Z, stuck until its effort was set by hand), so a walk past Opus 5 must drop to high.
     # Every chain runs past claude-opus-4-8 to 4.7 and 4.6. A classifier refusal
     # walks the chain, and in the 21 days to 2026-10-07 four of the six subagent
     # turns that died stopped at 4.8 with nothing below it tried, though both
@@ -117,25 +120,25 @@ retry:
     anthropic/claude-fable-5:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     anthropic/claude-fable-5-1:
       - anthropic/claude-fable-5
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     anthropic/claude-opus-5-5:
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     anthropic/claude-opus-5:
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     # Codex (ChatGPT Pro subscription) falls to the Anthropic tier that matches
     # the failing model; exact keys beat the wildcard. Model keys beat every
     # role chain, a subagent's own included, and an effort-suffixed key matches
@@ -260,37 +263,37 @@ retry:
     openai-codex/gpt-5.6-sol:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     openai-codex/gpt-5.6-terra:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
       - anthropic/claude-sonnet-5-5
     openai-codex/gpt-5.6-luna:
       - anthropic/claude-sonnet-5-5
     openai-codex/*:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
       - opencode-zen/*
     default:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
     plan:
       - anthropic/claude-opus-5-5
       - anthropic/claude-opus-5
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-6
+      - anthropic/claude-opus-4-8:high
+      - anthropic/claude-opus-4-7:high
+      - anthropic/claude-opus-4-6:high
 task:
   maxRecursionDepth: 3
   # task.softRequestBudget is deliberately ABSENT: the shipped default of 200 stands.
@@ -314,7 +317,7 @@ task:
     # review-role types gate merges (Rocq speed's gates caught #1950's stale-cache key and #1958's
     # box cap that night; task making's caught 4 defects in #1967 that tests missed), and a wrong
     # pass there merges a defect. Every other agent type takes `task`, now Opus 5.5 as well.
-    reviewer: anthropic/claude-opus-5-5
+    reviewer: anthropic/claude-opus-5-5:xhigh
     # 2026-11-10 — @REVIEW TYPES TEMPORARILY ON CLAUDE while the gateway's OpenAI account is at a
     # zero balance (every OpenAI model fails since 04:54Z, INFRA-2212). @review is gpt-6.1-sol with
     # no Claude fallback, so an analyze dispatch of these types returns only insufficient_quota --
@@ -324,23 +327,29 @@ task:
     # (the four below to the config value "@review"; the two thermonuclear-* by removing their lines,
     # since their own frontmatter already carries model: ["@review"]).
     # Durable fix (clear failure message + analyze step 2): INFRA-2269.
-    bug-finder: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
-    code-architect: anthropic/claude-opus-5-5
-    code-reviewer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
+    bug-finder: anthropic/claude-opus-5-5:xhigh  # @review while OpenAI unfunded (INFRA-2212)
+    code-architect: anthropic/claude-opus-5-5:xhigh
+    code-reviewer: anthropic/claude-opus-5-5:xhigh  # @review while OpenAI unfunded (INFRA-2212)
     code-simplifier: anthropic/claude-fable-5-1
-    comment-analyzer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
-    cybersecurity-expert: anthropic/claude-opus-5-5
+    comment-analyzer: anthropic/claude-opus-5-5:xhigh  # @review while OpenAI unfunded (INFRA-2212)
+    cybersecurity-expert: anthropic/claude-opus-5-5:xhigh
     performance-engineer: "@slow"
-    red-teamer: anthropic/claude-opus-5-5
-    test-analyzer: anthropic/claude-opus-5-5  # @review while OpenAI unfunded (INFRA-2212)
+    red-teamer: anthropic/claude-opus-5-5:xhigh
+    test-analyzer: anthropic/claude-opus-5-5:xhigh  # @review while OpenAI unfunded (INFRA-2212)
     # thermonuclear-code-quality and thermonuclear-deep-review carry `model: ["@review"]` in their
     # own frontmatter and had no entry here, so they resolved to @review and failed identically --
     # verified by probe 2026-11-10 10:16Z (insufficient_quota on the sol chain). They are the
     # merge-queue's final review gates, so this repoints them too, under INFRA-2212.
-    thermonuclear-code-quality: anthropic/claude-opus-5-5  # normally @review via frontmatter; INFRA-2212
-    thermonuclear-deep-review: anthropic/claude-opus-5-5  # normally @review via frontmatter; INFRA-2212
-    type-checker: anthropic/claude-opus-5-5
+    thermonuclear-code-quality: anthropic/claude-opus-5-5:xhigh  # normally @review via frontmatter; INFRA-2212
+    thermonuclear-deep-review: anthropic/claude-opus-5-5:xhigh  # normally @review via frontmatter; INFRA-2212
+    type-checker: anthropic/claude-opus-5-5:xhigh
     ux-designer: "@vision"
+    # 2026-11-12 — EVERY CLAUDE WORKLOAD ON OPUS 5.5 AT XHIGH. Sami, 2026-11-12T06:00:10Z
+    # (dispatch://INFRA-1393/comment/6d689bf2-526e-4224-86f6-56a585ce1267): "Unless we're actually running
+    # into rate limits, please just make sure that we bump everything up to the latest model version ...
+    # Essentially, just 5.5 and extra high reasoning." This replaces the 11-04 chore move below for
+    # task, scout, sonic and planner. Without a suffix omp runs `defaultThinkingLevel` (high), so each
+    # entry names :xhigh. The 11-04 note is kept as history.
     # 2026-11-04 16:25Z — CHORE SUBAGENTS MOVE TO OPUS 5. This carries out Sami's own decision of
     # 11-03 (dispatch://INFRA-481/ask/8af1836c): "Opus 5.5 only where the model is the point",
     # with checks, bookkeeping, producers, routine ports and subagent chores on Opus 5 / 4.8.
@@ -354,14 +363,14 @@ task:
     # `task` is the default every agent type without its own entry inherits, so this one line
     # moves the general subagent, scout, sonic and the rest. The entries above keep their models
     # because a weaker verdict there changes the result.
-    task: anthropic/claude-opus-5
-    scout: anthropic/claude-opus-5
-    sonic: anthropic/claude-opus-5
+    task: anthropic/claude-opus-5-5:xhigh
+    scout: anthropic/claude-opus-5-5:xhigh
+    sonic: anthropic/claude-opus-5-5:xhigh
     # planner is listed ONLY to hold it where it was. Without this line it would inherit `task`
     # and silently drop to Opus 5, which is not what the decision says: a plan is one of the places
     # the model is the point. Anything else added to this file that must stay on 5.5 needs its
     # own line for the same reason.
-    planner: anthropic/claude-opus-5-5
+    planner: anthropic/claude-opus-5-5:xhigh
   isolation:
     merge: patch
     enabled: true
@@ -544,7 +553,7 @@ providers:
     # claude-opus-5-5 is not a valid target. At most three entries; order = preference.
     serverSideFallbackModels:
       - claude-opus-5
-      - claude-opus-4-8
+      - claude-opus-4-8:high
 composer:
   shape: box
 isolation:

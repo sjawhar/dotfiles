@@ -29,10 +29,10 @@ class Sent(list):
         return {"recipient": sid}
 
 
-def driver(tmp_path, sent=None, *, dry_run=False, ack_minutes=60, panes=None, screen="") -> redrive.Driver:
+def driver(tmp_path, sent=None, *, dry_run=False, ack_minutes=60, panes=None, screen="", roles=None) -> redrive.Driver:
     return redrive.Driver(redrive.Ledger.load(tmp_path / "redrive.json"), send=sent if sent is not None else Sent(),
                           ack_minutes=ack_minutes, dry_run=dry_run,
-                          locate=(panes or {}).get, tmux=lambda *a, **k: screen)
+                          locate=(panes or {}).get, tmux=lambda *a, **k: screen, role=(roles or {}).get)
 
 
 def answered(key: str = "BET-1", ask_id: str = "q1", hours: float = 60, author=None, live=(LIVE,), extra=(),
@@ -141,6 +141,24 @@ def test_the_claim_holder_takes_it_when_no_session_opened_the_ask(tmp_path):
     assert "you claim BET-1" in sent[0]["message"]
 
 
+def test_a_reply_in_a_comment_thread_goes_to_the_session_he_answered_before_the_stream_lead(tmp_path):
+    """Sami replied under a live session's comment; the stream's scoreboard names another live session. The one he
+    answered takes it: the lead has not read the thread (LINUX-1500, where the lead sat on it 34 minutes)."""
+    sent = Sent()
+    controller = "01a1ctrl-0000-0000-0000-000000000000"
+    events = [ev("comment.created", session(controller, "Legion controller · BET"), 3, id="c1", body="What I found"),
+              ev("comment.created", SAMI, 2, id="c2", reply_to="c1", thread_root_id="c1", body="What did we learn?")]
+    api = FakeDispatch([issue("BET-1", status="backlog", events=events, parent="BET-59"),
+                        issue("BET-59", status="backlog", labels=["stream"])], live=(LEAD, controller))
+    streams = {"BET-59": {"project": "BET", "lead": {"title": "ORCH", "session": LEAD}}}
+    lines = run(api, driver(tmp_path, sent), streams=streams)
+
+    assert [s["to"] for s in sent] == [controller]
+    assert "you wrote the comment he replied to" in sent[0]["message"]
+    assert drive_of(lines) == [
+        f" 1: Legion controller · BET ({controller}); sent; acknowledge by 2026-10-25T13:00:00Z"]
+
+
 def gate_comment(hours: float = 15) -> dict:
     """GATE's acceptance of the item, on the issue and not in the ask's thread."""
     return ev("comment.created", session(OFF_ROSTER, "GATE: gateway"), hours, id="c1",
@@ -208,6 +226,22 @@ def test_a_legion_labelled_issue_takes_the_controller_even_when_a_session_opened
                "BET-83": {"project": "BET", "lead": {"title": "Legion controller · BET", "session": controller}}}
     run(api, driver(tmp_path, sent), streams=streams)
     assert [s["to"] for s in sent] == [controller]
+
+
+def test_a_legion_controller_is_its_role_s_live_holder_not_the_session_a_scoreboard_still_names(tmp_path):
+    """A scoreboard keeps the controller session it was written with; the role has moved on to a live holder since.
+    The holder is the controller (INFRA-1481, where the scoreboard's old session left the row with no executor)."""
+    sent = Sent()
+    old, holder = "01a1oldc-0000-0000-0000-000000000000", "01a1hold-0000-0000-0000-000000000000"
+    api = answered(author=session(DEAD, "Legion architect · BET-1"), labels=["legion"], live=(holder,))
+    streams = {"BET-83": {"project": "BET", "lead": {"title": "Legion controller · BET", "session": old}}}
+    roles = {"legion-bet-controller": {"role": "legion-bet-controller", "holder": holder,
+                                       "title": "Legion controller · BET"}}
+    lines = run(api, driver(tmp_path, sent, panes={}, roles=roles), streams=streams)
+
+    assert found(lines, "NO-EXECUTOR") == []
+    assert [s["to"] for s in sent] == [holder]
+    assert "you hold the role legion-bet-controller" in sent[0]["message"]
 
 
 def test_a_paused_session_keeps_its_row_and_the_registry_alone_never_decides(tmp_path):

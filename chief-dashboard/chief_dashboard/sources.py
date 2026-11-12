@@ -105,3 +105,17 @@ def envoy_sessions(timeout: float = 20) -> list[dict]:
     req = urllib.request.Request(f"{hub}/v1/sessions", method="GET")
     got = json.loads(_open(req, timeout))
     return got if isinstance(got, list) else got.get("sessions") or []
+
+
+def envoy_role(role: str, timeout: float = 20) -> dict | None:
+    """The hub's record of ROLE (`holder` is the session that holds it, `title` that session's title), or None when
+    nobody holds it (the hub answers 404). The re-drive names a Legion controller by it."""
+    hub = _config()["envoy"]["url"].rstrip("/")
+    req = urllib.request.Request(f"{hub}/v1/roles/{urllib.parse.quote(role, safe='')}", method="GET")
+    try:
+        got = json.loads(_open(req, timeout))
+    except SourceError as e:
+        if isinstance(e.__cause__, urllib.error.HTTPError) and e.__cause__.code == 404:
+            return None
+        raise
+    return got if isinstance(got, dict) and got.get("holder") else None

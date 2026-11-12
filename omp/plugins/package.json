@@ -4,15 +4,14 @@
   "dependencies": {
     "@bopstack/pi-codegraph": "^0.1.1",
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.2.3",
-    "@sjawhar/pi-envoy": "16.3.1",
-    "@sjawhar/pi-legion": "16.3.0",
+    "@sjawhar/pi-envoy": "16.51.1",
+    "@sjawhar/pi-legion": "18.52.2",
     "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
     "secretsd": "github:sjawhar/forward#v3.7.3",
     "superpowers": "github:obra/superpowers#v7.0.1"
   },
   "patchedDependencies": {
-    "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch",
-    "@sjawhar/pi-envoy@16.3.1": "patches/@sjawhar%2Fpi-envoy@16.3.1.patch"
+    "superpowers@github:obra/superpowers#cfd50a2": "patches/superpowers@github%3Aobra%2Fsuperpowers#cfd50a2.patch"
   }
 }

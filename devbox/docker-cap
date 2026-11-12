@@ -58,11 +58,56 @@
 # DOCKER_CAP_IMAGE_AGES override the defaults.
 set -euo pipefail
 
+# ONE docker-cap at a time. Two ran unlocked against one daemon at 00:1xZ on 2026-11-12 — one
+# under box-cleanup's `timeout 30m`, one from somewhere else with no wrapper — and this file's own
+# note records what concurrent pruning costs: "a prune racing a lane's pull is how four digest
+# pulls died that afternoon." The daemon is shared by every agent box on the machine, so a second
+# run is never useful: it contends with the first and makes both slower, which is how a step that
+# needs more than its timeout never finishes and never records a success. A non-blocking flock,
+# because the caller is a timer step that will run again within the hour: waiting would just hold a
+# second slot open for the same work.
+# The path must NOT come from the environment: TMPDIR is /mnt/scratch/<user>/tmp in one caller and
+# /tmp in another, so an inherited path gives two locks and excludes nothing — which is the exact
+# case this exists for. XDG_RUNTIME_DIR is per-user and per-boot, and every caller on this box is
+# the same user, so it is the one place both a timer step and a hand-run agree on.
+_lock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker-cap.lock"
+exec 9>"$_lock"
+if ! flock -n 9; then
+    echo "docker-cap: another run holds $_lock; this one exits without pruning" >&2
+    exit 0
+fi
+
 high="${DOCKER_CAP_HIGH_PCT:-80}"
 cache_cap="${DOCKER_CAP_BUILD_CACHE:-50GB}"
 cache_ages="${DOCKER_CAP_CACHE_AGES:-48h 24h 12h 6h}"
 images_cap="${DOCKER_CAP_IMAGES:-100GB}"
 image_ages="${DOCKER_CAP_IMAGE_AGES:-24h 12h 6h 2h}"
+
+# A BUDGET THE SCRIPT KEEPS ITSELF, so a long run ends as a success with what it freed rather
+# than as a SIGKILL with nothing. Measured 2026-11-12: this job took 3460s (57.7 min) on its
+# first completed run, after seven consecutive runs died at box-cleanup's 1800s step timeout
+# with `exit 124, reclaimed nothing`. A kill records no success, and docker-cap's hourly gate
+# measures from the last SUCCESS, so the step restarted every tick and never finished: the
+# budget breaks that loop even when the job outgrows its bound again. 75 min, not 58: a budget
+# equal to the last measurement turns the next slightly-worse run straight back into a kill,
+# and the figure grows with the backlog. The caller's own timeout stays above it (2h).
+budget_seconds="${DOCKER_CAP_BUDGET_SECONDS:-4500}"
+_start_epoch="$(date -u +%s)"
+over_budget() { (( $(date -u +%s) - _start_epoch >= budget_seconds )); }
+
+# What this run gave back, summed from each prune's own "Total reclaimed space:" line. Docker's
+# figure, not the filesystem's: other writers share this disk, so a df difference across an hour
+# measures the box and not this script (it fell 36.6 GiB across the successful run above while
+# the pass freed 13.6). box-cleanup reads the `reclaimed-bytes:` line below; without it this
+# cleaner is counted as unmeasured, which is why the only step that can free hundreds of
+# gigabytes was the one whose contribution nobody could see.
+reclaimed_total=0
+note_reclaimed() {
+    local amount
+    amount="$(printf '%s' "$1" | sed -n 's/.*Total reclaimed space:[[:space:]]*\([0-9.]*[A-Za-z]*\).*/\1/p')"
+    [[ -n "$amount" ]] || return 0
+    reclaimed_total=$((reclaimed_total + $(to_bytes "$amount")))
+}
 
 # Docker prints sizes in SI units ("65.1GB"), so 1 GB is 1000^3 bytes here.
 to_bytes() {
@@ -117,7 +162,13 @@ for age in $cache_ages; do
     if ((cache <= cap_bytes)); then
         break
     fi
-    echo "build cache is $((cache / 1000000000)) GB, over $cache_cap: records unused for $age: $(docker builder prune --force --all --filter "until=$age" | tail -1)"
+    if over_budget; then
+        echo "docker-cap: budget of ${budget_seconds}s reached during the cache passes; stopping here and keeping what was freed"
+        break
+    fi
+    _out="$(docker builder prune --force --all --filter "until=$age" | tail -1)"
+    note_reclaimed "$_out"
+    echo "build cache is $((cache / 1000000000)) GB, over $cache_cap: records unused for $age: $_out"
     cache="$(cache_bytes)"
 done
 # A record no build has used inside the shortest age still counts against the cap, and on a box
@@ -127,8 +178,10 @@ done
 # does remove shared records: the same cache went 197.8 GB -> 136.8 GB (61.3 GB freed) at 13:52Z.
 # It stops at the records a running build holds, so the cache can stay above the cap; the line
 # below says how much of what is left could still go.
-if ((cache > cap_bytes)); then
-    echo "build cache is $((cache / 1000000000)) GB after the age passes: asking BuildKit for $cache_cap: $(docker builder prune --force --all --max-used-space "$cache_cap" | tail -1)"
+if ((cache > cap_bytes)) && ! over_budget; then
+    _out="$(docker builder prune --force --all --max-used-space "$cache_cap" | tail -1)"
+    note_reclaimed "$_out"
+    echo "build cache is $((cache / 1000000000)) GB after the age passes: asking BuildKit for $cache_cap: $_out"
     cache="$(cache_bytes)"
 fi
 left=""
@@ -167,29 +220,51 @@ pull_in_flight() {
 }
 if pull_in_flight; then
     echo "a docker pull is in flight: skipping every image pass this run, since an image pulled by digest is untagged the moment it lands and pruning one mid-pull breaks it"
-    echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
+    _out="$(docker volume prune --force | tail -1)"
+    note_reclaimed "$_out"
+    echo "unused anonymous volumes: $_out"
     after="$(free_bytes)"
     echo "docker-cap: free space on $root went from $((before / 1000000000)) GB to $((after / 1000000000)) GB; now $(used_pct)% used"
+    echo "docker-cap: reclaimed-bytes: $reclaimed_total"
     exit 0
 fi
 images_cap_bytes="$(to_bytes "$images_cap")"
-if ! reclaimable="$(images_reclaimable)"; then
-    echo "untagged images: cannot read the reclaimable image total; running the 24 h pass only: $(docker image prune --force --filter until=24h | tail -1)"
+if over_budget; then
+    echo "docker-cap: budget of ${budget_seconds}s reached before the image passes; skipping them and keeping what was freed"
+elif ! reclaimable="$(images_reclaimable)"; then
+    _out="$(docker image prune --force --filter until=24h | tail -1)"
+    note_reclaimed "$_out"
+    echo "untagged images: cannot read the reclaimable image total; running the 24 h pass only: $_out"
 elif ((reclaimable <= images_cap_bytes)); then
-    echo "reclaimable images are $((reclaimable / 1000000000)) GB, at or under $images_cap: untagged images older than 24 h: $(docker image prune --force --filter until=24h | tail -1)"
+    _out="$(docker image prune --force --filter until=24h | tail -1)"
+    note_reclaimed "$_out"
+    echo "reclaimable images are $((reclaimable / 1000000000)) GB, at or under $images_cap: untagged images older than 24 h: $_out"
 else
     for age in $image_ages; do
         if ((reclaimable <= images_cap_bytes)); then
             break
         fi
-        echo "reclaimable images are $((reclaimable / 1000000000)) GB, over $images_cap: untagged images older than $age: $(docker image prune --force --filter "until=$age" | tail -1)"
+        if over_budget; then
+            echo "docker-cap: budget of ${budget_seconds}s reached during the image passes; stopping here and keeping what was freed"
+            break
+        fi
+        _out="$(docker image prune --force --filter "until=$age" | tail -1)"
+        note_reclaimed "$_out"
+        echo "reclaimable images are $((reclaimable / 1000000000)) GB, over $images_cap: untagged images older than $age: $_out"
         reclaimable="$(images_reclaimable)" || break
     done
     # What is left is held by a running container, or is younger than the shortest age. Both are
     # in use by somebody; the next hourly run takes whatever has aged past it since.
     echo "reclaimable images are now $((reclaimable / 1000000000)) GB, cap $images_cap"
 fi
-echo "unused anonymous volumes: $(docker volume prune --force | tail -1)"
+_out="$(docker volume prune --force | tail -1)"
+note_reclaimed "$_out"
+echo "unused anonymous volumes: $_out"
 after="$(free_bytes)"
 # Other writers share this filesystem, so the change in free space is not only these prunes.
 echo "docker-cap: free space on $root went from $((before / 1000000000)) GB to $((after / 1000000000)) GB; now $(used_pct)% used"
+# box-cleanup reads this line. Docker's own figure for what these prunes returned, which is a
+# different instrument from the df line above: the filesystem moves with every other writer on
+# the box, and across the 57.7-minute run of 2026-11-12 it FELL 36.6 GiB while the pass freed
+# 13.6. Without this line the step is recorded as unmeasured and its contribution is invisible.
+echo "docker-cap: reclaimed-bytes: $reclaimed_total"

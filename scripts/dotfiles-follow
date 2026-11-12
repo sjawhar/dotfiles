@@ -984,7 +984,11 @@ def run_once(options: argparse.Namespace) -> int:
 
     host = socket.gethostname().split(".")[0]
     display = display_path(repo)
-    where = f"{display} at {short(facts.get('head', ''))}, {options.remote}/{options.branch} at {short(facts.get('target', ''))}"
+    where = (
+        f"{display} at {short(facts.get('head', ''))},"
+        f" {options.remote}/{options.branch} at {short(facts.get('target', ''))},"
+        f" observed {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}"
+    )
     on_main = bool(facts.get("head")) and facts["head"] == facts.get("target")
     post_update_only = on_main and incidents.keys() <= POST_FOLLOW_KINDS
 

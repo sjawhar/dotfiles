@@ -618,11 +618,27 @@ def _acted_since(later: list[dict]) -> frozenset[str]:
     return frozenset(e["actor"]["id"] for e in later if is_session(e) and e["actor"].get("id"))
 
 
+def _replied_to(earlier: list[dict], p: dict) -> dict | None:
+    """The session Sami's comment P answers: the author of the newest session comment above his in its thread, the
+    thread's first comment included; None when his comment opens its thread or no session wrote in it. Dispatch sets
+    `reply_to` to the thread's first comment on every reply, so the newest session comment is the one he read last."""
+    root = p.get("thread_root_id") or p.get("reply_to")
+    if not root:
+        return None
+    for x in reversed(earlier):
+        q = x["payload"]
+        if x["type"] == "comment.created" and is_session(x) and root in (q.get("id"), q.get("thread_root_id"),
+                                                                          q.get("reply_to")):
+            return x["actor"]
+    return None
+
+
 def waiting_on_us(key: str, events: list[dict], open_ask_ids: set, remote: dict, authors: dict, server: str,
                   now: dt.datetime) -> list[Wait]:
     """Sami's comments, ask answers and messages that no session followed (see the module docstring), as the rows the
-    re-drive works on: each carries the node it is about, the session that opened it when there is one, and the
-    sessions that acted on the issue after he wrote."""
+    re-drive works on: each carries the node it is about, the session that opened it when there is one, the session
+    whose comment he replied to when it is a comment in a thread, and the sessions that acted on the issue after he
+    wrote."""
     rows: list[Wait] = []
     for i, e in _sami_waits(events, open_ask_ids):
         p = e["payload"]
@@ -636,6 +652,7 @@ def waiting_on_us(key: str, events: list[dict], open_ask_ids: set, remote: dict,
             where = f" on {p['artifact_name']}" if p.get("artifact_name") else ""
             body = " ".join((p.get("body") or "").split())
             rows.append(Wait(key, "comment", node, waited=waited, question=body, acted=acted,
+                             replied_to=_replied_to(events[:i], p),
                              text=f"{key} comment{where} by sami {waited} ago, unanswered and unresolved: "
                                   f"{body[:180]} ({server}/issues/{key}/comments/{node})"))
             continue

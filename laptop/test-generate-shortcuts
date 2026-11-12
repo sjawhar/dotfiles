@@ -13,6 +13,7 @@ HYBRID_MONITORS="${FIXTURES}/hybrid.monitors"
 DESK_DELL_LEFT_MONITORS="${FIXTURES}/desk-dell-left.monitors"
 OFFICE_WQHD_TWINS_MONITORS="${FIXTURES}/office-wqhd-twins.monitors"
 HOME_BENQ_MONITORS="${FIXTURES}/home-benq.monitors"
+HOME_BENQ_ASUS_MONITORS="${FIXTURES}/home-benq-asus.monitors"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
@@ -168,6 +169,10 @@ printf '%s\n' '1 MB16AC!,eDP-1 Alt+1 Alt+Shift+1' > "${empty_absent}"
 if "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${empty_absent}" > /dev/null 2>&1; then
     fail 'an empty absent-condition must fail'
 fi
+printf '%s\n' '1 MB16AC!!InnoView,eDP-1 Alt+1 Alt+Shift+1' > "${empty_absent}"
+if "${GENERATOR}" --check --monitors "${PORTABLE_MONITORS}" --conf "${empty_absent}" > /dev/null 2>&1; then
+    fail 'an empty absent-condition between two others must fail'
+fi
 
 # An EDID serial query follows the physical monitor when a dock renumbers ports, and
 # emits the current connector because the compositor cannot match serials.
@@ -273,6 +278,17 @@ grep -Fq '(modifiers: [Alt], key: "0", description: Some("WS10 — U32J59x (2)")
     || fail 'home workspace 10 must resolve to the right Samsung portrait'
 grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — eDP-1 (4)")): WorkspaceOnOutput("eDP-1", 4),' "${home_output}" \
     || fail 'home workspace 11 must continue the laptop local sequence'
+
+# Home desk with the ASUS under the ultrawide: it takes 4-6 and nothing else, so the
+# bottom row stays on the laptop.
+home_asus_output="${TMPDIR}/home-benq-asus-custom"
+"${GENERATOR}" --check --monitors "${HOME_BENQ_ASUS_MONITORS}" > "${home_asus_output}"
+grep -Fq '(modifiers: [Alt], key: "6", description: Some("WS6 — MB16AC (3)")): WorkspaceOnOutput("MB16AC", 3),' "${home_asus_output}" \
+    || fail 'home workspace 6 must resolve to the ASUS'
+! grep -q 'WorkspaceOnOutput("MB16AC", 4),' "${home_asus_output}" \
+    || fail 'the home ASUS must not hold a fourth local workspace'
+grep -Fq '(modifiers: [Super, Alt], key: "1", description: Some("WS11 — eDP-1 (1)")): WorkspaceOnOutput("eDP-1", 1),' "${home_asus_output}" \
+    || fail 'home workspace 11 must fall through to the laptop when the ASUS is present'
 
 disabled_laptop_output="${TMPDIR}/disabled-laptop-custom"
 "${GENERATOR}" --check --monitors "${DISABLED_LAPTOP_MONITORS}" > "${disabled_laptop_output}"

@@ -31,16 +31,16 @@ gh api repos/<owner>/<repo>/issues/comments/<id> -q .body | grep -o '<!-- legion
 Run both `gh search` lines, because `issues` skips PR comments. The `gh api` line is the deterministic sweep of one repo.
 
 ```bash
-git log --all --format='%h %s' --grep='^Omp-Session: <id>'
+git log -n <N> --format='@@@%h %s%n%B' <ref> | awk -v id='<id>' '/^@@@/{h=substr($0,4); next} $0 ~ ("^Omp-Session: " id) {print h}' | sort -u
 jj log --no-graph -r 'description(glob:"*Omp-Session: <id>*")' -T 'commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
 gh search issues "<id> in:comments" --owner <owner>
 gh search prs    "<id> in:comments" --owner <owner>
 gh api "repos/<owner>/<repo>/issues/comments" --paginate -q '.[] | select(.body | contains("<id>")) | .html_url'
 ```
 
-Search the message with `--grep`, never `%(trailers)`: a GitHub merge-queue squash puts the `Omp-Session` lines in the body and then appends its own `Co-authored-by` paragraph, so git's trailer parser reads only that last paragraph and misses them (grading-tools main, 2026-11-01).
+Match the whole message, never `%(trailers)`: a GitHub merge-queue squash appends its own `Co-authored-by` paragraph after the `Omp-Session` lines, and git's trailer parser reads only that last paragraph (on grading-tools main, 2026-11-12, it found 0 of one session's 103 commits). The read is bounded and uses no `--grep` or `--all`, which some repositories forbid; widen `-n` until it reaches the session's first commit.
 
-A merge commit that a `MERGE` queue made (machcsl-riscv-experimental's `main`) is GitHub's own commit: it holds an `Omp-Session` line only when the pull request's body did. The branch's commits keep their trailers and are in `main`'s history, so read those: `git log --format='%h %(trailers:key=Omp-Session,valueonly)' <merge>^1..<merge>^2`.
+A merge commit that a `MERGE` queue made (machcsl-riscv-experimental's `main`) holds an `Omp-Session` line only when the pull request's body did. The branch's commits keep theirs: read them with `<merge>^1..<merge>^2` as `<ref>`.
 
 ## Read the evidence
 

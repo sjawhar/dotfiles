@@ -1,17 +1,18 @@
-# Regenerates COSMIC custom shortcuts from laptop/workspaces.conf against the
-# currently connected monitors. Triggered by workspace-shortcuts.path, and run
-# once per login: cosmic-comp writes outputs.ron during session bring-up,
-# BEFORE the path unit arms its inotify watch (observed 70ms apart), so the
-# login-time write is invisible to the watcher. Ordering After= the path unit
-# closes the race from both sides: writes before this run are covered by the
-# run itself, writes after are covered by the already-armed watch. Run
-# manually with `systemctl --user start workspace-shortcuts` if needed.
+# Puts the connected monitors in their desk layout (laptop/desks.conf), then
+# regenerates COSMIC custom shortcuts from laptop/workspaces.conf against them.
+# Triggered by workspace-shortcuts.path, and run once per login: cosmic-comp
+# writes outputs.ron during session bring-up, BEFORE the path unit arms its
+# inotify watch (observed 70ms apart), so the login-time write is invisible to
+# the watcher. Ordering After= the path unit closes the race from both sides:
+# writes before this run are covered by the run itself, writes after are covered
+# by the already-armed watch. Run manually with
+# `systemctl --user start workspace-shortcuts` if needed.
 #
 # Companion symlink:
 #   ~/.config/systemd/user/workspace-shortcuts.service -> this file
 
 [Unit]
-Description=Regenerate COSMIC workspace shortcuts from connected monitors
+Description=Apply the desk layout and regenerate COSMIC workspace shortcuts from connected monitors
 After=graphical-session.target workspace-shortcuts.path
 # Dock enumeration rewrites outputs.ron many times in quick bursts; every
 # trigger must run so the final output state is the one applied. The default
@@ -23,6 +24,10 @@ Type=oneshot
 # Let WAYLAND_DISPLAY / DBus env import finish on session start; doubles as a
 # debounce for dock-enumeration write bursts.
 ExecStartPre=/bin/sleep 5
+# --if-changed: only when the set of connected outputs changed since its last run,
+# so a layout dragged by hand holds until the next reconnect. A failure here is
+# logged and must not stop the shortcuts from regenerating ('-').
+ExecStart=-%h/.dotfiles/laptop/apply-desk-layout --apply --if-changed
 ExecStart=%h/.dotfiles/laptop/generate-shortcuts --apply
 
 [Install]

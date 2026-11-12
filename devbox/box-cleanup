@@ -45,8 +45,28 @@ set -uo pipefail
 here="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 state_file="${BOX_CLEANUP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/state.json}"
 log_file="${BOX_CLEANUP_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/box-cleanup/log.jsonl}"
-envoy_url="${BOX_CLEANUP_ENVOY_URL:-http://127.0.0.1:9020}"
+# Where Envoy actually is, read from the same file the `envoy` CLI reads, so the two cannot drift.
+# The old default, http://127.0.0.1:9020, has nothing listening on it: measured 2026-11-12, curl
+# to it failed with "Couldn't connect" from a user unit AND from a plain shell, while `envoy.url`
+# from this config answered 200 on /healthz from a user unit. So every alert this script tried to
+# send went nowhere, including "A CLEANER HAS STOPPED WORKING: docker-cap (7 runs, last exit 124)"
+# -- a real fault, found only because a person asked why the unit kept failing. A notifier that
+# cannot notify is the box-exit-watch shape in scripts/AGENTS.md; this one at least says
+# COULD NOT SEND on stderr, which is how it was caught.
+_envoy_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json"
+envoy_url="${BOX_CLEANUP_ENVOY_URL:-$([[ -r "$_envoy_cfg" ]] && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("envoy",{}).get("url",""))' "$_envoy_cfg" 2>/dev/null)}"
+envoy_url="${envoy_url:-http://envoy-hub.tail12ec1c.ts.net:9020}"
 step_timeout="${BOX_CLEANUP_STEP_TIMEOUT:-30m}"
+# One global timeout does not fit every cleaner. `docker-cap` was killed at the 30m default on
+# seven consecutive runs (exit 124, reclaimed nothing, 2026-11-11/12) while `nvme-cache-cap`
+# finished in 4s, and a SIGKILL leaves no success recorded, so its hourly gate -- which measures
+# from the last SUCCESS -- never advances and the step starts again on the next tick. The step's
+# own lock now stops those attempts overlapping; this gives the one that runs a bound that fits
+# the job. 2h is what the same prune is given by hand; the service's TimeoutStartSec is 4h, and
+# docker-cap is the last step, so it cannot crowd the others out.
+declare -A STEP_TIMEOUTS=(
+    [docker-cap]="${BOX_CLEANUP_DOCKER_CAP_TIMEOUT:-2h}"
+)
 
 # Where a box-health notice goes. `lead-box-health` is an Envoy TOPIC NAME, not a standing lead:
 # Sami ended standing leads on 2026-11-09 (dispatch://INFRA-2397). The name stays until the
@@ -474,7 +494,8 @@ for entry in "${run_steps[@]}"; do
     for mount in "${!AVAIL[@]}"; do BEFORE["$mount"]="${AVAIL[$mount]}"; done
 
     step_start="$(date -u +%s)"
-    output="$(timeout "$step_timeout" bash -c "$command" 2>&1)"
+    this_timeout="${STEP_TIMEOUTS[$name]:-$step_timeout}"
+    output="$(timeout "$this_timeout" bash -c "$command" 2>&1)"
     rc=$?
     step_seconds=$(($(date -u +%s) - step_start))
     [[ -n "$output" ]] && printf '%s\n' "$output" | sed "s/^/  $name: /"
@@ -511,7 +532,7 @@ for entry in "${run_steps[@]}"; do
     STEP_LAST_EXIT["$name"]="$rc"
     state_word=ok
     if ((rc == 124)); then
-        state_word="TIMED OUT after $step_timeout"
+        state_word="TIMED OUT after $this_timeout"
         failed=$((failed + 1))
         failed_steps+=("$name")
         STEP_FAILS["$name"]=$((${STEP_FAILS[$name]:-0} + 1))
@@ -632,7 +653,20 @@ if [[ "$no_alert" == no ]] && ((${#said_now[@]})); then
     fi
 elif [[ "$no_alert" == no && "$zero_counted" == yes ]] && ((${#streak_said[@]} == 0)) && ((zero_days >= ZERO_DAYS)) &&
     ((alerted_at == 0 || zero_days >= alerted_at * 2)); then
-    if tell "THE DAILY CLEANUP HAS FREED NOTHING FOR $zero_days RUNS on $(hostname -s): not one byte came back from any of its ${#run_steps[@]} cleaners, and none of them failed. Either the box is genuinely quiet, or the cleaning has stopped working while the disks fill. Read $log_file; run box-cleanup --only <step> by hand to see one."; then
+    # Name the filesystems the cleaners actually watch, with how full each is. Without this the
+    # alert reads as "the cleaning has stopped working" when every step is correct to free nothing:
+    # on sami-rocqperf, 2026-11-12, five of seven steps watch /mnt/nvme at 6% used while / sat at
+    # 90% and /mnt/durable at 93%, because the step paths were written for a box where /mnt/nvme is
+    # the durable disk and copied to one where it is the throwaway. A reader who sees "freed
+    # nothing from a 6% disk" asks the right question; one who sees only "freed nothing" goes
+    # looking for a broken cleaner.
+    watched=""
+    for mount in $(mounts_sorted); do
+        pct="?"
+        ((TOTAL[$mount] > 0)) && pct="$(((TOTAL[$mount] - AVAIL[$mount]) * 100 / TOTAL[$mount]))%"
+        watched+="${watched:+, }$mount $pct used"
+    done
+    if tell "THE DAILY CLEANUP HAS FREED NOTHING FOR $zero_days RUNS on $(hostname -s): not one byte came back from any of its ${#run_steps[@]} cleaners, and none of them failed. Its cleaners watch ${watched:-no mount it could read}. A cleaner that caps a filesystem with room to spare is RIGHT to free nothing, so before reading this as a fault, check whether the disk that is filling is one of those. Read $log_file; run box-cleanup --only <step> by hand to see one."; then
         alerted_at=$zero_days
     fi
 fi

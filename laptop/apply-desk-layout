@@ -1,0 +1,567 @@
+#!/bin/bash
+set -euo pipefail
+
+LAPTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONF="${LAPTOP_DIR}/desks.conf"
+STATE_FILE="${XDG_STATE_HOME:-${HOME}/.local/state}/desk-layout/outputs"
+KDL_FILE=""
+MODE="plan"
+IF_CHANGED=0
+CAPTURE_DESK=""
+
+error() {
+    printf 'apply-desk-layout: %s\n' "$*" >&2
+    exit 1
+}
+
+warn() {
+    printf 'apply-desk-layout: %s\n' "$*" >&2
+}
+
+usage() {
+    cat <<'USAGE'
+Usage: apply-desk-layout [--apply [--if-changed]] [--conf PATH] [--kdl PATH] [--state PATH]
+       apply-desk-layout --capture DESK [--kdl PATH]
+
+Find the desk in laptop/desks.conf that matches the connected monitors and put every
+monitor of that desk at its mode, scale, rotation and position. Without --apply, print
+the desk and the cosmic-randr commands that would run.
+  --apply        run the cosmic-randr commands
+  --if-changed   with --apply: do nothing when the set of enabled outputs is the one
+                 the last --if-changed run saw, so a layout dragged by hand holds until
+                 the next reconnect
+  --capture DESK print the current layout as desks.conf rows for DESK
+  --conf PATH    read desk layouts from PATH instead of desks.conf
+  --kdl PATH     plan against PATH (`cosmic-randr list --kdl` output) instead of the
+                 live compositor; refused with --apply
+  --state PATH   where --if-changed keeps the last output set
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --apply)
+            [[ "${MODE}" == "plan" ]] || error 'choose only one of --apply or --capture'
+            MODE="apply"
+            ;;
+        --if-changed)
+            IF_CHANGED=1
+            ;;
+        --capture)
+            [[ "${MODE}" == "plan" ]] || error 'choose only one of --apply or --capture'
+            [[ $# -ge 2 ]] || error '--capture requires a desk name'
+            MODE="capture"
+            CAPTURE_DESK="$2"
+            shift
+            ;;
+        --conf)
+            [[ $# -ge 2 ]] || error '--conf requires a path'
+            CONF="$2"
+            shift
+            ;;
+        --kdl)
+            [[ $# -ge 2 ]] || error '--kdl requires a path'
+            KDL_FILE="$2"
+            shift
+            ;;
+        --state)
+            [[ $# -ge 2 ]] || error '--state requires a path'
+            STATE_FILE="$2"
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            error "unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
+((IF_CHANGED == 0)) || [[ "${MODE}" == "apply" ]] || error '--if-changed needs --apply'
+# A fixture describes some other moment's outputs; applying its plan to the live
+# compositor would move real screens (cosmic-randr matches eDP-1 on every machine).
+[[ -z "${KDL_FILE}" || "${MODE}" != "apply" ]] || error '--kdl only plans; --apply works on the live outputs'
+
+# --- Connected outputs, from `cosmic-randr list --kdl` ---
+
+declare -a outputs=()
+declare -A out_enabled=() out_make=() out_model=() out_serial=()
+declare -A out_x=() out_y=() out_scale=() out_transform=() out_mode=() out_modes=()
+
+load_outputs() {
+    local kdl
+    local line
+    local name=""
+    local output_pattern='^output[[:space:]]+"([^"]+)"[[:space:]]+enabled=#(true|false)'
+    local make_pattern='make="([^"]*)"'
+    local model_pattern='model="([^"]*)"'
+    local mode_pattern='^[[:space:]]*mode[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)(.*)$'
+
+    if [[ -n "${KDL_FILE}" ]]; then
+        [[ -r "${KDL_FILE}" ]] || error "cannot read output listing: ${KDL_FILE}"
+        kdl="$(< "${KDL_FILE}")"
+    else
+        kdl="$(cosmic-randr list --kdl 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')" \
+            || error 'failed to list outputs with cosmic-randr'
+    fi
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" =~ ${output_pattern} ]]; then
+            name="${BASH_REMATCH[1]}"
+            [[ -z "${out_enabled["${name}"]+x}" ]] || error "duplicate output in listing: ${name}"
+            outputs+=("${name}")
+            out_enabled["${name}"]="${BASH_REMATCH[2]}"
+            out_make["${name}"]=""
+            out_model["${name}"]=""
+            out_serial["${name}"]=""
+            out_modes["${name}"]=""
+            out_mode["${name}"]=""
+        elif [[ -z "${name}" ]]; then
+            continue
+        elif [[ "${line}" =~ ^[[:space:]]*description[[:space:]] ]]; then
+            [[ "${line}" =~ ${make_pattern} ]] && out_make["${name}"]="${BASH_REMATCH[1]}"
+            [[ "${line}" =~ ${model_pattern} ]] && out_model["${name}"]="${BASH_REMATCH[1]}"
+        elif [[ "${line}" =~ ^[[:space:]]*position[[:space:]]+(-?[0-9]+)[[:space:]]+(-?[0-9]+) ]]; then
+            out_x["${name}"]="${BASH_REMATCH[1]}"
+            out_y["${name}"]="${BASH_REMATCH[2]}"
+        elif [[ "${line}" =~ ^[[:space:]]*scale[[:space:]]+([0-9.]+) ]]; then
+            out_scale["${name}"]="${BASH_REMATCH[1]}"
+        elif [[ "${line}" =~ ^[[:space:]]*transform[[:space:]]+\"([^\"]+)\" ]]; then
+            out_transform["${name}"]="${BASH_REMATCH[1]}"
+        elif [[ "${line}" =~ ^[[:space:]]*serial_number[[:space:]]+\"([^\"]*)\" ]]; then
+            # "Unknown" is cosmic-comp's placeholder for an EDID without a serial.
+            [[ "${BASH_REMATCH[1]}" == "Unknown" ]] || out_serial["${name}"]="${BASH_REMATCH[1]}"
+        elif [[ "${line}" =~ ${mode_pattern} ]]; then
+            out_modes["${name}"]+="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"$'\n'
+            [[ "${BASH_REMATCH[4]}" != *current=#true* ]] \
+                || out_mode["${name}"]="${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+        fi
+    done <<< "${kdl}"
+    return 0
+}
+
+enabled_outputs() {
+    local name
+    for name in "${outputs[@]}"; do
+        [[ "${out_enabled["${name}"]}" == "true" ]] && printf '%s\n' "${name}"
+    done
+    return 0
+}
+
+# Resolve a monitor query against enabled outputs: exact connector, then exact EDID
+# serial, then case-insensitive model substring (the workspaces.conf rules). Sets
+# RESOLVED; returns 1 when nothing matches and 2 when a model substring is ambiguous.
+resolve_query() {
+    local query="$1"
+    local name
+    local -a matches=()
+
+    RESOLVED=""
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        if [[ "${name}" == "${query}" ]]; then
+            RESOLVED="${name}"
+            return 0
+        fi
+    done <<< "$(enabled_outputs)"
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        if [[ -n "${out_serial["${name}"]}" && "${out_serial["${name}"]}" == "${query}" ]]; then
+            RESOLVED="${name}"
+            return 0
+        fi
+    done <<< "$(enabled_outputs)"
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        if [[ "${out_model["${name}"],,}" == *"${query,,}"* ]]; then
+            matches+=("${name}")
+        fi
+    done <<< "$(enabled_outputs)"
+    case "${#matches[@]}" in
+        0) return 1 ;;
+        1) RESOLVED="${matches[0]}"; return 0 ;;
+        *) AMBIGUOUS="${matches[*]}"; return 2 ;;
+    esac
+}
+
+# --- Desk rows ---
+
+declare -a desks=()
+declare -a row_desk=() row_query=() row_need=() row_size=() row_hz=()
+declare -a row_scale=() row_transform=() row_x=() row_y=() row_line=()
+
+load_conf() {
+    local raw_line
+    local line_number=0
+    local desk query need mode scale transform x y extra
+    local known
+    local existing
+    local desk_name
+    local i
+
+    [[ -r "${CONF}" ]] || error "cannot read desk layouts: ${CONF}"
+    while IFS= read -r raw_line || [[ -n "${raw_line}" ]]; do
+        line_number=$((line_number + 1))
+        raw_line="${raw_line%%#*}"
+        [[ "${raw_line}" =~ [^[:space:]] ]] || continue
+        read -r desk query need mode scale transform x y extra <<< "${raw_line}"
+        [[ -n "${y}" && -z "${extra}" ]] \
+            || error "${CONF}:${line_number}: expected 8 columns: <desk> <monitor> <need> <mode> <scale> <transform> <x> <y>"
+        [[ "${need}" == "required" || "${need}" == "optional" ]] \
+            || error "${CONF}:${line_number}: need must be required or optional, not ${need}"
+        [[ "${mode}" =~ ^([0-9]+x[0-9]+)(@([0-9]+(\.[0-9]+)?))?$ ]] \
+            || error "${CONF}:${line_number}: mode must be WIDTHxHEIGHT or WIDTHxHEIGHT@HZ, not ${mode}"
+        row_size+=("${BASH_REMATCH[1]}")
+        row_hz+=("${BASH_REMATCH[3]}")
+        [[ "${scale}" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+            || error "${CONF}:${line_number}: scale must be a number, not ${scale}"
+        case "${transform}" in
+            normal|rotate90|rotate180|rotate270|flipped|flipped90|flipped180|flipped270) ;;
+            *) error "${CONF}:${line_number}: unknown transform: ${transform}" ;;
+        esac
+        [[ "${x}" =~ ^-?[0-9]+$ && "${y}" =~ ^-?[0-9]+$ ]] \
+            || error "${CONF}:${line_number}: position must be integers, not ${x} ${y}"
+
+        row_desk+=("${desk}")
+        row_query+=("${query}")
+        row_need+=("${need}")
+        row_scale+=("${scale}")
+        row_transform+=("${transform}")
+        row_x+=("${x}")
+        row_y+=("${y}")
+        row_line+=("${line_number}")
+        known=0
+        for existing in "${desks[@]}"; do
+            if [[ "${existing}" == "${desk}" ]]; then
+                known=1
+            fi
+        done
+        ((known)) || desks+=("${desk}")
+    done < "${CONF}"
+    [[ "${#desks[@]}" -gt 0 ]] || error "${CONF}: no desk rows"
+    # A desk with only optional monitors would match everywhere.
+    for desk_name in "${desks[@]}"; do
+        known=0
+        for i in "${!row_desk[@]}"; do
+            if [[ "${row_desk[$i]}" == "${desk_name}" && "${row_need[$i]}" == "required" ]]; then
+                known=1
+            fi
+        done
+        ((known)) || error "${CONF}: desk ${desk_name} has no required monitor"
+    done
+}
+
+# Resolve every row of DESK. Sets DESK_REQUIRED (count) and row_target[i] (connector or
+# empty); returns 1 when a required monitor is missing or two rows claim one output.
+declare -a row_target=()
+resolve_desk() {
+    local desk="$1"
+    local report="$2"
+    local i
+    local status
+    local -A claimed=()
+
+    DESK_REQUIRED=0
+    for i in "${!row_desk[@]}"; do
+        [[ "${row_desk[$i]}" == "${desk}" ]] || continue
+        row_target[i]=""
+        status=0
+        resolve_query "${row_query[$i]}" || status=$?
+        if ((status == 2)); then
+            ((report)) && warn "${CONF}:${row_line[$i]}: ${row_query[$i]} matches several outputs (${AMBIGUOUS}); use a serial"
+            status=1
+        fi
+        if ((status != 0)); then
+            [[ "${row_need[$i]}" == "required" ]] && return 1
+            continue
+        fi
+        if [[ -n "${claimed["${RESOLVED}"]+x}" ]]; then
+            warn "${CONF}:${row_line[$i]}: ${row_query[$i]} and ${claimed["${RESOLVED}"]} both name ${RESOLVED} in desk ${desk}"
+            return 1
+        fi
+        claimed["${RESOLVED}"]="${row_query[$i]}"
+        row_target[i]="${RESOLVED}"
+        [[ "${row_need[$i]}" == "required" ]] && DESK_REQUIRED=$((DESK_REQUIRED + 1))
+    done
+    return 0
+}
+
+select_desk() {
+    local desk
+    local best=""
+    local best_required=0
+    local tied=""
+
+    for desk in "${desks[@]}"; do
+        resolve_desk "${desk}" 1 || continue
+        if ((DESK_REQUIRED > best_required)); then
+            best="${desk}"
+            best_required="${DESK_REQUIRED}"
+            tied=""
+        elif ((DESK_REQUIRED == best_required && DESK_REQUIRED > 0)); then
+            tied+=" ${desk}"
+        fi
+    done
+    [[ -z "${tied}" ]] || error "desks ${best}${tied} all match the connected monitors; give one of them another required monitor"
+    SELECTED_DESK="${best}"
+    [[ -z "${best}" ]] || resolve_desk "${best}" 0
+}
+
+# Mode for a row on its output: the requested size at the refresh closest to HZ, or at
+# the highest refresh when no HZ is given. Sets TARGET_MODE to "W H MILLIHZ".
+pick_mode() {
+    local connector="$1"
+    local size="$2"
+    local hz="$3"
+    local width="${size%x*}"
+    local height="${size#*x}"
+    local w h r
+    local best=""
+    local best_score=""
+    local score
+    local target_mhz=""
+
+    [[ -z "${hz}" ]] || target_mhz="$(awk -v hz="${hz}" 'BEGIN { printf "%d", hz * 1000 + 0.5 }')"
+    while read -r w h r; do
+        [[ -n "${w}" && "${w}" == "${width}" && "${h}" == "${height}" ]] || continue
+        if [[ -n "${target_mhz}" ]]; then
+            score=$((r > target_mhz ? r - target_mhz : target_mhz - r))
+            if [[ -z "${best_score}" ]] || ((score < best_score)); then
+                best="${w} ${h} ${r}"
+                best_score="${score}"
+            fi
+        elif [[ -z "${best_score}" ]] || ((r > best_score)); then
+            best="${w} ${h} ${r}"
+            best_score="${r}"
+        fi
+    done <<< "${out_modes["${connector}"]}"
+    TARGET_MODE="${best}"
+    [[ -n "${best}" ]]
+}
+
+same_scale() {
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !((a - b) < 0.0005 && (b - a) < 0.0005) }'
+}
+
+millihz_to_hz() {
+    printf '%d.%03d' "$(($1 / 1000))" "$(($1 % 1000))"
+}
+
+trim_scale() {
+    local scale="$1"
+    if [[ "${scale}" == *.* ]]; then
+        scale="${scale%"${scale##*[!0]}"}"
+        scale="${scale%.}"
+    fi
+    printf '%s' "${scale}"
+}
+
+output_set_key() {
+    local name
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        printf '%s|%s|%s|%s\n' "${name}" "${out_make["${name}"]}" "${out_model["${name}"]}" "${out_serial["${name}"]}"
+    done <<< "$(enabled_outputs)" | sort
+}
+
+capture() {
+    local desk="$1"
+    local name
+    local query
+    local need
+    local last_word
+    local w h r max_r mode
+    local status
+
+    [[ "${desk}" =~ ^[[:alnum:]_-]+$ ]] || error "desk names are letters, digits, - and _: ${desk}"
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        query=""
+        if [[ -n "${out_serial["${name}"]}" ]]; then
+            query="${out_serial["${name}"]}"
+        elif [[ "${name}" != eDP-* ]]; then
+            last_word="${out_model["${name}"]##* }"
+            status=0
+            [[ -z "${last_word}" ]] || resolve_query "${last_word}" || status=$?
+            [[ -n "${last_word}" && ${status} -eq 0 && "${RESOLVED}" == "${name}" ]] && query="${last_word}"
+        fi
+        if [[ -z "${query}" ]]; then
+            query="${name}"
+            [[ "${name}" == eDP-* ]] || warn "${name} has no serial or unique model word; captured by connector name, which a dock can renumber"
+        fi
+        # A screen with a serial is a fixture of some desk; one without (the laptop
+        # panel, a portable screen) comes and goes, so it must not decide the desk.
+        need="optional"
+        [[ -z "${out_serial["${name}"]}" || "${name}" == eDP-* ]] || need="required"
+
+        read -r w h r <<< "${out_mode["${name}"]}"
+        [[ -n "${w:-}" ]] || error "${name} reports no current mode"
+        max_r="$(awk -v w="${w}" -v h="${h}" '$1 == w && $2 == h && $3 > m { m = $3 } END { print m + 0 }' <<< "${out_modes["${name}"]}")"
+        mode="${w}x${h}"
+        ((r == max_r)) || mode+="@$(millihz_to_hz "${r}")"
+        printf '%s  %s  %s  %s  %s  %s  %s  %s\n' "${desk}" "${query}" "${need}" "${mode}" \
+            "$(trim_scale "${out_scale["${name}"]}")" "${out_transform["${name}"]:-normal}" \
+            "${out_x["${name}"]}" "${out_y["${name}"]}"
+    done <<< "$(enabled_outputs)"
+    return 0
+}
+
+load_outputs
+
+if [[ "${MODE}" == "capture" ]]; then
+    echo "# Review the need column: a screen you sometimes unplug must be optional."
+    capture "${CAPTURE_DESK}"
+    exit 0
+fi
+
+load_conf
+
+# With --if-changed, remember the output set only once it is in place: a failed apply
+# is retried on the next trigger. A configuration cosmic-comp refuses makes it re-probe
+# and rewrite outputs.ron, which triggers this again, so one output set gets three
+# attempts rather than a loop.
+MAX_ATTEMPTS=3
+finish() {
+    local status="$1"
+    local failures=0
+    local failed_key=""
+
+    if ((IF_CHANGED)); then
+        mkdir -p "$(dirname "${STATE_FILE}")"
+        if ((status == 0)); then
+            printf '%s\n' "${current_key}" > "${STATE_FILE}.tmp"
+            mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+            rm -f "${STATE_FILE}.failed"
+        else
+            if [[ -r "${STATE_FILE}.failed" ]]; then
+                { read -r failures; failed_key="$(cat)"; } < "${STATE_FILE}.failed"
+            fi
+            [[ "${failed_key}" == "${current_key}" ]] || failures=0
+            printf '%s\n%s\n' "$((failures + 1))" "${current_key}" > "${STATE_FILE}.failed.tmp"
+            mv "${STATE_FILE}.failed.tmp" "${STATE_FILE}.failed"
+        fi
+    fi
+    exit "${status}"
+}
+
+if ((IF_CHANGED)); then
+    current_key="$(output_set_key)"
+    if [[ -r "${STATE_FILE}" && "$(< "${STATE_FILE}")" == "${current_key}" ]]; then
+        echo 'outputs unchanged since the last run; leaving the layout alone'
+        exit 0
+    fi
+    if [[ -r "${STATE_FILE}.failed" ]]; then
+        { read -r attempts; attempts_key="$(cat)"; } < "${STATE_FILE}.failed"
+        if [[ "${attempts_key}" == "${current_key}" ]] && ((attempts >= MAX_ATTEMPTS)); then
+            echo "applying the desk failed ${attempts} times for these outputs; not trying again until they change (run apply-desk-layout --apply by hand)"
+            exit 0
+        fi
+    fi
+fi
+
+select_desk
+if [[ -z "${SELECTED_DESK}" ]]; then
+    echo 'no desk in desks.conf matches the connected monitors; leaving the layout alone'
+    finish 0
+fi
+
+kdl_string() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "${value}"
+}
+
+# Two steps, because neither cosmic-randr command does both jobs:
+#   1. `cosmic-randr mode` per output whose mode is wrong. It picks the exact refresh
+#      rate, but every call is a separate configuration, and cosmic-comp snaps outputs
+#      against their neighbours after each one, so positions set this way drift.
+#      Changes that lower an output's pixel rate run first, so no step on the way asks
+#      a dock's shared link for more bandwidth than the finished desk uses. A refused
+#      configuration makes cosmic-comp reset and re-probe the outputs, and a probe made
+#      while the link is busy can drop a high-refresh mode until the next reconnect.
+#   2. One `cosmic-randr kdl` configuration with the position, scale and rotation of
+#      every output in the desk. It is atomic, so the snapping sees the finished layout.
+#      It carries no modes: `kdl` matches a mode by size alone and can pick the wrong
+#      refresh rate, while an output with no mode keeps the one step 1 set.
+echo "desk: ${SELECTED_DESK}"
+declare -A placed=()
+declare -a lowering_commands=() raising_commands=()
+geometry=""
+geometry_changed=0
+for i in "${!row_desk[@]}"; do
+    [[ "${row_desk[$i]}" == "${SELECTED_DESK}" ]] || continue
+    connector="${row_target[$i]:-}"
+    if [[ -z "${connector}" ]]; then
+        echo "  ${row_query[$i]}: not connected"
+        continue
+    fi
+    placed["${connector}"]=1
+    if ! pick_mode "${connector}" "${row_size[$i]}" "${row_hz[$i]}"; then
+        warn "${connector} (${row_query[$i]}) offers no ${row_size[$i]} mode; leaving it alone"
+        continue
+    fi
+    read -r w h r <<< "${TARGET_MODE}"
+    status="in place"
+    if [[ "${TARGET_MODE}" != "${out_mode["${connector}"]}" ]]; then
+        command="cosmic-randr mode ${connector} ${w} ${h} --refresh $(millihz_to_hz "${r}")"
+        read -r cw ch cr <<< "${out_mode["${connector}"]:-0 0 0}"
+        if ((w * h * r < cw * ch * cr)); then
+            lowering_commands+=("${command}")
+        else
+            raising_commands+=("${command}")
+        fi
+        status="to place"
+    fi
+    if ! same_scale "${row_scale[$i]}" "${out_scale["${connector}"]:-0}" \
+        || [[ "${row_transform[$i]}" != "${out_transform["${connector}"]:-}" ]] \
+        || [[ "${row_x[$i]}" != "${out_x["${connector}"]:-}" || "${row_y[$i]}" != "${out_y["${connector}"]:-}" ]]; then
+        geometry_changed=1
+        status="to place"
+    fi
+    echo "  ${connector} (${row_query[$i]}): ${status}: ${w}x${h}@$(millihz_to_hz "${r}") scale ${row_scale[$i]} ${row_transform[$i]} at ${row_x[$i]},${row_y[$i]}"
+
+    description="description"
+    [[ -z "${out_make["${connector}"]}" ]] || description+=" make=$(kdl_string "${out_make["${connector}"]}")"
+    description+=" model=$(kdl_string "${out_model["${connector}"]}")"
+    geometry+="output $(kdl_string "${connector}") enabled=#true {"$'\n'
+    geometry+="  ${description}"$'\n'
+    geometry+="  position ${row_x[$i]} ${row_y[$i]}"$'\n'
+    geometry+="  scale $(awk -v s="${row_scale[$i]}" 'BEGIN { printf "%.2f", s }')"$'\n'
+    geometry+="  transform $(kdl_string "${row_transform[$i]}")"$'\n'
+    geometry+="}"$'\n'
+done
+while IFS= read -r name; do
+    [[ -n "${name}" && -z "${placed["${name}"]+x}" ]] || continue
+    echo "  ${name} (${out_model["${name}"]}): not in desk ${SELECTED_DESK}; left alone"
+done <<< "$(enabled_outputs)"
+
+mode_commands=("${lowering_commands[@]}" "${raising_commands[@]}")
+if [[ "${#mode_commands[@]}" -eq 0 && "${geometry_changed}" -eq 0 ]]; then
+    echo 'layout already in place'
+    finish 0
+fi
+for command in "${mode_commands[@]}"; do
+    echo "run: ${command}"
+done
+echo 'run: cosmic-randr kdl <<EOF'
+printf '%s' "${geometry}"
+echo 'EOF'
+
+[[ "${MODE}" == "apply" ]] || exit 0
+failed=0
+for command in "${mode_commands[@]}"; do
+    read -r -a argv <<< "${command}"
+    if ! "${argv[@]}"; then
+        warn "failed: ${command}"
+        failed=1
+    fi
+done
+if ! printf '%s' "${geometry}" | cosmic-randr kdl; then
+    warn 'failed: cosmic-randr kdl (positions, scales and rotations)'
+    failed=1
+fi
+finish "${failed}"

@@ -10,16 +10,21 @@ was the instruction step, and four hours later it had not held.
 What it does with each WAITING-ON-US row:
 
 1. **Names an executor**, in this order, and sends only to agent sessions, never to a person:
-   the session that opened the ask; else the session that claims the issue; else the session the stream issue's
-   scoreboard names; else the one the project's own stream scoreboard names (with standing leads gone, that is the
-   project's Legion controller wherever a scoreboard names one). A candidate that is
+   for Sami's reply in a comment thread, the session whose comment he replied to, since that is the session he
+   answered and a scoreboard's lead may never have read the thread; else the session that opened the ask; else the
+   session that claims the issue; else the session the stream issue's scoreboard names; else the one the project's
+   own stream scoreboard names (with standing leads gone, that is the project's Legion controller wherever a
+   scoreboard names one). A candidate that is
    not alive is passed over. A row of a Legion tree, or one a Legion architect opened, takes only that project's
    Legion controller at the last step: an architect's claim outlives its process, so the tree is parked rather than
    gone, and the controller is the session that wakes it. When nothing resolves, the row prints as
    `DISPATCH-NO-EXECUTOR` with what was checked about each candidate it passed over. That row is for the chief to
    place by hand; it is never dropped and nothing is invented to send it to. The claim holder is read whatever the
    lead roster says, as long as it acted on the issue after Sami wrote: it has already taken the issue, so the
-   roster, which governs who a stream's work may be handed to, does not apply (INFRA-1168, 2026-11-07).
+   roster, which governs who a stream's work may be handed to, does not apply (INFRA-1168, 2026-11-07). A Legion
+   controller a scoreboard names is resolved, at each run, to the live holder of its Envoy role
+   (`legion-<project>-controller`), because a scoreboard keeps the session it was written with after the role has
+   moved on; the scoreboard's session stands only when the role has no holder.
 2. **Sets a time to acknowledge by** (`ACK_MINUTES`, default 60) and writes it to the ledger
    (`$DASHBOARD_STATE_DIR/redrive.json`), so the next run can tell an acknowledged row from a silent one.
 3. **Sends one message** naming the ask, Sami's answer, how long the row has waited, and what an acknowledgement is:
@@ -49,7 +54,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .sources import envoy_send
+from .sources import SourceError, envoy_role, envoy_send
 
 ACK_MINUTES = 60
 STATE_DIR = Path(os.environ.get("DASHBOARD_STATE_DIR", Path.home() / ".local" / "state" / "chief-dashboard"))
@@ -74,8 +79,9 @@ NOT_LEADS = frozenset({
 @dataclass
 class Wait:
     """One row that waits on us: the finding's issue, the Dispatch node it is about, its printed text, how long it
-    has waited, the session that opened it when it is an ask, and the sessions that acted on its issue after Sami
-    wrote (`acted`), which is how a claim holder that is carrying the row out is told from one that is not."""
+    has waited, the session that opened it when it is an ask, the session whose comment Sami replied to when it is a
+    comment in a thread (`replied_to`), and the sessions that acted on its issue after Sami wrote (`acted`), which is
+    how a claim holder that is carrying the row out is told from one that is not."""
 
     key: str
     kind: str  # ask | comment | message
@@ -86,6 +92,7 @@ class Wait:
     question: str = ""
     answer: str = ""
     acted: frozenset[str] = frozenset()
+    replied_to: dict | None = None
 
     @property
     def rid(self) -> str:
@@ -273,27 +280,33 @@ class Driver:
     rows whose time has passed."""
 
     def __init__(self, ledger: Ledger, send=envoy_send, ack_minutes: int = ACK_MINUTES, dry_run: bool = False,
-                 tmux=_tmux, locate=None) -> None:
+                 tmux=_tmux, locate=None, role=envoy_role) -> None:
         self.ledger = ledger
         self.send = send
         self.ack = dt.timedelta(minutes=ack_minutes)
         self.dry_run = dry_run
         self.tmux = tmux
         self.locate = locate
+        self.role = role
+        self._roles: dict[str, dict | None] = {}  # role: its holder's record, read once a run
         self.sent: list[tuple[str, str, str]] = []  # (row id, session, message), for the dry run and the tests
 
     # ------------------------------------------------------------------------------------------ the executor
     def candidates(self, w: Wait, data: dict, project: str) -> list[tuple[str, str, str]]:
-        """(session id, name, why it is the executor), in the order the rule gives: the session that opened the ask,
-        the issue's claim holder, the lead of the stream the issue belongs to, and last the lead of the project's
-        own stream when the project has exactly one. A claim a person holds is left out: executors are agent sessions.
+        """(session id, name, why it is the executor), in the order the rule gives: the session whose comment Sami
+        replied to in its thread (he answered that session; a scoreboard's lead may never have read the thread), the
+        session that opened the ask, the issue's claim holder, the lead of the stream the issue belongs to, and last
+        the lead of the project's own stream when the project has exactly one. A claim a person holds is left out:
+        executors are agent sessions.
 
         A claim holder that acted on the issue after Sami wrote is an executor even when the lead roster no longer
         names it: the roster says who a STREAM's work may be handed to, not who has already taken this issue. On
         2026-11-07 INFRA-1168 printed NO-EXECUTOR at 13:27Z although GATE had accepted the item in a comment at
         2026-11-06T22:07:24Z and claimed the issue at 05:46:29Z; the session that opened the ask was dead and GATE
         is off the roster, so nothing was left. A claim held by a session that did not act after the answer, or by
-        one that is off the roster and silent, is passed over as before."""
+        one that is off the roster and silent, is passed over as before. A Legion controller lead, whether a stream's
+        or the project's, is the live holder of its role (`controller`), and the scoreboard's session only when the
+        role has no holder, since a scoreboard keeps a session after the role moved on."""
         out: list[tuple[str, str, str]] = []
         live, meta = data["live"], data["meta"]
         # A session is named by its whole id: eight hex characters are not unique in this fleet (01a16a9e is both the
@@ -302,6 +315,8 @@ class Driver:
         add = lambda sid, label, why, off_roster=False: (  # noqa: E731
             out.append((sid, label or sid, why))
             if sid and (off_roster or sid not in NOT_LEADS) and not any(c[0] == sid for c in out) else None)
+        if w.replied_to and w.replied_to.get("kind") == "session":
+            add(w.replied_to["id"], name(w.replied_to), "you wrote the comment he replied to in this thread")
         if w.author and w.author.get("kind") == "session":
             add(w.author["id"], name(w.author), "you opened this ask")
         claim = ((meta.get(w.key) or {}).get("claim") or {}).get("actor") or {}
@@ -315,11 +330,16 @@ class Driver:
             seen.add(k)
             if "stream" in (meta.get(k) or {}).get("labels", []) or k in data["streams"]:
                 lead = (data["streams"].get(k) or {}).get("lead") or {}
-                add(lead.get("session"), lead.get("title"), f"you lead stream {k}, which {w.key} belongs to")
+                sid, title, note = self.controller(lead.get("session"), lead.get("title"))
+                add(sid, title, f"you lead stream {k}, which {w.key} belongs to{note}")
                 break
             k = (meta.get(k) or {}).get("parent")
         legion = self.legion(w, data, out)
-        leads = self.project_leads(data, project)
+        leads: list[tuple[str, str, str, str]] = []
+        for sid, title, key in self.project_leads(data, project):
+            sid, title, note = self.controller(sid, title)
+            if not any(x[0] == sid for x in leads):
+                leads.append((sid, title, key, note))
         if legion:
             leads = [x for x in leads if x[1].startswith(LEGION_CONTROLLER)]
         # The project fallback names an executor only when the project has ONE stream lead. With several it would be
@@ -327,9 +347,26 @@ class Driver:
         # lead (INFRA-203), Sami's "@sre" request on INFRA-759 among them (2026-11-05). Such a row is NO-EXECUTOR and
         # its owner is asked instead (Sami, 18:05Z: "A script is not a substitute for just fucking asking").
         if len(leads) == 1:
-            sid, title, key = leads[0]
-            add(sid, title, f"you lead {project}'s stream {key} and nothing nearer the issue can take this")
+            sid, title, key, note = leads[0]
+            add(sid, title, f"you lead {project}'s stream {key} and nothing nearer the issue can take this{note}")
         return out
+
+    def controller(self, sid: str | None, title: str | None) -> tuple[str | None, str | None, str]:
+        """(session, title, note) for a lead: a "Legion controller · <PROJECT>" lead becomes the session that holds
+        the role `legion-<project>-controller` now, with a note saying so; any other lead, a role with no holder, or
+        a hub that cannot be read leaves the scoreboard's session as it is."""
+        if not (title or "").startswith(LEGION_CONTROLLER) or "·" not in title or self.role is None:
+            return sid, title, ""
+        role = f"legion-{title.rsplit('·', 1)[1].strip().lower()}-controller"
+        if role not in self._roles:
+            try:
+                self._roles[role] = self.role(role)
+            except SourceError:
+                self._roles[role] = None
+        held = self._roles[role] or {}
+        if not held.get("holder"):
+            return sid, title, ""
+        return held["holder"], held.get("title") or title, f" (you hold the role {role})"
 
     @staticmethod
     def project_leads(data: dict, project: str) -> list[tuple[str, str, str]]:

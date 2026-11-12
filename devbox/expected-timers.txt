@@ -81,6 +81,14 @@ unit-health-watch.timer            # owner: box-health lead. This list, and ever
 # matches "authorized" or "SSH key" - so a change to ~/.ssh/authorized_keys is now noticed by
 # nobody, recorded at dispatch://INFRA-2022/artifact/timer-decisions-md v5 rather than dropped
 # quietly. Under Sami's decision, dispatch://INFRA-2022/ask/b5ddab54-8ba0-40e8-b4ba-c2dcb291ca5c.
+#
+# THAT GAP IS NOW ACCEPTED AND CLOSED, so do not re-raise it. Asked whether the watch should
+# come back as a config-managed Datadog or Google Cloud check, Sami answered "No, accepted -
+# the risk is small enough to live with and nothing watches it" (2026-11-10T18:01:16Z,
+# dispatch://INFRA-2022/ask/670a0063-171d-4835-b21d-842ebb7de638). Confirmed on the box at
+# 2026-11-12 05:29Z: no user unit, no timer and no crontab line matches authorized_keys, so
+# the machine agrees with the decision. A later audit finding "nothing watches authorized_keys"
+# has found the intended state, not a regression.
 
 # --- the box's own housekeeping (devbox/) ---
 dotfiles-follow.timer              # owner: box-health lead. ~/.dotfiles fast-forwards to main.
