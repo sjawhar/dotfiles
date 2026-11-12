@@ -61,6 +61,14 @@ echo "agent-secrets $*" >>"$STUB_LOG"
 exit 1
 '''
 
+TIMEOUT_STUB = r'''
+echo "timeout $*" >>"$STUB_LOG"
+if [[ -n "${STUB_TIMEOUT_EXIT:-}" ]]; then
+    exit "$STUB_TIMEOUT_EXIT"
+fi
+exec /usr/bin/timeout "$@"
+'''
+
 
 def write_stub(directory: Path, name: str, body: str) -> None:
     path = directory / name
@@ -92,6 +100,7 @@ class AgentSecretsLocal(unittest.TestCase):
         write_stub(self.stub_dir, "agent-secrets", AGENT_SECRETS_STUB)
         write_stub(self.stub_dir, "jj", 'echo "jj $*" >>"$STUB_LOG"')
         write_stub(self.stub_dir, "gh", 'echo "gh $*" >>"$STUB_LOG"')
+        write_stub(self.stub_dir, "timeout", TIMEOUT_STUB)
         self.mise_v1 = self.make_mise_install("legion-envoy-v1.0.0")
         self.env = {
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
@@ -130,7 +139,8 @@ class AgentSecretsLocal(unittest.TestCase):
         write_stub(
             binary_dir,
             "agent-secrets-helper",
-            'echo "helper $*" >>"$STUB_LOG"\nprintf "%s" "${STUB_SESSIONS:-}"',
+            'echo "helper $*" >>"$STUB_LOG"\nprintf "%s" "${STUB_SESSIONS:-}"\n'
+            'exit "${STUB_SESSIONS_EXIT:-0}"',
         )
         return install
 
@@ -234,6 +244,28 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assertIn("NOT restarted", result.stderr)
         self.assertEqual(self.marker.read_text(encoding="utf-8"), original_marker)
         self.assert_positive_log()
+
+    def assert_keeps_helper_when_sessions_unanswered(
+        self, expected_status: str, **stub_env: str
+    ) -> list[str]:
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        first_result = self.run_local()
+        self.assertEqual(first_result.returncode, 0, first_result.stderr)
+        original_marker = self.marker.read_text(encoding="utf-8")
+        before = len(self.calls())
+        self.change_pin()
+        self.env.update(stub_env)
+
+        result = self.run_local()
+        new_calls = self.calls()[before:]
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_lifecycle_calls(new_calls)
+        self.assertIn("did not answer", result.stderr)
+        self.assertIn(expected_status, result.stderr)
+        self.assertEqual(self.marker.read_text(encoding="utf-8"), original_marker)
+        self.assert_positive_log()
+        return new_calls
 
     def prepare_root_installer(self) -> Path:
         root_installer = self.fixture / "install.sh"
@@ -351,6 +383,19 @@ class AgentSecretsLocal(unittest.TestCase):
 
     def test_g_broker_env_change_with_sessions_does_not_restart(self) -> None:
         self.assert_defers_restart_after_change(self.change_broker_env)
+
+    def test_g_pin_change_sessions_call_fails_does_not_restart(self) -> None:
+        new_calls = self.assert_keeps_helper_when_sessions_unanswered(
+            "(exit status 1)", STUB_SESSIONS_EXIT="1"
+        )
+        self.assertIn("helper sessions", new_calls)
+
+    def test_g_pin_change_sessions_call_times_out_does_not_restart(self) -> None:
+        new_calls = self.assert_keeps_helper_when_sessions_unanswered(
+            "exit status 124: it timed out after 10 s", STUB_TIMEOUT_EXIT="124"
+        )
+        helper = Path(self.env["STUB_MISE_WHERE"]) / "bin" / "agent-secrets-helper"
+        self.assertIn(f"timeout 10 {helper} sessions", new_calls)
 
     def test_g2_local_installer_drops_session_restart_override(self) -> None:
         self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")

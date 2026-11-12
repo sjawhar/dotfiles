@@ -43,9 +43,16 @@ if ! systemctl --user is-enabled --quiet agent-secrets-helper.service 2>/dev/nul
 fi
 if [ "$(cat "$MARKER" 2>/dev/null)" != "$installed" ]; then
     # Only when the binary version or the helper's files changed. `sessions` is answered by the
-    # running helper (the old version); an empty answer, or no helper, means nothing to lose.
-    sessions="$(timeout 10 "$HELPER_BIN" sessions 2>/dev/null || true)"
-    if [ -n "$sessions" ] && [ "${AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS:-}" != 1 ]; then
+    # running helper (the old version). A restart needs `sessions` to exit 0 with no output; a
+    # failed or timed-out answer is treated as possibly-registered sessions, so the helper is not
+    # restarted, whatever AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS says, and the old marker
+    # stays for the next install to retry.
+    if sessions="$(timeout 10 "$HELPER_BIN" sessions 2>/dev/null)"; then rc=0; else rc=$?; fi
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 124 ]; then why="exit status 124: it timed out after 10 s"; else why="exit status ${rc}"; fi
+        echo "WARNING: agent-secrets-helper NOT restarted -- the new version or unit is installed but 'agent-secrets-helper sessions' did not answer (${why}), so whether host sessions are registered is unknown, and a restart would revoke every grant they hold; the next install retries." >&2
+        echo "  To restart anyway: systemctl --user restart agent-secrets-helper.service" >&2
+    elif [ -n "$sessions" ] && [ "${AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS:-}" != 1 ]; then
         n="$(printf '%s\n' "$sessions" | wc -l)"
         echo "WARNING: agent-secrets-helper NOT restarted -- the new version or unit is installed but ${n} host session(s) are registered, and a restart re-pins them with fresh keys: every grant they hold is revoked and they must re-request:" >&2
         printf '%s\n' "$sessions" | while IFS= read -r line; do printf '    %s\n' "$line"; done >&2
