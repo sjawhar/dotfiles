@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pwd
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -16,6 +19,7 @@ from typing import Mapping, Sequence
 LIST_EXIT = 2
 FOUND_EXIT = 3
 TEXT_EXIT = 4
+EDITOR_GUARD = "DOTFILES_JJ_EDITOR_WRAPPER_ACTIVE"
 SCISSORS = "------------------------ >8 ------------------------"
 
 
@@ -525,6 +529,181 @@ def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: st
         findings.extend(f"{place} line {line_number}" for _ in matcher.spans(line))
     return findings
 
+
+def print_findings(findings: Sequence[str]) -> None:
+    for place in findings:
+        print(f"leak terms: {place}: listed leak term", file=sys.stderr)
+    print(
+        "leak terms: remove the term from the text, or if it is not private remove it from the list with "
+        "sops edit leak-terms.sops.yaml",
+        file=sys.stderr,
+    )
+
+
+def rust_lines(text: str) -> list[str]:
+    """Split text as Rust's str::lines(), including its CRLF normalization."""
+    lines = text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    return [line.removesuffix("\r") for line in lines]
+
+
+def clean_jj_description(lines: Sequence[str]) -> str:
+    """Apply jj 0.46's cleanup_description_lines rules."""
+    kept: list[str] = []
+    for line in lines:
+        if line.startswith("JJ: ignore-rest"):
+            break
+        if not line.startswith("JJ:"):
+            kept.append(line)
+    description = "\n".join(kept).strip("\n")
+    return f"{description}\n" if description else ""
+
+
+def jj_sections(text: str) -> list[tuple[str | None, str]]:
+    """Split jj's single or multi-description editor text into cleaned sections."""
+    sections: list[tuple[str, list[str]]] = []
+    current: list[str] | None = None
+    current_hash: str | None = None
+    for line in rust_lines(text):
+        if line.startswith("JJ: describe "):
+            if current is not None and current_hash is not None:
+                sections.append((current_hash, current))
+            current_hash = line.removeprefix("JJ: describe ").rstrip(" \t\n\r\v\f-")
+            current = []
+        elif current is not None:
+            current.append(line)
+    if current is not None and current_hash is not None:
+        sections.append((current_hash, current))
+    if sections:
+        return [(commit_id, clean_jj_description(lines)) for commit_id, lines in sections]
+    return [(None, clean_jj_description(rust_lines(text)))]
+
+
+def split_jj_command(value: str) -> list[str]:
+    """Copy jj's CommandNameAndArgs string splitting without invoking a shell."""
+    if '"' in value or "'" in value:
+        try:
+            lexer = shlex.shlex(value, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            return list(lexer)
+        except ValueError:
+            pass
+    return value.split(" ")
+
+
+def jj_editor_command(value: str, path: str, line_number: int) -> tuple[list[str], dict[str, str] | None]:
+    """Decode the JSON value jj config list emits for ui.editor."""
+    try:
+        configured = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("could not read jj's configured editor") from error
+    environment: dict[str, str] | None = None
+    if isinstance(configured, str):
+        command = split_jj_command(configured)
+    elif isinstance(configured, list) and configured and all(isinstance(item, str) for item in configured):
+        command = list(configured)
+    elif (
+        isinstance(configured, dict)
+        and isinstance(configured.get("env"), dict)
+        and isinstance(configured.get("command"), list)
+        and configured["command"]
+        and all(isinstance(item, str) for item in configured["command"])
+        and all(isinstance(key, str) and isinstance(item, str) for key, item in configured["env"].items())
+    ):
+        command = list(configured["command"])
+        environment = dict(configured["env"])
+    else:
+        raise ValueError("could not read jj's configured editor")
+
+    variables = {"path": path, "line": str(line_number)}
+    pattern = re.compile(r"\$([a-z0-9_]+)\b")
+    path_in_arguments = any("path" in pattern.findall(argument) for argument in command[1:])
+
+    def substitute(argument: str) -> str:
+        return pattern.sub(lambda match: variables.get(match.group(1), match.group(0)), argument)
+
+    command = [substitute(argument) for argument in command]
+    if not path_in_arguments:
+        command.append(path)
+    return command, environment
+
+
+def editor_is_wrapper(command: Sequence[str]) -> bool:
+    """Return whether the resolved editor executable is this wrapper."""
+    if not command:
+        return True
+    executable = command[0]
+    candidate = Path(executable) if os.path.sep in executable else shutil.which(executable)
+    if candidate is None:
+        return False
+    try:
+        return Path(candidate).resolve() == Path(__file__).resolve()
+    except OSError:
+        return False
+
+
+def jj_editor(path: str) -> int:
+    """Run jj's selected editor, then inspect its cleaned descriptions."""
+    if os.environ.get(EDITOR_GUARD):
+        print("leak terms: recursive jj editor wrapper refused", file=sys.stderr)
+        return LIST_EXIT
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as error:
+        print(f"leak terms: cannot read jj editor file: {error}", file=sys.stderr)
+        return 1
+    line_number = 1
+    for line in rust_lines(text):
+        if not line.startswith("JJ:"):
+            break
+        line_number += 1
+    configured = os.environ.get("DOTFILES_JJ_EDITOR")
+    if configured is None:
+        print("leak terms: cannot read jj's configured editor", file=sys.stderr)
+        return 1
+    try:
+        command, configured_environment = jj_editor_command(configured, path, line_number)
+    except ValueError as error:
+        print(f"leak terms: {error}", file=sys.stderr)
+        return 1
+    if editor_is_wrapper(command):
+        print("leak terms: recursive jj editor wrapper refused", file=sys.stderr)
+        return LIST_EXIT
+    try:
+        matcher = load_terms()
+    except ListError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
+    environment = {**os.environ, **(configured_environment or {}), EDITOR_GUARD: "1"}
+    try:
+        completed = subprocess.run(command, env=environment, check=False)
+    except OSError as error:
+        print(f"leak terms: could not run jj editor: {error}", file=sys.stderr)
+        return 1
+    if completed.returncode < 0:
+        os.kill(os.getpid(), -completed.returncode)
+    if completed.returncode:
+        return completed.returncode
+
+    try:
+        edited = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        print(f"leak terms: cannot read jj editor file: {error}", file=sys.stderr)
+        return 1
+
+    findings: list[str] = []
+    for commit_id, description in jj_sections(edited):
+        place = "commit message" if commit_id is None else f"description of {commit_id}"
+        findings.extend(scan_message(description, matcher, "verbatim", None, False, place))
+    if not findings:
+        return 0
+    print_findings(findings)
+    return 1
+
 def git_comment_char(text: str, editor_ran: bool, status_shown: bool) -> str | None:
     """Return Git 2.43's auto comment character from its pre-editor message."""
     # builtin/commit.c adjust_comment_line_char checks candidates in this order.
@@ -569,11 +748,15 @@ def parser() -> argparse.ArgumentParser:
     comment_char = modes.add_parser("git-comment-char")
     comment_char.add_argument("--editor-ran", choices=("0", "1"), required=True)
     comment_char.add_argument("--status-shown", choices=("0", "1"), required=True)
+    jj_editor_parser = modes.add_parser("jj-editor")
+    jj_editor_parser.add_argument("file")
     return argument_parser
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = parser().parse_args(arguments)
+    if args.mode == "jj-editor":
+        return jj_editor(args.file)
     try:
         text = read_stdin()
     except TextError as error:
@@ -603,13 +786,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
     if not findings:
         return 0
-    for place in findings:
-        print(f"leak terms: {place}: listed leak term", file=sys.stderr)
-    print(
-        "leak terms: remove the term from the text, or if it is not private remove it from the list with "
-        "sops edit leak-terms.sops.yaml",
-        file=sys.stderr,
-    )
+    print_findings(findings)
     return FOUND_EXIT
 
 

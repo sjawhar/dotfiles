@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -379,6 +381,58 @@ index 0000000,0000000,0000000..1111111
         )
         self.assertEqual((selected.returncode, selected.stdout, selected.stderr), (0, ";\n", ""))
         self.assertEqual((scissors.returncode, scissors.stdout, scissors.stderr), (0, "@\n", ""))
+
+    def test_scanner_jj_editor_cleans_each_description_section(self) -> None:
+        edited = self.root / "editor.jjdescription"
+        edited.write_text(
+            "JJ: describe first123456 -------\n"
+            "JJ: ignore-rest\n"
+            "Quillfeather Lane 9\n"
+            "JJ: describe second12345 -------\n"
+            "Quillfeather Lane 9\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [str(CHECK), "jj-editor", str(edited)],
+            env={**self.env, "DOTFILES_JJ_EDITOR": json.dumps(["/bin/true"])},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("leak terms: description of second12345 line 1: listed leak term", result.stderr)
+        self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assert_terms_hidden(result)
+
+    def test_jj_header_marker_is_first_in_the_first_512_bytes(self) -> None:
+        header = (ROOT / "shims" / "jj").read_bytes()[:512].decode("utf-8")
+        self.assertTrue(header.startswith("#!/bin/bash\n# jj-lock-shim:"))
+
+    def test_scanner_jj_editor_reads_the_list_before_running_the_editor(self) -> None:
+        edited = self.root / "editor.jjdescription"
+        edited.write_text("clean\n", encoding="utf-8")
+        ran = self.root / "editor-ran"
+        editor = self.root / "editor.sh"
+        editor.write_text("#!/bin/sh\n" f": > {shlex.quote(str(ran))}\n", encoding="utf-8")
+        editor.chmod(0o755)
+        result = subprocess.run(
+            [str(CHECK), "jj-editor", str(edited)],
+            env={
+                **self.env,
+                "DOTFILES_JJ_EDITOR": json.dumps([str(editor)]),
+                "DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml"),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "leak terms: the term list is missing; run scripts/dotfiles-sync local\n")
+        self.assertFalse(ran.exists())
 
 
 class GitLeaks(unittest.TestCase):
@@ -896,5 +950,560 @@ class GitLeaks(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class JjLeaks(unittest.TestCase):
+    session = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
+    marker_names = (
+        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
+        "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
+    )
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.xdg = self.root / "xdg"
+        self.tmpdir = self.root / "tmp"
+        for directory in (self.home, self.xdg, self.tmpdir):
+            directory.mkdir()
+        self.config = self.root / "jjconfig.toml"
+        self.config.write_text("[user]\nname = \"Leak Test\"\nemail = \"leak-test@example.invalid\"\n", encoding="utf-8")
+        base = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in self.marker_names
+            and not name.startswith(("PI_", "LEGION_", "GIT_CONFIG_"))
+            and name not in {"ENVOY_SESSION_ID", "CLAUDECODE", "AGENTBOX_SESSION", "AGENT_SHIM_AGENT",
+                             "JJ_EDITOR", "VISUAL", "EDITOR"}
+        }
+        self.person = {
+            **base,
+            **fixture_environment(),
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.xdg),
+            "TMPDIR": str(self.tmpdir),
+            "PATH": f"{ROOT / 'shims'}{os.pathsep}{os.environ['PATH']}",
+            "JJ_CONFIG": str(self.config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        self.agent = {**self.person, "OMP_SESSION_ID": self.session}
+        self.jj_binary = real_jj()
+        self.repositories = 0
+        self.editors = 0
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def environment(self, agent: bool, **extra: str) -> dict[str, str]:
+        return {**(self.agent if agent else self.person), **extra}
+
+    def jj(self, repository: Path, *arguments: str, agent: bool, real: bool = False, input: str | bytes | None = None,
+           extra: dict[str, str] | None = None, text: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self.jj_binary if real else "jj", *arguments],
+            cwd=repository,
+            env=self.environment(agent, **(extra or {})),
+            input=input,
+            capture_output=True,
+            text=text,
+            check=False,
+        )
+
+    def repository(self, agent: bool) -> Path:
+        self.repositories += 1
+        repository = self.root / f"repo-{self.repositories}"
+        repository.mkdir()
+        initialized = self.jj(repository, "git", "init", agent=agent)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        return repository
+
+    def write(self, repository: Path, name: str, text: str) -> None:
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def state(self, repository: Path, agent: bool) -> tuple[str, str]:
+        listed = self.jj(
+            repository,
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "all()",
+            "--no-graph",
+            "-T",
+            'change_id ++ "\\n" ++ parents.map(|p| p.change_id()).join(",") ++ "\\n" ++ description ++ "\\n---\\n"',
+            agent=agent,
+            real=True,
+        )
+        current = self.jj(repository, "--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "change_id", agent=agent, real=True)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(current.returncode, 0, current.stderr)
+        return listed.stdout, current.stdout
+
+    def snapshot_state(self, repository: Path, agent: bool) -> tuple[str, str]:
+        status = self.jj(repository, "status", agent=agent)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        return self.state(repository, agent)
+
+    def assert_hidden(self, result: subprocess.CompletedProcess[str]) -> None:
+        output = result.stdout + result.stderr
+        for term in TEST_TERMS:
+            self.assertNotIn(term.casefold(), output.casefold())
+
+    def assert_refused(self, repository: Path, agent: bool, place: str, *arguments: str,
+                       input: str | bytes | None = None, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        before = self.snapshot_state(repository, agent)
+        result = self.jj(repository, *arguments, agent=agent, input=input, extra=extra)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"leak terms: {place}: listed leak term", result.stderr)
+        self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
+        self.assertEqual(self.state(repository, agent), before)
+        self.assert_hidden(result)
+        return result
+
+    def assert_clean(self, repository: Path, agent: bool, *arguments: str, input: str | None = None,
+                     extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        result = self.jj(repository, *arguments, agent=agent, input=input, extra=extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_hidden(result)
+        return result
+
+    def description(self, repository: Path, agent: bool, revision: str = "@") -> str:
+        result = self.jj(repository, "--ignore-working-copy", "log", "-r", revision, "--no-graph", "-T", "description", agent=agent, real=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def editor(self, text: str, status: int = 0) -> tuple[str, Path]:
+        self.editors += 1
+        script = self.root / f"editor-{self.editors}.sh"
+        arguments = self.root / f"editor-{self.editors}.args"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" > {shlex.quote(str(arguments))}\n"
+            "for argument in \"$@\"; do\n"
+            "    if [ -f \"$argument\" ]; then file=$argument; fi\n"
+            "done\n"
+            f"printf '%s' {shlex.quote(text)} > \"$file\"\n"
+            f"exit {status}\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return str(script), arguments
+
+    def editor_with_environment(self, text: str, status: int = 0) -> tuple[str, Path, Path]:
+        self.editors += 1
+        script = self.root / f"editor-{self.editors}.sh"
+        arguments = self.root / f"editor-{self.editors}.args"
+        environment = self.root / f"editor-{self.editors}.environment"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" > {shlex.quote(str(arguments))}\n"
+            f"printf '%s' \"$JJ_LEAK_TEST_EDITOR\" > {shlex.quote(str(environment))}\n"
+            "for argument in \"$@\"; do\n"
+            "    if [ -f \"$argument\" ]; then file=$argument; fi\n"
+            "done\n"
+            f"printf '%s' {shlex.quote(text)} > \"$file\"\n"
+            f"exit {status}\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return str(script), arguments, environment
+
+    def set_user_editor(self, value: str) -> None:
+        self.config.write_text(
+            "[user]\nname = \"Leak Test\"\nemail = \"leak-test@example.invalid\"\n[ui]\neditor = " + value + "\n",
+            encoding="utf-8",
+        )
+
+    def test_jj_term_refuses_target_diffs_and_controls(self) -> None:
+        commands = (
+            ("commit", "-m", "ok"),
+            ("ci", "-m", "ok"),
+            ("describe", "-m", "ok"),
+            ("desc", "-m", "ok"),
+            ("new",),
+            ("new", "root()"),
+        )
+        tool = self.root / "test-diff-tool"
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        tool_arguments = (
+            "--config",
+            f"merge-tools.fixture.program={json.dumps(str(tool))}",
+            "commit",
+            "--tool",
+            "fixture",
+            "-m",
+            "ok",
+        )
+        for agent in (False, True):
+            for arguments in commands:
+                with self.subTest(agent=agent, command=arguments):
+                    repository = self.repository(agent)
+                    self.write(repository, "note.txt", "Quillfeather Lane 9\n")
+                    if arguments[0] in {"describe", "desc"}:
+                        self.snapshot_state(repository, agent)
+                        commit_id = self.jj(
+                            repository,
+                            "--ignore-working-copy",
+                            "log",
+                            "-r",
+                            "@",
+                            "--no-graph",
+                            "-T",
+                            "commit_id",
+                            agent=agent,
+                            real=True,
+                        )
+                        self.assertEqual(commit_id.returncode, 0, commit_id.stderr)
+                        place = f"commit {commit_id.stdout.strip()[:12]} note.txt:1"
+                    else:
+                        place = "note.txt:1"
+                    self.assert_refused(repository, agent, place, *arguments)
+
+                    clean = self.repository(agent)
+                    self.write(clean, "note.txt", "clean\n")
+                    self.assert_clean(clean, agent, *arguments)
+
+            with self.subTest(agent=agent, case="interactive"):
+                repository = self.repository(agent)
+                self.write(repository, "note.txt", "Quillfeather Lane 9\n")
+                self.assert_refused(repository, agent, "note.txt:1", "commit", "-i", "-m", "ok")
+                clean = self.repository(agent)
+                self.write(clean, "note.txt", "clean\n")
+                self.assert_clean(clean, agent, *tool_arguments)
+
+            with self.subTest(agent=agent, case="path"):
+                repository = self.repository(agent)
+                self.write(repository, "zorbleplex.txt", "clean\n")
+                self.assert_refused(repository, agent, "<listed term>.txt", "commit", "-m", "ok")
+
+            with self.subTest(agent=agent, case="limited-fileset"):
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.write(repository, "dirty.txt", "Quillfeather Lane 9\n")
+                self.assert_clean(repository, agent, "commit", "clean.txt", "-m", "ok")
+
+    def test_jj_message_editor_config_precedes_separator(self) -> None:
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="refusal"):
+                editor, _ = self.editor("Quillfeather Lane 9\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.write(repository, "other.txt", "other\n")
+                self.assert_refused(
+                    repository,
+                    agent,
+                    "commit message line 1",
+                    "commit",
+                    "--",
+                    "clean.txt",
+                    extra={"JJ_EDITOR": editor},
+                )
+
+            with self.subTest(agent=agent, case="clean"):
+                editor, _ = self.editor("clean editor message\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.write(repository, "other.txt", "other\n")
+                self.assert_clean(repository, agent, "commit", "--", "clean.txt", extra={"JJ_EDITOR": editor})
+                committed = self.jj(
+                    repository,
+                    "--ignore-working-copy",
+                    "diff",
+                    "--git",
+                    "-r",
+                    "@-",
+                    agent=agent,
+                    real=True,
+                )
+                self.assertEqual(committed.returncode, 0, committed.stderr)
+                self.assertIn("b/clean.txt", committed.stdout)
+                self.assertNotIn("b/other.txt", committed.stdout)
+
+    def test_jj_term_checks_each_described_revision_and_alias(self) -> None:
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="adds-then-removes"):
+                repository = self.repository(agent)
+                self.write(repository, "note.txt", "Quillfeather Lane 9\n")
+                made = self.jj(repository, "describe", "-m", "adds", agent=agent, real=True)
+                self.assertEqual(made.returncode, 0, made.stderr)
+                made = self.jj(repository, "commit", "-m", "removes", agent=agent, real=True)
+                self.assertEqual(made.returncode, 0, made.stderr)
+                self.write(repository, "note.txt", "clean\n")
+                made = self.jj(repository, "describe", "-m", "removes", agent=agent, real=True)
+                self.assertEqual(made.returncode, 0, made.stderr)
+                made = self.jj(repository, "commit", "-m", "next", agent=agent, real=True)
+                self.assertEqual(made.returncode, 0, made.stderr)
+                commit_id = self.jj(
+                    repository,
+                    "--ignore-working-copy",
+                    "log",
+                    "-r",
+                    "@--",
+                    "--no-graph",
+                    "-T",
+                    "commit_id",
+                    agent=agent,
+                    real=True,
+                )
+                self.assertEqual(commit_id.returncode, 0, commit_id.stderr)
+                self.assert_refused(
+                    repository,
+                    agent,
+                    f"commit {commit_id.stdout.strip()[:12]} note.txt:1",
+                    "describe",
+                    "-r",
+                    "@-",
+                    "-r",
+                    "@--",
+                    "-m",
+                    "ok",
+                )
+
+            with self.subTest(agent=agent, case="alias"):
+                self.config.write_text(
+                    "[user]\nname = \"Leak Test\"\nemail = \"leak-test@example.invalid\"\n[aliases]\nc = [\"commit\"]\n",
+                    encoding="utf-8",
+                )
+                repository = self.repository(agent)
+                self.write(repository, "note.txt", "Quillfeather Lane 9\n")
+                self.assert_refused(repository, agent, "note.txt:1", "c", "-m", "ok")
+
+    def test_jj_message_refuses_forms_and_keeps_stored_messages(self) -> None:
+        commands = (("describe",), ("commit",), ("new",))
+        for agent in (False, True):
+            for command in commands:
+                with self.subTest(agent=agent, command=command):
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    self.assert_refused(repository, agent, "commit message line 2", *command, "-m", "subject\nQuillfeather Lane 9")
+
+                    clean = self.repository(agent)
+                    self.write(clean, "clean.txt", "clean\n")
+                    self.assert_clean(clean, agent, *command, "--message=first", "-msecond")
+                    revision = "@-" if command == ("commit",) else "@"
+                    self.assertEqual(self.description(clean, agent, revision), "first\n\nsecond\n")
+
+            with self.subTest(agent=agent, case="stdin-refused"):
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_refused(repository, agent, "commit message line 1", "describe", "--stdin", input="Quillfeather Lane 9")
+
+            with self.subTest(agent=agent, case="stdin-preserves-bytes"):
+                for text in ("", "no final newline", "three\n\n\n"):
+                    subject = self.repository(agent)
+                    control = self.repository(agent)
+                    self.write(subject, "clean.txt", "clean\n")
+                    self.write(control, "clean.txt", "clean\n")
+                    actual = self.assert_clean(subject, agent, "describe", "--stdin", input=text)
+                    expected = self.jj(control, "describe", "--stdin", agent=agent, real=True, input=text)
+                    self.assertEqual(expected.returncode, 0, expected.stderr)
+                    self.assertEqual(self.description(subject, agent), self.description(control, agent), actual.stderr)
+
+            with self.subTest(agent=agent, case="stdin-nul"):
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                before = self.snapshot_state(repository, agent)
+                result = self.jj(
+                    repository,
+                    "describe",
+                    "--stdin",
+                    agent=agent,
+                    input=b"clean\x00message",
+                    text=False,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+                self.assertIn("cannot read a NUL byte", output)
+                self.assertEqual(self.state(repository, agent), before)
+                for term in TEST_TERMS:
+                    self.assertNotIn(term.casefold(), output.casefold())
+
+    def test_jj_message_editor_options_and_unknown_option_refuse(self) -> None:
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="jj-editor"):
+                editor, _ = self.editor("Quillfeather Lane 9\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_refused(repository, agent, "commit message line 1", "describe", extra={"JJ_EDITOR": editor})
+
+            with self.subTest(agent=agent, case="editor-over-message"):
+                editor, _ = self.editor("Quillfeather Lane 9\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_refused(repository, agent, "commit message line 1", "describe", "--editor", "-m", "clean", extra={"JJ_EDITOR": editor})
+
+            with self.subTest(agent=agent, case="user-string"):
+                editor, arguments = self.editor("clean from editor\n")
+                self.set_user_editor(json.dumps(f"{editor} --wait"))
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "describe")
+                self.assertEqual(arguments.read_text(encoding="utf-8").splitlines()[-1].endswith(".jjdescription"), True)
+
+            with self.subTest(agent=agent, case="user-array-path"):
+                editor, arguments = self.editor("clean array editor\n")
+                self.set_user_editor(json.dumps([editor, "$path", "--wait"]))
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "describe")
+                values = arguments.read_text(encoding="utf-8").splitlines()
+                self.assertTrue(values[0].endswith(".jjdescription"))
+                self.assertEqual(values[1], "--wait")
+
+            with self.subTest(agent=agent, case="user-structured"):
+                editor, arguments, configured_environment = self.editor_with_environment("clean structured editor\n")
+                self.set_user_editor(
+                    "{ env = { JJ_LEAK_TEST_EDITOR = \"configured\" }, command = "
+                    + json.dumps([editor, "$path"])
+                    + " }"
+                )
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "describe")
+                self.assertTrue(arguments.read_text(encoding="utf-8").splitlines()[0].endswith(".jjdescription"))
+                self.assertEqual(configured_environment.read_text(encoding="utf-8"), "configured")
+
+            with self.subTest(agent=agent, case="visual-and-editor"):
+                for variable in ("VISUAL", "EDITOR"):
+                    editor, arguments = self.editor("clean environment editor\n")
+                    self.config.write_text("[user]\nname = \"Leak Test\"\nemail = \"leak-test@example.invalid\"\n", encoding="utf-8")
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    self.assert_clean(repository, agent, "describe", extra={variable: editor})
+                    self.assertTrue(arguments.read_text(encoding="utf-8").splitlines()[-1].endswith(".jjdescription"))
+
+            with self.subTest(agent=agent, case="command-config-editor"):
+                editor, arguments = self.editor("clean command config editor\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "describe", "--config", f"ui.editor={json.dumps(editor + ' --wait')}")
+                self.assertTrue(arguments.read_text(encoding="utf-8").splitlines()[-1].endswith(".jjdescription"))
+
+            with self.subTest(agent=agent, case="editor-failure"):
+                editor, _ = self.editor("clean\n", status=19)
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                result = self.jj(repository, "describe", agent=agent, extra={"JJ_EDITOR": editor})
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Failed to edit description", result.stderr)
+
+            with self.subTest(agent=agent, case="jj-lines-clean"):
+                editor, _ = self.editor("JJ: Quillfeather Lane 9\nclean\nJJ: ignore-rest\nQuillfeather Lane 9\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "describe", extra={"JJ_EDITOR": editor})
+
+            for command, option in (
+                ("describe", "--unknown-option"),
+                ("new", "--edit"),
+                ("new", "-d"),
+            ):
+                with self.subTest(agent=agent, case=f"unknown-{command}-{option}"):
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    before = self.snapshot_state(repository, agent)
+                    result = self.jj(repository, command, option, "-m", "clean", agent=agent)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(
+                        f"jj shim: cannot read option {option}, so the leak-term check cannot run; nothing changed",
+                        result.stderr,
+                    )
+                    self.assertEqual(self.state(repository, agent), before)
+                    self.assert_hidden(result)
+
+            with self.subTest(agent=agent, case="repository-global"):
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                before = self.snapshot_state(repository, agent)
+                result = subprocess.run(
+                    ["jj", "-R", str(repository), "describe", "-m", "Quillfeather Lane 9"],
+                    cwd=self.root,
+                    env=self.environment(agent),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("leak terms: commit message line 1: listed leak term", result.stderr)
+                self.assertEqual(self.state(repository, agent), before)
+                self.assert_hidden(result)
+
+
+    def test_jj_message_editor_wrapper_loop_refuses_before_a_child_runs(self) -> None:
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="shim"):
+                self.set_user_editor(json.dumps(str(CHECK)))
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                before = self.snapshot_state(repository, agent)
+                result = self.jj(repository, "describe", agent=agent)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("configured jj editor resolves to leak-terms-check", result.stderr)
+                self.assertEqual(self.state(repository, agent), before)
+                self.assert_hidden(result)
+
+            with self.subTest(agent=agent, case="wrapper"):
+                description = self.root / f"description-{agent}"
+                description.write_text("clean\n", encoding="utf-8")
+                result = subprocess.run(
+                    [str(CHECK), "jj-editor", str(description)],
+                    env=self.environment(agent, DOTFILES_JJ_EDITOR=json.dumps([str(CHECK), "jj-editor"])),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("recursive jj editor wrapper refused", result.stderr)
+                self.assertEqual(description.read_text(encoding="utf-8"), "clean\n")
+                self.assert_hidden(result)
+
+            with self.subTest(agent=agent, case="already-active"):
+                description = self.root / f"active-description-{agent}"
+                description.write_text("clean\n", encoding="utf-8")
+                ran = self.root / f"unexpected-editor-child-{agent}"
+                editor = self.root / f"unexpected-editor-{agent}.sh"
+                editor.write_text(
+                    "#!/bin/sh\n"
+                    f": > {shlex.quote(str(ran))}\n",
+                    encoding="utf-8",
+                )
+                editor.chmod(0o755)
+                result = subprocess.run(
+                    [str(CHECK), "jj-editor", str(description)],
+                    env=self.environment(
+                        agent,
+                        DOTFILES_JJ_EDITOR=json.dumps([str(editor)]),
+                        DOTFILES_JJ_EDITOR_WRAPPER_ACTIVE="1",
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("recursive jj editor wrapper refused", result.stderr)
+                self.assertFalse(ran.exists())
+                self.assert_hidden(result)
+
+    def test_jj_without_a_real_binary_refuses_without_recursing(self) -> None:
+        result = subprocess.run(
+            [str(ROOT / "shims" / "jj"), "status"],
+            cwd=self.root,
+            env=self.environment(
+                False,
+                PATH=str(ROOT / "shims"),
+                DOTFILES_DIR=str(self.root / "missing-dotfiles"),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn("jj shim: no real jj found on PATH", result.stderr)
+        self.assertNotIn("recurs", result.stderr.casefold())
 if __name__ == "__main__":
     unittest.main()
