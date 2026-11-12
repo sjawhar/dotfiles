@@ -55,7 +55,8 @@ case "$visibility" in
         )" || term_rc=$?
         if ((term_rc)); then
             while IFS= read -r line; do [[ -z "$line" ]] || printf 'error: %s\n' "$line"; done <<< "$term_out" >&2
-            refuse "this push to $url holds a listed leak term. Nothing was pushed."
+            ((term_rc != 3)) || refuse "this push to $url holds a listed leak term. Nothing was pushed."
+            refuse "the leak-term check did not pass, so this push to $url is refused. Nothing was pushed."
         fi
         ;;
 esac

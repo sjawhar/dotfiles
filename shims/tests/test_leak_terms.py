@@ -7,23 +7,194 @@ import importlib.machinery
 import importlib.util
 import json
 import os
-import shlex
 import re
-import stat
-import threading
+import resource
+import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
 from leak_terms_fixture import TEST_TERMS, encrypt_yaml, fixture_environment, unrelated_key_file
+from test_jj_push_leak_gate import SERVER_SIDE, SINK_HELPER
 
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "scripts" / "leak-terms-check"
+SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
+# Every variable that makes a shim read its caller as an agent. Each test environment starts without them (and
+# without PI_*, LEGION_* and GIT_CONFIG_* variables), so the test alone decides who runs a case.
+AGENT_MARKERS = (
+    "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
+    "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
+    "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
+)
+# A launch may start this many tasks beyond the ones this uid has when its test starts. A shim or editor that
+# recurses (an earlier draft of this file fork-bombed its machine) then fails to fork instead of exhausting the
+# shared uid's tasks.
+TASK_MARGIN = 1000
+LAUNCH_TIMEOUT = 120
+AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
+
+
+def base_environment(*dropped: str) -> dict[str, str]:
+    """os.environ without the agent markers, the PI_/LEGION_/GIT_CONFIG_ variables, and DROPPED."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in AGENT_MARKERS and name not in dropped and not name.startswith(("PI_", "LEGION_", "GIT_CONFIG_"))
+    }
+
+
+def live_tasks() -> int:
+    """This uid's live tasks, threads included, read from /proc: what RLIMIT_NPROC counts."""
+    uid = os.getuid()
+    count = 0
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry.name}/status", encoding="ascii", errors="replace") as status:
+                fields = dict(line.split(":", 1) for line in status if ":" in line)
+        except OSError:
+            continue  # the process exited while /proc was read
+        if int(fields["Uid"].split()[0]) == uid:
+            count += int(fields["Threads"])
+    if count == 0:
+        # This process is one of them, so a count of 0 means /proc showed nothing of this uid.
+        raise AssertionError("no task of this uid is readable in /proc (UNKNOWN)")
+    return count
+
+
+# Each test term as the scanner matches it: case folded, each run of whitespace in the term any run of spaces and
+# tabs, inside one line.
+TERM_PATTERNS = tuple(
+    re.compile(r"[ \t]+".join(re.escape(part) for part in term.casefold().split())) for term in TEST_TERMS
+)
+
+
+def leaked_terms(text: str | bytes) -> list[str]:
+    """The test terms TEXT holds, by the scanner's matching rule."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="surrogateescape")
+    folded = text.casefold()
+    return [term for term, pattern in zip(TEST_TERMS, TERM_PATTERNS) if pattern.search(folded)]
+
+
+def write_executable(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def unreadable_lists(root: Path, path: str) -> tuple[tuple[str, dict[str, str], str], ...]:
+    """The five causes of an unreadable term list: each cause's environment changes, and the correction its one
+    diagnostic line must name."""
+    invalid = root / "invalid.sops.yaml"
+    invalid.write_text("terms: clear text\n", encoding="utf-8")
+    empty_sops_home = root / "empty-sops-home"
+    empty_sops_home.mkdir()
+    no_sops = os.pathsep.join(entry for entry in path.split(os.pathsep) if not (Path(entry) / "sops").exists())
+    if shutil.which("sops", path=no_sops) is not None:
+        raise AssertionError("the PATH without sops still finds sops")
+    return (
+        ("sops", {"PATH": no_sops}, "install sops with mise"),
+        # A fresh age key that no rule of the list names, and a sops home that holds no other identity.
+        (
+            "key",
+            {"SOPS_AGE_KEY_FILE": str(unrelated_key_file()), "DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)},
+            "add this machine's age key to .sops.yaml above the YubiKey line and run sops updatekeys leak-terms.sops.yaml",
+        ),
+        ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
+        ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
+        (
+            "blank",
+            {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml("terms: |\n  # blank\n\n"))},
+            "add a term with sops edit leak-terms.sops.yaml",
+        ),
+    )
+
+
+class LeakTestCase(unittest.TestCase):
+    """A private scratch root per test, and the one bounded way this file starts a command."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_limit = live_tasks() + TASK_MARGIN
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def launch(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        input: str | bytes | None = None,
+        text: bool = True,
+        timeout: float = LAUNCH_TIMEOUT,
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.CompletedProcess:
+        """ARGV in a session and process group of its own, its tasks capped at self.task_limit (RLIMIT_NPROC), stdin
+        /dev/null unless INPUT is given. A command that outlives TIMEOUT fails the test after its whole process
+        group is killed, descendants holding its pipes included."""
+        _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        limit = self.task_limit if hard == resource.RLIM_INFINITY else min(self.task_limit, hard)
+
+        def cap_tasks() -> None:
+            resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
+
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            start_new_session=True,
+            preexec_fn=cap_tasks,
+            pass_fds=pass_fds,
+        )
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # The leader is not reaped yet, so its pid still names this group.
+            os.killpg(process.pid, signal.SIGKILL)
+            _, stderr = process.communicate(timeout=30)
+            self.fail(f"{argv[0]} ran past {timeout} s; its process group was killed: {stderr!r}")
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+    def assert_hidden(self, *outputs: object) -> None:
+        """No test term in OUTPUTS (strings, bytes, or completed processes), by the scanner's matching rule."""
+        for output in outputs:
+            texts = (output.stdout, output.stderr) if isinstance(output, subprocess.CompletedProcess) else (output,)
+            for text in texts:
+                if text:
+                    self.assertEqual(leaked_terms(text), [], "a test term reached the output")
+
+    def assert_no_key_material(self, result: subprocess.CompletedProcess) -> None:
+        output = (result.stdout or "") + (result.stderr or "")
+        self.assertNotIn("AGE-SECRET-KEY", output.upper())
+        self.assertIsNone(AGE_PUBLIC_KEY.search(output), "an age recipient reached the output")
+
+    def assert_one_correction_line(self, result: subprocess.CompletedProcess, correction: str) -> None:
+        """Exactly one line of the output names the term list, and it holds CORRECTION, no key and no term."""
+        lines = [line for line in (result.stdout + result.stderr).splitlines() if "leak terms:" in line]
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertIn(correction, lines[0])
+        self.assert_no_key_material(result)
+        self.assert_hidden(result)
 
 
 def parse_strace(capture: bytes) -> tuple[list[tuple[bytes, ...]], dict[str, bytes]]:
@@ -208,6 +379,7 @@ def parse_strace(capture: bytes) -> tuple[list[tuple[bytes, ...]], dict[str, byt
         raise AssertionError("strace capture has no exit record for the traced command (cut)")
     return argv, {path: bytes(data) for path, data in writes.items()}
 
+@lru_cache(maxsize=1)
 def real_jj() -> str:
     located = subprocess.run(["mise", "which", "jj"], capture_output=True, text=True, check=False)
     if located.returncode == 0 and located.stdout.strip():
@@ -219,37 +391,41 @@ def real_jj() -> str:
     raise RuntimeError("jj is required for scanner tests")
 
 
-class ScanModes(unittest.TestCase):
+class ScanModes(LeakTestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.env = {**os.environ, **fixture_environment()}
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
     def check(self, mode: str, text: str, *arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(CHECK), mode, *arguments],
-            input=text,
-            capture_output=True,
-            text=True,
-            env=self.env if env is None else env,
-            cwd=ROOT,
-            check=False,
-        )
+        return self.launch([str(CHECK), mode, *arguments], input=text, env=self.env if env is None else env, cwd=ROOT)
 
-    def assert_terms_hidden(self, result: subprocess.CompletedProcess[str]) -> None:
-        output = (result.stdout + result.stderr).casefold()
-        for term in TEST_TERMS:
-            self.assertNotIn(term.casefold(), output)
+    def ok(self, argv: list[str], cwd: Path) -> str:
+        result = self.launch(argv, cwd=cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
 
     def assert_found(self, result: subprocess.CompletedProcess[str], place: str) -> None:
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn(f"leak terms: {place}: listed leak term", result.stderr)
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assert_terms_hidden(result)
+        self.assert_hidden(result)
+
+    def test_hidden_term_detector_matches_as_the_scanner_does(self) -> None:
+        # B7: an echo of the matched text, in another case or with another run of spaces, is a leak too. The
+        # detector and the scanner must give the same verdict on each sample.
+        for echoed in ("x quillfeather   LANE 9 y", "QUILLFEATHER\tlane  9", "Zorbleplex", "VINTRAPOLIS-CANARY-7"):
+            with self.subTest(echoed=echoed):
+                self.assertEqual(self.check("message", f"{echoed}\n").returncode, 3)
+                self.assertNotEqual(leaked_terms(echoed), [])
+                self.assertNotEqual(leaked_terms(echoed.encode()), [])
+                with self.assertRaises(AssertionError):
+                    self.assert_hidden(subprocess.CompletedProcess([], 1, "", f"error: {echoed}\n"))
+        for clean in ("Quillfeather Lane", "Quillfeather Lane 8", "Quillfeather\nLane 9", "zorble plex"):
+            with self.subTest(clean=clean):
+                self.assertEqual(self.check("message", f"{clean}\n").returncode, 0)
+                self.assertEqual(leaked_terms(clean), [])
+                self.assert_hidden(subprocess.CompletedProcess([], 1, "", clean))
 
     def test_scanner_casefolds_and_accepts_space_or_tab_runs(self) -> None:
         spaced = self.check("message", "quillfeather   LANE 9\n")
@@ -259,7 +435,7 @@ class ScanModes(unittest.TestCase):
         for text in ("Quillfeather Lane\n", "Quillfeather Lane 8\n"):
             result = self.check("message", text)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assert_terms_hidden(result)
+            self.assert_hidden(result)
 
     def test_scanner_reads_git_hunks_and_added_plus_content(self) -> None:
         diff = """diff --git a/note.txt b/note.txt
@@ -291,24 +467,21 @@ index 0000000..1111111 100644
         )
         result = self.check("diff", clean)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assert_terms_hidden(result)
+        self.assert_hidden(result)
         self.assert_found(self.check("diff", split_term), "plain.txt:7")
 
     def test_scanner_reads_a_real_git_c_quoted_path(self) -> None:
         repository = self.root / "git"
         repository.mkdir()
-        subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository, check=True)
+        self.ok(["/usr/bin/git", "init", "-q"], repository)
         path = repository / "notes"
         path.mkdir()
         (path / 'zorbleplex"file.txt').write_text("clean\n", encoding="utf-8")
-        subprocess.run(["/usr/bin/git", "add", "."], cwd=repository, check=True)
-        diff = subprocess.run(
+        self.ok(["/usr/bin/git", "add", "."], repository)
+        diff = self.ok(
             ["/usr/bin/git", "-c", "core.quotePath=false", "diff", "--cached", "-U0", "--no-ext-diff", "--no-textconv", "--no-color"],
-            cwd=repository,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
+            repository,
+        )
         self.assertIn('"a/notes/', diff)
         result = self.check("diff", diff)
         self.assert_found(result, 'notes/<listed term>"file.txt')
@@ -316,36 +489,27 @@ index 0000000..1111111 100644
     def test_scanner_reads_real_paths_that_contain_the_header_separator(self) -> None:
         repository = self.root / "ambiguous-path"
         repository.mkdir()
-        subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository, check=True)
-        subprocess.run([real_jj(), "git", "init", "--colocate"], cwd=repository, check=True, capture_output=True, text=True)
+        self.ok(["/usr/bin/git", "init", "-q"], repository)
+        self.ok([real_jj(), "git", "init", "--colocate"], repository)
         changed = repository / "dir b" / "notes.txt"
         listed = repository / "x b" / "zorbleplex.txt"
         changed.parent.mkdir()
         listed.parent.mkdir()
         changed.write_text("Quillfeather Lane 9\n", encoding="utf-8")
         listed.write_text("clean\n", encoding="utf-8")
-        subprocess.run(["/usr/bin/git", "add", "."], cwd=repository, check=True)
-        git_diff = subprocess.run(
+        self.ok(["/usr/bin/git", "add", "."], repository)
+        git_diff = self.ok(
             ["/usr/bin/git", "-c", "core.quotePath=false", "diff", "--cached", "-U0", "--no-ext-diff", "--no-textconv", "--no-color"],
-            cwd=repository,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        jj_diff = subprocess.run(
-            [real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"],
-            cwd=repository,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
+            repository,
+        )
+        jj_diff = self.ok([real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"], repository)
         for diff in (git_diff, jj_diff):
             self.assertIn("diff --git a/dir b/notes.txt b/dir b/notes.txt", diff)
             result = self.check("diff", diff)
             self.assertEqual(result.returncode, 3, result.stderr)
             self.assertIn("leak terms: dir b/notes.txt:1: listed leak term", result.stderr)
             self.assertIn("leak terms: x b/<listed term>.txt: listed leak term", result.stderr)
-            self.assert_terms_hidden(result)
+            self.assert_hidden(result)
 
     def test_scanner_reads_result_paths_but_not_deleted_or_renamed_away_paths(self) -> None:
         deleted = """diff --git a/zorbleplex.txt b/zorbleplex.txt
@@ -369,7 +533,7 @@ rename to zorbleplex.txt
         for diff in (deleted, renamed_away):
             result = self.check("diff", diff)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assert_terms_hidden(result)
+            self.assert_hidden(result)
         self.assert_found(self.check("diff", renamed_to), "<listed term>.txt")
 
     def test_scanner_reads_binary_paths_not_binary_payloads(self) -> None:
@@ -384,24 +548,18 @@ Quillfeather Lane 9
         self.assert_found(self.check("diff", binary_path), "<listed term>.bin")
         result = self.check("diff", binary_payload)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assert_terms_hidden(result)
+        self.assert_hidden(result)
 
     def test_scanner_reads_a_real_jj_raw_path_with_controls(self) -> None:
         repository = self.root / "jj"
         repository.mkdir()
-        subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository, check=True)
-        subprocess.run([real_jj(), "git", "init", "--colocate"], cwd=repository, check=True, capture_output=True, text=True)
+        self.ok(["/usr/bin/git", "init", "-q"], repository)
+        self.ok([real_jj(), "git", "init", "--colocate"], repository)
         filename = 'raw-"\t\\\nzorbleplex.txt'
         (repository / filename).write_text("clean\n", encoding="utf-8")
-        generated = subprocess.run(
-            [real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"],
-            cwd=repository,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        self.assertIn("diff --git", generated.stdout)
-        result = self.check("diff", generated.stdout)
+        generated = self.ok([real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"], repository)
+        self.assertIn("diff --git", generated)
+        result = self.check("diff", generated)
         self.assert_found(result, 'raw-"\\t\\\\\\n<listed term>.txt')
 
     def test_scanner_reads_combined_diffs_and_ignores_lines_from_one_parent(self) -> None:
@@ -429,7 +587,7 @@ index 0000000,0000000,0000000..1111111
         self.assert_found(self.check("diff", added), "merge.txt:1")
         clean = self.check("diff", from_one_parent)
         self.assertEqual(clean.returncode, 0, clean.stderr)
-        self.assert_terms_hidden(clean)
+        self.assert_hidden(clean)
         self.assert_found(self.check("diff", octopus), "octopus.txt:1")
 
     def test_scanner_refuses_a_malformed_hunk_count(self) -> None:
@@ -443,7 +601,7 @@ index 0000000,0000000,0000000..1111111
         self.assertEqual(result.returncode, 4, result.stderr)
         self.assertIn("malformed unified hunk count", result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assert_terms_hidden(result)
+        self.assert_hidden(result)
 
     def test_scanner_applies_message_cleanups_and_final_line_numbers(self) -> None:
         strip_known = self.check("message", "# Quillfeather Lane 9\n", "--cleanup", "strip", "--comment-char", "#")
@@ -492,7 +650,7 @@ index 0000000,0000000,0000000..1111111
         )
         for result in (strip_known, scissors, cut):
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assert_terms_hidden(result)
+            self.assert_hidden(result)
         for result in (strip_unknown, whitespace, verbatim):
             self.assert_found(result, "commit message line 1")
         for result in (unknown_scissors, unknown_cut):
@@ -525,7 +683,8 @@ index 0000000,0000000,0000000..1111111
             output_lines = result.stderr.strip().splitlines()
             self.assertEqual(len(output_lines), 1, result.stderr)
             self.assertIn(correction, output_lines[0])
-            self.assert_terms_hidden(result)
+            self.assert_hidden(result)
+            self.assert_no_key_material(result)
 
     def test_scanner_uses_passwd_key_fallback_when_the_callers_home_moved(self) -> None:
         loader = importlib.machinery.SourceFileLoader("leak_terms_check_test", str(CHECK))
@@ -583,7 +742,7 @@ index 0000000,0000000,0000000..1111111
             "Quillfeather Lane 9\n",
             encoding="utf-8",
         )
-        result = subprocess.run(
+        result = self.launch(
             [str(CHECK), "jj-editor", str(edited)],
             env={
                 **self.env,
@@ -591,16 +750,13 @@ index 0000000,0000000,0000000..1111111
                 "DOTFILES_JJ_EDITOR_MODE": "bulk",
                 "DOTFILES_JJ_EDITOR_IDS": "111111111111,222222222222",
             },
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=10,
         )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("leak terms: description of 222222222222 line 1: listed leak term", result.stderr)
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assert_terms_hidden(result)
+        self.assert_hidden(result)
 
     def test_jj_header_marker_is_first_in_the_first_512_bytes(self) -> None:
         header = (ROOT / "shims" / "jj").read_bytes()[:512].decode("utf-8")
@@ -610,19 +766,14 @@ index 0000000,0000000,0000000..1111111
         edited = self.root / "editor.jjdescription"
         edited.write_text("clean\n", encoding="utf-8")
         ran = self.root / "editor-ran"
-        editor = self.root / "editor.sh"
-        editor.write_text("#!/bin/sh\n" f": > {shlex.quote(str(ran))}\n", encoding="utf-8")
-        editor.chmod(0o755)
-        result = subprocess.run(
+        write_executable(self.root / "editor.sh", "#!/bin/sh\n" f": > {shlex.quote(str(ran))}\n")
+        result = self.launch(
             [str(CHECK), "jj-editor", str(edited)],
             env={
                 **self.env,
-                "DOTFILES_JJ_EDITOR": json.dumps([str(editor)]),
+                "DOTFILES_JJ_EDITOR": json.dumps([str(self.root / "editor.sh")]),
                 "DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml"),
             },
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=10,
         )
         self.assertEqual(result.returncode, 1, result.stderr)
@@ -649,28 +800,22 @@ index 0000000,0000000,0000000..1111111
                     "the term list is not a block of lines; fix it with sops edit leak-terms.sops.yaml",
                     result.stderr,
                 )
-                self.assert_terms_hidden(result)
+                self.assert_hidden(result)
 
     def test_scanner_refuses_unresolved_raw_jj_paths(self) -> None:
         repository = self.root / "unresolved-jj-path"
         repository.mkdir()
-        subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository, check=True)
-        subprocess.run([real_jj(), "git", "init", "--colocate"], cwd=repository, check=True, capture_output=True, text=True)
+        self.ok(["/usr/bin/git", "init", "-q"], repository)
+        self.ok([real_jj(), "git", "init", "--colocate"], repository)
         for name in ("raw-\nnew file mode 100644\nzorbleplex.txt", "p\n+++ /dev/null\nq"):
             with self.subTest(name=name):
                 (repository / name).parent.mkdir(parents=True, exist_ok=True)
                 (repository / name).write_text("clean\n", encoding="utf-8")
-                generated = subprocess.run(
-                    [real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"],
-                    cwd=repository,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                result = self.check("diff", generated.stdout)
+                generated = self.ok([real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"], repository)
+                result = self.check("diff", generated)
                 self.assertEqual(result.returncode, 4, result.stderr)
                 self.assertIn("cannot read text to check", result.stderr)
-                self.assert_terms_hidden(result)
+                self.assert_hidden(result)
                 (repository / name).unlink()
 
     def test_scanner_uses_git_auto_comment_character_rules(self) -> None:
@@ -729,25 +874,18 @@ index 0000000,0000000,0000000..1111111
             "Quillfeather Lane 9\nJJ: describe fake -------\nclean\n",
             encoding="utf-8",
         )
-        single_result = subprocess.run(
+        single_result = self.launch(
             [str(CHECK), "jj-editor", str(single)],
-            env={
-                **self.env,
-                "DOTFILES_JJ_EDITOR": json.dumps(["/bin/true"]),
-                "DOTFILES_JJ_EDITOR_MODE": "single",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
+            env={**self.env, "DOTFILES_JJ_EDITOR": json.dumps(["/bin/true"]), "DOTFILES_JJ_EDITOR_MODE": "single"},
             timeout=10,
         )
         self.assertEqual(single_result.returncode, 1, single_result.stderr)
         self.assertIn("commit message line 1: listed leak term", single_result.stderr)
-        self.assert_terms_hidden(single_result)
+        self.assert_hidden(single_result)
 
         bulk = self.root / "bulk.jjdescription"
         bulk.write_text("JJ: describe Quillfeather Lane 9 -------\nclean\n", encoding="utf-8")
-        bulk_result = subprocess.run(
+        bulk_result = self.launch(
             [str(CHECK), "jj-editor", str(bulk)],
             env={
                 **self.env,
@@ -755,35 +893,52 @@ index 0000000,0000000,0000000..1111111
                 "DOTFILES_JJ_EDITOR_MODE": "bulk",
                 "DOTFILES_JJ_EDITOR_IDS": "111111111111",
             },
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=10,
         )
         self.assertEqual(bulk_result.returncode, 1, bulk_result.stderr)
         self.assertIn("cannot read jj editor descriptions", bulk_result.stderr)
-        self.assert_terms_hidden(bulk_result)
+        self.assert_hidden(bulk_result)
+
+    def test_harness_launch_kills_its_group_and_caps_tasks(self) -> None:
+        # The bound itself, made to fire: a child that outlives the timeout while it holds the output pipes, and a
+        # command that starts more tasks than its budget allows.
+        pid_file = self.root / "sleeper.pid"
+        with self.assertRaisesRegex(AssertionError, "process group was killed"):
+            self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=2)
+        sleeper = Path(f"/proc/{int(pid_file.read_text(encoding='ascii'))}/stat")
+        for _ in range(100):
+            if not sleeper.exists() or sleeper.read_text(encoding="ascii").rsplit(")", 1)[1].split()[0] == "Z":
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the timed-out command's background child survived the group kill")
+
+        self.task_limit = live_tasks() + 50
+        spawner = (
+            "import subprocess\n"
+            "started = []\n"
+            "try:\n"
+            "    for _ in range(400):\n"
+            "        started.append(subprocess.Popen(['sleep', '30'], stdin=subprocess.DEVNULL,\n"
+            "                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))\n"
+            "except BlockingIOError:\n"
+            "    pass\n"
+            "finally:\n"
+            "    for process in started:\n"
+            "        process.kill()\n"
+            "        process.wait()\n"
+            "print(len(started))\n"
+        )
+        result = self.launch([sys.executable, "-c", spawner], timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(int(result.stdout), 400, "the task budget did not stop the forks")
 
 
-class GitLeaks(unittest.TestCase):
-    session = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
-    marker_names = (
-        "OMP_SESSION_ID",
-        "PI_SESSION_FILE",
-        "PI_TOOL_BRIDGE_URL",
-        "AGENTBOX_SESSION",
-        "CLAUDECODE",
-        "ENVOY_SESSION_ID",
-        "AGENT_SHIM_AGENT",
-        "SSH_CONNECTION",
-        "SSH_TTY",
-        "TMUX",
-        "AGENT_SHIM_PERSON",
-    )
+class GitLeaks(LeakTestCase):
+    session = SESSION
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.home = self.root / "home"
         self.xdg = self.root / "xdg"
         self.tmpdir = self.root / "tmp"
@@ -795,15 +950,8 @@ class GitLeaks(unittest.TestCase):
             "[init]\n\tdefaultBranch = main\n",
             encoding="utf-8",
         )
-        base = {
-            name: value
-            for name, value in os.environ.items()
-            if name not in self.marker_names
-            and not name.startswith(("PI_", "LEGION_", "GIT_CONFIG_"))
-            and name not in {"ENVOY_SESSION_ID", "CLAUDECODE", "AGENTBOX_SESSION", "AGENT_SHIM_AGENT"}
-        }
         self.person = {
-            **base,
+            **base_environment(),
             **fixture_environment(),
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.xdg),
@@ -816,9 +964,6 @@ class GitLeaks(unittest.TestCase):
         self.agent = {**self.person, "OMP_SESSION_ID": self.session}
         self.repositories = 0
         self.editors = 0
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
 
     def environment(self, agent: bool, **extra: str) -> dict[str, str]:
         return {**(self.agent if agent else self.person), **extra}
@@ -838,23 +983,13 @@ class GitLeaks(unittest.TestCase):
         if subcommand < len(command_arguments) and command_arguments[subcommand] == "commit" and "--allow-empty" not in command_arguments:
             command_arguments.insert(subcommand + 1, "--allow-empty")
         command = ["/usr/bin/git" if real else "git", *command_arguments]
-        return subprocess.run(
-            command,
-            cwd=repository,
-            env=self.environment(agent, **(extra or {})),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        return self.launch(command, cwd=repository, env=self.environment(agent, **(extra or {})))
 
     def hook_run(self, repository: Path, name: str, *arguments: str, agent: bool) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        return self.launch(
             [str(ROOT / "shims" / "git-hooks" / name), *arguments],
             cwd=repository,
             env=self.environment(agent, DOTFILES_GIT_COMMIT_SCAN="cleanup=default verbose=config status=config"),
-            capture_output=True,
-            text=True,
-            check=False,
         )
 
     def repository(self, agent: bool, remote: bool = False) -> Path:
@@ -879,11 +1014,6 @@ class GitLeaks(unittest.TestCase):
         result = self.git_run(repository, "rev-parse", "HEAD", agent=agent, real=True)
         return result.returncode, result.stdout.strip()
 
-    def assert_hidden(self, result: subprocess.CompletedProcess[str]) -> None:
-        output = (result.stdout + result.stderr).casefold()
-        for term in TEST_TERMS:
-            self.assertNotIn(term.casefold(), output)
-
     def assert_refused(self, repository: Path, agent: bool, place: str, *arguments: str,
                        extra: dict[str, str] | None = None) -> None:
         before = self.head(repository, agent)
@@ -903,12 +1033,7 @@ class GitLeaks(unittest.TestCase):
 
     def editor(self, text: str) -> str:
         self.editors += 1
-        path = self.root / f"editor-{self.editors}.sh"
-        import shlex
-
-        path.write_text(f"#!/bin/sh\nprintf %s {shlex.quote(text)} > \"$1\"\n", encoding="utf-8")
-        path.chmod(0o755)
-        return str(path)
+        return str(write_executable(self.root / f"editor-{self.editors}.sh", f"#!/bin/sh\nprintf %s {shlex.quote(text)} > \"$1\"\n"))
 
     def test_git_term_refuses_staged_content_paths_amends_and_controls(self) -> None:
         for agent in (False, True):
@@ -929,15 +1054,19 @@ class GitLeaks(unittest.TestCase):
                 self.assert_clean(repository, agent, "commit", "-m", "clean")
 
             with self.subTest(agent=agent, case="pre-commit"):
-                repository = self.repository(agent)
-                hook = repository / ".git" / "hooks" / "pre-commit"
-                hook.write_text(
-                    "#!/bin/sh\nprintf '%s\\n' 'Quillfeather Lane 9' > injected.txt\ngit add injected.txt\n",
-                    encoding="utf-8",
-                )
-                hook.chmod(0o755)
-                self.stage(repository, "clean.txt", "clean\n", agent)
-                self.assert_refused(repository, agent, "injected.txt:1", "commit", "-m", "blocked")
+                for content, refused in (("Quillfeather Lane 9", True), ("clean injected line", False)):
+                    repository = self.repository(agent)
+                    write_executable(
+                        repository / ".git" / "hooks" / "pre-commit",
+                        f"#!/bin/sh\nprintf '%s\\n' '{content}' > injected.txt\ngit add injected.txt\n",
+                    )
+                    self.stage(repository, "clean.txt", "clean\n", agent)
+                    if refused:
+                        self.assert_refused(repository, agent, "injected.txt:1", "commit", "-m", "blocked")
+                        continue
+                    self.assert_clean(repository, agent, "commit", "-m", "clean")
+                    files = self.git_run(repository, "show", "--format=", "--name-only", "HEAD", agent=agent, real=True)
+                    self.assertEqual(files.stdout.split(), ["clean.txt", "injected.txt"])
 
             with self.subTest(agent=agent, case="amend"):
                 repository = self.repository(agent)
@@ -963,35 +1092,39 @@ class GitLeaks(unittest.TestCase):
                 self.assert_clean(repository, agent, "commit", "a.txt", "-m", "partial")
 
             with self.subTest(agent=agent, case="all"):
-                repository = self.repository(agent)
-                self.stage(repository, "tracked.txt", "clean\n", agent)
-                self.assert_clean(repository, agent, "commit", "-m", "base")
-                (repository / "tracked.txt").write_text("Quillfeather Lane 9\n", encoding="utf-8")
-                self.assert_refused(repository, agent, "tracked.txt:1", "commit", "-a", "-m", "blocked")
+                for content, refused in (("Quillfeather Lane 9", True), ("changed clean", False)):
+                    repository = self.repository(agent)
+                    self.stage(repository, "tracked.txt", "clean\n", agent)
+                    self.assert_clean(repository, agent, "commit", "-m", "base")
+                    (repository / "tracked.txt").write_text(f"{content}\n", encoding="utf-8")
+                    if refused:
+                        self.assert_refused(repository, agent, "tracked.txt:1", "commit", "-a", "-m", "blocked")
+                    else:
+                        self.assert_clean(repository, agent, "commit", "-a", "-m", "clean")
 
     def test_git_term_refuses_a_gitlink_when_submodules_are_ignored_in_config(self) -> None:
         for agent in (False, True):
-            with self.subTest(agent=agent):
-                repository = self.repository(agent)
-                object_id = subprocess.run(
-                    ["/usr/bin/git", "hash-object", "-w", "--stdin"],
-                    cwd=repository,
-                    input=b"gitlink",
-                    capture_output=True,
-                    check=True,
-                ).stdout.decode("ascii").strip()
-                indexed = self.git_run(
-                    repository,
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    f"160000,{object_id},zorbleplex",
-                    agent=agent,
-                )
-                self.assertEqual(indexed.returncode, 0, indexed.stderr)
-                configured = self.git_run(repository, "config", "diff.ignoreSubmodules", "all", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_refused(repository, agent, "<listed term>", "commit", "-m", "clean")
+            for path, refused in (("zorbleplex", True), ("clean-module", False)):
+                with self.subTest(agent=agent, path=path):
+                    repository = self.repository(agent)
+                    object_id = self.launch(
+                        ["/usr/bin/git", "hash-object", "-w", "--stdin"], cwd=repository, input="gitlink"
+                    ).stdout.strip()
+                    indexed = self.git_run(
+                        repository,
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        f"160000,{object_id},{path}",
+                        agent=agent,
+                    )
+                    self.assertEqual(indexed.returncode, 0, indexed.stderr)
+                    configured = self.git_run(repository, "config", "diff.ignoreSubmodules", "all", agent=agent)
+                    self.assertEqual(configured.returncode, 0, configured.stderr)
+                    if refused:
+                        self.assert_refused(repository, agent, "<listed term>", "commit", "-m", "clean")
+                    else:
+                        self.assert_clean(repository, agent, "commit", "-m", "clean")
 
     def test_git_term_session_trailer_matches_existing_conditions(self) -> None:
         remote = self.repository(True, remote=True)
@@ -1006,128 +1139,102 @@ class GitLeaks(unittest.TestCase):
         body = self.git_run(throwaway, "log", "-1", "--format=%B", agent=False, real=True)
         self.assertNotIn("Omp-Session:", body.stdout)
 
+    def message_case(self, agent: bool, config: tuple[tuple[str, str], ...], arguments: tuple[str, ...],
+                     editor_text: str | None, hook_lines: tuple[str, ...] | None, place: str | None, *,
+                     remote: bool = False, environment: dict[str, str] | None = None) -> None:
+        """One commit in a new repository: refused at PLACE, or (PLACE None) one that must go on."""
+        repository = self.repository(agent, remote=remote)
+        for key, value in config:
+            configured = self.git_run(repository, "config", key, value, agent=agent)
+            self.assertEqual(configured.returncode, 0, configured.stderr)
+        if hook_lines is not None:
+            write_executable(
+                repository / ".git" / "hooks" / "commit-msg",
+                "#!/bin/sh\nprintf '%s\\n' " + " ".join(shlex.quote(line) for line in hook_lines) + " >> \"$1\"\n",
+            )
+        extra = dict(environment or {})
+        if editor_text is not None:
+            extra["GIT_EDITOR"] = self.editor(editor_text)
+        if place is None:
+            self.assert_clean(repository, agent, "commit", *arguments, extra=extra)
+        else:
+            self.assert_refused(repository, agent, place, "commit", *arguments, extra=extra)
+
     def test_git_message_refuses_cleanup_modes_and_forms(self) -> None:
+        cut = "# ------------------------ >8 ------------------------"
+        term, partial = "Quillfeather Lane 9", "Quillfeather Lane"
+        with_term = self.root / "message-with-term"
+        with_term.write_text(f"subject\n{term}\n", encoding="utf-8")
+        with_partial = self.root / "message-with-partial"
+        with_partial.write_text(f"subject\n{partial}\n", encoding="utf-8")
+        strip, verbatim, semicolon, verbose = (
+            (("commit.cleanup", "strip"),),
+            (("commit.cleanup", "verbatim"),),
+            (("core.commentChar", ";"),),
+            (("commit.verbose", "true"),),
+        )
+        # (label, config, arguments, editor text, lines a commit-msg hook appends, the refusal's place or None for a
+        # commit that goes on). Each setting has a refused commit and one that goes on; 'Quillfeather Lane' is the
+        # partial-term control of each message form.
+        cases = (
+            ("m", (), ("-m", f"subject\n{term}"), None, None, "commit message line 2"),
+            ("m", (), ("-m", f"subject\n{partial}"), None, None, None),
+            ("message-equals", (), (f"--message={term}",), None, None, "commit message line 1"),
+            ("message-equals", (), (f"--message={partial}",), None, None, None),
+            ("m-attached", (), (f"-m{term}",), None, None, "commit message line 1"),
+            ("m-attached", (), (f"-m{partial}",), None, None, None),
+            ("file", (), ("-F", str(with_term)), None, None, "commit message line 2"),
+            ("file", (), ("-F", str(with_partial)), None, None, None),
+            ("editor", (), (), f"{term}\n", None, "commit message line 1"),
+            ("editor", (), (), f"{partial}\n", None, None),
+            ("m-comment", (), ("-m", f"# {term}"), None, None, "commit message line 1"),
+            ("m-comment", (), ("-m", f"# {partial}"), None, None, None),
+            ("config-strip", strip, (), f"# comment\n{term}\n", None, "commit message line 1"),
+            ("config-strip", strip, (), f"# {term}\nclean\n", None, None),
+            ("config-verbatim", verbatim, (), f"# {term}\n", None, "commit message line 1"),
+            ("config-verbatim", verbatim, (), "# clean comment\nclean\n", None, None),
+            ("cleanup-verbatim", (), ("--cleanup=verbatim",), f"# {term}\n", None, "commit message line 1"),
+            ("cleanup-verbatim", (), ("--cleanup=verbatim",), "# clean comment\nclean\n", None, None),
+            ("comment-char", semicolon, (), f"# {term}\n", None, "commit message line 1"),
+            ("comment-char", semicolon, (), f"; {term}\nclean\n", None, None),
+            ("commit-msg", (), ("-m", "clean"), None, (term,), "commit message line 2"),
+            ("commit-msg", (), ("-m", "clean"), None, ("clean appended line",), None),
+            ("scissors-editor", (), ("--cleanup=scissors",), f"# {term}\n{cut}\nclean\n", None, "commit message line 1"),
+            ("scissors-editor", (), ("--cleanup=scissors",), f"clean\n{cut}\n{term}\n", None, None),
+            ("scissors-message", (), ("--cleanup=scissors", "-m", f"clean\n{cut}\n{term}"), None, None, "commit message line 3"),
+            ("scissors-message", (), ("--cleanup=scissors", "-m", f"clean\n{cut}\nclean"), None, None, None),
+            ("config-verbose", verbose, ("-m", "clean"), None, (term, cut), "commit message line 2"),
+            ("config-verbose", verbose, ("-m", "clean"), None, (cut, term), None),
+        )
         for agent in (False, True):
-            with self.subTest(agent=agent, case="negative"):
-                repository = self.repository(agent)
-                self.assert_clean(repository, agent, "commit", "-m", "Quillfeather Lane")
+            for label, config, arguments, editor_text, hook_lines, place in cases:
+                with self.subTest(agent=agent, case=label, refused=place is not None):
+                    self.message_case(agent, config, arguments, editor_text, hook_lines, place)
 
-            with self.subTest(agent=agent, case="forms"):
-                cases = (
-                    (("-m", "subject\nQuillfeather Lane 9"), "commit message line 2"),
-                    (("--message=Quillfeather Lane 9",), "commit message line 1"),
-                    (("-mQuillfeather Lane 9",), "commit message line 1"),
-                )
-                for arguments, place in cases:
+            with self.subTest(agent=agent, case="verbose-diff"):
+                # `git commit -v` shows the editor the staged diff below its cut line; here that diff removes a
+                # line holding the term. Above the line the editor writes the subject.
+                for subject, place in (("clean subject", None), (term, "commit message line 1")):
                     repository = self.repository(agent)
-                    self.assert_refused(repository, agent, place, "commit", *arguments)
-
-            with self.subTest(agent=agent, case="file"):
-                repository = self.repository(agent)
-                message = repository / "message"
-                message.write_text("subject\nQuillfeather Lane 9\n", encoding="utf-8")
-                self.assert_refused(repository, agent, "commit message line 2", "commit", "-F", str(message))
-
-            with self.subTest(agent=agent, case="editor"):
-                repository = self.repository(agent)
-                self.assert_refused(
-                    repository,
-                    agent,
-                    "commit message line 1",
-                    "commit",
-                    extra={"GIT_EDITOR": self.editor("Quillfeather Lane 9\n")},
-                )
-
-            with self.subTest(agent=agent, case="message-comment"):
-                repository = self.repository(agent)
-                self.assert_refused(repository, agent, "commit message line 1", "commit", "-m", "# Quillfeather Lane 9")
-
-            with self.subTest(agent=agent, case="configured-cleanup"):
-                strip = self.repository(agent)
-                set_strip = self.git_run(strip, "config", "commit.cleanup", "strip", agent=agent)
-                self.assertEqual(set_strip.returncode, 0, set_strip.stderr)
-                self.assert_clean(strip, agent, "commit", extra={"GIT_EDITOR": self.editor("# Quillfeather Lane 9\nclean\n")})
-                verbatim = self.repository(agent)
-                set_verbatim = self.git_run(verbatim, "config", "commit.cleanup", "verbatim", agent=agent)
-                self.assertEqual(set_verbatim.returncode, 0, set_verbatim.stderr)
-                self.assert_refused(
-                    verbatim,
-                    agent,
-                    "commit message line 1",
-                    "commit",
-                    extra={"GIT_EDITOR": self.editor("# Quillfeather Lane 9\n")},
-                )
-
-            with self.subTest(agent=agent, case="comment-char"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "core.commentChar", ";", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "commit",
-                    extra={"GIT_EDITOR": self.editor("; Quillfeather Lane 9\nclean\n")},
-                )
-                refused = self.repository(agent)
-                configured = self.git_run(refused, "config", "core.commentChar", ";", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_refused(
-                    refused,
-                    agent,
-                    "commit message line 1",
-                    "commit",
-                    extra={"GIT_EDITOR": self.editor("# Quillfeather Lane 9\n")},
-                )
-
-            with self.subTest(agent=agent, case="commit-msg"):
-                repository = self.repository(agent)
-                hook = repository / ".git" / "hooks" / "commit-msg"
-                hook.write_text("#!/bin/sh\nprintf '%s\\n' 'Quillfeather Lane 9' >> \"$1\"\n", encoding="utf-8")
-                hook.chmod(0o755)
-                self.assert_refused(repository, agent, "commit message line 2", "commit", "-m", "clean")
-
-            with self.subTest(agent=agent, case="scissors"):
-                above = self.repository(agent)
-                self.assert_refused(
-                    above,
-                    agent,
-                    "commit message line 1",
-                    "commit",
-                    "--cleanup=scissors",
-                    extra={"GIT_EDITOR": self.editor("# Quillfeather Lane 9\n# ------------------------ >8 ------------------------\nclean\n")},
-                )
-                below = self.repository(agent)
-                self.assert_clean(
-                    below,
-                    agent,
-                    "commit",
-                    "--cleanup=scissors",
-                    extra={"GIT_EDITOR": self.editor("clean\n# ------------------------ >8 ------------------------\nQuillfeather Lane 9\n")},
-                )
-
-            with self.subTest(agent=agent, case="scissors-without-editor"):
-                repository = self.repository(agent)
-                self.assert_refused(
-                    repository,
-                    agent,
-                    "commit message line 3",
-                    "commit",
-                    "--cleanup=scissors",
-                    "-m",
-                    "clean\n# ------------------------ >8 ------------------------\nQuillfeather Lane 9",
-                )
-
-            with self.subTest(agent=agent, case="verbose"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "commit.verbose", "true", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                hook = repository / ".git" / "hooks" / "commit-msg"
-                hook.write_text(
-                    "#!/bin/sh\nprintf '%s\\n' '# ------------------------ >8 ------------------------' 'Quillfeather Lane 9' >> \"$1\"\n",
-                    encoding="utf-8",
-                )
-                hook.chmod(0o755)
-                self.assert_clean(repository, agent, "commit", "-m", "clean")
+                    (repository / "old.txt").write_text(f"{term}\nkeep\n", encoding="utf-8")
+                    for arguments in (("add", "old.txt"), ("commit", "-q", "-m", "base")):
+                        made = self.git_run(repository, *arguments, agent=agent, real=True)
+                        self.assertEqual(made.returncode, 0, made.stderr)
+                    self.stage(repository, "old.txt", "keep\n", agent)
+                    shown = self.root / f"verbose-shown-{self.repositories}"
+                    editor = write_executable(
+                        self.root / f"verbose-editor-{self.repositories}.sh",
+                        f"#!/bin/sh\ncp \"$1\" {shlex.quote(str(shown))}\n"
+                        f"{{ printf '%s\\n' {shlex.quote(subject)}; cat {shlex.quote(str(shown))}; }} > \"$1\"\n",
+                    )
+                    if place is None:
+                        self.assert_clean(repository, agent, "commit", "-v", extra={"GIT_EDITOR": str(editor)})
+                    else:
+                        self.assert_refused(repository, agent, place, "commit", "-v", extra={"GIT_EDITOR": str(editor)})
+                    above, cut_line, below = shown.read_text(encoding="utf-8").partition(f"{cut}\n")
+                    self.assertTrue(cut_line, "git commit -v showed no cut line")
+                    self.assertEqual(leaked_terms(above), [])
+                    self.assertIn(f"\n-{term}\n", below)
 
             with self.subTest(agent=agent, case="stored"):
                 repository = self.repository(agent)
@@ -1139,214 +1246,128 @@ class GitLeaks(unittest.TestCase):
                 self.assertEqual(body, f"{message}\n")
 
     def test_git_message_explicit_default_cleanup_beats_configuration(self) -> None:
+        term = "Quillfeather Lane 9"
+        verbatim, strip = (("commit.cleanup", "verbatim"),), (("commit.cleanup", "strip"),)
+        cases = (
+            ("editor", verbatim, ("--cleanup=default",), f"# {term}\nclean\n", None),
+            ("editor", verbatim, ("--cleanup=default",), f"clean\n{term}\n", "commit message line 2"),
+            ("no-editor", strip, ("--cleanup=default", "-m", f"# {term}"), None, "commit message line 1"),
+            ("no-editor", strip, ("--cleanup=default", "-m", "# clean comment"), None, None),
+        )
         for agent in (False, True):
-            with self.subTest(agent=agent, case="editor"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "commit.cleanup", "verbatim", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "commit",
-                    "--cleanup=default",
-                    extra={"GIT_EDITOR": self.editor("# Quillfeather Lane 9\nclean\n")},
-                )
-            with self.subTest(agent=agent, case="no-editor"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "commit.cleanup", "strip", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_refused(
-                    repository,
-                    agent,
-                    "commit message line 1",
-                    "commit",
-                    "--cleanup=default",
-                    "-m",
-                    "# Quillfeather Lane 9",
-                    extra={"GIT_EDITOR": ":"},
-                )
+            for label, config, arguments, editor_text, place in cases:
+                with self.subTest(agent=agent, case=label, refused=place is not None):
+                    self.message_case(
+                        agent, config, arguments, editor_text, None, place,
+                        environment=None if editor_text else {"GIT_EDITOR": ":"},
+                    )
 
     def test_git_message_auto_comment_char_ignores_caller_cut_lines_and_line_counts(self) -> None:
         cut = "# ------------------------ >8 ------------------------"
         many_at = "# keep\n" + "\n".join(f"@ line {index}" for index in range(40))
+        auto = (("core.commentChar", "auto"),)
+        cases = (
+            # DeepReview 6: git picks `;`, so it keeps the editor's `#` line.
+            ("caller-cut-line", cut, "# Quillfeather Lane 9\n", "commit message line 1"),
+            ("caller-cut-line", cut, "; Quillfeather Lane 9\nclean\n", None),
+            # More `@` lines than git's `;` block: git still keeps the `@` line.
+            ("many-at-lines", many_at, "clean\n@ Quillfeather Lane 9\n", "commit message line 2"),
+            ("many-at-lines", many_at, "clean\n; Quillfeather Lane 9\n", None),
+        )
         for agent in (False, True):
-            for label, message, edited, place in (
-                # DeepReview 6: git picks `;`, so it keeps the editor's `#` line.
-                ("caller-cut-line", cut, "# Quillfeather Lane 9\n", "commit message line 1"),
-                # More `@` lines than git's `;` block: git still keeps the `@` line.
-                ("many-at-lines", many_at, "clean\n@ Quillfeather Lane 9\n", "commit message line 2"),
-            ):
-                with self.subTest(agent=agent, case=label):
-                    repository = self.repository(agent)
-                    configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
-                    self.assertEqual(configured.returncode, 0, configured.stderr)
-                    self.assert_refused(
-                        repository,
-                        agent,
-                        place,
-                        "commit",
-                        "-e",
-                        "-m",
-                        message,
-                        extra={"GIT_EDITOR": self.editor(edited)},
-                    )
-            with self.subTest(agent=agent, case="many-at-lines-control"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "commit",
-                    "-e",
-                    "-m",
-                    many_at,
-                    extra={"GIT_EDITOR": self.editor("clean\n; Quillfeather Lane 9\n")},
-                )
+            for label, message, edited, place in cases:
+                with self.subTest(agent=agent, case=label, refused=place is not None):
+                    self.message_case(agent, auto, ("-e", "-m", message), edited, None, place)
 
     def test_git_message_auto_comment_char_handles_status_trailers_and_scissors(self) -> None:
+        auto = (("core.commentChar", "auto"),)
+        keep = ("-e", "-m", "# keep")
+        semicolon_comment, hash_line = "clean\n; Quillfeather Lane 9\n", "clean\n# Quillfeather Lane 9\n"
+        # With `# keep` in the message git picks `;`; with no message it picks `#`.
+        cases = (
+            ("initial-comment", keep, semicolon_comment, None),
+            ("initial-comment", keep, hash_line, "commit message line 2"),
+            ("no-initial-comment", (), hash_line, None),
+            ("no-initial-comment", (), semicolon_comment, "commit message line 2"),
+            ("no-status", (*keep, "--no-status"), semicolon_comment, None),
+            ("no-status", (*keep, "--no-status"), hash_line, "commit message line 2"),
+            ("caller-trailer", (*keep, "--trailer", "X-Test: y"), semicolon_comment, None),
+            ("caller-trailer", (*keep, "--trailer", "X-Test: y"), hash_line, "commit message line 2"),
+            ("signoff", (*keep, "-s"), semicolon_comment, None),
+            ("signoff", (*keep, "-s"), hash_line, "commit message line 2"),
+        )
         for agent in (False, True):
-            with self.subTest(agent=agent, case="initial-comment"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "commit",
-                    "-e",
-                    "-m",
-                    "# keep",
-                    extra={"GIT_EDITOR": self.editor("clean\n; Quillfeather Lane 9\n")},
-                )
-                refused = self.repository(agent)
-                configured = self.git_run(refused, "config", "core.commentChar", "auto", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_refused(
-                    refused,
-                    agent,
-                    "commit message line 2",
-                    "commit",
-                    "-e",
-                    "-m",
-                    "# keep",
-                    extra={"GIT_EDITOR": self.editor("clean\n# Quillfeather Lane 9\n")},
-                )
+            for label, arguments, edited, place in cases:
+                with self.subTest(agent=agent, case=label, refused=place is not None):
+                    self.message_case(agent, auto, arguments, edited, None, place)
+        # An agent's commit in a repository with a remote gets the Omp-Session trailer after git's block.
+        for edited, place in ((semicolon_comment, None), (hash_line, "commit message line 2")):
+            with self.subTest(case="session-trailer", refused=place is not None):
+                self.message_case(True, auto, keep, edited, None, place, remote=True)
 
-            with self.subTest(agent=agent, case="no-initial-comment"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "commit",
-                    extra={"GIT_EDITOR": self.editor("clean\n# Quillfeather Lane 9\n")},
-                )
+    def recording_hooks(self, directory: Path, label: str) -> None:
+        """pre-commit and commit-msg in DIRECTORY, each writing its argv and its stdin bytes to files named after
+        LABEL and itself in $HOOK_MARKERS."""
+        for name in ("pre-commit", "commit-msg"):
+            record = f"\"$HOOK_MARKERS\"/{label}-{name}"
+            write_executable(directory / name, f"#!/bin/sh\nprintf '%s\\0' \"$@\" > {record}.argv\ncat > {record}.stdin\n")
 
-            with self.subTest(agent=agent, case="no-status"):
-                repository = self.repository(agent)
-                configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "commit",
-                    "-e",
-                    "-m",
-                    "# keep",
-                    "--no-status",
-                    extra={"GIT_EDITOR": self.editor("clean\n; Quillfeather Lane 9\n")},
-                )
-
-            with self.subTest(agent=agent, case="caller-trailer-and-signoff"):
-                for extra_arguments in (("--trailer", "X-Test: y"), ("-s",)):
-                    repository = self.repository(agent)
-                    configured = self.git_run(repository, "config", "core.commentChar", "auto", agent=agent)
-                    self.assertEqual(configured.returncode, 0, configured.stderr)
-                    self.assert_clean(
-                        repository,
-                        agent,
-                        "commit",
-                        "-e",
-                        "-m",
-                        "# keep",
-                        *extra_arguments,
-                        extra={"GIT_EDITOR": self.editor("clean\n; Quillfeather Lane 9\n")},
-                    )
-
-        remote = self.repository(True, remote=True)
-        configured = self.git_run(remote, "config", "core.commentChar", "auto", agent=True)
-        self.assertEqual(configured.returncode, 0, configured.stderr)
-        self.assert_clean(
-            remote,
-            True,
-            "commit",
-            "-e",
-            "-m",
-            "# keep",
-            extra={"GIT_EDITOR": self.editor("clean\n; Quillfeather Lane 9\n")},
-        )
-        refused = self.repository(True, remote=True)
-        configured = self.git_run(refused, "config", "core.commentChar", "auto", agent=True)
-        self.assertEqual(configured.returncode, 0, configured.stderr)
-        self.assert_refused(
-            refused,
-            True,
-            "commit message line 2",
-            "commit",
-            "-e",
-            "-m",
-            "# keep",
-            extra={"GIT_EDITOR": self.editor("clean\n# Quillfeather Lane 9\n")},
-        )
+    def hook_records(self, markers: Path) -> dict[str, bytes]:
+        return {path.name: path.read_bytes() for path in sorted(markers.iterdir())}
 
     def test_repo_hooks_run_and_the_opt_outs_stay_unscanned(self) -> None:
+        # With the real git first on PATH and no shims directory at all (one holding git-hooks/hook).
+        no_shim_path = os.pathsep.join(
+            ["/usr/bin", *(entry for entry in os.environ["PATH"].split(os.pathsep) if not (Path(entry) / "git-hooks" / "hook").exists())]
+        )
+        self.assertEqual(shutil.which("git", path=no_shim_path), "/usr/bin/git")
         for agent in (False, True):
-            with self.subTest(agent=agent, case="repository-hooks"):
-                repository = self.repository(agent)
-                hooks = repository / ".git" / "hooks"
-                for name in ("pre-commit", "commit-msg"):
-                    marker = repository / f"{name}.marker"
-                    (hooks / name).write_text(
-                        f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {marker}\ncat >> {marker}\n",
-                        encoding="utf-8",
+            for layout in ("default", "hooks-path"):
+                with self.subTest(agent=agent, case=layout):
+                    repository = self.repository(agent)
+                    hooks = repository / ".git" / "hooks"
+                    if layout == "hooks-path":
+                        hooks = self.root / f"own-hooks-{self.repositories}"
+                        configured = self.git_run(repository, "config", "core.hooksPath", str(hooks), agent=agent)
+                        self.assertEqual(configured.returncode, 0, configured.stderr)
+                    self.recording_hooks(hooks, layout)
+                    through_shim, without_shim = self.root / f"shim-{self.repositories}", self.root / f"real-{self.repositories}"
+                    through_shim.mkdir()
+                    without_shim.mkdir()
+                    self.stage(repository, "clean.txt", "clean\n", agent)
+                    self.assert_clean(repository, agent, "commit", "-m", "clean", extra={"HOOK_MARKERS": str(through_shim)})
+                    # The no-shim control in the same repository: a file with the term commits, and git gives the
+                    # same hooks the same arguments and input.
+                    (repository / "leak.txt").write_text("Quillfeather Lane 9\n", encoding="utf-8")
+                    added = self.git_run(repository, "add", "leak.txt", agent=agent, real=True)
+                    self.assertEqual(added.returncode, 0, added.stderr)
+                    unchecked = self.git_run(
+                        repository, "commit", "-m", "unchecked", agent=agent,
+                        extra={"HOOK_MARKERS": str(without_shim), "PATH": no_shim_path},
                     )
-                    (hooks / name).chmod(0o755)
-                self.assert_clean(repository, agent, "commit", "-m", "clean")
-                self.assertTrue((repository / "pre-commit.marker").exists())
-                self.assertIn("COMMIT_EDITMSG", (repository / "commit-msg.marker").read_text(encoding="utf-8"))
-
-            with self.subTest(agent=agent, case="configured-hooks"):
-                repository = self.repository(agent)
-                hooks = self.root / f"own-hooks-{agent}"
-                hooks.mkdir(exist_ok=True)
-                marker = repository / "configured.marker"
-                for name in ("pre-commit", "commit-msg"):
-                    (hooks / name).write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
-                    (hooks / name).chmod(0o755)
-                configured = self.git_run(repository, "config", "core.hooksPath", str(hooks), agent=agent)
-                self.assertEqual(configured.returncode, 0, configured.stderr)
-                self.assert_clean(repository, agent, "commit", "-m", "clean")
-                self.assertTrue(marker.exists())
+                    self.assertEqual(unchecked.returncode, 0, unchecked.stderr)
+                    names = [f"{layout}-{name}.{kind}" for name in ("commit-msg", "pre-commit") for kind in ("argv", "stdin")]
+                    self.assertEqual(list(self.hook_records(through_shim)), names)
+                    self.assertEqual(self.hook_records(through_shim), self.hook_records(without_shim))
+                    self.assertEqual(self.hook_records(through_shim)[f"{layout}-commit-msg.argv"], b".git/COMMIT_EDITMSG\0")
 
             with self.subTest(agent=agent, case="failing-pre-commit"):
                 repository = self.repository(agent)
-                hook = repository / ".git" / "hooks" / "pre-commit"
-                hook.write_text("#!/bin/sh\nexit 19\n", encoding="utf-8")
-                hook.chmod(0o755)
+                write_executable(repository / ".git" / "hooks" / "pre-commit", "#!/bin/sh\nexit 19\n")
+                before = self.head(repository, agent)
                 result = self.git_run(repository, "commit", "-m", "clean", agent=agent)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.head(repository, agent), before)
                 direct = self.hook_run(repository, "pre-commit", agent=agent)
                 self.assertEqual(direct.returncode, 19, direct.stderr)
 
             with self.subTest(agent=agent, case="failing-commit-msg"):
                 repository = self.repository(agent)
-                hook = repository / ".git" / "hooks" / "commit-msg"
-                hook.write_text("#!/bin/sh\nexit 23\n", encoding="utf-8")
-                hook.chmod(0o755)
+                write_executable(repository / ".git" / "hooks" / "commit-msg", "#!/bin/sh\nexit 23\n")
+                before = self.head(repository, agent)
                 result = self.git_run(repository, "commit", "-m", "clean", agent=agent)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.head(repository, agent), before)
                 message = repository / "message"
                 message.write_text("clean\n", encoding="utf-8")
                 direct = self.hook_run(repository, "commit-msg", str(message), agent=agent)
@@ -1363,62 +1384,31 @@ class GitLeaks(unittest.TestCase):
                 self.stage(repository, "leak.txt", "Quillfeather Lane 9\n", agent)
                 self.assert_clean(repository, agent, "commit", "--no-verify", "-m", "unchecked")
 
-            with self.subTest(agent=agent, case="real-git"):
-                repository = self.repository(agent)
-                self.stage(repository, "leak.txt", "Quillfeather Lane 9\n", agent)
-                result = self.git_run(repository, "commit", "-m", "unchecked", agent=agent, real=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_unreadable_lists_refuse_git_commits(self) -> None:
-        invalid = self.root / "invalid.sops.yaml"
-        invalid.write_text("terms: clear text\n", encoding="utf-8")
-        empty_sops_home = self.root / "empty-sops-home"
-        empty_sops_home.mkdir()
-        blank = encrypt_yaml("terms: |\n  # blank\n\n")
-        no_sops = os.pathsep.join(
-            entry for entry in self.person["PATH"].split(os.pathsep) if not (Path(entry) / "sops").exists()
-        )
-        cases = (
-            ("sops", {"PATH": no_sops}, "install sops with mise"),
-            ("key", {"DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)}, "add this machine's age key to .sops.yaml"),
-            ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
-            ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
-            ("blank", {"DOTFILES_LEAK_TERMS_FILE": str(blank)}, "add a term with sops edit leak-terms.sops.yaml"),
-        )
+        cases = unreadable_lists(self.root, self.person["PATH"])
         for agent in (False, True):
+            with self.subTest(agent=agent, case="healthy-list-control"):
+                repository = self.repository(agent)
+                self.stage(repository, "clean.txt", "clean\n", agent)
+                before = self.head(repository, agent)
+                self.assert_clean(repository, agent, "commit", "-m", "clean")
+                self.assertNotEqual(self.head(repository, agent), before)
             for label, extra, correction in cases:
                 with self.subTest(agent=agent, case=label):
                     repository = self.repository(agent)
                     self.stage(repository, "clean.txt", "clean\n", agent)
                     before = self.head(repository, agent)
-                    environment = self.environment(agent, **extra)
-                    if label == "key":
-                        for name in ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD"):
-                            environment.pop(name, None)
-                    result = subprocess.run(
-                        ["git", "commit", "--allow-empty", "-m", "clean"],
-                        cwd=repository,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    result = self.git_run(repository, "commit", "-m", "clean", agent=agent, extra=extra)
                     self.assertNotEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(correction, result.stderr)
+                    self.assert_one_correction_line(result, correction)
                     self.assertEqual(self.head(repository, agent), before)
-                    self.assert_hidden(result)
 
 
-class JjLeaks(unittest.TestCase):
-    session = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
-    marker_names = (
-        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
-        "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
-    )
+class JjLeaks(LeakTestCase):
+    session = SESSION
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.home = self.root / "home"
         self.xdg = self.root / "xdg"
         self.tmpdir = self.root / "tmp"
@@ -1426,22 +1416,16 @@ class JjLeaks(unittest.TestCase):
             directory.mkdir()
         self.config = self.root / "jjconfig.toml"
         self.config.write_text("[user]\nname = \"Leak Test\"\nemail = \"leak-test@example.invalid\"\n", encoding="utf-8")
-        base = {
-            name: value
-            for name, value in os.environ.items()
-            if name not in self.marker_names
-            and not name.startswith(("PI_", "LEGION_", "GIT_CONFIG_"))
-            and name not in {"ENVOY_SESSION_ID", "CLAUDECODE", "AGENTBOX_SESSION", "AGENT_SHIM_AGENT",
-                             "JJ_EDITOR", "VISUAL", "EDITOR"}
-        }
         self.person = {
-            **base,
+            **base_environment("JJ_EDITOR", "VISUAL", "EDITOR"),
             **fixture_environment(),
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.xdg),
             "TMPDIR": str(self.tmpdir),
             "PATH": f"{ROOT / 'shims'}{os.pathsep}{os.environ['PATH']}",
             "JJ_CONFIG": str(self.config),
+            # One commit timestamp, so a snapshot of the same working copy gives the same commit ids anywhere.
+            "JJ_TIMESTAMP": "2026-01-01T00:00:00+00:00",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
         }
@@ -1449,23 +1433,19 @@ class JjLeaks(unittest.TestCase):
         self.jj_binary = real_jj()
         self.repositories = 0
         self.editors = 0
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+        self.copies = 0
 
     def environment(self, agent: bool, **extra: str) -> dict[str, str]:
         return {**(self.agent if agent else self.person), **extra}
 
     def jj(self, repository: Path, *arguments: str, agent: bool, real: bool = False, input: str | bytes | None = None,
            extra: dict[str, str] | None = None, text: bool = True) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        return self.launch(
             [self.jj_binary if real else "jj", *arguments],
             cwd=repository,
             env=self.environment(agent, **(extra or {})),
             input=input,
-            capture_output=True,
             text=text,
-            check=False,
         )
 
     def repository(self, agent: bool) -> Path:
@@ -1482,6 +1462,8 @@ class JjLeaks(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
 
     def state(self, repository: Path, agent: bool) -> tuple[str, str]:
+        """Each visible commit's change and commit id, its parents' change and commit ids and its description, and
+        @'s change id; read without a snapshot."""
         listed = self.jj(
             repository,
             "--ignore-working-copy",
@@ -1490,33 +1472,42 @@ class JjLeaks(unittest.TestCase):
             "all()",
             "--no-graph",
             "-T",
-            'change_id ++ "\\n" ++ parents.map(|p| p.change_id()).join(",") ++ "\\n" ++ description ++ "\\n---\\n"',
+            'change_id ++ " " ++ commit_id ++ "\\n" ++ parents.map(|p| p.change_id() ++ ":" ++ p.commit_id()).join(",")'
+            ' ++ "\\n" ++ json(description) ++ "\\n"',
             agent=agent,
             real=True,
         )
         current = self.jj(repository, "--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "change_id", agent=agent, real=True)
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertEqual(current.returncode, 0, current.stderr)
+        self.assertTrue(listed.stdout and current.stdout, "jj listed no commit (UNKNOWN)")
         return listed.stdout, current.stdout
 
-    def snapshot_state(self, repository: Path, agent: bool) -> tuple[str, str]:
-        status = self.jj(repository, "status", agent=agent)
+    def snapshot_copy(self, repository: Path, agent: bool) -> Path:
+        """An equivalent copy of REPOSITORY after a plain snapshot (`jj status`); REPOSITORY itself stays as it was,
+        its working copy not yet snapshotted."""
+        target = repository / ".jj" / "repo" / "store" / "git_target"
+        if target.exists():
+            self.assertFalse(Path(target.read_text(encoding="utf-8").strip()).is_absolute(), "the copy would share git")
+        self.copies += 1
+        copy = self.root / f"snapshot-copy-{self.copies}"
+        copied = self.launch(["cp", "-a", "--", str(repository), str(copy)])
+        self.assertEqual(copied.returncode, 0, copied.stderr)
+        status = self.jj(copy, "status", agent=agent, real=True)
         self.assertEqual(status.returncode, 0, status.stderr)
-        return self.state(repository, agent)
+        return copy
 
-    def assert_hidden(self, result: subprocess.CompletedProcess[str]) -> None:
-        output = result.stdout + result.stderr
-        for term in TEST_TERMS:
-            self.assertNotIn(term.casefold(), output.casefold())
+    def expected_state(self, repository: Path, agent: bool) -> tuple[str, str]:
+        return self.state(self.snapshot_copy(repository, agent), agent)
 
     def assert_refused(self, repository: Path, agent: bool, place: str, *arguments: str,
                        input: str | bytes | None = None, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        before = self.snapshot_state(repository, agent)
+        expected = self.expected_state(repository, agent)
         result = self.jj(repository, *arguments, agent=agent, input=input, extra=extra)
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"leak terms: {place}: listed leak term", result.stderr)
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
-        self.assertEqual(self.state(repository, agent), before)
+        self.assertEqual(self.state(repository, agent), expected)
         self.assert_hidden(result)
         return result
 
@@ -1532,40 +1523,36 @@ class JjLeaks(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
+    def commit_id(self, repository: Path, agent: bool, revision: str) -> str:
+        result = self.jj(repository, "--ignore-working-copy", "log", "-r", revision, "--no-graph", "-T", "commit_id", agent=agent, real=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def changed_paths(self, repository: Path, agent: bool, revision: str) -> list[str]:
+        result = self.jj(repository, "--ignore-working-copy", "diff", "--name-only", "-r", revision, agent=agent, real=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
     def editor(self, text: str, status: int = 0) -> tuple[str, Path]:
-        self.editors += 1
-        script = self.root / f"editor-{self.editors}.sh"
-        arguments = self.root / f"editor-{self.editors}.args"
-        script.write_text(
-            "#!/bin/sh\n"
-            f"printf '%s\\n' \"$@\" > {shlex.quote(str(arguments))}\n"
-            "for argument in \"$@\"; do\n"
-            "    if [ -f \"$argument\" ]; then file=$argument; fi\n"
-            "done\n"
-            f"printf '%s' {shlex.quote(text)} > \"$file\"\n"
-            f"exit {status}\n",
-            encoding="utf-8",
-        )
-        script.chmod(0o755)
-        return str(script), arguments
+        script, arguments, _ = self.editor_with_environment(text, status)
+        return script, arguments
 
     def editor_with_environment(self, text: str, status: int = 0) -> tuple[str, Path, Path]:
         self.editors += 1
         script = self.root / f"editor-{self.editors}.sh"
         arguments = self.root / f"editor-{self.editors}.args"
         environment = self.root / f"editor-{self.editors}.environment"
-        script.write_text(
+        write_executable(
+            script,
             "#!/bin/sh\n"
             f"printf '%s\\n' \"$@\" > {shlex.quote(str(arguments))}\n"
-            f"printf '%s' \"$JJ_LEAK_TEST_EDITOR\" > {shlex.quote(str(environment))}\n"
+            f"printf '%s' \"${{JJ_LEAK_TEST_EDITOR-}}\" > {shlex.quote(str(environment))}\n"
             "for argument in \"$@\"; do\n"
             "    if [ -f \"$argument\" ]; then file=$argument; fi\n"
             "done\n"
             f"printf '%s' {shlex.quote(text)} > \"$file\"\n"
             f"exit {status}\n",
-            encoding="utf-8",
         )
-        script.chmod(0o755)
         return str(script), arguments, environment
 
     def set_user_editor(self, value: str) -> None:
@@ -1575,73 +1562,71 @@ class JjLeaks(unittest.TestCase):
         )
 
     def test_jj_term_refuses_target_diffs_and_controls(self) -> None:
-        commands = (
-            ("commit", "-m", "ok"),
-            ("ci", "-m", "ok"),
-            ("describe", "-m", "ok"),
-            ("desc", "-m", "ok"),
-            ("new",),
-            ("new", "root()"),
-        )
-        tool = self.root / "test-diff-tool"
-        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        tool.chmod(0o755)
-        tool_arguments = (
-            "--config",
-            f"merge-tools.fixture.program={json.dumps(str(tool))}",
-            "commit",
-            "--tool",
-            "fixture",
-            "-m",
-            "ok",
+        tool = write_executable(self.root / "test-diff-tool", "#!/bin/sh\nexit 0\n")
+        # The test diff tool keeps every change jj shows it: as ui.diff-editor for -i, and by name for --tool.
+        tool_config = ("--config", f"merge-tools.fixture.program={json.dumps(str(tool))}", "--config", "ui.diff-editor=fixture")
+        # (label, the file just written and not yet snapshotted, arguments)
+        cases = (
+            ("commit", "note.txt", ("commit", "-m", "ok")),
+            ("ci", "note.txt", ("ci", "-m", "ok")),
+            ("commit-fileset", "dirty.txt", ("commit", "dirty.txt", "-m", "ok")),
+            ("commit-interactive", "note.txt", (*tool_config, "commit", "-i", "-m", "ok")),
+            ("commit-tool", "note.txt", (*tool_config, "commit", "--tool", "fixture", "-m", "ok")),
+            ("describe", "note.txt", ("describe", "-m", "ok")),
+            ("desc", "note.txt", ("desc", "-m", "ok")),
+            ("new", "note.txt", ("new",)),
+            ("new-root", "note.txt", ("new", "root()")),
         )
         for agent in (False, True):
-            for arguments in commands:
-                with self.subTest(agent=agent, command=arguments):
+            for label, path, arguments in cases:
+                with self.subTest(agent=agent, case=label):
                     repository = self.repository(agent)
-                    self.write(repository, "note.txt", "Quillfeather Lane 9\n")
-                    if arguments[0] in {"describe", "desc"}:
-                        self.snapshot_state(repository, agent)
-                        commit_id = self.jj(
-                            repository,
-                            "--ignore-working-copy",
-                            "log",
-                            "-r",
-                            "@",
-                            "--no-graph",
-                            "-T",
-                            "commit_id",
-                            agent=agent,
-                            real=True,
-                        )
-                        self.assertEqual(commit_id.returncode, 0, commit_id.stderr)
-                        place = f"commit {commit_id.stdout.strip()[:12]} note.txt:1"
-                    else:
-                        place = "note.txt:1"
+                    self.write(repository, path, "Quillfeather Lane 9\n")
+                    place = f"{path}:1"
+                    if label in {"describe", "desc"}:
+                        # The id the snapshot gives @, read from an equivalent copy, so the subject stays unsnapshotted.
+                        place = f"commit {self.commit_id(self.snapshot_copy(repository, agent), agent, '@')[:12]} {place}"
                     self.assert_refused(repository, agent, place, *arguments)
 
                     clean = self.repository(agent)
-                    self.write(clean, "note.txt", "clean\n")
+                    self.write(clean, path, "clean\n")
                     self.assert_clean(clean, agent, *arguments)
+                    if label.startswith(("commit", "ci")):
+                        self.assertEqual((self.description(clean, agent, "@-"), self.changed_paths(clean, agent, "@-")), ("ok\n", [path]))
+                    elif label in {"describe", "desc"}:
+                        self.assertEqual((self.description(clean, agent), self.changed_paths(clean, agent, "@")), ("ok\n", [path]))
+                    elif label == "new":
+                        self.assertEqual((self.changed_paths(clean, agent, "@-"), self.changed_paths(clean, agent, "@")), ([path], []))
+                    else:
+                        self.assertEqual(self.commit_id(clean, agent, "@-"), "0" * 40)
 
-            with self.subTest(agent=agent, case="interactive"):
-                repository = self.repository(agent)
-                self.write(repository, "note.txt", "Quillfeather Lane 9\n")
-                self.assert_refused(repository, agent, "note.txt:1", "commit", "-i", "-m", "ok")
-                clean = self.repository(agent)
-                self.write(clean, "note.txt", "clean\n")
-                self.assert_clean(clean, agent, *tool_arguments)
+            for option in ("-i", "--tool=fixture"):
+                with self.subTest(agent=agent, case=f"{option}-reads-all-of-@"):
+                    # A diff tool may select any change, so a fileset does not narrow what is read.
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    self.write(repository, "dirty.txt", "Quillfeather Lane 9\n")
+                    self.assert_refused(repository, agent, "dirty.txt:1", *tool_config, "commit", option, "clean.txt", "-m", "ok")
+                    clean = self.repository(agent)
+                    self.write(clean, "clean.txt", "clean\n")
+                    self.write(clean, "dirty.txt", "also clean\n")
+                    self.assert_clean(clean, agent, *tool_config, "commit", option, "clean.txt", "-m", "ok")
+                    self.assertEqual(self.changed_paths(clean, agent, "@-"), ["clean.txt"])
 
             with self.subTest(agent=agent, case="path"):
                 repository = self.repository(agent)
                 self.write(repository, "zorbleplex.txt", "clean\n")
                 self.assert_refused(repository, agent, "<listed term>.txt", "commit", "-m", "ok")
+                clean = self.repository(agent)
+                self.write(clean, "clean-name.txt", "clean\n")
+                self.assert_clean(clean, agent, "commit", "-m", "ok")
 
             with self.subTest(agent=agent, case="limited-fileset"):
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.write(repository, "dirty.txt", "Quillfeather Lane 9\n")
                 self.assert_clean(repository, agent, "commit", "clean.txt", "-m", "ok")
+                self.assertEqual(self.changed_paths(repository, agent, "@-"), ["clean.txt"])
 
     def test_jj_message_editor_config_precedes_separator(self) -> None:
         for agent in (False, True):
@@ -1682,43 +1667,21 @@ class JjLeaks(unittest.TestCase):
 
     def test_jj_term_checks_each_described_revision_and_alias(self) -> None:
         for agent in (False, True):
-            with self.subTest(agent=agent, case="adds-then-removes"):
-                repository = self.repository(agent)
-                self.write(repository, "note.txt", "Quillfeather Lane 9\n")
-                made = self.jj(repository, "describe", "-m", "adds", agent=agent, real=True)
-                self.assertEqual(made.returncode, 0, made.stderr)
-                made = self.jj(repository, "commit", "-m", "removes", agent=agent, real=True)
-                self.assertEqual(made.returncode, 0, made.stderr)
-                self.write(repository, "note.txt", "clean\n")
-                made = self.jj(repository, "describe", "-m", "removes", agent=agent, real=True)
-                self.assertEqual(made.returncode, 0, made.stderr)
-                made = self.jj(repository, "commit", "-m", "next", agent=agent, real=True)
-                self.assertEqual(made.returncode, 0, made.stderr)
-                commit_id = self.jj(
-                    repository,
-                    "--ignore-working-copy",
-                    "log",
-                    "-r",
-                    "@--",
-                    "--no-graph",
-                    "-T",
-                    "commit_id",
-                    agent=agent,
-                    real=True,
-                )
-                self.assertEqual(commit_id.returncode, 0, commit_id.stderr)
-                self.assert_refused(
-                    repository,
-                    agent,
-                    f"commit {commit_id.stdout.strip()[:12]} note.txt:1",
-                    "describe",
-                    "-r",
-                    "@-",
-                    "-r",
-                    "@--",
-                    "-m",
-                    "ok",
-                )
+            for added, refused in (("Quillfeather Lane 9", True), ("clean first", False)):
+                with self.subTest(agent=agent, case="adds-then-removes", refused=refused):
+                    # @-- adds the line and @- removes it, so only @--'s own diff holds it.
+                    repository = self.repository(agent)
+                    for text, message in ((added, "adds"), ("clean\n", "removes")):
+                        self.write(repository, "note.txt", f"{text}\n")
+                        made = self.jj(repository, "commit", "-m", message, agent=agent, real=True)
+                        self.assertEqual(made.returncode, 0, made.stderr)
+                    arguments = ("describe", "-r", "@-", "-r", "@--", "-m", "ok")
+                    if refused:
+                        place = f"commit {self.commit_id(repository, agent, '@--')[:12]} note.txt:1"
+                        self.assert_refused(repository, agent, place, *arguments)
+                    else:
+                        self.assert_clean(repository, agent, *arguments)
+                        self.assertEqual((self.description(repository, agent, "@-"), self.description(repository, agent, "@--")), ("ok\n", "ok\n"))
 
             with self.subTest(agent=agent, case="alias"):
                 self.config.write_text(
@@ -1728,11 +1691,16 @@ class JjLeaks(unittest.TestCase):
                 repository = self.repository(agent)
                 self.write(repository, "note.txt", "Quillfeather Lane 9\n")
                 self.assert_refused(repository, agent, "note.txt:1", "c", "-m", "ok")
+                clean = self.repository(agent)
+                self.write(clean, "note.txt", "clean\n")
+                self.assert_clean(clean, agent, "c", "-m", "ok")
+                self.assertEqual(self.description(clean, agent, "@-"), "ok\n")
 
     def test_jj_message_refuses_forms_and_keeps_stored_messages(self) -> None:
         commands = (("describe",), ("commit",), ("new",))
         for agent in (False, True):
             for command in commands:
+                revision = "@-" if command == ("commit",) else "@"
                 with self.subTest(agent=agent, command=command):
                     repository = self.repository(agent)
                     self.write(repository, "clean.txt", "clean\n")
@@ -1741,13 +1709,32 @@ class JjLeaks(unittest.TestCase):
                     clean = self.repository(agent)
                     self.write(clean, "clean.txt", "clean\n")
                     self.assert_clean(clean, agent, *command, "--message=first", "-msecond")
-                    revision = "@-" if command == ("commit",) else "@"
                     self.assertEqual(self.description(clean, agent, revision), "first\n\nsecond\n")
 
-            with self.subTest(agent=agent, case="stdin-refused"):
-                repository = self.repository(agent)
-                self.write(repository, "clean.txt", "clean\n")
-                self.assert_refused(repository, agent, "commit message line 1", "describe", "--stdin", input="Quillfeather Lane 9")
+                with self.subTest(agent=agent, command=command, case="jj-line"):
+                    # Outside the editor jj keeps a line of -m that starts with `JJ:`.
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    self.assert_refused(repository, agent, "commit message line 1", *command, "-m", "JJ: Quillfeather Lane 9")
+                    clean = self.repository(agent)
+                    self.write(clean, "clean.txt", "clean\n")
+                    self.assert_clean(clean, agent, *command, "-m", "JJ: Quillfeather Lane")
+                    self.assertEqual(self.description(clean, agent, revision), "JJ: Quillfeather Lane\n")
+
+            for text, place, stored in (
+                ("Quillfeather Lane 9", "commit message line 1", None),
+                ("clean\nJJ: Quillfeather Lane 9\n", "commit message line 2", None),
+                ("Quillfeather Lane", None, "Quillfeather Lane\n"),
+                ("clean\nJJ: Quillfeather Lane\n", None, "clean\nJJ: Quillfeather Lane\n"),
+            ):
+                with self.subTest(agent=agent, case="stdin", refused=place is not None, jj_line="JJ:" in text):
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    if place is not None:
+                        self.assert_refused(repository, agent, place, "describe", "--stdin", input=text)
+                    else:
+                        self.assert_clean(repository, agent, "describe", "--stdin", input=text)
+                        self.assertEqual(self.description(repository, agent), stored)
 
             with self.subTest(agent=agent, case="stdin-preserves-bytes"):
                 for text in ("", "no final newline", "three\n\n\n"):
@@ -1763,7 +1750,7 @@ class JjLeaks(unittest.TestCase):
             with self.subTest(agent=agent, case="stdin-nul"):
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
-                before = self.snapshot_state(repository, agent)
+                before = self.expected_state(repository, agent)
                 result = self.jj(
                     repository,
                     "describe",
@@ -1776,8 +1763,7 @@ class JjLeaks(unittest.TestCase):
                 output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
                 self.assertIn("cannot read a NUL byte", output)
                 self.assertEqual(self.state(repository, agent), before)
-                for term in TEST_TERMS:
-                    self.assertNotIn(term.casefold(), output.casefold())
+                self.assert_hidden(output)
 
     def test_jj_message_editor_options_and_unknown_option_refuse(self) -> None:
         for agent in (False, True):
@@ -1786,12 +1772,22 @@ class JjLeaks(unittest.TestCase):
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_refused(repository, agent, "commit message line 1", "describe", extra={"JJ_EDITOR": editor})
+                editor, arguments = self.editor("ok\n")
+                clean = self.repository(agent)
+                self.write(clean, "clean.txt", "clean\n")
+                self.assert_clean(clean, agent, "describe", extra={"JJ_EDITOR": editor})
+                self.assertEqual((self.editor_argv(arguments), self.description(clean, agent)), (["<path>"], "ok\n"))
 
             with self.subTest(agent=agent, case="editor-over-message"):
                 editor, _ = self.editor("Quillfeather Lane 9\n")
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_refused(repository, agent, "commit message line 1", "describe", "--editor", "-m", "clean", extra={"JJ_EDITOR": editor})
+                editor, _ = self.editor("clean\n")
+                clean = self.repository(agent)
+                self.write(clean, "clean.txt", "clean\n")
+                self.assert_clean(clean, agent, "describe", "--editor", "-m", "Quillfeather Lane 9", extra={"JJ_EDITOR": editor})
+                self.assertEqual(self.description(clean, agent), "clean\n")
 
             with self.subTest(agent=agent, case="user-string"):
                 editor, arguments = self.editor("clean from editor\n")
@@ -1799,7 +1795,7 @@ class JjLeaks(unittest.TestCase):
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_clean(repository, agent, "describe")
-                self.assertEqual(arguments.read_text(encoding="utf-8").splitlines()[-1].endswith(".jjdescription"), True)
+                self.assertEqual(self.editor_argv(arguments), ["--wait", "<path>"])
 
             with self.subTest(agent=agent, case="user-array-path"):
                 editor, arguments = self.editor("clean array editor\n")
@@ -1807,9 +1803,7 @@ class JjLeaks(unittest.TestCase):
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_clean(repository, agent, "describe")
-                values = arguments.read_text(encoding="utf-8").splitlines()
-                self.assertTrue(values[0].endswith(".jjdescription"))
-                self.assertEqual(values[1], "--wait")
+                self.assertEqual(self.editor_argv(arguments), ["<path>", "--wait"])
 
             with self.subTest(agent=agent, case="user-structured"):
                 editor, arguments, configured_environment = self.editor_with_environment("clean structured editor\n")
@@ -1821,7 +1815,7 @@ class JjLeaks(unittest.TestCase):
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_clean(repository, agent, "describe")
-                self.assertTrue(arguments.read_text(encoding="utf-8").splitlines()[0].endswith(".jjdescription"))
+                self.assertEqual(self.editor_argv(arguments), ["<path>"])
                 self.assertEqual(configured_environment.read_text(encoding="utf-8"), "configured")
 
             with self.subTest(agent=agent, case="visual-and-editor"):
@@ -1831,28 +1825,48 @@ class JjLeaks(unittest.TestCase):
                     repository = self.repository(agent)
                     self.write(repository, "clean.txt", "clean\n")
                     self.assert_clean(repository, agent, "describe", extra={variable: editor})
-                    self.assertTrue(arguments.read_text(encoding="utf-8").splitlines()[-1].endswith(".jjdescription"))
+                    self.assertEqual(self.editor_argv(arguments), ["<path>"])
+                    self.assertEqual(self.description(repository, agent), "clean environment editor\n")
 
             with self.subTest(agent=agent, case="command-config-editor"):
                 editor, arguments = self.editor("clean command config editor\n")
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_clean(repository, agent, "describe", "--config", f"ui.editor={json.dumps(editor + ' --wait')}")
-                self.assertTrue(arguments.read_text(encoding="utf-8").splitlines()[-1].endswith(".jjdescription"))
+                self.assertEqual(self.editor_argv(arguments), ["--wait", "<path>"])
+
+            with self.subTest(agent=agent, case="line-variable"):
+                # jj puts the first line after the leading `JJ:` lines where an argument says $line; the wrapper
+                # must give the editor that same argv.
+                recorded = []
+                for real in (True, False):
+                    editor, arguments = self.editor("clean line editor\n")
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    configured = f"ui.editor={json.dumps([editor, '+$line', '$path'])}"
+                    ran = self.jj(repository, "--config", configured, "describe", agent=agent, real=real)
+                    self.assertEqual(ran.returncode, 0, ran.stderr)
+                    recorded.append(self.editor_argv(arguments))
+                self.assertEqual(recorded[0], ["+1", "<path>"])
+                self.assertEqual(recorded[1], recorded[0])
 
             with self.subTest(agent=agent, case="editor-failure"):
                 editor, _ = self.editor("clean\n", status=19)
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
+                expected = self.expected_state(repository, agent)
                 result = self.jj(repository, "describe", agent=agent, extra={"JJ_EDITOR": editor})
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Failed to edit description", result.stderr)
+                self.assertIn("exited with exit status: 19", result.stderr)
+                self.assertEqual(self.state(repository, agent), expected)
 
             with self.subTest(agent=agent, case="jj-lines-clean"):
                 editor, _ = self.editor("JJ: Quillfeather Lane 9\nclean\nJJ: ignore-rest\nQuillfeather Lane 9\n")
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
                 self.assert_clean(repository, agent, "describe", extra={"JJ_EDITOR": editor})
+                self.assertEqual(self.description(repository, agent), "clean\n")
 
             for command, option in (
                 ("describe", "--unknown-option"),
@@ -1860,9 +1874,10 @@ class JjLeaks(unittest.TestCase):
                 ("new", "-d"),
             ):
                 with self.subTest(agent=agent, case=f"unknown-{command}-{option}"):
+                    # Refused before any jj command runs, so nothing changes: not even a snapshot.
                     repository = self.repository(agent)
                     self.write(repository, "clean.txt", "clean\n")
-                    before = self.snapshot_state(repository, agent)
+                    before = self.state(repository, agent)
                     result = self.jj(repository, command, option, "-m", "clean", agent=agent)
                     self.assertNotEqual(result.returncode, 0, result.stderr)
                     self.assertIn(
@@ -1872,22 +1887,28 @@ class JjLeaks(unittest.TestCase):
                     self.assertEqual(self.state(repository, agent), before)
                     self.assert_hidden(result)
 
-            with self.subTest(agent=agent, case="repository-global"):
-                repository = self.repository(agent)
-                self.write(repository, "clean.txt", "clean\n")
-                before = self.snapshot_state(repository, agent)
-                result = subprocess.run(
-                    ["jj", "-R", str(repository), "describe", "-m", "Quillfeather Lane 9"],
-                    cwd=self.root,
-                    env=self.environment(agent),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertNotEqual(result.returncode, 0, result.stderr)
-                self.assertIn("leak terms: commit message line 1: listed leak term", result.stderr)
-                self.assertEqual(self.state(repository, agent), before)
-                self.assert_hidden(result)
+            for label, before_command in (("before-command", True), ("after-command", False)):
+                with self.subTest(agent=agent, case=f"repository-option-{label}"):
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    expected = self.expected_state(repository, agent)
+                    location = ("-R", str(repository))
+                    arguments = (*location, "describe") if before_command else ("describe", *location)
+                    result = self.jj(self.root, *arguments, "-m", "Quillfeather Lane 9", agent=agent)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("leak terms: commit message line 1: listed leak term", result.stderr)
+                    self.assertEqual(self.state(repository, agent), expected)
+                    self.assert_hidden(result)
+                    clean = self.repository(agent)
+                    self.write(clean, "clean.txt", "clean\n")
+                    location = ("-R", str(clean))
+                    arguments = (*location, "describe") if before_command else ("describe", *location)
+                    self.assert_clean(self.root, agent, *arguments, "-m", "Quillfeather Lane")
+                    self.assertEqual(self.description(clean, agent), "Quillfeather Lane\n")
+
+    def editor_argv(self, arguments: Path) -> list[str]:
+        """The arguments a test editor recorded, with the description file it got shown as <path>."""
+        return ["<path>" if value.endswith(".jjdescription") else value for value in arguments.read_text(encoding="utf-8").splitlines()]
 
 
     def test_jj_message_editor_strings_split_as_real_jj(self) -> None:
@@ -1945,6 +1966,7 @@ class JjLeaks(unittest.TestCase):
                     "Quillfeather Lane 9",
                     extra={"JJ_EDITOR": editor},
                 )
+                self.assertEqual(self.description(repository, agent, "@-"), "clean\n")
             with self.subTest(agent=agent, case="editor-introduces-leaking-message"):
                 editor, _ = self.editor("Quillfeather Lane 9\n")
                 repository = self.repository(agent)
@@ -1972,66 +1994,49 @@ class JjLeaks(unittest.TestCase):
                     repository = self.repository(agent)
                     self.write(repository, "clean.txt", "clean\n")
                     self.assert_refused(repository, agent, "commit message line 1", "describe", extra={"JJ_EDITOR": editor})
+            with self.subTest(agent=agent, case="clean-header-line"):
+                editor, _ = self.editor("clean\nJJ: describe Quillfeather Lane 9 -------\nmore\n")
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "describe", extra={"JJ_EDITOR": editor})
+                self.assertEqual(self.description(repository, agent), "clean\nmore\n")
+
+    def bulk_editor(self, awk_program: str) -> str:
+        """An editor that rewrites the multi-revision description file with AWK_PROGRAM."""
+        self.editors += 1
+        return str(write_executable(
+            self.root / f"bulk-editor-{self.editors}.sh",
+            f"#!/bin/sh\nawk {shlex.quote(awk_program)} \"$1\" > \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+        ))
 
     def test_jj_message_bulk_editor_checks_only_validated_sections(self) -> None:
+        # jj writes the two sections parents first: @-- (first), then @- (second). Each editor adds `JJ: ignore-rest`
+        # below the first description's own line.
+        ignore_first = (
+            '/^JJ: describe / { count++; print; if (count == 1) below = 1; next } '
+            'below { print; print "JJ: ignore-rest"; below = 0; next } { print }'
+        )
         for agent in (False, True):
-            with self.subTest(agent=agent, case="kept-second-section"):
-                repository = self.repository(agent)
-                self.write(repository, "first.txt", "first\n")
-                self.assert_clean(repository, agent, "commit", "-m", "first")
-                self.write(repository, "second.txt", "second\n")
-                self.assert_clean(repository, agent, "commit", "-m", "second")
-                editor = self.root / f"bulk-kept-{agent}.sh"
-                editor.write_text(
-                    "#!/bin/sh\n"
-                    "file=$1\n"
-                    "awk '/^JJ: describe / { count++; print; if (count == 1) print \"JJ: ignore-rest\"; next } { print } "
-                    "END { print \"Quillfeather Lane 9\" }' \"$file\" > \"$file.new\"\n"
-                    "mv \"$file.new\" \"$file\"\n",
-                    encoding="utf-8",
-                )
-                editor.chmod(0o755)
-                before = self.snapshot_state(repository, agent)
-                result = self.jj(
-                    repository,
-                    "describe",
-                    "-r",
-                    "@-",
-                    "-r",
-                    "@--",
-                    agent=agent,
-                    extra={"JJ_EDITOR": str(editor)},
-                )
-                self.assertNotEqual(result.returncode, 0, result.stderr)
-                self.assertIn("leak terms: description of ", result.stderr)
-                self.assertEqual(self.state(repository, agent), before)
-                self.assert_hidden(result)
-            with self.subTest(agent=agent, case="ignored-first-section"):
-                repository = self.repository(agent)
-                self.write(repository, "first.txt", "first\n")
-                self.assert_clean(repository, agent, "commit", "-m", "first")
-                self.write(repository, "second.txt", "second\n")
-                self.assert_clean(repository, agent, "commit", "-m", "second")
-                editor = self.root / f"bulk-ignored-{agent}.sh"
-                editor.write_text(
-                    "#!/bin/sh\n"
-                    "file=$1\n"
-                    "awk '/^JJ: describe / { count++; print; if (count == 1) { print \"JJ: ignore-rest\"; print \"Quillfeather Lane 9\" }; next } { print }' "
-                    "\"$file\" > \"$file.new\"\n"
-                    "mv \"$file.new\" \"$file\"\n",
-                    encoding="utf-8",
-                )
-                editor.chmod(0o755)
-                self.assert_clean(
-                    repository,
-                    agent,
-                    "describe",
-                    "-r",
-                    "@-",
-                    "-r",
-                    "@--",
-                    extra={"JJ_EDITOR": str(editor)},
-                )
+            for label, program in (
+                # The term on a kept line of the second description, after the file's last `JJ:` line.
+                ("kept-second-section", ignore_first + ' END { print "Quillfeather Lane 9" }'),
+                # The term only after `JJ: ignore-rest`, in the first description.
+                ("ignored-first-section", ignore_first.replace('print "JJ: ignore-rest";', 'print "JJ: ignore-rest"; print "Quillfeather Lane 9";')),
+            ):
+                with self.subTest(agent=agent, case=label):
+                    repository = self.repository(agent)
+                    for name in ("first", "second"):
+                        self.write(repository, f"{name}.txt", f"{name}\n")
+                        self.assert_clean(repository, agent, "commit", "-m", name)
+                    arguments = ("describe", "-r", "@-", "-r", "@--")
+                    editor = {"JJ_EDITOR": self.bulk_editor(program)}
+                    if label == "kept-second-section":
+                        place = f"description of {self.commit_id(repository, agent, '@-')[:12]} line 3"
+                        self.assert_refused(repository, agent, place, *arguments, extra=editor)
+                    else:
+                        self.assert_clean(repository, agent, *arguments, extra=editor)
+                    # Both descriptions stay as they were.
+                    self.assertEqual((self.description(repository, agent, "@--"), self.description(repository, agent, "@-")), ("first\n", "second\n"))
 
     def test_jj_message_editor_wrapper_loop_refuses_before_a_child_runs(self) -> None:
         for agent in (False, True):
@@ -2039,22 +2044,19 @@ class JjLeaks(unittest.TestCase):
                 self.set_user_editor(json.dumps(str(CHECK)))
                 repository = self.repository(agent)
                 self.write(repository, "clean.txt", "clean\n")
-                before = self.snapshot_state(repository, agent)
+                expected = self.expected_state(repository, agent)
                 result = self.jj(repository, "describe", agent=agent)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertIn("configured jj editor resolves to leak-terms-check", result.stderr)
-                self.assertEqual(self.state(repository, agent), before)
+                self.assertEqual(self.state(repository, agent), expected)
                 self.assert_hidden(result)
 
             with self.subTest(agent=agent, case="wrapper"):
                 description = self.root / f"description-{agent}"
                 description.write_text("clean\n", encoding="utf-8")
-                result = subprocess.run(
+                result = self.launch(
                     [str(CHECK), "jj-editor", str(description)],
                     env=self.environment(agent, DOTFILES_JJ_EDITOR=json.dumps([str(CHECK), "jj-editor"])),
-                    capture_output=True,
-                    text=True,
-                    check=False,
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 2, result.stderr)
@@ -2066,23 +2068,14 @@ class JjLeaks(unittest.TestCase):
                 description = self.root / f"active-description-{agent}"
                 description.write_text("clean\n", encoding="utf-8")
                 ran = self.root / f"unexpected-editor-child-{agent}"
-                editor = self.root / f"unexpected-editor-{agent}.sh"
-                editor.write_text(
-                    "#!/bin/sh\n"
-                    f": > {shlex.quote(str(ran))}\n",
-                    encoding="utf-8",
-                )
-                editor.chmod(0o755)
-                result = subprocess.run(
+                editor = write_executable(self.root / f"unexpected-editor-{agent}.sh", f"#!/bin/sh\n: > {shlex.quote(str(ran))}\n")
+                result = self.launch(
                     [str(CHECK), "jj-editor", str(description)],
                     env=self.environment(
                         agent,
                         DOTFILES_JJ_EDITOR=json.dumps([str(editor)]),
                         DOTFILES_JJ_EDITOR_WRAPPER_ACTIVE="1",
                     ),
-                    capture_output=True,
-                    text=True,
-                    check=False,
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 2, result.stderr)
@@ -2091,7 +2084,7 @@ class JjLeaks(unittest.TestCase):
                 self.assert_hidden(result)
 
     def test_jj_without_a_real_binary_refuses_without_recursing(self) -> None:
-        result = subprocess.run(
+        result = self.launch(
             [str(ROOT / "shims" / "jj"), "status"],
             cwd=self.root,
             env=self.environment(
@@ -2099,9 +2092,6 @@ class JjLeaks(unittest.TestCase):
                 PATH=str(ROOT / "shims"),
                 DOTFILES_DIR=str(self.root / "missing-dotfiles"),
             ),
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=10,
         )
         self.assertEqual(result.returncode, 127, result.stderr)
@@ -2109,58 +2099,34 @@ class JjLeaks(unittest.TestCase):
         self.assertNotIn("recurs", result.stderr.casefold())
 
     def test_unreadable_lists_refuse_jj_commits(self) -> None:
-        invalid = self.root / "invalid.sops.yaml"
-        invalid.write_text("terms: clear text\n", encoding="utf-8")
-        empty_sops_home = self.root / "empty-sops-home"
-        empty_sops_home.mkdir()
-        blank = encrypt_yaml("terms: |\n  # blank\n\n")
-        no_sops = os.pathsep.join(
-            entry for entry in self.person["PATH"].split(os.pathsep) if not (Path(entry) / "sops").exists()
-        )
-        cases = (
-            ("sops", {"PATH": no_sops}, "install sops with mise"),
-            ("key", {"DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)}, "add this machine's age key to .sops.yaml"),
-            ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
-            ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
-            ("blank", {"DOTFILES_LEAK_TERMS_FILE": str(blank)}, "add a term with sops edit leak-terms.sops.yaml"),
-        )
+        cases = unreadable_lists(self.root, self.person["PATH"])
         for agent in (False, True):
+            with self.subTest(agent=agent, case="healthy-list-control"):
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                self.assert_clean(repository, agent, "commit", "-m", "ok")
+                self.assertEqual(self.description(repository, agent, "@-"), "ok\n")
             for label, extra, correction in cases:
                 with self.subTest(agent=agent, case=label):
                     repository = self.repository(agent)
                     self.write(repository, "clean.txt", "clean\n")
-                    environment = self.environment(agent, **extra)
-                    if label == "key":
-                        for name in ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD"):
-                            environment.pop(name, None)
-                    result = subprocess.run(
-                        ["jj", "commit", "clean.txt", "-m", "clean"],
-                        cwd=repository,
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    expected = self.expected_state(repository, agent)
+                    result = self.jj(repository, "commit", "-m", "ok", agent=agent, extra=extra)
                     self.assertNotEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(correction, result.stderr)
-                    self.assert_hidden(result)
+                    self.assert_one_correction_line(result, correction)
+                    self.assertEqual(self.state(repository, agent), expected)
 
 
-class OutgoingLeaks(unittest.TestCase):
+class OutgoingLeaks(LeakTestCase):
     """Outgoing Git and JJ commits are scanned independently of the public-leak gate."""
 
-    agent_markers = (
-        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
-        "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
-        "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
-    )
     public_url = "https://github.com/theorem-labs/rocq.git"
     unknown_url = "https://github.com/theorem-labs/unreadable-fixture.git"
     private_url = "https://github.com/theorem-labs/private-fixture.git"
+    term = TEST_TERMS[0]
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.home = self.root / "home"
         self.xdg = self.root / "xdg"
         self.tmpdir = self.root / "tmp"
@@ -2168,47 +2134,24 @@ class OutgoingLeaks(unittest.TestCase):
         self.sinks = self.root / "sinks"
         for directory in (self.home, self.xdg, self.tmpdir, self.fake, self.sinks):
             directory.mkdir()
-        cache = self.home / ".cache" / "public-leak-check"
-        cache.mkdir(parents=True)
-        (cache / "theorem-labs_rocq").write_text("public", encoding="utf-8")
-        (cache / "theorem-labs_private-fixture").write_text("private", encoding="utf-8")
-        (cache / "theorem-labs_other-public").write_text("public", encoding="utf-8")
+        self.cache = self.home / ".cache" / "public-leak-check"
+        self.cache.mkdir(parents=True)
+        for name, visibility in (("rocq", "public"), ("private-fixture", "private"), ("other-public", "public")):
+            (self.cache / f"theorem-labs_{name}").write_text(visibility, encoding="utf-8")
         self.public_log = self.root / "public-check.log"
-        self.write_executable("gh", "#!/bin/bash\nexit 1\n")
-        self.write_executable(
-            "git-remote-sink",
-            "#!/bin/bash\n"
-            "key=$(printf '%s' \"$2\" | sha1sum | cut -c1-16)\n"
-            f"sink={shlex.quote(str(self.sinks))}/$key.git\n"
-            "[[ -d \"$sink\" ]] || /usr/bin/git init -q --bare \"$sink\"\n"
-            f"printf '%s\\t%s\\n' \"$2\" \"$sink\" >> {shlex.quote(str(self.sinks) + '.log')}\n"
-            "while IFS= read -r line; do\n"
-            "    case \"$line\" in\n"
-            "        capabilities) printf 'connect\\n\\n' ;;\n"
-            "        'connect git-receive-pack'|'connect git-upload-pack')\n"
-            "            printf '\\n'\n"
-            "            exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR "
-            "-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT /usr/bin/git \"${line#connect git-}\" \"$sink\"\n"
-            "            ;;\n"
-            "        '') exit 0 ;;\n"
-            "        *) exit 1 ;;\n"
-            "    esac\n"
-            "done\n",
+        write_executable(self.fake / "gh", "#!/bin/bash\nexit 1\n")
+        write_executable(self.fake / "git-remote-sink", SINK_HELPER.replace("@SINKS@", str(self.sinks)))
+        self.check = write_executable(
+            self.root / "public-leak-check",
+            f"#!/bin/bash\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(self.public_log))}\nexit 0\n",
         )
-        self.check = self.root / "public-leak-check"
-        self.check.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(self.public_log))}\nexit 0\n", encoding="utf-8")
-        self.check.chmod(0o755)
         self.jj_config = self.root / "jj.toml"
         self.jj_config.write_text(
             '[user]\nname = "Push Test"\nemail = "push-test@example.invalid"\n[signing]\nbehavior = "drop"\n',
             encoding="utf-8",
         )
-        base = {
-            key: value for key, value in os.environ.items()
-            if key not in self.agent_markers and not key.startswith(("GIT_CONFIG_", "LEGION_", "PI_"))
-        }
         self.person = {
-            **base,
+            **base_environment(),
             **fixture_environment(),
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.xdg),
@@ -2220,7 +2163,7 @@ class OutgoingLeaks(unittest.TestCase):
             "GIT_ALLOW_PROTOCOL": "sink",
             "JJ_CONFIG": str(self.jj_config),
         }
-        self.agent = {**self.person, "OMP_SESSION_ID": "01a0fa64-b3a5-7415-b143-c2a338b5da8b"}
+        self.agent = {**self.person, "OMP_SESSION_ID": SESSION}
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.real("init", "-q", "-b", "main")
@@ -2229,18 +2172,28 @@ class OutgoingLeaks(unittest.TestCase):
         self.real("commit", "-q", "--allow-empty", "-m", "base")
         self.real("remote", "add", "origin", self.public_url)
         self.real("config", "remote.origin.vcs", "sink")
+        self.base = self.real("rev-parse", "HEAD")
+        self.made = 0
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def callers(self) -> tuple[tuple[bool, dict[str, str]], ...]:
+        return ((True, self.agent), (False, self.person))
 
-    def write_executable(self, name: str, content: str) -> Path:
-        path = self.fake / name
-        path.write_text(content, encoding="utf-8")
-        path.chmod(0o755)
-        return path
+    def combinations(self) -> list[tuple[bool, dict[str, str], str]]:
+        """An agent and a person, each to a public remote and to one whose visibility cannot be read."""
+        return [(agent, environment, url) for url in (self.public_url, self.unknown_url) for agent, environment in self.callers()]
+
+    def unique(self, label: str) -> str:
+        self.made += 1
+        return f"{label}-{self.made}"
+
+    def fresh_public_url(self) -> str:
+        """A public repository whose sink nothing has reached yet."""
+        name = self.unique("fresh-public")
+        (self.cache / f"theorem-labs_{name}").write_text("public", encoding="utf-8")
+        return f"https://github.com/theorem-labs/{name}.git"
 
     def command(self, command: list[str], environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, cwd=self.repo, env=environment or self.agent, capture_output=True, text=True, check=False, timeout=60)
+        return self.launch(command, cwd=self.repo, env=environment or self.agent)
 
     def real(self, *arguments: str, environment: dict[str, str] | None = None) -> str:
         result = self.command(["/usr/bin/git", *arguments], environment)
@@ -2248,55 +2201,136 @@ class OutgoingLeaks(unittest.TestCase):
         return result.stdout.strip()
 
     def git_push(self, remote: str, commit: str, ref: str, environment: dict[str, str], *options: str) -> subprocess.CompletedProcess[str]:
+        self.refresh_visibility()
         return self.command(["git", "push", *options, remote, f"{commit}:refs/heads/{ref}"], environment)
 
-    def commit(self, path: str, content: str, message: str) -> str:
+    def commit(self, path: str, content: str, message: str, parent: str | None = None,
+               shim: dict[str, str] | None = None) -> str:
+        """A commit of PATH holding CONTENT, on PARENT (else on HEAD). /usr/bin/git makes it, or, with SHIM the caller's
+        environment, `git commit --no-verify` through the shim: neither checks it."""
+        if parent is not None:
+            self.real("checkout", "-q", "--detach", parent)
         target = self.repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content + "\n", encoding="utf-8")
         self.real("add", path)
-        self.real("commit", "--no-verify", "-m", message)
+        if shim is None:
+            self.real("commit", "--no-verify", "-m", message)
+        else:
+            made = self.command(["git", "commit", "--no-verify", "-m", message], shim)
+            self.assertEqual(made.returncode, 0, made.stderr)
         return self.real("rev-parse", "HEAD")
 
     def sink(self, url: str) -> Path:
-        return self.sinks / f"{hashlib.sha1(url.encode()).hexdigest()[:16]}.git"
+        """The bare repository the sink helper keeps for URL. git hands the helper the address of a `sink::<address>`
+        URL, so both forms of one address reach one sink."""
+        address = url.split("::", 1)[1] if "::" in url else url
+        return self.sinks / f"{hashlib.sha1(address.encode()).hexdigest()[:16]}.git"
+
+    def sink_git(self, url: str, *arguments: str, input: str | None = None) -> str:
+        result = self.launch(["/usr/bin/git", "--git-dir", str(self.sink(url)), *arguments], env=self.person, input=input)
+        self.assertEqual(result.returncode, 0, f"cannot read the sink of {url}: {result.stderr}")
+        return result.stdout
 
     def received(self, commit: str, url: str) -> bool:
-        sink = self.sink(url)
-        return sink.is_dir() and subprocess.run(
-            ["/usr/bin/git", "--git-dir", str(sink), "cat-file", "-e", commit],
-            capture_output=True,
-        ).returncode == 0
+        """Whether the sink of URL holds COMMIT; a sink not made yet holds nothing, and one that cannot be read fails."""
+        if not self.sink(url).exists():
+            return False
+        answer = self.sink_git(url, "cat-file", "--batch-check", input=f"{commit}\n")
+        self.assertRegex(answer, rf"\A{commit} (missing|commit \d+)\n\Z")
+        return not answer.endswith(" missing\n")
+
+    def sink_state(self, url: str) -> tuple[str, str]:
+        """Every ref and every object the sink of URL holds: none for a sink not made yet; a sink that exists and
+        cannot be read fails the test."""
+        if not self.sink(url).exists():
+            return "", ""
+        refs = self.sink_git(url, "for-each-ref", "--format=%(objectname) %(refname)")
+        objects = self.sink_git(url, "cat-file", "--batch-all-objects", "--batch-check")
+        return refs, objects
 
     def set_url(self, url: str) -> None:
+        self.refresh_visibility()
         self.real("remote", "set-url", "origin", url)
 
-    def assert_term_refusal(
-        self,
-        result: subprocess.CompletedProcess[str],
-        commit: str,
-        place: str,
-        url: str,
-        shim: str = "git",
-    ) -> None:
+    def refresh_visibility(self) -> None:
+        """Keep every cached visibility fresh: the cache trusts a private entry for 60 s only, and a long test
+        would otherwise read a private remote as unknown."""
+        for entry in self.cache.iterdir():
+            os.utime(entry)
+
+    def public_checks(self) -> int:
+        return len(self.public_log.read_text(encoding="utf-8").splitlines()) if self.public_log.exists() else 0
+
+    def assert_term_refusal(self, result: subprocess.CompletedProcess[str], commit: str, place: str, url: str,
+                            shim: str = "git") -> None:
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"error: leak terms: commit {commit[:12]} {place}: listed leak term", result.stderr)
         self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
         self.assertFalse(self.received(commit, url), result.stderr)
-        for term in TEST_TERMS:
-            self.assertNotIn(term.casefold(), (result.stdout + result.stderr).casefold())
+        self.assert_hidden(result)
+
+    def assert_push_refused(self, push, commit: str, place: str, url: str, shim: str = "git") -> subprocess.CompletedProcess[str]:
+        """PUSH() is refused for the term at PLACE of COMMIT, and the sink of URL keeps exactly the refs and objects
+        it had."""
+        before = self.sink_state(url)
+        result = push()
+        self.assert_term_refusal(result, commit, place, url, shim)
+        self.assertEqual(self.sink_state(url), before, "a refused push changed the sink")
+        return result
+
+    def assert_pushed(self, result: subprocess.CompletedProcess[str], url: str, *commits: str) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for commit in commits:
+            self.assertTrue(self.received(commit, url), result.stderr)
+        self.assert_hidden(result)
 
     def init_jj(self) -> None:
         result = self.command(["jj", "git", "init", "--colocate"])
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def jj_ok(self, environment: dict[str, str], *arguments: str) -> str:
+        result = self.command(["jj", *arguments], environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
     def jj_push(self, commit: str, bookmark: str, environment: dict[str, str], executable: bool = False) -> subprocess.CompletedProcess[str]:
-        imported = self.command(["jj", "git", "import"], environment)
-        self.assertEqual(imported.returncode, 0, imported.stderr)
-        marked = self.command(["jj", "bookmark", "set", "--allow-backwards", bookmark, "-r", commit], environment)
-        self.assertEqual(marked.returncode, 0, marked.stderr)
+        self.jj_ok(environment, "git", "import")
+        self.jj_ok(environment, "bookmark", "set", "--allow-backwards", bookmark, "-r", commit)
         config = ["--config", "git.executable-path=/usr/bin/git"] if executable else []
+        self.refresh_visibility()
         return self.command(["jj", *config, "git", "push", "--bookmark", bookmark], environment)
+
+    def squash_commit(self, path: str, content: str, environment: dict[str, str]) -> str:
+        """A commit made by `jj squash`: PATH, holding CONTENT, moved from a new working-copy commit into its parent."""
+        self.jj_ok(environment, "new", self.base, "-m", "squashed")
+        self.jj_ok(environment, "new")
+        (self.repo / path).write_text(content + "\n", encoding="utf-8")
+        self.jj_ok(environment, "squash")
+        made = self.jj_ok(environment, "log", "--no-graph", "-r", "@-", "-T", 'commit_id ++ "\\n" ++ description')
+        commit, description = made.split("\n", 1)
+        self.assertEqual(description, "squashed\n")
+        self.assertEqual(self.jj_ok(environment, "diff", "--name-only", "-r", commit).split(), [path])
+        return commit
+
+    def without_public_check(self, environment: dict[str, str]) -> dict[str, str]:
+        """ENVIRONMENT with no public leak check in any place the hook looks: PUBLIC_LEAK_CHECK, public-leak-check.sh
+        on PATH, and the pointer file under XDG_CONFIG_HOME."""
+        empty_config = self.root / "no-check-config"
+        empty_config.mkdir(exist_ok=True)
+        stripped = {name: value for name, value in environment.items() if name != "PUBLIC_LEAK_CHECK"}
+        stripped["XDG_CONFIG_HOME"] = str(empty_config)
+        stripped["PATH"] = os.pathsep.join(
+            entry for entry in environment["PATH"].split(os.pathsep) if not (Path(entry) / "public-leak-check.sh").exists()
+        )
+        self.assert_no_public_check(stripped)
+        return stripped
+
+    def assert_no_public_check(self, environment: dict[str, str]) -> None:
+        self.assertNotIn("PUBLIC_LEAK_CHECK", environment)
+        self.assertIsNone(shutil.which("public-leak-check.sh", path=environment["PATH"]))
+        pointer = Path(environment.get("XDG_CONFIG_HOME") or Path(environment["HOME"]) / ".config") / "public-leak-check" / "path"
+        self.assertFalse(pointer.exists(), pointer)
 
     def test_push_term_gate_parses_verification_and_destination_forms(self) -> None:
         # Each case pushes its own leaky commit, so one that leaks cannot hide the next.
@@ -2304,9 +2338,10 @@ class OutgoingLeaks(unittest.TestCase):
         self.set_url(self.private_url)
         self.real("config", f"url.{destination}.insteadOf", "alias")
         with self.subTest(option="insteadof-alias"):
-            leaky = self.commit("alias.txt", "Quillfeather Lane 9", "clean")
-            alias = self.command(["git", "push", "alias", f"{leaky}:refs/heads/alias"], self.person)
-            self.assert_term_refusal(alias, leaky, "alias.txt:1", destination)
+            leaky = self.commit("alias.txt", self.term, "clean")
+            self.assert_push_refused(
+                lambda: self.command(["git", "push", "alias", f"{leaky}:refs/heads/alias"], self.person), leaky, "alias.txt:1", destination
+            )
 
         for label, options in (
             ("no-veri", ("--no-veri",)),
@@ -2315,39 +2350,42 @@ class OutgoingLeaks(unittest.TestCase):
             ("attached-value", ("--push-option=--no-verify",)),
         ):
             with self.subTest(option=label):
-                leaky = self.commit(f"{label}.txt", "Quillfeather Lane 9", "clean")
-                result = self.command(
-                    ["git", "push", *options, destination, f"{leaky}:refs/heads/{label}"],
-                    self.person,
+                leaky = self.commit(f"{label}.txt", self.term, "clean")
+                self.assert_push_refused(
+                    lambda: self.command(["git", "push", *options, destination, f"{leaky}:refs/heads/{label}"], self.person),
+                    leaky,
+                    f"{label}.txt:1",
+                    destination,
                 )
-                self.assert_term_refusal(result, leaky, f"{label}.txt:1", destination)
         with self.subTest(option="ambiguous"):
-            leaky = self.commit("ambiguous.txt", "Quillfeather Lane 9", "clean")
+            leaky = self.commit("ambiguous.txt", self.term, "clean")
+            before = self.sink_state(destination)
             ambiguous = self.command(
                 ["git", "push", "--no-v", destination, f"{leaky}:refs/heads/ambiguous"],
                 self.person,
             )
             self.assertEqual(ambiguous.returncode, 1, ambiguous.stderr)
             self.assertIn("git shim: cannot read option --no-v, so the leak-term check cannot run. Nothing was pushed.", ambiguous.stderr)
-            self.assertFalse(self.received(leaky, self.public_url))
+            self.assertEqual(self.sink_state(destination), before)
 
         with self.subTest(option="bare-push-default"):
-            leaky = self.commit("bare.txt", "Quillfeather Lane 9", "clean")
+            leaky = self.commit("bare.txt", self.term, "clean")
             self.real("remote", "remove", "origin")
             self.real("config", "push.default", "current")
             self.real("config", "remote.pushDefault", destination)
-            bare = self.command(["git", "push"], self.person)
-            self.assert_term_refusal(bare, leaky, "bare.txt:1", destination)
+            self.assert_push_refused(lambda: self.command(["git", "push"], self.person), leaky, "bare.txt:1", destination)
 
     def test_push_term_gate_ignores_replacement_objects(self) -> None:
-        leaky = self.commit("replace-leaky.txt", "Quillfeather Lane 9", "clean")
+        leaky = self.commit("replace-leaky.txt", self.term, "clean")
         clean = self.commit("replace-clean.txt", "clean", "clean")
         self.real("replace", leaky, clean)
-        result = self.command(
-            ["git", "push", f"sink::{self.public_url}", f"{leaky}:refs/heads/replaced"],
-            self.person,
+        destination = f"sink::{self.public_url}"
+        self.assert_push_refused(
+            lambda: self.command(["git", "push", destination, f"{leaky}:refs/heads/replaced"], self.person),
+            leaky,
+            "replace-leaky.txt:1",
+            destination,
         )
-        self.assert_term_refusal(result, leaky, "replace-leaky.txt:1", f"sink::{self.public_url}")
 
     def test_push_term_gate_parses_negations_end_of_options_and_short_values(self) -> None:
         # Each case pushes its own leaky commit, so one that leaks cannot hide the next.
@@ -2363,12 +2401,13 @@ class OutgoingLeaks(unittest.TestCase):
             ("repo-beside-positional", ("--repo=origin",)),
         ):
             with self.subTest(option=label):
-                leaky = self.commit(f"{label}.txt", "Quillfeather Lane 9", "clean")
-                result = self.command(
-                    ["git", "push", *options, destination, f"{leaky}:refs/heads/{label}"],
-                    self.person,
+                leaky = self.commit(f"{label}.txt", self.term, "clean")
+                self.assert_push_refused(
+                    lambda: self.command(["git", "push", *options, destination, f"{leaky}:refs/heads/{label}"], self.person),
+                    leaky,
+                    f"{label}.txt:1",
+                    destination,
                 )
-                self.assert_term_refusal(result, leaky, f"{label}.txt:1", destination)
 
     def test_push_term_uses_utf8_when_log_output_encoding_is_configured(self) -> None:
         # i18n.logOutputEncoding re-encodes messages, not file content, so the term is the message.
@@ -2376,20 +2415,18 @@ class OutgoingLeaks(unittest.TestCase):
         term_file = encrypt_yaml(f"terms: |\n  {term}\n")
         commit = self.commit("encoding.txt", "clean", term)
         self.real("config", "i18n.logOutputEncoding", "ISO-8859-1")
-        result = self.git_push(
-            "origin",
+        result = self.assert_push_refused(
+            lambda: self.git_push("origin", commit, "encoding", self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
             commit,
-            "encoding",
-            self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)},
+            "message line 1",
+            self.public_url,
         )
-        self.assert_term_refusal(result, commit, "message line 1", self.public_url)
         self.assertNotIn("Caf", result.stderr)
 
     def test_push_agent_guarded_checkout_keeps_its_public_check_for_private_url(self) -> None:
         clean = self.commit("private-direct-clean.txt", "clean", "clean")
         invoked = self.root / "private-direct-public-check"
-        self.check.write_text(f"#!/bin/sh\n: > {shlex.quote(str(invoked))}\nexit 9\n", encoding="utf-8")
-        self.check.chmod(0o755)
+        write_executable(self.check, f"#!/bin/sh\n: > {shlex.quote(str(invoked))}\nexit 9\n")
         result = self.command(
             ["git", "push", f"sink::{self.private_url}", f"{clean}:refs/heads/private-direct"],
             self.agent,
@@ -2400,19 +2437,13 @@ class OutgoingLeaks(unittest.TestCase):
 
     def test_push_options_keep_their_values_after_verification_is_rebuilt(self) -> None:
         destination = f"sink::{self.public_url}"
-        base = self.real("rev-parse", "HEAD")
-        self.real("push", "--no-verify", destination, f"{base}:refs/heads/bootstrap")
+        self.real("push", "--no-verify", destination, f"{self.base}:refs/heads/bootstrap")
         received = self.root / "received-push-option"
-        hook = self.sink(self.public_url) / "hooks" / "pre-receive"
-        hook.write_text(f"#!/bin/sh\nprintf '%s' \"${{GIT_PUSH_OPTION_0-unset}}\" > {shlex.quote(str(received))}\n", encoding="utf-8")
-        hook.chmod(0o755)
-        configured = subprocess.run(
-            ["/usr/bin/git", "--git-dir", str(self.sink(self.public_url)), "config", "receive.advertisePushOptions", "true"],
-            capture_output=True,
-            text=True,
-            check=False,
+        write_executable(
+            self.sink(self.public_url) / "hooks" / "pre-receive",
+            f"#!/bin/sh\nprintf '%s' \"${{GIT_PUSH_OPTION_0-unset}}\" > {shlex.quote(str(received))}\n",
         )
-        self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.sink_git(self.public_url, "config", "receive.advertisePushOptions", "true")
         clean = self.commit("push-option-clean.txt", "clean", "clean")
         for label, options, expected in (
             ("no-veri", ("--no-veri",), "unset"),
@@ -2431,100 +2462,304 @@ class OutgoingLeaks(unittest.TestCase):
                     ["git", "push", *options, destination, f"{clean}:refs/heads/{label}"],
                     self.person,
                 )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(self.received(clean, self.public_url), result.stderr)
+                self.assert_pushed(result, self.public_url, clean)
                 self.assertEqual(received.read_text(encoding="utf-8"), expected)
 
-
-
-    def test_push_refuses_git_content_message_options_and_hooks(self) -> None:
+    def test_push_refuses_unchecked_git_commits_and_pushes_that_skip_hooks(self) -> None:
+        # (1) a commit made through the shim by `git commit --no-verify`, its diff holding the term; (2) a commit made
+        # by /usr/bin/git, its message holding it; (3) `git push --no-verify` and (4) `git -c core.hooksPath=<dir>
+        # push`, <dir> the caller's own hooks, of a commit like (1).
+        own_hooks = self.root / "command-hooks"
+        hook_log = self.root / "command-hooks.log"
+        write_executable(own_hooks / "pre-push", f"#!/bin/sh\n{{ printf 'argv %s\\n' \"$*\"; cat; }} >> {shlex.quote(str(hook_log))}\n")
+        command_hooks = ("-c", f"core.hooksPath={own_hooks}")
         cases = (
-            ("content", "guard.txt", "Quillfeather Lane 9", "clean", (), "guard.txt:1"),
-            ("message", "message.txt", "clean", "Quillfeather Lane 9", (), "message line 1"),
-            ("no-verify", "no-verify.txt", "Quillfeather Lane 9", "clean", ("--no-verify",), "no-verify.txt:1"),
-            ("caller-hooks", "caller-hooks.txt", "Quillfeather Lane 9", "clean", ("-c", "core.hooksPath=/dev/null"), "caller-hooks.txt:1"),
+            ("1", "shim", self.term, "clean", ()),
+            ("2", "absolute-git", "clean", self.term, ()),
+            ("3", "shim", self.term, "clean", ("--no-verify",)),
+            ("4", "shim", self.term, "clean", command_hooks),
         )
-        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
-            for label, path, content, message, options, place in cases:
-                with self.subTest(agent=agent, url=url, case=label):
-                    self.set_url(url)
-                    actual_path = f"{label}-{int(agent)}-{url.rsplit('/', 1)[-1]}"
-                    commit = self.commit(actual_path, content, message)
-                    environment = self.agent if agent else self.person
-                    actual_place = f"{actual_path}:1" if place.endswith(":1") else place
-                    if options[:1] == ("-c",):
-                        result = self.command(["git", *options, "push", "origin", f"{commit}:refs/heads/{label}-{agent}"], environment)
-                    else:
-                        result = self.git_push("origin", commit, f"{label}-{agent}", environment, *options)
-                    self.assert_term_refusal(result, commit, actual_place, url)
 
-    def test_push_refuses_wrapper_dispatcher_paths_and_changed_paths(self) -> None:
-        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
-            for marker, file in (("PUBLIC-LEAK-CHECK-WRAPPER", "pre-push"), ("PUBLIC-LEAK-CHECK-DISPATCHER", "dispatch")):
-                with self.subTest(agent=agent, url=url, marker=marker):
-                    self.set_url(url)
-                    hooks = self.root / f"{marker}-{agent}-{url.rsplit('/', 1)[-1]}"
-                    hooks.mkdir()
-                    executable = hooks / file
-                    executable.write_text(f"#!/bin/bash\n# {marker}\nexit 0\n", encoding="utf-8")
-                    executable.chmod(0o755)
-                    self.real("config", "core.hooksPath", str(hooks))
-                    path = f"{marker}-{agent}-{url.rsplit('/', 1)[-1]}/zorbleplex.txt"
-                    commit = self.commit(path, "clean", "clean")
-                    result = self.git_push("origin", commit, f"{marker}-{agent}", self.agent if agent else self.person)
-                    self.assert_term_refusal(result, commit, path.replace("zorbleplex", "<listed term>"), url)
-                    self.real("config", "--unset", "core.hooksPath")
+        def push(options: tuple[str, ...], commit: str, ref: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            if options == command_hooks:
+                return self.command(["git", *options, "push", "origin", f"{commit}:refs/heads/{ref}"], environment)
+            return self.git_push("origin", commit, ref, environment, *options)
 
-    def test_push_refuses_jj_and_a_middle_stack_commit(self) -> None:
+        for case, maker, content, message, options in cases:
+            for agent, environment, url in self.combinations():
+                with self.subTest(case=case, agent=agent, url=url):
+                    hook_log.unlink(missing_ok=True)
+                    self.set_url(url)
+                    path = f"{self.unique(f'case-{case}')}.txt"
+                    commit = self.commit(path, content, message, parent=self.base, shim=environment if maker == "shim" else None)
+                    place = f"{path}:1" if content == self.term else "message line 1"
+                    ref = self.unique("refused")
+                    self.assert_push_refused(lambda: push(options, commit, ref, environment), commit, place, url)
+                    self.assertFalse(hook_log.exists(), "the caller's pre-push ran for a refused push")
+                    # The negative control: the same commit goes to a private remote.
+                    self.set_url(self.private_url)
+                    self.assert_pushed(push(options, commit, self.unique("private"), environment), self.private_url, commit)
+                    hook_log.unlink(missing_ok=True)
+            for agent, environment in self.callers():
+                with self.subTest(case=case, agent=agent, control="clean"):
+                    hook_log.unlink(missing_ok=True)
+                    self.set_url(self.public_url)
+                    clean = self.commit(
+                        f"{self.unique(f'clean-{case}')}.txt", "clean", "clean", parent=self.base,
+                        shim=environment if maker == "shim" else None,
+                    )
+                    ref = self.unique("clean")
+                    if options == command_hooks:
+                        # What git gives the caller's pre-push for this push: a dry run of the real git runs it.
+                        dry = self.command(["/usr/bin/git", *options, "push", "--dry-run", "origin", f"{clean}:refs/heads/{ref}"], environment)
+                        self.assertEqual(dry.returncode, 0, dry.stderr)
+                        expected = hook_log.read_text(encoding="utf-8")
+                        hook_log.unlink()
+                    self.assert_pushed(push(options, clean, ref, environment), self.public_url, clean)
+                    if options == command_hooks:
+                        # After the clean scan the caller's pre-push ran once, with git's arguments and input.
+                        self.assertEqual(hook_log.read_text(encoding="utf-8"), expected)
+                        hook_log.unlink()
+
+    def test_push_refuses_through_a_dispatcher_or_wrapper_and_runs_it_once_when_clean(self) -> None:
+        # (5) the repository's core.hooksPath holds the public leak check's dispatcher entry: an executable
+        # `dispatch` marked PUBLIC-LEAK-CHECK-DISPATCHER, which `pre-push` links to; (5b) its pre-push is the wrapper.
+        entry_log = self.root / "entry.log"
+        record = f"{{ printf '%s %s\\n' \"${{0##*/}}\" \"$*\"; cat; }} >> {shlex.quote(str(entry_log))}\n"
+        for kind in ("dispatcher", "wrapper"):
+            hooks = self.root / f"{kind}-hooks"
+            if kind == "dispatcher":
+                write_executable(hooks / "dispatch", f"#!/bin/sh\n# PUBLIC-LEAK-CHECK-DISPATCHER\n{record}")
+                (hooks / "pre-push").symlink_to("dispatch")
+            else:
+                write_executable(hooks / "pre-push", f"#!/bin/sh\n# PUBLIC-LEAK-CHECK-WRAPPER\n{record}")
+            self.real("config", "core.hooksPath", str(hooks))
+            for agent, environment, url in self.combinations():
+                with self.subTest(kind=kind, agent=agent, url=url):
+                    entry_log.unlink(missing_ok=True)
+                    self.set_url(url)
+                    path = f"{self.unique(kind)}.txt"
+                    commit = self.commit(path, self.term, "clean", parent=self.base, shim=environment)
+                    ref = self.unique("refused")
+                    self.assert_push_refused(lambda: self.git_push("origin", commit, ref, environment), commit, f"{path}:1", url)
+                    self.assertFalse(entry_log.exists(), f"the {kind} ran for a refused push")
+                    self.set_url(self.private_url)
+                    self.assert_pushed(self.git_push("origin", commit, self.unique("private"), environment), self.private_url, commit)
+                    entry_log.unlink(missing_ok=True)
+            for agent, environment in self.callers():
+                with self.subTest(kind=kind, agent=agent, control="clean"):
+                    entry_log.unlink(missing_ok=True)
+                    self.set_url(self.public_url)
+                    clean = self.commit(f"{self.unique(kind)}.txt", "clean", "clean", parent=self.base, shim=environment)
+                    ref = self.unique("clean")
+                    checks = self.public_checks()
+                    self.assert_pushed(self.git_push("origin", clean, ref, environment), self.public_url, clean)
+                    # The entry ran once, as git's pre-push; it holds the public check, so the gate ran none itself.
+                    lines = entry_log.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(len(lines), 2, lines)
+                    self.assertEqual(lines[0], f"pre-push origin {self.public_url}")
+                    self.assertTrue(lines[1].endswith(f" {clean} refs/heads/{ref} {'0' * 40}"), lines)
+                    self.assertEqual(self.public_checks(), checks)
+                    entry_log.unlink()
+            self.real("config", "--unset", "core.hooksPath")
+
+    def test_push_refuses_jj_pushes_of_a_squash_made_commit(self) -> None:
+        # (6) `jj git push` of a bookmark whose commit `jj squash` made; (7) the same with jj running /usr/bin/git;
+        # (8) the same as a person with DOTFILES_JJ_NO_LEAK_CHECK=1, whose refusal names no such bypass.
         self.init_jj()
-        first = self.commit("first.txt", "clean", "first")
-        middle = self.commit("middle.txt", "clean", "Quillfeather Lane 9")
-        last = self.commit("last.txt", "clean", "last")
-        for url in (self.public_url, self.unknown_url):
-            self.set_url(url)
-            for environment, executable in (
-                (self.agent, False),
-                (self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"}, False),
-                (self.agent, True),
-                (self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"}, True),
-            ):
-                with self.subTest(agent=environment is self.agent, executable=executable, url=url):
-                    result = self.jj_push(last, f"stack-{executable}-{id(environment)}-{url.rsplit('/', 1)[-1]}", environment, executable)
-                    self.assert_term_refusal(result, middle, "message line 1", url, "jj")
-                    self.assertFalse(self.received(first, url))
-                    self.assertFalse(self.received(last, url))
+        variants = (
+            ("6", True, {}, False),
+            ("6", False, {}, False),
+            ("7", True, {}, True),
+            ("7", False, {}, True),
+            ("8", False, {"DOTFILES_JJ_NO_LEAK_CHECK": "1"}, False),
+        )
+        for case, agent, extra, executable in variants:
+            environment = (self.agent if agent else self.person) | extra
+            for url in (self.public_url, self.unknown_url):
+                with self.subTest(case=case, agent=agent, url=url):
+                    self.set_url(url)
+                    path = f"{self.unique('squash')}.txt"
+                    commit = self.squash_commit(path, self.term, environment)
+                    bookmark = self.unique("refused")
+                    result = self.assert_push_refused(
+                        lambda: self.jj_push(commit, bookmark, environment, executable), commit, f"{path}:1", url, "jj"
+                    )
                     self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
+                    self.set_url(self.private_url)
+                    self.assert_pushed(self.jj_push(commit, self.unique("private"), environment, executable), self.private_url, commit)
+            with self.subTest(case=case, agent=agent, control="clean"):
+                self.set_url(self.public_url)
+                clean = self.squash_commit(f"{self.unique('squash-clean')}.txt", "clean", environment)
+                self.assert_pushed(self.jj_push(clean, self.unique("clean"), environment, executable), self.public_url, clean)
 
-    def test_push_clean_stacks_and_merges_reach_the_sink(self) -> None:
-        first = self.commit("stack-first.txt", "clean", "first")
-        second = self.commit("stack-second.txt", "clean", "second")
-        third = self.commit("stack-third.txt", "clean", "third")
-        stack = self.git_push("origin", third, "clean-stack", self.person)
-        self.assertEqual(stack.returncode, 0, stack.stderr)
-        for commit in (first, second, third):
-            self.assertTrue(self.received(commit, self.public_url))
-
-        self.real("checkout", "-b", "clean-side")
-        self.commit("clean-merge.txt", "side", "side")
-        self.real("checkout", "main")
-        self.commit("clean-merge.txt", "main", "main")
-        merge = self.command(["/usr/bin/git", "merge", "--no-ff", "clean-side"], self.person)
-        self.assertNotEqual(merge.returncode, 0)
-        (self.repo / "clean-merge.txt").write_text("resolution\n", encoding="utf-8")
-        self.real("add", "clean-merge.txt")
-        self.real("commit", "--no-verify", "-m", "clean merge")
-        merged = self.real("rev-parse", "HEAD")
-        merge_push = self.git_push("origin", merged, "clean-merge", self.person)
-        self.assertEqual(merge_push.returncode, 0, merge_push.stderr)
-        self.assertTrue(self.received(merged, self.public_url))
-
+    def test_push_refuses_a_persons_terms_with_no_public_check_installed(self) -> None:
+        # (9): cases (1) and (6) as a person on a machine with no public leak check.
+        planted = write_executable(self.root / "planted-check" / "public-leak-check.sh", "#!/bin/sh\nexit 0\n")
+        no_check = self.without_public_check(self.person)
+        # The check-free assertion fires for a check the hook would find on PATH or through the pointer file.
+        with self.assertRaises(AssertionError):
+            self.assert_no_public_check(no_check | {"PATH": f"{planted.parent}{os.pathsep}{no_check['PATH']}"})
+        pointer_config = self.root / "pointer-config"
+        (pointer_config / "public-leak-check").mkdir(parents=True)
+        (pointer_config / "public-leak-check" / "path").write_text(f"{planted}\n", encoding="utf-8")
+        with self.assertRaises(AssertionError):
+            self.assert_no_public_check(no_check | {"XDG_CONFIG_HOME": str(pointer_config)})
         self.init_jj()
-        before = self.public_log.read_text(encoding="utf-8").splitlines() if self.public_log.exists() else []
-        jj_push = self.jj_push(merged, "clean-jj", self.person)
-        self.assertEqual(jj_push.returncode, 0, jj_push.stderr)
-        self.assertTrue(self.received(merged, self.public_url))
-        after = self.public_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(after), len(before) + 1)
+        for url in (self.public_url, self.unknown_url):
+            with self.subTest(case="1", url=url):
+                self.set_url(url)
+                path = f"{self.unique('no-check')}.txt"
+                commit = self.commit(path, self.term, "clean", parent=self.base, shim=no_check)
+                ref = self.unique("refused")
+                self.assert_push_refused(lambda: self.git_push("origin", commit, ref, no_check), commit, f"{path}:1", url)
+                self.set_url(self.private_url)
+                self.assert_pushed(self.git_push("origin", commit, self.unique("private"), no_check), self.private_url, commit)
+            with self.subTest(case="6", url=url):
+                self.set_url(url)
+                path = f"{self.unique('no-check-squash')}.txt"
+                commit = self.squash_commit(path, self.term, no_check)
+                bookmark = self.unique("refused")
+                self.assert_push_refused(lambda: self.jj_push(commit, bookmark, no_check), commit, f"{path}:1", url, "jj")
+                self.set_url(self.private_url)
+                self.assert_pushed(self.jj_push(commit, self.unique("private"), no_check), self.private_url, commit)
+        with self.subTest(control="clean"):
+            self.set_url(self.public_url)
+            clean = self.commit(f"{self.unique('no-check-clean')}.txt", "clean", "clean", parent=self.base, shim=no_check)
+            self.assert_pushed(self.git_push("origin", clean, self.unique("clean"), no_check), self.public_url, clean)
+            squashed = self.squash_commit(f"{self.unique('no-check-clean')}.txt", "clean", no_check)
+            self.assert_pushed(self.jj_push(squashed, self.unique("clean"), no_check), self.public_url, squashed)
+
+    def stack(self, label: str, middle_content: str, middle_message: str) -> tuple[str, str, str]:
+        """Three commits on the base; only the middle one may hold the term."""
+        first = self.commit(f"{label}-first.txt", "clean", "first", parent=self.base)
+        middle = self.commit(f"{label}-middle.txt", middle_content, middle_message)
+        last = self.commit(f"{label}-last.txt", "clean", "last")
+        return first, middle, last
+
+    def test_push_refuses_a_stack_whose_middle_commit_alone_holds_the_term(self) -> None:
+        # (10) a git push of three commits whose middle one holds the term in its diff, and a jj push of three whose
+        # middle one holds it in its message; the tip holds none.
+        self.init_jj()
+        jj_variants = [(agent, environment, url, False) for agent, environment, url in self.combinations()] + [
+            (agent, environment, url, True)
+            for url in (self.public_url, self.unknown_url)
+            for agent, environment in ((True, self.agent), (False, self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"}))
+        ]
+        for agent, environment, url in self.combinations():
+            with self.subTest(kind="git", agent=agent, url=url):
+                self.set_url(url)
+                label = self.unique("git-stack")
+                commits = self.stack(label, self.term, "middle")
+                ref = self.unique("refused")
+                self.assert_push_refused(lambda: self.git_push("origin", commits[2], ref, environment), commits[1], f"{label}-middle.txt:1", url)
+                self.set_url(self.private_url)
+                self.assert_pushed(self.git_push("origin", commits[2], self.unique("private"), environment), self.private_url, *commits)
+        for agent, environment, url, executable in jj_variants:
+            with self.subTest(kind="jj", agent=agent, url=url, executable=executable):
+                self.set_url(url)
+                commits = self.stack(self.unique("jj-stack"), "clean", self.term)
+                bookmark = self.unique("refused")
+                result = self.assert_push_refused(
+                    lambda: self.jj_push(commits[2], bookmark, environment, executable), commits[1], "message line 1", url, "jj"
+                )
+                self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
+                self.set_url(self.private_url)
+                self.assert_pushed(self.jj_push(commits[2], self.unique("private"), environment, executable), self.private_url, *commits)
+        for agent, environment in self.callers():
+            for kind in ("git", "jj"):
+                with self.subTest(kind=kind, agent=agent, control="clean-stack"):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    commits = self.stack(self.unique(f"{kind}-clean-stack"), "clean", "middle")
+                    pushed = (
+                        self.git_push("origin", commits[2], self.unique("clean"), environment)
+                        if kind == "git"
+                        else self.jj_push(commits[2], self.unique("clean"), environment)
+                    )
+                    self.assert_pushed(pushed, url, *commits)
+
+    def test_push_refuses_a_term_only_in_a_changed_path(self) -> None:
+        # (11) the only test term is in the path of a changed file, shown as <listed term>.txt.
+        self.init_jj()
+
+        def push(kind: str, commit: str, ref: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            return self.git_push("origin", commit, ref, environment) if kind == "git" else self.jj_push(commit, ref, environment)
+
+        for agent, environment, url in self.combinations():
+            for kind in ("git", "jj"):
+                with self.subTest(kind=kind, agent=agent, url=url):
+                    self.set_url(url)
+                    directory = self.unique(f"{kind}-path")
+                    commit = self.commit(f"{directory}/zorbleplex.txt", "clean", "clean", parent=self.base)
+                    ref = self.unique("refused")
+                    self.assert_push_refused(
+                        lambda: push(kind, commit, ref, environment), commit, f"{directory}/<listed term>.txt", url, kind
+                    )
+                    self.set_url(self.private_url)
+                    self.assert_pushed(push(kind, commit, self.unique("private"), environment), self.private_url, commit)
+        for agent, environment in self.callers():
+            for kind in ("git", "jj"):
+                with self.subTest(kind=kind, agent=agent, control="clean"):
+                    self.set_url(self.public_url)
+                    commit = self.commit(f"{self.unique(f'{kind}-path')}/clean-name.txt", "clean", "clean", parent=self.base)
+                    self.assert_pushed(push(kind, commit, self.unique("clean"), environment), self.public_url, commit)
+
+    def merge(self, label: str, resolution: str) -> str:
+        """A merge of two clean parents whose conflict resolution writes RESOLUTION."""
+        self.real("checkout", "-q", "-B", f"{label}-side", self.base)
+        self.commit(f"{label}.txt", "side", "side")
+        self.real("checkout", "-q", "-B", f"{label}-main", self.base)
+        self.commit(f"{label}.txt", "main", "main")
+        merged = self.command(["/usr/bin/git", "merge", "--no-ff", f"{label}-side"], self.person)
+        self.assertNotEqual(merged.returncode, 0, "the parents did not conflict")
+        (self.repo / f"{label}.txt").write_text(resolution + "\n", encoding="utf-8")
+        self.real("add", f"{label}.txt")
+        self.real("commit", "--no-verify", "-m", "resolve")
+        return self.real("rev-parse", "HEAD")
+
+    def test_push_refuses_a_combined_diff(self) -> None:
+        # (12) a merge of two clean parents whose conflict resolution adds a line with the term.
+        leaky = self.merge("merge", self.term)
+        clean = self.merge("clean-merge", "resolution")
+        clean_parents = self.real("rev-parse", f"{clean}^1", f"{clean}^2").split()
+        self.init_jj()
+        for agent, environment, url in self.combinations():
+            with self.subTest(kind="git", agent=agent, url=url):
+                self.set_url(url)
+                ref = self.unique("refused")
+                self.assert_push_refused(lambda: self.git_push("origin", leaky, ref, environment), leaky, "merge.txt:1", url)
+            for executable in (False, True):
+                with self.subTest(kind="jj", agent=agent, executable=executable, url=url):
+                    self.set_url(url)
+                    bookmark = self.unique("refused")
+                    self.assert_push_refused(
+                        lambda: self.jj_push(leaky, bookmark, environment, executable), leaky, "merge.txt:1", url, "jj"
+                    )
+        for agent, environment in self.callers():
+            for kind in ("git", "jj"):
+                with self.subTest(kind=kind, agent=agent, control="private"):
+                    self.set_url(self.private_url)
+                    pushed = (
+                        self.git_push("origin", leaky, self.unique("private"), environment)
+                        if kind == "git"
+                        else self.jj_push(leaky, self.unique("private"), environment)
+                    )
+                    self.assert_pushed(pushed, self.private_url, leaky)
+                with self.subTest(kind=kind, agent=agent, control="clean-merge"):
+                    # A fresh sink, so the clean merge and both its parents go out and are read.
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    checks = self.public_checks()
+                    pushed = (
+                        self.git_push("origin", clean, self.unique("clean"), environment)
+                        if kind == "git"
+                        else self.jj_push(clean, self.unique("clean"), environment)
+                    )
+                    self.assert_pushed(pushed, url, clean, *clean_parents)
+                    if kind == "jj" and not agent:
+                        # A person's clean jj push still runs the public check once.
+                        self.assertEqual(self.public_checks(), checks + 1)
 
     def test_push_root_diff_ignores_log_configuration(self) -> None:
         (self.home / ".gitconfig").write_text(
@@ -2535,7 +2770,7 @@ class OutgoingLeaks(unittest.TestCase):
         )
         initial_repository = self.repo
         try:
-            for label, content in (("root-leak", "Quillfeather Lane 9"), ("root-clean", "clean")):
+            for label, content in (("root-leak", self.term), ("root-clean", "clean")):
                 with self.subTest(kind=label):
                     self.repo = self.root / label
                     self.repo.mkdir()
@@ -2545,20 +2780,18 @@ class OutgoingLeaks(unittest.TestCase):
                     self.real("remote", "add", "origin", self.public_url)
                     self.real("config", "remote.origin.vcs", "sink")
                     commit = self.commit("root.txt", content, label)
-                    result = self.git_push("origin", commit, label, self.person)
                     if label == "root-leak":
-                        self.assert_term_refusal(result, commit, "root.txt:1", self.public_url)
+                        self.assert_push_refused(lambda: self.git_push("origin", commit, label, self.person), commit, "root.txt:1", self.public_url)
                     else:
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertTrue(self.received(commit, self.public_url))
+                        self.assert_pushed(self.git_push("origin", commit, label, self.person), self.public_url, commit)
         finally:
             self.repo = initial_repository
 
     def test_push_skips_an_empty_private_dry_run_destination(self) -> None:
         self.init_jj()
         self.set_url(self.private_url)
-        self.write_executable(
-            "jj",
+        write_executable(
+            self.fake / "jj",
             "#!/bin/bash\n"
             "if [[ \" $* \" == *' --dry-run '* ]]; then\n"
             "    printf 'Changes to push to origin:\\n'\n"
@@ -2570,90 +2803,68 @@ class OutgoingLeaks(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_push_refuses_a_combined_diff(self) -> None:
-        self.real("checkout", "-b", "side")
-        self.commit("merge.txt", "side", "side")
-        self.real("checkout", "main")
-        self.commit("merge.txt", "main", "main")
-        merge = self.command(["/usr/bin/git", "merge", "--no-ff", "side"], self.agent)
-        self.assertNotEqual(merge.returncode, 0)
-        (self.repo / "merge.txt").write_text("Quillfeather Lane 9\n", encoding="utf-8")
-        self.real("add", "merge.txt")
-        self.real("commit", "--no-verify", "-m", "resolve")
-        commit = self.real("rev-parse", "HEAD")
-        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
-            with self.subTest(kind="git", agent=agent, url=url):
+    def test_push_refuses_force_and_direct_url_pushes_and_lets_deletions_go(self) -> None:
+        for agent, environment, url in self.combinations():
+            with self.subTest(case="force", agent=agent, url=url):
                 self.set_url(url)
-                self.assert_term_refusal(
-                    self.git_push("origin", commit, f"merge-{agent}", self.agent if agent else self.person),
-                    commit,
-                    "merge.txt:1",
-                    url,
+                path = f"{self.unique('force')}.txt"
+                leaky = self.commit(path, self.term, "force", parent=self.base)
+                ref = self.unique("force")
+                self.assert_push_refused(lambda: self.git_push("origin", leaky, ref, environment, "--force"), leaky, f"{path}:1", url)
+            with self.subTest(case="deletion", agent=agent, url=url):
+                self.set_url(url)
+                ref = self.unique("delete")
+                self.real("push", "--no-verify", "origin", f"{self.base}:refs/heads/{ref}")
+                self.assertIn(f"refs/heads/{ref}\n", self.sink_state(url)[0])
+                deleted = self.command(["git", "push", "origin", f":refs/heads/{ref}"], environment)
+                self.assertEqual(deleted.returncode, 0, deleted.stderr)
+                self.assertNotIn(f"refs/heads/{ref}\n", self.sink_state(url)[0])
+            with self.subTest(case="direct-url", agent=agent, url=url):
+                # A URL that is not a configured remote, from a checkout whose one remote is private.
+                self.set_url(self.private_url)
+                destination = f"sink::{url}"
+                path = f"{self.unique('direct')}.txt"
+                leaky = self.commit(path, self.term, "direct", parent=self.base)
+                ref = self.unique("direct")
+                self.assert_push_refused(
+                    lambda: self.command(["git", "push", destination, f"{leaky}:refs/heads/{ref}"], environment),
+                    leaky,
+                    f"{path}:1",
+                    destination,
                 )
-        self.init_jj()
-        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
-            for executable in (False, True):
-                with self.subTest(kind="jj", agent=agent, executable=executable, url=url):
-                    self.set_url(url)
-                    result = self.jj_push(
-                        commit,
-                        f"merge-jj-{agent}-{executable}-{url.rsplit('/', 1)[-1]}",
-                        self.agent if agent else self.person,
-                        executable,
-                    )
-                    self.assert_term_refusal(result, commit, "merge.txt:1", url, "jj")
-
-    def test_push_refuses_person_terms_without_the_public_check(self) -> None:
-        no_check = dict(self.person)
-        no_check.pop("PUBLIC_LEAK_CHECK")
-        commit = self.commit("without-public-check.txt", "Quillfeather Lane 9", "clean")
-        for url in (self.public_url, self.unknown_url):
-            with self.subTest(kind="git", url=url):
-                self.set_url(url)
-                result = self.git_push("origin", commit, f"no-public-{url.rsplit('/', 1)[-1]}", no_check)
-                self.assert_term_refusal(result, commit, "without-public-check.txt:1", url)
-        self.init_jj()
-        for url in (self.public_url, self.unknown_url):
-            with self.subTest(kind="jj", url=url):
-                self.set_url(url)
-                result = self.jj_push(commit, f"no-public-jj-{url.rsplit('/', 1)[-1]}", no_check)
-                self.assert_term_refusal(result, commit, "without-public-check.txt:1", url, "jj")
-
-    def test_push_controls_private_clean_force_deletion_and_direct_url(self) -> None:
-        clean = self.commit("clean.txt", "clean", "clean")
-        self.set_url(self.private_url)
-        private = self.git_push("origin", clean, "private", self.person)
-        self.assertEqual(private.returncode, 0, private.stderr)
-        self.assertTrue(self.received(clean, self.private_url))
-        self.set_url(self.public_url)
-        leaky = self.commit("force.txt", "Quillfeather Lane 9", "force")
-        self.assert_term_refusal(self.git_push("origin", leaky, "force", self.agent, "--force"), leaky, "force.txt:1", self.public_url)
-        self.real("push", "--no-verify", "origin", f"{clean}:refs/heads/delete")
-        deleted = self.command(["git", "push", "origin", ":refs/heads/delete"], self.person)
-        self.assertEqual(deleted.returncode, 0, deleted.stderr)
-        self.set_url(self.private_url)
-        direct = self.command(["git", "push", f"sink::{self.public_url}", f"{leaky}:refs/heads/direct"], self.person)
-        self.assert_term_refusal(direct, leaky, "force.txt:1", f"sink::{self.public_url}")
+                clean = self.commit(f"{self.unique('direct-clean')}.txt", "clean", "clean", parent=self.base)
+                pushed = self.command(["git", "push", destination, f"{clean}:refs/heads/{self.unique('direct')}"], environment)
+                self.assert_pushed(pushed, url, clean)
 
     def test_push_uses_the_destination_advertisement_not_other_refs(self) -> None:
-        leaky = self.commit("advertisement.txt", "Quillfeather Lane 9", "leak")
+        leaky = self.commit("advertisement.txt", self.term, "leak", parent=self.base)
         other_url = "https://github.com/theorem-labs/other-public.git"
         self.real("remote", "add", "other", other_url)
         self.real("config", "remote.other.vcs", "sink")
         self.real("push", "--no-verify", "other", f"{leaky}:refs/heads/held")
         self.real("update-ref", "refs/remotes/origin/stale", leaky)
-        self.assert_term_refusal(self.git_push("origin", leaky, "destination", self.agent), leaky, "advertisement.txt:1", self.public_url)
+        self.assert_push_refused(
+            lambda: self.git_push("origin", leaky, "destination", self.agent), leaky, "advertisement.txt:1", self.public_url
+        )
+        # Once the destination advertises the commit, neither git nor jj refuses a push of it for its term.
         self.real("push", "--no-verify", "origin", f"{leaky}:refs/heads/already")
-        up_to_date = self.git_push("origin", leaky, "again", self.person)
-        self.assertEqual(up_to_date.returncode, 0, up_to_date.stderr)
         direct_url = f"sink::{self.unknown_url}"
         self.real("push", "--no-verify", direct_url, f"{leaky}:refs/heads/direct-held")
-        direct_held = self.command(["git", "push", direct_url, f"{leaky}:refs/heads/direct-again"], self.person)
-        self.assertEqual(direct_held.returncode, 0, direct_held.stderr)
+        self.init_jj()
+        for agent, environment in self.callers():
+            with self.subTest(kind="git", agent=agent):
+                self.assert_pushed(self.git_push("origin", leaky, self.unique("again"), environment), self.public_url, leaky)
+                direct = self.command(["git", "push", direct_url, f"{leaky}:refs/heads/{self.unique('direct-again')}"], environment)
+                self.assert_pushed(direct, self.unknown_url, leaky)
+            with self.subTest(kind="jj", agent=agent):
+                bookmark = self.unique("jj-again")
+                self.assert_pushed(self.jj_push(leaky, bookmark, environment), self.public_url, leaky)
+                self.assertIn(f"{leaky} refs/heads/{bookmark}\n", self.sink_state(self.public_url)[0])
 
     def test_push_refuses_a_failed_advertisement_read(self) -> None:
-        self.write_executable(
-            "git-remote-fail",
+        # A transport whose upload-pack, the advertisement read, fails, while its receive-pack would take the push.
+        write_executable(
+            self.fake / "git-remote-fail",
             "#!/bin/bash\n"
             "key=$(printf '%s' \"$2\" | sha1sum | cut -c1-16)\n"
             f"sink={shlex.quote(str(self.sinks))}/$key.git\n"
@@ -2661,11 +2872,7 @@ class OutgoingLeaks(unittest.TestCase):
             "while IFS= read -r line; do\n"
             "    case \"$line\" in\n"
             "        capabilities) printf 'connect\\n\\n' ;;\n"
-            "        'connect git-receive-pack')\n"
-            "            printf '\\n'\n"
-            "            exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR "
-            "-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT /usr/bin/git receive-pack \"$sink\"\n"
-            "            ;;\n"
+            f"        'connect git-receive-pack') printf '\\n'; exec {SERVER_SIDE} receive-pack \"$sink\" ;;\n"
             "        'connect git-upload-pack') exit 1 ;;\n"
             "        '') exit 0 ;;\n"
             "        *) exit 1 ;;\n"
@@ -2673,60 +2880,68 @@ class OutgoingLeaks(unittest.TestCase):
             "done\n",
         )
         self.real("config", "remote.origin.vcs", "fail")
-        leaky = self.commit("failed.txt", "Quillfeather Lane 9", "failed")
+        leaky = self.commit("failed.txt", self.term, "failed")
+        before = self.sink_state(self.public_url)
         result = self.git_push("origin", leaky, "failed", self.person | {"GIT_ALLOW_PROTOCOL": "sink:fail"})
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("cannot read text to check: git could not read outgoing commits", result.stderr)
+        # No term was found, so the refusal must not say the push holds one.
+        self.assertNotIn("holds a listed leak term", result.stderr)
+        self.assertEqual(self.sink_state(self.public_url), before)
         self.assertFalse(self.received(leaky, self.public_url))
+
+    def test_push_sink_reader_fails_on_an_unreadable_sink(self) -> None:
+        # B9's instrument, made to fail: a sink not made yet reads as empty, one that holds a push lists its ref and
+        # objects, and one that exists but is no repository fails the test instead of reading as empty.
+        self.assertEqual(self.sink_state(self.public_url), ("", ""))
+        self.assertFalse(self.received(self.base, self.public_url))
+        self.real("push", "--no-verify", "origin", f"{self.base}:refs/heads/held")
+        refs, objects = self.sink_state(self.public_url)
+        self.assertEqual(refs, f"{self.base} refs/heads/held\n")
+        self.assertIn(f"{self.base} commit ", objects)
+        self.assertTrue(self.received(self.base, self.public_url))
+        broken = self.sink(self.unknown_url)
+        broken.mkdir()
+        (broken / "HEAD").write_text("not a reference\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "cannot read the sink"):
+            self.sink_state(self.unknown_url)
+        with self.assertRaisesRegex(AssertionError, "cannot read the sink"):
+            self.received(self.base, self.unknown_url)
 
     def test_unreadable_push_lists_refuse_git_and_jj(self) -> None:
         self.init_jj()
-        invalid = self.root / "invalid.sops.yaml"
-        invalid.write_text("terms: clear text\n", encoding="utf-8")
-        empty_sops_home = self.root / "empty-sops-home"
-        empty_sops_home.mkdir()
-        blank = encrypt_yaml("terms: |\n  # blank\n\n")
-        no_sops = os.pathsep.join(
-            entry for entry in self.person["PATH"].split(os.pathsep) if not (Path(entry) / "sops").exists()
-        )
-        cases = (
-            ("sops", {"PATH": no_sops}, "install sops with mise"),
-            ("key", {"DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)}, "add this machine's age key to .sops.yaml"),
-            ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
-            ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
-            ("blank", {"DOTFILES_LEAK_TERMS_FILE": str(blank)}, "add a term with sops edit leak-terms.sops.yaml"),
-        )
-        for agent in (False, True):
+        cases = unreadable_lists(self.root, self.person["PATH"])
+        for agent, environment in self.callers():
+            with self.subTest(agent=agent, case="healthy-list-control"):
+                commit = self.commit(f"{self.unique('healthy')}.txt", "clean", "clean", parent=self.base)
+                self.assert_pushed(self.git_push("origin", commit, self.unique("git-healthy"), environment), self.public_url, commit)
+                commit = self.commit(f"{self.unique('healthy')}.txt", "clean", "clean", parent=self.base)
+                self.assert_pushed(self.jj_push(commit, self.unique("jj-healthy"), environment), self.public_url, commit)
             for label, extra, correction in cases:
                 with self.subTest(agent=agent, case=label):
-                    commit = self.commit(f"{label}-{agent}.txt", "clean", label)
-                    environment = (self.agent if agent else self.person) | extra
-                    if label == "key":
-                        for name in ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD"):
-                            environment.pop(name, None)
-                    git_result = self.git_push("origin", commit, f"git-{label}-{agent}", environment)
-                    self.assertNotEqual(git_result.returncode, 0, git_result.stderr)
-                    self.assertIn(correction, git_result.stderr)
-                    self.assertFalse(self.received(commit, self.public_url))
-                    jj_result = self.jj_push(commit, f"jj-{label}-{agent}", environment)
-                    self.assertNotEqual(jj_result.returncode, 0, jj_result.stderr)
-                    self.assertIn(correction, jj_result.stderr)
-                    self.assertFalse(self.received(commit, self.public_url))
+                    commit = self.commit(f"{self.unique(label)}.txt", "clean", label, parent=self.base)
+                    for kind in ("git", "jj"):
+                        before = self.sink_state(self.public_url)
+                        ref = self.unique(f"{kind}-{label}")
+                        result = (
+                            self.git_push("origin", commit, ref, environment | extra)
+                            if kind == "git"
+                            else self.jj_push(commit, ref, environment | extra)
+                        )
+                        self.assertNotEqual(result.returncode, 0, result.stderr)
+                        self.assert_one_correction_line(result, correction)
+                        # The list was not read, so the refusal must not say the push holds a listed term.
+                        self.assertNotIn("holds a listed leak term", result.stderr)
+                        self.assertEqual(self.sink_state(self.public_url), before, "a refused push changed the sink")
 
 
-class SecrecyTrace(unittest.TestCase):
+class SecrecyTrace(LeakTestCase):
     """Trace refusals so that a listed term never reaches a persistent surface."""
 
     public_url = "https://github.com/theorem-labs/rocq.git"
-    marker_names = (
-        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
-        "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
-        "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
-    )
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.home = self.root / "home"
         self.xdg = self.root / "xdg"
         self.tmpdir = self.root / "tmp"
@@ -2737,40 +2952,16 @@ class SecrecyTrace(unittest.TestCase):
         cache = self.home / ".cache" / "public-leak-check"
         cache.mkdir(parents=True)
         (cache / "theorem-labs_rocq").write_text("public", encoding="utf-8")
-        self.write_executable("gh", "#!/bin/sh\nexit 1\n")
-        self.write_executable(
-            "git-remote-sink",
-            "#!/bin/sh\n"
-            "key=$(printf '%s' \"$2\" | sha1sum | cut -c1-16)\n"
-            f"sink={shlex.quote(str(self.sinks))}/$key.git\n"
-            "[[ -d \"$sink\" ]] || /usr/bin/git init -q --bare \"$sink\"\n"
-            "while IFS= read -r line; do\n"
-            "    case \"$line\" in\n"
-            "        capabilities) printf 'connect\\n\\n' ;;\n"
-            "        'connect git-receive-pack'|'connect git-upload-pack')\n"
-            "            printf '\\n'\n"
-            "            exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR "
-            "-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT /usr/bin/git \"${line#connect git-}\" \"$sink\"\n"
-            "            ;;\n"
-            "        '') exit 0 ;;\n"
-            "        *) exit 1 ;;\n"
-            "    esac\n"
-            "done\n",
-        )
-        self.public_check = self.root / "public-leak-check"
-        self.public_check.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        self.public_check.chmod(0o755)
+        write_executable(self.fake / "gh", "#!/bin/sh\nexit 1\n")
+        write_executable(self.fake / "git-remote-sink", SINK_HELPER.replace("@SINKS@", str(self.sinks)))
+        self.public_check = write_executable(self.root / "public-leak-check", "#!/bin/sh\nexit 0\n")
         self.jj_config = self.root / "jj.toml"
         self.jj_config.write_text(
             '[user]\nname = "Hidden Test"\nemail = "hidden-test@example.invalid"\n[signing]\nbehavior = "drop"\n',
             encoding="utf-8",
         )
-        base = {
-            key: value for key, value in os.environ.items()
-            if key not in self.marker_names and not key.startswith(("GIT_CONFIG_", "LEGION_", "PI_"))
-        }
         self.environment = {
-            **base,
+            **base_environment(),
             **fixture_environment(),
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.xdg),
@@ -2791,17 +2982,8 @@ class SecrecyTrace(unittest.TestCase):
         self.real_git("remote", "add", "origin", self.public_url)
         self.real_git("config", "remote.origin.vcs", "sink")
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
-    def write_executable(self, name: str, content: str) -> Path:
-        path = self.fake / name
-        path.write_text(content, encoding="utf-8")
-        path.chmod(0o755)
-        return path
-
     def command(self, command: list[str], environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, cwd=self.repo, env=environment or self.environment, capture_output=True, text=True, check=False)
+        return self.launch(command, cwd=self.repo, env=environment or self.environment)
 
     def real_git(self, *arguments: str) -> str:
         result = self.command(["/usr/bin/git", *arguments])
@@ -2821,79 +3003,75 @@ class SecrecyTrace(unittest.TestCase):
         reader = threading.Thread(target=read_trace, daemon=True)
         reader.start()
         try:
-            process = subprocess.Popen(
+            result = self.launch(
                 [
                     "strace", "-f", "-yy", "-xx", "-s", str(string_limit),
                     "-e", "trace=execve,write,pwrite64,writev", "-o", f"/dev/fd/{write_fd}", "--", *command,
                 ],
                 cwd=self.repo,
                 env=environment or self.environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                text=False,
                 pass_fds=(write_fd,),
             )
         finally:
             os.close(write_fd)
-        try:
-            stdout, stderr = process.communicate(timeout=120)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            self.fail(f"strace timed out: {stderr.decode('utf-8', errors='replace')}")
         reader.join(timeout=10)
         self.assertFalse(reader.is_alive(), "strace capture pipe did not close")
         self.assertEqual(len(captured), 1, "strace capture was not read")
-        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr), captured[0]
+        return result, captured[0]
 
     def assert_refusal(
         self, result: subprocess.CompletedProcess[bytes], capture: bytes, allowed_files: set[str] | None = None
     ) -> dict[str, bytes]:
+        """The traced refusal shows and writes no test term, by the scanner's matching rule: not in its output, an
+        argv, or any regular file but ALLOWED_FILES, which may hold the person's own message but not the canary."""
         allowed_files = allowed_files or set()
+        canary = TEST_TERMS[-1]
         self.assertNotEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
         self.assertIn(b"listed leak term", result.stderr.lower())
-        terms = tuple(term.encode() for term in TEST_TERMS)
-        for stream in (result.stdout, result.stderr):
-            for term in terms:
-                self.assertNotIn(term.lower(), stream.lower())
+        self.assert_hidden(result.stdout, result.stderr)
         argv, writes = parse_strace(capture)
         for values in argv:
-            joined = b"\0".join(values).lower()
-            for term in terms:
-                self.assertNotIn(term.lower(), joined)
+            self.assertEqual(leaked_terms(b"\0".join(values)), [], values)
         for path, data in writes.items():
-            self.assertNotIn(terms[-1], data, path)
-            if path not in allowed_files:
-                for term in terms:
-                    self.assertNotIn(term, data, path)
+            if path in allowed_files:
+                self.assertNotIn(canary, leaked_terms(data), path)
+            else:
+                self.assertEqual(leaked_terms(data), [], path)
         return writes
 
-    def assert_no_canary(self) -> None:
-        canary = TEST_TERMS[-1].encode()
+    def canary_hits(self) -> list[str]:
+        """Each place the canary is after a command: a regular file under the test HOME, TMPDIR or repository, or an
+        object of the repository's git or jj backing store. An object store that lists no object fails (UNKNOWN)."""
+        canary = TEST_TERMS[-1]
+        hits: list[str] = []
         for root in (self.home, self.tmpdir, self.repo):
             for directory, names, files in os.walk(root):
                 names[:] = [name for name in names if not (Path(directory) / name).is_symlink()]
                 for name in files:
                     path = Path(directory) / name
-                    if not stat.S_ISREG(path.lstat().st_mode):
-                        continue
-                    self.assertNotIn(canary, path.read_bytes(), str(path))
-        git_directories = {Path(self.real_git("rev-parse", "--absolute-git-dir"))}
+                    if stat.S_ISREG(path.lstat().st_mode) and canary in leaked_terms(path.read_bytes()):
+                        hits.append(f"file {path}")
+        git_directories = {Path(self.real_git("rev-parse", "--absolute-git-dir")).resolve()}
         target_file = self.repo / ".jj" / "repo" / "store" / "git_target"
         if target_file.is_file():
             target = Path(target_file.read_text(encoding="utf-8").strip())
-            git_directories.add(target if target.is_absolute() else target_file.parent / target)
-        for git_directory in git_directories:
-            result = subprocess.run(
+            git_directories.add((target if target.is_absolute() else target_file.parent / target).resolve())
+        for git_directory in sorted(git_directories):
+            objects = self.launch(
                 ["/usr/bin/git", f"--git-dir={git_directory}", "cat-file", "--batch-all-objects", "--batch"],
                 cwd=self.repo,
                 env=self.environment,
-                input=b"",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
+                text=False,
             )
-            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
-            self.assertNotIn(canary, result.stdout, str(git_directory))
+            self.assertEqual(objects.returncode, 0, objects.stderr.decode("utf-8", errors="replace"))
+            self.assertTrue(objects.stdout, f"{git_directory} listed no object (UNKNOWN)")
+            if canary in leaked_terms(objects.stdout):
+                hits.append(f"object {git_directory}")
+        return hits
+
+    def assert_no_canary(self) -> None:
+        self.assertEqual(self.canary_hits(), [])
 
     def initialize_jj(self) -> None:
         result = self.command(["jj", "git", "init", "--colocate"])
@@ -2980,6 +3158,46 @@ class SecrecyTrace(unittest.TestCase):
         )
         self.assert_refusal(result, capture)
         self.assert_no_canary()
+
+    def test_hidden_canary_search_finds_a_seeded_object_and_file(self) -> None:
+        # B6: the post-command search must find the canary inside the backing store's compressed objects, which no
+        # file holds as plain bytes, and in a plain file.
+        self.initialize_jj()
+        self.assert_no_canary()
+        seeded = self.launch(
+            ["/usr/bin/git", "hash-object", "-w", "--stdin"], cwd=self.repo, env=self.environment, input=f"{TEST_TERMS[-1]}\n"
+        )
+        self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        git_directory = Path(self.real_git("rev-parse", "--absolute-git-dir")).resolve()
+        self.assertEqual(self.canary_hits(), [f"object {git_directory}"])
+        planted = self.tmpdir / "planted"
+        planted.write_text(f"x {TEST_TERMS[-1].upper()}\n", encoding="utf-8")
+        self.assertEqual(self.canary_hits(), [f"file {planted}", f"object {git_directory}"])
+
+    def test_hidden_refusal_audit_catches_an_echo_in_another_case_and_spacing(self) -> None:
+        # B7: the audit matches as the scanner does, so a refusal that echoes `quillfeather   LANE 9` to its output,
+        # a file or an argv fails it; the same refusal without the echo passes.
+        target = self.tmpdir / "echo-target"
+        script = write_executable(
+            self.root / "echoing-refusal.sh",
+            "#!/bin/sh\n"
+            "printf 'leak terms: listed leak term\\n' >&2\n"
+            "case \"$MODE\" in\n"
+            "    output) printf 'echo: %s\\n' \"$ECHOED\" >&2 ;;\n"
+            f"    file) printf '%s\\n' \"$ECHOED\" > {shlex.quote(str(target))}; rm -f -- {shlex.quote(str(target))} ;;\n"
+            "    argv) /usr/bin/true \"$ECHOED\" ;;\n"
+            "esac\n"
+            "exit 1\n",
+        )
+        for mode in ("output", "file", "argv"):
+            with self.subTest(mode=mode):
+                result, capture = self.traced(
+                    [str(script)], environment=self.environment | {"MODE": mode, "ECHOED": "quillfeather   LANE 9"}
+                )
+                with self.assertRaises(AssertionError):
+                    self.assert_refusal(result, capture)
+        result, capture = self.traced([str(script)], environment=self.environment | {"MODE": "none", "ECHOED": ""})
+        self.assert_refusal(result, capture)
 
     def test_hidden_negative_control_finds_file_writes_and_argv(self) -> None:
         script, canary_file, term_file = self.control_writer()

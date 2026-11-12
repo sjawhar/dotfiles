@@ -404,7 +404,8 @@ push_gate() {
             )" || term_rc=$?
             if ((term_rc)); then
                 while IFS= read -r line; do [[ -z "$line" ]] || printf 'error: %s\n' "$line"; done <<< "$term_out" >&2
-                push_term_refuse "this push to $url holds a listed leak term. Nothing was pushed."
+                ((term_rc == 3)) && push_term_refuse "this push to $url holds a listed leak term. Nothing was pushed."
+                push_term_refuse "the leak-term check did not pass, so this push to $url is refused. Nothing was pushed."
             fi
         done <<< "$urls"
     done
