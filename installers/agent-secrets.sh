@@ -6,8 +6,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # --- agent-secrets: the host helper of the secrets broker (sjawhar/legion, AGENTC-393) -------
 # The root install.sh runs this through installers/agent-secrets-local.sh where
 # ~/.config/agent-secrets/env.local sets AGENT_SECRETS_URL; devbox/install.sh runs it on the
-# devbox. A machine without the helper's unit keeps secretsd alone, with no AGENT_SECRETS_* in
-# .bashrc and no session registration (scripts/agent-secrets-session).
+# devbox. A machine without the helper's unit keeps secretsd alone: its shells get no
+# AGENT_SECRETS_HELPER_SOCK (.bashrc) and its sessions are not registered
+# (scripts/agent-secrets-session).
 # Mirrors installers/secretsd.sh: mise owns the binaries (mise.toml [tools.agent-secrets]; the
 # release tarball ships bin/agent-secrets and bin/agent-secrets-helper), the user unit is linked
 # and enabled, and a restart happens only when the pinned version, the unit, its wrapper or its
