@@ -141,6 +141,24 @@ def test_the_claim_holder_takes_it_when_no_session_opened_the_ask(tmp_path):
     assert "you claim BET-1" in sent[0]["message"]
 
 
+def test_a_reply_in_a_comment_thread_goes_to_the_session_he_answered_before_the_stream_lead(tmp_path):
+    """Sami replied under a live session's comment; the stream's scoreboard names another live session. The one he
+    answered takes it: the lead has not read the thread (LINUX-1500, where the lead sat on it 34 minutes)."""
+    sent = Sent()
+    controller = "01a1ctrl-0000-0000-0000-000000000000"
+    events = [ev("comment.created", session(controller, "Legion controller · BET"), 3, id="c1", body="What I found"),
+              ev("comment.created", SAMI, 2, id="c2", reply_to="c1", thread_root_id="c1", body="What did we learn?")]
+    api = FakeDispatch([issue("BET-1", status="backlog", events=events, parent="BET-59"),
+                        issue("BET-59", status="backlog", labels=["stream"])], live=(LEAD, controller))
+    streams = {"BET-59": {"project": "BET", "lead": {"title": "ORCH", "session": LEAD}}}
+    lines = run(api, driver(tmp_path, sent), streams=streams)
+
+    assert [s["to"] for s in sent] == [controller]
+    assert "you wrote the comment he replied to" in sent[0]["message"]
+    assert drive_of(lines) == [
+        f" 1: Legion controller · BET ({controller}); sent; acknowledge by 2026-10-25T13:00:00Z"]
+
+
 def gate_comment(hours: float = 15) -> dict:
     """GATE's acceptance of the item, on the issue and not in the ask's thread."""
     return ev("comment.created", session(OFF_ROSTER, "GATE: gateway"), hours, id="c1",

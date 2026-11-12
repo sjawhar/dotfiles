@@ -10,9 +10,11 @@ was the instruction step, and four hours later it had not held.
 What it does with each WAITING-ON-US row:
 
 1. **Names an executor**, in this order, and sends only to agent sessions, never to a person:
-   the session that opened the ask; else the session that claims the issue; else the session the stream issue's
-   scoreboard names; else the one the project's own stream scoreboard names (with standing leads gone, that is the
-   project's Legion controller wherever a scoreboard names one). A candidate that is
+   for Sami's reply in a comment thread, the session whose comment he replied to, since that is the session he
+   answered and a scoreboard's lead may never have read the thread; else the session that opened the ask; else the
+   session that claims the issue; else the session the stream issue's scoreboard names; else the one the project's
+   own stream scoreboard names (with standing leads gone, that is the project's Legion controller wherever a
+   scoreboard names one). A candidate that is
    not alive is passed over. A row of a Legion tree, or one a Legion architect opened, takes only that project's
    Legion controller at the last step: an architect's claim outlives its process, so the tree is parked rather than
    gone, and the controller is the session that wakes it. When nothing resolves, the row prints as
@@ -74,8 +76,9 @@ NOT_LEADS = frozenset({
 @dataclass
 class Wait:
     """One row that waits on us: the finding's issue, the Dispatch node it is about, its printed text, how long it
-    has waited, the session that opened it when it is an ask, and the sessions that acted on its issue after Sami
-    wrote (`acted`), which is how a claim holder that is carrying the row out is told from one that is not."""
+    has waited, the session that opened it when it is an ask, the session whose comment Sami replied to when it is a
+    comment in a thread (`replied_to`), and the sessions that acted on its issue after Sami wrote (`acted`), which is
+    how a claim holder that is carrying the row out is told from one that is not."""
 
     key: str
     kind: str  # ask | comment | message
@@ -86,6 +89,7 @@ class Wait:
     question: str = ""
     answer: str = ""
     acted: frozenset[str] = frozenset()
+    replied_to: dict | None = None
 
     @property
     def rid(self) -> str:
@@ -284,9 +288,11 @@ class Driver:
 
     # ------------------------------------------------------------------------------------------ the executor
     def candidates(self, w: Wait, data: dict, project: str) -> list[tuple[str, str, str]]:
-        """(session id, name, why it is the executor), in the order the rule gives: the session that opened the ask,
-        the issue's claim holder, the lead of the stream the issue belongs to, and last the lead of the project's
-        own stream when the project has exactly one. A claim a person holds is left out: executors are agent sessions.
+        """(session id, name, why it is the executor), in the order the rule gives: the session whose comment Sami
+        replied to in its thread (he answered that session; a scoreboard's lead may never have read the thread), the
+        session that opened the ask, the issue's claim holder, the lead of the stream the issue belongs to, and last
+        the lead of the project's own stream when the project has exactly one. A claim a person holds is left out:
+        executors are agent sessions.
 
         A claim holder that acted on the issue after Sami wrote is an executor even when the lead roster no longer
         names it: the roster says who a STREAM's work may be handed to, not who has already taken this issue. On
@@ -302,6 +308,8 @@ class Driver:
         add = lambda sid, label, why, off_roster=False: (  # noqa: E731
             out.append((sid, label or sid, why))
             if sid and (off_roster or sid not in NOT_LEADS) and not any(c[0] == sid for c in out) else None)
+        if w.replied_to and w.replied_to.get("kind") == "session":
+            add(w.replied_to["id"], name(w.replied_to), "you wrote the comment he replied to in this thread")
         if w.author and w.author.get("kind") == "session":
             add(w.author["id"], name(w.author), "you opened this ask")
         claim = ((meta.get(w.key) or {}).get("claim") or {}).get("actor") or {}
