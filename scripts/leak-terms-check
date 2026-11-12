@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a diff or commit message against the encrypted leak-term list."""
+"""Check diffs, commit messages, and outgoing commits against the encrypted leak-term list."""
 from __future__ import annotations
 
 import argparse
@@ -10,10 +10,11 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterator, Mapping, Sequence
 
 
 LIST_EXIT = 2
@@ -429,7 +430,7 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
                 break
             marks, content = line[:len(parents)], line[len(parents):]
             for parent, marker in enumerate(marks):
-                if marker != "+":
+                if marker == "-" or ("-" not in marks and marker == " "):
                     seen[parent] += 1
             result_present = "-" not in marks
             if result_present:
@@ -735,6 +736,242 @@ def read_stdin() -> str:
         raise TextError("could not read standard input") from error
 
 
+
+
+OBJECT_ID = re.compile(r"[0-9A-Fa-f]{40,64}\Z")
+TRANSPORT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*::")
+
+
+def git_output(arguments: Sequence[str], standard_input: bytes) -> bytes:
+    """Run one Git producer and fail closed when it cannot provide complete output."""
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            input=standard_input,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as error:
+        raise TextError("could not run git while reading outgoing commits") from error
+    if completed.returncode:
+        raise TextError("git could not read outgoing commits")
+    return completed.stdout
+
+def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[bytes]:
+    """Yield one Git producer's output without collecting every outgoing diff."""
+    try:
+        process = subprocess.Popen(
+            ["git", *arguments],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise TextError("could not run git while reading outgoing commits") from error
+    assert process.stdin is not None
+    assert process.stdout is not None
+    write_errors: list[OSError] = []
+
+    def write_input() -> None:
+        try:
+            process.stdin.write(standard_input)
+        except BrokenPipeError:
+            pass
+        except OSError as error:
+            write_errors.append(error)
+        finally:
+            try:
+                process.stdin.close()
+            except OSError as error:
+                write_errors.append(error)
+
+    writer = threading.Thread(target=write_input)
+    writer.start()
+    try:
+        while chunk := process.stdout.read1(65536):
+            yield chunk
+    finally:
+        process.stdout.close()
+        writer.join()
+        status = process.wait()
+    if write_errors or status:
+        raise TextError("git could not read outgoing commits")
+
+
+def push_updates(text: str) -> tuple[list[str], list[str]]:
+    """Read Git's pre-push updates, keeping only commits that can send content."""
+    local: list[str] = []
+    remote: list[str] = []
+    for line in newline_lines(text):
+        fields = line.split()
+        if len(fields) != 4 or not OBJECT_ID.fullmatch(fields[1]) or not OBJECT_ID.fullmatch(fields[3]):
+            raise TextError("malformed pre-push update")
+        if set(fields[1]) != {"0"}:
+            local.append(fields[1])
+        if set(fields[3]) != {"0"}:
+            remote.append(fields[3])
+    return local, remote
+
+
+def push_destination(remote: str, url: str) -> str:
+    """Use the same transport for advertisement reads that Git uses for the push."""
+    if TRANSPORT_URL.match(url):
+        return url
+    try:
+        configured = subprocess.run(
+            ["git", "config", "--get", f"remote.{remote}.vcs"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as error:
+        raise TextError("could not read the push transport") from error
+    if configured.returncode == 0:
+        helper = configured.stdout.decode("utf-8", errors="surrogateescape").strip()
+        if helper:
+            return f"{helper}::{url}"
+    elif configured.returncode != 1:
+        raise TextError("could not read the push transport")
+    return url
+
+
+def local_object_ids(candidates: Sequence[str]) -> set[str]:
+    """Return the advertised IDs that this repository actually has, in one Git call."""
+    if not candidates:
+        return set()
+    output = git_output(
+        ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        ("\n".join(candidates) + "\n").encode(),
+    )
+    lines = output.decode("utf-8", errors="surrogateescape").splitlines()
+    if len(lines) != len(candidates):
+        raise TextError("git gave an incomplete object advertisement")
+    result: set[str] = set()
+    for candidate, line in zip(candidates, lines, strict=True):
+        fields = line.split()
+        if len(fields) < 2 or not OBJECT_ID.fullmatch(fields[0]):
+            raise TextError("git gave a malformed object advertisement")
+        if fields[1] != "missing":
+            result.add(candidate)
+    return result
+
+
+def remote_advertisement(destination: str) -> list[str]:
+    """Read all refs advertised by the exact transport Git will use to push."""
+    output = git_output(["ls-remote", "--", destination], b"")
+    object_ids: list[str] = []
+    for line in output.decode("utf-8", errors="surrogateescape").splitlines():
+        fields = line.split("\t", 1)
+        if len(fields) != 2 or not OBJECT_ID.fullmatch(fields[0]):
+            raise TextError("git gave a malformed remote advertisement")
+        object_ids.append(fields[0])
+    return object_ids
+
+
+def outgoing_commit_ids(local: Sequence[str], held: Sequence[str]) -> list[str]:
+    """List exactly the commits sent to this destination, preserving Git's topo order."""
+    revisions = [*local]
+    if held:
+        revisions.extend(("--not", *held))
+    output = git_output(["rev-list", "--topo-order", "--stdin"], ("\n".join(revisions) + "\n").encode())
+    commits = output.decode("ascii", errors="strict").splitlines()
+    if any(OBJECT_ID.fullmatch(commit) is None for commit in commits):
+        raise TextError("git gave a malformed outgoing commit list")
+    return commits
+
+
+def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
+    """Read all outgoing messages and combined diffs from one Git producer."""
+    if not commits:
+        return []
+    # Do not let local log.* or diff.* configuration omit a root diff, a
+    # signature, notes, decorations, or a submodule change from this scan.
+    arguments = [
+        "-c",
+        "core.quotePath=false",
+        "log",
+        "--no-walk=unsorted",
+        "--stdin",
+        "--format=%x00%H%x00%B%x00",
+        "--root",
+        "--no-show-signature",
+        "--no-notes",
+        "--no-decorate",
+        "--cc",
+        "-U0",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--no-renames",
+        "--no-relative",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--submodule=short",
+        "--ignore-submodules=none",
+        "--diff-algorithm=myers",
+    ]
+    findings: list[str] = []
+    expected = set(commits)
+    seen: set[str] = set()
+    records: list[bytes] = []
+
+    def scan_record(raw_commit: bytes, raw_message: bytes, raw_diff: bytes) -> None:
+        try:
+            commit = raw_commit.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise TextError("git gave malformed commit boundaries") from error
+        if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
+            raise TextError("git gave malformed commit boundaries")
+        seen.add(commit)
+        short = commit[:12]
+        message = raw_message.decode("utf-8", errors="surrogateescape")
+        diff = raw_diff.decode("utf-8", errors="surrogateescape")
+        findings.extend(scan_message(message, matcher, "verbatim", None, False, f"commit {short} message"))
+        findings.extend(scan_diff(diff, matcher, f"commit {short} "))
+
+    first = True
+    buffered = b""
+    for chunk in git_chunks(arguments, ("\n".join(commits) + "\n").encode()):
+        buffered += chunk
+        while b"\0" in buffered:
+            raw, buffered = buffered.split(b"\0", 1)
+            if first:
+                if raw:
+                    raise TextError("git gave malformed commit boundaries")
+                first = False
+                continue
+            records.append(raw)
+            if len(records) == 3:
+                scan_record(*records)
+                records.clear()
+    if buffered or records:
+        records.append(buffered)
+        if len(records) != 3:
+            raise TextError("git gave malformed commit boundaries")
+        scan_record(*records)
+        records.clear()
+    if first or seen != expected:
+        raise TextError("git gave malformed commit boundaries")
+    return findings
+
+
+def scan_push(text: str, remote: str, url: str) -> list[str]:
+    """Scan only commits this pre-push invocation sends and its destination lacks."""
+    local, prior_remote = push_updates(text)
+    if not local:
+        return []
+    destination = push_destination(remote, url)
+    advertised = remote_advertisement(destination)
+    held = local_object_ids([*advertised, *prior_remote])
+    commits = outgoing_commit_ids(local, sorted(held))
+    try:
+        matcher = load_terms()
+    except ListError:
+        raise
+    return scan_outgoing_commits(commits, matcher)
+
 def parser() -> argparse.ArgumentParser:
     argument_parser = argparse.ArgumentParser(prog="leak-terms-check")
     modes = argument_parser.add_subparsers(dest="mode", required=True)
@@ -750,6 +987,9 @@ def parser() -> argparse.ArgumentParser:
     comment_char.add_argument("--status-shown", choices=("0", "1"), required=True)
     jj_editor_parser = modes.add_parser("jj-editor")
     jj_editor_parser.add_argument("file")
+    push = modes.add_parser("push")
+    push.add_argument("--remote", required=True)
+    push.add_argument("--url", required=True)
     return argument_parser
 
 
@@ -770,16 +1010,17 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        matcher = load_terms()
+        if args.mode == "push":
+            findings = scan_push(text, args.remote, args.url)
+        else:
+            matcher = load_terms()
+            if args.mode == "diff":
+                findings = scan_diff(text, matcher, args.place_prefix)
+            else:
+                findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors, args.place)
     except ListError as error:
         print(error, file=sys.stderr)
         return LIST_EXIT
-
-    try:
-        if args.mode == "diff":
-            findings = scan_diff(text, matcher, args.place_prefix)
-        else:
-            findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors, args.place)
     except TextError as error:
         print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
         return TEXT_EXIT

@@ -2,6 +2,7 @@
 """The leak-term scanner against an encrypted, per-process test list."""
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -949,6 +950,45 @@ class GitLeaks(unittest.TestCase):
                 result = self.git_run(repository, "commit", "-m", "unchecked", agent=agent, real=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_unreadable_lists_refuse_git_commits(self) -> None:
+        invalid = self.root / "invalid.sops.yaml"
+        invalid.write_text("terms: clear text\n", encoding="utf-8")
+        empty_sops_home = self.root / "empty-sops-home"
+        empty_sops_home.mkdir()
+        blank = encrypt_yaml("terms: |\n  # blank\n\n")
+        no_sops = os.pathsep.join(
+            entry for entry in self.person["PATH"].split(os.pathsep) if not (Path(entry) / "sops").exists()
+        )
+        cases = (
+            ("sops", {"PATH": no_sops}, "install sops with mise"),
+            ("key", {"DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)}, "add this machine's age key to .sops.yaml"),
+            ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
+            ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
+            ("blank", {"DOTFILES_LEAK_TERMS_FILE": str(blank)}, "add a term with sops edit leak-terms.sops.yaml"),
+        )
+        for agent in (False, True):
+            for label, extra, correction in cases:
+                with self.subTest(agent=agent, case=label):
+                    repository = self.repository(agent)
+                    self.stage(repository, "clean.txt", "clean\n", agent)
+                    before = self.head(repository, agent)
+                    environment = self.environment(agent, **extra)
+                    if label == "key":
+                        for name in ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD"):
+                            environment.pop(name, None)
+                    result = subprocess.run(
+                        ["git", "commit", "--allow-empty", "-m", "clean"],
+                        cwd=repository,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(correction, result.stderr)
+                    self.assertEqual(self.head(repository, agent), before)
+                    self.assert_hidden(result)
+
 
 class JjLeaks(unittest.TestCase):
     session = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
@@ -1505,5 +1545,471 @@ class JjLeaks(unittest.TestCase):
         self.assertEqual(result.returncode, 127, result.stderr)
         self.assertIn("jj shim: no real jj found on PATH", result.stderr)
         self.assertNotIn("recurs", result.stderr.casefold())
+
+    def test_unreadable_lists_refuse_jj_commits(self) -> None:
+        invalid = self.root / "invalid.sops.yaml"
+        invalid.write_text("terms: clear text\n", encoding="utf-8")
+        empty_sops_home = self.root / "empty-sops-home"
+        empty_sops_home.mkdir()
+        blank = encrypt_yaml("terms: |\n  # blank\n\n")
+        no_sops = os.pathsep.join(
+            entry for entry in self.person["PATH"].split(os.pathsep) if not (Path(entry) / "sops").exists()
+        )
+        cases = (
+            ("sops", {"PATH": no_sops}, "install sops with mise"),
+            ("key", {"DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)}, "add this machine's age key to .sops.yaml"),
+            ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
+            ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
+            ("blank", {"DOTFILES_LEAK_TERMS_FILE": str(blank)}, "add a term with sops edit leak-terms.sops.yaml"),
+        )
+        for agent in (False, True):
+            for label, extra, correction in cases:
+                with self.subTest(agent=agent, case=label):
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    environment = self.environment(agent, **extra)
+                    if label == "key":
+                        for name in ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD"):
+                            environment.pop(name, None)
+                    result = subprocess.run(
+                        ["jj", "commit", "clean.txt", "-m", "clean"],
+                        cwd=repository,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(correction, result.stderr)
+                    self.assert_hidden(result)
+
+
+class OutgoingLeaks(unittest.TestCase):
+    """Outgoing Git and JJ commits are scanned independently of the public-leak gate."""
+
+    agent_markers = (
+        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION", "CLAUDECODE",
+        "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
+        "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
+    )
+    public_url = "https://github.com/theorem-labs/rocq.git"
+    unknown_url = "https://github.com/theorem-labs/unreadable-fixture.git"
+    private_url = "https://github.com/theorem-labs/private-fixture.git"
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.xdg = self.root / "xdg"
+        self.tmpdir = self.root / "tmp"
+        self.fake = self.root / "fake"
+        self.sinks = self.root / "sinks"
+        for directory in (self.home, self.xdg, self.tmpdir, self.fake, self.sinks):
+            directory.mkdir()
+        cache = self.home / ".cache" / "public-leak-check"
+        cache.mkdir(parents=True)
+        (cache / "theorem-labs_rocq").write_text("public", encoding="utf-8")
+        (cache / "theorem-labs_private-fixture").write_text("private", encoding="utf-8")
+        (cache / "theorem-labs_other-public").write_text("public", encoding="utf-8")
+        self.public_log = self.root / "public-check.log"
+        self.write_executable("gh", "#!/bin/bash\nexit 1\n")
+        self.write_executable(
+            "git-remote-sink",
+            "#!/bin/bash\n"
+            "key=$(printf '%s' \"$2\" | sha1sum | cut -c1-16)\n"
+            f"sink={shlex.quote(str(self.sinks))}/$key.git\n"
+            "[[ -d \"$sink\" ]] || /usr/bin/git init -q --bare \"$sink\"\n"
+            f"printf '%s\\t%s\\n' \"$2\" \"$sink\" >> {shlex.quote(str(self.sinks) + '.log')}\n"
+            "while IFS= read -r line; do\n"
+            "    case \"$line\" in\n"
+            "        capabilities) printf 'connect\\n\\n' ;;\n"
+            "        'connect git-receive-pack'|'connect git-upload-pack')\n"
+            "            printf '\\n'\n"
+            "            exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR "
+            "-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT /usr/bin/git \"${line#connect git-}\" \"$sink\"\n"
+            "            ;;\n"
+            "        '') exit 0 ;;\n"
+            "        *) exit 1 ;;\n"
+            "    esac\n"
+            "done\n",
+        )
+        self.check = self.root / "public-leak-check"
+        self.check.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(self.public_log))}\nexit 0\n", encoding="utf-8")
+        self.check.chmod(0o755)
+        self.jj_config = self.root / "jj.toml"
+        self.jj_config.write_text(
+            '[user]\nname = "Push Test"\nemail = "push-test@example.invalid"\n[signing]\nbehavior = "drop"\n',
+            encoding="utf-8",
+        )
+        base = {
+            key: value for key, value in os.environ.items()
+            if key not in self.agent_markers and not key.startswith(("GIT_CONFIG_", "LEGION_", "PI_"))
+        }
+        self.person = {
+            **base,
+            **fixture_environment(),
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.xdg),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "TMPDIR": str(self.tmpdir),
+            "PATH": os.pathsep.join([str(self.fake), str(ROOT / "shims"), str(Path(real_jj()).parent), os.environ["PATH"]]),
+            "PUBLIC_LEAK_CHECK": str(self.check),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_ALLOW_PROTOCOL": "sink",
+            "JJ_CONFIG": str(self.jj_config),
+        }
+        self.agent = {**self.person, "OMP_SESSION_ID": "01a0fa64-b3a5-7415-b143-c2a338b5da8b"}
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.real("init", "-q", "-b", "main")
+        self.real("config", "user.name", "Push Test")
+        self.real("config", "user.email", "push-test@example.invalid")
+        self.real("commit", "-q", "--allow-empty", "-m", "base")
+        self.real("remote", "add", "origin", self.public_url)
+        self.real("config", "remote.origin.vcs", "sink")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_executable(self, name: str, content: str) -> Path:
+        path = self.fake / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def command(self, command: list[str], environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(command, cwd=self.repo, env=environment or self.agent, capture_output=True, text=True, check=False, timeout=60)
+
+    def real(self, *arguments: str, environment: dict[str, str] | None = None) -> str:
+        result = self.command(["/usr/bin/git", *arguments], environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def git_push(self, remote: str, commit: str, ref: str, environment: dict[str, str], *options: str) -> subprocess.CompletedProcess[str]:
+        return self.command(["git", "push", *options, remote, f"{commit}:refs/heads/{ref}"], environment)
+
+    def commit(self, path: str, content: str, message: str) -> str:
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content + "\n", encoding="utf-8")
+        self.real("add", path)
+        self.real("commit", "--no-verify", "-m", message)
+        return self.real("rev-parse", "HEAD")
+
+    def sink(self, url: str) -> Path:
+        return self.sinks / f"{hashlib.sha1(url.encode()).hexdigest()[:16]}.git"
+
+    def received(self, commit: str, url: str) -> bool:
+        sink = self.sink(url)
+        return sink.is_dir() and subprocess.run(
+            ["/usr/bin/git", "--git-dir", str(sink), "cat-file", "-e", commit],
+            capture_output=True,
+        ).returncode == 0
+
+    def set_url(self, url: str) -> None:
+        self.real("remote", "set-url", "origin", url)
+
+    def assert_term_refusal(
+        self,
+        result: subprocess.CompletedProcess[str],
+        commit: str,
+        place: str,
+        url: str,
+        shim: str = "git",
+    ) -> None:
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"error: leak terms: commit {commit[:12]} {place}: listed leak term", result.stderr)
+        self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
+        self.assertFalse(self.received(commit, url), result.stderr)
+        for term in TEST_TERMS:
+            self.assertNotIn(term.casefold(), (result.stdout + result.stderr).casefold())
+
+    def init_jj(self) -> None:
+        result = self.command(["jj", "git", "init", "--colocate"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def jj_push(self, commit: str, bookmark: str, environment: dict[str, str], executable: bool = False) -> subprocess.CompletedProcess[str]:
+        imported = self.command(["jj", "git", "import"], environment)
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        marked = self.command(["jj", "bookmark", "set", "--allow-backwards", bookmark, "-r", commit], environment)
+        self.assertEqual(marked.returncode, 0, marked.stderr)
+        config = ["--config", "git.executable-path=/usr/bin/git"] if executable else []
+        return self.command(["jj", *config, "git", "push", "--bookmark", bookmark], environment)
+
+    def test_push_refuses_git_content_message_options_and_hooks(self) -> None:
+        cases = (
+            ("content", "guard.txt", "Quillfeather Lane 9", "clean", (), "guard.txt:1"),
+            ("message", "message.txt", "clean", "Quillfeather Lane 9", (), "message line 1"),
+            ("no-verify", "no-verify.txt", "Quillfeather Lane 9", "clean", ("--no-verify",), "no-verify.txt:1"),
+            ("caller-hooks", "caller-hooks.txt", "Quillfeather Lane 9", "clean", ("-c", "core.hooksPath=/dev/null"), "caller-hooks.txt:1"),
+        )
+        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
+            for label, path, content, message, options, place in cases:
+                with self.subTest(agent=agent, url=url, case=label):
+                    self.set_url(url)
+                    actual_path = f"{label}-{int(agent)}-{url.rsplit('/', 1)[-1]}"
+                    commit = self.commit(actual_path, content, message)
+                    environment = self.agent if agent else self.person
+                    actual_place = f"{actual_path}:1" if place.endswith(":1") else place
+                    if options[:1] == ("-c",):
+                        result = self.command(["git", *options, "push", "origin", f"{commit}:refs/heads/{label}-{agent}"], environment)
+                    else:
+                        result = self.git_push("origin", commit, f"{label}-{agent}", environment, *options)
+                    self.assert_term_refusal(result, commit, actual_place, url)
+
+    def test_push_refuses_wrapper_dispatcher_paths_and_changed_paths(self) -> None:
+        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
+            for marker, file in (("PUBLIC-LEAK-CHECK-WRAPPER", "pre-push"), ("PUBLIC-LEAK-CHECK-DISPATCHER", "dispatch")):
+                with self.subTest(agent=agent, url=url, marker=marker):
+                    self.set_url(url)
+                    hooks = self.root / f"{marker}-{agent}-{url.rsplit('/', 1)[-1]}"
+                    hooks.mkdir()
+                    executable = hooks / file
+                    executable.write_text(f"#!/bin/bash\n# {marker}\nexit 0\n", encoding="utf-8")
+                    executable.chmod(0o755)
+                    self.real("config", "core.hooksPath", str(hooks))
+                    path = f"{marker}-{agent}-{url.rsplit('/', 1)[-1]}/zorbleplex.txt"
+                    commit = self.commit(path, "clean", "clean")
+                    result = self.git_push("origin", commit, f"{marker}-{agent}", self.agent if agent else self.person)
+                    self.assert_term_refusal(result, commit, path.replace("zorbleplex", "<listed term>"), url)
+                    self.real("config", "--unset", "core.hooksPath")
+
+    def test_push_refuses_jj_and_a_middle_stack_commit(self) -> None:
+        self.init_jj()
+        first = self.commit("first.txt", "clean", "first")
+        middle = self.commit("middle.txt", "clean", "Quillfeather Lane 9")
+        last = self.commit("last.txt", "clean", "last")
+        for url in (self.public_url, self.unknown_url):
+            self.set_url(url)
+            for environment, executable in (
+                (self.agent, False),
+                (self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"}, False),
+                (self.agent, True),
+                (self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"}, True),
+            ):
+                with self.subTest(agent=environment is self.agent, executable=executable, url=url):
+                    result = self.jj_push(last, f"stack-{executable}-{id(environment)}-{url.rsplit('/', 1)[-1]}", environment, executable)
+                    self.assert_term_refusal(result, middle, "message line 1", url, "jj")
+                    self.assertFalse(self.received(first, url))
+                    self.assertFalse(self.received(last, url))
+                    self.assertNotIn("DOTFILES_JJ_NO_LEAK_CHECK", result.stderr)
+
+    def test_push_clean_stacks_and_merges_reach_the_sink(self) -> None:
+        first = self.commit("stack-first.txt", "clean", "first")
+        second = self.commit("stack-second.txt", "clean", "second")
+        third = self.commit("stack-third.txt", "clean", "third")
+        stack = self.git_push("origin", third, "clean-stack", self.person)
+        self.assertEqual(stack.returncode, 0, stack.stderr)
+        for commit in (first, second, third):
+            self.assertTrue(self.received(commit, self.public_url))
+
+        self.real("checkout", "-b", "clean-side")
+        self.commit("clean-merge.txt", "side", "side")
+        self.real("checkout", "main")
+        self.commit("clean-merge.txt", "main", "main")
+        merge = self.command(["/usr/bin/git", "merge", "--no-ff", "clean-side"], self.person)
+        self.assertNotEqual(merge.returncode, 0)
+        (self.repo / "clean-merge.txt").write_text("resolution\n", encoding="utf-8")
+        self.real("add", "clean-merge.txt")
+        self.real("commit", "--no-verify", "-m", "clean merge")
+        merged = self.real("rev-parse", "HEAD")
+        merge_push = self.git_push("origin", merged, "clean-merge", self.person)
+        self.assertEqual(merge_push.returncode, 0, merge_push.stderr)
+        self.assertTrue(self.received(merged, self.public_url))
+
+        self.init_jj()
+        before = self.public_log.read_text(encoding="utf-8").splitlines() if self.public_log.exists() else []
+        jj_push = self.jj_push(merged, "clean-jj", self.person)
+        self.assertEqual(jj_push.returncode, 0, jj_push.stderr)
+        self.assertTrue(self.received(merged, self.public_url))
+        after = self.public_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(after), len(before) + 1)
+
+    def test_push_root_diff_ignores_log_configuration(self) -> None:
+        (self.home / ".gitconfig").write_text(
+            "[log]\n"
+            "\tshowRoot = false\n"
+            "\tshowSignature = true\n",
+            encoding="utf-8",
+        )
+        initial_repository = self.repo
+        try:
+            for label, content in (("root-leak", "Quillfeather Lane 9"), ("root-clean", "clean")):
+                with self.subTest(kind=label):
+                    self.repo = self.root / label
+                    self.repo.mkdir()
+                    self.real("init", "-q", "-b", "main")
+                    self.real("config", "user.name", "Push Test")
+                    self.real("config", "user.email", "push-test@example.invalid")
+                    self.real("remote", "add", "origin", self.public_url)
+                    self.real("config", "remote.origin.vcs", "sink")
+                    commit = self.commit("root.txt", content, label)
+                    result = self.git_push("origin", commit, label, self.person)
+                    if label == "root-leak":
+                        self.assert_term_refusal(result, commit, "root.txt:1", self.public_url)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertTrue(self.received(commit, self.public_url))
+        finally:
+            self.repo = initial_repository
+
+    def test_push_skips_an_empty_private_dry_run_destination(self) -> None:
+        self.init_jj()
+        self.set_url(self.private_url)
+        self.write_executable(
+            "jj",
+            "#!/bin/bash\n"
+            "if [[ \" $* \" == *' --dry-run '* ]]; then\n"
+            "    printf 'Changes to push to origin:\\n'\n"
+            "fi\n",
+        )
+        result = self.command(
+            [str(ROOT / "shims" / "jj"), "git", "push"],
+            self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_push_refuses_a_combined_diff(self) -> None:
+        self.real("checkout", "-b", "side")
+        self.commit("merge.txt", "side", "side")
+        self.real("checkout", "main")
+        self.commit("merge.txt", "main", "main")
+        merge = self.command(["/usr/bin/git", "merge", "--no-ff", "side"], self.agent)
+        self.assertNotEqual(merge.returncode, 0)
+        (self.repo / "merge.txt").write_text("Quillfeather Lane 9\n", encoding="utf-8")
+        self.real("add", "merge.txt")
+        self.real("commit", "--no-verify", "-m", "resolve")
+        commit = self.real("rev-parse", "HEAD")
+        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
+            with self.subTest(kind="git", agent=agent, url=url):
+                self.set_url(url)
+                self.assert_term_refusal(
+                    self.git_push("origin", commit, f"merge-{agent}", self.agent if agent else self.person),
+                    commit,
+                    "merge.txt:1",
+                    url,
+                )
+        self.init_jj()
+        for agent, url in ((True, self.public_url), (False, self.public_url), (True, self.unknown_url), (False, self.unknown_url)):
+            for executable in (False, True):
+                with self.subTest(kind="jj", agent=agent, executable=executable, url=url):
+                    self.set_url(url)
+                    result = self.jj_push(
+                        commit,
+                        f"merge-jj-{agent}-{executable}-{url.rsplit('/', 1)[-1]}",
+                        self.agent if agent else self.person,
+                        executable,
+                    )
+                    self.assert_term_refusal(result, commit, "merge.txt:1", url, "jj")
+
+    def test_push_refuses_person_terms_without_the_public_check(self) -> None:
+        no_check = dict(self.person)
+        no_check.pop("PUBLIC_LEAK_CHECK")
+        commit = self.commit("without-public-check.txt", "Quillfeather Lane 9", "clean")
+        for url in (self.public_url, self.unknown_url):
+            with self.subTest(kind="git", url=url):
+                self.set_url(url)
+                result = self.git_push("origin", commit, f"no-public-{url.rsplit('/', 1)[-1]}", no_check)
+                self.assert_term_refusal(result, commit, "without-public-check.txt:1", url)
+        self.init_jj()
+        for url in (self.public_url, self.unknown_url):
+            with self.subTest(kind="jj", url=url):
+                self.set_url(url)
+                result = self.jj_push(commit, f"no-public-jj-{url.rsplit('/', 1)[-1]}", no_check)
+                self.assert_term_refusal(result, commit, "without-public-check.txt:1", url, "jj")
+
+    def test_push_controls_private_clean_force_deletion_and_direct_url(self) -> None:
+        clean = self.commit("clean.txt", "clean", "clean")
+        self.set_url(self.private_url)
+        private = self.git_push("origin", clean, "private", self.person)
+        self.assertEqual(private.returncode, 0, private.stderr)
+        self.assertTrue(self.received(clean, self.private_url))
+        self.set_url(self.public_url)
+        leaky = self.commit("force.txt", "Quillfeather Lane 9", "force")
+        self.assert_term_refusal(self.git_push("origin", leaky, "force", self.agent, "--force"), leaky, "force.txt:1", self.public_url)
+        self.real("push", "--no-verify", "origin", f"{clean}:refs/heads/delete")
+        deleted = self.command(["git", "push", "origin", ":refs/heads/delete"], self.person)
+        self.assertEqual(deleted.returncode, 0, deleted.stderr)
+        self.set_url(self.private_url)
+        direct = self.command(["git", "push", f"sink::{self.public_url}", f"{leaky}:refs/heads/direct"], self.person)
+        self.assert_term_refusal(direct, leaky, "force.txt:1", f"sink::{self.public_url}")
+
+    def test_push_uses_the_destination_advertisement_not_other_refs(self) -> None:
+        leaky = self.commit("advertisement.txt", "Quillfeather Lane 9", "leak")
+        other_url = "https://github.com/theorem-labs/other-public.git"
+        self.real("remote", "add", "other", other_url)
+        self.real("config", "remote.other.vcs", "sink")
+        self.real("push", "--no-verify", "other", f"{leaky}:refs/heads/held")
+        self.real("update-ref", "refs/remotes/origin/stale", leaky)
+        self.assert_term_refusal(self.git_push("origin", leaky, "destination", self.agent), leaky, "advertisement.txt:1", self.public_url)
+        self.real("push", "--no-verify", "origin", f"{leaky}:refs/heads/already")
+        up_to_date = self.git_push("origin", leaky, "again", self.person)
+        self.assertEqual(up_to_date.returncode, 0, up_to_date.stderr)
+        direct_url = f"sink::{self.unknown_url}"
+        self.real("push", "--no-verify", direct_url, f"{leaky}:refs/heads/direct-held")
+        direct_held = self.command(["git", "push", direct_url, f"{leaky}:refs/heads/direct-again"], self.person)
+        self.assertEqual(direct_held.returncode, 0, direct_held.stderr)
+
+    def test_push_refuses_a_failed_advertisement_read(self) -> None:
+        self.write_executable(
+            "git-remote-fail",
+            "#!/bin/bash\n"
+            "key=$(printf '%s' \"$2\" | sha1sum | cut -c1-16)\n"
+            f"sink={shlex.quote(str(self.sinks))}/$key.git\n"
+            "[[ -d \"$sink\" ]] || /usr/bin/git init -q --bare \"$sink\"\n"
+            "while IFS= read -r line; do\n"
+            "    case \"$line\" in\n"
+            "        capabilities) printf 'connect\\n\\n' ;;\n"
+            "        'connect git-receive-pack')\n"
+            "            printf '\\n'\n"
+            "            exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR "
+            "-u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT /usr/bin/git receive-pack \"$sink\"\n"
+            "            ;;\n"
+            "        'connect git-upload-pack') exit 1 ;;\n"
+            "        '') exit 0 ;;\n"
+            "        *) exit 1 ;;\n"
+            "    esac\n"
+            "done\n",
+        )
+        self.real("config", "remote.origin.vcs", "fail")
+        leaky = self.commit("failed.txt", "Quillfeather Lane 9", "failed")
+        result = self.git_push("origin", leaky, "failed", self.person | {"GIT_ALLOW_PROTOCOL": "sink:fail"})
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cannot read text to check: git could not read outgoing commits", result.stderr)
+        self.assertFalse(self.received(leaky, self.public_url))
+
+    def test_unreadable_push_lists_refuse_git_and_jj(self) -> None:
+        self.init_jj()
+        invalid = self.root / "invalid.sops.yaml"
+        invalid.write_text("terms: clear text\n", encoding="utf-8")
+        empty_sops_home = self.root / "empty-sops-home"
+        empty_sops_home.mkdir()
+        blank = encrypt_yaml("terms: |\n  # blank\n\n")
+        no_sops = os.pathsep.join(
+            entry for entry in self.person["PATH"].split(os.pathsep) if not (Path(entry) / "sops").exists()
+        )
+        cases = (
+            ("sops", {"PATH": no_sops}, "install sops with mise"),
+            ("key", {"DOTFILES_LEAK_TERMS_SOPS_HOME": str(empty_sops_home)}, "add this machine's age key to .sops.yaml"),
+            ("missing", {"DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}, "run scripts/dotfiles-sync local"),
+            ("invalid", {"DOTFILES_LEAK_TERMS_FILE": str(invalid)}, "fix it with sops edit leak-terms.sops.yaml"),
+            ("blank", {"DOTFILES_LEAK_TERMS_FILE": str(blank)}, "add a term with sops edit leak-terms.sops.yaml"),
+        )
+        for agent in (False, True):
+            for label, extra, correction in cases:
+                with self.subTest(agent=agent, case=label):
+                    commit = self.commit(f"{label}-{agent}.txt", "clean", label)
+                    environment = (self.agent if agent else self.person) | extra
+                    if label == "key":
+                        for name in ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD"):
+                            environment.pop(name, None)
+                    git_result = self.git_push("origin", commit, f"git-{label}-{agent}", environment)
+                    self.assertNotEqual(git_result.returncode, 0, git_result.stderr)
+                    self.assertIn(correction, git_result.stderr)
+                    self.assertFalse(self.received(commit, self.public_url))
+                    jj_result = self.jj_push(commit, f"jj-{label}-{agent}", environment)
+                    self.assertNotEqual(jj_result.returncode, 0, jj_result.stderr)
+                    self.assertIn(correction, jj_result.stderr)
+                    self.assertFalse(self.received(commit, self.public_url))
 if __name__ == "__main__":
     unittest.main()

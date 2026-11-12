@@ -6,11 +6,12 @@
 # missing, and an unlocked registration under <store>/.git/worktrees/ can
 # disappear (AGENTC-431); a locked one survives, and `jj workspace forget` still
 # removes it. In an agent session it refuses `jj git push --deleted` and checks
-# outgoing GitHub pushes with the shared public leak check. Outside one it runs
-# the same check on `jj git push` wherever this machine has the check installed
-# (dispatch://BET-706), unless DOTFILES_JJ_NO_LEAK_CHECK=1. Where
-# scripts/omp-session-trailer says no, it drops the session's Omp-Session trailer.
-# Everything else goes straight to the real jj.
+# outgoing GitHub pushes with the shared public leak check. Every `jj git push`
+# also dry-runs each destination and scans a public or unreadable GitHub
+# destination's outgoing commits for listed leak terms before that existing
+# gate; a person's DOTFILES_JJ_NO_LEAK_CHECK=1 skips only the public check.
+# Where scripts/omp-session-trailer says no, it drops the session's
+# Omp-Session trailer. Everything else goes straight to the real jj.
 set -euo pipefail
 
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
@@ -121,12 +122,12 @@ find_leak_check() {
 }
 # Who the push gate runs for: `agent` in an agent session; `person` outside one, on a machine with the check
 # installed and DOTFILES_JJ_NO_LEAK_CHECK not 1; empty otherwise. A person's own `jj git push` from a terminal
-# reaches no git hook (jj runs git with --no-verify) and no other gate (shims/git checks only agent sessions),
-# so where the check is installed this shim checks it (Sami, dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5:
-# "Add a hook somehow to my devbox for these leaks"). A machine without the check (a laptop) is unchanged, and
-# DOTFILES_JJ_NO_LEAK_CHECK=1 skips it for one command, as `git push --no-verify` does for git. In an agent
-# session that variable is ignored and the rule is as before: without a check only a confirmed-private
-# destination passes.
+# reaches no ordinary git hook (jj runs git with --no-verify) and no other public-check gate: shims/git installs
+# the encrypted term hook but preserves this public-check decision. So where the check is installed this shim checks
+# it (Sami, dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5: "Add a hook somehow to my devbox for these
+# leaks"). A machine without the check (a laptop) is unchanged, and DOTFILES_JJ_NO_LEAK_CHECK=1 skips it for one
+# command, as `git push --no-verify` does for git. In an agent session that variable is ignored and the rule is as
+# before: without a check only a confirmed-private destination passes.
 _gate=""
 _is_agent=0
 if agent_context; then
@@ -140,6 +141,10 @@ push_refuse() {
     printf 'error: jj shim: %s\n' "$@" >&2
     [[ "$_gate" != person ]] ||
         printf 'error: jj shim: to push this one command without the public leak check, run it with DOTFILES_JJ_NO_LEAK_CHECK=1.\n' >&2
+    exit 1
+}
+push_term_refuse() {
+    printf 'error: jj shim: %s\n' "$@" >&2
     exit 1
 }
 alias_refuse() {
@@ -319,7 +324,7 @@ git_target() {
 }
 
 push_gate() {
-    local target out rc=0 a remote="" kind ref action old new url slug check pointer visibility line
+    local target out rc=0 a remote="" kind ref action old new url slug check pointer visibility line scanner sshcmd term_out term_rc
     local zero=0000000000000000000000000000000000000000
     local scripts="${BASH_SOURCE[0]%/*}/../scripts"
     local header='^Changes to push to (.+):$'
@@ -378,6 +383,32 @@ push_gate() {
         [[ "$out" == *'Nothing changed.'* ]] || push_refuse "jj's dry-run gave no readable push plan. Nothing was pushed."
         return 0
     fi
+    scanner="$scripts/leak-terms-check"
+    sshcmd="$(git --git-dir="$target" config --get core.sshCommand 2> /dev/null)" || sshcmd=""
+    for remote in "${remotes[@]}"; do
+        local urls
+        urls="$(git --git-dir="$target" remote get-url --push --all "$remote" 2>/dev/null)" ||
+            push_term_refuse "cannot read push remote $remote. Nothing was pushed."
+        [[ -n "$urls" ]] || push_term_refuse "push remote $remote has no URL. Nothing was pushed."
+        while IFS= read -r url; do
+            visibility="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$scripts/github-repo-visibility" "$url" 2> /dev/null)" ||
+                visibility=unknown
+            case "$visibility" in private | internal | not-github) continue ;; esac
+            [[ -n "${updates[$remote]}" ]] || push_term_refuse "jj's dry-run gave no updates for $remote. Nothing was pushed."
+            term_rc=0
+            term_out="$(
+                printf '%s' "${updates[$remote]}" | GIT_DIR="$target" "$scanner" push --remote "$remote" --url "$url" 2>&1
+                statuses=("${PIPESTATUS[@]}")
+                ((statuses[0] == 0)) || exit "${statuses[0]}"
+                exit "${statuses[1]}"
+            )" || term_rc=$?
+            if ((term_rc)); then
+                while IFS= read -r line; do [[ -z "$line" ]] || printf 'error: %s\n' "$line"; done <<< "$term_out" >&2
+                push_term_refuse "this push to $url holds a listed leak term. Nothing was pushed."
+            fi
+        done <<< "$urls"
+    done
+    [[ -n "$_gate" ]] || return 0
     find_leak_check
     check="$_check" pointer="$_pointer"
     for remote in "${remotes[@]}"; do
@@ -406,7 +437,7 @@ push_gate() {
         done <<< "$urls"
     done
 }
-if [[ -n "$_gate" && "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
     # Execute the same expanded argv that is checked, not a second alias lookup.
     push_gate "$@"
 fi

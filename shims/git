@@ -3,10 +3,9 @@
 # throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
 # lock of ours and no further, give every `git commit` without a command-line hooks path
 # the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
-# it does now, run the shared public leak check on every `git push` jj runs where the pre-push
-# hook would and on every plain `git push` whose hooks directory holds neither the leak check's
-# wrapper nor its dispatcher, and keep a pruning `git fetch` from deleting the destination
-# of a short-named refspec.
+# it does now, run the shared public leak check under its existing conditions, run the
+# encrypted leak-term check on every guarded `git push` and direct public/unknown URL push,
+# and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
 # (AGENTC-431: 17 bare prunes on 2026-09-26, from five boxes). A locked
@@ -239,7 +238,9 @@ if ((scan_commit)); then
     exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$hook_dir" "${args[@]:i}"
 fi
 
-((is_agent)) || exec "$_real" "$@"
+if [[ "${args[i]:-}" != push ]]; then
+    ((is_agent)) || exec "$_real" "$@"
+fi
 # Say so when the SSH rule, and not a session marker, made this an agent's call: the agent-session
 # rules below (the worktree lock, the prune refusal, the session trailer) are otherwise silent
 # about why, and a person whose own non-interactive ssh command this is needs the escape named.
@@ -329,15 +330,16 @@ fi
 # a git checkout runs the shared public leak check never runs for a jj push, and
 # theorem-labs/rocq alone has fourteen jj checkouts here (dispatch://BET-214/ask/19a77b7a;
 # Sami, dispatch://BET-214/ask/3f2020ba: "Some reasonable check makes sense").
-# So when jj is the caller in a checkout that hook guards, this gives the push its
-# pre-push hook back: it drops jj's --no-verify and points core.hooksPath at
-# jj-push-hooks/, whose pre-push makes the hook's call to the same check. git
-# itself hands that hook the URL it is pushing to and the updates it is about to
-# send, so nothing about the push is guessed here: an up-to-date ref is not
-# scanned, a bookmark moved meanwhile does not change what goes out, and a remote
-# changed meanwhile does not change where it goes. jj has resolved every way of
-# naming what to push (--bookmark, --named, -r, --change, --all, --tag, aliases,
-# git.push, global options) before it runs git.
+# This block gives every guarded jj push, and every guarded plain push, the leak
+# gate's pre-push hook: it drops jj's --no-verify and points core.hooksPath at
+# jj-push-hooks/. That hook first scans listed leak terms, then runs the shared
+# public check exactly where the old decision required it. git itself hands the
+# hook the URL it is pushing to and the updates it is about to send, so nothing
+# about the push is guessed here: an up-to-date ref is not scanned, a bookmark
+# moved meanwhile does not change what goes out, and a remote changed meanwhile
+# does not change where it goes. jj has resolved every way of naming what to
+# push (--bookmark, --named, -r, --change, --all, --tag, aliases, git.push,
+# global options) before it runs git.
 # - Guarded is the rule of dispatch://BET-706, which the hook sweep (sweep-hooks.sh, beside the shared check) also
 #   installs the hook by: a checkout is guarded when any URL its `git remote -v` prints is GUARD by
 #   ../scripts/github-repo-visibility: a GitHub repository (github.com, www.github.com or ssh.github.com, directly or through an ssh
@@ -352,8 +354,8 @@ fi
 #   (tests/test_jj_push_leak_gate.py runs both on the same checkouts).
 # - Unknown counts as public (spec R4): every failure to read a visibility, a cache that cannot be reached, an entry
 #   that is empty or holds another word, gh that fails or does not answer in 5 s, a helper that cannot run, guards the
-#   checkout. The check then decides, and refuses a push to a theorem-labs repository whose visibility it cannot read
-#   either, so that still fails closed against a leak while a clean push goes out.
+#   checkout. The public check then decides, and refuses a push to a theorem-labs repository whose visibility it cannot
+#   read; the term check scans that push too, so a clean push can still go out.
 # A plain `git push` runs the pre-push hook of git's effective hooks directory: core.hooksPath where it is set, else
 # the repository's common hooks directory. The leak check reaches it there in two ways only: the leak-check wrapper
 # that install-prepush-hook.sh and the sweep install (marker PUBLIC-LEAK-CHECK-WRAPPER), or the global hooks
@@ -361,15 +363,13 @@ fi
 # PUBLIC-LEAK-CHECK-DISPATCHER. Neither reaches a fresh clone on a machine or in an agent box without the dispatcher
 # (a box made before 2026-11-05 has its ~/.gitconfig bound to a deleted file, so it never saw the include, and has no
 # hooks directory), nor a repository whose own core.hooksPath (local or worktree, an empty value included, which git
-# 2.43 reads as `/`: husky, the pre-commit framework) overrides the dispatcher. So for every plain push from a guarded
-# checkout, with no --no-verify, whose effective hooks directory has no executable pre-push that is the wrapper or
-# the dispatcher's entry (git ignores a hook that is not executable), the shim adds a last -c
-# core.hooksPath=jj-push-hooks/ as for jj, and names that directory in GIT_SHIM_OWN_HOOKS: the gate's pre-push runs
-# the check, then that directory's pre-push with the same arguments and stdin; every other hook is the one git would
-# have run. Where the wrapper or the dispatcher is effective the shim adds nothing, so a push is checked once. Not
-# seen, as `git push --no-verify` is not: a hooks path set on the command line or in the environment (the caller's
-# own choice), a jj told to run another git (`git.executable-path`) or copied under another name, and a remote
-# changed between this decision and git reading its config.
+# 2.43 reads as `/`: husky, the pre-commit framework) overrides the dispatcher. The encrypted term gate always adds
+# its last -c core.hooksPath=jj-push-hooks/ for a guarded push or a direct public or unreadable GitHub URL, then names
+# the plain verified push's original directory in GIT_SHIM_OWN_HOOKS so it runs after a clean scan. A wrapper or
+# dispatcher still runs once there; it only keeps GIT_SHIM_PUBLIC_CHECK=0 because that original hook performs it.
+# The public check, but not the term scan, remains unseen by `git push --no-verify`, a hooks path set on the command
+# line or in the environment (the caller's own choice), a jj told to run another git (`git.executable-path`) or copied
+# under another name, and a remote changed between this decision and git reading its config.
 from_jj() { # true when the process that ran this git is jj, also a jj binary replaced since it started
     local exe
     exe="$(readlink "/proc/$PPID/exe" 2> /dev/null)" || return 1
@@ -426,42 +426,13 @@ jj_push_guarded() {
     done <<< "$1"
     return 1
 }
-# jj_push_gate: in a guarded checkout, runs this push with git's hooks on and a last -c core.hooksPath=jj-push-hooks/,
-# which beats jj's own core.hooksPath and every earlier one, so the gate's pre-push runs; jj-push-hooks/hook, which
-# every other hook name there links to, takes that one -c back out and runs the hook git would have run without it.
-# When git's stderr carries git's own "failed to push some refs", jj 0.46 reads only git's stdout, which is empty
-# when a pre-push hook refused, and drops the stderr: the person sees "Git push output unfamiliar" and nothing else
-# (measured 2026-11-02). git prints that line for a destination right after that destination's pre-push hook
-# refused, so the one that belongs to the gate's refusal is the one right after its `error: git shim: ` lines; that
-# line alone is left out, and jj then reports git's stderr, the check's lines naming the commit and the text that
-# matched included, under --quiet too. Another destination's failure keeps its line: jj then reports that failure
-# from git's porcelain and drops the stderr, the gate's refusal with it. The push is refused either way: git exits 1.
-jj_push_gate() {
-    local out hooks a seen=0
-    local -a rest=()
-    out="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)" ||
-        jj_push_refuse "cannot list this repository's remotes, so whether this jj push needs the public leak check is unknown and it is refused." \
-            "$JJ_PUSH_UNREAD"
-    jj_push_guarded "$out" || return 0
-    hooks="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
-    [[ -x "$hooks/pre-push" ]] ||
-        jj_push_refuse "the leak gate's hook $hooks/pre-push is missing, so this jj push from a checkout of a public or unreadable GitHub repository is refused." \
-            "$JJ_PUSH_UNREAD"
-    for a in "${args[@]:i+1}"; do
-        if ((!seen)); then
-            [[ "$a" == -- ]] && seen=1
-            [[ "$a" == --no-verify ]] && continue
-        fi
-        rest+=("$a")
-    done
-    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$hooks" push --verify "${rest[@]}" \
-        2> >(awk '/^error: git shim: /{ gate = 1; print; fflush(); next }
-                  gate && /^error: failed to push some refs to /{ gate = 0; next }
-                  { gate = 0; print; fflush() }' >&2)
-}
-# plain_push_gate: a plain `git push` whose effective hooks directory runs no leak check (above), else returns.
-plain_push_gate() {
-    local a verify=1 out scope own base hooks
+# Every guarded push, and every direct push to a public or unreadable GitHub URL, takes this hooks path so the
+# leak-term scan cannot be skipped with --no-verify, a caller-selected hooks path, or a pre-push wrapper. The existing
+# public-check decisions stay separate: agent jj pushes and the old agent plain-push conditions set
+# GIT_SHIM_PUBLIC_CHECK=1; all other term-gated pushes set it to 0. For a plain verified push, the hook receives the
+# pre-push directory Git would otherwise run in GIT_SHIM_OWN_HOOKS and invokes it after a clean scan.
+push_is_verified() {
+    local a verify=1
     for a in "${args[@]:i+1}"; do
         case "$a" in
             --) break ;;
@@ -469,45 +440,177 @@ plain_push_gate() {
             --verify) verify=1 ;;
         esac
     done
-    ((verify)) || return 0
-    # git's effective hooks directory. core.hooksPath and where it is set: from the command line or the environment it
-    # is the caller's choice and left alone. An empty value still overrides every other one, and git 2.43 then looks
-    # for each hook at /<name> (`git rev-parse --git-path hooks/pre-push` prints /pre-push), so its directory is /.
-    # Unset, git uses the common hooks directory (a worktree's included).
+    ((verify))
+}
+# Read the exact hooks directory Git would run for a plain verified push. `--type=path`
+# expands `~` without involving the shell. An unset core.hooksPath takes the common
+# directory (not a linked worktree's `$GIT_DIR/hooks`); a set empty one is `/`, as
+# Git's `strbuf_repo_git_path()` resolves it. The scope matters: a command-scope
+# hooks path is the caller's choice for the public check, but the encrypted term
+# scan still runs through jj-push-hooks/. A value that begins with `./` is relative
+# to the top-level working tree (and in a bare repository, to the git directory),
+# as Git is; `git rev-parse --path-format=absolute --git-path hooks` is not used
+# because an empty core.hooksPath would turn it into `<git-dir>/` instead of `/`.
+# The wrapper marker belongs to the `pre-push` itself, the dispatcher marker to
+# its sibling `dispatch`: dispatch's `pre-push` is an ordinary symlink and its
+# bytes only name `dispatch`. A missing directory, hook or dispatcher is normal.
+# This one `git config` call sees `-c core.hooksPath` as well as config files, and
+# its scope tells the public check to leave a caller's command-line hook alone.
+# `git -c core.hooksPath=… push` puts the last matching pair first in
+# GIT_CONFIG_PARAMETERS, so jj-push-hooks/pre-push removes its own exact pair
+# before it invokes this hook.
+push_own_hooks() {
+    local out own base scope
+    PUSH_OWN_HOOKS_SCOPE=default
     if out="$("$_real" "${args[@]:0:i}" config --show-scope --type=path --get core.hooksPath 2> /dev/null)"; then
-        scope="${out%%$'\t'*}" own="${out#*$'\t'}"
-        [[ "$scope" != command ]] || return 0
+        scope="${out%%$'\t'*}"
+        own="${out#*$'\t'}"
+        PUSH_OWN_HOOKS_SCOPE="$scope"
         [[ -n "$own" ]] || own=/
-        # git runs a hook from the top of the work tree (from the git directory in a bare repository), and takes a
-        # relative hooks path from there.
         if [[ "$own" != /* ]]; then
             base="$("$_real" "${args[@]:0:i}" rev-parse --show-toplevel 2> /dev/null)" ||
-                base="$("$_real" "${args[@]:0:i}" rev-parse --absolute-git-dir 2> /dev/null)" || return 0
+                base="$("$_real" "${args[@]:0:i}" rev-parse --absolute-git-dir 2> /dev/null)" || return 1
             own="$base/$own"
         fi
     else
-        own="$("$_real" "${args[@]:0:i}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)/hooks" || return 0
+        own="$("$_real" "${args[@]:0:i}" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)/hooks" || return 1
     fi
-    # The wrapper or the dispatcher checks only when git runs its pre-push, and git ignores a hook that is not
-    # executable.
-    if [[ -x "$own/pre-push" ]]; then
-        if grep -qs PUBLIC-LEAK-CHECK-WRAPPER -- "$own/pre-push"; then return 0; fi
-        if [[ -x "$own/dispatch" ]] && grep -qs PUBLIC-LEAK-CHECK-DISPATCHER -- "$own/dispatch"; then return 0; fi
+    PUSH_OWN_HOOKS="$own"
+}
+push_own_hooks_run_public_check() {
+    [[ -x "$PUSH_OWN_HOOKS/pre-push" ]] || return 1
+    grep -qs PUBLIC-LEAK-CHECK-WRAPPER -- "$PUSH_OWN_HOOKS/pre-push" && return 0
+    [[ -x "$PUSH_OWN_HOOKS/dispatch" ]] &&
+        grep -qs PUBLIC-LEAK-CHECK-DISPATCHER -- "$PUSH_OWN_HOOKS/dispatch"
+}
+push_repository() {
+    local a take_value=0
+    for a in "${args[@]:i+1}"; do
+        if ((take_value == 1)); then
+            printf '%s\n' "$a"
+            return
+        fi
+        if ((take_value == 2)); then
+            take_value=0
+            continue
+        fi
+        case "$a" in
+            --) take_value=1 ;;
+            --repo) take_value=1 ;;
+            --repo=*) printf '%s\n' "${a#*=}"; return ;;
+            --receive-pack | --exec | --push-option | -o) take_value=2 ;;
+            --receive-pack=* | --exec=* | --push-option=*) ;;
+            -*) ;;
+            *) printf '%s\n' "$a"; return ;;
+        esac
+    done
+}
+push_is_named_remote() {
+    local remote=$1 out name
+    out="$("$_real" "${args[@]:0:i}" remote 2> /dev/null)" || return 1
+    while IFS= read -r name; do
+        [[ "$name" == "$remote" ]] && return 0
+    done <<< "$out"
+    return 1
+}
+push_url_is_guarded() {
+    local url=$1 sshcmd visibility
+    sshcmd="$("$_real" "${args[@]:0:i}" config --get core.sshCommand 2> /dev/null)" || sshcmd=""
+    visibility="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$jj_gate_visibility" "$url" 2> /dev/null)" || visibility=unknown
+    case "$visibility" in private | internal | not-github) return 1 ;; *) return 0 ;; esac
+}
+# `push_with_gate`: for a term-gated jj push, runs this push with git's hooks
+# on and a last -c core.hooksPath=jj-push-hooks/, which beats jj's own
+# core.hooksPath and every earlier one, so the gate's pre-push runs;
+# jj-push-hooks/hook, which every other hook name there links to, takes that
+# one -c back out and runs the hook git would have run without it. A plain
+# term-gated push uses the same last -c and receives its own pre-push after a
+# clean term scan (and its old public check where applicable).
+# When git's stderr carries git's own "failed to push some refs", jj 0.46 reads
+# only git's stdout, which is empty when a pre-push hook refused, and drops the
+# stderr: the person sees "Git push output unfamiliar" and nothing else
+# (measured 2026-11-02). git prints that line for a destination right after
+# that destination's pre-push hook refused, so the one that belongs to the
+# gate's refusal is the one right after its `error: git shim: ` line; that line
+# alone is left out, and jj then reports git's stderr, the scanner's lines
+# naming the commit and place included, under --quiet too. Another
+# destination's failure keeps its line: jj then reports that failure from git's
+# porcelain and drops the stderr, the gate's refusal with it. The push is
+# refused either way: git exits 1. A plain push needs no filter: Git is the
+# final reader of its stderr.
+# `push_with_gate` removes every caller --no-verify/--verify before adding
+# --verify and the last core.hooksPath, so the term gate cannot be bypassed
+# while every other push argument keeps its original order.
+push_with_gate() {
+    local is_jj=$1 a seen=0
+    local -a rest=()
+    for a in "${args[@]:i+1}"; do
+        if ((!seen)); then
+            [[ "$a" == -- ]] && seen=1
+            case "$a" in --no-verify | --verify) continue ;; esac
+        fi
+        rest+=("$a")
+    done
+    if ((is_jj)); then
+        exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$PUSH_GATE_HOOKS" push --verify "${rest[@]}" \
+            2> >(awk '/^error: git shim: /{ gate = 1; print; fflush(); next }
+                      gate && /^error: failed to push some refs to /{ gate = 0; next }
+                      { gate = 0; print; fflush() }' >&2)
     fi
-    out="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)" ||
-        jj_push_refuse "cannot list this repository's remotes, so whether this push needs the public leak check is unknown and it is refused." \
-            "$JJ_PUSH_UNREAD"
-    jj_push_guarded "$out" || return 0
-    hooks="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
-    [[ -x "$hooks/pre-push" ]] ||
-        jj_push_refuse "the leak gate's hook $hooks/pre-push is missing, so this push from a checkout of a public or unreadable GitHub repository is refused." \
-            "$JJ_PUSH_UNREAD"
-    export GIT_SHIM_OWN_HOOKS="$own"
-    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$hooks" "${args[@]:i}"
+    exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$PUSH_GATE_HOOKS" push --verify "${rest[@]}"
 }
 if [[ "${args[i]}" == push ]]; then
-    unset GIT_SHIM_OWN_HOOKS
-    if from_jj; then jj_push_gate; else plain_push_gate; fi
+    unset GIT_SHIM_PUBLIC_CHECK GIT_SHIM_OWN_HOOKS
+    is_jj=0
+    from_jj && is_jj=1
+    repository="$(push_repository)"
+    named_remote=0
+    if [[ -z "$repository" ]] || push_is_named_remote "$repository"; then
+        named_remote=1
+    fi
+    listing=""
+    listed=0
+    if listing="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)"; then listed=1; fi
+    guarded=0
+    if ((listed)); then
+        jj_push_guarded "$listing" && guarded=1
+    else
+        guarded=1
+    fi
+    term_gate=0
+    if [[ -z "$repository" || $named_remote -eq 1 ]]; then
+        term_gate=$guarded
+    elif push_url_is_guarded "$repository"; then
+        term_gate=1
+    fi
+
+    public_check=0
+    PUSH_OWN_HOOKS=""
+    PUSH_OWN_HOOKS_SCOPE=default
+    if ((is_agent)); then
+        if ((is_jj)); then
+            ((listed)) ||
+                jj_push_refuse "cannot list this repository's remotes, so whether this jj push needs the public leak check is unknown and it is refused." \
+                    "$JJ_PUSH_UNREAD"
+            ((guarded)) && public_check=1
+        elif push_is_verified && push_own_hooks && [[ "$PUSH_OWN_HOOKS_SCOPE" != command ]] && ! push_own_hooks_run_public_check; then
+            ((listed)) ||
+                jj_push_refuse "cannot list this repository's remotes, so whether this push needs the public leak check is unknown and it is refused." \
+                    "$JJ_PUSH_UNREAD"
+            ((guarded)) && public_check=1
+        fi
+    fi
+    ((term_gate)) || exec "$_real" "$@"
+
+    PUSH_GATE_HOOKS="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
+    [[ -x "$PUSH_GATE_HOOKS/pre-push" ]] ||
+        jj_push_refuse "the leak gate's hook $PUSH_GATE_HOOKS/pre-push is missing, so this push to a public or unreadable GitHub repository is refused." \
+            "$JJ_PUSH_UNREAD"
+    export GIT_SHIM_PUBLIC_CHECK="$public_check"
+    if ((!is_jj)) && push_is_verified && { [[ -n "$PUSH_OWN_HOOKS" ]] || push_own_hooks; }; then
+        export GIT_SHIM_OWN_HOOKS="$PUSH_OWN_HOOKS"
+    fi
+    push_with_gate "$is_jj"
     exec "$_real" "$@"
 fi
 
