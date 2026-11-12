@@ -425,6 +425,64 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assertEqual(enables, [f"systemctl --user enable --now {UNIT_NAME}"])
         self.assert_positive_log()
 
+    def make_helper_answer_only_after_startup(self, install: Path) -> None:
+        """Model the real helper's start: `enable --now` returns before its socket listens.
+
+        The unit is Type=simple and its ExecStart is a bash wrapper around `mise exec`, so
+        systemctl returns as soon as the process forks. Measured on oryx with the pinned
+        legion-envoy-v29.54.0 binary in a private XDG_RUNTIME_DIR: `agent-secrets-helper sessions`
+        12 ms after `serve` starts exits 2 ("not answering at .../helper.sock"). Here the first
+        `sessions` call after a start fails with exit 2 and the helper then listens; a helper that
+        was already running answers at once.
+        """
+        write_stub(
+            install / "bin",
+            "agent-secrets-helper",
+            'echo "helper $*" >>"$STUB_LOG"\n'
+            'if [[ "$1" == sessions && ! -f "$STUB_STATE/listening" ]]; then\n'
+            '    touch "$STUB_STATE/listening"\n'
+            '    echo "agent-secrets-helper is not answering" >&2\n'
+            "    exit 2\n"
+            "fi\n"
+            'printf "%s" "${STUB_SESSIONS:-}"',
+        )
+
+    def test_e2_unchanged_run_after_first_install_started_the_helper_is_quiet(self) -> None:
+        # R1: a second run with the same pin, unit, wrapper and broker.env, while the helper
+        # runs, makes no call that enables, starts or restarts it. The first install started the
+        # helper itself, so the helper already runs the installed files.
+        self.make_helper_answer_only_after_startup(self.mise_v1)
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        first = self.run_local()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn(f"systemctl --user enable --now {UNIT_NAME}", self.calls())
+        before = len(self.calls())
+
+        result = self.run_local()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_lifecycle_calls(self.calls()[before:])
+        self.assert_positive_log()
+
+    def test_h2_unchanged_run_after_starting_a_stopped_helper_on_a_new_pin_is_quiet(self) -> None:
+        # A stopped helper is started on the new pin by `enable --now`, so it already runs the
+        # installed version; the next unchanged run must not restart it.
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        self.assertEqual(self.run_local().returncode, 0)
+        (self.state / "active").unlink()
+        mise_v2 = self.make_mise_install("legion-envoy-v2.0.0")
+        self.make_helper_answer_only_after_startup(mise_v2)
+        self.env["STUB_MISE_WHERE"] = str(mise_v2)
+        started = self.run_local()
+        self.assertEqual(started.returncode, 0, started.stderr)
+        before = len(self.calls())
+
+        result = self.run_local()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_lifecycle_calls(self.calls()[before:])
+        self.assert_positive_log()
+
     def test_i_env_local_url_change_does_not_restart_the_helper(self) -> None:
         self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
         self.assertEqual(self.run_local().returncode, 0)
