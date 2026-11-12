@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""What shims/secrets hands the real secrets: on a machine with the broker's helper, an agent's human-tier
-request is refused; on a machine without it (the laptop), and for everything else, the call is unchanged.
+"""What shims/secrets hands the real secrets: on a machine with the broker's helper, an agent's
+human-tier request is refused; on a machine without it, and for everything else, the call is
+unchanged.
 
 Technique: a stub `secrets` after shims/ on PATH logs every argv it receives and answers
 `get --no-request KEY` the way the real client does, a stub `agent-secrets` answers `identity`, a
@@ -176,7 +177,8 @@ class SecretsShim(unittest.TestCase):
             )
 
     def test_machine_without_the_broker_helper_sends_agents_to_secretsd(self) -> None:
-        # The laptop has no helper, so refusing there left its agents with no human-tier key at all.
+        # A machine without the helper has no broker to send an agent to, so refusing there would
+        # leave its agents with no human-tier key at all.
         self.helper_unit.unlink()
         for args in (
             ("get", "HUMAN_KEY"),

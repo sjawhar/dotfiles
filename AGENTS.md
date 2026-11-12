@@ -16,7 +16,7 @@ aerospace.toml       # macOS window manager (AeroSpace)
 mise.toml            # Tool version manager — pinned versions for all CLI tools
 omp/                 # oh-my-pi config, agents, and plugin pins (binary is mise-managed; wrapper in shims/)
 nvim/init.lua        # Neovim config (single file)
-install.sh           # Main installer — runs all installers/* in order
+install.sh           # Main installer — runs the installers it lists, in order
 installers/          # Per-tool install scripts (shell.sh, mise.sh, docker.sh, jj.sh, tmux.sh, nvim.sh, claude.sh, omp.sh)
 installers/lib.sh    # Shared helpers: ensure_link, ensure_clone, ensure_command, ensure_json
 forward/             # Browser-forwarding policy plus devbox serve and laptop daemon user units
@@ -28,7 +28,7 @@ shims/               # PATH-priority wrappers (gh, gh-app-token, gcloud, gws, go
 scripts/             # Utility scripts (git-identity, tmux-attention, ephemeral-monitor, etc.)
 completions.d/       # Auto-generated shell completions (jj, gh)
 agentbox/            # Opt-in agent box: image + home allow-list (scripts/agentbox runs sessions in it)
-agent-secrets/       # Host helper of the secrets broker: user unit, wrapper, broker.env (devbox only, installers/agent-secrets.sh)
+agent-secrets/       # Host helper of the secrets broker: root install.sh installs it where ~/.config/agent-secrets/env.local sets AGENT_SECRETS_URL, and devbox/install.sh on the devbox
 devpod/              # Cloud-init for a bare VM (dormant)
 plugins/             # Claude/omp plugins (sjawhar/ has all custom skills, agents, and commands)
 vendor/              # Third-party vendored content
@@ -54,7 +54,7 @@ Each major subdirectory has its own AGENTS.md with details and conventions:
 
 ## How Install Works
 
-`install.sh` sources each `installers/*.sh` in order. Installers use helpers from `installers/lib.sh`:
+`install.sh` sources the installers it lists, in order, and runs `installers/agent-secrets-local.sh` as a command; a file in `installers/` that it does not list does not run. Installers use helpers from `installers/lib.sh`:
 - **`ensure_link`** — symlinks config files to their expected locations; a plain file there is replaced only when identical to the dotfiles copy, and anything else (a differing file, a real directory) fails the install so an app's saved setting is reconciled, not overwritten
 - **`ensure_clone`** — shallow-clones git repos (e.g., tmux plugins)
 - **`ensure_command`** — installs a binary if not on PATH

@@ -4,10 +4,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # --- agent-secrets: the host helper of the secrets broker (sjawhar/legion, AGENTC-393) -------
-# A machine-role installer, like forward.sh: devbox/install.sh runs it, the root install.sh does
-# not, so only a machine that runs agent sessions gets the helper. Sami's own shells and his
-# laptop use secretsd and never depend on the broker; a machine without the helper's unit gets
-# no AGENT_SECRETS_* in .bashrc and no session registration (scripts/agent-secrets-session).
+# The root install.sh runs this through installers/agent-secrets-local.sh where
+# ~/.config/agent-secrets/env.local sets AGENT_SECRETS_URL; devbox/install.sh runs it on the
+# devbox. A machine without the helper's unit keeps secretsd alone, with no AGENT_SECRETS_* in
+# .bashrc and no session registration (scripts/agent-secrets-session).
 # Mirrors installers/secretsd.sh: mise owns the binaries (mise.toml [tools.agent-secrets]; the
 # release tarball ships bin/agent-secrets and bin/agent-secrets-helper), the user unit is linked
 # and enabled, and a restart happens only when the pinned version, the unit, its wrapper or its
@@ -34,8 +34,12 @@ mkdir -p "${HOME}/.config/systemd/user" "$CONF_DIR"
 chmod 700 "$CONF_DIR"
 ensure_link "$UNIT_SRC" "$UNIT_DST"
 systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable --now agent-secrets-helper.service 2>/dev/null \
-    || echo "NOTE: could not enable agent-secrets-helper (no user systemd session here?) — enable it on the target machine."
+# An unchanged running helper needs no enable or start call; a stopped helper must be started.
+if ! systemctl --user is-enabled --quiet agent-secrets-helper.service 2>/dev/null \
+    || ! systemctl --user is-active --quiet agent-secrets-helper.service 2>/dev/null; then
+    systemctl --user enable --now agent-secrets-helper.service 2>/dev/null \
+        || echo "NOTE: could not enable agent-secrets-helper (no user systemd session here?) — enable it on the target machine."
+fi
 if [ "$(cat "$MARKER" 2>/dev/null)" != "$installed" ]; then
     # Only when the binary version or the helper's files changed. `sessions` is answered by the
     # running helper (the old version); an empty answer, or no helper, means nothing to lose.
