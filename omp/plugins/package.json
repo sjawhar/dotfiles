@@ -5,7 +5,7 @@
     "@bopstack/pi-codegraph": "^0.1.1",
     "@sjawhar/opencode-knives": "github:sjawhar/knives#v3.2.3",
     "@sjawhar/pi-envoy": "16.51.1",
-    "@sjawhar/pi-legion": "18.50.2",
+    "@sjawhar/pi-legion": "18.52.2",
     "ctx-memory": "github:sjawhar/ctx-memory#v0.2.9",
     "gws-accounts": "github:sjawhar/gws-accounts#v0.1.10",
     "secretsd": "github:sjawhar/forward#v3.7.3",
