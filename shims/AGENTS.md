@@ -210,14 +210,26 @@ before handing the call to the real one.
   an alias, `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
   library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
   `omp/extensions/session-env.ts` sets to the session's line.
-  Every caller's `git commit` without a command-line `-c core.hooksPath` gets
+  Before it dispatches a command, the shim finds the command after every Git 2.43 global option
+  in `git.c`'s `handle_options`, including separate values for `-C`, `-c`, `--config-env`,
+  `--git-dir`, `--work-tree`, `--namespace`, `--shallow-file` and `--attr-source`, and
+  attached-only forms such as `--exec-path=<path>` and `--list-cmds=<list>`. A global query or
+  unknown option goes to Git unchanged, which reports its own result or error. When that command
+  is not a Git builtin, the shim reads `alias.<command>` through the real Git with those globals,
+  applies Git's quoted `split_cmdline` rules, and repeats for each ordinary alias. The expanded
+  arguments are both checked and run. A builtin never needs the configuration read. A shell alias
+  (its value starts with `!`), a bad alias, or an alias loop stays with Git and is not expanded by
+  the shim. Every caller's `git commit` without a command-line `-c core.hooksPath` gets
   `core.hooksPath=git-hooks/` and scans after Git runs the repository's own hooks. The hook first
   runs the repository's `pre-commit` or `commit-msg`, with Git's same arguments and standard
-  input; only a successful hook is followed by the scan. The pre-commit scan reads added lines
-  and result-side paths from the staged diff, submodule changes included whatever
-  `diff.ignoreSubmodules` says. The commit-message scan reads the message as Git stores it: it
+  input; only a successful hook is followed by the scan. The pre-commit scan selects an empty
+  attribute-source tree, `core.attributesFile=/dev/null`, and `GIT_ATTR_NOSYSTEM=1`, so tree,
+  configured, and system attributes cannot hide text. Git has no switch for a non-empty
+  `info/attributes`; then the scan uses `--text`, including NUL-containing bytes. Otherwise
+  Git's own binary detection keeps a file containing a NUL byte in its first 8,000 bytes outside
+  the text scan. It reads added lines and result-side paths from the staged diff, submodule
+  changes included whatever `diff.ignoreSubmodules` says. The commit-message scan reads the
   applies the effective cleanup mode (an explicit `--cleanup=default` resolves as Git resolves it,
-  strip with the editor and whitespace without, and beats `commit.cleanup`), the effective
   `core.commentChar`, and scissors handling. For `core.commentChar=auto`, the character is taken
   only from what Git wrote into the prepared message: without the editor or the status, Git's own
   choice from that text; else the character of Git's cut lines when Git wrote them (scissors or
@@ -243,7 +255,13 @@ before handing the call to the real one.
   (`scripts/github-repo-visibility`). It reads Git's update lines and the destination's live
   advertisement, then scans only the commits the updates send that the destination does not
   hold: their added result-side lines and paths and their messages, read as UTF-8 and with
-  replacement objects ignored. jj runs
+  replacement objects ignored. The outgoing-diff producer applies the same empty attribute tree,
+  configured-attribute override, and system-attribute disablement as the commit hook. A non-empty
+  `info/attributes` makes that producer use `--text`; its bytes remain safe because messages use
+  a separate NUL-delimited producer and diffs use a separate byte stream. The diff stream frames
+  `commit <object-id>` lines only outside hunks, whose declared parent and result counts are
+  checked before a line can be a boundary. Without `info/attributes`, Git's own binary detection
+  still omits NUL-containing file bytes. jj runs
   `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote, so no hook
   runs for that push; the shim directs those pushes through this gate by the same rule.
   The checkout is guarded when a URL `git remote -v` prints (read whole after the tab: a push line

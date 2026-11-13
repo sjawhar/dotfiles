@@ -916,6 +916,25 @@ index 0000000,0000000,0000000..1111111
         chunks = [payload[index:index + 65536] for index in range(0, len(payload), 65536)]
         self.assertEqual(list(module.nul_records([*chunks, b"\0"])), [payload])
 
+    def test_scanner_diff_stream_counts_hunks_before_accepting_a_commit_boundary(self) -> None:
+        module = scanner_module()
+        first = b"a" * 40
+        second = b"b" * 40
+        valid = (
+            b"commit " + first + b"\n"
+            b"diff --git a/file b/file\n"
+            b"@@ -0,0 +1,2 @@\n"
+            b"+clean\0bytes\n"
+            b"+commit " + second + b"\n"
+            b"commit " + second + b"\n"
+        )
+        records = list(module.outgoing_diff_records([valid[index:index + 7] for index in range(0, len(valid), 7)]))
+        self.assertEqual([commit for commit, _ in records], [first.decode(), second.decode()])
+        self.assertIn(b"+commit " + second + b"\n", records[0][1])
+        malformed = b"commit " + first + b"\n@@ -0,0 +1,1 @@\ncommit " + second + b"\n"
+        with self.assertRaises(module.TextError):
+            list(module.outgoing_diff_records([malformed]))
+
     def test_scanner_reproduces_jj_command_comments_and_escapes(self) -> None:
         module = scanner_module()
         command, _ = module.jj_editor_command(json.dumps('"/editor path" # ignored comment'), "/message", 1)
@@ -1244,6 +1263,48 @@ class GitLeaks(LeakTestCase):
                     self.assert_refused(repository, agent, "hidden.txt:2", "commit", "-m", "blocked")
                     self.stage(repository, "hidden.txt", "clean\n", agent)
                     self.assert_clean(repository, agent, "commit", "-m", "clean")
+
+    def test_git_term_reads_text_files_external_attributes_mark_binary(self) -> None:
+        # An empty attribute-source tree does not suppress higher-precedence info/attributes
+        # or the user's configured attributes file. Those attributes cannot hide text.
+        for agent in (False, True):
+            for label in ("info", "global"):
+                with self.subTest(agent=agent, attributes=label):
+                    repository = self.repository(agent)
+                    if label == "info":
+                        attributes = repository / ".git" / "info" / "attributes"
+                    else:
+                        attributes = self.xdg / "git" / "attributes"
+                        attributes.parent.mkdir(parents=True, exist_ok=True)
+                    attributes.write_text("*.txt -diff\n" if label == "info" else "*.txt binary\n", encoding="utf-8")
+                    self.stage(repository, "hidden.txt", "Quillfeather Lane 9\n", agent)
+                    self.assert_refused(repository, agent, "hidden.txt:1", "commit", "-m", "blocked")
+
+            with self.subTest(agent=agent, attributes="info-binary"):
+                repository = self.repository(agent)
+                attributes = repository / ".git" / "info" / "attributes"
+                attributes.write_text("*.bin -diff\n", encoding="utf-8")
+                (repository / "binary.bin").write_bytes(b"\0clean\n")
+                staged = self.git_run(repository, "add", "binary.bin", agent=agent)
+                self.assertEqual(staged.returncode, 0, staged.stderr)
+                self.assert_clean(repository, agent, "commit", "-m", "binary")
+
+    def test_git_term_handles_invalid_and_binary_file_bytes(self) -> None:
+        # An invalid byte is still text and cannot break surrogateescape decoding. A NUL makes
+        # the same term binary, so it remains outside the text-only scope.
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="invalid-text-byte"):
+                repository = self.repository(agent)
+                (repository / "invalid.txt").write_bytes(b"\xffQuillfeather Lane 9\n")
+                staged = self.git_run(repository, "add", "invalid.txt", agent=agent)
+                self.assertEqual(staged.returncode, 0, staged.stderr)
+                self.assert_refused(repository, agent, "invalid.txt:1", "commit", "-m", "blocked")
+            with self.subTest(agent=agent, case="real-binary"):
+                repository = self.repository(agent)
+                (repository / "binary.bin").write_bytes(b"\0Quillfeather Lane 9\n")
+                staged = self.git_run(repository, "add", "binary.bin", agent=agent)
+                self.assertEqual(staged.returncode, 0, staged.stderr)
+                self.assert_clean(repository, agent, "commit", "-m", "binary")
 
     def test_git_term_refuses_a_gitlink_when_submodules_are_ignored_in_config(self) -> None:
         for agent in (False, True):
@@ -1844,6 +1905,20 @@ class JjLeaks(LeakTestCase):
                 self.write(repository, "dirty.txt", "Quillfeather Lane 9\n")
                 self.assert_clean(repository, agent, "commit", "clean.txt", "-m", "ok")
                 self.assertEqual(self.changed_paths(repository, agent, "@-"), ["clean.txt"])
+
+    def test_jj_term_reads_text_files_attributes_mark_binary(self) -> None:
+        # jj's --git diff must retain text that Git attributes mark binary, while an actual
+        # NUL-containing file remains outside the text-only scan.
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="attribute-hidden-text"):
+                repository = self.repository(agent)
+                self.write(repository, ".gitattributes", "*.txt -diff\n")
+                self.write(repository, "hidden.txt", "Quillfeather Lane 9\n")
+                self.assert_refused(repository, agent, "hidden.txt:1", "commit", "-m", "blocked")
+            with self.subTest(agent=agent, case="real-binary"):
+                repository = self.repository(agent)
+                (repository / "binary.bin").write_bytes(b"\0Quillfeather Lane 9\n")
+                self.assert_clean(repository, agent, "commit", "-m", "binary")
 
     def test_jj_message_editor_config_precedes_separator(self) -> None:
         for agent in (False, True):
@@ -2692,6 +2767,85 @@ class OutgoingLeaks(SinkRepositoryCase):
                     self.refresh_visibility()
                     pushed = self.command(["git", *arguments, "origin", f"{clean}:refs/heads/{self.unique('clean')}"], environment)
                     self.assert_pushed(pushed, self.public_url, clean)
+
+    def test_push_refuses_files_external_attributes_mark_binary(self) -> None:
+        # The push scanner runs in this checkout, so attributes outside the commit tree must not
+        # hide a text blob. Exercise both Git's hook and jj's direct scanner for every caller.
+        info_attributes = self.repo / ".git" / "info" / "attributes"
+        global_attributes = self.xdg / "git" / "attributes"
+        self.init_jj()
+        for label, attributes in (("info", info_attributes), ("global", global_attributes)):
+            for agent, environment in self.callers():
+                with self.subTest(attributes=label, agent=agent):
+                    info_attributes.unlink(missing_ok=True)
+                    global_attributes.unlink(missing_ok=True)
+                    attributes.parent.mkdir(parents=True, exist_ok=True)
+                    attributes.write_text("*.txt -diff\n" if label == "info" else "*.txt binary\n", encoding="utf-8")
+                    path = f"{self.unique(label)}.txt"
+                    leaky = self.commit(path, self.term, "clean", parent=self.base)
+                    git_url = self.fresh_public_url()
+                    self.set_url(git_url)
+                    self.assert_push_refused(
+                        lambda: self.git_push("origin", leaky, self.unique("git"), environment),
+                        leaky,
+                        f"{path}:1",
+                        git_url,
+                    )
+                    jj_url = self.fresh_public_url()
+                    self.set_url(jj_url)
+                    self.assert_push_refused(
+                        lambda: self.jj_push(leaky, self.unique("jj"), environment),
+                        leaky,
+                        f"{path}:1",
+                        jj_url,
+                        "jj",
+                    )
+
+    def test_push_allows_real_binary_with_info_attributes(self) -> None:
+        # A non-empty info/attributes file makes the producer use --text. Binary NUL bytes must
+        # not crash that framed producer, and a binary file with no term still pushes.
+        info_attributes = self.repo / ".git" / "info" / "attributes"
+        info_attributes.write_text("*.bin -diff\n", encoding="utf-8")
+        commits: list[tuple[bool, dict[str, str], str]] = []
+        for agent, environment in self.callers():
+            self.real("checkout", "-q", "--detach", self.base)
+            path = f"{self.unique('binary-info')}.bin"
+            (self.repo / path).write_bytes(b"\0clean\n")
+            self.real("add", path)
+            self.real("commit", "--no-verify", "-m", "binary")
+            commits.append((agent, environment, self.real("rev-parse", "HEAD")))
+        self.init_jj()
+        for agent, environment, commit in commits:
+            with self.subTest(agent=agent, route="git"):
+                url = self.fresh_public_url()
+                self.set_url(url)
+                self.assert_pushed(self.git_push("origin", commit, self.unique("binary-git"), environment), url, commit)
+            with self.subTest(agent=agent, route="jj"):
+                url = self.fresh_public_url()
+                self.set_url(url)
+                self.assert_pushed(self.jj_push(commit, self.unique("binary-jj"), environment), url, commit)
+
+    def test_push_allows_real_binary_file_content(self) -> None:
+        # With no info/attributes override, Git's binary detection omits this NUL-containing
+        # blob, even though its bytes contain a listed term. Test direct Git and jj push routes.
+        commits: list[tuple[bool, dict[str, str], str]] = []
+        for agent, environment in self.callers():
+            self.real("checkout", "-q", "--detach", self.base)
+            path = f"{self.unique('binary')}.bin"
+            (self.repo / path).write_bytes(b"\0Quillfeather Lane 9\n")
+            self.real("add", path)
+            self.real("commit", "--no-verify", "-m", "binary")
+            commits.append((agent, environment, self.real("rev-parse", "HEAD")))
+        self.init_jj()
+        for agent, environment, commit in commits:
+            with self.subTest(agent=agent, route="git"):
+                url = self.fresh_public_url()
+                self.set_url(url)
+                self.assert_pushed(self.git_push("origin", commit, self.unique("binary-git"), environment), url, commit)
+            with self.subTest(agent=agent, route="jj"):
+                url = self.fresh_public_url()
+                self.set_url(url)
+                self.assert_pushed(self.jj_push(commit, self.unique("binary-jj"), environment), url, commit)
 
     def test_push_term_gate_parses_negations_end_of_options_and_short_values(self) -> None:
         # Each case pushes its own leaky commit, so one that leaks cannot hide the next.

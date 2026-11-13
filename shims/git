@@ -1,5 +1,6 @@
 #!/bin/bash
-# git-worktree-shim: in an agent session, refuse a bare `git worktree prune` outside a
+# git-worktree-shim: locate Git 2.43 global options and expand its non-shell aliases before
+# dispatching; in an agent session, refuse a bare `git worktree prune` outside a
 # throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
 # lock of ours and no further, give every `git commit` without a command-line hooks path
 # the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
@@ -92,17 +93,184 @@ agent_context() {
     fi
     return 1
 }
-# Locate the subcommand past git's global options before distinguishing an agent from a person:
-# every caller's ordinary `git commit` uses the leak-term hooks.
-args=("$@")
-i=0
-while ((i < ${#args[@]})); do
-    case "${args[i]}" in
-        -C | -c | --git-dir | --work-tree | --namespace | --config-env | --exec-path) i=$((i + 2)) ;;
-        -*) i=$((i + 1)) ;;
-        *) break ;;
+# Locate the subcommand exactly past Git 2.43's global options before distinguishing an agent
+# from a person: every caller's ordinary `git commit` uses the leak-term hooks. A global query
+# or an unknown option cannot reach a subcommand, so leave I at the end and let Git report it.
+git_command_index() {
+    local option count=${#args[@]}
+    i=0
+    while ((i < count)); do
+        option="${args[i]}"
+        case "$option" in
+            --help | -h | --version | -v) return ;;
+            --exec-path=*) ((i += 1)) ;;
+            --exec-path?* | --exec-path | --html-path | --man-path | --info-path | --list-cmds=*) i=$count; return ;;
+            -p | --paginate | -P | --no-pager | --no-replace-objects | --bare | --literal-pathspecs | --no-literal-pathspecs | \
+                --glob-pathspecs | --noglob-pathspecs | --icase-pathspecs | --no-optional-locks) ((i += 1)) ;;
+            --git-dir | --namespace | --work-tree | -c | --config-env | --shallow-file | -C | --attr-source)
+                ((i += 2))
+                ((i <= count)) || i=$count
+                ;;
+            --git-dir=* | --namespace=* | --work-tree=* | --config-env=* | --attr-source=*) ((i += 1)) ;;
+            -*) i=$count; return ;;
+            *) return ;;
+        esac
+    done
+}
+
+# Git v2.43's commands[] table in git.c. Builtins run before aliases, and avoiding the alias
+# lookup keeps ordinary commands at their existing process cost.
+git_builtin() {
+    case "$1" in
+        --help | -h | --version | -v | add | am | annotate | apply | archive | bisect | blame | branch | bugreport | bundle | cat-file | \
+            check-attr | check-ignore | check-mailmap | check-ref-format | checkout | checkout--worker | checkout-index | cherry | \
+            cherry-pick | clean | clone | column | commit | commit-graph | commit-tree | config | count-objects | credential | \
+            credential-cache | credential-cache--daemon | credential-store | describe | diagnose | diff | diff-files | diff-index | \
+            diff-tree | difftool | fast-export | fast-import | fetch | fetch-pack | fmt-merge-msg | for-each-ref | for-each-repo | \
+            format-patch | fsck | fsck-objects | fsmonitor--daemon | gc | get-tar-commit-id | grep | hash-object | help | hook | \
+            index-pack | init | init-db | interpret-trailers | log | ls-files | ls-remote | ls-tree | mailinfo | mailsplit | maintenance | \
+            merge | merge-base | merge-file | merge-index | merge-ours | merge-recursive | merge-recursive-ours | merge-recursive-theirs | \
+            merge-subtree | merge-tree | mktag | mktree | multi-pack-index | mv | name-rev | notes | pack-objects | pack-redundant | \
+            pack-refs | patch-id | pickaxe | prune | prune-packed | pull | push | range-diff | read-tree | rebase | receive-pack | reflog | \
+            remote | remote-ext | remote-fd | repack | replace | rerere | reset | restore | rev-list | rev-parse | revert | rm | send-pack | \
+            shortlog | show | show-branch | show-index | show-ref | sparse-checkout | stage | stash | status | stripspace | \
+            submodule--helper | switch | symbolic-ref | tag | unpack-file | unpack-objects | update-index | update-ref | \
+            update-server-info | upload-archive | upload-archive--writer | upload-pack | var | verify-commit | verify-pack | verify-tag | \
+            version | whatchanged | worktree | write-tree) return 0 ;;
     esac
-done
+    return 1
+}
+
+# Return true when handle_options() rejects an alias because it changes Git's environment.
+git_alias_changes_environment() {
+    local option
+    local -a alias_options=("$@")
+    local index=0 count=${#alias_options[@]}
+    while ((index < count)); do
+        option="${alias_options[index]}"
+        case "$option" in
+            --help | -h | --version | -v) return 1 ;;
+            --exec-path=*) ((index += 1)) ;;
+            --exec-path?* | --exec-path | --html-path | --man-path | --info-path | --list-cmds=*) return 1 ;;
+            -p | --paginate) ((index += 1)) ;;
+            -P | --no-pager | --no-replace-objects | --git-dir | --git-dir=* | --namespace | --namespace=* | --work-tree | \
+                --work-tree=* | --bare | --literal-pathspecs | --no-literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | \
+                --icase-pathspecs | --no-optional-locks | --shallow-file | -C | --attr-source | --attr-source=*) return 0 ;;
+            -c | --config-env)
+                ((index += 2))
+                ((index <= count)) || return 1
+                ;;
+            --config-env=*) ((index += 1)) ;;
+            -*) return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
+}
+
+# Expand ordinary aliases with Git's split_cmdline rules. A shell alias starts with `!`; Git
+# delegates it to a shell, so it stays outside this shim's commit and push dispatch.
+git_expand_aliases() {
+    local name
+    local -a alias_words=()
+    local -A seen=()
+    while ((i < ${#args[@]})); do
+        name="${args[i]}"
+        git_builtin "$name" && return
+        [[ -z "${seen[$name]:-}" ]] || {
+            args=("${original_args[@]}")
+            git_command_index
+            return
+        }
+        mapfile -d '' -t alias_words < <(
+            python3 - "$_real" "$name" "${args[@]:0:i}" <<'PY'
+import os
+import subprocess
+import sys
+
+real, name, *globals_ = sys.argv[1:]
+try:
+    completed = subprocess.run(
+        [real, *globals_, "config", "--null", "--get", f"alias.{name}"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+except OSError:
+    sys.stdout.buffer.write(b"error\0")
+    raise SystemExit
+if completed.returncode == 1:
+    sys.stdout.buffer.write(b"missing\0")
+    raise SystemExit
+if completed.returncode:
+    sys.stdout.buffer.write(b"error\0")
+    raise SystemExit
+if completed.stdout.count(b"\0") != 1 or not completed.stdout.endswith(b"\0"):
+    sys.stdout.buffer.write(b"error\0")
+    raise SystemExit
+value = completed.stdout[:-1]
+if value.startswith(b"!"):
+    sys.stdout.buffer.write(b"shell\0")
+    raise SystemExit
+
+whitespace = b" \t\n\v\f\r"
+words = []
+word = bytearray()
+quoted = 0
+index = 0
+while index < len(value):
+    character = value[index]
+    if not quoted and character in whitespace:
+        words.append(bytes(word))
+        word.clear()
+        index += 1
+        while index < len(value) and value[index] in whitespace:
+            index += 1
+        continue
+    if not quoted and character in (ord("'"), ord('"')):
+        quoted = character
+        index += 1
+        continue
+    if quoted and character == quoted:
+        quoted = 0
+        index += 1
+        continue
+    if character == ord("\\") and quoted != ord("'"):
+        index += 1
+        if index == len(value):
+            sys.stdout.buffer.write(b"split\0")
+            raise SystemExit
+        character = value[index]
+    word.append(character)
+    index += 1
+if quoted:
+    sys.stdout.buffer.write(b"split\0")
+    raise SystemExit
+words.append(bytes(word))
+sys.stdout.buffer.write(b"found\0")
+for word in words:
+    sys.stdout.buffer.write(word + b"\0")
+PY
+        )
+        case "${alias_words[0]:-error}" in
+            missing | shell | error | split) return ;;
+            found) ;;
+            *) return ;;
+        esac
+        git_alias_changes_environment "${alias_words[@]:1}" && return
+        [[ "${alias_words[1]:-}" != "$name" ]] || return
+        seen["$name"]=1
+        args=("${args[@]:0:i}" "${alias_words[@]:1}" "${args[@]:i+1}")
+        git_command_index
+    done
+}
+
+args=("$@")
+original_args=("$@")
+git_command_index
+git_expand_aliases
+set -- "${args[@]}"
 
 # Keep the existing case-insensitive command-line override test: a caller who selects a hooks
 # path owns that command, and the scanner does not run.

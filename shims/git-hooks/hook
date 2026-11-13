@@ -6,8 +6,9 @@
 #
 # For the scanned commit, prepare-commit-msg records Git's auto comment character before the
 # editor runs (not under --no-verify, which skips commit-msg, its reader); pre-commit runs the
-# repository hook then scans the staged diff; commit-msg runs the repository hook then scans the
-# message as Git will clean it. For the agent-session commands
+# repository hook then scans the staged diff with attributes from an empty tree, so attributes
+# cannot hide text but Git still detects binary content; commit-msg runs the message as Git will
+# clean it. For the agent-session commands
 # that take no --trailer, prepare-commit-msg adds `Omp-Session: $OMP_SESSION_ID` unless the same
 # line is there already, the id is malformed, scripts/omp-session-trailer says no, or a rebase is
 # replaying commits (`pull --rebase`, a rebase started from a hook): a replayed commit keeps the
@@ -236,9 +237,18 @@ if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
 
     case "$name" in
         pre-commit)
+            # The empty tree removes worktree .gitattributes. Disable configured and system
+            # attributes too; info/attributes has no switch, so force its diff to text.
+            attribute_source="$(git mktree < /dev/null)" || exit 1
+            [[ "$attribute_source" =~ ^[0-9a-f]{40,64}$ ]] || exit 1
+            info_attributes="$(git rev-parse --git-path info/attributes)" || exit 1
+            diff_text=()
+            if [[ -s "$info_attributes" ]]; then
+                diff_text=(--text)
+            fi
             set +e
-            GIT_NO_REPLACE_OBJECTS=1 git -c core.quotePath=false diff --cached --ignore-submodules=none -U0 --no-ext-diff --no-textconv --no-color --no-renames \
-                --no-relative --src-prefix=a/ --dst-prefix=b/ --submodule=short --diff-algorithm=myers |
+            GIT_NO_REPLACE_OBJECTS=1 GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null "--attr-source=$attribute_source" -c core.quotePath=false diff --cached --ignore-submodules=none -U0 --no-ext-diff --no-textconv --no-color --no-renames \
+                "${diff_text[@]}" --no-relative --src-prefix=a/ --dst-prefix=b/ --submodule=short --diff-algorithm=myers |
                 "$here/../../scripts/leak-terms-check" diff
             pipe_status=("${PIPESTATUS[@]}")
             set -e

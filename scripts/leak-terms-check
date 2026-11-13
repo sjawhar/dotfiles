@@ -956,8 +956,8 @@ TRANSPORT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*::")
 
 
 def git_environment() -> dict[str, str]:
-    """Disable replacement objects so scanned objects are the ones Git publishes."""
-    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    """Disable replacement and system attributes so Git scans the objects it publishes."""
+    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
 
 
 def git_output(arguments: Sequence[str], standard_input: bytes, failure: str) -> bytes:
@@ -1126,20 +1126,181 @@ def nul_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
         yield b"".join(pieces)
 
 
-def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
-    """Read all outgoing messages and combined diffs from one Git producer."""
-    if not commits:
-        return []
-    # Do not let local log.* or diff.* configuration omit a root diff, a
-    # signature, notes, decorations, or a submodule change from this scan.
+def newline_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
+    """Yield newline-delimited byte records while joining each growing record only once."""
+    pieces: list[bytes] = []
+    for chunk in chunks:
+        start = 0
+        while True:
+            boundary = chunk.find(b"\n", start)
+            if boundary < 0:
+                if start < len(chunk):
+                    pieces.append(chunk[start:])
+                break
+            pieces.append(chunk[start:boundary])
+            yield b"".join(pieces)
+            pieces.clear()
+            start = boundary + 1
+    if pieces:
+        yield b"".join(pieces)
+
+
+@dataclass
+class DiffHunk:
+    """The remaining parent and result lines that make a streamed diff hunk unambiguous."""
+
+    parents: list[int]
+    result: int
+    combined: bool
+
+
+def hunk_start(line: bytes) -> DiffHunk | None:
+    """Return the hunk counts for LINE, refusing a malformed hunk header."""
+    if line.startswith(b"@@@ "):
+        parsed = parse_combined_hunk(line.decode("utf-8", errors="surrogateescape"))
+        if parsed is None:
+            raise TextError("git gave a malformed combined hunk")
+        parents, (_, result) = parsed
+        counts = [count for _, count in parents]
+        return DiffHunk(counts, result, True) if any(counts) or result else None
+    if line.startswith(b"@@ "):
+        parsed = parse_unified_hunk(line.decode("utf-8", errors="surrogateescape"))
+        if parsed is None:
+            raise TextError("git gave a malformed unified hunk")
+        (_, old), (_, new) = parsed
+        return DiffHunk([old], new, False) if old or new else None
+    return None
+
+
+def consume_hunk_line(line: bytes, hunk: DiffHunk) -> DiffHunk | None:
+    """Consume one physical diff line, returning None only after its declared counts end."""
+    if line.startswith(b"\\ No newline at end of file"):
+        return hunk
+    if hunk.combined:
+        if len(line) < len(hunk.parents) or any(marker not in b"+- " for marker in line[:len(hunk.parents)]):
+            raise TextError("git gave a malformed combined hunk")
+        marks = line[:len(hunk.parents)]
+        for index, marker in enumerate(marks):
+            if marker == ord("-") or (ord("-") not in marks and marker == ord(" ")):
+                hunk.parents[index] -= 1
+        if ord("-") not in marks:
+            hunk.result -= 1
+        if any(count < 0 for count in hunk.parents) or hunk.result < 0:
+            raise TextError("git gave a malformed combined hunk count")
+    else:
+        if not line or line[0] not in b"+- ":
+            raise TextError("git gave a malformed unified hunk")
+        marker = line[0]
+        if marker in b"- ":
+            hunk.parents[0] -= 1
+        if marker in b"+ ":
+            hunk.result -= 1
+        if hunk.parents[0] < 0 or hunk.result < 0:
+            raise TextError("git gave a malformed unified hunk count")
+    return None if not any(hunk.parents) and hunk.result == 0 else hunk
+
+
+def outgoing_diff_records(chunks: Iterator[bytes]) -> Iterator[tuple[str, bytes]]:
+    """Frame `git log --format=commit %H` output without trusting bytes inside a diff hunk."""
+    current: str | None = None
+    diff = bytearray()
+    hunk: DiffHunk | None = None
+    for line in newline_records(chunks):
+        if hunk is None:
+            boundary = re.fullmatch(rb"commit ([0-9A-Fa-f]{40,64})", line)
+            if boundary:
+                if current is not None:
+                    yield current, bytes(diff)
+                current = boundary.group(1).decode("ascii")
+                diff.clear()
+                continue
+        if current is None:
+            if line:
+                raise TextError("git gave malformed commit boundaries")
+            continue
+        diff.extend(line)
+        diff.append(ord("\n"))
+        if hunk is None:
+            hunk = hunk_start(line)
+        else:
+            hunk = consume_hunk_line(line, hunk)
+    if hunk is not None:
+        raise TextError("git gave a malformed diff hunk count")
+    if current is not None:
+        yield current, bytes(diff)
+
+
+def empty_attribute_tree() -> str:
+    """Create the empty tree Git uses as an attribute source without changing refs or the index."""
+    output = git_output(["mktree"], b"", "git could not create an empty attribute tree")
+    try:
+        value = output.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise TextError("git gave an invalid empty attribute tree") from error
+    tree = value.removesuffix("\n")
+    if value != f"{tree}\n" or OBJECT_ID.fullmatch(tree) is None:
+        raise TextError("git gave an invalid empty attribute tree")
+    return tree
+
+
+def info_attributes_present() -> bool:
+    """Report whether this repository has the one higher-precedence attribute source Git cannot disable."""
+    output = git_output(["rev-parse", "--git-path", "info/attributes"], b"", "git could not read info attributes")
+    path = Path(output.decode("utf-8", errors="surrogateescape").removesuffix("\n"))
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError as error:
+        raise TextError("git could not read info attributes") from error
+
+
+def scan_outgoing_messages(commits: Sequence[str], matcher: TermMatcher, findings: list[str]) -> None:
+    """Scan commit messages from a NUL-framed producer, where Git messages cannot contain NUL."""
     arguments = [
-        "-c",
-        "core.quotePath=false",
         "log",
         "--encoding=UTF-8",
         "--no-walk=unsorted",
         "--stdin",
-        "--format=%x00%H%x00%B%x00",
+        "-z",
+        "--format=tformat:%H%x00%B",
+        "--no-show-signature",
+        "--no-notes",
+        "--no-decorate",
+    ]
+    expected = set(commits)
+    seen: set[str] = set()
+    records: list[bytes] = []
+    for raw in nul_records(git_chunks(arguments, ("\n".join(commits) + "\n").encode())):
+        records.append(raw)
+        if len(records) != 2:
+            continue
+        raw_commit, raw_message = records
+        records.clear()
+        try:
+            commit = raw_commit.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise TextError("git gave malformed commit boundaries") from error
+        if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
+            raise TextError("git gave malformed commit boundaries")
+        seen.add(commit)
+        findings.extend(scan_message(raw_message.decode("utf-8", errors="surrogateescape"), matcher, "verbatim", None, False,
+                                     f"commit {commit[:12]} message"))
+    if records or seen != expected:
+        raise TextError("git gave malformed commit boundaries")
+
+
+def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[str]) -> None:
+    """Scan a byte-streamed diff producer, framing commits only outside hunk content."""
+    arguments = [
+        "-c",
+        "core.attributesFile=/dev/null",
+        "--attr-source",
+        empty_attribute_tree(),
+        "-c",
+        "core.quotePath=false",
+        "log",
+        "--no-walk=unsorted",
+        "--stdin",
+        "--format=commit %H",
         "--root",
         "--no-show-signature",
         "--no-notes",
@@ -1157,40 +1318,26 @@ def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[
         "--ignore-submodules=none",
         "--diff-algorithm=myers",
     ]
-    findings: list[str] = []
+    if info_attributes_present():
+        arguments.append("--text")
     expected = set(commits)
     seen: set[str] = set()
-    records: list[bytes] = []
-
-    def scan_record(raw_commit: bytes, raw_message: bytes, raw_diff: bytes) -> None:
-        try:
-            commit = raw_commit.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise TextError("git gave malformed commit boundaries") from error
+    for commit, raw_diff in outgoing_diff_records(git_chunks(arguments, ("\n".join(commits) + "\n").encode())):
         if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
             raise TextError("git gave malformed commit boundaries")
         seen.add(commit)
-        short = commit[:12]
-        message = raw_message.decode("utf-8", errors="surrogateescape")
-        diff = raw_diff.decode("utf-8", errors="surrogateescape")
-        findings.extend(scan_message(message, matcher, "verbatim", None, False, f"commit {short} message"))
-        findings.extend(scan_diff(diff, matcher, f"commit {short} "))
+        findings.extend(scan_diff(raw_diff.decode("utf-8", errors="surrogateescape"), matcher, f"commit {commit[:12]} "))
+    if seen != expected:
+        raise TextError("git gave malformed commit boundaries")
 
-    first = True
-    for raw in nul_records(git_chunks(arguments, ("\n".join(commits) + "\n").encode())):
-        if first:
-            if raw:
-                raise TextError("git gave malformed commit boundaries")
-            first = False
-            continue
-        records.append(raw)
-        if len(records) == 3:
-            scan_record(*records)
-            records.clear()
-    if records:
-        raise TextError("git gave malformed commit boundaries")
-    if first or seen != expected:
-        raise TextError("git gave malformed commit boundaries")
+
+def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
+    """Scan outgoing messages and diffs with separate producers and verified boundaries."""
+    if not commits:
+        return []
+    findings: list[str] = []
+    scan_outgoing_messages(commits, matcher, findings)
+    scan_outgoing_diffs(commits, matcher, findings)
     return findings
 
 
