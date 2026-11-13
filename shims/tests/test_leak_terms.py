@@ -2666,6 +2666,17 @@ class JjLeaks(LeakTestCase):
         self.assertEqual(helped.returncode, 0, helped.stderr)
         self.assertIn("Usage:", helped.stdout)
 
+    def test_jj_term_locks_workspace_add_with_a_destination_after_double_dash(self) -> None:
+        repository = self.repository(False)
+        workspace = self.root / "dashed-workspace"
+        result = self.jj(repository, "workspace", "add", "--quiet", "--name=x", "--", str(workspace), agent=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed = self.launch(["/usr/bin/git", "-C", str(workspace), "worktree", "list", "--porcelain"], env=self.person)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        blocks = {block.splitlines()[0]: block for block in listed.stdout.strip().split("\n\n")}
+        entry = blocks.get(f"worktree {os.path.realpath(workspace)}", "")
+        self.assertIn("locked jj shim: locked on add (AGENTC-431)", entry, listed.stdout)
+
     def test_unreadable_lists_allow_empty_jj_new_but_refuse_a_clean_file(self) -> None:
         cases = [case for case in unreadable_lists(self.root, self.person["PATH"]) if case[0] in {"key", "missing"}]
         self.assertEqual({case[0] for case in cases}, {"key", "missing"})
