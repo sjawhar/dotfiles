@@ -91,6 +91,7 @@ render_bridge() {
         "$YQ" -i "$common
             | .database.type = \"sqlite3-fk-wal\"
             | .database.uri = \"$db\"
+            | .matrix.message_status_events = true
             | .double_puppet.secrets = {\"chathub\": \"$dp_secret\"}
             | .encryption.allow = false
             | .provisioning.shared_secret = \"generate\"
@@ -101,6 +102,7 @@ render_bridge() {
         "$YQ" -i "$common
             | .appservice.database.type = \"sqlite3-fk-wal\"
             | .appservice.database.uri = \"$db\"
+            | .bridge.message_status_events = true
             | .bridge.login_shared_secret_map = {\"chathub\": \"$dp_secret\"}
             | .bridge.backfill.forward_limits.initial.dm = 50
             | .bridge.backfill.forward_limits.missed.dm = -1
