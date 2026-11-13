@@ -225,18 +225,24 @@ behavior before handing the call to the real one. One file is data: `person-name
   arguments, the current branch and its `branch.<name>.merge`, each `remote.<name>.push`, and every
   local branch for `--all`, `--branches`, `--mirror` or a prefix git takes for one (`--bra`), a
   refspec with `@{` or a remote with `mirror` set. When no name in that list carries a token and no
-  refspec holds `*`, it asks the remote nothing. Otherwise it reads the remote once: git's own dry
-  run of the same push (`push --dry-run --porcelain`, its flags after every option of the caller's,
-  so a caller's `--no-dry-run` or `-q` changes nothing), within 10 s. It refuses each branch that a
-  destination reports as new and whose name carries a token, and a branch the remote already holds
-  passes. When that dry run fails before any destination answers, the guard prints one line and the
-  push goes on: `git's dry run of this push gave no answer within 10 s, so the branch-name check
-  checked no name; the push goes on.` when the 10 s bound ran out, else `git's dry run of this push
-  failed (exit <n>), so the branch-name check checked no name; the push goes on.` Neither line names
-  a cause, because the guard cannot tell a failure in git (a refspec that matches nothing) from one
-  at the remote (a refused connection, a missing path). So only a push whose list carries a token,
-  or whose refspec holds `*`, pays a remote read: one, and up to two for a jj push (`shims/jj`'s,
-  then this shim's). Every other push pays only local reads.
+  refspec holds `*`, it asks the remote nothing. Otherwise it reads the remote once, within 10 s:
+  git's own dry run of the same push. Its flags, `--dry-run --dry-run --porcelain --no-verify
+  --no-quiet --no-signed --no-recurse-submodules`, go just before the caller's first `--` or
+  `--end-of-options` (the split), or at the end when there is none, so no caller option comes
+  after them and a caller's `--no-dry-run` or `-q` changes nothing. git gives an option that takes
+  a value exactly the next argument, so a caller's option left with none (`--repo` at the end, or
+  `-o --`, whose `--` git takes as the value) takes the first, spare `--dry-run`, and the rest
+  still apply. The split follows `--no-recurse-submodules`, which takes no value, so git reads it
+  as the end of options and each argument after it as the remote or a refspec. It refuses each
+  branch that a destination reports as new and whose name carries a token, and a branch the remote
+  already holds passes. When that dry run fails before any destination answers, the guard prints
+  one line and the push goes on: `git's dry run of this push gave no answer within 10 s, so the
+  branch-name check checked no name; the push goes on.` when the 10 s bound ran out, else `git's
+  dry run of this push failed (exit <n>), so the branch-name check checked no name; the push goes
+  on.` Neither line names a cause, because the guard cannot tell a failure in git (a refspec that
+  matches nothing) from one at the remote (a refused connection, a missing path). So only a push
+  whose list carries a token, or whose refspec holds `*`, pays a remote read: one, and up to two
+  for a jj push (`shims/jj`'s, then this shim's). Every other push pays only local reads.
   A request for help pushes nothing and is not checked: `-h`, alone or in a cluster of short options
   before any `o` (`-uh`, `-hv`, not `-oh`, whose `h` is the value of `-o`), or `--help`, before the
   first `--` or `--end-of-options`, lets git print its usage or open the push help as it would.
@@ -262,7 +268,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   a git run by its absolute path, and a jj not run through `shims/jj` whose git is not `shims/git`
   (run by its absolute path with no `shims/` on PATH, or with a `git.executable-path` that names
   another git); initials, and identity tokens under three characters; a token that is not at the
-  start of the name, or that is followed by `.`; jj's own identity settings (`user.*`).
+  start of the name, or that is followed by `.`; jj's own identity settings (`user.*`); a push whose
+  first `--` is the value of an option and is followed anywhere by an option of the caller's
+  (`git push --repo -- -v origin …`): the read takes that option as the remote or a refspec, fails,
+  and the push goes on.
   It refuses wrongly where `USER` names no person. Every agent box sets `USER=ubuntu`, so a new
   `ubuntu-…` branch there is refused, and `USER=root` makes `root` a token the same way. The
   message names the token and its source (`USER`). In an agent session, the push that

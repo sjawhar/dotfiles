@@ -22,9 +22,15 @@
 # no refspec holds a `*`, which can create a name that no local branch has, it exits 0 and asks the
 # remote nothing. The push's own arguments are read first, and once one of them carries a token or
 # holds a `*` the local reads are skipped, since the remote read is certain.
-# Then it asks the remote with git's own dry run of the same push, its flags after every caller
-# option and before the caller's first `--` or `--end-of-options`, since the last of --dry-run and
-# --no-dry-run wins and -q hides the porcelain lines. Each
+# Then it asks the remote with git's own dry run of the same push: the caller's arguments before its
+# first `--` or `--end-of-options`, then `--dry-run --dry-run --porcelain --no-verify --no-quiet
+# --no-signed --no-recurse-submodules`, then the caller's arguments from that split on. git gives an
+# option that takes a value exactly the one argument after it, so a caller's option left with none
+# (`--repo` at the end, or `-o --`, whose `--` git takes as the value) takes the first, spare
+# --dry-run, and the rest still apply. The split follows --no-recurse-submodules, which takes no
+# value, so git reads it as the end of options. No caller option comes after the flags, so none can
+# undo them: of --dry-run and --no-dry-run, and of --no-quiet and -q (which hides the porcelain
+# lines), the last wins. Each
 # `*<TAB><src>:refs/heads/<name><TAB>[new branch]` line under a `To <url>` line is a branch that
 # destination lacks. A dry run that exits non-zero and prints no `To ` line checked no name. git may
 # have failed by itself (a refspec that matches nothing) or at the remote (a refused connection, a
@@ -183,13 +189,17 @@ redact() {
     printf '%s' "$u"
 }
 
-# The caller's first `--` or `--end-of-options`: the read's own flags go just before it.
+# The read: the caller's arguments before its first `--` or `--end-of-options` (the split), the flags,
+# then the caller's arguments from the split on. git gives an option that takes a value exactly the
+# next argument, so an option the caller left open (at the end, or with the split as its value) takes
+# the spare first --dry-run, and the full set after it still applies; otherwise the spare is a repeat.
+# The split follows --no-recurse-submodules, which takes no value, so git reads it as the end of options.
 for ((d = 0; d < ${#push[@]}; d++)); do
     [[ "${push[d]}" != -- && "${push[d]}" != --end-of-options ]] || break
 done
 rc=0
 out="$(timeout -s KILL 10 env GIT_TERMINAL_PROMPT=0 "${git[@]}" push "${push[@]:0:d}" \
-    --dry-run --porcelain --no-verify --no-quiet --no-signed --no-recurse-submodules "${push[@]:d}" \
+    --dry-run --dry-run --porcelain --no-verify --no-quiet --no-signed --no-recurse-submodules "${push[@]:d}" \
     2> /dev/null < /dev/null)" || rc=$?
 
 url="" asked=0 refusals=()

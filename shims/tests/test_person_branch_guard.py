@@ -3,6 +3,7 @@
 remote per case: which pushes that would create a branch named with a person token are refused, and
 which pushes and commands go through."""
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -48,6 +49,24 @@ FIXTURE_IDENTITY = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example
 GITCONFIG = "[push]\n\tautoSetupRemote = true\n[init]\n\tdefaultBranch = main\n"
 IDENTITY = "[user]\n\tname = Stub Person\n\temail = stub@example.com\n"
 JJ_CONFIG = '[user]\nname = "Stub Person"\nemail = "stub@example.com"\n\n[signing]\nbehavior = "drop"\n'
+# A line of `git push -h` for an option that requires a value, with its short form when it has one:
+# `--[no-]repo <repository>`, `--[no-]recurse-submodules (check|on-demand|no)`, `-o, --[no-]push-option
+# <server-specific>`. An optional value follows the name with no space (`--[no-]signed[=...]`) and does
+# not match.
+VALUE_OPTION = re.compile(r"^ +(?:-(\w), )?--(?:\[no-\])?([a-z][a-z0-9-]*) [<(]")
+# What a push with such an option left open does, in both shapes, as measured with git 2.47.3.
+# "refused": git takes the read's spare --dry-run as the value, the read answers, and the guard refuses.
+# "git fails": git fails the read by itself (--recurse-submodules takes only check, on-demand or no; a
+# receive-pack program named `--dry-run` cannot run), so the push goes on, and git fails the caller's
+# command by itself too (an option with no value; `--` as the submodule mode or the program).
+OPEN_OPTION_OUTCOMES = {
+    "--repo": "refused",
+    "--push-option": "refused",
+    "-o": "refused",
+    "--recurse-submodules": "git fails",
+    "--receive-pack": "git fails",
+    "--exec": "git fails",
+}
 
 
 def workspace_bullet() -> str:
@@ -149,9 +168,10 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.fixture(self.tmp, "git", "init", "-q", "--bare", str(path))
         return path
 
-    def git_repo(self, branch: str | None = None, **env) -> Path:
-        """A git repository with one commit and `origin` at this case's bare remote, on BRANCH when given."""
-        w = self.tmp / "w"
+    def git_repo(self, branch: str | None = None, name: str = "w", **env) -> Path:
+        """A git repository at NAME in this case's directory, with one commit and `origin` at this case's bare
+        remote, on BRANCH when given."""
+        w = self.tmp / name
         self.fixture(self.tmp, "git", "init", "-q", str(w), **env)
         self.fixture(w, "git", *FIXTURE_IDENTITY, "commit", "-q", "--allow-empty", "-m", "one", **env)
         self.fixture(w, "git", "remote", "add", "origin", str(self.origin), **env)
@@ -275,6 +295,43 @@ class PersonBranchGuardTest(unittest.TestCase):
     def test_git_push_after_end_of_options_is_refused(self):
         w = self.git_repo()
         self.assert_refused(self.git(w, "push", "--end-of-options", "origin", "HEAD:refs/heads/sami-e"), "sami-e")
+
+    # Each option `git push -h` lists with a required value, left without one: at the end, or with `--` as its
+    # value, which git takes while the guard splits there. The option takes the read's spare --dry-run, so the
+    # read stays a dry run, and the remote never holds the branch.
+    def test_a_push_option_left_without_a_value_pushes_nothing(self):
+        result = run_bounded([str(self.git_bin), "push", "-h"], self.tmp, self.env(agent=False))
+        self.assertEqual(result.returncode, 129, result.stderr)
+        options = []
+        for line in result.stdout.splitlines():
+            if m := VALUE_OPTION.match(line):
+                options += [f"--{m[2]}", *([f"-{m[1]}"] if m[1] else [])]
+        self.assertNotEqual(options, [])
+        for option in ("--repo", "-o"):
+            self.assertIn(option, options)
+        for option in ("--force-with-lease", "--signed"):
+            self.assertNotIn(option, options)
+        n = 0
+        for option in options:
+            for shape, args in (("at the end", ["origin", "HEAD:refs/heads/stub-v", option]),
+                                ("with -- as its value", [option, "--", "origin", "HEAD:refs/heads/stub-v"])):
+                n += 1
+                with self.subTest(option=option, shape=shape):
+                    self.origin = self.bare(f"remote-{n}.git")
+                    self.fixture(self.tmp, "git", "--git-dir", str(self.origin), "config", "receive.advertisePushOptions", "true")
+                    w = self.git_repo(name=f"w-{n}")
+                    result = self.git(w, "push", *args)
+                    self.assertNotIn("stub-v", self.branches(), result.stderr)
+                    outcome = OPEN_OPTION_OUTCOMES.get(option)
+                    if outcome == "refused":
+                        self.assert_refused(result, "stub-v")
+                    elif outcome == "git fails":
+                        # The one push the stub git ran without --dry-run is the caller's own, and git failed it.
+                        self.assertEqual([c[c.index("push"):] for c in self.pushes("git")], [["push", *args]])
+                        self.assertNotEqual(result.returncode, 0, result.stderr)
+                        self.assert_no_refusal(result)
+                    else:
+                        self.fail(f"{option}: no measured outcome in OPEN_OPTION_OUTCOMES")
 
     def test_a_token_in_another_case_is_refused(self):
         w = self.git_repo("Stub/Upper")
@@ -553,8 +610,7 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.assert_passed(result, "stub/slug")
         self.assertIn("error: git shim: the branch-name check failed (exit 2); the push goes on.", result.stderr)
 
-    # A command that is not a push, and a push git fails by itself, get git's own output: no line says the
-    # remote could not be asked.
+    # A request for help gets git's own output, and a push git fails by itself is not refused.
 
     def test_git_push_help_on_a_token_branch_is_not_a_push(self):
         w = self.git_repo("stub/slug")
@@ -582,7 +638,6 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assert_no_refusal(result)
         self.assertIn("error: src refspec sami-typo does not match any", result.stderr)
-        self.assertNotIn("could not ask origin which branches it holds", result.stderr)
 
 
 if __name__ == "__main__":
