@@ -1320,11 +1320,11 @@ class TunnelSetup(unittest.TestCase):
         self.checkout("git", "typed-secret")
         self.advance_to_current()
         typed = f"synthetic-pasted-secret-{secrets.token_hex(8)}"
-        result = self.invoke(after_sync=True, answers=f"{typed}\n{typed}\n")
+        result = self.invoke(after_sync=True, answers=f"{typed}\n" * 4)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         report = self.report()
-        self.assertIn("self-check: browser page delivery: answer: no: failed\n", report)
-        self.assertIn("self-check: audio delivery: answer: no: failed\n", report)
+        self.assertIn("self-check: browser page delivery: answer: not recognized twice: failed\n", report)
+        self.assertIn("self-check: audio delivery: answer: not recognized twice: failed\n", report)
         searched = 0
         for root in (self.home, self.remote):
             for path in root.rglob("*"):
@@ -1353,6 +1353,30 @@ class TunnelSetup(unittest.TestCase):
                 self.assertEqual(len(lines), 1, report)
                 self.assertNotIn("answer: no", lines[0])
 
+    def test_yes_in_any_case_and_with_spaces_counts_as_yes(self) -> None:
+        for name, answers in (("answer-yes-upper", "YES\nyes\n"), ("answer-y-spaced", "  y \n\tY\t\n")):
+            with self.subTest(name):
+                self.checkout("git", name)
+                self.advance_to_current()
+                result = self.invoke(after_sync=True, answers=answers)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                report = self.report()
+                self.assertIn("self-check: browser page delivery: answer: yes: ok\n", report)
+                self.assertIn("self-check: audio delivery: answer: yes: ok\n", report)
+
+    def test_an_unrecognized_answer_is_asked_once_more_then_fails(self) -> None:
+        # The page prompt reads two unrecognized answers and fails; the sound prompt then reads
+        # the third line.
+        self.checkout("git", "answer-unrecognized")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, answers="maybe\nperhaps\ny\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        self.assertIn("self-check: browser page delivery: answer: not recognized twice: failed\n", report)
+        self.assertIn("self-check: audio delivery: answer: yes: ok\n", report)
+        self.assertEqual(result.stderr.count("Did the forward test page open in the browser? [y/N] "), 2)
+        self.assertEqual(result.stderr.count("Answer y or n.\n"), 1)
+
     def test_steps_stop_naming_a_failed_look_not_its_absence(self) -> None:
         for name, extra, message in (
             ("probe-ssh-down", {"SSH_FAILS_ON": "BatchMode=yes"},
@@ -1368,6 +1392,8 @@ class TunnelSetup(unittest.TestCase):
             ("cutover-run-fails", {"FAIL_STEP": "cutover"},
              "oryx-tunnel-setup: cutover: ssh -t oryx ~/.local/bin/oryx-edge-cutover exited 1 (255 is ssh's own failure); "
              "tr exited 0, tee exited 0\n"),
+            ("cutover-missing", {"CUTOVER_MISSING": "1"},
+             "oryx-tunnel-setup: cutover: ~/.local/bin/oryx-edge-cutover is missing or not executable; the parent installs it\n"),
             ("token-copy-fails", {"FAIL_STEP": "token"},
              "oryx-tunnel-setup: token: could not copy the Cloudflare Access tunnel token from oryx: "
              "ssh oryx secrets failed (exit 1)\n"),

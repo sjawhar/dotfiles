@@ -767,21 +767,40 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
 }
 
 ask_yes() {
-    local prompt="$1" answer="" status=0
-    printf '%s [y/N] ' "$prompt" >&2
-    # read fails at the end of input even when it read a last line without a newline, so the
-    # answer decides, and its status counts only when nothing was read. The report carries only
-    # the answer's category, never the text: a paste at this prompt must not reach the report or oryx.
-    read -r answer || status=$?
-    if [[ "$answer" == y || "$answer" == Y ]]; then
-        PROBE_VALUE="answer: yes"
-        return 0
-    fi
-    if [[ -z "$answer" ]] && ((status)); then
-        PROBE_VALUE="no answer (read exit $status)"
-    else
-        PROBE_VALUE="answer: no"
-    fi
+    local prompt="$1" answer status attempt
+    # The report carries only the answer's category, never the text: a paste at this prompt must
+    # not reach the report or oryx. y or yes (any case, spaces trimmed) is yes; n, no or Enter is
+    # no; anything else asks once more, and a second answer not recognized fails the probe.
+    for attempt in 1 2; do
+        answer=""
+        status=0
+        printf '%s [y/N] ' "$prompt" >&2
+        # read fails at the end of input even when it read a last line without a newline, so the
+        # answer decides, and its status counts only when nothing was read.
+        read -r answer || status=$?
+        answer="${answer#"${answer%%[![:space:]]*}"}"
+        answer="${answer%"${answer##*[![:space:]]}"}"
+        case "${answer,,}" in
+            y|yes)
+                PROBE_VALUE="answer: yes"
+                return 0
+                ;;
+            n|no)
+                PROBE_VALUE="answer: no"
+                return 1
+                ;;
+            '')
+                if ((status)); then
+                    PROBE_VALUE="no answer (read exit $status)"
+                else
+                    PROBE_VALUE="answer: no"
+                fi
+                return 1
+                ;;
+        esac
+        ((attempt == 2)) || printf 'Answer y or n.\n' >&2
+    done
+    PROBE_VALUE="answer: not recognized twice"
     return 1
 }
 
@@ -1136,7 +1155,7 @@ report_line "probe: ssh oryx login with the 1Password login key succeeded"
 cutover_check=0
 ssh oryx 'test -x ~/.local/bin/oryx-edge-cutover' || cutover_check=$?
 if ((cutover_check == 1)); then
-    stop cutover "~/.local/bin/oryx-edge-cutover is missing; the parent installs it"
+    stop cutover "~/.local/bin/oryx-edge-cutover is missing or not executable; the parent installs it"
 elif ((cutover_check)); then
     stop cutover "could not check for ~/.local/bin/oryx-edge-cutover through ssh oryx (exit $cutover_check)"
 fi
