@@ -158,6 +158,11 @@ case "$name" in
         fi
         if [[ "$joined" =~ -L[[:space:]]127\.0\.0\.1:([0-9]+):/run ]]; then
             port="${BASH_REMATCH[1]}"
+            if [[ "${LOCAL_SOCKET_LOGIN_FAILS:-}" == 1 ]]; then
+                # The key did not log in, so the -L never listens.
+                printf 'agent@oryx-pcsc.thecybermonk.com: Permission denied (publickey).\n' >&2
+                exit 255
+            fi
             printf 'open failed\n' >&2
             /usr/bin/python3 - "$port" <<'PY' &
 import socket
@@ -195,6 +200,10 @@ PY
             exit 0
         fi
         if [[ "$joined" == *"000chost:version"* ]]; then
+            if [[ "${ADB_FORWARD_DOWN:-}" == 1 ]]; then
+                printf 'ConnectionRefusedError: [Errno 111] Connection refused\n' >&2
+                exit 1
+            fi
             printf 'OKAY00040029\n'
             exit 0
         fi
@@ -950,6 +959,31 @@ class TunnelSetup(unittest.TestCase):
         ):
             self.assertIn(line + "\n", report)
         self.assertNotIn("uid=", report)
+
+    def test_local_socket_probe_names_a_connection_error_not_data(self) -> None:
+        # A -L that never came up proves nothing about the key; the report must not say "got data".
+        self.checkout("git", "local-socket-refused")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, LOCAL_SOCKET_LOGIN_FAILS="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("oryx-tunnel-setup: self-check:", result.stderr)
+        report = self.report()
+        self.assertIn(
+            'self-check: tunnel key rejects local socket forwarding: client connection failed:'
+            ' ConnectionRefusedError, no "open failed" line: failed\n',
+            report,
+        )
+        self.assertNotIn("client got data", report)
+
+    def test_adb_probe_names_an_error_not_a_reply(self) -> None:
+        self.checkout("git", "adb-forward-down")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, ADB_FORWARD_DOWN="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "self-check: adb through tunnel: no adb reply: ConnectionRefusedError: [Errno 111] Connection refused: failed\n",
+            self.report(),
+        )
 
     def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
         self.checkout("git", "before-move-unit")

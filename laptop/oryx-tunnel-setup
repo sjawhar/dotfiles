@@ -716,8 +716,14 @@ adb_through_tunnel() {
     local reply
     # adb's host:version request answers OKAY and the server's version; nothing starts a server.
     reply="$(ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); print(s.recv(12).decode("ascii", "replace")); s.close()'\''' 2>&1 | tail -n 1 | tr -d '\r')" || true
-    PROBE_VALUE="reply ${reply:0:80}"
-    [[ "$reply" == OKAY* ]]
+    if [[ "$reply" == OKAY* ]]; then
+        PROBE_VALUE="reply ${reply:0:80}"
+        return 0
+    fi
+    # Anything else is the error that stopped the request, not an adb answer.
+    PROBE_VALUE="no adb reply: ${reply:-nothing printed}"
+    PROBE_VALUE="${PROBE_VALUE:0:120}"
+    return 1
 }
 
 
@@ -807,25 +813,30 @@ key_probe_denied_local_socket() {
     pid=$!
     sleep 1
     set +e
-    python3 - "$port" <<'PY'
+    # The client prints what it saw: EOF (sshd refused the socket), data (it forwarded it), or the
+    # connection error (the -L never came up, so the probe proves nothing about the key).
+    local client
+    client="$(python3 - "$port" <<'PY'
 import socket
 import sys
-sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
-received = sock.recv(1)
-sock.close()
+try:
+    sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+    received = sock.recv(1)
+    sock.close()
+except OSError as error:
+    print(f"client connection failed: {type(error).__name__}")
+    raise SystemExit(2)
+print("client got EOF" if received == b"" else "client got data")
 raise SystemExit(0 if received == b"" else 1)
 PY
+)"
     local client_status=$?
     set -e
     kill -TERM "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     local line
     line="$(deciding_line "$err" 'open failed')"
-    if [[ $client_status -eq 0 ]]; then
-        PROBE_VALUE="client got EOF, ${line:-no \"open failed\" line}"
-    else
-        PROBE_VALUE="client got data, ${line:-no \"open failed\" line}"
-    fi
+    PROBE_VALUE="${client:-client printed nothing}, ${line:-no \"open failed\" line}"
     [[ $client_status -eq 0 && -n "$line" ]]
 }
 
