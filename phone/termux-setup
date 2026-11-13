@@ -1,0 +1,95 @@
+#!/bin/bash
+# Set up the SSH client that connects this Termux phone to oryx through Cloudflare Access.
+set -euo pipefail
+
+ssh_dir="$HOME/.ssh"
+key="$ssh_dir/id_ed25519"
+config="$ssh_dir/config"
+known_hosts="$ssh_dir/known_hosts"
+config_begin="# BEGIN phone/termux-setup oryx"
+config_end="# END phone/termux-setup oryx"
+known_hosts_line="oryx.thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN16uW+GsQu5KiAmxnFHlSdoz7jDM3N938v6hAZnrF53"
+managed_config=$(cat <<'EOF'
+# BEGIN phone/termux-setup oryx
+Host oryx
+  HostName oryx.thecybermonk.com
+  User agent
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+# END phone/termux-setup oryx
+EOF
+)
+
+mkdir -p "$ssh_dir"
+chmod 700 "$ssh_dir"
+
+pkg_output=$(mktemp)
+config_tmp=""
+trap 'rm -f "$pkg_output" "$config_tmp"' EXIT
+if ! pkg install -y openssh cloudflared >"$pkg_output" 2>&1; then
+    cat "$pkg_output" >&2
+    exit 1
+fi
+
+if [[ ! -f "$key" ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C "phone@termux" -f "$key"
+elif [[ ! -f "$key.pub" ]]; then
+    ssh-keygen -y -f "$key" > "$key.pub"
+fi
+
+has_config_begin=0
+has_config_end=0
+if [[ -f "$config" ]]; then
+    grep -Fqx -- "$config_begin" "$config" && has_config_begin=1 || true
+    grep -Fqx -- "$config_end" "$config" && has_config_end=1 || true
+fi
+
+if [[ "$has_config_begin" != "$has_config_end" ]]; then
+    printf 'termux-setup: SSH config has an unmatched managed-block marker\n' >&2
+    exit 1
+fi
+
+config_tmp=$(mktemp "$ssh_dir/.config.XXXXXX")
+if ((has_config_begin)); then
+    awk -v begin="$config_begin" -v end="$config_end" -v block="$managed_config" '
+        $0 == begin {
+            if (inside || seen) {
+                bad = 1
+                exit
+            }
+            inside = 1
+            seen = 1
+            print block
+            next
+        }
+        $0 == end {
+            if (!inside) {
+                bad = 1
+                exit
+            }
+            inside = 0
+            next
+        }
+        !inside { print }
+        END {
+            if (inside || !seen || bad) {
+                exit 1
+            }
+        }
+    ' "$config" > "$config_tmp"
+elif [[ -f "$config" ]]; then
+    cat "$config" > "$config_tmp"
+    printf '\n%s\n' "$managed_config" >> "$config_tmp"
+else
+    printf '%s\n' "$managed_config" > "$config_tmp"
+fi
+mv "$config_tmp" "$config"
+config_tmp=""
+
+touch "$known_hosts"
+if ! grep -Fqx -- "$known_hosts_line" "$known_hosts"; then
+    printf '%s\n' "$known_hosts_line" >> "$known_hosts"
+fi
+
+cat "$key.pub"

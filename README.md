@@ -33,3 +33,15 @@ oryx report path. If the upload fails, it prints the local report path.
 | 5038 | RemoteForward | 127.0.0.1:5037 | adb server; on oryx use `ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 adb …` |
 | 2223 | RemoteForward | sami-devbox:22 | Company Legion; on oryx use `ssh sami-devbox-via-laptop` only while the laptop is awake and on its tailnet |
 | 2224 | RemoteForward | ghost-wispr:22 | Ghost Wispr Pi's sshd (`ssh -i <key> <user>@ghost-wispr-via-laptop` on oryx) |
+
+## Phone
+
+Install Termux. Termux includes the bootstrap `curl` command. If `curl` is
+unavailable, run `pkg install -y curl`.
+
+```bash
+f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sjawhar/dotfiles/main/phone/termux-setup -o "$f" && bash "$f"; rm -f "$f"
+```
+
+The command runs `bash` only after `curl` downloads the complete script. It
+prints the public key for the phone.
