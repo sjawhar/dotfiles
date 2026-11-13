@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -175,10 +176,26 @@ PY
             exit 0
         fi
         if [[ "$joined" == *"oryx-probe"* ]]; then
-            [[ "$joined" == *"127.0.0.1:12999"* || "$joined" == *" -W 127.0.0.1:22 "* || "$joined" == *" -R /"* ]] && exit 255
+            # The lines OpenSSH 9.6 prints when the key's options refuse these (scratch sshd, 2026-11-13).
+            if [[ "$joined" == *"127.0.0.1:12999"* ]]; then
+                printf 'Error: remote port forwarding failed for listen port 12999\n' >&2
+                exit 255
+            fi
+            if [[ "$joined" == *" -W 127.0.0.1:22 "* ]]; then
+                printf 'channel 0: open failed: administratively prohibited: \nstdio forwarding failed\n' >&2
+                exit 255
+            fi
+            if [[ "$joined" == *" -R /"* ]]; then
+                printf 'Error: remote port forwarding failed for listen path /tmp/oryx-probe.sock\n' >&2
+                exit 255
+            fi
             if [[ "$joined" == *" id "* ]]; then
                 printf 'oryx-tunnel: forwarding-only key\n'
             fi
+            exit 0
+        fi
+        if [[ "$joined" == *"000chost:version"* ]]; then
+            printf 'OKAY00040029\n'
             exit 0
         fi
         if [[ "$joined" == " oryx id -u " ]]; then
@@ -907,6 +924,32 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn(prompt, result.stderr)
         self.assertIn(waiting, result.stderr)
         self.assertLess(result.stderr.index(prompt), result.stderr.index(waiting))
+
+    def test_report_carries_each_self_check_value(self) -> None:
+        # The parent's checks read these values from the report, not only ok or failed.
+        self.checkout("git", "report-values")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = self.report()
+        user = pwd.getpwuid(os.getuid()).pw_name
+        for line in (
+            f"self-check: token file mode and owner: 600 {user}: ok",
+            "self-check: token leak search: none: ok",
+            "self-check: ssh oryx true: exit 0: ok",
+            "self-check: oryx SSM login: exit 0: ok",
+            "self-check: human-tier read: CLOUDFLARE_API_KEY granted (exit 0): ok",
+            "self-check: adb through tunnel: reply OKAY00040029: ok",
+            "self-check: tunnel key true: exit 0: ok",
+            "self-check: tunnel key forced command: exit 0, no uid printed: ok",
+            "self-check: tunnel key rejects remote port 12999: exit 255, Error: remote port forwarding failed for listen port 12999: ok",
+            "self-check: tunnel key rejects stdio forwarding: exit 255, stdio forwarding failed: ok",
+            "self-check: tunnel key rejects remote socket forwarding: exit 255, Error: remote port forwarding failed for listen path /tmp/oryx-probe.sock: ok",
+            "self-check: tunnel key rejects local socket forwarding: client got EOF, open failed: ok",
+            "self-check: login key shell: exit 0, uid present: ok",
+        ):
+            self.assertIn(line + "\n", report)
+        self.assertNotIn("uid=", report)
 
     def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
         self.checkout("git", "before-move-unit")

@@ -455,15 +455,36 @@ stop_old_masters() {
 }
 
 self_failures=()
+# A probe may set PROBE_VALUE to what it saw (an exit status, a stat line, the deciding ssh line),
+# which the report carries beside ok or failed. It never holds a secret.
+PROBE_VALUE=""
+
 self_probe() {
-    local name="$1"
+    local name="$1" verdict=ok
     shift
-    if "$@"; then
-        report_line "self-check: $name: ok"
+    PROBE_VALUE=""
+    "$@" || verdict=failed
+    if [[ -n "$PROBE_VALUE" ]]; then
+        report_line "self-check: $name: $PROBE_VALUE: $verdict"
     else
-        report_line "self-check: $name: failed"
-        self_failures+=("$name")
+        report_line "self-check: $name: $verdict"
     fi
+    [[ "$verdict" == ok ]] || self_failures+=("$name")
+}
+
+# Run a command and set PROBE_VALUE to its exit status; succeed only on 0.
+probe_exit() {
+    local status=0
+    "$@" || status=$?
+    PROBE_VALUE="exit $status"
+    [[ $status -eq 0 ]]
+}
+
+# The last line of FILE that holds PATTERN, on one line, carriage returns removed.
+deciding_line() {
+    local line
+    line="$(grep -F -- "$2" "$1" | tail -n 1 | tr -d '\r')" || true
+    printf '%s' "${line:0:200}"
 }
 
 self_ssh_config() {
@@ -679,9 +700,26 @@ delivery_browser() {
 }
 
 human_tier_read() {
+    local status=0
     printf 'Touch the YubiKey now for the human-tier secret read.\n' >&2
-    ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' >/dev/null
+    # secrets get authorizes the key and reports its status; it never prints the value.
+    ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' >/dev/null || status=$?
+    if [[ $status -eq 0 ]]; then
+        PROBE_VALUE="CLOUDFLARE_API_KEY granted (exit 0)"
+    else
+        PROBE_VALUE="CLOUDFLARE_API_KEY refused (exit $status)"
+    fi
+    [[ $status -eq 0 ]]
 }
+
+adb_through_tunnel() {
+    local reply
+    # adb's host:version request answers OKAY and the server's version; nothing starts a server.
+    reply="$(ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); print(s.recv(12).decode("ascii", "replace")); s.close()'\''' 2>&1 | tail -n 1 | tr -d '\r')" || true
+    PROBE_VALUE="reply ${reply:0:80}"
+    [[ "$reply" == OKAY* ]]
+}
+
 
 write_probe_configs() {
     tunnel_probe="$work_dir/tunnel-probe.conf"
@@ -720,39 +758,42 @@ EOF
 }
 
 key_probe_true() {
-    with_token_environment timeout 60 ssh -F "$tunnel_probe" oryx-probe true
+    probe_exit with_token_environment timeout 60 ssh -F "$tunnel_probe" oryx-probe true
 }
 
 key_probe_no_shell() {
-    local output
-    output="$(with_token_environment timeout 60 ssh -F "$tunnel_probe" oryx-probe id)" || return 1
-    [[ "$output" != *uid=* ]]
+    local output status=0
+    output="$(with_token_environment timeout 60 ssh -F "$tunnel_probe" oryx-probe id)" || status=$?
+    # Say whether a uid came back; never write the uid itself.
+    if [[ "$output" == *uid=* ]]; then
+        PROBE_VALUE="exit $status, uid present"
+        return 1
+    fi
+    PROBE_VALUE="exit $status, no uid printed"
+    [[ $status -eq 0 ]]
+}
+
+# A tunnel-key probe that sshd must refuse: it passes when ssh exits 255 and stderr holds PATTERN.
+key_probe_refused() {
+    local pattern="$1" err="$work_dir/key-probe.err" status=0 line
+    shift
+    with_token_environment timeout 60 ssh -F "$tunnel_probe" "$@" oryx-probe >/dev/null 2>"$err" || status=$?
+    line="$(deciding_line "$err" "$pattern")"
+    PROBE_VALUE="exit $status, ${line:-no \"$pattern\" line}"
+    [[ $status -eq 255 && -n "$line" ]]
 }
 
 key_probe_denied_remote_forward() {
-    set +e
-    with_token_environment timeout 60 ssh -F "$tunnel_probe" -o ExitOnForwardFailure=yes -N -R 127.0.0.1:12999:127.0.0.1:9 oryx-probe >/dev/null 2>&1
-    local status=$?
-    set -e
-    [[ $status -eq 255 ]]
+    key_probe_refused 'remote port forwarding failed' -o ExitOnForwardFailure=yes -N -R 127.0.0.1:12999:127.0.0.1:9
 }
 
 key_probe_denied_stdio() {
-    set +e
-    with_token_environment timeout 60 ssh -F "$tunnel_probe" -W 127.0.0.1:22 oryx-probe >/dev/null 2>&1
-    local status=$?
-    set -e
-    [[ $status -eq 255 ]]
+    key_probe_refused 'stdio forwarding failed' -W 127.0.0.1:22
 }
 
 key_probe_denied_remote_socket() {
     # The listen path is on oryx: /tmp exists there, so only sshd's refusal can fail this forward.
-    local socket="/tmp/oryx-probe-$RANDOM$RANDOM.sock"
-    set +e
-    with_token_environment timeout 60 ssh -F "$tunnel_probe" -o ExitOnForwardFailure=yes -N -R "$socket:127.0.0.1:9" oryx-probe >/dev/null 2>&1
-    local status=$?
-    set -e
-    [[ $status -eq 255 ]]
+    key_probe_refused 'remote port forwarding failed' -o ExitOnForwardFailure=yes -N -R "/tmp/oryx-probe-$RANDOM$RANDOM.sock:127.0.0.1:9"
 }
 
 key_probe_denied_local_socket() {
@@ -778,13 +819,26 @@ PY
     set -e
     kill -TERM "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    [[ $client_status -eq 0 ]] && grep -q 'open failed' "$err"
+    local line
+    line="$(deciding_line "$err" 'open failed')"
+    if [[ $client_status -eq 0 ]]; then
+        PROBE_VALUE="client got EOF, ${line:-no \"open failed\" line}"
+    else
+        PROBE_VALUE="client got data, ${line:-no \"open failed\" line}"
+    fi
+    [[ $client_status -eq 0 && -n "$line" ]]
 }
 
 key_probe_login_key() {
-    local output
-    output="$(timeout 60 ssh -F "$login_probe" oryx-login-probe id)" || return 1
-    [[ "$output" == *uid=* ]]
+    local output status=0
+    output="$(timeout 60 ssh -F "$login_probe" oryx-login-probe id)" || status=$?
+    # Say whether a uid came back; never write the uid itself.
+    if [[ "$output" == *uid=* ]]; then
+        PROBE_VALUE="exit $status, uid present"
+    else
+        PROBE_VALUE="exit $status, no uid printed"
+    fi
+    [[ $status -eq 0 && "$output" == *uid=* ]]
 }
 
 case "${1:-}" in
@@ -957,11 +1011,13 @@ fi
 report_line "devbox-forward: complete"
 
 self_token_mode() {
-    [[ "$(stat -c '%a %U' "$token_file")" == "600 $(id -un)" ]]
+    PROBE_VALUE="$(stat -c '%a %U' "$token_file")" || return 1
+    [[ "$PROBE_VALUE" == "600 $(id -un)" ]]
 }
 
 self_token_leak_search() {
-    [[ "$(token_leak_result "$token_file")" == none ]]
+    PROBE_VALUE="$(token_leak_result "$token_file")"
+    [[ "$PROBE_VALUE" == none ]]
 }
 
 self_probe "unit forward-daemon@oryx.service" self_unit_active forward-daemon@oryx.service
@@ -969,7 +1025,7 @@ self_probe "unit forward-tunnel@oryx.service" self_unit_active forward-tunnel@or
 self_probe "unit adb-server.service" self_unit_active adb-server.service
 self_probe "devboxes daemon configuration" self_devboxes_config
 self_probe "ssh configuration" self_ssh_config
-self_probe "ssh oryx true" ssh oryx true
+self_probe "ssh oryx true" probe_exit ssh oryx true
 self_probe "forward doctor oryx pair" self_command_output "forward doctor oryx pair" "$DOTFILES/bin/mise" exec -- forward doctor --config "$HOME/.config/forward/config-oryx.toml"
 self_probe "forward doctor devboxes" self_command_output "forward doctor devboxes" "$DOTFILES/bin/mise" exec -- forward doctor
 self_probe "oryx forward doctor" self_command_output "oryx forward doctor" ssh oryx 'forward doctor'
@@ -979,11 +1035,11 @@ self_probe "browser page delivery" delivery_page
 self_probe "audio delivery" delivery_sound
 self_probe "browser grant delivery" delivery_browser
 self_probe "human-tier read" human_tier_read
-self_probe "oryx SSM login" ssh oryx-ssm true
+self_probe "oryx SSM login" probe_exit ssh oryx-ssm true
 self_probe "token file mode and owner" self_token_mode
 self_probe "token leak search" self_token_leak_search
 self_probe "laptop port 22" self_laptop_port_22
-self_probe "adb through tunnel" ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); assert s.recv(4) == b"OKAY"; s.close()'\'''
+self_probe "adb through tunnel" adb_through_tunnel
 write_probe_configs
 self_probe "tunnel key true" key_probe_true
 self_probe "tunnel key forced command" key_probe_no_shell
