@@ -123,7 +123,7 @@ class ForwardInstaller(unittest.TestCase):
     def test_serve_stops_enabled_or_active_pcsc_bridge_before_start_without_deleting_unit(self) -> None:
         unit = self.home / ".config/systemd/user/pcscd-bridge.service"
         unit.parent.mkdir(parents=True)
-        unit.symlink_to(DOTFILES / "devbox/pcscd-bridge.service")
+        unit.write_text("[Service]\n", encoding="utf-8")
         for state in (
             {"PCSC_UNIT_FILES": "pcscd-bridge.service enabled enabled"},
             {"PCSC_ACTIVE_UNITS": "pcscd-bridge.service loaded active running Bridge"},
@@ -136,8 +136,7 @@ class ForwardInstaller(unittest.TestCase):
                 log = self.systemctl_log.read_text().splitlines()
                 self.assertLess(log.index("--user disable --now pcscd-bridge.service"),
                                 log.index("--user enable --now forward-serve"))
-                self.assertTrue(unit.is_symlink())
-                self.assertEqual(unit.resolve(), DOTFILES / "devbox/pcscd-bridge.service")
+                self.assertEqual(unit.read_text(encoding="utf-8"), "[Service]\n")
                 self.assertTrue((self.home / ".pcscd").is_dir())
 
     def test_serve_stops_and_clears_a_not_found_bridge_without_disabling_it(self) -> None:

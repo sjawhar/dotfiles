@@ -1,4 +1,8 @@
-# Laptop
+# Dotfiles
+
+Read [AGENTS.md](AGENTS.md) before changing these files.
+
+## Laptop
 
 Run this command on the laptop. It works from an old `~/.dotfiles` checkout.
 
@@ -34,6 +38,19 @@ oryx report path. If the upload fails, it prints the local report path.
 | 2223 | RemoteForward | sami-devbox:22 | Company Legion; on oryx use `ssh sami-devbox-via-laptop` only while the laptop is awake and on its tailnet |
 | 2224 | RemoteForward | ghost-wispr:22 | Ghost Wispr Pi's sshd (`ssh -i <key> <user>@ghost-wispr-via-laptop` on oryx) |
 
+## Oryx
+
+Run `bash ~/.dotfiles/oryx/install.sh` once on oryx. It arms the
+`dotfiles-follow` user timer with oryx's drop-in, so oryx's `~/.dotfiles`
+follows `origin/main` every 10 minutes and its alerts go to the HOME controller.
+It needs no Tailscale; the laptop command above writes oryx's forward config.
+
+Two files here are installed on oryx by hand: `oryx/ssh-config` becomes oryx's
+`~/.ssh/config` (the routes to sami-devbox and the Ghost Wispr Pi through the
+laptop), and the line in `oryx/oryx-tunnel.key-options` goes in front of the
+laptop's tunnel key in `agent`'s `~/.ssh/authorized_keys`. sshd on oryx's port
+2222 must also set `AllowStreamLocalForwarding no`.
+
 ## Phone
 
 Install Termux. Termux includes the bootstrap `curl` command. If `curl` is
@@ -44,4 +61,5 @@ f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sjawhar/dotfiles/mai
 ```
 
 The command runs `bash` only after `curl` downloads the complete script. It
-prints the public key for the phone.
+prints the public key for the phone. Put the printed public key in `agent`'s
+`~/.ssh/authorized_keys` on oryx.

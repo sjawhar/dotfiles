@@ -114,6 +114,7 @@ stop_supervisors() {
         ((${#PROCESS_ARGS[@]} == 4)) || continue
         path="${PROCESS_ARGS[1]}"
         [[ "${PROCESS_ARGS[0]}" == bash && "$path" == */devbox && "${PROCESS_ARGS[2]}" == --tunnel-supervisor ]] || continue
+        # Removed devbox tunnel supervisors used oryx or oryx-cf as their final argument.
         case "${PROCESS_ARGS[3]}" in
             oryx|oryx-cf)
                 terminate_and_wait "$pid" supervisors
@@ -216,11 +217,13 @@ validate_ssh_configuration() {
     [[ "$(ssh_field "$oryx" hostname)" == oryx.thecybermonk.com ]] || return 1
     [[ "$(ssh_field "$oryx" user)" == agent ]] || return 1
     [[ "$(ssh_field "$oryx" proxycommand)" == 'cloudflared access ssh --hostname %h' ]] || return 1
+    # This tailnet name is only the label under which known_hosts holds oryx's key.
     [[ "$(ssh_field "$oryx" hostkeyalias)" == oryx.tail12ec1c.ts.net ]] || return 1
 
     [[ "$(ssh_field "$tunnel" hostname)" == oryx-pcsc.thecybermonk.com ]] || return 1
     [[ "$(ssh_field "$tunnel" user)" == agent ]] || return 1
     [[ "$(ssh_field "$tunnel" proxycommand)" == 'cloudflared access ssh --hostname %h' ]] || return 1
+    # This tailnet name is only the label under which known_hosts holds oryx's key.
     [[ "$(ssh_field "$tunnel" hostkeyalias)" == oryx.tail12ec1c.ts.net ]] || return 1
     [[ "$(ssh_field "$tunnel" exitonforwardfailure)" == yes ]] || return 1
     [[ "$(ssh_field "$tunnel" serveraliveinterval)" == 15 ]] || return 1
@@ -340,6 +343,7 @@ stop_old_masters() {
         process_args "$pid" || continue
         ((${#PROCESS_ARGS[@]} == 4)) || continue
         [[ "${PROCESS_ARGS[0]##*/}" == ssh && "${PROCESS_ARGS[1]}" == -N && "${PROCESS_ARGS[2]}" == -f ]] || continue
+        # Removed devbox tunnel processes used these old SSH hosts as their final argument.
         case "${PROCESS_ARGS[3]}" in
             oryx-tunnel|oryx-cf-tunnel)
                 terminate_and_wait "$pid" old-tunnel
@@ -368,6 +372,7 @@ self_ssh_config() {
     proxycommand="$(ssh_field "$values" proxycommand)"
     hostkeyalias="$(ssh_field "$values" hostkeyalias)"
     report_line "self-check: ssh -G oryx: hostname=$hostname proxycommand=$proxycommand hostkeyalias=$hostkeyalias"
+    # This tailnet name is only the label under which known_hosts holds oryx's key.
     [[ "$hostname" == oryx.thecybermonk.com && "$proxycommand" == 'cloudflared access ssh --hostname %h' && "$hostkeyalias" == oryx.tail12ec1c.ts.net ]]
 }
 
@@ -491,6 +496,7 @@ write_probe_configs() {
 Host oryx-probe
   HostName oryx-pcsc.thecybermonk.com
   User agent
+  # This tailnet name is only the label under which known_hosts holds oryx's key.
   HostKeyAlias oryx.tail12ec1c.ts.net
   ProxyCommand cloudflared access ssh --hostname %h
   IdentityFile ~/.ssh/oryx-tunnel
@@ -506,6 +512,7 @@ EOF
 Host oryx-login-probe
   HostName oryx.thecybermonk.com
   User agent
+  # This tailnet name is only the label under which known_hosts holds oryx's key.
   HostKeyAlias oryx.tail12ec1c.ts.net
   ProxyCommand cloudflared access ssh --hostname %h
   IdentitiesOnly no
@@ -741,6 +748,7 @@ done
 report_line "units: complete"
 
 stop_old_masters
+# Confirm that the old tunnel's port 12799 is gone.
 old_listener="$(ssh oryx 'ss -Hltn "( sport = :12799 )"')" || stop old-tunnel "could not check oryx port 12799"
 [[ -z "$old_listener" ]] || stop old-tunnel "oryx still has a listener on port 12799"
 report_line "old-tunnel: complete"
