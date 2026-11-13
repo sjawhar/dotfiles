@@ -726,6 +726,96 @@ class TunnelSetup(unittest.TestCase):
         self.assertEqual(missing.returncode, 1)
         self.assertIn("adb is not installed", missing.stderr)
 
+    def fake_ss(self, *lines: str) -> None:
+        """Make the fake ss print these `ss -Hltnp` lines; PID becomes the fake's own pid."""
+        (self.fakebin / "ss").unlink()
+        text = "\n".join(lines)
+        write_executable(
+            self.fakebin / "ss",
+            f'if [[ " $* " == *" -Hltnp "* ]]; then\n/bin/sed "s/PID/$$/" <<\'LINES\'\n{text}\nLINES\nfi',
+        )
+
+    def test_preflight_refuses_a_wildcard_listener_on_a_tunnel_port(self) -> None:
+        # ss prints these for a listener on 0.0.0.0 and on dual-stack ::. Either one makes the
+        # tunnel's LocalForward bind of 127.0.0.1:12802 fail with EADDRINUSE.
+        for index, line in enumerate((
+            'LISTEN 0      1      0.0.0.0:12802 0.0.0.0:* users:(("python3",pid=PID,fd=3))',
+            'LISTEN 0      1      *:12802 *:* users:(("python3",pid=PID,fd=4))',
+        )):
+            with self.subTest(line=line):
+                self.checkout("git", f"wildcard-{index}")
+                self.advance_to_current()
+                self.fake_ss(line)
+                result = self.invoke(after_sync=True)
+                self.assert_stop_before_move(result, "preflight")
+
+    def test_preflight_ignores_a_listener_whose_port_only_starts_with_5037(self) -> None:
+        self.checkout("git", "port-prefix")
+        self.advance_to_current()
+        self.fake_ss('LISTEN 0      4096   127.0.0.1:50371 0.0.0.0:* users:(("python3",pid=PID,fd=3))')
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_report_umask_does_not_reach_the_apt_files(self) -> None:
+        self.checkout("git", "umask")
+        result = self.invoke(readme=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        install_root = Path(self.env["INSTALL_ROOT"])
+        for path in (
+            install_root / "etc/apt/sources.list.d/cloudflared.list",
+            install_root / "etc/apt/preferences.d/cloudflared.pref",
+        ):
+            with self.subTest(path=str(path)):
+                # apt's non-root readers (apt list, apt-cache policy) need group and other read.
+                self.assertEqual(oct(stat.S_IMODE(path.stat().st_mode) & 0o044), oct(0o044))
+
+    def test_bootstrap_leaves_no_work_dir_behind(self) -> None:
+        self.checkout("git", "workdir")
+        tmpdir = self.root / "tmpdir"
+        tmpdir.mkdir()
+        result = self.invoke(readme=True, TMPDIR=str(tmpdir))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(path.name for path in tmpdir.glob("oryx-tunnel-setup.*")), [])
+
+    def test_config_local_options_outside_host_lines_are_refused(self) -> None:
+        # An option before any Host line, or in a Match block, of ~/.ssh/config.local applies
+        # to Host oryx-tunnel too, since the config includes config.local first.
+        for index, text in enumerate((
+            "StrictHostKeyChecking no\n",
+            "IdentityFile ~/.ssh/other\n",
+            "Match originalhost oryx-tunnel\n  StrictHostKeyChecking no\n",
+        )):
+            with self.subTest(text=text):
+                self.checkout("git", f"config-local-{index}")
+                self.advance_to_current()
+                (self.home / ".ssh/config.local").write_text(text, encoding="utf-8")
+                result = self.invoke(after_sync=True)
+                self.assert_stop_before_move(result, "ssh-config")
+
+    def test_token_search_that_cannot_read_the_tree_does_not_report_none(self) -> None:
+        self.checkout("git", "leak-blind")
+        self.advance_to_current()
+        leaked = self.checkout_dir / "leaked.env"
+        leaked.write_text(f"TUNNEL_SERVICE_TOKEN_SECRET={self.token_secret}\n", encoding="utf-8")
+        leaked.chmod(0)
+        try:
+            result = self.invoke(after_sync=True)
+        finally:
+            leaked.chmod(0o600)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("oryx-tunnel-setup: token:", result.stderr)
+        self.assertNotIn("dotfiles search: none", self.report())
+
+    def test_human_tier_read_asks_for_the_yubikey_touch(self) -> None:
+        # README: "Touch the YubiKey when the command asks for it." The human-tier read needs a
+        # touch (secrets get: "triggers the hardware touch when no grant is live"), and its own
+        # output goes to /dev/null.
+        self.checkout("git", "yubikey-ask")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("YubiKey", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
