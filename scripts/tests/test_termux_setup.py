@@ -206,6 +206,32 @@ exit "${PKG_EXIT:-0}"''',
                 self.assertEqual(values["proxycommand"], ["cloudflared access ssh --hostname %h"])
                 self.assertIn(older, self.config.read_text(encoding="utf-8"))
 
+    def test_options_before_the_first_host_line_still_apply_to_other_hosts(self) -> None:
+        # Lines before a config's first Host line apply to every host. Once the managed block is
+        # written above them, they would sit inside Host oryx and stop applying to other hosts.
+        self.ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        self.config.write_text(
+            "ServerAliveInterval 42\nIdentityFile ~/.ssh/github\n\nHost other\n  HostName other.example\n",
+            encoding="utf-8",
+        )
+
+        for run in (1, 2):
+            with self.subTest(run=run):
+                result = self.invoke()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                other = subprocess.run(
+                    ["/usr/bin/ssh", "-F", str(self.config), "-G", "other"],
+                    cwd=self.home, env=self.env, capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(other.returncode, 0, other.stderr)
+                lines = other.stdout.splitlines()
+                self.assertIn("serveraliveinterval 42", lines)
+                self.assertIn("identityfile ~/.ssh/github", lines)
+                self.assertEqual(self.ssh_values()["hostname"], ["oryx.thecybermonk.com"])
+        first = self.config.read_bytes()
+        self.assertEqual(self.invoke().returncode, 0)
+        self.assertEqual(self.config.read_bytes(), first)
+
     def test_pkg_output_reaches_standard_error_only_on_failure(self) -> None:
         result = self.invoke(PKG_EXIT="1")
 
