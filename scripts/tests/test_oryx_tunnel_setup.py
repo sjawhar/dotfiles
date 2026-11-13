@@ -205,6 +205,10 @@ PY
                 printf 'ConnectionRefusedError: [Errno 111] Connection refused\n' >&2
                 exit 1
             fi
+            if [[ "${ADB_REPLIES_FAIL:-}" == 1 ]]; then
+                printf 'FAIL0005nope\n'
+                exit 0
+            fi
             printf 'OKAY00040029\n'
             exit 0
         fi
@@ -998,6 +1002,13 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn("exit 255", lines[0])
         self.assertTrue(lines[0].endswith(": failed"), lines[0])
         self.assertNotIn("refused", lines[0])
+
+    def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
+        self.checkout("git", "adb-replies-fail")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, ADB_REPLIES_FAIL="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("self-check: adb through tunnel: adb replied FAIL: FAIL0005nope: failed\n", self.report())
 
     def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
         self.checkout("git", "before-move-unit")

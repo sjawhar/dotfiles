@@ -704,11 +704,13 @@ human_tier_read() {
     printf 'Touch the YubiKey now for the human-tier secret read.\n' >&2
     # secrets get authorizes the key and reports its status; it never prints the value.
     ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' >/dev/null || status=$?
-    if [[ $status -eq 0 ]]; then
-        PROBE_VALUE="CLOUDFLARE_API_KEY granted (exit 0)"
-    else
-        PROBE_VALUE="CLOUDFLARE_API_KEY refused (exit $status)"
-    fi
+    # ssh exits 255 for its own failure (oryx unreachable, no login), so secretsd never saw the
+    # request; any other non-zero status is secrets get's answer.
+    case "$status" in
+        0) PROBE_VALUE="CLOUDFLARE_API_KEY granted (exit 0)" ;;
+        255) PROBE_VALUE="CLOUDFLARE_API_KEY not asked: ssh to oryx failed (exit 255)" ;;
+        *) PROBE_VALUE="CLOUDFLARE_API_KEY refused (exit $status)" ;;
+    esac
     [[ $status -eq 0 ]]
 }
 
@@ -720,9 +722,13 @@ adb_through_tunnel() {
         PROBE_VALUE="reply ${reply:0:80}"
         return 0
     fi
-    # Anything else is the error that stopped the request, not an adb answer.
-    PROBE_VALUE="no adb reply: ${reply:-nothing printed}"
-    PROBE_VALUE="${PROBE_VALUE:0:120}"
+    # adb answers OKAY or FAIL; anything else is the error that stopped the request.
+    if [[ "$reply" == FAIL* ]]; then
+        PROBE_VALUE="adb replied FAIL: ${reply:0:80}"
+    else
+        PROBE_VALUE="no adb reply: ${reply:-nothing printed}"
+        PROBE_VALUE="${PROBE_VALUE:0:120}"
+    fi
     return 1
 }
 
