@@ -1,9 +1,10 @@
 # Laptop role, sami-devbox pair: run by forward-daemon@sami-devbox.service,
 # carried over an SSH tunnel to the VM by forward-tunnel@sami-devbox.service
 # (Host sami-devbox-tunnel in ~/.ssh/config.local). Fields and URL policy are
-# explained in config-daemon-oryx.toml. sami-leanperf's pair holds 127.0.0.1 and
-# sami-rocqperf's 127.0.0.2, so this daemon listens on 127.0.0.3 and dials the
-# bridge and grant feed at 12821 and 12825 (config-serve-sami-devbox.toml).
+# explained in config-daemon-oryx.toml. Oryx's tunnel pair holds 127.0.0.1 and
+# sami-rocqperf's pair holds 127.0.0.2, so this daemon listens on 127.0.0.3 and
+# dials the bridge and grant feed at 12821 and 12825
+# (config-serve-sami-devbox.toml).
 # Tunnelled connections arrive from 127.0.0.1, which any local process shares.
 listen = "127.0.0.3"
 peer = "127.0.0.1"

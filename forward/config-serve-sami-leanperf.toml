@@ -1,11 +1,10 @@
 # Devbox role on sami-leanperf (an Azure VM), chosen by installers/forward.sh
 # because this host has its own file. Fields mean what config-serve-oryx.toml
-# says. The pair is carried over an SSH tunnel to the VM: the
-# laptop's forward-tunnel@sami-leanperf carries every channel (Host
-# sami-leanperf-tunnel in ~/.ssh/config.local), each port to the same port on the
-# far side's loopback. sshd makes the far-end connection, so the laptop arrives
-# from 127.0.0.1 and both addresses are loopback: any process on this VM can
-# reach these channels the way the laptop does.
+# says. The legacy pair is carried over an SSH tunnel to the VM: the laptop's
+# forward-tunnel@sami-leanperf carries every channel (Host sami-leanperf-tunnel
+# in ~/.ssh/config.local), each port to the same port on the far side's
+# loopback. Oryx's tunnel pair now holds the laptop's 127.0.0.1 and default
+# ports; this retained config shares them only until migration removes it.
 listen = "127.0.0.1"
 peer = "127.0.0.1"
 

@@ -12,6 +12,18 @@ fail() {
     exit 1
 }
 
+# The oryx pair is a Cloudflare Access tunnel that laptop/oryx-tunnel-setup
+# manages. It is not part of the Tailscale VM inventory.
+tunnel_pairs=(oryx)
+
+is_tunnel_pair() {
+    local pair
+    for pair in "${tunnel_pairs[@]}"; do
+        [[ "$1" = "$pair" ]] && return 0
+    done
+    return 1
+}
+
 role="${1:-}"
 case "$role" in
     serve) units=(forward-serve.service) ;;
@@ -23,13 +35,19 @@ MISE="${DOTFILES_DIR}/bin/mise"
 config_home="$HOME/.config"
 [[ "${XDG_CONFIG_HOME:-$config_home}" = "$config_home" ]] \
     || fail "$role" "XDG_CONFIG_HOME must be unset or exactly $config_home; Forward's user units and agent boxes use ~/.config/forward."
+
+host="$(hostname -s)"
+if [[ "$role" = serve ]] && is_tunnel_pair "$host"; then
+    fail "$role" "$host's forward is the loopback tunnel pair; laptop/oryx-tunnel-setup writes its config"
+fi
+
 command -v python3 >/dev/null || fail "$role" "install Python 3.11 or newer, then rerun this installer."
 command -v tailscale >/dev/null || fail "$role" "install Tailscale, join the tailnet, then rerun this installer."
 
 # Resolve and validate the entire inventory before replacing a config or touching
 # units. Atomic replacement detaches an old config symlink without writing through
 # it into the committed per-pair file, which remains available until migration step 4.
-python3 - "$DOTFILES_DIR" "$role" "$(hostname -s)" "$config_home/forward/config.toml" <<'PY'
+python3 - "$DOTFILES_DIR" "$role" "$host" "$config_home/forward/config.toml" <<'PY'
 import ipaddress
 import json
 import os
@@ -145,6 +163,11 @@ if [[ "$role" = daemon ]]; then
     done <<<"${legacy_files}
 ${legacy_active}"
     for unit in "${legacy_units[@]}"; do
+        pair="${unit#*@}"
+        pair="${pair%.service}"
+        if is_tunnel_pair "$pair"; then
+            continue
+        fi
         systemctl --user disable --now "$unit" \
             || fail "$role" "could not disable $unit; check systemctl --user status $unit before retrying migration step 2."
     done

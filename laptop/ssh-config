@@ -30,17 +30,18 @@ Host trajectory-route
   ProxyCommand aws ssm start-session --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
+# Oryx through Cloudflare Access. The host-key alias is only the label under
+# which known_hosts holds oryx's key.
 Host oryx
-  HostName oryx.tail12ec1c.ts.net
+  HostName oryx.thecybermonk.com
   User agent
   ForwardAgent yes
-  # YubiKey access for sops human tier: use `devbox oryx` (scripts/devbox),
-  # which ensures the oryx-tunnel below exists before connecting. Works with mosh.
+  ProxyCommand cloudflared access ssh --hostname %h
+  HostKeyAlias oryx.tail12ec1c.ts.net
   IPQoS lowdelay throughput
 
-# oryx over AWS Session Manager (hybrid node in the personal AWS account), so
-# it stays reachable whichever tailnet it or the laptop is on. sshd's host key
-# is the one already pinned for its tailnet name.
+# Oryx over AWS Session Manager. The host-key alias is only the label under
+# which known_hosts holds oryx's key.
 Host oryx-ssm
   HostName mi-0c13e59d491bb8ade
   User agent
@@ -49,43 +50,35 @@ Host oryx-ssm
   ProxyCommand aws ssm start-session --profile personal --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
-# YubiKey tunnel for oryx (scripts/devbox); every other devbox uses forward's pcsc channel.
+# The forwarding-only Cloudflare Access connection for the oryx pair. The
+# forward-tunnel@oryx unit opens it with its service token in the environment.
+# The host-key alias is only the label under which known_hosts holds oryx's key.
 Host oryx-tunnel
-  HostName oryx.tail12ec1c.ts.net
-  User agent
-  Port 2222
-  IdentityFile ~/.ssh/oryx-tunnel
-  IdentitiesOnly yes
-  ControlPath ~/.ssh/sockets/tunnel-%r@%h
-  ControlPersist no
-  ExitOnForwardFailure yes
-  ServerAliveInterval 15
-  RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
-
-# oryx through Cloudflare Tunnel + Access (dojo platform/oryx-edge), with no tailnet. First use
-# opens a browser for the Access sign-in and caches it in ~/.cloudflared/ for 24 h. Needs the
-# cloudflared client (platform/oryx-edge/deploy/install-cloudflared.sh client). Same sshd and host
-# key as `oryx`. No mosh (Cloudflare carries TCP only): `devbox oryx-cf` uses ssh -t.
-Host oryx-cf
-  HostName oryx.thecybermonk.com
-  User agent
-  HostKeyAlias oryx.tail12ec1c.ts.net
-  ProxyCommand cloudflared access ssh --hostname %h
-  IPQoS lowdelay throughput
-
-# The YubiKey tunnel of `devbox oryx-cf`: sshd's port 2222 on oryx's loopback.
-Host oryx-cf-tunnel
   HostName oryx-pcsc.thecybermonk.com
   User agent
   HostKeyAlias oryx.tail12ec1c.ts.net
   ProxyCommand cloudflared access ssh --hostname %h
   IdentityFile ~/.ssh/oryx-tunnel
   IdentitiesOnly yes
-  ControlPath ~/.ssh/sockets/tunnel-%r@%h
-  ControlPersist no
+  IdentityAgent none
+  ForwardAgent no
+  ControlMaster no
+  ControlPath none
+  StrictHostKeyChecking yes
+  BatchMode yes
   ExitOnForwardFailure yes
   ServerAliveInterval 15
-  RemoteForward 127.0.0.1:12799 /run/pcscd/pcscd.comm
+  ServerAliveCountMax 4
+  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
+  RemoteForward 127.0.0.1:12803 127.0.0.1:12803
+  RemoteForward 127.0.0.1:12804 127.0.0.1:12804
+  RemoteForward 127.0.0.1:12806 127.0.0.1:12806
+  LocalForward 127.0.0.1:12801 127.0.0.1:12801
+  LocalForward 127.0.0.1:12802 127.0.0.1:12802
+  LocalForward 127.0.0.1:12805 127.0.0.1:12805
+  RemoteForward 127.0.0.1:5038 127.0.0.1:5037
+  RemoteForward 127.0.0.1:2223 sami-devbox:22
+  RemoteForward 127.0.0.1:2224 ghost-wispr:22
 
 # Every login key lives in 1Password, except trajectory-route's key file.
 Host *

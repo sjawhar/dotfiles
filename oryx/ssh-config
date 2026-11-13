@@ -1,0 +1,22 @@
+# oryx's ~/.ssh/config. The company route reaches sami-devbox's sshd through the
+# laptop: the laptop's forward-tunnel@oryx connection holds oryx's
+# 127.0.0.1:2223 and forwards it to sami-devbox:22 over the laptop's own
+# tailnet, so it works only while the laptop is awake and on that tailnet.
+# known_hosts holds sami-devbox's key under the name sami-devbox.
+Host sami-devbox-via-laptop
+  HostName 127.0.0.1
+  Port 2223
+  User sami
+  HostKeyAlias sami-devbox
+  StrictHostKeyChecking yes
+
+# The Ghost Wispr Pi's sshd, by the same route: the laptop's forward-tunnel@oryx
+# connection holds oryx's 127.0.0.1:2224 and forwards it to ghost-wispr:22 over
+# the laptop's tailnet. The caller names the account and the key
+# (ssh -i <key> <user>@ghost-wispr-via-laptop). known_hosts holds the Pi's key
+# under the name ghost-wispr.
+Host ghost-wispr-via-laptop
+  HostName 127.0.0.1
+  Port 2224
+  HostKeyAlias ghost-wispr
+  StrictHostKeyChecking yes

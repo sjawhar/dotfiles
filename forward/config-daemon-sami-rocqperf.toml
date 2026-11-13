@@ -2,7 +2,7 @@
 # carried over an SSH tunnel to the VM by
 # forward-tunnel@sami-rocqperf.service (Host sami-rocqperf-tunnel in
 # ~/.ssh/config.local). Fields and URL policy are explained in
-# config-daemon-oryx.toml. sami-leanperf's pair holds 127.0.0.1 and the default
+# config-daemon-oryx.toml. Oryx's tunnel pair holds 127.0.0.1 and the default
 # ports, so this daemon listens on 127.0.0.2 and dials the bridge and grant feed
 # at 12811 and 12815 (config-serve-sami-rocqperf.toml). Tunnelled connections
 # arrive from 127.0.0.1, which any local process shares.

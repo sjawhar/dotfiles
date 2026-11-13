@@ -7,17 +7,15 @@
 # compared against by nothing; peer is the devbox's literal address, compared
 # against every inbound connection and dialled for nothing on this side. Literal
 # addresses only: a MagicDNS name is mutable from the admin console and must never
-# sit inside a security decision. oryx's are tailnet IPv6 addresses. A pair
-# carried over an SSH tunnel uses loopback instead (see the sami-leanperf and
-# sami-rocqperf files). bridge_port is the devbox's OAuth callback bridge port,
+# sit inside a security decision. oryx's pair rides forward-tunnel@oryx, one SSH
+# connection through Cloudflare Access that carries forward's default ports to the
+# same ports on the far side's loopback, so both addresses are 127.0.0.1 (the
+# other tunnel pairs do the same on 127.0.0.2 and 127.0.0.3). bridge_port is the
+# devbox's OAuth callback bridge port,
 # which this side dials; config-serve-oryx.toml explains the bridge.
-listen = "fd7a:115c:a1e0::8f36:1226"
-peer = "fd7a:115c:a1e0::3336:5706"
+listen = "127.0.0.1"
+peer = "127.0.0.1"
 bridge_port = 12801
-
-# oryx reaches the YubiKey through the SSH tunnel from scripts/devbox, which owns
-# ~/.pcscd/pcscd.comm there, so forward's PC/SC channel is off for this pair.
-pcsc_port = 0
 
 # URL policy, the same for every pair (scripts/tests/test_forward_environment.py
 # fails if the pairs drift), except the preview host: each pair allows its own
@@ -42,7 +40,7 @@ clipboard = ["wl-copy"]
 # of daemon logs, so routine traffic does not turn into constant pasting.
 allow = [
   "*.anthropic.com",
-  "[fd7a:115c:a1e0::3336:5706]",
+  "127.0.0.1:12802",
   "accounts.google.com",
   "auth.openai.com",
   "claude.ai",

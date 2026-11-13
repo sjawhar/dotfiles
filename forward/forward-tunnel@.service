@@ -1,23 +1,28 @@
 [Unit]
-Description=SSH tunnel carrying forward's channels to the %i devbox
-# One per pair whose laptop daemon listens on loopback; installers/forward.sh
-# enables it beside forward-daemon@%i. The forwards live in Host %i-tunnel
-# (~/.ssh/config.local), which signs in with its own key (~/.ssh/forward-tunnel)
-# so a reconnect never waits on 1Password. It stops and starts with the
-# graphical session, as forward-daemon@.service does.
+Description=SSH tunnel carrying forward's channels to the %i pair
+# One per pair whose laptop daemon listens on loopback: laptop/oryx-tunnel-setup
+# enables it beside forward-daemon@oryx, and the legacy devbox pairs
+# (forward/migration.md) used it the same way. The forwards live in Host
+# %i-tunnel (~/.ssh/config for oryx, ~/.ssh/config.local for a devbox), which
+# signs in with its own key so a
+# reconnect never waits on 1Password. It stops and starts with the graphical
+# session, as forward-daemon@.service does. StartLimitIntervalSec=0: systemd
+# never stops restarting it, however often the link drops.
 After=graphical-session.target
 PartOf=graphical-session.target
+StartLimitIntervalSec=0
 
 [Service]
 # ssh exits when the server sends no greeting within 30 s (ConnectTimeout), a
 # forward cannot bind (ExitOnForwardFailure) or the link goes quiet
 # (ServerAlive), and systemd reconnects. Without ConnectTimeout, an sshd that
 # accepts TCP but never sends its greeting holds ssh with no time limit, so the
-# tunnel never reconnects. A reconnect after a dead link fails until the devbox's
-# sshd reaps the old session's ports, then succeeds. That needs the devbox's
-# OpenSSH (ClientAlive): Host %i-tunnel names port 443, because on port 22 the
-# tailnet answers with Tailscale's own ssh server, which kept a dead session's
-# ports for over an hour on 2026-10-21 (dispatch://INFRA-103).
+# tunnel never reconnects. A reconnect after a dead link fails until the far
+# sshd reaps the old session's ports, then succeeds. That needs the far side's
+# OpenSSH (ClientAlive): a devbox's Host %i-tunnel names port 443, because on
+# port 22 the tailnet answers with Tailscale's own ssh server, which kept a dead
+# session's ports for over an hour on 2026-10-21 (dispatch://INFRA-103). oryx's
+# reaches its OpenSSH on 127.0.0.1:2222 through Cloudflare.
 ExecStart=/usr/bin/ssh -o ConnectTimeout=30 -N %i-tunnel
 Restart=always
 RestartSec=10
