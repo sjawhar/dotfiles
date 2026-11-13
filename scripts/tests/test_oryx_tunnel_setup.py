@@ -54,6 +54,17 @@ record "$@"
 case "$name" in
     ssh)
         if [[ "${1:-}" == -G ]]; then
+            # SSH_G_FAIL_FROM: the Nth plain ssh -G of the run, and every later one, fails.
+            if [[ -n "${SSH_G_FAIL_FROM:-}" ]]; then
+                calls=0
+                [[ -f "$SSH_G_CALLS" ]] && calls="$(<"$SSH_G_CALLS")"
+                calls=$((calls + 1))
+                printf '%s\n' "$calls" > "$SSH_G_CALLS"
+                if ((calls >= SSH_G_FAIL_FROM)); then
+                    printf 'ssh: could not read configuration\n' >&2
+                    exit 255
+                fi
+            fi
             # A plain ssh reads ~/.ssh/config, then /etc/ssh/ssh_config; -F alone skips the second.
             combined="$(/usr/bin/mktemp)"
             { /bin/cat "$HOME/.ssh/config"; [[ -f /etc/ssh/ssh_config ]] && printf '\nMatch all\nInclude /etc/ssh/ssh_config\n'; } > "$combined"
@@ -74,6 +85,17 @@ case "$name" in
             } >> "$FAKE_LOG"
         done
         joined=" $* "
+        # SSH_FAILS_ON: '|'-separated parts of a command line; ssh itself fails on each match, as
+        # when Cloudflare or oryx does not answer.
+        if [[ -n "${SSH_FAILS_ON:-}" ]]; then
+            IFS='|' read -r -a fail_parts <<< "$SSH_FAILS_ON"
+            for part in "${fail_parts[@]}"; do
+                if [[ "$joined" == *"$part"* ]]; then
+                    printf 'ssh: connect to host oryx.thecybermonk.com port 22: Connection timed out\n' >&2
+                    exit 255
+                fi
+            done
+        fi
         if [[ "$joined" == *"forward port"* ]]; then
             if [[ "$2" =~ (oryx-port-[0-9]+-[0-9]+) ]]; then
                 printf '%s\n' "${BASH_REMATCH[1]}" > "$CURRENT_NONCE"
@@ -256,6 +278,10 @@ PY
         done
         url="${!#}"
         if [[ -f "$FORWARD_PORT" && "$url" == http://127.0.0.1:"$(<"$FORWARD_PORT")"/* ]]; then
+            if [[ "${FORWARD_CURL_FAILS:-}" == 1 ]]; then
+                printf 'curl: (7) Failed to connect to 127.0.0.1\n' >&2
+                exit 7
+            fi
             if [[ "${FORWARD_CURL_FAIL_FIRST:-}" == 1 ]]; then
                 attempts=0
                 [[ -f "$FORWARD_CURL_CALLS" ]] && attempts="$(<"$FORWARD_CURL_CALLS")"
@@ -264,6 +290,10 @@ PY
                 ((attempts > 1)) || exit 1
             fi
             exec /usr/bin/curl --noproxy '*' -fsS "$url"
+        fi
+        if [[ "${PREVIEW_CURL_FAILS:-}" == 1 ]]; then
+            printf 'curl: (7) Failed to connect to 127.0.0.1 port 12802\n' >&2
+            exit 7
         fi
         [[ -f "$CURRENT_NONCE" ]] && /bin/cat "$CURRENT_NONCE"
         ;;
@@ -289,6 +319,11 @@ PY
     systemctl)
         if [[ " $* " == *" is-active "* ]]; then
             unit="${!#}"
+            # IS_ACTIVE_UNREACHABLE: is-active cannot reach the user manager, so it tells no state.
+            if [[ "${IS_ACTIVE_UNREACHABLE:-}" == "$unit" && " $* " != *" --quiet "* ]]; then
+                printf 'Failed to connect to bus: No medium found\n'
+                exit 1
+            fi
             if [[ "${INACTIVE_UNIT:-}" == "$unit" ]]; then
                 [[ " $* " == *" --quiet "* ]] || printf 'inactive\n'
                 exit 3
@@ -303,6 +338,10 @@ PY
         ;;
     ss)
         [[ "${FAIL_SS:-}" == 1 ]] && exit 1
+        if [[ -n "${SS_FAILS_ON:-}" && " $* " == *"$SS_FAILS_ON"* ]]; then
+            printf 'Cannot open netlink socket: Permission denied\n' >&2
+            exit 1
+        fi
         if [[ " $* " == *"sport = :12802"* ]]; then
             # The tunnel's LocalForward of the preview port: down, or up TUNNEL_UP_DELAY s after the
             # first look, as after a slow Cloudflare connect or a unit restart.
@@ -328,6 +367,10 @@ PY
         ;;
     mise)
         if [[ " $* " == *" forward doctor "* ]]; then
+            if [[ "${FORWARD_DOCTOR_FAILS:-}" == 1 ]]; then
+                printf 'forward doctor: daemon socket missing\n'
+                exit 1
+            fi
             printf 'forward doctor: healthy\n'
         fi
         ;;
@@ -445,6 +488,7 @@ class TunnelSetup(unittest.TestCase):
             "FORWARD_PORT": str(self.forward_port),
             "TUNNEL_FIRST_LOOK": str(self.root / f"tunnel-first-look-{name}"),
             "FORWARD_CURL_CALLS": str(self.forward_curl_calls),
+            "SSH_G_CALLS": str(self.root / f"ssh-g-calls-{name}"),
             "CF_VERSION_FILE": str(self.version_file),
             "CF_VERSION": "2026.10.7",
             "GPG_FINGERPRINT": "CC94B39C77AE7342A68B89628A682D308D4E5E73",
@@ -502,7 +546,9 @@ class TunnelSetup(unittest.TestCase):
         self.assertIsNotNone(match, "README must contain the bootstrap command verbatim")
         return match.group(0)
 
-    def invoke(self, *, readme: bool = False, after_sync: bool = False, **extra: str) -> subprocess.CompletedProcess[str]:
+    def invoke(
+        self, *, readme: bool = False, after_sync: bool = False, answers: str = "y\ny\n", **extra: str
+    ) -> subprocess.CompletedProcess[str]:
         if readme:
             command = ["bash", "-c", self.readme_command()]
         else:
@@ -513,7 +559,7 @@ class TunnelSetup(unittest.TestCase):
             command,
             cwd=self.home,
             env={**self.env, **extra},
-            input="y\ny\n",
+            input=answers,
             capture_output=True,
             text=True,
             timeout=75,
@@ -1152,6 +1198,164 @@ class TunnelSetup(unittest.TestCase):
         lines = [line for line in self.report().splitlines() if line.startswith("self-check: tunnel not up after ")]
         self.assertEqual(len(lines), 1, self.report())
         self.assertNotIn("oryx 127.0.0.1:5038 listening: no", lines[0])
+
+    def test_tunnel_wait_names_a_failed_look_on_each_side(self) -> None:
+        # A look that failed saw no port, so the not-up line names the failed look, not "no".
+        self.checkout("git", "tunnel-looks-fail")
+        self.advance_to_current()
+        result = self.invoke(
+            after_sync=True, SS_FAILS_ON="sport = :12802", SSH_FAILS_ON="sport = :5038", ORYX_TUNNEL_WAIT_SECONDS="3"
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "(laptop 127.0.0.1:12802 listening: look with ss failed (exit 1); "
+            "oryx 127.0.0.1:5038 listening: look through ssh oryx failed (exit 255))\n",
+            self.report(),
+        )
+
+    def test_laptop_self_checks_name_their_failed_looks(self) -> None:
+        self.checkout("git", "laptop-looks-fail")
+        self.advance_to_current()
+        # The third plain ssh -G is the self-check's; the first two are the ssh-config step's.
+        result = self.invoke(
+            after_sync=True,
+            SS_FAILS_ON="sport = :22 )",
+            IS_ACTIVE_UNREACHABLE="adb-server.service",
+            SSH_G_FAIL_FROM="3",
+            FORWARD_DOCTOR_FAILS="1",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        for line in (
+            "self-check: laptop port 22: look with ss failed (exit 1): failed",
+            "self-check: unit adb-server.service: systemctl --user is-active printed "
+            "Failed to connect to bus: No medium found (exit 1): failed",
+            "self-check: ssh configuration: ssh -G oryx failed (exit 255): failed",
+            "self-check: forward doctor devboxes: exit 1: forward doctor: daemon socket missing: failed",
+        ):
+            self.assertIn(line + "\n", report)
+
+    def test_delivery_probes_name_ssh_oryx_failing(self) -> None:
+        self.checkout("git", "delivery-ssh-fails")
+        self.advance_to_current()
+        result = self.invoke(
+            after_sync=True, SSH_FAILS_ON="forward url|forward port|paplay|forward browser grant|000chost:version"
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        for line in (
+            "self-check: preview delivery: making the file and its URL through ssh oryx failed (exit 255): failed",
+            "self-check: forward port delivery: ssh oryx exited 255 before oryx printed READY: failed",
+            "self-check: browser page delivery: making the page and its URL through ssh oryx failed (exit 255): failed",
+            "self-check: audio delivery: paplay through ssh oryx failed (exit 255): failed",
+            "self-check: browser grant delivery: forward browser grant through ssh -t oryx failed "
+            "(exit 255, tee exit 0): failed",
+            "self-check: adb through tunnel: ssh oryx failed (exit 255): "
+            "ssh: connect to host oryx.thecybermonk.com port 22: Connection timed out: failed",
+        ):
+            self.assertIn(line + "\n", report)
+
+    def test_delivery_probes_name_the_step_after_ssh_that_failed(self) -> None:
+        self.checkout("git", "delivery-step-fails")
+        self.advance_to_current()
+        result = self.invoke(
+            after_sync=True, PREVIEW_CURL_FAILS="1", FORWARD_CURL_FAILS="1", SSH_FAILS_ON="forward open|/json/version"
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        for line in (
+            "self-check: preview delivery: fetching the preview URL failed (curl exit 7): failed",
+            "self-check: browser page delivery: forward open through ssh oryx failed (exit 255): failed",
+            "self-check: browser grant delivery: fetching /json/version through ssh oryx failed (exit 255): failed",
+        ):
+            self.assertIn(line + "\n", report)
+        self.assertRegex(
+            report,
+            r"self-check: forward port delivery: fetching localhost:\d+ failed for 10 s: "
+            r"curl: \(7\) Failed to connect to 127\.0\.0\.1: failed\n",
+        )
+
+    def test_delivery_probes_name_a_failed_cleanup_on_oryx(self) -> None:
+        # The file was delivered; removing its directory through ssh oryx failed, and the line says so.
+        self.checkout("git", "delivery-cleanup-fails")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, SSH_FAILS_ON="rm -rf -- '/tmp/oryx-tunnel-setup.")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        self.assertIn("self-check: preview delivery: removing the preview's oryx directory failed (exit 255): failed\n", report)
+        self.assertIn("self-check: browser page delivery: removing the page's oryx directory failed (exit 255): failed\n", report)
+
+    def test_delivery_probes_report_the_answer_they_read(self) -> None:
+        for name, answers, value in (
+            ("answers-no", "n\nn\n", 'answer was not y: "n"'),
+            ("answers-none", "", "no answer read"),
+        ):
+            with self.subTest(name):
+                self.checkout("git", name)
+                self.advance_to_current()
+                result = self.invoke(after_sync=True, answers=answers)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = self.report()
+                self.assertIn(f"self-check: browser page delivery: {value}: failed\n", report)
+                self.assertIn(f"self-check: audio delivery: {value}: failed\n", report)
+
+    def test_steps_stop_naming_a_failed_look_not_its_absence(self) -> None:
+        for name, extra, message in (
+            ("probe-ssh-down", {"SSH_FAILS_ON": "BatchMode=yes"},
+             "oryx-tunnel-setup: probe: ssh -o BatchMode=yes oryx true failed (exit 255)"),
+            ("cutover-look-fails", {"SSH_FAILS_ON": "test -x ~/.local/bin/oryx-edge-cutover"},
+             "oryx-tunnel-setup: cutover: could not check for ~/.local/bin/oryx-edge-cutover through ssh oryx (exit 255)\n"),
+            ("old-tunnel-look-fails", {"SSH_FAILS_ON": "sport = :12799"},
+             "oryx-tunnel-setup: old-tunnel: could not check oryx port 12799 through ssh oryx (exit 255)\n"),
+            ("ssh-g-fails", {"SSH_G_FAIL_FROM": "1"},
+             "oryx-tunnel-setup: ssh-config: could not read effective Host oryx values: ssh -G oryx failed (exit 255)\n"),
+            ("listeners-look-fails", {"SS_FAILS_ON": "-Hltnp"},
+             "oryx-tunnel-setup: preflight: could not list the laptop's TCP listeners with ss -Hltnp (exit 1)\n"),
+            ("cutover-run-fails", {"FAIL_STEP": "cutover"},
+             "oryx-tunnel-setup: cutover: ssh -t oryx ~/.local/bin/oryx-edge-cutover exited 1 (255 is ssh's own failure); "
+             "tr exited 0, tee exited 0\n"),
+            ("token-copy-fails", {"FAIL_STEP": "token"},
+             "oryx-tunnel-setup: token: could not copy the Cloudflare Access tunnel token from oryx: "
+             "ssh oryx secrets failed (exit 1)\n"),
+            ("forward-installer-fails", {"XDG_CONFIG_HOME": str(self.root / "elsewhere")},
+             "oryx-tunnel-setup: devbox-forward: forward.sh daemon failed (exit 1); its message is above\n"),
+        ):
+            with self.subTest(name):
+                self.checkout("git", name)
+                self.advance_to_current()
+                result = self.invoke(after_sync=True, **extra)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(message, result.stderr)
+
+    def test_sync_stop_names_the_failed_sync_and_its_status(self) -> None:
+        self.checkout("git", "sync-fails")
+        self.advance_to_current()
+        self.command(self.git, "remote", "set-url", "origin", str(self.root / "no-such-origin.git"), cwd=self.checkout_dir, env=self.env)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertRegex(result.stderr, r"oryx-tunnel-setup: sync: dotfiles-sync --here failed \(exit [1-9][0-9]*\); ")
+
+    def test_unit_wait_reports_what_is_active_last_said(self) -> None:
+        self.checkout("git", "unit-wait-state")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, INACTIVE_UNIT="adb-server.service")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "units: adb-server.service: systemctl --user is-active printed inactive (exit 3) after 30 s\n", self.report()
+        )
+
+    def test_token_search_that_cannot_read_the_tree_names_grep_status(self) -> None:
+        self.checkout("git", "leak-blind-status")
+        self.advance_to_current()
+        leaked = self.checkout_dir / "leaked.env"
+        leaked.write_text(f"TUNNEL_SERVICE_TOKEN_SECRET={self.token_secret}\n", encoding="utf-8")
+        leaked.chmod(0)
+        try:
+            result = self.invoke(after_sync=True)
+        finally:
+            leaked.chmod(0o600)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("token: copied; dotfiles search: UNKNOWN (grep exit 2)\n", self.report())
 
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")

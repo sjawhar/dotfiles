@@ -180,7 +180,9 @@ LISTENERS=""
 
 read_listeners() {
     local step="$1"
-    LISTENERS="$(ss -Hltnp)" || stop "$step" "could not list the laptop's TCP listeners with ss -Hltnp"
+    local status=0
+    LISTENERS="$(ss -Hltnp)" || status=$?
+    ((status == 0)) || stop "$step" "could not list the laptop's TCP listeners with ss -Hltnp (exit $status)"
 }
 
 listener_lines() {
@@ -306,25 +308,19 @@ ssh_config_expect() {
     return 1
 }
 
+# Returns 1 when the values differ from the required ones, and 2 when a look with ssh -G failed.
 validate_ssh_configuration() {
     local oryx tunnel oryx_reference tunnel_reference expected
     ssh_config_errors=()
-    oryx="$(ssh_g oryx)" || {
-        ssh_config_errors=("could not read effective Host oryx values")
-        return 1
-    }
-    tunnel="$(ssh_g oryx-tunnel)" || {
-        ssh_config_errors=("could not read effective Host oryx-tunnel values")
-        return 1
-    }
-    oryx_reference="$(ssh_g_reference oryx)" || {
-        ssh_config_errors=("could not read reference Host oryx values")
-        return 1
-    }
-    tunnel_reference="$(ssh_g_reference oryx-tunnel)" || {
-        ssh_config_errors=("could not read reference Host oryx-tunnel values")
-        return 1
-    }
+    local status=0
+    oryx="$(ssh_g oryx)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read effective Host oryx values: ssh -G oryx failed (exit $status)"); return 2; }
+    tunnel="$(ssh_g oryx-tunnel)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read effective Host oryx-tunnel values: ssh -G oryx-tunnel failed (exit $status)"); return 2; }
+    oryx_reference="$(ssh_g_reference oryx)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read reference Host oryx values: ssh -F <reference> -G oryx failed (exit $status)"); return 2; }
+    tunnel_reference="$(ssh_g_reference oryx-tunnel)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read reference Host oryx-tunnel values: ssh -F <reference> -G oryx-tunnel failed (exit $status)"); return 2; }
     ssh_config_compare oryx "$oryx" "$oryx_reference" || true
     ssh_config_compare oryx-tunnel "$tunnel" "$tunnel_reference" || true
 
@@ -398,7 +394,7 @@ token_leak_result() {
     fi
     case "$status" in
         1) printf 'none\n' ;;
-        *) printf 'UNKNOWN\n' ;;
+        *) printf 'UNKNOWN (grep exit %s)\n' "$status" ;;
     esac
 }
 
@@ -421,6 +417,10 @@ wait_for_unit() {
         unit_active "$unit" && return 0
         sleep 1
     done
+    # The last answer of is-active tells a unit that is not active from a systemctl that could not tell.
+    local state status=0
+    state="$(systemctl --user is-active "$unit" 2>&1)" || status=$?
+    report_line "units: $unit: systemctl --user is-active printed ${state:-nothing} (exit $status) after 30 s"
     journal="$(journalctl --user -u "$unit" -n 20 --no-pager 2>&1 || true)"
     report_line "units: $unit journal: $journal"
     return 1
@@ -480,19 +480,38 @@ TUNNEL_WAIT_SECONDS="${ORYX_TUNNEL_WAIT_SECONDS:-60}"
 tunnel_up=false
 
 wait_for_tunnel() {
-    local start=$SECONDS laptop remote left
+    local start=$SECONDS laptop remote left status laptop_seen remote_seen
     while :; do
-        laptop="$(ss -Hltn '( sport = :12802 )' 2>/dev/null | awk '$4 == "127.0.0.1:12802"')" || laptop=""
+        # Each side reads yes or no only from a look that succeeded; a failed look says so.
+        status=0
+        laptop="$(ss -Hltn '( sport = :12802 )' 2>/dev/null)" || status=$?
+        if ((status)); then
+            laptop_seen="look with ss failed (exit $status)"
+        elif awk '$4 == "127.0.0.1:12802" { found = 1 } END { exit !found }' <<< "$laptop"; then
+            laptop_seen=yes
+        else
+            laptop_seen=no
+        fi
         left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
         ((left >= 1)) || left=1
-        remote="$(timeout "$left" ssh oryx 'ss -Hltn "( sport = :5038 )"' 2>/dev/null)" || remote=""
-        if [[ -n "$laptop" && "$remote" == *127.0.0.1:5038* ]]; then
+        status=0
+        remote="$(timeout "$left" ssh oryx 'ss -Hltn "( sport = :5038 )"' 2>/dev/null)" || status=$?
+        if ((status == 124)); then
+            remote_seen="look through ssh oryx failed (exit 124: timed out after $left s)"
+        elif ((status)); then
+            remote_seen="look through ssh oryx failed (exit $status)"
+        elif [[ "$remote" == *127.0.0.1:5038* ]]; then
+            remote_seen=yes
+        else
+            remote_seen=no
+        fi
+        if [[ "$laptop_seen" == yes && "$remote_seen" == yes ]]; then
             tunnel_up=true
             report_line "self-check: tunnel up after $((SECONDS - start)) s"
             return 0
         fi
         if ((SECONDS - start >= TUNNEL_WAIT_SECONDS)); then
-            report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $([[ -n "$laptop" ]] && echo yes || echo no); oryx 127.0.0.1:5038 listening: $([[ "$remote" == *127.0.0.1:5038* ]] && echo yes || echo no))"
+            report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $laptop_seen; oryx 127.0.0.1:5038 listening: $remote_seen)"
             return 1
         fi
         left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
@@ -527,8 +546,12 @@ deciding_line() {
 }
 
 self_ssh_config() {
-    local values hostname proxycommand hostkeyalias
-    values="$(ssh_g oryx)" || return 1
+    local values hostname proxycommand hostkeyalias status=0
+    values="$(ssh_g oryx)" || status=$?
+    if ((status)); then
+        PROBE_VALUE="ssh -G oryx failed (exit $status)"
+        return 1
+    fi
     hostname="$(ssh_field "$values" hostname)"
     proxycommand="$(ssh_field "$values" proxycommand)"
     hostkeyalias="$(ssh_field "$values" hostkeyalias)"
@@ -538,8 +561,14 @@ self_ssh_config() {
 }
 
 self_unit_active() {
-    local unit="$1" state
-    state="$(systemctl --user is-active "$unit" 2>&1)" || return 1
+    local unit="$1" state status=0
+    state="$(systemctl --user is-active "$unit" 2>&1)" || status=$?
+    if ((status)); then
+        # is-active prints the state (inactive, failed) when it answers, or why it could not.
+        state="${state//$'\n'/ }"
+        PROBE_VALUE="systemctl --user is-active printed ${state:-nothing} (exit $status)"
+        return 1
+    fi
     report_line "self-check: systemctl --user is-active $unit: $state"
     [[ "$state" == active ]]
 }
@@ -552,16 +581,24 @@ self_devboxes_config() {
 }
 
 self_command_output() {
-    local name="$1" output
+    local name="$1" output status=0
     shift
-    output="$("$@" 2>&1)" || return 1
+    output="$("$@" 2>&1)" || status=$?
     output="${output//$'\n'/ }"
+    if ((status)); then
+        PROBE_VALUE="exit $status: ${output:0:160}"
+        return 1
+    fi
     report_line "self-check: $name output: $output"
 }
 
 self_laptop_port_22() {
-    local listeners
-    listeners="$(ss -Hltn '( sport = :22 )')" || return 1
+    local listeners status=0
+    listeners="$(ss -Hltn '( sport = :22 )')" || status=$?
+    if ((status)); then
+        PROBE_VALUE="look with ss failed (exit $status)"
+        return 1
+    fi
     if [[ -n "$listeners" ]]; then
         listeners="${listeners//$'\n'/ }"
         report_line "self-check: laptop port 22: $listeners"
@@ -610,20 +647,29 @@ cleanup_delivery_directory() {
 }
 
 delivery_preview() {
-    local nonce remote_file response body curl_status=0 cleanup_status=0
+    local nonce remote_file response body make_status=0 curl_status=0 cleanup_status=0
     nonce="oryx-preview-$(date +%s)-$RANDOM"
     remote_file="oryx-preview-$nonce"
     response="$(ssh oryx "d=\$(mktemp -d /tmp/oryx-tunnel-setup.XXXXXX) || exit
 printf '%s\\n' '$nonce' > \"\$d/$remote_file\"
 url=\$(forward url \"\$d/$remote_file\") || { rm -rf -- \"\$d\"; exit 1; }
 printf 'ORYX_TUNNEL_TEMP_DIR=%s\\n' \"\$d\"
-printf '%s\\n' \"\$url\"")" || return 1
+printf '%s\\n' \"\$url\"")" || make_status=$?
+    if ((make_status)); then
+        PROBE_VALUE="making the file and its URL through ssh oryx failed (exit $make_status)"
+        return 1
+    fi
     if ! delivery_response_parts "$response"; then
         cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" >/dev/null 2>&1 || true
         return 1
     fi
     body="$(curl --noproxy '*' -fsS "$DELIVERY_URL")" || curl_status=$?
     cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
+    if ((curl_status)); then
+        PROBE_VALUE="fetching the preview URL failed (curl exit $curl_status)"
+    elif ((cleanup_status)); then
+        PROBE_VALUE="removing the preview's oryx directory failed (exit $cleanup_status)"
+    fi
     [[ $curl_status -eq 0 && $cleanup_status -eq 0 && "$body" == "$nonce" ]]
 }
 
@@ -665,7 +711,18 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
         grep -q '^READY$' "$work_dir/forward-port.out" && { ready=1; break; }
         sleep 1
     done
-    ((ready)) || { kill -TERM "$session" 2>/dev/null || true; wait "$session" 2>/dev/null || true; return 1; }
+    if ! ((ready)); then
+        if kill -0 "$session" 2>/dev/null; then
+            kill -TERM "$session" 2>/dev/null || true
+            wait "$session" 2>/dev/null || true
+            PROBE_VALUE="no READY from oryx within 20 s; ssh oryx was still running and was ended"
+        else
+            local session_status=0
+            wait "$session" 2>/dev/null || session_status=$?
+            PROBE_VALUE="ssh oryx exited $session_status before oryx printed READY"
+        fi
+        return 1
+    fi
     # forward port may bind a moment after READY: retry for 10 s, and show only the last error.
     local attempt curl_err="$work_dir/forward-port-curl.err"
     for attempt in {1..100}; do
@@ -679,6 +736,7 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
         cat "$curl_err" >&2
         kill -TERM "$session" 2>/dev/null || true
         wait "$session" 2>/dev/null || true
+        PROBE_VALUE="fetching localhost:$port failed for 10 s: $(tail -n 1 "$curl_err" | tr -d '\r' | cut -c1-120)"
         return 1
     fi
     wait "$session" || return 1
@@ -688,8 +746,13 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
 ask_yes() {
     local prompt="$1" answer
     printf '%s [y/N] ' "$prompt" >&2
-    read -r answer
-    [[ "$answer" == y || "$answer" == Y ]]
+    if ! read -r answer; then
+        PROBE_VALUE="no answer read"
+        return 1
+    fi
+    [[ "$answer" == y || "$answer" == Y ]] && return 0
+    PROBE_VALUE="answer was not y: \"$answer\""
+    return 1
 }
 
 delivery_page() {
@@ -700,7 +763,11 @@ delivery_page() {
 printf '<p>%s</p>\\n' '$nonce' > \"\$d/$remote_file\"
 url=\$(forward url \"\$d/$remote_file\") || { rm -rf -- \"\$d\"; exit 1; }
 printf 'ORYX_TUNNEL_TEMP_DIR=%s\\n' \"\$d\"
-printf '%s\\n' \"\$url\"")" || return 1
+printf '%s\\n' \"\$url\"")" || open_status=$?
+    if ((open_status)); then
+        PROBE_VALUE="making the page and its URL through ssh oryx failed (exit $open_status)"
+        return 1
+    fi
     if ! delivery_response_parts "$response"; then
         cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" >/dev/null 2>&1 || true
         return 1
@@ -710,14 +777,23 @@ printf '%s\\n' \"\$url\"")" || return 1
         # The browser loads the page after forward open returns, so the page stays until Sami answers.
         ask_yes "Did the forward test page open in the browser?" && seen=true
     else
-        open_status=1
+        open_status=$?
+        PROBE_VALUE="forward open through ssh oryx failed (exit $open_status)"
     fi
     cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
+    if ((cleanup_status)); then
+        PROBE_VALUE="${PROBE_VALUE:+$PROBE_VALUE; }removing the page's oryx directory failed (exit $cleanup_status)"
+    fi
     [[ $open_status -eq 0 && $cleanup_status -eq 0 ]] && "$seen"
 }
 
 delivery_sound() {
-    ssh oryx 'PULSE_SERVER=unix:/run/user/$(id -u)/forward/pulse.sock paplay /usr/share/sounds/freedesktop/stereo/complete.oga' || return 1
+    local status=0
+    ssh oryx 'PULSE_SERVER=unix:/run/user/$(id -u)/forward/pulse.sock paplay /usr/share/sounds/freedesktop/stereo/complete.oga' || status=$?
+    if ((status)); then
+        PROBE_VALUE="paplay through ssh oryx failed (exit $status)"
+        return 1
+    fi
     ask_yes "Did you hear the forward test sound?"
 }
 
@@ -730,11 +806,19 @@ delivery_browser() {
     ssh -t oryx 'forward browser grant --ttl 5m' | tee "$grant_output"
     grant_status=("${PIPESTATUS[@]}")
     set -e
-    [[ "${grant_status[0]}" -eq 0 && "${grant_status[1]}" -eq 0 ]] || return 1
+    if [[ "${grant_status[0]}" -ne 0 || "${grant_status[1]}" -ne 0 ]]; then
+        PROBE_VALUE="forward browser grant through ssh -t oryx failed (exit ${grant_status[0]}, tee exit ${grant_status[1]})"
+        return 1
+    fi
     mapfile -t endpoints < <(grep -Eo 'https?://[^[:space:]]+' "$grant_output")
     ((${#endpoints[@]})) || return 1
     endpoint="${endpoints[${#endpoints[@]} - 1]}"
-    version="$(ssh oryx "curl -fsS '${endpoint%/}/json/version'")" || return 1
+    local status=0
+    version="$(ssh oryx "curl -fsS '${endpoint%/}/json/version'")" || status=$?
+    if ((status)); then
+        PROBE_VALUE="fetching /json/version through ssh oryx failed (exit $status)"
+        return 1
+    fi
     [[ "$version" == *'"Browser"'* ]]
 }
 
@@ -758,7 +842,14 @@ human_tier_read() {
 adb_through_tunnel() {
     local reply
     # adb's host:version request answers OKAY and the server's version; nothing starts a server.
-    reply="$(ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); print(s.recv(12).decode("ascii", "replace")); s.close()'\''' 2>&1 | tail -n 1 | tr -d '\r')" || true
+    local output status=0
+    output="$(ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); print(s.recv(12).decode("ascii", "replace")); s.close()'\''' 2>&1)" || status=$?
+    reply="$(tail -n 1 <<< "$output" | tr -d '\r')"
+    if ((status == 255)); then
+        # ssh itself failed, so the request never ran on oryx.
+        PROBE_VALUE="ssh oryx failed (exit 255): ${reply:0:100}"
+        return 1
+    fi
     if [[ "$reply" == OKAY* ]]; then
         PROBE_VALUE="reply ${reply:0:80}"
         return 0
@@ -953,8 +1044,10 @@ report_line "oryx-tunnel-setup: report=$REPORT"
 
 if [[ "${1:-}" != --after-sync ]]; then
     stop_supervisors
-    if ! "$DOTFILES/scripts/dotfiles-sync" --here ""; then
-        stop sync "dotfiles-sync did not bring ~/.dotfiles to origin/main"
+    sync_status=0
+    "$DOTFILES/scripts/dotfiles-sync" --here "" || sync_status=$?
+    if ((sync_status)); then
+        stop sync "dotfiles-sync --here failed (exit $sync_status); ~/.dotfiles may not be at origin/main"
     fi
     report_line "sync: complete"
     rm -rf -- "$work_dir"
@@ -988,7 +1081,13 @@ chmod 600 "$HOME/.ssh/config"
 if ! write_ssh_reference_config; then
     stop ssh-config "could not read the installed ~/.ssh/config without config.local"
 fi
-if ! validate_ssh_configuration; then
+validation_status=0
+validate_ssh_configuration || validation_status=$?
+if ((validation_status == 2)); then
+    # A look with ssh -G failed, so nothing was compared.
+    stop ssh-config "${ssh_config_errors[*]}"
+fi
+if ((validation_status)); then
     if [[ -f "$HOME/.ssh/config.local" ]]; then
         stop ssh-config "~/.ssh/config.local changed effective Host oryx or Host oryx-tunnel values: ${ssh_config_errors[*]}"
     fi
@@ -996,14 +1095,20 @@ if ! validate_ssh_configuration; then
 fi
 report_line "ssh-config: complete"
 
-if ! ssh -o BatchMode=yes oryx true; then
-    stop probe "ssh oryx did not log in with your 1Password login key; oryx's sshd journal shows no login with that key since 2026-10-17; check that its public key is in agent's ~/.ssh/authorized_keys on oryx"
+probe_status=0
+ssh -o BatchMode=yes oryx true || probe_status=$?
+if ((probe_status)); then
+    stop probe "ssh -o BatchMode=yes oryx true failed (exit $probe_status); its message is above. If it could not log in, check that your 1Password login key's public key is in agent's ~/.ssh/authorized_keys on oryx; oryx's sshd journal shows no login with that key since 2026-10-17"
 fi
 probe_logged_in=true
 report_line "probe: ssh oryx login with the 1Password login key succeeded"
 
-if ! ssh oryx 'test -x ~/.local/bin/oryx-edge-cutover'; then
+cutover_check=0
+ssh oryx 'test -x ~/.local/bin/oryx-edge-cutover' || cutover_check=$?
+if ((cutover_check == 1)); then
     stop cutover "~/.local/bin/oryx-edge-cutover is missing; the parent installs it"
+elif ((cutover_check)); then
+    stop cutover "could not check for ~/.local/bin/oryx-edge-cutover through ssh oryx (exit $cutover_check)"
 fi
 cutover_output="$work_dir/cutover.out"
 printf 'Touch the YubiKey now for the oryx cutover.\n' >&2
@@ -1014,7 +1119,7 @@ set -e
 cutover_text="$(<"$cutover_output")"
 report_line "cutover: output: $cutover_text"
 if [[ "${cutover_status[0]}" -ne 0 || "${cutover_status[1]}" -ne 0 || "${cutover_status[2]}" -ne 0 ]]; then
-    stop cutover "oryx-edge-cutover exited non-zero"
+    stop cutover "ssh -t oryx ~/.local/bin/oryx-edge-cutover exited ${cutover_status[0]} (255 is ssh's own failure); tr exited ${cutover_status[1]}, tee exited ${cutover_status[2]}"
 fi
 report_line "cutover: complete"
 
@@ -1023,9 +1128,11 @@ token_file="$token_dir/tunnel-oryx.env"
 mkdir -p "$token_dir"
 chmod 700 "$token_dir"
 token_tmp="$(umask 077; mktemp "$token_dir/.tunnel-oryx-XXXXXX")"
-if ! ssh oryx 'secrets CF_ACCESS_ORYX_TUNNEL_ID CF_ACCESS_ORYX_TUNNEL_SECRET -- sh -c '\''printf "TUNNEL_SERVICE_TOKEN_ID=%s\nTUNNEL_SERVICE_TOKEN_SECRET=%s\n" "$CF_ACCESS_ORYX_TUNNEL_ID" "$CF_ACCESS_ORYX_TUNNEL_SECRET"'\''' > "$token_tmp"; then
+copy_status=0
+ssh oryx 'secrets CF_ACCESS_ORYX_TUNNEL_ID CF_ACCESS_ORYX_TUNNEL_SECRET -- sh -c '\''printf "TUNNEL_SERVICE_TOKEN_ID=%s\nTUNNEL_SERVICE_TOKEN_SECRET=%s\n" "$CF_ACCESS_ORYX_TUNNEL_ID" "$CF_ACCESS_ORYX_TUNNEL_SECRET"'\''' > "$token_tmp" || copy_status=$?
+if ((copy_status)); then
     rm -f "$token_tmp"
-    stop token "could not copy the Cloudflare Access tunnel token from oryx"
+    stop token "could not copy the Cloudflare Access tunnel token from oryx: ssh oryx secrets failed (exit $copy_status)"
 fi
 if ! valid_token_file "$token_tmp"; then
     rm -f "$token_tmp"
@@ -1098,12 +1205,16 @@ report_line "units: complete"
 
 stop_old_masters
 # Confirm that the old tunnel's port 12799 is gone.
-old_listener="$(ssh oryx 'ss -Hltn "( sport = :12799 )"')" || stop old-tunnel "could not check oryx port 12799"
+old_status=0
+old_listener="$(ssh oryx 'ss -Hltn "( sport = :12799 )"')" || old_status=$?
+((old_status == 0)) || stop old-tunnel "could not check oryx port 12799 through ssh oryx (exit $old_status)"
 [[ -z "$old_listener" ]] || stop old-tunnel "oryx still has a listener on port 12799"
 report_line "old-tunnel: complete"
 
-if ! bash "$DOTFILES/installers/forward.sh" daemon; then
-    stop devbox-forward "forward.sh daemon did not configure the devbox daemon"
+forward_status=0
+bash "$DOTFILES/installers/forward.sh" daemon || forward_status=$?
+if ((forward_status)); then
+    stop devbox-forward "forward.sh daemon failed (exit $forward_status); its message is above"
 fi
 report_line "devbox-forward: complete"
 
