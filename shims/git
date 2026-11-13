@@ -443,8 +443,8 @@ fi
 #   without that override (git-hooks/hook). A rebase (`pull --rebase`) keeps each
 #   replayed commit's message as it was. A caller's own `-c core.hooksPath`
 #   stands, and that command gets no trailer.
-# A commit made through an alias, `git rebase`, `git am` or `git commit-tree`
-# carries none.
+# An ordinary alias is expanded first, so it gets the trailer of the command it names. A commit
+# made through a shell alias (`!…`), `git rebase`, `git am` or `git commit-tree` carries none.
 session_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 if ((scan_commit)); then
     hook_dir="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks"

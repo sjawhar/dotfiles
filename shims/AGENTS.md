@@ -207,7 +207,8 @@ before handing the call to the real one.
   adds the line, and each hook name there then runs the hook git would have run without that
   override, a hooks directory the caller chose included (`git-hooks/hook`). A rebase, including
   `pull --rebase`, leaves replayed commits as they were;
-  an alias, `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
+  an ordinary alias gets the trailer of the command it expands to (the expansion is described
+  below); a shell alias (`!…`), `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
   library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
   `omp/extensions/session-env.ts` sets to the session's line.
   Before it dispatches a command, the shim finds the command after every Git 2.43 global option
