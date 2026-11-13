@@ -14,6 +14,6 @@ if [[ "$(hostname -s)" != oryx ]]; then
 fi
 
 mkdir -p "$HOME/.config/systemd/user/dotfiles-follow.service.d"
-ensure_link "$DOTFILES_DIR/oryx/dotfiles-follow.service.d/oryx.conf" \
+ensure_link "$HOME/.dotfiles/oryx/dotfiles-follow.service.d/oryx.conf" \
     "$HOME/.config/systemd/user/dotfiles-follow.service.d/oryx.conf"
 arm_user_timer devbox dotfiles-follow

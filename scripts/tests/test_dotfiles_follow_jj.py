@@ -204,6 +204,18 @@ class JjFollow(JjHarness):
         self.assertEqual(local.read_bytes(), before)
         self.no_tool_run()
 
+    def test_a_failed_fetch_leaves_an_open_sync_refusal_open(self) -> None:
+        (self.repo / "shared.txt").write_text("local edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("conflict")
+        first = self.run_follow()
+        self.assertEqual(len(first), 1)
+        self.assertIn("DOTFILES SYNC REFUSED", first[0])
+        self.origin.rename(self.origin.with_name("unreachable.git"))
+
+        # The sync stops at its fetch and judges nothing, so no message says the refusal cleared.
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+
     def test_unpublished_commit_is_reported_without_tools_or_file_changes(self) -> None:
         local = self.repo / "other.txt"
         local.write_text("local commit\n")

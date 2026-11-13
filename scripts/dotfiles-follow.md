@@ -1,8 +1,8 @@
 # dotfiles-follow
 
-Keeps a machine's `~/.dotfiles` on origin's main by fast-forward only (in a colocated jj checkout,
-through `scripts/dotfiles-sync`), then installs mise and omp pins. When it cannot follow or install
-tools, it tells the box-health owner over Envoy, once per condition.
+Keeps a machine's `~/.dotfiles` on origin's main, then installs mise and omp pins. A git checkout
+moves by fast-forward; a colocated jj checkout moves through `scripts/dotfiles-sync`. When it
+cannot follow or install tools, it tells the box-health owner over Envoy, once per condition.
 
 Armed by `devbox/install.sh` as the `dotfiles-follow` user timer
 (`devbox/dotfiles-follow.{service,timer}`), on a Google VM only (`scripts/on-google-vm`:
@@ -40,16 +40,19 @@ the dirty-lock anomaly that stopped the follower after a marketplace install on 
 
 When `~/.dotfiles` has `.jj` and `jj --version` works, follow runs
 `~/.dotfiles/scripts/dotfiles-sync --here ""` while it holds follow's state lock. This is the only
-checkout that follow moves this way. The sync keeps the working-copy change in `@` and rebases it
-onto `main@origin`. Follow does not describe, commit, push, or abandon `@`.
+checkout that follow moves this way. The sync keeps the working-copy change in `@`, rebases it
+onto `main@origin`, and abandons commits whose changes main already has. Follow never describes,
+commits, or pushes.
 
 For this mode, following means git `HEAD` equals `origin/main`. The git dirty-file and kept-file
-checks do not apply. The sync's `UNPUBLISHED` and `CONFLICT` refusals become follow conditions.
+checks do not apply. A failed `jj git fetch` makes dotfiles-sync exit 75, which follow counts
+toward `--fetch-grace`; every other non-zero sync exit is an immediate sync condition. Follow
+sets the sync lock wait one second below its sync timeout, so a held lock reports its own refusal.
 Follow restores the managed marketplace lock before it calls the sync.
 
 ## What one run does
 
-1. `git fetch origin main`.
+1. A git checkout runs `git fetch origin main`; a colocated jj checkout runs `jj git fetch` through dotfiles-sync.
 2. **Refuses** while the checkout holds any change git sees: a tracked file modified, staged,
    deleted or in conflict; an untracked file that no `.gitignore` covers; a merge, rebase or
    cherry-pick in progress. The kept files below are one exception. A tracked file modified in
@@ -80,8 +83,8 @@ Follow restores the managed marketplace lock before it calls the sync.
    `finally`, with saved bytes as fallback if `git checkout --` fails. An interrupted run may
    leave it dirty: the next run restores HEAD before fast-forwarding or retrying installation.
    An upgrade to a catalog version other than the committed pin is a failure too. Every omp
-   command removes `OMP_PROFILE` and `PI_PROFILE` from its environment. If
-   `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
+   command removes `OMP_PROFILE`, `PI_PROFILE`, and `PI_CODING_AGENT_DIR` from its environment.
+   If `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives
    and mise pins. An alert when any step fails; the next run retries, skipping marketplace
    plugins already at want.
@@ -136,9 +139,10 @@ Follow restores the managed marketplace lock before it calls the sync.
    wedged other sessions' shells. With the timer's back-to-back runs the walk of all roots ran
    almost without a break.
 
-Git mode never stashes, resets, rebases, or abandons. jj mode leaves `@` as the working copy and
-lets `dotfiles-sync` rebase it. Both modes restore only the follow-managed marketplace lock before
-dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
+Git mode never stashes, resets, rebases, or abandons. jj mode leaves `@` as the working copy;
+dotfiles-sync rebases it and abandons commits whose changes main already has. dotfiles-follow
+never describes, commits, or pushes. Both modes restore only the follow-managed marketplace lock
+before dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
 already holds their bytes, right before the fast-forward. Apart from managed-lock recovery, a
 refusal leaves HEAD, the index and every file as they were.
 
@@ -164,13 +168,13 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | Condition | Headline | Clears when |
 | --- | --- | --- |
 | a change git sees, other than a kept file or the follow-managed marketplace lock | `UNCOMMITTED CHANGES` | the other checkout paths are clean |
-| `dotfiles-sync` refuses a colocated jj working-copy move | `DOTFILES SYNC REFUSED` | the sync moves `~/.dotfiles` and git `HEAD` equals `origin/main` |
+| `dotfiles-sync`, except a failed `jj git fetch`, refuses a colocated jj working-copy move | `DOTFILES SYNC REFUSED` | the sync moves `~/.dotfiles` and git `HEAD` equals `origin/main` |
 | HEAD has commits origin/main lacks | `NOT A FAST-FORWARD` | origin/main contains HEAD |
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | managed-lock restoration or `git merge --ff-only` failed | `FAST-FORWARD FAILED` | the managed lock is clean and HEAD is origin/main |
 | mise, Bun, a marketplace upgrade/version check or the pin lines failed | `TOOLS NOT INSTALLED` | all pass at the current HEAD |
 | the hook sweep is missing, ran past its bound, exited without its summary line, could not hook a public checkout, or deferred one, or the run had no time left for a pass; the message names the kind of pass | `PRE-PUSH HOOK NOT INSTALLED` | a pass ends with 0 failed and 0 deferred; a condition a slow-root pass found clears only on a slow-root pass |
-| `git fetch` failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
+| `git fetch`, or `jj git fetch` in a colocated checkout, failed on 3 runs in a row (`--fetch-grace`) | `CANNOT FETCH origin/main` | a fetch passes |
 
 All of one run's new conditions go in one message. Its headline considers **all open conditions**:
 if only tools/hooks remain open and HEAD is at origin/main, it says `<host> is on main, but a

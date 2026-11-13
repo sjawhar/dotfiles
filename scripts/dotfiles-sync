@@ -21,6 +21,10 @@
 # commit there and `git pull --rebase`.
 set -euo pipefail
 
+# dotfiles-follow uses this status only for a failed jj fetch. Other non-zero exits are sync
+# refusals, which follow reports immediately.
+JJ_FETCH_FAILURE=75
+
 # HOSTNAME=DESTINATION, every machine by user@MagicDNS name. The entry whose name is this
 # machine's hostname syncs locally. oryx follows main by its own dotfiles-follow timer.
 MACHINES=(
@@ -84,7 +88,10 @@ sync_here() {
     [ -z "$old" ] || local_only=$(git log --oneline "$(jj log -r @- --no-graph -T 'commit_id')" ^"$old")
     wc=$(jj log -r @ --no-graph -T 'change_id')
     before=$(jj diff -r @ --git | { grep -v '^index ' || true; } | sha256sum)
-    jj git fetch --quiet
+    if ! jj git fetch --quiet; then
+      jj bookmark delete "$anchor" >/dev/null
+      return "$JJ_FETCH_FAILURE"
+    fi
     # Commits under the working copy that main lacks (after a squash, --old handles them below).
     # Moving the working copy alone onto main would drop their changes from the files on disk, so
     # one whose change main does not have stops the run; the others, originals dotfiles-publish
@@ -124,11 +131,13 @@ sync_here() {
       jj abandon --quiet --ignore-immutable "$trial"
       if [ "$trial_conflict" = true ]; then
         echo "CONFLICT: the working-copy change $wc conflicts with main; not moved, nothing on disk changed; resolve it here" >&2
+        jj bookmark delete "$anchor" >/dev/null
         return 1
       fi
       jj rebase --quiet -r "$wc" -d main@origin
       if [ "$(jj log -r "$wc" --no-graph -T 'conflict')" = true ]; then
         echo "CONFLICT: the working-copy change $wc conflicts with main; resolve it here" >&2
+        jj bookmark delete "$anchor" >/dev/null
         return 1
       fi
       after=$(jj diff -r "$wc" --git | { grep -v '^index ' || true; } | sha256sum)

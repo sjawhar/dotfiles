@@ -8,7 +8,7 @@ hand.
 
 What one run does:
 
-  1. `git fetch origin main`.
+  1. `git fetch origin main`, or `jj git fetch` through dotfiles-sync in a colocated jj checkout.
   2. Refuse, and change nothing, while the checkout holds any change git sees: a tracked file
      modified, staged, deleted or in conflict, an untracked file that no .gitignore covers, or a
      merge, rebase or cherry-pick in progress. One exception: a path that SECRET_FILES in
@@ -50,11 +50,13 @@ What one run does:
      When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
      not that the checkout failed to follow. Any open follow failure keeps the not-following headline.
 
-It never stashes, resets, rebases, abandons or deletes. It restores only the follow-managed
-marketplace lock, before judging dirty files and after plugin commands. Other edits are discarded
-only when origin/main already holds their bytes, right before the fast-forward. Apart from that
-lock recovery, a refusal leaves HEAD, the index and every file as they were. Alerts go over Envoy
-to BOX_HEALTH_OWNER when set, else the `lead-box-health` role, else the SRE session.
+In git mode, it never stashes, resets, rebases or abandons. In jj mode, dotfiles-sync rebases
+`@` and abandons commits that main already has. dotfiles-follow never describes, commits or pushes.
+It restores only the follow-managed marketplace lock, before judging dirty files and after plugin
+commands. Other edits are discarded only when origin/main already holds their bytes, right before
+the fast-forward. Apart from that lock recovery, a refusal leaves HEAD, the index and every file
+as they were. Alerts go over Envoy to BOX_HEALTH_OWNER when set, else --box-health-role when set,
+else the `lead-box-health` role, then the SRE session.
 """
 
 from __future__ import annotations
@@ -345,14 +347,24 @@ MARKETPLACE_LOCK = "omp/plugins/omp-plugins.lock.json"
 MARKETPLACE_COMMAND_TIMEOUT = 60.0
 MARKETPLACE_TIMEOUT = 300.0
 
+SYNC_FETCH_FAILURE = 75
+SYNC_TIMEOUT_MARGIN = 1.0
+
 
 def run_step(
-    argv: list[str], cwd: Path, timeout: float, *, clear_omp_profiles: bool = False
+    argv: list[str],
+    cwd: Path,
+    timeout: float,
+    *,
+    clear_omp_profiles: bool = False,
+    environment: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     env = {**os.environ, "DOTFILES_DIR": str(cwd)}
     if clear_omp_profiles:
-        env.pop("OMP_PROFILE", None)
-        env.pop("PI_PROFILE", None)
+        for name in ("OMP_PROFILE", "PI_PROFILE", "PI_CODING_AGENT_DIR"):
+            env.pop(name, None)
+    if environment:
+        env.update(environment)
     try:
         proc = subprocess.Popen(
             argv,
@@ -826,14 +838,31 @@ def assess_jj_and_follow(
         return found, judged, facts
 
     before = rev(repo, "HEAD")
+    target_ref = f"refs/remotes/{options.remote}/{options.branch}"
+    sync_timeout = options.fetch_timeout * 2
     code, output = run_step(
         [str(repo / "scripts/dotfiles-sync"), "--here", ""],
         repo,
-        options.fetch_timeout * 2,
+        sync_timeout,
+        environment={
+            "DOTFILES_SYNC_LOCK_WAIT": f"{max(0.0, sync_timeout - SYNC_TIMEOUT_MARGIN):g}",
+        },
     )
     head = rev(repo, "HEAD")
-    target = rev(repo, f"refs/remotes/{options.remote}/{options.branch}")
+    target = rev(repo, target_ref)
     facts.update(head=head, target=target, relation="current" if head == target and head else "not-current")
+    if code == SYNC_FETCH_FAILURE:
+        failures = int(data.get("fetch_failures", 0)) + 1
+        data["fetch_failures"] = failures
+        log(f"fetch failed ({failures} run(s) in a row): {tail(output)}")
+        if failures >= options.fetch_grace:
+            found["fetch"] = (
+                f"`jj git fetch --quiet` in {display} failed on the last {failures} runs; the latest said:\n"
+                f"{tail(output)}\n  The sync stopped before it judged or moved {display}."
+            )
+        # The sync stopped at its fetch, so it judged nothing else: an open sync condition stays open.
+        return found, {"fetch"}, facts
+    data["fetch_failures"] = 0
     if code != 0:
         found["sync"] = (
             f"`scripts/dotfiles-sync --here ''` in {display} exited {code}; its working-copy"
@@ -1138,8 +1167,9 @@ def run_once(options: argparse.Namespace) -> int:
             changed += f" and fast-forwarded the checkout to {short(facts.get('head', ''))}"
     footer = (
         f"From dotfiles-follow on {host} (scripts/dotfiles-follow.md). {changed}:"
-        " it never stashes, resets, describes, commits, pushes or abandons."
-        " Only the follow-managed marketplace lock is restored."
+        " in git mode it never stashes, resets, rebases or abandons. In jj mode dotfiles-sync"
+        " rebases @ and abandons commits main already has; dotfiles-follow never describes,"
+        " commits or pushes. Only the follow-managed marketplace lock is restored."
     )
     if opened:
         headline = (
