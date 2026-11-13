@@ -330,6 +330,8 @@ PY
             fi
             [[ " $* " == *" --quiet "* ]] || printf 'active\n'
         elif [[ " $* " == *" show -p MainPID "* ]]; then
+            # SYSTEMCTL_SHOW_FAILS: the user manager does not answer, so no MainPID is read.
+            [[ "${SYSTEMCTL_SHOW_FAILS:-}" == 1 ]] && { printf 'Failed to connect to bus: No medium found\n' >&2; exit 1; }
             printf '0\n'
         fi
         ;;
@@ -1404,6 +1406,22 @@ class TunnelSetup(unittest.TestCase):
         (self.home / ".ssh/config.local").write_text("Host *\n  Compression no\n", encoding="utf-8")
         result = self.invoke(after_sync=True)
         self.assert_stop_before_move(result, "ssh-config")
+
+    def test_preflight_does_not_call_a_listener_foreign_when_systemctl_could_not_answer(self) -> None:
+        # On a second run the unit's own ssh holds 127.0.0.1:12802. The preflight tells it from a
+        # foreign listener by the units' MainPID; when systemctl --user show fails, nothing told
+        # the listener apart, so the stop must say the look failed, not that it is not allowed.
+        self.checkout("git", "preflight-systemctl-down")
+        self.advance_to_current()
+        holder = subprocess.Popen(["/bin/sleep", "60"])
+        try:
+            self.fake_ss(f'LISTEN 0      128    127.0.0.1:12802 0.0.0.0:* users:(("ssh",pid={holder.pid},fd=5))')
+            result = self.invoke(after_sync=True, SYSTEMCTL_SHOW_FAILS="1")
+        finally:
+            holder.kill()
+            holder.wait()
+        self.assert_stop_before_move(result, "preflight")
+        self.assertNotIn("is not an allowed forward process", result.stderr)
 
     def test_preflight_accepts_the_devbox_daemons_on_other_addresses(self) -> None:
         # The laptop's devbox daemon binds forward's default ports on the laptop's tailnet address
