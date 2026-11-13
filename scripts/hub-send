@@ -53,8 +53,11 @@ class UsageError(Exception):
     """An input error discovered after argparse has parsed the command line."""
 
 
-class Interrupted(Exception):
-    """SIGINT and SIGTERM use one controlled exception path."""
+class Interrupted(BaseException):
+    """SIGINT and SIGTERM use one controlled exception path.
+
+    A BaseException, like KeyboardInterrupt, so no `except Exception` reads a signal as a crash.
+    """
 
 
 class HttpError(Exception):
