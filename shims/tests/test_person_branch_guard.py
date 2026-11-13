@@ -564,6 +564,16 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.assertEqual((result.stdout, result.stderr), (person.stdout, person.stderr))
         self.assert_refused(self.git(w, "push"), "stub/slug")
 
+    def test_git_push_help_in_a_short_option_cluster_is_not_a_push(self):
+        w = self.git_repo("stub/slug")
+        for cluster in ("-uh", "-hv"):
+            with self.subTest(cluster=cluster):
+                person = self.git(w, "push", cluster, agent=False)
+                result = self.git(w, "push", cluster)
+                self.assertEqual(result.returncode, 129, result.stderr)
+                self.assertEqual((result.stdout, result.stderr), (person.stdout, person.stderr))
+        self.assert_refused(self.git(w, "push"), "stub/slug")
+
     def test_a_push_git_fails_by_itself_is_not_called_a_remote_that_could_not_be_asked(self):
         w = self.git_repo()
         self.fixture(w, "git", "branch", "sami-x")
