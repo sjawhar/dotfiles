@@ -55,6 +55,9 @@ case "$name" in
         if [[ "${1:-}" == -G ]]; then
             exec /usr/bin/ssh -F "$HOME/.ssh/config" -G "$2"
         fi
+        if [[ "${1:-}" == -F && "${3:-}" == -G ]]; then
+            exec /usr/bin/ssh -F "$2" -G "$4"
+        fi
         for ((index = 1; index <= $#; index += 1)); do
             [[ "${!index}" == -F ]] || continue
             next=$((index + 1))
@@ -112,6 +115,10 @@ case "$name" in
             [[ "${FAIL_STEP:-}" == move ]] && exit 1
             exit 0
         fi
+        if [[ "${1:-}" == oryx && "${2:-}" == "rm -rf -- '/tmp/oryx-tunnel-setup."* ]]; then
+            printf 'remote delivery cleanup\n' >> "$FAKE_LOG"
+            exit 0
+        fi
         if [[ "$joined" == *"forward browser grant"* ]]; then
             printf 'https://browser.example\n'
             exit 0
@@ -122,6 +129,7 @@ case "$name" in
         fi
         if [[ "$joined" == *"forward url"* ]]; then
             if [[ "$joined" =~ (oryx-(preview|page)-[0-9]+-[0-9]+) ]]; then
+                printf 'ORYX_TUNNEL_TEMP_DIR=/tmp/oryx-tunnel-setup.fake-%s\n' "$RANDOM"
                 printf '%s\n' "${BASH_REMATCH[1]}" > "$CURRENT_NONCE"
                 printf 'http://127.0.0.1:12802/%s\n' "${BASH_REMATCH[1]}"
             else
@@ -190,13 +198,14 @@ PY
         done
         url="${!#}"
         if [[ -f "$FORWARD_PORT" && "$url" == http://127.0.0.1:"$(<"$FORWARD_PORT")"/* ]]; then
-            for _ in {1..20}; do
-                if /usr/bin/curl --noproxy '*' -fsS "$url" 2>/dev/null; then
-                    exit 0
-                fi
-                /bin/sleep 0.01
-            done
-            exit 1
+            if [[ "${FORWARD_CURL_FAIL_FIRST:-}" == 1 ]]; then
+                attempts=0
+                [[ -f "$FORWARD_CURL_CALLS" ]] && attempts="$(<"$FORWARD_CURL_CALLS")"
+                ((attempts += 1))
+                printf '%s\n' "$attempts" > "$FORWARD_CURL_CALLS"
+                ((attempts > 1)) || exit 1
+            fi
+            exec /usr/bin/curl --noproxy '*' -fsS "$url"
         fi
         [[ -f "$CURRENT_NONCE" ]] && /bin/cat "$CURRENT_NONCE"
         ;;
@@ -212,6 +221,9 @@ PY
         exec "$@"
         ;;
     apt-get)
+        if [[ "${FAIL_ADB_INSTALL:-}" == 1 && "${1:-}" == install && "${2:-}" == -y && "${3:-}" == adb ]]; then
+            exit 1
+        fi
         if [[ "${1:-}" == install && " $* " == *" cloudflared="* ]]; then
             printf '%s\n' "$CF_VERSION" > "$CF_VERSION_FILE"
         fi
@@ -232,6 +244,7 @@ PY
         printf 'fake journal\n'
         ;;
     ss)
+        [[ "${FAIL_SS:-}" == 1 ]] && exit 1
         if [[ "${FOREIGN_LISTENER:-}" == 1 && " $* " == *" -Hltnp "* ]]; then
             printf 'LISTEN 0 1 127.0.0.1:12802 0.0.0.0:* users:(("foreign",pid=%s,fd=3))\n' "$$"
         fi
@@ -349,6 +362,7 @@ class TunnelSetup(unittest.TestCase):
         self.remote = self.root / f"remote-{name}"
         self.current_nonce = self.root / f"nonce-{name}"
         self.forward_port = self.root / f"forward-port-{name}"
+        self.forward_curl_calls = self.root / f"forward-curl-calls-{name}"
         self.version_file = self.root / f"version-{name}"
         self.jj_config = self.root / f"{name}.jjconfig.toml"
         self.jj_config.write_text('[user]\nname = "Test"\nemail = "test@example.com"\n[signing]\nbehavior = "drop"\n', encoding="utf-8")
@@ -362,6 +376,7 @@ class TunnelSetup(unittest.TestCase):
             "REMOTE_ROOT": str(self.remote),
             "CURRENT_NONCE": str(self.current_nonce),
             "FORWARD_PORT": str(self.forward_port),
+            "FORWARD_CURL_CALLS": str(self.forward_curl_calls),
             "CF_VERSION_FILE": str(self.version_file),
             "CF_VERSION": "2026.10.7",
             "GPG_FINGERPRINT": "CC94B39C77AE7342A68B89628A682D308D4E5E73",
@@ -735,6 +750,52 @@ class TunnelSetup(unittest.TestCase):
             f'if [[ " $* " == *" -Hltnp "* ]]; then\n/bin/sed "s/PID/$$/" <<\'LINES\'\n{text}\nLINES\nfi',
         )
 
+    def path_without_adb(self) -> Path:
+        restricted = self.root / f"no-adb-bin-{self.kind}"
+        restricted.mkdir()
+        for name in (
+            "ssh",
+            "systemctl",
+            "journalctl",
+            "cloudflared",
+            "sudo",
+            "apt-get",
+            "curl",
+            "forward",
+            "gpg",
+            "ss",
+            "paplay",
+            "hostname",
+            "tailscale",
+            "mise",
+            "omp",
+            "sleep",
+        ):
+            (restricted / name).symlink_to(self.fakebin / name)
+        for name in (
+            "bash",
+            "basename",
+            "cat",
+            "chmod",
+            "cmp",
+            "date",
+            "dirname",
+            "grep",
+            "id",
+            "ln",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "python3",
+            "rm",
+            "sort",
+            "stat",
+            "tee",
+            "tr",
+        ):
+            (restricted / name).symlink_to(real_binary(name))
+        return restricted
+
     def test_preflight_refuses_a_wildcard_listener_on_a_tunnel_port(self) -> None:
         # ss prints these for a listener on 0.0.0.0 and on dual-stack ::. Either one makes the
         # tunnel's LocalForward bind of 127.0.0.1:12802 fail with EADDRINUSE.
@@ -755,6 +816,13 @@ class TunnelSetup(unittest.TestCase):
         self.fake_ss('LISTEN 0      4096   127.0.0.1:50371 0.0.0.0:* users:(("python3",pid=PID,fd=3))')
         result = self.invoke(after_sync=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_preflight_stops_when_ss_cannot_list_listeners(self) -> None:
+        # A listing that could not be read is not "nothing listens".
+        self.checkout("git", "ss-fails")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, FAIL_SS="1")
+        self.assert_stop_before_move(result, "preflight")
 
     def test_report_umask_does_not_reach_the_apt_files(self) -> None:
         self.checkout("git", "umask")
@@ -815,6 +883,47 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(after_sync=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("YubiKey", result.stderr)
+
+    def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
+        self.checkout("git", "before-move-unit")
+        self.advance_to_current()
+        unit = self.home / ".config/systemd/user/forward-tunnel@.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("move recorded", "\n".join(self.lines()))
+        self.assertFalse((self.remote / "config.toml").exists())
+
+    def test_adb_install_failure_leaves_oryx_forward_unmoved(self) -> None:
+        self.checkout("git", "before-move-adb")
+        self.advance_to_current()
+        self.version_file.write_text("2026.10.7\n", encoding="utf-8")
+        result = self.invoke(after_sync=True, PATH=str(self.path_without_adb()), FAIL_ADB_INSTALL="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("move recorded", "\n".join(self.lines()))
+        self.assertFalse((self.remote / "config.toml").exists())
+
+    def test_forward_port_retries_until_the_listener_is_ready(self) -> None:
+        self.checkout("git", "forward-port-retry")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, FORWARD_CURL_FAIL_FIRST="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.forward_curl_calls.read_text(encoding="utf-8").strip(), "2")
+
+    def test_delivery_preview_and_page_remove_their_remote_directories(self) -> None:
+        self.checkout("git", "delivery-cleanup")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lines().count("remote delivery cleanup"), 2)
+
+    def test_config_local_wildcard_changes_are_refused(self) -> None:
+        self.checkout("git", "config-local-wildcard")
+        self.advance_to_current()
+        (self.home / ".ssh/config.local").write_text("Host *\n  Compression no\n", encoding="utf-8")
+        result = self.invoke(after_sync=True)
+        self.assert_stop_before_move(result, "ssh-config")
 
 
 if __name__ == "__main__":

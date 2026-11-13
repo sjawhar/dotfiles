@@ -50,6 +50,7 @@ Package: cloudflared
 Pin: version $VERSION
 Pin-Priority: 1001
 EOF
+sudo chmod 0644 "$source_list" "$preferences"
 
 sudo apt-get update -o Dir::Etc::sourcelist=sources.list.d/cloudflared.list \
     -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0

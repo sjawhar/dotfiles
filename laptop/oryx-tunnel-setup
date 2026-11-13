@@ -9,13 +9,13 @@ REPORT="${ORYX_SETUP_REPORT:-$REPORT_DIR/report-$(date -u +%Y%m%dT%H%M%SZ).txt}"
 REMOTE_REPORT="~/.local/state/oryx-laptop/$(basename "$REPORT")"
 probe_logged_in=false
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/oryx-tunnel-setup.XXXXXX")"
-trap 'rm -rf "$work_dir"' EXIT
+trap 'rm -rf -- "$work_dir"' EXIT
+ssh_reference_config="$work_dir/ssh-config-without-local"
 
 mkdir -p "$REPORT_DIR"
 chmod 700 "$REPORT_DIR"
 if [[ ! -e "$REPORT" ]]; then
-    umask 077
-    : > "$REPORT"
+    (umask 077; : > "$REPORT")
 fi
 chmod 600 "$REPORT"
 
@@ -155,11 +155,30 @@ line_pids() {
     done
 }
 
+listener_port() {
+    local line="$1" state receive_queue send_queue local_address peer_address port
+    read -r state receive_queue send_queue local_address peer_address _ <<< "$line"
+    [[ "$local_address" == *:* ]] || return 1
+    port="${local_address##*:}"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$port"
+}
+
+# One listing of the laptop's TCP listeners, taken by read_listeners. A failed ss stops the
+# step: a listing that could not be read must never pass as "nothing listens".
+LISTENERS=""
+
+read_listeners() {
+    local step="$1"
+    LISTENERS="$(ss -Hltnp)" || stop "$step" "could not list the laptop's TCP listeners with ss -Hltnp"
+}
+
 listener_lines() {
-    local port="$1"
-    ss -Hltnp 2>/dev/null | while IFS= read -r line; do
-        [[ "$line" == *"127.0.0.1:$port"* ]] && printf '%s\n' "$line"
-    done
+    local wanted_port="$1" line port
+    while IFS= read -r line; do
+        port="$(listener_port "$line" 2>/dev/null)" || continue
+        [[ "$port" == "$wanted_port" ]] && printf '%s\n' "$line"
+    done <<< "$LISTENERS"
 }
 
 process_is_adb() {
@@ -199,6 +218,10 @@ ssh_g() {
     ssh -G "$1" 2>/dev/null
 }
 
+ssh_g_reference() {
+    ssh -F "$ssh_reference_config" -G "$1" 2>/dev/null
+}
+
 ssh_field() {
     local output="$1" wanted="$2" key value
     while read -r key value; do
@@ -209,27 +232,126 @@ ssh_field() {
     return 1
 }
 
+ssh_fields() {
+    local output="$1" wanted="$2" key value
+    while read -r key value; do
+        [[ "$key" == "$wanted" ]] && printf '%s\n' "$value"
+    done <<< "$output"
+}
+
+write_ssh_reference_config() {
+    local include
+    {
+        IFS= read -r include || return 1
+        [[ "$include" == "Include ~/.ssh/config.local" ]] || return 1
+        cat
+    } < "$HOME/.ssh/config" > "$ssh_reference_config"
+}
+
+ssh_config_changed_values() {
+    local actual="$1" expected="$2" key value actual_display expected_display
+    local -a changes=()
+    local -A actual_values=() expected_values=() fields=()
+    while read -r key value; do
+        actual_values["$key"]+="${actual_values[$key]:+$'\n'}$value"
+        fields["$key"]=1
+    done <<< "$actual"
+    while read -r key value; do
+        expected_values["$key"]+="${expected_values[$key]:+$'\n'}$value"
+        fields["$key"]=1
+    done <<< "$expected"
+    for key in "${!fields[@]}"; do
+        [[ "${actual_values[$key]-}" == "${expected_values[$key]-}" ]] && continue
+        actual_display="${actual_values[$key]-}"
+        expected_display="${expected_values[$key]-}"
+        actual_display="${actual_display//$'\n'/, }"
+        expected_display="${expected_display//$'\n'/, }"
+        changes+=("$key=$actual_display (expected $expected_display)")
+    done
+    printf '%s; ' "${changes[@]}"
+}
+
+ssh_config_compare() {
+    local host="$1" actual="$2" expected="$3" changes
+    [[ "$actual" == "$expected" ]] && return 0
+    changes="$(ssh_config_changed_values "$actual" "$expected")"
+    ssh_config_errors+=("$host differs from ~/.ssh/config without config.local: $changes")
+    return 1
+}
+
+ssh_config_errors=()
+ssh_config_expect() {
+    local host="$1" output="$2" field="$3" expected="$4" actual actual_display expected_display
+    actual="$(ssh_fields "$output" "$field")"
+    [[ "$actual" == "$expected" ]] && return 0
+    actual_display="${actual//$'\n'/, }"
+    expected_display="${expected//$'\n'/, }"
+    ssh_config_errors+=("$host $field=$actual_display (expected $expected_display)")
+    return 1
+}
+
 validate_ssh_configuration() {
-    local oryx tunnel local_hits expected actual
-    oryx="$(ssh_g oryx)" || return 1
-    tunnel="$(ssh_g oryx-tunnel)" || return 1
+    local oryx tunnel oryx_reference tunnel_reference expected
+    ssh_config_errors=()
+    oryx="$(ssh_g oryx)" || {
+        ssh_config_errors=("could not read effective Host oryx values")
+        return 1
+    }
+    tunnel="$(ssh_g oryx-tunnel)" || {
+        ssh_config_errors=("could not read effective Host oryx-tunnel values")
+        return 1
+    }
+    oryx_reference="$(ssh_g_reference oryx)" || {
+        ssh_config_errors=("could not read reference Host oryx values")
+        return 1
+    }
+    tunnel_reference="$(ssh_g_reference oryx-tunnel)" || {
+        ssh_config_errors=("could not read reference Host oryx-tunnel values")
+        return 1
+    }
+    ssh_config_compare oryx "$oryx" "$oryx_reference" || true
+    ssh_config_compare oryx-tunnel "$tunnel" "$tunnel_reference" || true
 
-    [[ "$(ssh_field "$oryx" hostname)" == oryx.thecybermonk.com ]] || return 1
-    [[ "$(ssh_field "$oryx" user)" == agent ]] || return 1
-    [[ "$(ssh_field "$oryx" proxycommand)" == 'cloudflared access ssh --hostname %h' ]] || return 1
+    ssh_config_expect oryx "$oryx" hostname oryx.thecybermonk.com || true
+    ssh_config_expect oryx "$oryx" user agent || true
+    ssh_config_expect oryx "$oryx" proxycommand 'cloudflared access ssh --hostname %h' || true
     # This tailnet name is only the label under which known_hosts holds oryx's key.
-    [[ "$(ssh_field "$oryx" hostkeyalias)" == oryx.tail12ec1c.ts.net ]] || return 1
+    ssh_config_expect oryx "$oryx" hostkeyalias oryx.tail12ec1c.ts.net || true
+    ssh_config_expect oryx "$oryx" stricthostkeychecking ask || true
+    expected="$(printf '%s\n' \
+        '~/.ssh/id_rsa' \
+        '~/.ssh/id_ecdsa' \
+        '~/.ssh/id_ecdsa_sk' \
+        '~/.ssh/id_ed25519' \
+        '~/.ssh/id_ed25519_sk' \
+        '~/.ssh/id_xmss' \
+        '~/.ssh/id_dsa')"
+    ssh_config_expect oryx "$oryx" identityfile "$expected" || true
+    ssh_config_expect oryx "$oryx" identitiesonly no || true
+    ssh_config_expect oryx "$oryx" batchmode no || true
+    ssh_config_expect oryx "$oryx" controlmaster auto || true
+    [[ -n "$(ssh_fields "$oryx" controlpath)" ]] || ssh_config_errors+=("oryx controlpath is missing")
+    ssh_config_expect oryx "$oryx" exitonforwardfailure no || true
+    ssh_config_expect oryx "$oryx" serveraliveinterval 30 || true
+    ssh_config_expect oryx "$oryx" serveralivecountmax 3 || true
+    ssh_config_expect oryx "$oryx" localforward '' || true
+    ssh_config_expect oryx "$oryx" remoteforward '' || true
 
-    [[ "$(ssh_field "$tunnel" hostname)" == oryx-pcsc.thecybermonk.com ]] || return 1
-    [[ "$(ssh_field "$tunnel" user)" == agent ]] || return 1
-    [[ "$(ssh_field "$tunnel" proxycommand)" == 'cloudflared access ssh --hostname %h' ]] || return 1
+    ssh_config_expect oryx-tunnel "$tunnel" hostname oryx-pcsc.thecybermonk.com || true
+    ssh_config_expect oryx-tunnel "$tunnel" user agent || true
+    ssh_config_expect oryx-tunnel "$tunnel" proxycommand 'cloudflared access ssh --hostname %h' || true
     # This tailnet name is only the label under which known_hosts holds oryx's key.
-    [[ "$(ssh_field "$tunnel" hostkeyalias)" == oryx.tail12ec1c.ts.net ]] || return 1
-    [[ "$(ssh_field "$tunnel" exitonforwardfailure)" == yes ]] || return 1
-    [[ "$(ssh_field "$tunnel" serveraliveinterval)" == 15 ]] || return 1
-    [[ "$(ssh_field "$tunnel" serveralivecountmax)" == 4 ]] || return 1
-    [[ "$(ssh_field "$tunnel" identityagent)" == none ]] || return 1
-    ! grep -q '^controlpath ' <<< "$tunnel" || return 1
+    ssh_config_expect oryx-tunnel "$tunnel" hostkeyalias oryx.tail12ec1c.ts.net || true
+    ssh_config_expect oryx-tunnel "$tunnel" stricthostkeychecking true || true
+    ssh_config_expect oryx-tunnel "$tunnel" identityfile '~/.ssh/oryx-tunnel' || true
+    ssh_config_expect oryx-tunnel "$tunnel" identitiesonly yes || true
+    ssh_config_expect oryx-tunnel "$tunnel" identityagent none || true
+    ssh_config_expect oryx-tunnel "$tunnel" batchmode yes || true
+    ssh_config_expect oryx-tunnel "$tunnel" controlmaster false || true
+    [[ -z "$(ssh_fields "$tunnel" controlpath)" ]] || ssh_config_errors+=("oryx-tunnel controlpath=$(ssh_fields "$tunnel" controlpath) (expected none)")
+    ssh_config_expect oryx-tunnel "$tunnel" exitonforwardfailure yes || true
+    ssh_config_expect oryx-tunnel "$tunnel" serveraliveinterval 15 || true
+    ssh_config_expect oryx-tunnel "$tunnel" serveralivecountmax 4 || true
 
     expected="$(printf '%s\n' \
         'localforward 127.0.0.1:12801 127.0.0.1:12801' \
@@ -250,38 +372,9 @@ validate_ssh_configuration() {
             printf '%s\n' "$line"
         done <<< "$tunnel" | sort
     )"
-    [[ "$actual" == "$expected" ]] || return 1
+    [[ "$actual" == "$expected" ]] || ssh_config_errors+=("oryx-tunnel forwards=$actual (expected $expected)")
 
-    local_hits="$(matching_local_hosts)"
-    [[ -z "$local_hits" ]] || return 1
-}
-
-matching_local_hosts() {
-    local line line_number=0 target pattern positive excluded index
-    local -a fields
-    [[ -f "$HOME/.ssh/config.local" ]] || return 0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        ((line_number += 1))
-        read -r -a fields <<< "$line"
-        [[ "${fields[0]:-}" == Host || "${fields[0]:-}" == host ]] || continue
-        for target in oryx oryx-tunnel; do
-            positive=false
-            excluded=false
-            for ((index = 1; index < ${#fields[@]}; index += 1)); do
-                pattern="${fields[index]}"
-                [[ "$pattern" == \#* ]] && break
-                if [[ "$pattern" == !* ]]; then
-                    [[ "$target" == ${pattern#!} ]] && excluded=true
-                elif [[ "$target" == $pattern ]]; then
-                    positive=true
-                fi
-            done
-            if "$positive" && ! "$excluded"; then
-                printf '%s:%s\n' "$line_number" "$line"
-                break
-            fi
-        done
-    done < "$HOME/.ssh/config.local"
+    ((${#ssh_config_errors[@]} == 0))
 }
 
 valid_token_file() {
@@ -293,12 +386,21 @@ valid_token_file() {
 }
 
 token_leak_result() {
-    local token_file="$1"
-    if grep -rqF -f <(sed -n 's/^TUNNEL_SERVICE_TOKEN_[A-Z]*=//p' "$token_file") "$DOTFILES" 2>/dev/null; then
+    local token_file="$1" status
+    if grep -rqF -f <(
+        while IFS='=' read -r name value; do
+            [[ "$name" == TUNNEL_SERVICE_TOKEN_ID || "$name" == TUNNEL_SERVICE_TOKEN_SECRET ]] && printf '%s\n' "$value"
+        done < "$token_file"
+    ) "$DOTFILES" 2>/dev/null; then
         printf 'FOUND\n'
+        return 0
     else
-        printf 'none\n'
+        status=$?
     fi
+    case "$status" in
+        1) printf 'none\n' ;;
+        *) printf 'UNKNOWN\n' ;;
+    esac
 }
 
 find_adb() {
@@ -429,19 +531,45 @@ sock.close()
 PY
 }
 
+delivery_response_parts() {
+    local response="$1" line
+    DELIVERY_REMOTE_DIR=
+    DELIVERY_URL=
+    while IFS= read -r line; do
+        case "$line" in
+            ORYX_TUNNEL_TEMP_DIR=*) DELIVERY_REMOTE_DIR="${line#ORYX_TUNNEL_TEMP_DIR=}" ;;
+            http://*|https://*) DELIVERY_URL="$line" ;;
+        esac
+    done <<< "$response"
+    [[ "$DELIVERY_REMOTE_DIR" =~ ^/tmp/oryx-tunnel-setup\.[A-Za-z0-9._-]+$ && -n "$DELIVERY_URL" ]]
+}
+
+cleanup_delivery_directory() {
+    local remote_dir="$1"
+    [[ "$remote_dir" =~ ^/tmp/oryx-tunnel-setup\.[A-Za-z0-9._-]+$ ]] || return 1
+    ssh oryx "rm -rf -- '$remote_dir'" >/dev/null 2>&1
+}
+
 delivery_preview() {
-    local nonce url remote_file body
+    local nonce remote_file response body curl_status=0 cleanup_status=0
     nonce="oryx-preview-$(date +%s)-$RANDOM"
     remote_file="oryx-preview-$nonce"
-    url="$(ssh oryx "d=\$(mktemp -d); printf '%s\\n' '$nonce' > \"\$d/$remote_file\"; forward url \"\$d/$remote_file\"")" || return 1
-    url="${url##*$'\n'}"
-    [[ -n "$url" ]] || return 1
-    body="$(curl --noproxy '*' -fsS "$url")" || return 1
-    [[ "$body" == "$nonce" ]]
+    response="$(ssh oryx "d=\$(mktemp -d /tmp/oryx-tunnel-setup.XXXXXX) || exit
+printf '%s\\n' '$nonce' > \"\$d/$remote_file\"
+url=\$(forward url \"\$d/$remote_file\") || { rm -rf -- \"\$d\"; exit 1; }
+printf 'ORYX_TUNNEL_TEMP_DIR=%s\\n' \"\$d\"
+printf '%s\\n' \"\$url\"")" || return 1
+    if ! delivery_response_parts "$response"; then
+        cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" >/dev/null 2>&1 || true
+        return 1
+    fi
+    body="$(curl --noproxy '*' -fsS "$DELIVERY_URL")" || curl_status=$?
+    cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
+    [[ $curl_status -eq 0 && $cleanup_status -eq 0 && "$body" == "$nonce" ]]
 }
 
 delivery_forward_port() {
-    local nonce port remote_file session ready=0 body
+    local nonce port remote_file session ready=0 body delivered=false
     nonce="oryx-port-$(date +%s)-$RANDOM"
     port="$(pick_free_port)" || return 1
     remote_file="oryx-port-$nonce"
@@ -479,11 +607,18 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
         sleep 1
     done
     ((ready)) || { kill -TERM "$session" 2>/dev/null || true; wait "$session" 2>/dev/null || true; return 1; }
-    body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file")" || {
+    for _ in {1..100}; do
+        if body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file")"; then
+            delivered=true
+            break
+        fi
+        sleep 0.1
+    done
+    if ! "$delivered"; then
         kill -TERM "$session" 2>/dev/null || true
         wait "$session" 2>/dev/null || true
         return 1
-    }
+    fi
     wait "$session" || return 1
     [[ "$body" == "$nonce" ]]
 }
@@ -496,14 +631,27 @@ ask_yes() {
 }
 
 delivery_page() {
-    local nonce remote_file url
+    local nonce remote_file response open_status=0 cleanup_status=0
     nonce="oryx-page-$(date +%s)-$RANDOM"
     remote_file="oryx-page-$nonce.html"
-    url="$(ssh oryx "d=\$(mktemp -d); printf '<p>%s</p>\\n' '$nonce' > \"\$d/$remote_file\"; forward url \"\$d/$remote_file\"")" || return 1
-    url="${url##*$'\n'}"
-    [[ -n "$url" ]] || return 1
-    ssh oryx "forward open '$url'" || return 1
-    ask_yes "Did the forward test page open in the browser?"
+    response="$(ssh oryx "d=\$(mktemp -d /tmp/oryx-tunnel-setup.XXXXXX) || exit
+printf '<p>%s</p>\\n' '$nonce' > \"\$d/$remote_file\"
+url=\$(forward url \"\$d/$remote_file\") || { rm -rf -- \"\$d\"; exit 1; }
+printf 'ORYX_TUNNEL_TEMP_DIR=%s\\n' \"\$d\"
+printf '%s\\n' \"\$url\"")" || return 1
+    if ! delivery_response_parts "$response"; then
+        cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" >/dev/null 2>&1 || true
+        return 1
+    fi
+    local seen=false
+    if ssh oryx "forward open '$DELIVERY_URL'"; then
+        # The browser loads the page after forward open returns, so the page stays until Sami answers.
+        ask_yes "Did the forward test page open in the browser?" && seen=true
+    else
+        open_status=1
+    fi
+    cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
+    [[ $open_status -eq 0 && $cleanup_status -eq 0 ]] && "$seen"
 }
 
 delivery_sound() {
@@ -512,12 +660,25 @@ delivery_sound() {
 }
 
 delivery_browser() {
-    local grant endpoint version
-    grant="$(ssh -t oryx 'forward browser grant --ttl 5m')" || return 1
-    endpoint="$(grep -Eo 'https?://[^[:space:]]+' <<< "$grant" | tail -n 1)"
-    [[ -n "$endpoint" ]] || return 1
+    local grant_output endpoint version
+    local -a grant_status endpoints
+    grant_output="$work_dir/browser-grant.out"
+    printf 'Touch the YubiKey now for the browser grant.\n' >&2
+    set +e
+    ssh -t oryx 'forward browser grant --ttl 5m' | tee "$grant_output"
+    grant_status=("${PIPESTATUS[@]}")
+    set -e
+    [[ "${grant_status[0]}" -eq 0 && "${grant_status[1]}" -eq 0 ]] || return 1
+    mapfile -t endpoints < <(grep -Eo 'https?://[^[:space:]]+' "$grant_output")
+    ((${#endpoints[@]})) || return 1
+    endpoint="${endpoints[${#endpoints[@]} - 1]}"
     version="$(ssh oryx "curl -fsS '${endpoint%/}/json/version'")" || return 1
     [[ "$version" == *'"Browser"'* ]]
+}
+
+human_tier_read() {
+    printf 'Touch the YubiKey now for the human-tier secret read.\n' >&2
+    ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' >/dev/null
 }
 
 write_probe_configs() {
@@ -643,12 +804,15 @@ if [[ "${1:-}" != --after-sync ]]; then
         stop sync "dotfiles-sync did not bring ~/.dotfiles to origin/main"
     fi
     report_line "sync: complete"
+    rm -rf -- "$work_dir"
+    trap - EXIT
     exec env ORYX_SETUP_REPORT="$REPORT" bash "$DOTFILES/laptop/oryx-tunnel-setup" --after-sync
 fi
 
 if [[ ! -f "$HOME/.ssh/oryx-tunnel" ]]; then
     stop preflight "~/.ssh/oryx-tunnel is missing; this command never creates the key because oryx authorized_keys holds its public half"
 fi
+read_listeners preflight
 for port in 12800 12801 12802 12803 12804 12805 12806; do
     check_listener "$port" forward || true
 done
@@ -668,12 +832,14 @@ if ! ensure_link "$DOTFILES/laptop/ssh-config" "$HOME/.ssh/config"; then
     stop ssh-config "could not link ~/.ssh/config to laptop/ssh-config"
 fi
 chmod 600 "$HOME/.ssh/config"
+if ! write_ssh_reference_config; then
+    stop ssh-config "could not read the installed ~/.ssh/config without config.local"
+fi
 if ! validate_ssh_configuration; then
-    local_host_lines="$(matching_local_hosts)"
-    if [[ -n "$local_host_lines" ]]; then
-        stop ssh-config "~/.ssh/config.local has a Host line that matches oryx: $local_host_lines"
+    if [[ -f "$HOME/.ssh/config.local" ]]; then
+        stop ssh-config "~/.ssh/config.local changed effective Host oryx or Host oryx-tunnel values: ${ssh_config_errors[*]}"
     fi
-    stop ssh-config "the installed Host oryx or Host oryx-tunnel configuration is not the required Cloudflare configuration"
+    stop ssh-config "the installed Host oryx or Host oryx-tunnel configuration is not the required Cloudflare configuration: ${ssh_config_errors[*]}"
 fi
 report_line "ssh-config: complete"
 
@@ -687,6 +853,7 @@ if ! ssh oryx 'test -x ~/.local/bin/oryx-edge-cutover'; then
     stop cutover "~/.local/bin/oryx-edge-cutover is missing; the parent installs it"
 fi
 cutover_output="$work_dir/cutover.out"
+printf 'Touch the YubiKey now for the oryx cutover.\n' >&2
 set +e
 ssh -t oryx '~/.local/bin/oryx-edge-cutover' 2>&1 | tr -d '\r' | tee "$cutover_output"
 cutover_status=("${PIPESTATUS[@]}")
@@ -701,8 +868,8 @@ report_line "cutover: complete"
 token_dir="$HOME/.config/forward"
 token_file="$token_dir/tunnel-oryx.env"
 mkdir -p "$token_dir"
-umask 077
-token_tmp="$(mktemp "$token_dir/.tunnel-oryx-XXXXXX")"
+chmod 700 "$token_dir"
+token_tmp="$(umask 077; mktemp "$token_dir/.tunnel-oryx-XXXXXX")"
 if ! ssh oryx 'secrets CF_ACCESS_ORYX_TUNNEL_ID CF_ACCESS_ORYX_TUNNEL_SECRET -- sh -c '\''printf "TUNNEL_SERVICE_TOKEN_ID=%s\nTUNNEL_SERVICE_TOKEN_SECRET=%s\n" "$CF_ACCESS_ORYX_TUNNEL_ID" "$CF_ACCESS_ORYX_TUNNEL_SECRET"'\''' > "$token_tmp"; then
     rm -f "$token_tmp"
     stop token "could not copy the Cloudflare Access tunnel token from oryx"
@@ -719,12 +886,7 @@ fi
 chmod 600 "$token_file"
 leak_result="$(token_leak_result "$token_file")"
 report_line "token: copied; dotfiles search: $leak_result"
-[[ "$leak_result" == none ]] || stop token "the tunnel token was found in ~/.dotfiles"
-
-if ! ssh oryx 'umask 077; mkdir -p ~/.config/forward && t=$(mktemp ~/.config/forward/.config-XXXXXX.toml) && cat >"$t" && mv -f "$t" ~/.config/forward/config.toml && systemctl --user restart forward-serve.service' < "$DOTFILES/forward/config-serve-oryx.toml"; then
-    stop move "could not atomically replace oryx's forward configuration and restart forward-serve.service"
-fi
-report_line "move: wrote oryx ~/.config/forward/config.toml and restarted forward-serve.service"
+[[ "$leak_result" == none ]] || stop token "the dotfiles tunnel token search returned $leak_result"
 
 mkdir -p "$HOME/.config/systemd/user/forward-tunnel@oryx.service.d" "$HOME/.config/forward"
 if ! ensure_link "$DOTFILES/forward/forward-daemon@.service" "$HOME/.config/systemd/user/forward-daemon@.service" \
@@ -732,20 +894,27 @@ if ! ensure_link "$DOTFILES/forward/forward-daemon@.service" "$HOME/.config/syst
     || ! ensure_link "$DOTFILES/forward/forward-tunnel@oryx.service.d/token.conf" "$HOME/.config/systemd/user/forward-tunnel@oryx.service.d/token.conf" \
     || ! ensure_link "$DOTFILES/laptop/adb-server.service" "$HOME/.config/systemd/user/adb-server.service" \
     || ! ensure_link "$DOTFILES/forward/config-daemon-oryx.toml" "$HOME/.config/forward/config-oryx.toml"; then
-    stop units "could not install a tunnel or adb unit file"
+    stop unit-files "could not install a tunnel or adb unit file"
 fi
 adb="$(find_adb)"
 if [[ -z "$adb" ]]; then
     if ! sudo apt-get install -y adb; then
-        stop units "could not install adb"
+        stop unit-files "could not install adb"
     fi
     adb="$(find_adb)"
-    [[ -n "$adb" ]] || stop units "adb is still unavailable after installing it"
+    [[ -n "$adb" ]] || stop unit-files "adb is still unavailable after installing it"
 fi
 if ! systemctl --user daemon-reload; then
-    stop units "could not reload user units"
+    stop unit-files "could not reload user units"
 fi
+report_line "unit-files: complete"
 
+if ! ssh oryx 'umask 077; mkdir -p ~/.config/forward && t=$(mktemp ~/.config/forward/.config-XXXXXX.toml) && cat >"$t" && mv -f "$t" ~/.config/forward/config.toml && systemctl --user restart forward-serve.service' < "$DOTFILES/forward/config-serve-oryx.toml"; then
+    stop move "could not atomically replace oryx's forward configuration and restart forward-serve.service"
+fi
+report_line "move: wrote oryx ~/.config/forward/config.toml and restarted forward-serve.service"
+
+read_listeners units
 for listener in $(listener_lines 5037 | while IFS= read -r line; do line_pids "$line"; done); do
     if ! pid_belongs_to_unit "$listener" adb-server.service && process_is_adb "$listener"; then
         if ! "$adb" kill-server; then
@@ -807,7 +976,7 @@ self_probe "forward port delivery" delivery_forward_port
 self_probe "browser page delivery" delivery_page
 self_probe "audio delivery" delivery_sound
 self_probe "browser grant delivery" delivery_browser
-self_probe "human-tier read" bash -c "ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' >/dev/null"
+self_probe "human-tier read" human_tier_read
 self_probe "oryx SSM login" ssh oryx-ssm true
 self_probe "token file mode and owner" self_token_mode
 self_probe "token leak search" self_token_leak_search
