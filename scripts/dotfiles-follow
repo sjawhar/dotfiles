@@ -774,6 +774,56 @@ class State:
 
 
 
+def judge_fetch(
+    data: dict, options: argparse.Namespace, found: dict[str, str], failed: bool, command: str,
+    said: str, after: str,
+) -> None:
+    """Count runs in a row whose fetch failed; say it once --fetch-grace of them have (both modes)."""
+    if not failed:
+        data["fetch_failures"] = 0
+        return
+    failures = int(data.get("fetch_failures", 0)) + 1
+    data["fetch_failures"] = failures
+    log(f"fetch failed ({failures} run(s) in a row): {said.strip()}")
+    if failures >= options.fetch_grace:
+        found["fetch"] = (
+            f"{command} failed on the last {failures} runs; the latest said:\n{tail(said)}\n  {after}"
+        )
+
+
+def run_tools_step(
+    repo: Path, options: argparse.Namespace, state: State, deadline: float, head: str,
+    found: dict[str, str], judged: set[str], facts: dict,
+) -> None:
+    """The post-update tools step at HEAD, shared by git mode and jj mode.
+
+    A run on which a slow-root pass takes priority (slow_sweep_takes_priority: overdue, and no run
+    has left its tools for one in the last interval), and the time left still holds that whole
+    pass, leaves the tools step to the next run and makes the slow-root pass instead (sweep_hooks):
+    otherwise a tools step that fails, or runs after every fast-forward, would keep the slow roots
+    unswept for as long as it does. That run's time is on disk before the pass starts, so a pass
+    that never completes, even one whose whole run is killed, takes at most one run's tools step
+    per interval. With --no-hook-sweep there is no pass, so the tools step always runs."""
+    data = state.data
+    now = time.time()
+    if (
+        not getattr(options, "no_hook_sweep", False)
+        and slow_sweep_takes_priority(options, data, now)
+        and deadline - monotonic() >= options.slow_sweep_timeout
+    ):
+        facts["tools_deferred"] = True
+        data["slow_sweep_priority_at"] = now
+        state.commit()
+        log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
+        return
+    judged.add("tools")
+    why = install_tools(repo, options)
+    if why:
+        found["tools"] = why + f"\n  {display_path(repo)} is at {short(head)}. The next run tries again."
+    else:
+        data["tools_ok_head"] = head
+
+
 def restore_marketplace_lock(
     repo: Path,
     state: State,
@@ -824,6 +874,16 @@ def assess_jj_and_follow(
         )
         return found, judged, facts
 
+    # dotfiles-sync moves @ onto main@origin and nothing else, so another --remote or --branch
+    # is refused before anything in the checkout changes.
+    if (options.remote, options.branch) != ("origin", "main"):
+        found["sync"] = (
+            f"{display} is a colocated jj checkout, which follows only origin/main through"
+            f" dotfiles-sync; --remote {options.remote} --branch {options.branch} is refused and"
+            " the checkout stays in place."
+        )
+        return found, judged, facts
+
     entries, error = worktree_status(repo, MARKETPLACE_LOCK)
     entries, error, lock_error, restored = restore_marketplace_lock(
         repo, state, entries, error, display, status_paths=(MARKETPLACE_LOCK,)
@@ -851,18 +911,13 @@ def assess_jj_and_follow(
     head = rev(repo, "HEAD")
     target = rev(repo, target_ref)
     facts.update(head=head, target=target, relation="current" if head == target and head else "not-current")
+    judge_fetch(
+        data, options, found, code == SYNC_FETCH_FAILURE, f"`jj git fetch --quiet` in {display}", output,
+        f"The sync stopped before it judged or moved {display}.",
+    )
     if code == SYNC_FETCH_FAILURE:
-        failures = int(data.get("fetch_failures", 0)) + 1
-        data["fetch_failures"] = failures
-        log(f"fetch failed ({failures} run(s) in a row): {tail(output)}")
-        if failures >= options.fetch_grace:
-            found["fetch"] = (
-                f"`jj git fetch --quiet` in {display} failed on the last {failures} runs; the latest said:\n"
-                f"{tail(output)}\n  The sync stopped before it judged or moved {display}."
-            )
         # The sync stopped at its fetch, so it judged nothing else: an open sync condition stays open.
         return found, {"fetch"}, facts
-    data["fetch_failures"] = 0
     if code != 0:
         found["sync"] = (
             f"`scripts/dotfiles-sync --here ''` in {display} exited {code}; its working-copy"
@@ -879,20 +934,7 @@ def assess_jj_and_follow(
     if facts["fast_forwarded"]:
         log(f"moved colocated jj checkout {display} from {short(before)} to {short(head)}")
     if data.get("tools_ok_head") != head:
-        if not getattr(options, "no_hook_sweep", False) and slow_sweep_takes_priority(
-            options, data, time.time()
-        ) and deadline - monotonic() >= options.slow_sweep_timeout:
-            facts["tools_deferred"] = True
-            data["slow_sweep_priority_at"] = time.time()
-            state.commit()
-            log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
-        else:
-            judged.add("tools")
-            why = install_tools(repo, options)
-            if why:
-                found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
-            else:
-                data["tools_ok_head"] = head
+        run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
 
 # ------------------------------------------------------------------------------- one run
@@ -913,18 +955,11 @@ def assess_and_follow(
 
     fetched = git(repo, "fetch", "--quiet", options.remote, options.branch, timeout=options.fetch_timeout)
     target_ref = f"refs/remotes/{options.remote}/{options.branch}"
-    if fetched.returncode != 0:
-        failures = int(data.get("fetch_failures", 0)) + 1
-        data["fetch_failures"] = failures
-        log(f"fetch failed ({failures} run(s) in a row): {fetched.stderr.strip()}")
-        if failures >= options.fetch_grace:
-            found["fetch"] = (
-                f"`git fetch {options.remote} {options.branch}` in {display} failed on the last"
-                f" {failures} runs; the latest said:\n{tail(fetched.stderr)}\n"
-                f"  The checks below used the {target_ref} of the last fetch that worked."
-            )
-    else:
-        data["fetch_failures"] = 0
+    judge_fetch(
+        data, options, found, fetched.returncode != 0,
+        f"`git fetch {options.remote} {options.branch}` in {display}", fetched.stderr,
+        f"The checks below used the {target_ref} of the last fetch that worked.",
+    )
 
     head = rev(repo, "HEAD")
     target = rev(repo, target_ref)
@@ -1039,30 +1074,11 @@ def assess_and_follow(
                 log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
                 head = facts["head"]
 
-    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD. A
-    # run on which a slow-root pass takes priority (slow_sweep_takes_priority: overdue, and no run
-    # has left its tools for one in the last interval), and the time left still holds that whole
-    # pass, leaves the tools step to the next run and makes the slow-root pass instead
-    # (sweep_hooks): otherwise a tools step that fails, or runs after every fast-forward, would keep
-    # the slow roots unswept for as long as it does. That run's time is on disk before the pass
-    # starts, so a pass that never completes, even one whose whole run is killed, takes at most one
-    # run's tools step per interval.
+    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
     if head == target and "dirty" not in found and (
         facts["fast_forwarded"] or data.get("tools_ok_head") != head
     ):
-        now = time.time()
-        if not getattr(options, "no_hook_sweep", False) and slow_sweep_takes_priority(options, data, now) and deadline - monotonic() >= options.slow_sweep_timeout:
-            facts["tools_deferred"] = True
-            data["slow_sweep_priority_at"] = now
-            state.commit()
-            log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
-        else:
-            judged.add("tools")
-            why = install_tools(repo, options)
-            if why:
-                found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
-            else:
-                data["tools_ok_head"] = head
+        run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
 
 

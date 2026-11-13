@@ -216,6 +216,29 @@ class JjFollow(JjHarness):
         # The sync stops at its fetch and judges nothing, so no message says the refusal cleared.
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
 
+    def test_a_remote_or_branch_other_than_origin_main_is_refused_before_the_checkout_moves(self) -> None:
+        # dotfiles-sync moves @ onto main@origin only, so jj mode must not run it for another ref.
+        (self.repo / "omp/plugins/omp-plugins.lock.json").write_text("interrupted marketplace lock\n")
+        # The second run's refusal is the same open condition, so it sends no second message.
+        for overrides, new_messages in (({"branch": "release"}, 1), ({"remote": "upstream"}, 0)):
+            with self.subTest(**overrides):
+                parent = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+
+                messages = self.run_follow(**overrides)
+
+                self.assertEqual(len(messages), new_messages)
+                if messages:
+                    self.assertIn("DOTFILES SYNC REFUSED", messages[0])
+                    self.assertIn("follows only origin/main", messages[0])
+                self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), parent)
+                self.assertEqual(
+                    (self.repo / "omp/plugins/omp-plugins.lock.json").read_text(),
+                    "interrupted marketplace lock\n",
+                )
+                self.no_tool_run()
+                for path, want in self.local_bytes.items():
+                    self.assertEqual(path.read_bytes(), want)
+
     def test_unpublished_commit_is_reported_without_tools_or_file_changes(self) -> None:
         local = self.repo / "other.txt"
         local.write_text("local commit\n")

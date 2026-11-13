@@ -125,6 +125,11 @@ case "$name" in
             printf 'remote delivery cleanup\n' >> "$FAKE_LOG"
             exit 0
         fi
+        if [[ "$joined" == *"secrets get CLOUDFLARE_API_KEY"* ]]; then
+            # secretsd waits for the touch here; the test reads where the prompt stands against it.
+            printf 'fake secretsd: waiting for the human-tier touch\n' >&2
+            exit 0
+        fi
         if [[ "$joined" == *"forward browser grant"* ]]; then
             printf 'https://browser.example\n'
             exit 0
@@ -889,6 +894,19 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(after_sync=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("YubiKey", result.stderr)
+
+    def test_human_tier_prompt_comes_before_its_secrets_read(self) -> None:
+        # The cutover and the browser grant also name the YubiKey, so this reads the human-tier
+        # read's own prompt and its place before the touch secretsd waits for.
+        self.checkout("git", "human-tier-prompt")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        prompt = "Touch the YubiKey now for the human-tier secret read."
+        waiting = "fake secretsd: waiting for the human-tier touch"
+        self.assertIn(prompt, result.stderr)
+        self.assertIn(waiting, result.stderr)
+        self.assertLess(result.stderr.index(prompt), result.stderr.index(waiting))
 
     def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
         self.checkout("git", "before-move-unit")

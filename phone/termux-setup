@@ -26,7 +26,8 @@ chmod 700 "$ssh_dir"
 
 pkg_output=$(mktemp)
 config_tmp=""
-trap 'rm -f "$pkg_output" "$config_tmp"' EXIT
+rest_tmp=""
+trap 'rm -f "$pkg_output" "$config_tmp" "$rest_tmp"' EXIT
 if ! pkg install -y openssh cloudflared >"$pkg_output" 2>&1; then
     cat "$pkg_output" >&2
     exit 1
@@ -50,42 +51,48 @@ if [[ "$has_config_begin" != "$has_config_end" ]]; then
     exit 1
 fi
 
+# The managed block goes first: ssh takes the first value it reads, so an older Host oryx or a
+# Host * further down cannot change where ssh oryx goes.
 config_tmp=$(mktemp "$ssh_dir/.config.XXXXXX")
-if ((has_config_begin)); then
-    awk -v begin="$config_begin" -v end="$config_end" -v block="$managed_config" '
-        $0 == begin {
-            if (inside || seen) {
-                bad = 1
-                exit
-            }
-            inside = 1
-            seen = 1
-            print block
-            next
-        }
-        $0 == end {
-            if (!inside) {
-                bad = 1
-                exit
-            }
-            inside = 0
-            next
-        }
+rest_tmp=$(mktemp "$ssh_dir/.config-rest.XXXXXX")
+if [[ -f "$config" ]]; then
+    if ! awk -v begin="$config_begin" -v end="$config_end" '
+        $0 == begin { if (inside || seen) { bad = 1; exit } inside = 1; seen = 1; next }
+        $0 == end { if (!inside) { bad = 1; exit } inside = 0; next }
         !inside { print }
-        END {
-            if (inside || !seen || bad) {
-                exit 1
-            }
-        }
-    ' "$config" > "$config_tmp"
-elif [[ -f "$config" ]]; then
-    cat "$config" > "$config_tmp"
-    printf '\n%s\n' "$managed_config" >> "$config_tmp"
-else
-    printf '%s\n' "$managed_config" > "$config_tmp"
+        END { if (inside || bad) exit 1 }
+    ' "$config" > "$rest_tmp"; then
+        printf 'termux-setup: SSH config has a broken managed block\n' >&2
+        exit 1
+    fi
 fi
+{
+    printf '%s\n' "$managed_config"
+    if grep -q '[^[:space:]]' "$rest_tmp"; then
+        printf '\n'
+        # Drop the blank lines that used to separate the managed block from the rest.
+        awk 'started || NF { started = 1; print }' "$rest_tmp"
+    fi
+} > "$config_tmp"
+rm -f "$rest_tmp"
 mv "$config_tmp" "$config"
 config_tmp=""
+
+# Check what ssh oryx will use, not what the file says.
+effective=$(ssh -F "$config" -G oryx 2>&1) || {
+    printf 'termux-setup: ssh -G oryx failed:\n%s\n' "$effective" >&2
+    exit 1
+}
+first_value() { awk -v key="$1" '$1 == key { sub(/^[^ ]+ /, ""); print; exit }' <<< "$effective"; }
+for expected in "hostname oryx.thecybermonk.com" "user agent" "identityfile ~/.ssh/id_ed25519" \
+    "proxycommand cloudflared access ssh --hostname %h"; do
+    field="${expected%% *}"
+    if [[ "$(first_value "$field")" != "${expected#* }" ]]; then
+        printf 'termux-setup: ssh oryx would use %s %s, not %s; check %s\n' \
+            "$field" "$(first_value "$field")" "${expected#* }" "$config" >&2
+        exit 1
+    fi
+done
 
 touch "$known_hosts"
 if ! grep -Fqx -- "$known_hosts_line" "$known_hosts"; then

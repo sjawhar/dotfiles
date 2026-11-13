@@ -184,6 +184,28 @@ exit "${PKG_EXIT:-0}"''',
         self.assertEqual(known_hosts.count(KNOWN_HOSTS_LINE), 1)
         self.assertEqual(self.pkg_calls(), ["install -y openssh cloudflared", "install -y openssh cloudflared"])
 
+    def test_older_host_entries_do_not_decide_ssh_oryx(self) -> None:
+        # ssh takes the first value it reads, so an older Host oryx or a Host * earlier in the
+        # phone's config must not win over the managed block.
+        self.ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        older = (
+            "Host oryx\n  HostName oryx.example-tailnet.invalid\n  User someone\n"
+            "  IdentityFile ~/.ssh/old_key\n  ProxyCommand nc %h %p\n\n"
+            "Host *\n  User everyone\n"
+        )
+        self.config.write_text(older, encoding="utf-8")
+
+        for run in (1, 2):
+            with self.subTest(run=run):
+                result = self.invoke()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = self.ssh_values()
+                self.assertEqual(values["hostname"], ["oryx.thecybermonk.com"])
+                self.assertEqual(values["user"], ["agent"])
+                self.assertEqual(values["identityfile"][0], "~/.ssh/id_ed25519")
+                self.assertEqual(values["proxycommand"], ["cloudflared access ssh --hostname %h"])
+                self.assertIn(older, self.config.read_text(encoding="utf-8"))
+
     def test_pkg_output_reaches_standard_error_only_on_failure(self) -> None:
         result = self.invoke(PKG_EXIT="1")
 
