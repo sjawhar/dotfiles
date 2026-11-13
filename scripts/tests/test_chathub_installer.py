@@ -25,6 +25,10 @@ bridge:
         "*": relay
         "example.com": user
         "@admin:example.com": admin
+matrix:
+    message_status_events: false
+    delivery_receipts: false
+    message_error_notices: true
 database:
     type: postgres
     uri: postgres://user:password@host/database?sslmode=disable
@@ -66,6 +70,7 @@ appservice:
     as_token: "This value is generated when generating the registration"
     hs_token: "This value is generated when generating the registration"
 bridge:
+    message_status_events: false
     encryption:
         allow: true
     permissions:
@@ -124,6 +129,47 @@ else
     echo "curl: (22) The requested URL returned error: 404" >&2; exit 22
 fi
 """
+
+STATUS_EVENT_PATHS: tuple[tuple[str, str], ...] = (
+    ("gmessages", "matrix"),
+    ("whatsapp", "matrix"),
+    ("signal", "matrix"),
+    ("meta", "matrix"),
+    ("instagram", "matrix"),
+    ("discord", "bridge"),
+    ("linkedin", "matrix"),
+)
+
+JsonPath = tuple[str | int, ...]
+_MISSING = object()
+
+
+def leaf_values(value: object, path: JsonPath = ()) -> dict[JsonPath, object]:
+    if isinstance(value, dict):
+        if not value:
+            return {path: value}
+        leaves: dict[JsonPath, object] = {}
+        for key, child in value.items():
+            leaves.update(leaf_values(child, path + (key,)))
+        return leaves
+    if isinstance(value, list):
+        if not value:
+            return {path: value}
+        leaves = {}
+        for index, child in enumerate(value):
+            leaves.update(leaf_values(child, path + (index,)))
+        return leaves
+    return {path: value}
+
+
+def changed_leaves(before: object, after: object) -> dict[JsonPath, tuple[object, object]]:
+    before_leaves = leaf_values(before)
+    after_leaves = leaf_values(after)
+    return {
+        path: (before_leaves.get(path, _MISSING), after_leaves.get(path, _MISSING))
+        for path in before_leaves.keys() | after_leaves.keys()
+        if before_leaves.get(path, _MISSING) != after_leaves.get(path, _MISSING)
+    }
 
 
 def write_executable(path: Path, body: str) -> None:
@@ -210,6 +256,18 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(c["bridge"]["backfill"]["forward_limits"]["missed"]["dm"], -1)
         self.assertNotIn("database", c)
 
+    def test_every_bridge_posts_a_send_status(self) -> None:
+        """A bridge records each outbound result, so hub-send can report that a message sent."""
+        self.install()
+
+        for bridge, section in STATUS_EVENT_PATHS:
+            with self.subTest(bridge=bridge):
+                matrix_or_bridge = self.config(bridge)[section]
+                self.assertTrue(matrix_or_bridge["message_status_events"])
+                if section == "matrix":
+                    self.assertFalse(matrix_or_bridge["delivery_receipts"])
+                    self.assertTrue(matrix_or_bridge["message_error_notices"])
+
     def test_every_bridge_double_puppets_through_one_hub_registration(self) -> None:
         """Bridges act as @sami through the doublepuppet registration, so they join new
         chat rooms for him instead of leaving invites that nobody accepts."""
@@ -272,6 +330,33 @@ class ChathubInstaller(unittest.TestCase):
         self.assertEqual(self.config("gmessages")["homeserver"]["domain"], "chathub")
         restarts = [l for l in log.read_text(encoding="utf-8").splitlines() if "try-restart mautrix@" in l]
         self.assertEqual(restarts, ["--user try-restart mautrix@gmessages"])
+
+    def test_rerun_turns_on_send_status_and_restarts_each_bridge_once(self) -> None:
+        """Configs from before send statuses converge without changing other leaves, and each
+        corrected bridge restarts once."""
+        self.install()
+        for bridge, section in STATUS_EVENT_PATHS:
+            cfg = self.state / bridge / "config.yaml"
+            subprocess.run([REAL_YQ, "-i", f".{section}.message_status_events = false", str(cfg)], check=True)
+        before = {bridge: self.config(bridge) for bridge, _ in STATUS_EVENT_PATHS}
+        log = self.root / "systemctl.log"
+        log.write_text("", encoding="utf-8")
+
+        self.install()
+
+        for bridge, section in STATUS_EVENT_PATHS:
+            with self.subTest(bridge=bridge):
+                self.assertEqual(
+                    changed_leaves(before[bridge], self.config(bridge)),
+                    {(section, "message_status_events"): (False, True)},
+                )
+        lines = log.read_text(encoding="utf-8").splitlines()
+        restarts = [line for line in lines if "try-restart" in line]
+        self.assertEqual(
+            restarts,
+            [f"--user try-restart mautrix@{bridge}" for bridge, _ in STATUS_EVENT_PATHS],
+        )
+        self.assertNotIn("--user restart tuwunel", lines)
 
     def test_state_is_private(self) -> None:
         self.install()
