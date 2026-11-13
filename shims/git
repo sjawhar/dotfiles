@@ -179,8 +179,13 @@ git_external_command() {
     [[ -n "$exec_path" && -f "$exec_path/git-$1" && -x "$exec_path/git-$1" ]] && return 0
     command -v -- "git-$1" > /dev/null 2>&1
 }
+git_alias_refuse() {
+    printf 'git shim: cannot read alias %s, so the leak-term check cannot run. Nothing was changed.\n' "$1" >&2
+    exit 1
+}
+
 git_expand_aliases() {
-    local name
+    local name decoder_pid decoder_read
     local -a alias_words=()
     local -A seen=()
     while ((i < ${#args[@]})); do
@@ -192,7 +197,8 @@ git_expand_aliases() {
             git_command_index
             return
         }
-        mapfile -d '' -t alias_words < <(
+        alias_words=()
+        if mapfile -d '' -t alias_words < <(
             python3 - "$_real" "$name" "${args[@]:0:i}" <<'PY'
 import os
 import subprocess
@@ -262,11 +268,19 @@ sys.stdout.buffer.write(b"found\0")
 for word in words:
     sys.stdout.buffer.write(word + b"\0")
 PY
-        )
-        case "${alias_words[0]:-error}" in
-            missing | shell | error | split) return ;;
+        ); then
+            decoder_read=0
+        else
+            decoder_read=$?
+        fi
+        decoder_pid=$!
+        if ((decoder_read != 0)) || ! wait "$decoder_pid"; then
+            git_alias_refuse "$name"
+        fi
+        case "${alias_words[0]:-}" in
+            missing | shell) return ;;
             found) ;;
-            *) return ;;
+            *) git_alias_refuse "$name" ;;
         esac
         git_alias_changes_environment "${alias_words[@]:1}" && return
         [[ "${alias_words[1]:-}" != "$name" ]] || return
@@ -282,12 +296,27 @@ git_command_index
 git_expand_aliases
 set -- "${args[@]}"
 
-# Keep the existing case-insensitive command-line override test: a caller who selects a hooks
-# path owns that command, and the scanner does not run.
+# A caller who selects a hooks path owns that command, and the scanner does not run. Git's
+# `-c` takes a separate `key=value`, while --config-env accepts both separate and `=` forms.
 caller_hooks_path=0
-shopt -s nocasematch
-[[ " ${args[*]:0:i} " == *core.hookspath=* ]] && caller_hooks_path=1
-shopt -u nocasematch
+for ((k = 0; k < i; k++)); do
+    config=""
+    case "${args[k]}" in
+        -c | --config-env)
+            ((k + 1 < i)) || break
+            config="${args[k + 1]}"
+            ((k += 1))
+            ;;
+        --config-env=*) config="${args[k]#*=}" ;;
+        # Another global's separate value is never a -c entry, even when it reads `-c`.
+        -C | --git-dir | --work-tree | --namespace | --shallow-file | --attr-source) ((k += 1)); continue ;;
+        *) continue ;;
+    esac
+    [[ "${config%%=*}" != [Cc][Oo][Rr][Ee].[Hh][Oo][Oo][Kk][Ss][Pp][Aa][Tt][Hh] ]] || {
+        caller_hooks_path=1
+        break
+    }
+done
 
 # Prints DOTFILES_GIT_COMMIT_SCAN, `cleanup=<mode> verbose=<n|config|unknown>
 # status=<1|0|config|unknown> verify=<1|0|unknown>`: the mode is `absent` when the argv names no

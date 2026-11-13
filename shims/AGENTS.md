@@ -149,7 +149,8 @@ before handing the call to the real one.
   interactive or tool-driven commit selects all of it; `describe` and `desc` scan every selected
   revision (or `@`); and `new` scans the working-copy diff before it creates its new revision.
   Each scans its explicit `-m` or `--message` text, and `describe`/`desc` also scan `--stdin`;
-  with `--editor`, only the edited text is scanned, as jj stores only that.
+  an unreadable standard input refuses before jj runs, while an empty message or diff does not
+  load the encrypted list. With `--editor`, only the edited text is scanned, as jj stores only that.
   Where `commit`, `ci`, `describe` or `desc` opens an editor, the shim replaces `ui.editor` with
   `leak-terms-check jj-editor`; the wrapper runs jj's selected editor with the argv jj would give
   it (a string is split as jj 0.46 splits it: by the shlex 2.0.1 crate's rules when it holds a
@@ -160,15 +161,18 @@ before handing the call to the real one.
   an editor that is the wrapper itself, and names an editor configuration it cannot read as such;
   its active guard rejects a recursive wrapper run. The
   `--deleted` refusal and trailer handling stay as they were.
-  Every `jj git push` first dry-runs its resolved destination plan and, for every public or
-  unreadable GitHub URL, scans the outgoing commits that destination does not advertise. This
-  encrypted-term check runs for every caller before the shared public leak check, and fails closed
-  when it cannot read the plan, destination or term list. The shared public check remains an agent
-  check, or a person's check where it is installed; `DOTFILES_JJ_NO_LEAK_CHECK=1` skips only that
-  public check for a person's one command, never the encrypted-term check. In an agent session the
-  variable is ignored. Every destination must pass before any actual push. A failed dry-run,
-  unreadable plan or nonzero check refuses; without a check, only a destination confirmed private
-  passes in an agent session (outside one, no check means no public gate).
+  Every `jj git` finds its nested subcommand after the same jj 0.46 global-option table that
+  finds its outer command. Therefore every `jj git <global options> push` first dry-runs its
+  resolved destination plan and, for every public or unreadable GitHub URL, scans the outgoing
+  commits that destination does not advertise. This encrypted-term check runs for every caller
+  before the shared public leak check, and fails closed when it cannot read the plan, destination
+  or a nonempty scan's term list. The shared public check remains an agent check, or a person's
+  check where it is installed; `DOTFILES_JJ_NO_LEAK_CHECK=1` skips only that public check for a
+  person's one command, never the encrypted-term check. In an agent session the variable is
+  ignored. Every destination must pass before any actual push. A failed dry-run, unreadable plan
+  or nonzero check refuses; without a check, only a destination confirmed private passes in an
+  agent session (outside one, no check means no public gate). A push whose destination already
+  holds every outgoing commit does not load the encrypted list.
   The shim resolves push aliases in jj's startup invocation context: up to eight levels in an
   agent session, up to 64 outside one. A command whose first word is a builtin other than `git`
   needs no alias lookup. Lookup/decoding failures and deeper expansions refuse (a person's
@@ -176,8 +180,8 @@ before handing the call to the real one.
   push; outside an agent session a cyclic alias is left to jj, which refuses it itself and runs
   nothing. The checked expanded argv is the actual push argv. Non-GitHub destinations pass
   unchanged. `--quiet` needs a second dry-run with only that rendering flag removed to read the
-  plan. The gate does not depend on jj's git executable or git's hooks, and aliases cannot bypass
-  `--deleted` refusal.
+  plan. The gate does not depend on jj's git executable or git's hooks. Its nested parse also
+  makes the agent `--deleted` refusal apply when globals stand between `git` and `push`.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration. The prune runs
   when the repository's common directory, resolved through symlinks, lies under a temporary
@@ -219,28 +223,31 @@ before handing the call to the real one.
   is not a Git builtin and no external `git-<command>` exists in Git's exec path or on `PATH`
   (Git runs that before it reads an alias), the shim reads `alias.<command>` through the real Git
   with those globals, applies Git's quoted `split_cmdline` rules, and repeats for each ordinary
-  alias. The expanded arguments are both checked and run. A builtin never needs the configuration
-  read. A shell alias (its value starts with `!`), a bad alias, or an alias loop stays with Git
-  and is not expanded by the shim. Every caller's `git commit` without a command-line
-  `-c core.hooksPath` gets `core.hooksPath=git-hooks/` and scans after Git runs the repository's
-  own hooks. The hook first
-  runs the repository's `pre-commit` or `commit-msg`, with Git's same arguments and standard
-  input; only a successful hook is followed by the scan. The pre-commit scan selects an empty
-  attribute-source tree, `core.attributesFile=/dev/null`, and `GIT_ATTR_NOSYSTEM=1`, so tree,
-  configured, and system attributes cannot hide text. Git has no switch for a non-empty
-  `info/attributes`; then the scan uses `--text`, including NUL-containing bytes. Otherwise
-  Git's own binary detection keeps a file containing a NUL byte in its first 8,000 bytes outside
-  the text scan. It reads added lines and result-side paths from the staged diff, submodule
-  changes included whatever `diff.ignoreSubmodules` says. The commit-message scan reads the
-  applies the effective cleanup mode (an explicit `--cleanup=default` resolves as Git resolves it,
-  `core.commentChar`, and scissors handling. For `core.commentChar=auto`, the character is taken
-  only from what Git wrote into the prepared message: without the editor or the status, Git's own
-  choice from that text; else the character of Git's cut lines when Git wrote them (scissors or
-  verbose, a line for each) and every cut line in the file has that one character, or the one
-  candidate that starts Git's comment block after the message. When
-  that is not certain, every line is read. A comment or text after scissors that Git removes is
-  not read; the same text is read when Git keeps it. These commit scans do not cover
-  `git commit --no-verify`, a caller's `-c core.hooksPath`, `merge`, `pull`,
+  alias. The expanded arguments are both checked and run. A builtin never starts the Python
+  alias decoder. A missing alias and a shell alias (its value starts with `!`) stay with Git; an
+  empty, split, malformed or failed decoder result refuses before Git can change anything. An
+  alias loop stays with Git and is not expanded by the shim. Every caller's `git commit` gets
+  `core.hooksPath=git-hooks/` unless an exact, case-insensitive `core.hooksPath` key appears in a
+  separate `-c key=value`, a separate `--config-env key=environment`, or an attached
+  `--config-env=key=environment` global. Values of other configuration keys do not exempt it.
+  The hook first runs the repository's `pre-commit` or `commit-msg`, with Git's same arguments and
+  standard input; only a successful hook is followed by the scan. The pre-commit hook then calls
+  `leak-terms-check staged`, which produces the cached diff with an empty attribute-source tree,
+  `core.attributesFile=/dev/null`, and `GIT_ATTR_NOSYSTEM=1`, so tree, configured, and system
+  attributes cannot hide text. Git has no switch for a non-empty `info/attributes`; then the
+  scanner uses `--text`, including NUL-containing bytes. Otherwise Git's own binary detection
+  keeps a file containing a NUL byte in its first 8,000 bytes outside the text scan. It reads
+  added lines and result-side paths from the staged diff, submodule changes included whatever
+  `diff.ignoreSubmodules` says. The commit-message scan decodes Git's effective
+  `i18n.commitEncoding` (UTF-8 by default), then applies the effective cleanup mode (an explicit
+  `--cleanup=default` resolves as Git resolves it), `core.commentChar`, and scissors handling.
+  For `core.commentChar=auto`, the character is taken only from what Git wrote into the prepared
+  message: without the editor or the status, Git's own choice from that text; else the character
+  of Git's cut lines when Git wrote them (scissors or verbose, a line for each) and every cut line
+  in the file has that one character, or the one candidate that starts Git's comment block after
+  the message. When that is not certain, every line is read. A comment or text after scissors that
+  Git removes is not read; the same text is read when Git keeps it. These commit scans do not
+  cover `git commit --no-verify`, a caller's exact hooks-path configuration, `merge`, `pull`,
   `cherry-pick`, `revert`, `rebase`, `am`, `commit-tree`, or Git run by its full path.
   A `git fetch <remote> <src>:<dst>` whose source is not a full ref name runs with `--no-prune`
   when no refspec has a `*`, since git's pruning deletes such a destination that already exists
@@ -256,17 +263,17 @@ before handing the call to the real one.
   option it cannot read or an ambiguous abbreviation refuses. The gate's pre-push scans when the
   URL Git gives it, after `insteadOf`, is a public or unreadable GitHub repository
   (`scripts/github-repo-visibility`). It reads Git's update lines and the destination's live
-  advertisement, then scans only the commits the updates send that the destination does not
-  hold: their added result-side lines and paths and their messages, read as UTF-8 and with
-  replacement objects ignored. The outgoing-diff producer applies the same empty attribute tree,
-  configured-attribute override, and system-attribute disablement as the commit hook. A non-empty
-  `info/attributes` makes that producer use `--text`; its bytes remain safe because messages use
-  a separate NUL-delimited producer and diffs use a separate byte stream. The diff stream frames
-  `commit <object-id>` lines only outside hunks, whose declared parent and result counts are
-  checked before a line can be a boundary. Without `info/attributes`, Git's own binary detection
-  still omits NUL-containing file bytes. jj runs
-  `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote, so no hook
-  runs for that push; the shim directs those pushes through this gate by the same rule.
+  advertisement, then finds the commits the updates send that the destination does not hold. No
+  such commit means no encrypted-list read; otherwise it scans their added result-side lines and
+  paths and their messages, read as UTF-8 and with replacement objects ignored. The
+  outgoing-diff producer applies the same empty attribute tree, configured-attribute override,
+  and system-attribute disablement as the commit hook. A non-empty `info/attributes` makes that
+  producer use `--text`; its bytes remain safe because messages use a separate NUL-delimited
+  producer and diffs use a separate byte stream. The diff stream frames `commit <object-id>` lines
+  only outside hunks, whose declared parent and result counts are checked before a line can be a
+  boundary. Without `info/attributes`, Git's own binary detection still omits NUL-containing file
+  bytes. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote,
+  so no hook runs for that push; the shim directs those pushes through this gate by the same rule.
   The checkout is guarded when a URL `git remote -v` prints (read whole after the tab: a push line
   without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial clone's
   filter, which may hold anything, follows that; a remote listed with a blank URL, its name and a

@@ -194,12 +194,20 @@ prepare_auto_comment_char() {
 }
 
 message_scan_args() {
-    local cleanup verbose configured code=0 comment_path read_every_line
+    local cleanup verbose configured code=0 comment_path read_every_line encoding
     resolve_cleanup_and_verbose
+    encoding="UTF-8"
+    configured="$(git config --get i18n.commitEncoding 2> /dev/null)" || code=$?
+    case "$code:$configured" in
+        1:*) ;;
+        0:?*) encoding="$configured" ;;
+        *) exit 1 ;;
+    esac
     if ((read_every_line)); then
-        scanner_args=(message --cleanup verbatim --place "commit message")
+        scanner_args=(message --cleanup verbatim --place "commit message" --encoding "$encoding")
         return 0
     fi
+    code=0
     configured="$(git config --get core.commentChar 2> /dev/null)" || code=$?
     case "$code:$configured" in
         1:*) comment_char="#" ;;
@@ -216,7 +224,7 @@ message_scan_args() {
         *) comment_char="" ;;
     esac
 
-    scanner_args=(message --cleanup "$cleanup" --place "commit message")
+    scanner_args=(message --cleanup "$cleanup" --place "commit message" --encoding "$encoding")
     if [[ -n "$comment_char" ]]; then
         scanner_args+=(--comment-char "$comment_char")
     fi
@@ -237,22 +245,7 @@ if [[ -n "${DOTFILES_GIT_COMMIT_SCAN:-}" ]]; then
 
     case "$name" in
         pre-commit)
-            # The empty tree removes worktree .gitattributes. Disable configured and system
-            # attributes too; info/attributes has no switch, so force its diff to text.
-            attribute_source="$(git mktree < /dev/null)" || exit 1
-            [[ "$attribute_source" =~ ^[0-9a-f]{40,64}$ ]] || exit 1
-            info_attributes="$(git rev-parse --git-path info/attributes)" || exit 1
-            diff_text=()
-            if [[ -s "$info_attributes" ]]; then
-                diff_text=(--text)
-            fi
-            set +e
-            GIT_NO_REPLACE_OBJECTS=1 GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null "--attr-source=$attribute_source" -c core.quotePath=false diff --cached --ignore-submodules=none -U0 --no-ext-diff --no-textconv --no-color --no-renames \
-                "${diff_text[@]}" --no-relative --src-prefix=a/ --dst-prefix=b/ --submodule=short --diff-algorithm=myers |
-                "$here/../../scripts/leak-terms-check" diff
-            pipe_status=("${PIPESTATUS[@]}")
-            set -e
-            ((pipe_status[0] == 0 && pipe_status[1] == 0)) || exit 1
+            "$here/../../scripts/leak-terms-check" staged || exit 1
             ;;
         commit-msg)
             message_scan_args

@@ -152,18 +152,18 @@ alias_refuse() {
     printf 'jj shim: %s. Nothing was changed.\n' "$1" >&2
     exit 1
 }
-# Locate the subcommand past jj's global options. The leak-term parser below
-# recognizes the same globals wherever they occur, but aliases resolve before
-# jj applies options after the command.
+# Locate a subcommand past jj 0.46's global options. Call it with the first token
+# to inspect, so nested commands use the same table.
 _pargs=("$@")
 command_index() {
-    _pi=0
+    _pi="${1:-0}"
     while ((_pi < ${#_pargs[@]})); do
         case "${_pargs[_pi]}" in
             -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
             -R?* | --repository=* | --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=*) _pi=$((_pi + 1)) ;;
+            --ignore-working-copy | --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager) _pi=$((_pi + 1)) ;;
             --) _pi=$((_pi + 1)); break ;;
-            -*) _pi=$((_pi + 1)) ;;
+            -*) break ;;
             *) break ;;
         esac
     done
@@ -180,7 +180,7 @@ resolve_aliases() {
     for ((depth = 0; depth <= cap; depth++)); do
         name="${_pargs[_pi]:-}"
         case "$name" in
-            "" | abandon | absorb | backout | bisect | bookmark | b | commit | ci | config | describe | desc | diff | diffedit | duplicate | edit | evolog | file | fix | gerrit | git | help | interdiff | log | metaedit | new | next | op | operation | parallelize | prev | rebase | redo | resolve | restore | revert | root | show | sign | simplify-parents | sparse | split | squash | status | st | tag | undo | unsign | util | version | workspace) return 0 ;;
+            "" | -h | --help | -V | --version | abandon | absorb | backout | bisect | bookmark | b | commit | ci | config | describe | desc | diff | diffedit | duplicate | edit | evolog | file | fix | gerrit | git | help | interdiff | log | metaedit | new | next | op | operation | parallelize | prev | rebase | redo | resolve | restore | revert | root | show | sign | simplify-parents | sparse | split | squash | status | st | tag | undo | unsign | util | version | workspace) return 0 ;;
         esac
         if ((depth >= cap)); then
             alias_refuse "alias expansion exceeds $cap levels"
@@ -226,8 +226,15 @@ for value in result:
 }
 resolve_aliases
 set -- "${_pargs[@]}"
-if [[ "$_gate" == agent && "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
-    for _parg in "${_pargs[@]:_pi+2}"; do
+_jj_git_pi=-1
+if [[ "${_pargs[_pi]:-}" == git ]]; then
+    _jj_outer_pi=$_pi
+    command_index "$((_pi + 1))"
+    _jj_git_pi=$_pi
+    _pi=$_jj_outer_pi
+fi
+if [[ "$_gate" == agent && $_jj_git_pi -ge 0 && "${_pargs[_jj_git_pi]:-}" == push ]]; then
+    for _parg in "${_pargs[@]:_jj_git_pi+1}"; do
         [[ "$_parg" == -- ]] && break
         if [[ "$_parg" == --deleted ]]; then
             cat >&2 << 'EOF'
@@ -262,14 +269,41 @@ fi
 # `git config` read and, where that sets nothing, a `git remote` and a
 # `git rev-parse`; any other command, an alias included, pays it.
 _pre=()
-trailer_on() {
-    local d="" repo target="" a prev=""
-    for a in "$@"; do
-        [[ "$a" == -- ]] && break
-        case "$prev" in -R | --repository) d="$a" ;; esac
-        case "$a" in --repository=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
-        prev="$a"
+# Return the last repository path from a sequence of jj global options. Callers
+# give only option ranges, so a value that belongs to another global is skipped.
+repository_option() {
+    local index=0 option result=""
+    local -a options=("$@")
+    while ((index < ${#options[@]})); do
+        option="${options[index]}"
+        case "$option" in
+            -R | --repository)
+                ((index + 1 < ${#options[@]})) || break
+                result="${options[index + 1]}"
+                ((index += 2))
+                ;;
+            -R=*) result="${option#*=}"; ((index += 1)) ;;
+            -R?*) result="${option#-R}"; ((index += 1)) ;;
+            --repository=*) result="${option#*=}"; ((index += 1)) ;;
+            --at-operation | --at-op | --color | --config | --config-file) ((index += 2)) ;;
+            --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=* | \
+                --ignore-working-copy | --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager)
+                ((index += 1))
+                ;;
+            --) break ;;
+            *) ((index += 1)) ;;
+        esac
     done
+    printf '%s' "$result"
+}
+
+trailer_on() {
+    local d="" configured="" repo target=""
+    d="$(repository_option "${_pargs[@]:0:_pi}")"
+    if [[ -n "$_jj_command" ]]; then
+        configured="$(repository_option "${_jj_global[@]}")"
+        [[ -z "$configured" ]] || d="$configured"
+    fi
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
     d="${d%/}"
@@ -291,13 +325,10 @@ trailer_on() {
     "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" git --git-dir="$target" > /dev/null 2>&1
 }
 git_target() {
-    local d="" repo target="" a prev=""
-    for a in "$@"; do
-        [[ "$a" == -- ]] && break
-        case "$prev" in -R | --repository) d="$a" ;; esac
-        case "$a" in --repository=* | -R=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
-        prev="$a"
-    done
+    local d="" repo target=""
+    # jj accepts globals after `git push`, too. This reader skips each global
+    # option's value, so that value cannot be mistaken for a repository key.
+    d="$(repository_option "${_pargs[@]}")"
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
     d="${d%/}"
@@ -322,7 +353,7 @@ git_target() {
 # The leak-term scanner, for the push check below and the commit, describe and new checks after it.
 _jj_scanner="${BASH_SOURCE[0]%/*}/../scripts/leak-terms-check"
 push_gate() {
-    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc
+    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start
     local zero=0000000000000000000000000000000000000000
     local scripts="${BASH_SOURCE[0]%/*}/../scripts"
     local header='^Changes to push to (.+):$'
@@ -331,7 +362,8 @@ push_gate() {
     local move='^move (forward|backward|sideways) from ([0-9a-f]+) to ([0-9a-f]+)$'
     local -a display=() remotes=()
     local -A updates=() push_urls=()
-    for a in "${_pargs[@]:_pi+2}"; do
+    start=$((_jj_git_pi + 1))
+    for a in "${_pargs[@]:start}"; do
         [[ "$a" == -- ]] && break
         case "$a" in --help | -h) return 0 ;; esac
     done
@@ -432,7 +464,7 @@ push_gate() {
         done <<< "${push_urls[$remote]}"
     done
 }
-if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+if [[ $_jj_git_pi -ge 0 && "${_pargs[_jj_git_pi]:-}" == push ]]; then
     # Execute the same expanded argv that is checked, not a second alias lookup.
     push_gate "$@"
 fi
@@ -482,6 +514,7 @@ jj_scan_message() {
     ((statuses[0] == 0)) || jj_scan_refuse "cannot read the message for the leak-term check"
     ((statuses[1] == 0)) || jj_scan_refuse "the leak-term check did not pass"
 }
+
 # Scan the -m texts as jj joins them: each paragraph ends in a newline, with a blank line between two.
 jj_scan_messages() {
     local paragraph joined="" completed=0
@@ -652,9 +685,26 @@ if [[ -n "$_jj_command" ]] && ((_jj_help == 0)); then
                 done
             done
             if ((_jj_stdin)); then
-                if IFS= read -r -d '' _jj_stdin_text; then
-                    jj_scan_refuse "cannot read a NUL byte in a description from standard input"
-                fi
+                # Read whole into memory, never a file (no message is written to disk): a reader that reports
+                # its own status, so a read error refuses instead of reading as an empty description. Bash
+                # drops NUL bytes from a variable, so the reader refuses one (a description is text), and the
+                # trailing sentinel keeps final newlines, which $(...) strips.
+                _jj_stdin_status=0
+                _jj_stdin_text="$(python3 -c '
+import sys
+try:
+    data = sys.stdin.buffer.read()
+except OSError:
+    raise SystemExit(2)
+if b"\0" in data:
+    raise SystemExit(3)
+sys.stdout.buffer.write(data + b"x")
+' 2> /dev/null)" || _jj_stdin_status=$?
+                case "$_jj_stdin_status" in
+                    0) _jj_stdin_text="${_jj_stdin_text%x}" ;;
+                    3) jj_scan_refuse "cannot read a NUL byte in a description from standard input" ;;
+                    *) jj_scan_refuse "cannot read the description from standard input" ;;
+                esac
                 ((!_jj_editor)) && jj_scan_message "$_jj_stdin_text" "commit message"
             elif ((${#_jj_messages[@]} && !_jj_editor)); then
                 jj_scan_messages
@@ -696,6 +746,8 @@ if ((${#_jj_final_config[@]})); then
 fi
 
 if ((_jj_stdin)); then
+    # The bytes checked, through a pipe from a subshell that sets the marker and execs jj; the shim exits with jj's
+    # status.
     if printf '%s' "$_jj_stdin_text" |
         (DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"); then
         _jj_statuses=("${PIPESTATUS[@]}")
@@ -704,13 +756,35 @@ if ((_jj_stdin)); then
     fi
     exit "${_jj_statuses[1]}"
 fi
+_add=0
+_add_destination=""
+if [[ "${_pargs[_pi]:-}" == workspace ]]; then
+    _jj_workspace_pi=$_pi
+    command_index "$((_pi + 1))"
+    if [[ "${_pargs[_pi]:-}" == add ]]; then
+        _add=1
+        _jj_add_index=$((_pi + 1))
+        while ((_jj_add_index < ${#_pargs[@]})); do
+            _jj_add_option="${_pargs[_jj_add_index]}"
+            case "$_jj_add_option" in
+                -R | --repository | --at-operation | --at-op | --color | --config | --config-file | \
+                    --name | -r | --revision | -m | --message | --sparse-patterns)
+                    _jj_add_index=$((_jj_add_index + 2))
+                    ;;
+                -R?* | --repository=* | --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=* | \
+                    -r?* | --revision=* | -m?* | --message=* | --sparse-patterns=* | --ignore-working-copy | \
+                    --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager | --colocate | --no-colocate)
+                    _jj_add_index=$((_jj_add_index + 1))
+                    ;;
+                --) _jj_add_index=$((_jj_add_index + 1)); break ;;
+                -*) break ;;
+                *) _add_destination="$_jj_add_option"; break ;;
+            esac
+        done
+    fi
+    _pi=$_jj_workspace_pi
+fi
 unset _pargs _pi _parg
-
-_add=0 _prev=""
-for _a in "$@"; do
-    if [[ "$_prev" == workspace && "$_a" == add ]]; then _add=1; break; fi
-    _prev="$_a"
-done
 ((_add)) || exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"
 
 _err="$(mktemp)"
@@ -724,7 +798,7 @@ cat "$_err" >&2
 
 # jj names the new workspace relative to the current directory.
 _rel="$(sed -n 's/^Created workspace in "\(.*\)"$/\1/p' "$_err" | tail -1)"
-[[ -n "$_rel" ]] || exit 0
+_rel="${_rel:-$_add_destination}"
 _dest="$(realpath -m -- "$_rel")"
 [[ -f "$_dest/.git" ]] || exit 0
 if ! _out="$(git -C "$_dest" worktree lock --reason "jj shim: locked on add (AGENTC-431)" "$_dest" 2>&1)"; then

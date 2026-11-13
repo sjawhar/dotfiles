@@ -464,6 +464,47 @@ class ScanModes(LeakTestCase):
                 self.assertEqual(leaked_terms(clean), [])
                 self.assert_hidden(subprocess.CompletedProcess([], 1, "", clean))
 
+    def test_scanner_masks_overlapping_path_terms(self) -> None:
+        terms = ("alpha beta", "beta gamma")
+        matcher = scanner_module().TermMatcher(terms)
+        self.assertEqual(matcher.spans("notes/alpha beta gamma.txt"), [
+            scanner_module().Span(6, 16), scanner_module().Span(12, 22)
+        ])
+        self.assertEqual(
+            scanner_module().mask_path("notes/alpha beta gamma.txt", matcher.spans("notes/alpha beta gamma.txt")),
+            "notes/<listed term>.txt",
+        )
+        listed = encrypt_yaml("terms: |\n  alpha beta\n  beta gamma\n")
+        diff = (
+            "diff --git a/notes/alpha beta gamma.txt b/notes/alpha beta gamma.txt\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/notes/alpha beta gamma.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+clean\n"
+        )
+        result = self.check("diff", diff, env={**self.env, "DOTFILES_LEAK_TERMS_FILE": str(listed)})
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("notes/<listed term>.txt", result.stderr)
+        for term in terms:
+            self.assertNotIn(term, result.stderr)
+
+    def test_scanner_refuses_an_unknown_message_encoding(self) -> None:
+        result = self.check("message", "clean\n", "--encoding", "unknown-test-encoding")
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("cannot decode standard input", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_scanner_staged_uses_the_outgoing_attribute_policy(self) -> None:
+        repository = self.root / "staged"
+        repository.mkdir()
+        self.ok(["/usr/bin/git", "init", "-q"], repository)
+        (repository / ".gitattributes").write_text("*.txt -diff\n", encoding="utf-8")
+        (repository / "hidden.txt").write_text("Quillfeather Lane 9\n", encoding="utf-8")
+        self.ok(["/usr/bin/git", "add", "."], repository)
+        result = self.launch([str(CHECK), "staged"], cwd=repository, env=self.env)
+        self.assert_found(result, "hidden.txt:1")
+
     def test_scanner_casefolds_and_accepts_space_or_tab_runs(self) -> None:
         spaced = self.check("message", "quillfeather   LANE 9\n")
         tabbed = self.check("message", "quillfeather\tLANE 9\n")
@@ -1246,6 +1287,59 @@ class GitLeaks(LeakTestCase):
                     self.stage(repository, "alias.txt", "clean\n", agent)
                     self.assert_clean(repository, agent, *options, "ci", "-m", "clean")
 
+    def test_git_term_refuses_an_alias_when_the_decoder_fails(self) -> None:
+        failing_python = self.root / "failing-python"
+        write_executable(
+            failing_python / "python3",
+            "#!/bin/sh\nif [ \"$1\" = - ]; then exit 71; fi\nexec /usr/bin/python3 \"$@\"\n",
+        )
+        for agent in (False, True):
+            with self.subTest(agent=agent):
+                repository = self.repository(agent)
+                configured = self.git_run(repository, "config", "alias.ci", "commit", agent=agent, real=True)
+                self.assertEqual(configured.returncode, 0, configured.stderr)
+                environment = {"PATH": f"{failing_python}{os.pathsep}{self.environment(agent)['PATH']}"}
+                status = self.git_run(repository, "status", "--short", agent=agent, extra=environment)
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.stage(repository, "alias.txt", "Quillfeather Lane 9\n", agent)
+                before = self.head(repository, agent)
+                result = self.git_run(repository, "ci", "-m", "blocked", agent=agent, extra=environment)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(
+                    result.stderr,
+                    "git shim: cannot read alias ci, so the leak-term check cannot run. Nothing was changed.\n",
+                )
+                self.assertEqual(self.head(repository, agent), before)
+                self.assert_hidden(result)
+
+    def test_git_term_reads_only_config_keys_for_the_hooks_path_exemption(self) -> None:
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="unrelated-value"):
+                repository = self.repository(agent)
+                self.stage(repository, "leak.txt", "Quillfeather Lane 9\n", agent)
+                self.assert_refused(
+                    repository,
+                    agent,
+                    "leak.txt:1",
+                    "-c",
+                    "audit.note=core.hooksPath=unused",
+                    "commit",
+                    "-m",
+                    "blocked",
+                )
+            with self.subTest(agent=agent, case="hooks-path"):
+                repository = self.repository(agent)
+                self.stage(repository, "leak.txt", "Quillfeather Lane 9\n", agent)
+                self.assert_clean(repository, agent, "-c", "core.hookspath=/dev/null", "commit", "-m", "unchecked")
+            with self.subTest(agent=agent, case="hooks-path-after-a-value-that-reads-as-an-option"):
+                # `-C -c` changes into a directory named `-c`; the `-c core.hooksPath` after it is the caller's own.
+                repository = self.repository(agent)
+                (repository / "-c").mkdir()
+                self.stage(repository, "leak.txt", "Quillfeather Lane 9\n", agent)
+                self.assert_clean(
+                    repository, agent, "-C", "-c", "-c", "core.hookspath=/dev/null", "commit", "-m", "unchecked"
+                )
+
     def test_git_term_alias_expansion_leaves_a_dashed_external_command_to_git(self) -> None:
         # Git 2.43's run_argv runs an external `git-<name>` from the exec path or PATH before it reads `alias.<name>`,
         # so a command whose name is both an alias and an external command runs the external one. The shim's alias
@@ -1495,6 +1589,32 @@ class GitLeaks(LeakTestCase):
                 self.assertEqual(stored.returncode, 0, stored.stderr)
                 _, _, body = stored.stdout.partition("\n\n")
                 self.assertEqual(body, f"{message}\n")
+
+    def test_git_message_uses_the_effective_commit_encoding(self) -> None:
+        term = "Café Zorble"
+        listed = encrypt_yaml(f"terms: |\n  {term}\n")
+        message = self.root / "latin-1-message"
+        message.write_bytes(f"{term}\n".encode("iso-8859-1"))
+        for agent in (False, True):
+            with self.subTest(agent=agent):
+                repository = self.repository(agent)
+                configured = self.git_run(
+                    repository, "config", "i18n.commitEncoding", "ISO-8859-1", agent=agent, real=True
+                )
+                self.assertEqual(configured.returncode, 0, configured.stderr)
+                self.stage(repository, "clean.txt", "clean\n", agent)
+                before = self.head(repository, agent)
+                result = self.launch(
+                    ["git", "commit", "--allow-empty", "-F", str(message)],
+                    cwd=repository,
+                    env=self.environment(agent, DOTFILES_LEAK_TERMS_FILE=str(listed)),
+                    text=False,
+                )
+                stderr = result.stderr.decode("utf-8", errors="surrogateescape")
+                self.assertNotEqual(result.returncode, 0, stderr)
+                self.assertIn("leak terms: commit message line 1: listed leak term", stderr)
+                self.assertEqual(self.head(repository, agent), before)
+                self.assertNotIn(term, stderr)
 
     def test_git_message_explicit_default_cleanup_beats_configuration(self) -> None:
         term = "Quillfeather Lane 9"
@@ -2101,6 +2221,38 @@ class JjLeaks(LeakTestCase):
                 self.assertEqual(self.state(repository, agent), before)
                 self.assert_hidden(output)
 
+    def test_jj_message_refuses_an_unreadable_standard_input(self) -> None:
+        directory = self.root / "description-directory"
+        directory.mkdir()
+
+        def read_directory(repository: Path, agent: bool, binary: str) -> subprocess.CompletedProcess[str]:
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                return self.launch(
+                    [binary, "describe", "--stdin"],
+                    cwd=repository,
+                    env=self.environment(agent),
+                    stdin=descriptor,
+                )
+            finally:
+                os.close(descriptor)
+
+        for agent in (False, True):
+            with self.subTest(agent=agent):
+                repository = self.repository(agent)
+                self.write(repository, "clean.txt", "clean\n")
+                direct = read_directory(repository, agent, self.jj_binary)
+                self.assertEqual(direct.returncode, 1, direct.stderr)
+                expected = self.expected_state(repository, agent)
+                result = read_directory(repository, agent, "jj")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(
+                    "jj shim: cannot read the description from standard input; nothing changed",
+                    result.stderr,
+                )
+                self.assertEqual(self.state(repository, agent), expected)
+                self.assert_hidden(result)
+
     def test_jj_message_editor_options_and_unknown_option_refuse(self) -> None:
         for agent in (False, True):
             with self.subTest(agent=agent, case="jj-editor"):
@@ -2450,6 +2602,55 @@ class JjLeaks(LeakTestCase):
         self.assertIn("jj shim: no real jj found on PATH", result.stderr)
         self.assertNotIn("recurs", result.stderr.casefold())
 
+    def test_jj_message_uses_an_attached_repository_for_trailer_decisions(self) -> None:
+        overlay = self.root / f"omp-attribution-{self.session}.toml"
+        overlay.write_text(
+            f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n",
+            encoding="utf-8",
+        )
+        repository = self.repository(False)
+        result = self.jj(
+            self.root,
+            f"-R={repository}",
+            "describe",
+            "-m",
+            "clean",
+            agent=False,
+            extra={"JJ_CONFIG": f"{self.config}{os.pathsep}{overlay}"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.description(repository, False), "clean\n")
+
+    def test_jj_term_locks_workspace_add_after_global_options(self) -> None:
+        repository = self.repository(False)
+        workspace = self.root / "workspace"
+        result = self.jj(repository, "workspace", "--quiet", "add", str(workspace), agent=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed = self.launch(["/usr/bin/git", "-C", str(workspace), "worktree", "list", "--porcelain"], env=self.person)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("locked jj shim: locked on add (AGENTC-431)", listed.stdout)
+
+    def test_unreadable_lists_allow_empty_jj_new_but_refuse_a_clean_file(self) -> None:
+        cases = [case for case in unreadable_lists(self.root, self.person["PATH"]) if case[0] in {"key", "missing"}]
+        self.assertEqual({case[0] for case in cases}, {"key", "missing"})
+        for agent in (False, True):
+            for label, extra, correction in cases:
+                with self.subTest(agent=agent, case=label, empty=True):
+                    repository = self.repository(agent)
+                    before = self.commit_id(repository, agent, "@")
+                    result = self.jj(repository, "new", "--quiet", agent=agent, extra=extra)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotEqual(self.commit_id(repository, agent, "@"), before)
+                    self.assert_hidden(result)
+                with self.subTest(agent=agent, case=label, empty=False):
+                    repository = self.repository(agent)
+                    self.write(repository, "clean.txt", "clean\n")
+                    expected = self.expected_state(repository, agent)
+                    result = self.jj(repository, "new", "--quiet", agent=agent, extra=extra)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assert_one_correction_line(result, correction)
+                    self.assertEqual(self.state(repository, agent), expected)
+
     def test_unreadable_lists_refuse_jj_commits(self) -> None:
         cases = unreadable_lists(self.root, self.person["PATH"])
         for agent in (False, True):
@@ -2740,6 +2941,85 @@ class OutgoingLeaks(SinkRepositoryCase):
             self.real("config", "push.default", "current")
             self.real("config", "remote.pushDefault", destination)
             self.assert_push_refused(lambda: self.command(["git", "push"], self.person), leaky, "bare.txt:1", destination)
+
+    def test_push_refuses_jj_git_push_with_nested_global_options(self) -> None:
+        self.init_jj()
+        cases = (
+            ("config-separate", ("--config", "git.executable-path=/usr/bin/git")),
+            ("config-attached", ("--config=git.executable-path=/usr/bin/git",)),
+            ("repository", ("-R", str(self.repo), "--config", "git.executable-path=/usr/bin/git")),
+            ("quiet", ("--quiet", "--config", "git.executable-path=/usr/bin/git")),
+        )
+        for agent, environment in self.callers():
+            for label, options in cases:
+                with self.subTest(agent=agent, option=label):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    path = f"{self.unique(label)}.txt"
+                    leaky = self.commit(path, self.term, "clean", parent=self.base)
+                    bookmark = self.unique("bookmark")
+                    self.jj_ok(environment, "git", "import")
+                    self.jj_ok(environment, "bookmark", "set", "--allow-backwards", bookmark, "-r", leaky)
+                    self.refresh_visibility()
+                    self.assert_push_refused(
+                        lambda: self.command(["jj", "git", *options, "push", "--bookmark", bookmark], environment),
+                        leaky,
+                        f"{path}:1",
+                        url,
+                        "jj",
+                    )
+        before = self.sink_state(self.public_url)
+        deleted = self.command(["jj", "git", "--quiet", "push", "--deleted"], self.agent)
+        self.assertEqual(deleted.returncode, 1, deleted.stderr)
+        self.assertIn("jj shim: `jj git push --deleted` is refused in an agent session.", deleted.stderr)
+        self.assertEqual(self.sink_state(self.public_url), before)
+
+    def test_push_refuses_an_alias_when_the_decoder_fails(self) -> None:
+        self.real("config", "alias.p", "push")
+        failing_python = self.root / "failing-python"
+        write_executable(
+            failing_python / "python3",
+            "#!/bin/sh\nif [ \"$1\" = - ]; then exit 71; fi\nexec /usr/bin/python3 \"$@\"\n",
+        )
+        leaky = self.commit("alias-decoder.txt", self.term, "clean", parent=self.base)
+        before = self.sink_state(self.public_url)
+        result = self.command(
+            ["git", "p", "origin", f"{leaky}:refs/heads/{self.unique('alias-decoder')}"],
+            {**self.person, "PATH": f"{failing_python}{os.pathsep}{self.person['PATH']}"},
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "git shim: cannot read alias p, so the leak-term check cannot run. Nothing was changed.\n",
+        )
+        self.assertEqual(self.sink_state(self.public_url), before)
+        self.assert_hidden(result)
+
+    def test_unreadable_push_allows_an_advertised_tag_but_refuses_a_new_commit(self) -> None:
+        cases = [case for case in unreadable_lists(self.root, self.person["PATH"]) if case[0] in {"key", "missing"}]
+        self.assertEqual({case[0] for case in cases}, {"key", "missing"})
+        self.real("push", "origin", f"{self.base}:refs/heads/base")
+        for label, extra, correction in cases:
+            with self.subTest(case=label, kind="tag"):
+                tag = self.unique("advertised")
+                self.real("tag", tag, self.base)
+                self.refresh_visibility()
+                tag_result = self.command(["git", "push", "origin", f"refs/tags/{tag}"], {**self.agent, **extra})
+                self.assertEqual(tag_result.returncode, 0, tag_result.stderr)
+                self.sink_git(self.public_url, "show-ref", "--verify", f"refs/tags/{tag}")
+                self.assert_hidden(tag_result)
+            with self.subTest(case=label, kind="commit"):
+                path = f"{self.unique('new')}.txt"
+                commit = self.commit(path, "clean", "clean", parent=self.base)
+                before = self.sink_state(self.public_url)
+                self.refresh_visibility()
+                commit_result = self.command(
+                    ["git", "push", "origin", f"{commit}:refs/heads/{self.unique('new')}"],
+                    {**self.agent, **extra},
+                )
+                self.assertNotEqual(commit_result.returncode, 0, commit_result.stderr)
+                self.assert_one_correction_line(commit_result, correction)
+                self.assertEqual(self.sink_state(self.public_url), before)
 
     def test_push_term_gate_ignores_replacement_objects(self) -> None:
         leaky = self.commit("replace-leaky.txt", self.term, "clean")
