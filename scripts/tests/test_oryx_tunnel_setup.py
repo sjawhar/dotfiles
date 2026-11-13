@@ -925,6 +925,52 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(after_sync=True)
         self.assert_stop_before_move(result, "ssh-config")
 
+    def test_preflight_accepts_the_devbox_daemons_on_other_addresses(self) -> None:
+        # The laptop's devbox daemon binds forward's default ports on the laptop's tailnet address
+        # (installers/forward.sh writes listen = <tailnet IP>), and a legacy pair binds 127.0.0.2.
+        # Neither blocks the tunnel's binds on 127.0.0.1, so neither may stop the command.
+        self.checkout("git", "devbox-daemon-listeners")
+        self.advance_to_current()
+        self.fake_ss(
+            'LISTEN 0      4096   100.80.0.1:12800 0.0.0.0:* users:(("forward-daemon",pid=PID,fd=7))',
+            'LISTEN 0      4096   100.80.0.1:12803 0.0.0.0:* users:(("forward-daemon",pid=PID,fd=8))',
+            'LISTEN 0      4096   127.0.0.2:12802 0.0.0.0:* users:(("ssh",pid=PID,fd=5))',
+        )
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_ssh_config_check_passes_with_the_system_ssh_config(self) -> None:
+        # On the laptop, `ssh -G <host>` reads ~/.ssh/config and then /etc/ssh/ssh_config, while
+        # `ssh -F <file> -G <host>` skips the system file (ssh(1), -F). Stock Ubuntu's file sets
+        # SendEnv, HashKnownHosts and GSSAPIAuthentication for Host *. This fake ssh reads the
+        # system file for a plain -G, as the real one does.
+        system = Path("/etc/ssh/ssh_config")
+        self.checkout("git", "system-ssh-config")
+        self.advance_to_current()
+        bare = run(["/usr/bin/ssh", "-F", "/dev/null", "-G", "oryx"], cwd=self.home, env=self.env).stdout
+        with_system = self.root / "system-only.conf"
+        with_system.write_text(f"Match all\nInclude {system}\n", encoding="utf-8")
+        if run(["/usr/bin/ssh", "-F", str(with_system), "-G", "oryx"], cwd=self.home, env=self.env).stdout == bare:
+            self.skipTest(f"{system} on this host changes no ssh -G value")
+        real = self.fakebin / "real"
+        real.mkdir()
+        (real / "ssh").symlink_to(self.fakebin / "fake")
+        (self.fakebin / "ssh").unlink()
+        write_executable(
+            self.fakebin / "ssh",
+            f'''if [[ "${{1:-}}" == -G ]]; then
+    combined="$(/usr/bin/mktemp)"
+    {{ /bin/cat "$HOME/.ssh/config"; printf '\\nMatch all\\nInclude %s\\n' "{system}"; }} > "$combined"
+    status=0
+    /usr/bin/ssh -F "$combined" -G "$2" || status=$?
+    /bin/rm -f "$combined"
+    exit "$status"
+fi
+exec "{real}/ssh" "$@"''',
+        )
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
