@@ -8,10 +8,14 @@ temporary root; self.kept, under ~/.cache, is not."""
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_jj_lock_shim import real_jj  # noqa: E402
 
 SHIMS = Path(__file__).parents[1]
 SCRIPTS = SHIMS.parent / "scripts"
@@ -22,15 +26,6 @@ SESSION = "01a0fa64-b3a5-7415-b143-c2a338b5da8b"
 TRAILER = f"Omp-Session: {SESSION}"
 PUBLIC = "https://github.com/theorem-labs/oss-verify-proofs.git"
 FAKE = '#!/bin/bash\necho "$0 $*" >> "$FAKE_LOG"\nexit 1\n'
-
-
-def real_jj() -> str | None:
-    for d in os.environ["PATH"].split(os.pathsep):
-        c = Path(d) / "jj"
-        if c.is_file() and os.access(c, os.X_OK) and b"jj-lock-shim" not in c.read_bytes()[:512] and c.resolve().name != "mise":
-            return str(c)
-    found = subprocess.run(["mise", "which", "jj"], capture_output=True, text=True, check=False).stdout.strip()
-    return found or None
 
 
 class Base(unittest.TestCase):
@@ -190,8 +185,6 @@ class JjTest(Base):
     def setUp(self):
         super().setUp()
         jj = real_jj()
-        if jj is None:
-            raise unittest.SkipTest("no real jj")
         self.agent["PATH"] = os.pathsep.join([str(self.tmp / "fake-bin"), str(SHIMS), str(Path(jj).parent), self.agent["PATH"]])
         user = self.tmp / "jj-user.toml"
         user.write_text('[user]\nname = "Agent"\nemail = "agent@example.com"\n[signing]\nbehavior = "drop"\n')

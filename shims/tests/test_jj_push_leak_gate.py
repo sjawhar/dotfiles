@@ -18,11 +18,10 @@ hook find it; HOME is the test's own, so the visibility cache is the test's.
 import hashlib
 import os
 import re
-import resource
 import shutil
-import statistics
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -432,8 +431,10 @@ class JjPushLeakGateTest(unittest.TestCase):
         cfg = self.tmp / "jj.toml"
         cfg.write_text('[user]\nname = "T"\nemail = "t@example.com"\n[signing]\nbehavior = "drop"\n', encoding="utf-8")
         self.fake = fake
+        # None of the caller's GIT_CONFIG_* config: a core.hooksPath set there would decide which hooks run, and the
+        # gate reads a command-scope hooks path as the caller's own choice.
         self.env = {
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
             # The fake gh first, ahead of this shims dir, whose dotfiles checkout holds shims/gh: no gh past it is
             # reached. Then this shims dir, then the recording git and the sink helper.
             "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(fake), str(real_jj().parent), os.environ["PATH"]]),
@@ -871,6 +872,18 @@ class JjPushLeakGateTest(unittest.TestCase):
         # it only narrows; and a whole `sweep` over the checkouts must install the hook in exactly the guarded ones, and
         # defer none. So a change to either reader fails here until the other follows.
         self.keep_cache_fresh()
+        # The sweep trusts a cached private for 60 s from the entry's mtime, and one of the bash calls below can take
+        # longer than that on a busy machine: the entries' mtimes are refreshed every 5 s until the test ends.
+        stop = threading.Event()
+
+        def refresh():
+            while not stop.wait(5):
+                self.keep_cache_fresh()
+
+        fresher = threading.Thread(target=refresh, daemon=True)
+        fresher.start()
+        self.addCleanup(fresher.join)
+        self.addCleanup(stop.set)
         # Neither GIT_SSH_COMMAND (which setUp sets to block git's ssh transport) nor GIT_SSH: either makes every alias
         # unknown, and the table's alias rows are about ssh -G. The "sshCommand" rows set the checkout's own.
         env = {k: v for k, v in self.env.items() if not k.startswith("GIT_CONFIG") and k not in ("GIT_SSH_COMMAND", "GIT_SSH")} \
@@ -2198,32 +2211,33 @@ class JjPushLeakGateTest(unittest.TestCase):
         direct = run_bounded([str(real_jj()), *argv], self.repo, self.env)
         self.assertEqual((via.returncode, via.stdout), (direct.returncode, direct.stdout))
         self.assertFalse(self.calls.exists(), "jj log must run no git")
-        # Cost: CPU time (which the box's load barely moves, unlike wall time) of `git status` through this shim and
-        # through the same shim with the jj push gate cut out, both copied under one directory, alternating.
+        # Cost: what bash runs for `git status` through a copy of this shim and through a copy with the jj push gate cut
+        # out, each in its own directory and traced with `bash -x`, that directory read as one placeholder. The traces
+        # must be equal: the gate adds no command to that path. The control, the gate-less copy with one git call added
+        # after the agent-session test, must trace differently, which shows the trace sees one added command. CPU time
+        # is not used: here it is counted in 10 ms ticks, coarser than the cost of one added git call.
         text = (SHIMS / "git").read_text(encoding="utf-8")
         start = text.index("# jj publishes through git")
         tail = '    exec "$_real" "$@"\nfi\n'
         end = text.index(tail, start) + len(tail)
-        shims = {"with the gate": text, "without it": text[:start] + text[end:]}
-        self.assertNotIn("jj_push_gate", shims["without it"])
-        cpu: dict[str, list[float]] = {}
+        without = text[:start] + text[end:]
+        self.assertNotIn("jj_push_gate", without)
+        anchor = 'agent_context || exec "$_real" "$@"\n'
+        at = without.index(anchor) + len(anchor)
+        shims = {"with the gate": text, "without it": without,
+                 "with one git call added": without[:at] + '"$_real" rev-parse --git-dir > /dev/null\n' + without[at:]}
+        traces: dict[str, list[str]] = {}
         for name, body in shims.items():
             path = self.tmp / name.replace(" ", "-") / "git"
             path.parent.mkdir()
             path.write_text(body, encoding="utf-8")
             path.chmod(0o755)
-            shims[name] = str(path)
-            cpu[name] = []
-        for k in range(60):
-            for name in (("with the gate", "without it") if k % 2 == 0 else ("without it", "with the gate")):
-                before = resource.getrusage(resource.RUSAGE_CHILDREN)
-                subprocess.run([shims[name], "status", "--porcelain"], cwd=self.repo, env=self.env, capture_output=True, check=True)
-                after = resource.getrusage(resource.RUSAGE_CHILDREN)
-                cpu[name].append(after.ru_utime - before.ru_utime + after.ru_stime - before.ru_stime)
-        added = statistics.median(cpu["with the gate"]) - statistics.median(cpu["without it"])
-        print(f"\n  git status CPU: with the gate {statistics.median(cpu['with the gate']) * 1000:.2f} ms, "
-              f"without it {statistics.median(cpu['without it']) * 1000:.2f} ms")
-        self.assertLess(added, 0.001, "the jj push gate adds a millisecond or more of CPU to git status")
+            r = subprocess.run(["/bin/bash", "-x", str(path), "status", "--porcelain"], cwd=self.repo, env=self.env,
+                               capture_output=True, text=True, check=True)
+            traces[name] = r.stderr.replace(str(path.parent), "<shim dir>").splitlines()
+        self.assertEqual(traces["with the gate"], traces["without it"], "the jj push gate runs a command on the path of git status")
+        self.assertNotEqual(traces["with one git call added"], traces["without it"],
+                            "the trace does not show a git call added to the path of git status")
 
     # Fail closed, with a message that says what failed.
     def test_no_check_on_the_machine_refuses(self):

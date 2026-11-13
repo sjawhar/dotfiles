@@ -3,9 +3,11 @@
 # its git worktree locked. From inside an agent box every other box's workspace
 # path looks missing, and an unlocked registration under <store>/.git/worktrees/
 # can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
-# still removes it. In an agent session it refuses `jj git push --deleted` and
-# checks outgoing GitHub pushes with the shared public leak check. Outside one it
-# runs the same check on `jj git push` wherever this machine has the check
+# still removes it. In an agent session it refuses `jj git push --deleted`, refuses
+# a push whose plan adds to a remote a bookmark whose name starts with a person
+# token (scripts/person-branch-guard), and checks outgoing GitHub pushes with the
+# shared public leak check. Outside one it runs the same check on `jj git push`
+# wherever this machine has the check
 # installed (dispatch://BET-706), unless DOTFILES_JJ_NO_LEAK_CHECK=1. Where
 # scripts/omp-session-trailer says no, it drops the session's Omp-Session trailer.
 # Everything else goes straight to the real jj.
@@ -306,18 +308,18 @@ git_target() {
 }
 
 push_gate() {
-    local target out rc=0 a remote="" kind ref action old new url slug check pointer visibility line
+    local target out rc=0 a remote="" kind ref action old new url slug check pointer visibility line dry=0
     local zero=0000000000000000000000000000000000000000
     local scripts="${BASH_SOURCE[0]%/*}/../scripts"
     local header='^Changes to push to (.+):$'
     local update='^  (bookmark|tag): (.+) \[(.*)\]$'
     local add='^add to ([0-9a-f]+)$' delete='^delete from ([0-9a-f]+)$'
     local move='^move (forward|backward|sideways) from ([0-9a-f]+) to ([0-9a-f]+)$'
-    local -a display=() remotes=()
+    local -a display=() remotes=() adds=()
     local -A updates=()
     for a in "${_pargs[@]:_pi+2}"; do
         [[ "$a" == -- ]] && break
-        case "$a" in --help | -h) return 0 ;; esac
+        case "$a" in --help | -h) return 0 ;; --dry-run) dry=1 ;; esac
     done
     target="$(git_target "$@")" || push_refuse "cannot find the backing git repository. Nothing was pushed."
     [[ -n "$target" ]] || push_refuse "cannot find the backing git repository. Nothing was pushed."
@@ -364,6 +366,24 @@ push_gate() {
     if ((${#remotes[@]} == 0)); then
         [[ "$out" == *'Nothing changed.'* ]] || push_refuse "jj's dry-run gave no readable push plan. Nothing was pushed."
         return 0
+    fi
+    # In an agent session, a bookmark the plan adds to a remote, whose name starts with a person token, is
+    # refused before anything is pushed: scripts/person-branch-guard asks the remote whether it holds the name,
+    # and prints the refusal with jj's hint. A move or a delete creates nothing and is not sent to it, and
+    # neither is the caller's own --dry-run. The guard's read runs the git on PATH, shims/git, which lets a dry
+    # run through unchecked; the push jj then runs through shims/git is checked there again.
+    if [[ "$_gate" == agent ]] && ((!dry)); then
+        for remote in "${remotes[@]}"; do
+            adds=()
+            while read -r ref new _ old; do
+                if [[ "$old" == "$zero" && "$new" != "$zero" && "$ref" == refs/heads/?* ]]; then adds+=("$new:$ref"); fi
+            done <<< "${updates[$remote]}"
+            ((${#adds[@]})) || continue
+            rc=0
+            "$scripts/person-branch-guard" jj git --git-dir="$target" -- "$remote" "${adds[@]}" || rc=$?
+            if ((rc == 3)); then exit 1; fi
+            if ((rc)); then printf 'error: jj shim: the branch-name check failed (exit %s); the push goes on.\n' "$rc" >&2; fi
+        done
     fi
     find_leak_check
     check="$_check" pointer="$_pointer"

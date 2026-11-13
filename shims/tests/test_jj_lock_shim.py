@@ -11,24 +11,36 @@ from pathlib import Path
 SHIMS = Path(__file__).parents[1]
 
 
-def real_jj() -> Path:
-    """The jj binary itself: the first jj on PATH that is neither shims/jj nor a mise shim (a link
-    to mise, which reaches the binary only where mise has a jj version for the directory), else
-    the one `mise which jj` names. A test that moves HOME needs the binary, not mise's shim."""
+def real_binary(name: str) -> Path:
+    """The NAME binary itself: the first NAME on PATH that is neither a script (a file that starts with
+    `#!`, such as shims/git, shims/jj or a wrapper a Legion pod puts first on PATH) nor a mise shim (a
+    link to mise, which reaches the binary only where mise has a version of NAME for the directory),
+    else the one `mise which NAME` names when PATH held a mise shim."""
     mise_shim = False
     for d in os.environ["PATH"].split(os.pathsep):
-        c = Path(d) / "jj"
-        if not (c.is_file() and os.access(c, os.X_OK)) or b"jj-lock-shim" in c.read_bytes()[:512]:
+        c = Path(d) / name
+        if not (c.is_file() and os.access(c, os.X_OK)):
             continue
+        with open(c, "rb") as f:
+            if f.read(2) == b"#!":
+                continue
         if c.resolve().name == "mise":
             mise_shim = True
             continue
         return c
     if mise_shim:
-        found = subprocess.run(["mise", "which", "jj"], capture_output=True, text=True, check=False).stdout.strip()
+        found = subprocess.run(["mise", "which", name], capture_output=True, text=True, check=False).stdout.strip()
         if found:
             return Path(found)
-    raise unittest.SkipTest("no real jj on PATH")
+    raise unittest.SkipTest(f"no real {name} on PATH")
+
+
+def real_jj() -> Path:
+    """The jj binary itself: the first jj on PATH that is neither a script wrapper (a file that starts
+    with `#!`, such as shims/jj or the jj wrapper a Legion pod puts first on PATH) nor a mise shim (a
+    link to mise, which reaches the binary only where mise has a jj version for the directory), else
+    the one `mise which jj` names. A test that moves HOME needs the binary, not mise's shim."""
+    return real_binary("jj")
 
 
 def real_jj_dir() -> str:
