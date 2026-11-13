@@ -1003,6 +1003,20 @@ class TunnelSetup(unittest.TestCase):
         self.assertTrue(lines[0].endswith(": failed"), lines[0])
         self.assertNotIn("refused", lines[0])
 
+    def test_human_tier_line_does_not_call_every_secrets_error_a_refusal(self) -> None:
+        # secrets exits 1 for errors that are not a refusal: `secrets get --no-request` of a key
+        # that does not exist printed "secrets: secret '...' not found; looked in ..." and exit 1 on
+        # oryx. A bare exit status cannot tell those from a refusal, so the line must not say one.
+        self.checkout("git", "human-tier-secrets-error")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, HUMAN_TIER_SSH_EXIT="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        lines = [line for line in self.report().splitlines() if line.startswith("self-check: human-tier read:")]
+        self.assertEqual(len(lines), 1, self.report())
+        self.assertIn("exit 1", lines[0])
+        self.assertTrue(lines[0].endswith(": failed"), lines[0])
+        self.assertNotIn("refused", lines[0])
+
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")
         self.advance_to_current()
