@@ -551,6 +551,27 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.assert_passed(result, "stub/slug")
         self.assertIn("error: git shim: the branch-name check failed (exit 2); the push goes on.", result.stderr)
 
+    # A command that is not a push, and a push git fails by itself, get git's own output: no line says the
+    # remote could not be asked.
+
+    def test_git_push_help_on_a_token_branch_is_not_a_push(self):
+        w = self.git_repo("stub/slug")
+        person = self.git(w, "push", "-h", agent=False)
+        result = self.git(w, "push", "-h")
+        self.assertEqual(result.returncode, 129, result.stderr)
+        self.assertEqual((result.stdout, result.stderr), (person.stdout, person.stderr))
+        self.assert_refused(self.git(w, "push"), "stub/slug")
+
+    def test_a_push_git_fails_by_itself_is_not_called_a_remote_that_could_not_be_asked(self):
+        w = self.git_repo()
+        self.fixture(w, "git", "branch", "sami-x")
+        self.assert_refused(self.git(w, "push", "origin", "sami-x"), "sami-x")
+        result = self.git(w, "push", "origin", "sami-typo")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assert_no_refusal(result)
+        self.assertIn("error: src refspec sami-typo does not match any", result.stderr)
+        self.assertNotIn("could not ask origin which branches it holds", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
