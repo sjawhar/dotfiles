@@ -34,6 +34,20 @@ sample_rate = 16000
 # Maximum recording duration in seconds (safety limit)
 max_duration_secs = 900
 
+# Stop a recording whose microphone sends no sound at all, which is what the
+# DJI receiver does when it is switched off: the daemon then records, streams
+# it to Deepgram and pastes nothing, and the dictation is gone. 29 of the
+# 22,889 saved recordings are bit-exact silence, 6 of them in November 2026.
+# On a dead verdict the recording stops, the error cue plays and a critical
+# notification names the PipeWire source that stayed silent.
+[audio.dead_input]
+enabled = true
+# The loudest 100 ms frame of the first 1.5 s decides, measured after a
+# 150 Hz high-pass so the built-in mic's -0.21 DC bias counts for nothing.
+# -100 dBFS is 11.7 dB below the quietest live recording in the corpus.
+window_ms = 1500
+threshold_dbfs = -100.0
+
 [audio.feedback]
 enabled = true
 theme = "subtle"
