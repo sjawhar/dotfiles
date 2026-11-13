@@ -211,6 +211,8 @@ PY
             exit 0
         fi
         if [[ "$joined" == *"sport = :5038"* ]]; then
+            # TUNNEL_LOOK_HANGS: the look through ssh oryx hangs, as a slow Cloudflare connect can.
+            [[ "${TUNNEL_LOOK_HANGS:-}" == 1 ]] && exec /bin/sleep 30
             [[ "${TUNNEL_DOWN:-}" == 1 ]] || printf 'LISTEN 0 128 127.0.0.1:5038 0.0.0.0:*\n'
             exit 0
         fi
@@ -1000,8 +1002,8 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn("oryx-tunnel-setup: self-check:", result.stderr)
         report = self.report()
         self.assertIn(
-            "self-check: tunnel key rejects local socket forwarding: client never connected: ssh exited"
-            " before the -L listened, ssh said: agent@oryx-pcsc.thecybermonk.com: Permission denied"
+            "self-check: tunnel key rejects local socket forwarding: client never connected; ssh exited"
+            " (exit 255), ssh said: agent@oryx-pcsc.thecybermonk.com: Permission denied"
             " (publickey).: failed\n",
             report,
         )
@@ -1053,7 +1055,7 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn("CLOUDFLARE_API_KEY: tier human, grant live", result.stdout)
         self.assertNotIn("tier human, grant live", self.report())
 
-    def test_local_socket_probe_reports_a_silent_forwarded_socket_as_forwarded(self) -> None:
+    def test_local_socket_probe_reports_a_silent_socket_as_no_data_or_eof(self) -> None:
         # The dangerous case: sshd forwards the Unix socket and its server stays silent.
         self.checkout("git", "local-socket-forwarded")
         self.advance_to_current()
@@ -1061,8 +1063,8 @@ class TunnelSetup(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         report = self.report()
         self.assertIn(
-            "self-check: tunnel key rejects local socket forwarding: client connected and the socket"
-            ' stayed open with no data for 5 s: forwarded, no "open failed" line: failed\n',
+            "self-check: tunnel key rejects local socket forwarding: client connected; no data or EOF"
+            ' within 5 s, no "open failed" line: failed\n',
             report,
         )
         self.assertNotIn("client connection failed", report)
@@ -1096,7 +1098,9 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(after_sync=True, TUNNEL_UP_DELAY="3")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.report()
-        self.assertRegex(report, r"self-check: tunnel up after [3-9] s\n")
+        waited = re.search(r"self-check: tunnel up after (\d+) s\n", report)
+        self.assertIsNotNone(waited, report)
+        self.assertGreaterEqual(int(waited.group(1)), 3)
         self.assertLess(report.index("self-check: tunnel up after"), report.index("self-check: preview delivery:"))
         self.assertIn("self-check: preview delivery: ok\n", report)
 
@@ -1106,18 +1110,35 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(after_sync=True, TUNNEL_DOWN="1", ORYX_TUNNEL_WAIT_SECONDS="2")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         report = self.report()
-        self.assertRegex(
-            report,
-            r"self-check: tunnel not up after [2-9] s \(laptop 127\.0\.0\.1:12802 listening: no;"
+        waited = re.search(
+            r"self-check: tunnel not up after (\d+) s \(laptop 127\.0\.0\.1:12802 listening: no;"
             r" oryx 127\.0\.0\.1:5038 listening: no\)\n",
+            report,
         )
+        self.assertIsNotNone(waited, report)
+        self.assertGreaterEqual(int(waited.group(1)), 2)
+        # The devboxes' doctor reads the laptop's own devbox daemon, so it runs without oryx's tunnel.
+        self.assertIn("self-check: forward doctor devboxes: ok\n", report)
         for name in (
-            "forward doctor oryx pair", "forward doctor devboxes", "oryx forward doctor", "preview delivery",
+            "forward doctor oryx pair", "oryx forward doctor", "preview delivery",
             "forward port delivery", "browser page delivery", "audio delivery", "browser grant delivery",
             "human-tier read", "adb through tunnel",
         ):
             self.assertIn(f"self-check: {name}: not run: tunnel not up: failed\n", report)
         self.assertIn("self-check: tunnel key true: exit 0: ok\n", report)
+
+    def test_tunnel_wait_bounds_its_look_through_ssh_oryx(self) -> None:
+        # Each look through ssh oryx is cut to the time left, so a hanging connect cannot stretch the wait.
+        self.checkout("git", "tunnel-look-hangs")
+        self.advance_to_current()
+        started = time.monotonic()
+        result = self.invoke(after_sync=True, TUNNEL_LOOK_HANGS="1", ORYX_TUNNEL_WAIT_SECONDS="3")
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        waited = re.search(r"self-check: tunnel not up after (\d+) s ", self.report())
+        self.assertIsNotNone(waited, self.report())
+        self.assertLessEqual(int(waited.group(1)), 5)
+        self.assertLess(elapsed, 25)
 
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")

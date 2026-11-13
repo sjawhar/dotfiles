@@ -480,10 +480,12 @@ TUNNEL_WAIT_SECONDS="${ORYX_TUNNEL_WAIT_SECONDS:-60}"
 tunnel_up=false
 
 wait_for_tunnel() {
-    local start=$SECONDS laptop remote
+    local start=$SECONDS laptop remote left
     while :; do
         laptop="$(ss -Hltn '( sport = :12802 )' 2>/dev/null | awk '$4 == "127.0.0.1:12802"')" || laptop=""
-        remote="$(ssh oryx 'ss -Hltn "( sport = :5038 )"' 2>/dev/null)" || remote=""
+        left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
+        ((left >= 1)) || left=1
+        remote="$(timeout "$left" ssh oryx 'ss -Hltn "( sport = :5038 )"' 2>/dev/null)" || remote=""
         if [[ -n "$laptop" && "$remote" == *127.0.0.1:5038* ]]; then
             tunnel_up=true
             report_line "self-check: tunnel up after $((SECONDS - start)) s"
@@ -493,7 +495,8 @@ wait_for_tunnel() {
             report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $([[ -n "$laptop" ]] && echo yes || echo no); oryx 127.0.0.1:5038 listening: $([[ "$remote" == *127.0.0.1:5038* ]] && echo yes || echo no))"
             return 1
         fi
-        sleep 2
+        left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
+        sleep "$((left < 2 ? (left < 1 ? 1 : left) : 2))"
     done
 }
 
@@ -885,8 +888,9 @@ while True:
         break
     except OSError as error:
         if not ssh_running():
-            print("client never connected: ssh exited before the -L listened")
-            raise SystemExit(2)
+            # The shell adds ssh's exit status and last line (exit 4 tells it to).
+            print("client never connected; ssh exited")
+            raise SystemExit(4)
         if time.monotonic() >= deadline:
             print(f"client connection failed after 30 s: {type(error).__name__}")
             raise SystemExit(2)
@@ -895,7 +899,7 @@ sock.settimeout(5)
 try:
     received = sock.recv(1)
 except socket.timeout:
-    print("client connected and the socket stayed open with no data for 5 s: forwarded")
+    print("client connected; no data or EOF within 5 s")
     raise SystemExit(1)
 except OSError as error:
     print(f"client connected, then {type(error).__name__}")
@@ -907,14 +911,16 @@ raise SystemExit(0 if received == b"" else 1)
 PY
 )"
     local client_status=$?
-    set -e
     kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    local ssh_status=0
+    wait "$pid" 2>/dev/null || ssh_status=$?
+    set -e
     local line
     line="$(deciding_line "$err" 'open failed')"
-    if [[ -z "$line" && "$client" == "client never connected: "* ]]; then
-        # Name why ssh stopped (for example the key's login refused), from its own last line.
-        line="ssh said: $(tail -n 1 "$err" | tr -d '\r' | cut -c1-160)"
+    if [[ $client_status -eq 4 ]]; then
+        # ssh stopped before the client got in: its exit status and last line say why.
+        client="$client (exit $ssh_status)"
+        [[ -n "$line" ]] || line="ssh said: $(tail -n 1 "$err" | tr -d '\r' | cut -c1-160)"
     fi
     PROBE_VALUE="${client:-client printed nothing}, ${line:-no \"open failed\" line}"
     [[ $client_status -eq 0 && "$line" == *"open failed"* ]]
@@ -1119,7 +1125,7 @@ self_probe "ssh configuration" self_ssh_config
 self_probe "ssh oryx true" probe_exit ssh oryx true
 wait_for_tunnel || true
 tunnel_self_probe "forward doctor oryx pair" self_command_output "forward doctor oryx pair" "$DOTFILES/bin/mise" exec -- forward doctor --config "$HOME/.config/forward/config-oryx.toml"
-tunnel_self_probe "forward doctor devboxes" self_command_output "forward doctor devboxes" "$DOTFILES/bin/mise" exec -- forward doctor
+self_probe "forward doctor devboxes" self_command_output "forward doctor devboxes" "$DOTFILES/bin/mise" exec -- forward doctor
 tunnel_self_probe "oryx forward doctor" self_command_output "oryx forward doctor" ssh oryx 'forward doctor'
 tunnel_self_probe "preview delivery" delivery_preview
 tunnel_self_probe "forward port delivery" delivery_forward_port
