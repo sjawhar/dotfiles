@@ -9,6 +9,7 @@ and checks that follow delegates the working-copy move to dotfiles-sync.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -39,6 +40,7 @@ record = {
     "args": args,
     "has_omp_profile": "OMP_PROFILE" in os.environ,
     "has_pi_profile": "PI_PROFILE" in os.environ,
+    "agent_dir": os.environ.get("PI_CODING_AGENT_DIR"),
 }
 with Path(os.environ["FAKE_OMP_LOG"]).open("a") as log:
     log.write(json.dumps(record) + "\n")
@@ -321,6 +323,61 @@ class JjAlertRouting(JjHarness):
         self.assertEqual(FOLLOW.health_role("legion-home-controller"), "legion-home-controller")
         with self.assertRaises(argparse.ArgumentTypeError):
             FOLLOW.health_role("Legion_home_controller")
+
+
+class JjSyncFailures(JjHarness):
+    def test_a_failed_fetch_waits_fetch_grace_runs_as_in_git_mode(self) -> None:
+        self.assertEqual(self.run_follow(), [])
+        self.origin.rename(self.origin.with_name("unreachable.git"))
+
+        # --fetch-grace is 3 (Harness.options): two failed runs are quiet, the third says it.
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assertEqual(self.run_follow(now=1_001_200.0), [])
+        third = self.run_follow(now=1_001_800.0)
+
+        self.assertEqual(len(third), 1)
+        self.assertIn("DOTFILES NOT FOLLOWING MAIN", third[0])
+        for path, want in self.local_bytes.items():
+            self.assertEqual(path.read_bytes(), want)
+
+    def test_omp_steps_do_not_inherit_a_legion_sessions_agent_dir(self) -> None:
+        # A run by hand from a Legion session carries all three variables. omp uses
+        # PI_CODING_AGENT_DIR when no profile is named; scripts/omp-teleport unsets all three.
+        legion_agent_dir = str(self.home / ".omp/profiles/legion/agent")
+        os.environ.update(OMP_PROFILE="legion", PI_PROFILE="legion", PI_CODING_AGENT_DIR=legion_agent_dir)
+
+        self.assertEqual(self.run_follow(), [])
+
+        calls = self.omp_calls()
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertFalse(call["has_omp_profile"])
+            self.assertFalse(call["has_pi_profile"])
+            self.assertIsNone(call["agent_dir"])
+
+    def test_conflict_refusal_deletes_the_anchor_bookmark(self) -> None:
+        (self.repo / "shared.txt").write_text("local edit\n")
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("conflict")
+
+        messages = self.run_follow()
+
+        self.assertIn("CONFLICT", messages[0])
+        self.assertNotIn("dotfiles-sync-anchor", self.jj("bookmark", "list", "-T", 'name ++ "\\n"'))
+
+    def test_a_held_sync_lock_is_named_not_reported_as_a_timeout(self) -> None:
+        # Follow kills dotfiles-sync after 2 x --fetch-timeout, and the sync waits
+        # DOTFILES_SYNC_LOCK_WAIT (300 s by default) for its lock, so the sync's own refusal
+        # must arrive before the kill. Scaled down: --fetch-timeout 1, a 2 s kill.
+        handle = (self.repo / ".git/dotfiles-sync.lock").open("w")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            messages = self.run_follow(fetch_timeout=1.0)
+        finally:
+            handle.close()
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("another dotfiles-sync holds", messages[0])
 
 
 if __name__ == "__main__":
