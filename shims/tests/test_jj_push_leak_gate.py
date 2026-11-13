@@ -432,8 +432,10 @@ class JjPushLeakGateTest(unittest.TestCase):
         cfg = self.tmp / "jj.toml"
         cfg.write_text('[user]\nname = "T"\nemail = "t@example.com"\n[signing]\nbehavior = "drop"\n', encoding="utf-8")
         self.fake = fake
+        # None of the caller's GIT_CONFIG_* config: a core.hooksPath set there would decide which hooks run, and the
+        # gate reads a command-scope hooks path as the caller's own choice.
         self.env = {
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")},
             # The fake gh first, ahead of this shims dir, whose dotfiles checkout holds shims/gh: no gh past it is
             # reached. Then this shims dir, then the recording git and the sink helper.
             "PATH": os.pathsep.join([str(self.ghdir), str(SHIMS), str(fake), str(real_jj().parent), os.environ["PATH"]]),
