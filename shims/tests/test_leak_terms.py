@@ -1243,6 +1243,28 @@ class GitLeaks(LeakTestCase):
                     self.stage(repository, "alias.txt", "clean\n", agent)
                     self.assert_clean(repository, agent, *options, "ci", "-m", "clean")
 
+    def test_git_term_alias_expansion_leaves_a_dashed_external_command_to_git(self) -> None:
+        # Git 2.43's run_argv runs an external `git-<name>` from the exec path or PATH before it reads `alias.<name>`,
+        # so a command whose name is both an alias and an external command runs the external one. The shim's alias
+        # expansion must keep that order: expanding the alias first runs a different program than git would.
+        external = self.root / "external-commands"
+        marker = "external git-zz ran"
+        write_executable(external / "git-zz", f"#!/bin/sh\necho '{marker}'\n")
+        for agent in (False, True):
+            path = f"{external}{os.pathsep}{self.environment(agent)['PATH']}"
+            with self.subTest(agent=agent, case="external-and-alias"):
+                repository = self.repository(agent)
+                configured = self.git_run(repository, "config", "alias.zz", "rev-parse --git-dir", agent=agent, real=True)
+                self.assertEqual(configured.returncode, 0, configured.stderr)
+                expected = self.git_run(repository, "zz", agent=agent, real=True, extra={"PATH": path})
+                self.assertEqual((expected.returncode, expected.stdout), (0, f"{marker}\n"), expected.stderr)
+                result = self.git_run(repository, "zz", agent=agent, extra={"PATH": path})
+                self.assertEqual((result.returncode, result.stdout), (0, f"{marker}\n"), result.stderr)
+            with self.subTest(agent=agent, case="alias-alone"):
+                # The control: with no external command the alias runs, through the shim as through git.
+                result = self.git_run(repository, "zz", agent=agent)
+                self.assertEqual((result.returncode, result.stdout), (0, ".git\n"), result.stderr)
+
     def test_git_term_reads_text_files_the_repository_marks_binary(self) -> None:
         # A text file is still text when the repository's attributes tell `git diff` to show it as binary; the spec
         # leaves out binary files, not text files that an attribute hides.
