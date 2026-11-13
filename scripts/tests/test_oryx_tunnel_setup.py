@@ -1423,6 +1423,45 @@ class TunnelSetup(unittest.TestCase):
         self.assert_stop_before_move(result, "preflight")
         self.assertNotIn("is not an allowed forward process", result.stderr)
 
+    def test_preflight_names_the_failed_look_for_a_foreign_listener_on_the_adb_port(self) -> None:
+        # A process that is not adb holds 127.0.0.1:5037, and systemctl cannot say whether
+        # adb-server.service started it: the stop names that failed look, not a foreign process.
+        self.checkout("git", "preflight-adb-systemctl-down")
+        self.advance_to_current()
+        holder = subprocess.Popen(["/bin/sleep", "60"])
+        try:
+            self.fake_ss(f'LISTEN 0      128    127.0.0.1:5037 0.0.0.0:* users:(("sleep",pid={holder.pid},fd=5))')
+            result = self.invoke(after_sync=True, SYSTEMCTL_SHOW_FAILS="1")
+        finally:
+            holder.kill()
+            holder.wait()
+        self.assert_stop_before_move(result, "preflight")
+        self.assertIn(
+            "oryx-tunnel-setup: preflight: could not tell whether the listener on 127.0.0.1:5037 is adb-server.service's: "
+            "systemctl --user show -p MainPID adb-server.service failed (exit 1): ",
+            result.stderr,
+        )
+
+    def test_units_step_does_not_stop_an_adb_server_systemctl_could_not_place(self) -> None:
+        # An adb server holds 127.0.0.1:5037. When systemctl cannot say whether it is
+        # adb-server.service's own, the command must not take it for a stray server and kill it.
+        self.checkout("git", "units-adb-systemctl-down")
+        self.advance_to_current()
+        holder = subprocess.Popen(["/bin/bash", "-c", "exec -a adb /bin/sleep 60"])
+        try:
+            self.fake_ss(f'LISTEN 0      128    127.0.0.1:5037 0.0.0.0:* users:(("adb",pid={holder.pid},fd=5))')
+            result = self.invoke(after_sync=True, SYSTEMCTL_SHOW_FAILS="1")
+        finally:
+            holder.kill()
+            holder.wait()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            f"oryx-tunnel-setup: units: could not tell whether the adb server on 127.0.0.1:5037 (pid {holder.pid}) "
+            "is adb-server.service's: systemctl --user show -p MainPID adb-server.service failed (exit 1)\n",
+            result.stderr,
+        )
+        self.assertFalse([line for line in self.lines() if line.startswith("adb:") and "kill-server" in line])
+
     def test_preflight_accepts_the_devbox_daemons_on_other_addresses(self) -> None:
         # The laptop's devbox daemon binds forward's default ports on the laptop's tailnet address
         # (installers/forward.sh writes listen = <tailnet IP>), and a legacy pair binds 127.0.0.2.

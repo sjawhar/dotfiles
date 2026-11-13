@@ -127,17 +127,27 @@ stop_supervisors() {
 }
 
 unit_main_pid() {
-    systemctl --user show -p MainPID --value "$1" 2>/dev/null || true
+    systemctl --user show -p MainPID --value "$1" 2>/dev/null
 }
 
+# The look that failed when pid_belongs_to_unit could not tell.
+UNIT_LOOK_FAILURE=""
+
+# Returns 0 when PID or one of its ancestors is a unit's main process, 1 when none is, and 2 when
+# systemctl --user show did not answer, so nothing told the two apart; UNIT_LOOK_FAILURE names it.
 pid_belongs_to_unit() {
     local pid="$1"
     shift
-    local current="$pid" main parent hops=0 unit
+    local current="$pid" main parent hops=0 unit status
     process_is_mine "$pid" || return 1
     while [[ "$current" =~ ^[0-9]+$ && "$current" != 0 && $hops -lt 64 ]]; do
         for unit in "$@"; do
-            main="$(unit_main_pid "$unit")"
+            status=0
+            main="$(unit_main_pid "$unit")" || status=$?
+            if ((status)); then
+                UNIT_LOOK_FAILURE="systemctl --user show -p MainPID $unit failed (exit $status)"
+                return 2
+            fi
             [[ "$main" == "$current" && "$main" != 0 ]] && return 0
         done
         parent="$(process_parent "$current" 2>/dev/null || true)"
@@ -202,7 +212,7 @@ process_is_adb() {
 }
 
 check_listener() {
-    local port="$1" kind="$2" line pid saw=false
+    local port="$1" kind="$2" line pid saw=false belongs
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         saw=true
@@ -212,10 +222,22 @@ check_listener() {
             line_has_pid=true
             case "$kind" in
                 forward)
-                    pid_belongs_to_unit "$pid" forward-daemon@oryx.service forward-tunnel@oryx.service || line_allowed=false
+                    belongs=0
+                    pid_belongs_to_unit "$pid" forward-daemon@oryx.service forward-tunnel@oryx.service || belongs=$?
+                    if ((belongs == 2)); then
+                        stop preflight "could not tell whether the listener on 127.0.0.1:$port is forward's own: $UNIT_LOOK_FAILURE: $line"
+                    fi
+                    ((belongs == 0)) || line_allowed=false
                     ;;
                 adb)
-                    pid_belongs_to_unit "$pid" adb-server.service || process_is_adb "$pid" || line_allowed=false
+                    belongs=0
+                    pid_belongs_to_unit "$pid" adb-server.service || belongs=$?
+                    if ((belongs != 0)) && ! process_is_adb "$pid"; then
+                        if ((belongs == 2)); then
+                            stop preflight "could not tell whether the listener on 127.0.0.1:$port is adb-server.service's: $UNIT_LOOK_FAILURE: $line"
+                        fi
+                        line_allowed=false
+                    fi
                     ;;
             esac
         done < <(line_pids "$line")
@@ -1176,7 +1198,13 @@ report_line "move: wrote oryx ~/.config/forward/config.toml and restarted forwar
 
 read_listeners units
 for listener in $(listener_lines 5037 | while IFS= read -r line; do line_pids "$line"; done); do
-    if ! pid_belongs_to_unit "$listener" adb-server.service && process_is_adb "$listener"; then
+    process_is_adb "$listener" || continue
+    belongs=0
+    pid_belongs_to_unit "$listener" adb-server.service || belongs=$?
+    if ((belongs == 2)); then
+        stop units "could not tell whether the adb server on 127.0.0.1:5037 (pid $listener) is adb-server.service's: $UNIT_LOOK_FAILURE"
+    fi
+    if ((belongs == 1)); then
         if ! "$adb" kill-server; then
             stop units "could not stop the existing user adb server on 127.0.0.1:5037"
         fi
