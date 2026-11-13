@@ -18,6 +18,7 @@ Only SENT counts as sent.
 """
 
 import argparse
+import http.client
 import json
 import mimetypes
 import os
@@ -98,19 +99,20 @@ class Hub:
 
 @dataclass
 class PostState:
-    """Whether a message post request has reached its send boundary."""
+    """Whether the message post request reached its send boundary, and its event ID."""
 
     sent: bool = False
+    event_id: str | None = None
 
 
 @dataclass(frozen=True)
 class BridgeInfo:
-    """The m.bridge bot and, when checks are enabled, its bridge-table entry."""
+    """The m.bridge bot and its bridge-table entry."""
 
     bot: str
-    instance: str | None = None
-    port: str | None = None
-    layout: str | None = None
+    instance: str
+    port: str
+    layout: str
 
 
 def json_body(raw):
@@ -123,6 +125,9 @@ def json_body(raw):
 def collapse(value):
     """Turn arbitrary server text into one safe result-line fragment."""
     return "" if value is None else " ".join(str(value).split())
+
+def has_control_character(value):
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
 
 def quoted(value):
@@ -160,7 +165,11 @@ def exception_reason(error):
     if isinstance(error, HttpError):
         return collapse(error)
     if isinstance(error, urllib.error.URLError) and error.reason:
+        if isinstance(error.reason, ValueError):
+            return "HTTP request failed"
         return collapse(error.reason)
+    if isinstance(error, ValueError):
+        return "invalid response"
     text = collapse(error)
     return text or type(error).__name__
 
@@ -181,13 +190,24 @@ def http_request(
         if post_state is not None:
             post_state.sent = True
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read()
+            try:
+                return response.read()
+            except http.client.HTTPException as error:
+                raise ConnectionError("HTTP response read failed") from error
     except urllib.error.HTTPError as error:
         try:
-            body = error.read()
+            try:
+                body = error.read()
+            except (http.client.HTTPException, OSError):
+                body = b""
         finally:
-            error.close()
+            try:
+                error.close()
+            except OSError:
+                pass
         raise HttpError(error.code, body) from None
+    except http.client.HTTPException as error:
+        raise ConnectionError("HTTP request failed") from error
 
 
 def dotfiles_root():
@@ -338,7 +358,7 @@ def discord_secret():
     except OSError as error:
         raise Refused("cannot read Discord shared secret") from error
     secret = result.stdout.strip() if result.returncode == 0 else ""
-    if not secret or secret == "null":
+    if not secret or secret == "null" or has_control_character(secret):
         raise Refused("cannot read Discord shared secret")
     return secret
 
@@ -361,14 +381,10 @@ def check_discord(bridge):
 
 
 def check_room(hub, room_id, force):
-    """Validate the room and its bridge without posting; return its bridge metadata.
-
-    A caller may construct Hub(MATRIX_HUB_URL, MATRIX_HUB_TOKEN) and call this function
-    to inspect a room. It always checks m.bridge, and force only bypasses bridge health.
-    """
+    """Validate the room and its bridge without posting."""
     bot, content = room_bridge_bot(hub, room_id)
     if force:
-        return BridgeInfo(bot=bot)
+        return
 
     bridge = bridge_table().get(bot)
     if bridge is None:
@@ -382,8 +398,6 @@ def check_room(hub, room_id, force):
         check_discord(bridge)
     else:
         check_bridgev2(hub, bridge, receiver)
-    return bridge
-
 
 def http_json(
     method,
@@ -504,10 +518,14 @@ def status_reason(content, status):
     return chosen
 
 
-def status_for_event(hub, room_id, event_id, timeout):
-    """Read up to ten forward relation pages and return the first terminal status."""
+def status_for_event(hub, room_id, event_id, deadline, clock):
+    """Read relation pages until a terminal status or the polling deadline."""
     page = None
     for _ in range(10):
+        remaining = deadline - clock()
+        if remaining < 0:
+            return None
+        timeout = max(1, min(READ_TIMEOUT, remaining))
         parameters = {"dir": "f", "limit": "100"}
         if page:
             parameters["from"] = page
@@ -545,10 +563,10 @@ def status_for_event(hub, room_id, event_id, timeout):
 def wait_for_status(hub, room_id, event_id, clock, sleep):
     deadline = clock() + WAIT_SECONDS
     while True:
-        remaining = deadline - clock()
-        timeout = max(1, min(READ_TIMEOUT, remaining))
+        if clock() > deadline:
+            return f"UNCONFIRMED {event_id}", 5
         try:
-            status = status_for_event(hub, room_id, event_id, timeout)
+            status = status_for_event(hub, room_id, event_id, deadline, clock)
         except (HttpError, OSError, ValueError):
             status = None
         if status:
@@ -577,54 +595,63 @@ def build_parser():
     return parser
 
 
-def emit(line, code):
-    print(line)
-    return code
+class InterruptGuard:
+    """Turn the first SIGINT or SIGTERM into one Interrupted exception.
+
+    The handler disarms itself before it raises, so no second signal can raise while
+    the first one is handled. Once the result is known, disarm() makes further signals
+    do nothing, so the result line is printed exactly once.
+    """
+
+    def __init__(self):
+        self.armed = True
+        self.previous = {}
+        for number in (signal.SIGINT, signal.SIGTERM):
+            self.previous[number] = signal.signal(number, self.handle)
+
+    def handle(self, _signum, _frame):
+        if self.armed:
+            self.armed = False
+            raise Interrupted()
+
+    def disarm(self):
+        self.armed = False
+
+    def restore(self):
+        for number, handler in self.previous.items():
+            signal.signal(number, handler)
 
 
-def install_interrupt_handlers():
-    def interrupted(_signum, _frame):
-        raise Interrupted()
+def send(argv, post_state, clock, sleep):
+    """Parse, check, post and wait; return the result line and exit code.
 
-    previous = {}
-    for number in (signal.SIGINT, signal.SIGTERM):
-        previous[number] = signal.signal(number, interrupted)
-    return previous
+    Interrupted propagates to main, which decides from post_state what was sent.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.room_id.startswith("!"):
+        parser.error("ROOM_ID must start with !")
+    if args.reply_to is not None and not args.reply_to.startswith("$"):
+        parser.error("--reply-to must start with $")
+    if args.caption_file and not args.file:
+        parser.error("--caption-file requires --file")
 
-
-def restore_interrupt_handlers(previous):
-    for number, handler in previous.items():
-        signal.signal(number, handler)
-
-
-def main(argv=None, *, clock=time.monotonic, sleep=time.sleep) -> int:
-    post_state = PostState()
-    event_id = None
-    handlers = None
     try:
-        handlers = install_interrupt_handlers()
-        parser = build_parser()
-        args = parser.parse_args(argv)
-        if not args.room_id.startswith("!"):
-            parser.error("ROOM_ID must start with !")
-        if args.reply_to is not None and not args.reply_to.startswith("$"):
-            parser.error("--reply-to must start with $")
-        if args.caption_file and not args.file:
-            parser.error("--caption-file requires --file")
+        text = read_text_file(args.text_file, "text file") if args.text_file else None
+        caption = read_text_file(args.caption_file, "caption file") if args.caption_file else None
+        file_path, file_data = read_upload(args.file) if args.file else (None, None)
+    except UsageError as error:
+        parser.error(str(error))
 
-        try:
-            text = read_text_file(args.text_file, "text file") if args.text_file else None
-            caption = read_text_file(args.caption_file, "caption file") if args.caption_file else None
-            file_path, file_data = read_upload(args.file) if args.file else (None, None)
-        except UsageError as error:
-            parser.error(str(error))
+    hub_url = os.environ.get("MATRIX_HUB_URL")
+    hub_token = os.environ.get("MATRIX_HUB_TOKEN")
+    if not hub_url or not hub_token:
+        parser.error("MATRIX_HUB_URL and MATRIX_HUB_TOKEN must be set")
+    if has_control_character(hub_token):
+        parser.error("MATRIX_HUB_TOKEN must not contain control characters")
+    hub = Hub(hub_url, hub_token)
 
-        hub_url = os.environ.get("MATRIX_HUB_URL")
-        hub_token = os.environ.get("MATRIX_HUB_TOKEN")
-        if not hub_url or not hub_token:
-            parser.error("MATRIX_HUB_URL and MATRIX_HUB_TOKEN must be set")
-        hub = Hub(hub_url, hub_token)
-
+    try:
         check_room(hub, args.room_id, args.force)
         if args.reply_to:
             check_reply_target(hub, args.room_id, args.reply_to)
@@ -635,7 +662,7 @@ def main(argv=None, *, clock=time.monotonic, sleep=time.sleep) -> int:
         else:
             uploaded, upload_error = upload_file(hub, file_path, file_data)
             if upload_error:
-                return emit(f"FAILED -: {upload_error}", 4)
+                return f"FAILED -: {upload_error}", 4
             body = caption if caption is not None else file_path.name
             content = {
                 "msgtype": uploaded["msgtype"],
@@ -648,29 +675,46 @@ def main(argv=None, *, clock=time.monotonic, sleep=time.sleep) -> int:
 
         outcome, event_id, error = post_message(hub, args.room_id, content, post_state)
         if outcome == "failed":
-            return emit(f"FAILED -: {error}", 4)
+            return f"FAILED -: {error}", 4
         if outcome == "unconfirmed":
-            return emit("UNCONFIRMED -", 5)
-        line, code = wait_for_status(hub, args.room_id, event_id, clock, sleep)
-        return emit(line, code)
+            return "UNCONFIRMED -", 5
+        post_state.event_id = event_id
+        return wait_for_status(hub, args.room_id, event_id, clock, sleep)
     except UsageError as error:
         parser.error(str(error))
     except Refused as error:
         if not post_state.sent:
-            return emit(f"REFUSED: {collapse(error)}", 3)
-        return emit(f"UNCONFIRMED {event_id or '-'}", 5)
-    except (Interrupted, KeyboardInterrupt):
-        if not post_state.sent:
-            return emit("REFUSED: interrupted", 3)
-        return emit(f"UNCONFIRMED {event_id or '-'}", 5)
+            return f"REFUSED: {collapse(error)}", 3
+        return unconfirmed(post_state)
     except Exception as error:
         if not post_state.sent:
-            reason = f"internal error: {type(error).__name__}: {collapse(error)}"
-            return emit(f"REFUSED: {reason}", 3)
-        return emit(f"UNCONFIRMED {event_id or '-'}", 5)
+            return f"REFUSED: internal error: {type(error).__name__}", 3
+        return unconfirmed(post_state)
+
+
+def unconfirmed(post_state):
+    return f"UNCONFIRMED {post_state.event_id or '-'}", 5
+
+
+def main(argv=None, *, clock=time.monotonic, sleep=time.sleep) -> int:
+    post_state = PostState()
+    guard = InterruptGuard()
+    try:
+        result = None
+        try:
+            try:
+                result = send(argv, post_state, clock, sleep)
+            finally:
+                guard.disarm()
+        except (Interrupted, KeyboardInterrupt):
+            # A signal that came after the result was known leaves that result.
+            if result is None:
+                result = ("REFUSED: interrupted", 3) if not post_state.sent else unconfirmed(post_state)
+        line, code = result
+        print(line)
+        return code
     finally:
-        if handlers is not None:
-            restore_interrupt_handlers(handlers)
+        guard.restore()
 
 
 if __name__ == "__main__":

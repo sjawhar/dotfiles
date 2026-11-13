@@ -61,6 +61,22 @@ class FakeClock:
         self.now += seconds
 
 
+class InterruptingStringIO(io.StringIO):
+    """Deliver real SIGINT and SIGTERM to this process once print has written its newline."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupted = False
+
+    def write(self, text: str) -> int:
+        count = super().write(text)
+        if text == "\n" and not self.interrupted:
+            self.interrupted = True
+            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return count
+
+
 class FakeHub:
     """A small fake of the Matrix and local bridge APIs hub-send uses."""
 
@@ -79,6 +95,7 @@ class FakeHub:
         self.relation_page_size = 100
         self.relations_return_every_status = False
         self.relation_reads = 0
+        self.relation_read_seconds = 0.0
         self.status_after_reads: int | None = None
         self.after_statuses: list[dict[str, object]] = []
         self.status_due: float | None = None
@@ -245,6 +262,21 @@ class FakeHubHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _truncated_json(self, status: int) -> None:
+        data = b'{"partial":'
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data) + 100))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        self.close_connection = True
+
     def _error(
         self, status: int, error: str = "request failed", errcode: str = "M_FAKE"
     ) -> None:
@@ -269,11 +301,17 @@ class FakeHubHandler(BaseHTTPRequestHandler):
         if mode == "drop":
             self._drop()
             return True
+        if mode == "truncated":
+            self._truncated_json(200)
+            return True
         if mode == "http500":
             self._error(500, "request failed")
             return True
         if mode == "http403":
             self._error(403, "forbidden")
+            return True
+        if mode == "http403_truncated":
+            self._truncated_json(403)
             return True
         if upload and mode == "http413":
             self._error(413, "upload rejected")
@@ -351,6 +389,8 @@ class FakeHubHandler(BaseHTTPRequestHandler):
             self._error(400, "relations must be forward and limited")
             return
         self.fake.relation_reads += 1
+        if self.fake.clock is not None:
+            self.fake.clock.sleep(self.fake.relation_read_seconds)
         if self.fake.status_after_reads is not None and not self.fake._after_added and self.fake.relation_reads > self.fake.status_after_reads:
             self.fake.add_configured_statuses(room, self.fake.after_statuses)
             self.fake._after_added = True
@@ -440,7 +480,10 @@ class HubSendTest(unittest.TestCase):
     def write_discord_secret(self, root: Path, secret: str) -> None:
         config = root / ".local" / "share" / "chathub" / "discord" / "config.yaml"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(f"bridge:\n  provisioning:\n    shared_secret: {secret}\n", encoding="utf-8")
+        config.write_text(
+            f"bridge:\n  provisioning:\n    shared_secret: {json.dumps(secret)}\n",
+            encoding="utf-8",
+        )
 
     def load_module(self):
         name = f"hub_send_test_{id(self)}_{time.time_ns()}"
@@ -461,8 +504,10 @@ class HubSendTest(unittest.TestCase):
         *,
         interrupt: str | None = None,
         interrupt_during_provision: bool = False,
+        interrupt_during_emit: bool = False,
         env: dict[str, str] | None = None,
         configure_module=None,
+        urlopen_errors: list[BaseException] | None = None,
     ) -> tuple[int, str, str, FakeClock]:
         name, module = self.load_module()
         if configure_module is not None:
@@ -487,7 +532,18 @@ class HubSendTest(unittest.TestCase):
                 self.fail(f"hub-send requested outside the fake: {url}")
             if interrupt_during_provision and parsed.path.startswith("/port/"):
                 sleeper(0)
-            return old_urlopen(request, *request_args, **request_kwargs)
+            try:
+                return old_urlopen(request, *request_args, **request_kwargs)
+            except (socket.timeout, TimeoutError) as error:
+                if urlopen_errors is not None:
+                    urlopen_errors.append(error)
+                raise
+            except urllib.error.URLError as error:
+                if urlopen_errors is not None and isinstance(
+                    error.reason, (socket.timeout, TimeoutError)
+                ):
+                    urlopen_errors.append(error.reason)
+                raise
 
         variables = {
             "HOME": str(self.home),
@@ -498,7 +554,7 @@ class HubSendTest(unittest.TestCase):
         }
         if env is not None:
             variables.update(env)
-        stdout = io.StringIO()
+        stdout = InterruptingStringIO() if interrupt_during_emit else io.StringIO()
         stderr = io.StringIO()
         try:
             with (
@@ -828,10 +884,75 @@ class HubSendTest(unittest.TestCase):
 
     def test_status_read_failures_then_success(self) -> None:
         self.fake.read_failure_modes = ["http500", "hang"]
+        self.fake.hang_seconds = 1.2
         self.fake.status_after_reads = 2
         self.fake.after_statuses = [{"status": "SUCCESS"}]
-        self.assert_result(self.invoke(self.text_args()), f"SENT {EVENT}", 0)
+        timeout_errors: list[BaseException] = []
+        self.assert_result(
+            self.invoke(self.text_args(), urlopen_errors=timeout_errors),
+            f"SENT {EVENT}",
+            0,
+        )
         self.assertEqual(self.fake.relation_reads, 3)
+        self.assertTrue(
+            any(isinstance(error, (socket.timeout, TimeoutError)) for error in timeout_errors)
+        )
+
+    def test_truncated_status_read_retries_then_sends(self) -> None:
+        self.configure_success()
+        self.fake.read_failure_modes = ["truncated"]
+        self.assert_result(self.invoke(self.text_args()), f"SENT {EVENT}", 0)
+        self.assertEqual(self.fake.relation_reads, 2)
+
+    def test_truncated_post_error_keeps_http_status(self) -> None:
+        self.fake.post_mode = "http403_truncated"
+        self.assert_result(self.invoke(self.text_args()), "FAILED -: HTTP 403", 4)
+
+    def test_truncated_upload_does_not_post_a_message(self) -> None:
+        self.fake.upload_mode = "truncated"
+        file = self.binary_file(b"data", "truncated.bin")
+        self.assert_result(
+            self.invoke([ROOM, "--file", str(file)]),
+            "FAILED -: upload: HTTP response read failed",
+            4,
+        )
+        self.assertEqual(self.fake.post_requests(), [])
+
+    def test_truncated_state_read_refuses(self) -> None:
+        self.fake.state_mode = "truncated"
+        self.assert_result(
+            self.invoke(self.forced_text_args()),
+            "REFUSED: cannot read the room's state: HTTP response read failed",
+            3,
+        )
+        self.assertEqual(self.fake.post_requests(), [])
+        self.assert_no_provisioning()
+
+    def test_truncated_provisioning_read_refuses(self) -> None:
+        self.fake.provision_modes["29336"] = "truncated"
+        self.assert_result(
+            self.invoke(self.text_args()),
+            "REFUSED: bridge gmessages provisioning check failed: HTTP response read failed",
+            3,
+        )
+        self.assertEqual(self.fake.post_requests(), [])
+
+    def test_status_pagination_stops_at_the_deadline(self) -> None:
+        self.fake.relation_page_size = 1
+        self.fake.relation_read_seconds = 9
+        self.fake.post_statuses = [{"status": "PENDING"} for _ in range(9)] + [
+            {"status": "SUCCESS"}
+        ]
+        clock = self.assert_result(self.invoke(self.text_args()), f"UNCONFIRMED {EVENT}", 5)
+        self.assertLessEqual(clock(), 70)
+        self.assertLess(self.fake.relation_reads, 10)
+
+    def test_status_pagination_succeeds_within_the_deadline(self) -> None:
+        self.fake.relation_page_size = 1
+        self.fake.relation_read_seconds = 9
+        self.fake.post_statuses = [{"status": "PENDING"}, {"status": "SUCCESS"}]
+        clock = self.assert_result(self.invoke(self.text_args()), f"SENT {EVENT}", 0)
+        self.assertEqual(clock(), 18)
 
     def test_status_read_failures_until_deadline(self) -> None:
         self.fake.read_failure_forever = "http500"
@@ -887,6 +1008,15 @@ class HubSendTest(unittest.TestCase):
         self.assert_usage(self.invoke(["not-a-room", "--text-file", str(self.text_file("text"))]))
         self.assertEqual(signal.getsignal(signal.SIGINT), sigint)
         self.assertEqual(signal.getsignal(signal.SIGTERM), sigterm)
+
+    def test_interrupt_during_result_emit_keeps_one_result_line(self) -> None:
+        self.configure_success()
+        self.assert_result(
+            self.invoke(self.text_args(), interrupt_during_emit=True),
+            f"SENT {EVENT}",
+            0,
+        )
+
     def test_upload_failures_do_not_post_a_message(self) -> None:
         for mode, expected in [
             ("http413", "FAILED -: upload: M_FAKE: upload rejected"),
@@ -983,6 +1113,53 @@ class HubSendTest(unittest.TestCase):
         self.assertEqual(ping.port, "29334")
         self.assertEqual(ping.headers["authorization"], f"Bearer {HOME_DISCORD_SECRET}")
         self.assertNotEqual(ping.headers["authorization"], f"Bearer {DECOY_DISCORD_SECRET}")
+
+    def test_control_character_hub_token_is_a_usage_error_without_requests(self) -> None:
+        token = "synthetic-token\nsecond-part"
+        result, stdout, stderr, _clock = self.invoke(
+            self.text_args(),
+            env={"MATRIX_HUB_TOKEN": token},
+        )
+        self.assertEqual(result, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("MATRIX_HUB_TOKEN", stderr)
+        for fragment in ("synthetic-token", "second-part"):
+            self.assertNotIn(fragment, stdout)
+            self.assertNotIn(fragment, stderr)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_control_character_discord_secret_refuses_and_force_skips_it(self) -> None:
+        secret = "discord-first\nsecond-part"
+        self.write_discord_secret(self.home, secret)
+        self.fake.set_bridge(ROOM, "@discordbot:chathub")
+        actual = self.invoke(self.text_args())
+        self.assert_result(
+            actual,
+            "REFUSED: cannot read Discord shared secret",
+            3,
+        )
+        _result, stdout, stderr, _clock = actual
+        self.assert_no_provisioning()
+        headers = "\n".join(
+            value for request in self.fake.requests for value in request.headers.values()
+        )
+        for fragment in ("discord-first", "second-part"):
+            self.assertNotIn(fragment, stdout)
+            self.assertNotIn(fragment, stderr)
+            self.assertNotIn(fragment, headers)
+        self.configure_success()
+        self.assert_result(self.invoke(self.forced_text_args()), f"SENT {EVENT}", 0)
+        self.assert_no_provisioning()
+
+    def test_check_room_is_validation_only_and_bridge_fields_are_required(self) -> None:
+        name, module = self.load_module()
+        try:
+            self.assertIsNone(module.check_room(module.Hub(self.fake.url, HUB_TOKEN), ROOM, True))
+            with self.assertRaises(TypeError):
+                module.BridgeInfo(bot="@gmessagesbot:chathub")
+        finally:
+            sys.modules.pop(name, None)
+        self.assert_no_provisioning()
 
     def test_missing_home_discord_config_refuses_but_force_posts(self) -> None:
         shutil.rmtree(self.home / ".local")
