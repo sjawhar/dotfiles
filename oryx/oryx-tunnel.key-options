@@ -4,6 +4,8 @@
 # ports the laptop's RemoteForwards open on oryx's loopback, permitopen the oryx
 # channels its LocalForwards reach, and the forced command gives the key no
 # shell. Where a RemoteForward ends on the laptop's side is the laptop's own
-# choice, which sshd cannot see or limit. sshd on oryx's port 2222 must also set
-# AllowStreamLocalForwarding no, since these options do not limit Unix sockets.
+# choice, which sshd cannot see or limit. permitopen also refuses a LocalForward
+# to a Unix socket, but nothing here limits a RemoteForward that listens on a
+# socket path on oryx (OpenSSH 9.6, scratch sshd, 2026-11-13), so sshd on
+# oryx's port 2222 must also set AllowStreamLocalForwarding no.
 restrict,port-forwarding,permitlisten="127.0.0.1:12800",permitlisten="127.0.0.1:12803",permitlisten="127.0.0.1:12804",permitlisten="127.0.0.1:12806",permitlisten="127.0.0.1:5038",permitlisten="127.0.0.1:2223",permitlisten="127.0.0.1:2224",permitopen="127.0.0.1:12801",permitopen="127.0.0.1:12802",permitopen="127.0.0.1:12805",command="echo oryx-tunnel: forwarding-only key"

@@ -210,6 +210,10 @@ PY
             fi
             exit 0
         fi
+        if [[ "$joined" == *"sport = :5038"* ]]; then
+            [[ "${TUNNEL_DOWN:-}" == 1 ]] || printf 'LISTEN 0 128 127.0.0.1:5038 0.0.0.0:*\n'
+            exit 0
+        fi
         if [[ "$joined" == *"000chost:version"* ]]; then
             if [[ "${ADB_FORWARD_DOWN:-}" == 1 ]]; then
                 printf 'ConnectionRefusedError: [Errno 111] Connection refused\n' >&2
@@ -297,6 +301,15 @@ PY
         ;;
     ss)
         [[ "${FAIL_SS:-}" == 1 ]] && exit 1
+        if [[ " $* " == *"sport = :12802"* ]]; then
+            # The tunnel's LocalForward of the preview port: down, or up TUNNEL_UP_DELAY s after the
+            # first look, as after a slow Cloudflare connect or a unit restart.
+            [[ "${TUNNEL_DOWN:-}" == 1 ]] && exit 0
+            [[ -f "$TUNNEL_FIRST_LOOK" ]] || /bin/date +%s > "$TUNNEL_FIRST_LOOK"
+            (( $(/bin/date +%s) - $(<"$TUNNEL_FIRST_LOOK") >= ${TUNNEL_UP_DELAY:-0} )) || exit 0
+            printf 'LISTEN 0 128 127.0.0.1:12802 0.0.0.0:*\n'
+            exit 0
+        fi
         if [[ "${FOREIGN_LISTENER:-}" == 1 && " $* " == *" -Hltnp "* ]]; then
             printf 'LISTEN 0 1 127.0.0.1:12802 0.0.0.0:* users:(("foreign",pid=%s,fd=3))\n' "$$"
         fi
@@ -428,6 +441,7 @@ class TunnelSetup(unittest.TestCase):
             "REMOTE_ROOT": str(self.remote),
             "CURRENT_NONCE": str(self.current_nonce),
             "FORWARD_PORT": str(self.forward_port),
+            "TUNNEL_FIRST_LOOK": str(self.root / f"tunnel-first-look-{name}"),
             "FORWARD_CURL_CALLS": str(self.forward_curl_calls),
             "CF_VERSION_FILE": str(self.version_file),
             "CF_VERSION": "2026.10.7",
@@ -794,12 +808,14 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn("adb is not installed", missing.stderr)
 
     def fake_ss(self, *lines: str) -> None:
-        """Make the fake ss print these `ss -Hltnp` lines; PID becomes the fake's own pid."""
+        """Make the fake ss print these `ss -Hltnp` lines; PID becomes the fake's own pid. The
+        self-check's look for the tunnel's preview LocalForward still finds it up."""
         (self.fakebin / "ss").unlink()
         text = "\n".join(lines)
         write_executable(
             self.fakebin / "ss",
-            f'if [[ " $* " == *" -Hltnp "* ]]; then\n/bin/sed "s/PID/$$/" <<\'LINES\'\n{text}\nLINES\nfi',
+            f'if [[ " $* " == *" -Hltnp "* ]]; then\n/bin/sed "s/PID/$$/" <<\'LINES\'\n{text}\nLINES\nfi\n'
+            'if [[ " $* " == *"sport = :12802"* ]]; then\nprintf \'LISTEN 0 128 127.0.0.1:12802 0.0.0.0:*\\n\'\nfi',
         )
 
     def path_without_adb(self) -> Path:
@@ -984,8 +1000,9 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn("oryx-tunnel-setup: self-check:", result.stderr)
         report = self.report()
         self.assertIn(
-            'self-check: tunnel key rejects local socket forwarding: client connection failed:'
-            ' ConnectionRefusedError, no "open failed" line: failed\n',
+            "self-check: tunnel key rejects local socket forwarding: client never connected: ssh exited"
+            " before the -L listened, ssh said: agent@oryx-pcsc.thecybermonk.com: Permission denied"
+            " (publickey).: failed\n",
             report,
         )
         self.assertNotIn("client got data", report)
@@ -1071,6 +1088,36 @@ class TunnelSetup(unittest.TestCase):
             "self-check: human-tier read: CLOUDFLARE_API_KEY ssh failed (exit 255); request outcome unknown: failed\n",
             self.report(),
         )
+
+    def test_delivery_probes_wait_for_the_tunnel_to_carry_its_forwards(self) -> None:
+        # The unit is active before cloudflared connects: the deliveries wait until the forwards exist.
+        self.checkout("git", "tunnel-late")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, TUNNEL_UP_DELAY="3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = self.report()
+        self.assertRegex(report, r"self-check: tunnel up after [3-9] s\n")
+        self.assertLess(report.index("self-check: tunnel up after"), report.index("self-check: preview delivery:"))
+        self.assertIn("self-check: preview delivery: ok\n", report)
+
+    def test_delivery_probes_say_not_run_when_the_tunnel_never_comes_up(self) -> None:
+        self.checkout("git", "tunnel-down")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, TUNNEL_DOWN="1", ORYX_TUNNEL_WAIT_SECONDS="2")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        self.assertRegex(
+            report,
+            r"self-check: tunnel not up after [2-9] s \(laptop 127\.0\.0\.1:12802 listening: no;"
+            r" oryx 127\.0\.0\.1:5038 listening: no\)\n",
+        )
+        for name in (
+            "forward doctor oryx pair", "forward doctor devboxes", "oryx forward doctor", "preview delivery",
+            "forward port delivery", "browser page delivery", "audio delivery", "browser grant delivery",
+            "human-tier read", "adb through tunnel",
+        ):
+            self.assertIn(f"self-check: {name}: not run: tunnel not up: failed\n", report)
+        self.assertIn("self-check: tunnel key true: exit 0: ok\n", report)
 
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")

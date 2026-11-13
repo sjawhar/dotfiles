@@ -472,6 +472,42 @@ self_probe() {
     [[ "$verdict" == ok ]] || self_failures+=("$name")
 }
 
+# forward-tunnel@oryx is active as soon as ssh starts, before cloudflared connects and the forwards
+# exist. The probes that ride the tunnel run only once it carries them: the laptop's LocalForward of
+# the preview port listens, and oryx's 127.0.0.1:5038 (adb's RemoteForward) listens. 60 s covers a
+# slow Cloudflare connect and one unit restart (RestartSec=10). Tests shorten it.
+TUNNEL_WAIT_SECONDS="${ORYX_TUNNEL_WAIT_SECONDS:-60}"
+tunnel_up=false
+
+wait_for_tunnel() {
+    local start=$SECONDS laptop remote
+    while :; do
+        laptop="$(ss -Hltn '( sport = :12802 )' 2>/dev/null | awk '$4 == "127.0.0.1:12802"')" || laptop=""
+        remote="$(ssh oryx 'ss -Hltn "( sport = :5038 )"' 2>/dev/null)" || remote=""
+        if [[ -n "$laptop" && "$remote" == *127.0.0.1:5038* ]]; then
+            tunnel_up=true
+            report_line "self-check: tunnel up after $((SECONDS - start)) s"
+            return 0
+        fi
+        if ((SECONDS - start >= TUNNEL_WAIT_SECONDS)); then
+            report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $([[ -n "$laptop" ]] && echo yes || echo no); oryx 127.0.0.1:5038 listening: $([[ "$remote" == *127.0.0.1:5038* ]] && echo yes || echo no))"
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+# A probe that rides the tunnel: it runs only when the tunnel came up, and otherwise fails as not run.
+tunnel_self_probe() {
+    local name="$1"
+    if "$tunnel_up"; then
+        self_probe "$@"
+    else
+        report_line "self-check: $name: not run: tunnel not up: failed"
+        self_failures+=("$name")
+    fi
+}
+
 # Run a command and set PROBE_VALUE to its exit status; succeed only on 0.
 probe_exit() {
     local status=0
@@ -819,20 +855,43 @@ key_probe_denied_local_socket() {
     err="$work_dir/local-socket.err"
     with_token_environment timeout 60 ssh -F "$tunnel_probe" -N -L "127.0.0.1:$port:/run/user/$oryx_uid/forward/pulse.sock" oryx-probe > /dev/null 2> "$err" &
     pid=$!
-    sleep 1
     set +e
-    # The client prints what it saw. EOF: sshd refused the socket. Data, or a connection that stays
-    # open and silent: the socket was forwarded (forward's pulse.sock sends nothing until the client
-    # speaks). A failed connect: the -L never came up, so the probe proves nothing about the key.
+    # ssh binds the -L only after cloudflared reaches Cloudflare and the key logs in, so the client
+    # retries its connect for up to 30 s while ssh runs. It prints what it saw. EOF: sshd refused
+    # the socket. Data, or a connection that stays open and silent: the socket was forwarded
+    # (forward's pulse.sock sends nothing until the client speaks). No connect: the -L never came
+    # up, so the probe proves nothing about the key.
     local client
-    client="$(python3 - "$port" <<'PY'
+    client="$(python3 - "$port" "$pid" <<'PY'
 import socket
 import sys
-try:
-    sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
-except OSError as error:
-    print(f"client connection failed: {type(error).__name__}")
-    raise SystemExit(2)
+import time
+
+port, ssh_pid = int(sys.argv[1]), sys.argv[2]
+
+
+def ssh_running() -> bool:
+    try:
+        with open(f"/proc/{ssh_pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+deadline = time.monotonic() + 30
+while True:
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        break
+    except OSError as error:
+        if not ssh_running():
+            print("client never connected: ssh exited before the -L listened")
+            raise SystemExit(2)
+        if time.monotonic() >= deadline:
+            print(f"client connection failed after 30 s: {type(error).__name__}")
+            raise SystemExit(2)
+        time.sleep(0.2)
+sock.settimeout(5)
 try:
     received = sock.recv(1)
 except socket.timeout:
@@ -853,8 +912,12 @@ PY
     wait "$pid" 2>/dev/null || true
     local line
     line="$(deciding_line "$err" 'open failed')"
+    if [[ -z "$line" && "$client" == "client never connected: "* ]]; then
+        # Name why ssh stopped (for example the key's login refused), from its own last line.
+        line="ssh said: $(tail -n 1 "$err" | tr -d '\r' | cut -c1-160)"
+    fi
     PROBE_VALUE="${client:-client printed nothing}, ${line:-no \"open failed\" line}"
-    [[ $client_status -eq 0 && -n "$line" ]]
+    [[ $client_status -eq 0 && "$line" == *"open failed"* ]]
 }
 
 key_probe_login_key() {
@@ -1054,20 +1117,21 @@ self_probe "unit adb-server.service" self_unit_active adb-server.service
 self_probe "devboxes daemon configuration" self_devboxes_config
 self_probe "ssh configuration" self_ssh_config
 self_probe "ssh oryx true" probe_exit ssh oryx true
-self_probe "forward doctor oryx pair" self_command_output "forward doctor oryx pair" "$DOTFILES/bin/mise" exec -- forward doctor --config "$HOME/.config/forward/config-oryx.toml"
-self_probe "forward doctor devboxes" self_command_output "forward doctor devboxes" "$DOTFILES/bin/mise" exec -- forward doctor
-self_probe "oryx forward doctor" self_command_output "oryx forward doctor" ssh oryx 'forward doctor'
-self_probe "preview delivery" delivery_preview
-self_probe "forward port delivery" delivery_forward_port
-self_probe "browser page delivery" delivery_page
-self_probe "audio delivery" delivery_sound
-self_probe "browser grant delivery" delivery_browser
-self_probe "human-tier read" human_tier_read
+wait_for_tunnel || true
+tunnel_self_probe "forward doctor oryx pair" self_command_output "forward doctor oryx pair" "$DOTFILES/bin/mise" exec -- forward doctor --config "$HOME/.config/forward/config-oryx.toml"
+tunnel_self_probe "forward doctor devboxes" self_command_output "forward doctor devboxes" "$DOTFILES/bin/mise" exec -- forward doctor
+tunnel_self_probe "oryx forward doctor" self_command_output "oryx forward doctor" ssh oryx 'forward doctor'
+tunnel_self_probe "preview delivery" delivery_preview
+tunnel_self_probe "forward port delivery" delivery_forward_port
+tunnel_self_probe "browser page delivery" delivery_page
+tunnel_self_probe "audio delivery" delivery_sound
+tunnel_self_probe "browser grant delivery" delivery_browser
+tunnel_self_probe "human-tier read" human_tier_read
 self_probe "oryx SSM login" probe_exit ssh oryx-ssm true
 self_probe "token file mode and owner" self_token_mode
 self_probe "token leak search" self_token_leak_search
 self_probe "laptop port 22" self_laptop_port_22
-self_probe "adb through tunnel" adb_through_tunnel
+tunnel_self_probe "adb through tunnel" adb_through_tunnel
 write_probe_configs
 self_probe "tunnel key true" key_probe_true
 self_probe "tunnel key forced command" key_probe_no_shell
