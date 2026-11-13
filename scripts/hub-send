@@ -522,11 +522,15 @@ def status_reason(content, status):
 
 
 def status_for_event(hub, room_id, event_id, deadline, clock):
-    """Read relation pages until a terminal status or the polling deadline."""
+    """Read relation pages until a terminal status or the polling deadline.
+
+    The first page is always read, so the last read at the deadline happens even when
+    the sleep before it woke late; later pages stop once the deadline has passed.
+    """
     page = None
-    for _ in range(10):
+    for index in range(10):
         remaining = deadline - clock()
-        if remaining < 0:
+        if index and remaining <= 0:
             return None
         timeout = max(1, min(READ_TIMEOUT, remaining))
         parameters = {"dir": "f", "limit": "100"}
@@ -566,8 +570,6 @@ def status_for_event(hub, room_id, event_id, deadline, clock):
 def wait_for_status(hub, room_id, event_id, clock, sleep):
     deadline = clock() + WAIT_SECONDS
     while True:
-        if clock() > deadline:
-            return f"UNCONFIRMED {event_id}", 5
         try:
             status = status_for_event(hub, room_id, event_id, deadline, clock)
         except (HttpError, OSError, ValueError):
@@ -606,11 +608,25 @@ class InterruptGuard:
     do nothing, so the result line is printed exactly once.
     """
 
+    SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
     def __init__(self):
         self.armed = True
         self.previous = {}
-        for number in (signal.SIGINT, signal.SIGTERM):
-            self.previous[number] = signal.signal(number, self.handle)
+
+    def install(self):
+        """Install the handlers with both signals blocked, so none lands mid-install.
+
+        A signal sent meanwhile stays pending and reaches handle() on unblock, inside
+        main's protected scope. Each previous handler is saved before it is replaced.
+        """
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+        try:
+            for number in self.SIGNALS:
+                self.previous[number] = signal.getsignal(number)
+                signal.signal(number, self.handle)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
     def handle(self, _signum, _frame):
         if self.armed:
@@ -706,6 +722,7 @@ def main(argv=None, *, clock=time.monotonic, sleep=time.sleep) -> int:
         result = None
         try:
             try:
+                guard.install()
                 result = send(argv, post_state, clock, sleep)
             finally:
                 guard.disarm()

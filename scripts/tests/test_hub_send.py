@@ -51,14 +51,15 @@ class Request:
 
 
 class FakeClock:
-    def __init__(self) -> None:
+    def __init__(self, late: float = 0.0) -> None:
         self.now = 0.0
+        self.late = late  # a real sleep wakes a little after the time it was given
 
     def __call__(self) -> float:
         return self.now
 
     def sleep(self, seconds: float) -> None:
-        self.now += seconds
+        self.now += seconds + self.late
 
 
 class InterruptingStringIO(io.StringIO):
@@ -508,11 +509,12 @@ class HubSendTest(unittest.TestCase):
         env: dict[str, str] | None = None,
         configure_module=None,
         urlopen_errors: list[BaseException] | None = None,
+        sleep_late: float = 0.0,
     ) -> tuple[int, str, str, FakeClock]:
         name, module = self.load_module()
         if configure_module is not None:
             configure_module(module)
-        clock = FakeClock()
+        clock = FakeClock(sleep_late)
         self.fake.clock = clock
         old_urlopen = module.urllib.request.urlopen
 
@@ -972,6 +974,47 @@ class HubSendTest(unittest.TestCase):
             3,
         )
         self.assertEqual(self.fake.post_requests(), [])
+
+    def test_late_sleep_still_makes_the_final_read_at_the_deadline(self) -> None:
+        """A real sleep wakes after the deadline; the last read is still made there."""
+        self.fake.status_due = 59.5
+        self.fake.due_statuses = [{"status": "SUCCESS"}]
+        clock = self.assert_result(self.invoke(self.text_args(), sleep_late=0.002), f"SENT {EVENT}", 0)
+        self.assertGreaterEqual(clock(), 59.5)
+
+    def test_late_sleep_without_a_status_ends_unconfirmed(self) -> None:
+        self.fake.post_statuses = [{"status": "PENDING"}]
+        clock = self.assert_result(
+            self.invoke(self.text_args(), sleep_late=0.002), f"UNCONFIRMED {EVENT}", 5
+        )
+        self.assertLess(clock(), 61)
+
+    def test_signal_while_the_guard_installs_gives_one_refused_line(self) -> None:
+        """A real signal right after the first handler is installed is still the guard's."""
+        for number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=number.name):
+                self.restart_fake()
+                sigint = signal.getsignal(signal.SIGINT)
+                sigterm = signal.getsignal(signal.SIGTERM)
+                real_signal = signal.signal
+                sent = []
+
+                def install_then_signal(signum, handler, number=number, sent=sent):
+                    previous = real_signal(signum, handler)
+                    if not sent and getattr(handler, "__name__", "") == "handle":
+                        sent.append(signum)
+                        # To the main thread: hub-send is single-threaded, while this
+                        # test's fake hub serves from other threads.
+                        signal.pthread_kill(threading.main_thread().ident, number)
+                    return previous
+
+                with mock.patch.object(signal, "signal", install_then_signal):
+                    actual = self.invoke(self.text_args())
+                self.assertEqual(sent, [signal.SIGINT])
+                self.assert_result(actual, "REFUSED: interrupted", 3)
+                self.assertEqual(self.fake.requests, [])
+                self.assertEqual(signal.getsignal(signal.SIGINT), sigint)
+                self.assertEqual(signal.getsignal(signal.SIGTERM), sigterm)
 
     def test_signal_during_bridge_check_refuses_as_interrupted_without_post(self) -> None:
         """A real SIGTERM or SIGINT before the post reports the plan's `REFUSED: interrupted`,
