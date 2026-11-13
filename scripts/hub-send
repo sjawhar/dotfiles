@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""Send one chat-hub message and report its bridge result.
+
+Usage:
+  hub-send [--force] [--reply-to EVENT_ID] ROOM_ID --text-file FILE
+  hub-send [--force] [--reply-to EVENT_ID] ROOM_ID --file FILE [--caption-file FILE]
+
+Run with:
+  secrets MATRIX_HUB_URL MATRIX_HUB_TOKEN -- ~/.dotfiles/scripts/hub-send …
+
+Results:
+  SENT EVENT_ID                 (exit 0)
+  FAILED EVENT_ID_OR_DASH: WHY  (exit 4)
+  UNCONFIRMED EVENT_ID_OR_DASH  (exit 5)
+  REFUSED: WHY                  (exit 3)
+
+Only SENT counts as sent.
+"""
+
+import argparse
+import http.client
+import json
+import mimetypes
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+
+
+WAIT_SECONDS = 60
+POLL_SECONDS = 1
+POST_TIMEOUT = 30
+READ_TIMEOUT = 10
+PROVISION_URL = "http://127.0.0.1:{port}"
+USER_ID = "@sami:chathub"
+STATUS_EVENT_TYPE = "com.beeper.message_send_status"
+TERMINAL_STATUSES = {"SUCCESS", "FAIL_RETRIABLE", "FAIL_PERMANENT"}
+
+
+class Refused(Exception):
+    """A pre-post condition that prevents sending the message."""
+
+
+class UsageError(Exception):
+    """An input error discovered after argparse has parsed the command line."""
+
+
+class Interrupted(BaseException):
+    """SIGINT and SIGTERM use one controlled exception path.
+
+    A BaseException, like KeyboardInterrupt, so no `except Exception` reads a signal as a crash.
+    """
+
+
+class HttpError(Exception):
+    """An HTTP response outside the successful range."""
+
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+        super().__init__(http_error_reason(status, body))
+
+
+@dataclass(frozen=True)
+class Hub:
+    """The Matrix homeserver endpoint and its bearer token."""
+
+    base_url: str
+    token: str
+
+    def url(self, path):
+        return self.base_url.rstrip("/") + path
+
+    def json(
+        self,
+        method,
+        path,
+        *,
+        data=None,
+        content_type="application/json",
+        timeout=READ_TIMEOUT,
+        post_state=None,
+    ):
+        return http_json(
+            method,
+            self.url(path),
+            self.token,
+            data=data,
+            content_type=content_type,
+            timeout=timeout,
+            post_state=post_state,
+        )
+
+
+@dataclass
+class PostState:
+    """Whether the message post request reached its send boundary, and its event ID."""
+
+    sent: bool = False
+    event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BridgeInfo:
+    """The m.bridge bot and its bridge-table entry."""
+
+    bot: str
+    instance: str
+    port: str
+    layout: str
+
+
+def json_body(raw):
+    try:
+        return json.loads(raw.decode("utf-8")) if raw else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid JSON response") from error
+
+
+def collapse(value):
+    """Turn arbitrary server text into one safe result-line fragment."""
+    return "" if value is None else " ".join(str(value).split())
+
+def has_control_character(value):
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+def quoted(value):
+    return urllib.parse.quote(str(value), safe="")
+
+
+def query(values):
+    return urllib.parse.urlencode(values, quote_via=urllib.parse.quote)
+
+
+def decode_error_body(body):
+    try:
+        decoded = json_body(body)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def http_error_reason(status, body):
+    """Return the Matrix error body when present, otherwise the HTTP status."""
+    payload = decode_error_body(body)
+    if payload:
+        code = collapse(payload.get("errcode", ""))
+        message = collapse(payload.get("error", ""))
+        if code and message:
+            return f"{code}: {message}"
+        if message:
+            return message
+        if code:
+            return code
+    return f"HTTP {status}"
+
+
+def exception_reason(error):
+    if isinstance(error, HttpError):
+        return collapse(error)
+    if isinstance(error, urllib.error.URLError) and error.reason:
+        if isinstance(error.reason, ValueError):
+            return "HTTP request failed"
+        return collapse(error.reason)
+    if isinstance(error, ValueError):
+        return "invalid response"
+    text = collapse(error)
+    return text or type(error).__name__
+
+
+def http_request(
+    method, url, token, *, data=None, content_type=None, timeout=READ_TIMEOUT, post_state=None
+):
+    """Make every HTTP request used by hub-send.
+
+    urllib.request.urlopen is deliberately resolved here, at call time, so tests can
+    wrap the module attribute and reject requests outside their fake services.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        if post_state is not None:
+            post_state.sent = True
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            try:
+                return response.read()
+            except http.client.HTTPException as error:
+                raise ConnectionError("HTTP response read failed") from error
+    except urllib.error.HTTPError as error:
+        try:
+            try:
+                body = error.read()
+            except (http.client.HTTPException, OSError):
+                body = b""
+        finally:
+            try:
+                error.close()
+            except OSError:
+                pass
+        raise HttpError(error.code, body) from None
+    except http.client.HTTPException as error:
+        raise ConnectionError("HTTP request failed") from error
+
+
+def dotfiles_root():
+    return Path(__file__).resolve().parents[1]
+
+
+def bridge_table():
+    """Read the canonical bash bridge array without executing the installer."""
+    path = dotfiles_root() / "installers" / "chathub.sh"
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise Refused(f"cannot read the bridge table: {path}") from error
+
+    array = re.search(r"(?ms)^BRIDGES=\(\s*(.*?)^\)", source)
+    entries = [] if array is None else re.findall(r'^\s*"([^"]+)"\s*$', array.group(1), re.MULTILINE)
+    bridges = {}
+    for entry in entries:
+        fields = entry.split()
+        if len(fields) != 4:
+            continue
+        instance, port, bot, layout = fields
+        bridges[f"@{bot}:chathub"] = BridgeInfo(
+            bot=f"@{bot}:chathub", instance=instance, port=port, layout=layout
+        )
+    if not bridges:
+        raise Refused(f"cannot read the bridge table: {path}")
+    return bridges
+
+
+def room_bridge_bot(hub, room_id):
+    """Return the unique bridge bot named by the room's m.bridge state."""
+    path = f"/_matrix/client/v3/rooms/{quoted(room_id)}/state"
+    try:
+        state = hub.json("GET", path)
+    except (HttpError, OSError, ValueError) as error:
+        raise Refused(f"cannot read the room's state: {exception_reason(error)}") from error
+
+    if isinstance(state, dict):
+        state = state.get("chunk", [])
+    if not isinstance(state, list):
+        raise Refused("cannot read the room's state: invalid response")
+
+    bridge_events = [event for event in state if isinstance(event, dict) and event.get("type") == "m.bridge"]
+    if not bridge_events:
+        raise Refused("room has no m.bridge state")
+
+    bot_contents = [
+        (content["bridgebot"], content)
+        for event in bridge_events
+        if isinstance((content := event.get("content")), dict)
+        and isinstance(content.get("bridgebot"), str)
+        and content["bridgebot"]
+    ]
+    bots = {bot for bot, _content in bot_contents}
+    if not bots:
+        raise Refused("room's m.bridge state has no bridgebot")
+    if len(bots) > 1:
+        raise Refused(f"room has different bridge bots: {', '.join(sorted(bots))}")
+    bot = next(iter(bots))
+    return bot, next(content for candidate, content in bot_contents if candidate == bot)
+
+
+def provision_base(port):
+    return PROVISION_URL.format(port=port).rstrip("/")
+
+
+def login_state(login):
+    state = login.get("state")
+    if not isinstance(state, dict):
+        state = {}
+    event = state.get("state_event") or login.get("state_event") or "UNKNOWN"
+    info = state.get("info")
+    if not isinstance(info, dict):
+        info = login.get("state_info")
+    if not isinstance(info, dict):
+        info = {}
+    error = state.get("error") or info.get("error")
+    return collapse(event), collapse(error) if error else ""
+
+
+def disconnected_reason(bridge, login):
+    state, error = login_state(login)
+    login_id = collapse(login.get("id", "unknown")) or "unknown"
+    reason = f"bridge {bridge.instance} login {login_id} is {state}"
+    return f"{reason}: {error}" if error else reason
+
+
+def check_bridgev2(hub, bridge, receiver):
+    """Ensure the room's selected bridgev2 login, or every login, is CONNECTED."""
+    path = "/_matrix/provision/v3/whoami?" + query({"user_id": USER_ID})
+    try:
+        response = http_json(
+            "GET", provision_base(bridge.port) + path, hub.token, timeout=READ_TIMEOUT
+        )
+    except (HttpError, OSError, ValueError) as error:
+        raise Refused(
+            f"bridge {bridge.instance} provisioning check failed: {exception_reason(error)}"
+        ) from error
+
+    logins = response.get("logins") if isinstance(response, dict) else None
+    if not isinstance(logins, list):
+        raise Refused(f"bridge {bridge.instance} provisioning response has no logins list")
+
+    if receiver:
+        selected = next((login for login in logins if isinstance(login, dict) and login.get("id") == receiver), None)
+        if selected is None:
+            raise Refused(f"bridge {bridge.instance} has no login {collapse(receiver)}")
+        if login_state(selected)[0] != "CONNECTED":
+            raise Refused(disconnected_reason(bridge, selected))
+        return
+
+    if not logins:
+        raise Refused(f"bridge {bridge.instance} has no login")
+    for login in logins:
+        if not isinstance(login, dict) or login_state(login)[0] != "CONNECTED":
+            raise Refused(disconnected_reason(bridge, login if isinstance(login, dict) else {}))
+
+
+def discord_secret():
+    """Read Discord's provisioning secret without putting it in an argument list."""
+    config = Path.home() / ".local" / "share" / "chathub" / "discord" / "config.yaml"
+    if not config.is_file():
+        raise Refused("cannot read Discord shared secret")
+
+    mise = dotfiles_root() / "bin" / "mise"
+    try:
+        if mise.exists():
+            located = subprocess.run(
+                [str(mise), "which", "yq"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            yq = located.stdout.strip() if located.returncode == 0 else ""
+        else:
+            yq = "yq"
+        if not yq:
+            raise OSError("yq is unavailable")
+        result = subprocess.run(
+            [yq, "-r", ".bridge.provisioning.shared_secret", str(config)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as error:
+        raise Refused("cannot read Discord shared secret") from error
+    secret = result.stdout.strip() if result.returncode == 0 else ""
+    if not secret or secret == "null" or has_control_character(secret):
+        raise Refused("cannot read Discord shared secret")
+    return secret
+
+
+def check_discord(bridge):
+    secret = discord_secret()
+    path = "/_matrix/provision/v1/ping?" + query({"user_id": USER_ID})
+    try:
+        response = http_json(
+            "GET", provision_base(bridge.port) + path, secret, timeout=READ_TIMEOUT
+        )
+    except (HttpError, OSError, ValueError) as error:
+        raise Refused(
+            f"bridge {bridge.instance} provisioning check failed: {exception_reason(error)}"
+        ) from error
+
+    status = response.get("Discord") if isinstance(response, dict) else None
+    if not isinstance(status, dict) or not status.get("logged_in") or not status.get("connected"):
+        raise Refused(f"bridge {bridge.instance} login {USER_ID} is DISCONNECTED")
+
+
+def check_room(hub, room_id, force):
+    """Validate the room and its bridge without posting."""
+    bot, content = room_bridge_bot(hub, room_id)
+    if force:
+        return
+
+    bridge = bridge_table().get(bot)
+    if bridge is None:
+        raise Refused(f"room bridge bot {bot} is not in the bridge table")
+    receiver = None
+    channel = content.get("channel") if isinstance(content, dict) else None
+    if isinstance(channel, dict):
+        receiver = channel.get("fi.mau.receiver")
+
+    if bridge.layout == "legacy" and bridge.instance == "discord":
+        check_discord(bridge)
+    else:
+        check_bridgev2(hub, bridge, receiver)
+
+def http_json(
+    method,
+    url,
+    token,
+    *,
+    data=None,
+    content_type="application/json",
+    timeout=READ_TIMEOUT,
+    post_state=None,
+):
+    return json_body(
+        http_request(
+            method,
+            url,
+            token,
+            data=data,
+            content_type=content_type,
+            timeout=timeout,
+            post_state=post_state,
+        )
+    )
+
+
+def read_text_file(path, label):
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise UsageError(f"cannot read {label}: {path}") from error
+    text = text.rstrip("\r\n")
+    if not text.strip():
+        raise UsageError(f"{label} is empty")
+    return text
+
+
+def read_upload(path):
+    file_path = Path(path)
+    try:
+        data = file_path.read_bytes()
+    except OSError as error:
+        raise UsageError(f"cannot read file: {path}") from error
+    return file_path, data
+
+
+def message_relation(reply_to):
+    if reply_to is None:
+        return {}
+    return {"m.relates_to": {"m.in_reply_to": {"event_id": reply_to}}}
+
+
+def upload_file(hub, file_path, file_data):
+    mimetype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    path = "/_matrix/media/v3/upload?" + query({"filename": file_path.name})
+    try:
+        response = hub.json(
+            "POST", path, data=file_data, content_type=mimetype, timeout=POST_TIMEOUT
+        )
+    except (HttpError, OSError, ValueError) as error:
+        return None, f"upload: {exception_reason(error)}"
+    content_uri = response.get("content_uri") if isinstance(response, dict) else None
+    if not isinstance(content_uri, str) or not content_uri:
+        return None, "upload: response has no content_uri"
+    return {
+        "msgtype": "m.image" if mimetype.startswith("image/") else "m.file",
+        "mimetype": mimetype,
+        "content_uri": content_uri,
+    }, None
+
+
+def check_reply_target(hub, room_id, event_id):
+    path = f"/_matrix/client/v3/rooms/{quoted(room_id)}/event/{quoted(event_id)}"
+    try:
+        hub.json("GET", path, timeout=READ_TIMEOUT)
+    except HttpError as error:
+        if error.status == 404:
+            raise UsageError("reply target is not an event of this room") from error
+        raise Refused(f"cannot read the reply target: {exception_reason(error)}") from error
+    except (OSError, ValueError) as error:
+        raise Refused(f"cannot read the reply target: {exception_reason(error)}") from error
+
+
+def transaction_id():
+    return f"hub-send-{time.time_ns()}-{secrets.token_hex(4)}"
+
+
+def post_message(hub, room_id, content, post_state):
+    path = (
+        f"/_matrix/client/v3/rooms/{quoted(room_id)}/send/m.room.message/"
+        f"{quoted(transaction_id())}"
+    )
+    payload = json.dumps(content, separators=(",", ":")).encode("utf-8")
+    try:
+        response = hub.json(
+            "PUT", path, data=payload, timeout=POST_TIMEOUT, post_state=post_state
+        )
+    except HttpError as error:
+        return "failed", None, exception_reason(error)
+    except (OSError, ValueError):
+        return "unconfirmed", None, None
+    event_id = response.get("event_id") if isinstance(response, dict) else None
+    if not isinstance(event_id, str) or not event_id:
+        return "unconfirmed", None, None
+    return "posted", event_id, None
+
+
+def status_reason(content, status):
+    reason_code = collapse(content.get("reason", ""))
+    chosen = ""
+    for key in ("message", "error", "internal_error", "reason"):
+        value = collapse(content.get(key, ""))
+        if value:
+            chosen = value
+            break
+    if not chosen:
+        chosen = status
+    if reason_code and reason_code != chosen:
+        return f"{chosen} [{reason_code}]"
+    return chosen
+
+
+def status_for_event(hub, room_id, event_id, deadline, clock):
+    """Read relation pages until a terminal status or the polling deadline.
+
+    The first page is always read, so the last read at the deadline happens even when
+    the sleep before it woke late; later pages stop once the deadline has passed.
+    """
+    page = None
+    for index in range(10):
+        remaining = deadline - clock()
+        if index and remaining <= 0:
+            return None
+        timeout = max(1, min(READ_TIMEOUT, remaining))
+        parameters = {"dir": "f", "limit": "100"}
+        if page:
+            parameters["from"] = page
+        path = (
+            f"/_matrix/client/v1/rooms/{quoted(room_id)}/relations/{quoted(event_id)}/"
+            f"{quoted('m.reference')}/{quoted(STATUS_EVENT_TYPE)}?{query(parameters)}"
+        )
+        response = hub.json("GET", path, timeout=timeout)
+        chunk = response.get("chunk") if isinstance(response, dict) else None
+        if not isinstance(chunk, list) or not chunk:
+            return None
+        for event in chunk:
+            if not isinstance(event, dict) or event.get("type") != STATUS_EVENT_TYPE:
+                continue
+            content = event.get("content")
+            if not isinstance(content, dict):
+                continue
+            relates_to = content.get("m.relates_to")
+            if not isinstance(relates_to, dict):
+                continue
+            if (
+                relates_to.get("rel_type") != "m.reference"
+                or relates_to.get("event_id") != event_id
+            ):
+                continue
+            status = content.get("status")
+            if status in TERMINAL_STATUSES:
+                return status, content
+        page = response.get("next_batch") if isinstance(response, dict) else None
+        if not page:
+            return None
+    return None
+
+
+def wait_for_status(hub, room_id, event_id, clock, sleep):
+    deadline = clock() + WAIT_SECONDS
+    while True:
+        try:
+            status = status_for_event(hub, room_id, event_id, deadline, clock)
+        except (HttpError, OSError, ValueError):
+            status = None
+        if status:
+            name, content = status
+            if name == "SUCCESS":
+                return f"SENT {event_id}", 0
+            return f"FAILED {event_id}: {status_reason(content, name)}", 4
+        if clock() >= deadline:
+            return f"UNCONFIRMED {event_id}", 5
+        sleep(min(POLL_SECONDS, max(0, deadline - clock())))
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="hub-send",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--force", action="store_true", help="skip bridge-health checks, not m.bridge")
+    parser.add_argument("--reply-to", metavar="EVENT_ID")
+    parser.add_argument("room_id", metavar="ROOM_ID")
+    sent = parser.add_mutually_exclusive_group(required=True)
+    sent.add_argument("--text-file", metavar="FILE")
+    sent.add_argument("--file", metavar="FILE")
+    parser.add_argument("--caption-file", metavar="FILE")
+    return parser
+
+
+class InterruptGuard:
+    """Turn the first SIGINT or SIGTERM into one Interrupted exception.
+
+    The handler disarms itself before it raises, so no second signal can raise while
+    the first one is handled. Once the result is known, disarm() makes further signals
+    do nothing, so the result line is printed exactly once.
+    """
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+    def __init__(self):
+        self.armed = True
+        self.previous = {}
+
+    def install(self):
+        """Install the handlers with both signals blocked, so none lands mid-install.
+
+        A signal sent meanwhile stays pending and reaches handle() on unblock, inside
+        main's protected scope. Each previous handler is saved before it is replaced.
+        """
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+        try:
+            for number in self.SIGNALS:
+                self.previous[number] = signal.getsignal(number)
+                signal.signal(number, self.handle)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+    def handle(self, _signum, _frame):
+        if self.armed:
+            self.armed = False
+            raise Interrupted()
+
+    def disarm(self):
+        self.armed = False
+
+    def restore(self):
+        for number, handler in self.previous.items():
+            signal.signal(number, handler)
+
+
+def send(argv, post_state, clock, sleep):
+    """Parse, check, post and wait; return the result line and exit code.
+
+    Interrupted propagates to main, which decides from post_state what was sent.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.room_id.startswith("!"):
+        parser.error("ROOM_ID must start with !")
+    if args.reply_to is not None and not args.reply_to.startswith("$"):
+        parser.error("--reply-to must start with $")
+    if args.caption_file and not args.file:
+        parser.error("--caption-file requires --file")
+
+    try:
+        text = read_text_file(args.text_file, "text file") if args.text_file else None
+        caption = read_text_file(args.caption_file, "caption file") if args.caption_file else None
+        file_path, file_data = read_upload(args.file) if args.file else (None, None)
+    except UsageError as error:
+        parser.error(str(error))
+
+    hub_url = os.environ.get("MATRIX_HUB_URL")
+    hub_token = os.environ.get("MATRIX_HUB_TOKEN")
+    if not hub_url or not hub_token:
+        parser.error("MATRIX_HUB_URL and MATRIX_HUB_TOKEN must be set")
+    if has_control_character(hub_token):
+        parser.error("MATRIX_HUB_TOKEN must not contain control characters")
+    hub = Hub(hub_url, hub_token)
+
+    try:
+        check_room(hub, args.room_id, args.force)
+        if args.reply_to:
+            check_reply_target(hub, args.room_id, args.reply_to)
+
+        relation = message_relation(args.reply_to)
+        if text is not None:
+            content = {"msgtype": "m.text", "body": text, **relation}
+        else:
+            uploaded, upload_error = upload_file(hub, file_path, file_data)
+            if upload_error:
+                return f"FAILED -: {upload_error}", 4
+            body = caption if caption is not None else file_path.name
+            content = {
+                "msgtype": uploaded["msgtype"],
+                "body": body,
+                "filename": file_path.name,
+                "url": uploaded["content_uri"],
+                "info": {"mimetype": uploaded["mimetype"], "size": len(file_data)},
+                **relation,
+            }
+
+        outcome, event_id, error = post_message(hub, args.room_id, content, post_state)
+        if outcome == "failed":
+            return f"FAILED -: {error}", 4
+        if outcome == "unconfirmed":
+            return "UNCONFIRMED -", 5
+        post_state.event_id = event_id
+        return wait_for_status(hub, args.room_id, event_id, clock, sleep)
+    except UsageError as error:
+        parser.error(str(error))
+    except Refused as error:
+        if not post_state.sent:
+            return f"REFUSED: {collapse(error)}", 3
+        return unconfirmed(post_state)
+    except Exception as error:
+        if not post_state.sent:
+            return f"REFUSED: internal error: {type(error).__name__}", 3
+        return unconfirmed(post_state)
+
+
+def unconfirmed(post_state):
+    return f"UNCONFIRMED {post_state.event_id or '-'}", 5
+
+
+def main(argv=None, *, clock=time.monotonic, sleep=time.sleep) -> int:
+    post_state = PostState()
+    guard = InterruptGuard()
+    try:
+        result = None
+        try:
+            try:
+                guard.install()
+                result = send(argv, post_state, clock, sleep)
+            finally:
+                guard.disarm()
+        except (Interrupted, KeyboardInterrupt):
+            # A signal that came after the result was known leaves that result.
+            if result is None:
+                result = ("REFUSED: interrupted", 3) if not post_state.sent else unconfirmed(post_state)
+        line, code = result
+        print(line)
+        return code
+    finally:
+        guard.restore()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
