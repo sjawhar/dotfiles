@@ -705,12 +705,12 @@ human_tier_read() {
     # secrets get (never with --value) authorizes the key and prints only its tier and grant
     # status, so its message reaches the terminal for Sami to read, and stays out of the report.
     ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' || status=$?
-    # ssh exits 255 for its own failure (oryx unreachable, no login), so secretsd never saw the
-    # request. secrets exits non-zero for a refusal and for other errors alike (a missing key, an
+    # ssh exits 255 for its own failure: oryx unreachable or no login, but also a connection that
+    # dropped after secrets get started, so the request's outcome is unknown. secrets exits non-zero for a refusal and for other errors alike (a missing key, an
     # unreachable secretsd, a touch that timed out), so its status says only "not granted".
     case "$status" in
         0) PROBE_VALUE="CLOUDFLARE_API_KEY granted (exit 0)" ;;
-        255) PROBE_VALUE="CLOUDFLARE_API_KEY not asked: ssh to oryx failed (exit 255)" ;;
+        255) PROBE_VALUE="CLOUDFLARE_API_KEY ssh failed (exit 255); request outcome unknown" ;;
         *) PROBE_VALUE="CLOUDFLARE_API_KEY not granted (exit $status)" ;;
     esac
     [[ $status -eq 0 ]]
@@ -821,20 +821,29 @@ key_probe_denied_local_socket() {
     pid=$!
     sleep 1
     set +e
-    # The client prints what it saw: EOF (sshd refused the socket), data (it forwarded it), or the
-    # connection error (the -L never came up, so the probe proves nothing about the key).
+    # The client prints what it saw. EOF: sshd refused the socket. Data, or a connection that stays
+    # open and silent: the socket was forwarded (forward's pulse.sock sends nothing until the client
+    # speaks). A failed connect: the -L never came up, so the probe proves nothing about the key.
     local client
     client="$(python3 - "$port" <<'PY'
 import socket
 import sys
 try:
     sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
-    received = sock.recv(1)
-    sock.close()
 except OSError as error:
     print(f"client connection failed: {type(error).__name__}")
     raise SystemExit(2)
-print("client got EOF" if received == b"" else "client got data")
+try:
+    received = sock.recv(1)
+except socket.timeout:
+    print("client connected and the socket stayed open with no data for 5 s: forwarded")
+    raise SystemExit(1)
+except OSError as error:
+    print(f"client connected, then {type(error).__name__}")
+    raise SystemExit(3)
+finally:
+    sock.close()
+print("client got EOF" if received == b"" else "client got data: forwarded")
 raise SystemExit(0 if received == b"" else 1)
 PY
 )"

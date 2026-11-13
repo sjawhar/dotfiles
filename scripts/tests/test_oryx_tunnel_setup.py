@@ -165,15 +165,20 @@ case "$name" in
                 printf 'agent@oryx-pcsc.thecybermonk.com: Permission denied (publickey).\n' >&2
                 exit 255
             fi
-            printf 'open failed\n' >&2
-            /usr/bin/python3 - "$port" <<'PY' &
+            # LOCAL_SOCKET_FORWARDED_SILENT: sshd forwarded the socket, and the server on it, like
+            # forward's pulse.sock, sends nothing until the client speaks.
+            [[ "${LOCAL_SOCKET_FORWARDED_SILENT:-}" == 1 ]] || printf 'open failed\n' >&2
+            /usr/bin/python3 - "$port" "${LOCAL_SOCKET_FORWARDED_SILENT:-}" <<'PY' &
 import socket
 import sys
+import time
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", int(sys.argv[1])))
 sock.listen(1)
 conn, _ = sock.accept()
+if sys.argv[2] == "1":
+    time.sleep(8)
 conn.close()
 sock.close()
 PY
@@ -1026,6 +1031,31 @@ class TunnelSetup(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CLOUDFLARE_API_KEY: tier human, grant live", result.stdout)
         self.assertNotIn("tier human, grant live", self.report())
+
+    def test_local_socket_probe_reports_a_silent_forwarded_socket_as_forwarded(self) -> None:
+        # The dangerous case: sshd forwards the Unix socket and its server stays silent.
+        self.checkout("git", "local-socket-forwarded")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, LOCAL_SOCKET_FORWARDED_SILENT="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        self.assertIn(
+            "self-check: tunnel key rejects local socket forwarding: client connected and the socket"
+            ' stayed open with no data for 5 s: forwarded, no "open failed" line: failed\n',
+            report,
+        )
+        self.assertNotIn("client connection failed", report)
+
+    def test_human_tier_ssh_failure_says_the_outcome_is_unknown(self) -> None:
+        # ssh also exits 255 when the connection drops after secrets get started.
+        self.checkout("git", "human-tier-255-label")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, HUMAN_TIER_SSH_EXIT="255")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "self-check: human-tier read: CLOUDFLARE_API_KEY ssh failed (exit 255); request outcome unknown: failed\n",
+            self.report(),
+        )
 
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")
