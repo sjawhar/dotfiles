@@ -113,7 +113,7 @@ stop_supervisors() {
         process_args "$pid" || continue
         ((${#PROCESS_ARGS[@]} == 4)) || continue
         path="${PROCESS_ARGS[1]}"
-        [[ "${PROCESS_ARGS[0]}" == bash && "$path" == */devbox && "${PROCESS_ARGS[2]}" == --tunnel-supervisor ]] || continue
+        [[ "${PROCESS_ARGS[0]##*/}" == bash && "$path" == */devbox && "${PROCESS_ARGS[2]}" == --tunnel-supervisor ]] || continue
         # Removed devbox tunnel supervisors used oryx or oryx-cf as their final argument.
         case "${PROCESS_ARGS[3]}" in
             oryx|oryx-cf)
@@ -445,14 +445,45 @@ delivery_forward_port() {
     nonce="oryx-port-$(date +%s)-$RANDOM"
     port="$(pick_free_port)" || return 1
     remote_file="oryx-port-$nonce"
-    ssh oryx "d=\$(mktemp -d); printf '%s\\n' '$nonce' > \"\$d/$remote_file\"; (cd \"\$d\" && timeout 90 python3 -m http.server $port --bind 127.0.0.1) & server=\$!; timeout 90 forward port $port & forward=\$!; echo READY; wait \$server || true; wait \$forward || true; rm -rf \"\$d\"" > "$work_dir/forward-port.out" 2>&1 &
+    ssh oryx "d=\$(mktemp -d)
+printf '%s\\n' '$nonce' > \"\$d/$remote_file\"
+(
+    cd \"\$d\"
+    timeout 90 python3 - $port <<'PY'
+import http.server
+import sys
+
+server = http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)
+server.handle_request()
+server.server_close()
+PY
+) &
+server=\$!
+timeout 90 forward port $port &
+forward=\$!
+echo READY
+if wait \$server; then
+    kill -TERM \$forward 2>/dev/null || true
+    wait \$forward 2>/dev/null || true
+    rm -rf \"\$d\"
+else
+    status=\$?
+    kill -TERM \$forward 2>/dev/null || true
+    wait \$forward 2>/dev/null || true
+    rm -rf \"\$d\"
+    exit \$status
+fi" > "$work_dir/forward-port.out" 2>&1 &
     session=$!
     for _ in {1..20}; do
         grep -q '^READY$' "$work_dir/forward-port.out" && { ready=1; break; }
         sleep 1
     done
     ((ready)) || { kill -TERM "$session" 2>/dev/null || true; wait "$session" 2>/dev/null || true; return 1; }
-    body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file")" || { wait "$session" || true; return 1; }
+    body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file")" || {
+        kill -TERM "$session" 2>/dev/null || true
+        wait "$session" 2>/dev/null || true
+        return 1
+    }
     wait "$session" || return 1
     [[ "$body" == "$nonce" ]]
 }
@@ -680,12 +711,10 @@ if ! valid_token_file "$token_tmp"; then
     rm -f "$token_tmp"
     stop token "oryx returned a malformed Cloudflare Access tunnel token file"
 fi
-token_changed=false
 if [[ -f "$token_file" ]] && cmp -s "$token_tmp" "$token_file"; then
     rm -f "$token_tmp"
 else
     mv -f "$token_tmp" "$token_file"
-    token_changed=true
 fi
 chmod 600 "$token_file"
 leak_result="$(token_leak_result "$token_file")"
@@ -734,10 +763,8 @@ done
 if ! systemctl --user restart forward-daemon@oryx.service; then
     stop units "could not restart forward-daemon@oryx.service"
 fi
-if "$token_changed" || ! unit_active forward-tunnel@oryx.service; then
-    if ! systemctl --user restart forward-tunnel@oryx.service; then
-        stop units "could not restart forward-tunnel@oryx.service"
-    fi
+if ! systemctl --user restart forward-tunnel@oryx.service; then
+    stop units "could not restart forward-tunnel@oryx.service"
 fi
 if ! systemctl --user restart adb-server.service; then
     stop units "could not restart adb-server.service"

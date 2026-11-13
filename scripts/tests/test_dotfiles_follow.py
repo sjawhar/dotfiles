@@ -350,6 +350,25 @@ class Refuses(Harness):
         (self.repo / "scripts" / "stray").write_text("x\n")
         self.assert_refused("untracked file", "UNCOMMITTED CHANGES", "?? scripts/stray")
 
+    def test_git_status_failure_stops_follow(self) -> None:
+        self.commit_upstream("change a tool", scripts__tool="v2\n")
+        before = self.snapshot()
+        git = FOLLOW.git
+
+        def fail_status(repo, *args, **kwargs):
+            if args[:1] == ("status",):
+                return subprocess.CompletedProcess([], 1, "", "test git status failed")
+            return git(repo, *args, **kwargs)
+
+        with unittest.mock.patch.object(FOLLOW, "git", side_effect=fail_status):
+            messages = self.run_follow()
+
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("UNCOMMITTED CHANGES", messages[0])
+        self.assertIn("git status failed: test git status failed", messages[0])
+        self.assertNotIn("install", self.fake_log.read_text() if self.fake_log.exists() else "")
+
     def test_deleted_kept_file(self) -> None:
         self.commit_upstream("change a tool", scripts__tool="v2\n")
         (self.repo / "secrets.env").unlink()

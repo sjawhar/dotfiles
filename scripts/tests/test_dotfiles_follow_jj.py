@@ -20,18 +20,7 @@ import unittest.mock
 from pathlib import Path
 
 from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
-
-
-def real_binary(name: str) -> str:
-    """Find a real git or jj before a Harness puts its fake commands on PATH."""
-    found = subprocess.run(["mise", "which", name], capture_output=True, text=True)
-    if found.returncode == 0 and found.stdout.strip():
-        return found.stdout.strip()
-    path = os.pathsep.join(part for part in os.environ.get("PATH", "").split(os.pathsep) if "shims" not in part)
-    located = shutil.which(name, path=path)
-    if not located:
-        raise unittest.SkipTest(f"{name} is not installed")
-    return located
+from scripts.tests.test_dotfiles_sync import real_binary
 
 
 REAL_GIT = real_binary("git")
@@ -161,8 +150,16 @@ class JjFollow(JjHarness):
     def test_moves_a_colocated_checkout_runs_tools_keeps_local_files_and_does_not_push(self) -> None:
         (self.repo / "omp/plugins/omp-plugins.lock.json").write_text("interrupted marketplace lock\n")
         push_log = self.watch_git_pushes()
+        git = FOLLOW.git
+        status_calls: list[tuple[str, ...]] = []
 
-        messages = self.run_follow()
+        def record_status(repo: Path, *args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args[:1] == ("status",):
+                status_calls.append(args)
+            return git(repo, *args, **kwargs)
+
+        with unittest.mock.patch.object(FOLLOW, "git", side_effect=record_status):
+            messages = self.run_follow()
 
         self.assertEqual(messages, [])
         self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"))
@@ -178,6 +175,13 @@ class JjFollow(JjHarness):
             ["plugin", "marketplace", "update", "verification-skills"],
             ["plugin", "upgrade", "dev-infra@verification-skills"],
         ])
+        self.assertEqual(
+            status_calls,
+            [
+                ("status", "--porcelain=v1", "-z", "--untracked-files=all", "--", FOLLOW.MARKETPLACE_LOCK),
+                ("status", "--porcelain=v1", "-z", "--untracked-files=all", "--", FOLLOW.MARKETPLACE_LOCK),
+            ],
+        )
         for call in self.omp_calls():
             self.assertFalse(call["has_omp_profile"])
             self.assertFalse(call["has_pi_profile"])

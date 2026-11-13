@@ -22,7 +22,7 @@ ORYX_ECDSA_KEY = "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEqq9YBGsf
 ORYX_ECDSA_FINGERPRINT = "SHA256:gdwcOzRloi72e7Mhl3gRUYKQ9ogFLRj5cpBjBLN964c"
 KNOWN_HOSTS_LINE = f"oryx.thecybermonk.com ssh-ed25519 {ORYX_ED25519_KEY}"
 README_URL = "https://raw.githubusercontent.com/sjawhar/dotfiles/main/phone/termux-setup"
-README_COMMAND = f'f=$(mktemp) && curl -fsSL {README_URL} -o "$f" && bash "$f"; rm -f "$f"'
+README_COMMAND = f'f=$(mktemp) && curl -fsSL {README_URL} -o "$f" && bash "$f"; s=$?; rm -f "$f"; [ "$s" -eq 0 ]'
 
 
 def write_command(path: Path, body: str) -> None:
@@ -192,7 +192,7 @@ exit "${PKG_EXIT:-0}"''',
         self.assertEqual(result.stderr, "pkg standard output\npkg error output\n")
         self.assertFalse(self.key.exists())
 
-    def test_readme_command_runs_the_downloaded_script_and_skips_a_missing_file(self) -> None:
+    def test_readme_command_runs_the_downloaded_script_and_cleans_up_failures(self) -> None:
         success = self.run_readme_command(self.command.as_uri())
 
         self.assertEqual(success.returncode, 0, success.stderr)
@@ -201,7 +201,14 @@ exit "${PKG_EXIT:-0}"''',
 
         missing_root = self.root / "missing-home"
         missing_root.mkdir()
-        missing_env = {**self.env, "HOME": str(missing_root), "PKG_LOG": str(self.root / "missing-pkg.log")}
+        missing_tmp = self.root / "missing-tmp"
+        missing_tmp.mkdir()
+        missing_env = {
+            **self.env,
+            "HOME": str(missing_root),
+            "PKG_LOG": str(self.root / "missing-pkg.log"),
+            "TMPDIR": str(missing_tmp),
+        }
         missing = subprocess.run(
             ["bash", "-c", self.readme_command((self.root / "missing-termux-setup").as_uri())],
             cwd=missing_root,
@@ -212,10 +219,31 @@ exit "${PKG_EXIT:-0}"''',
             timeout=30,
         )
 
-        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertNotEqual(missing.returncode, 0, missing.stderr)
         self.assertEqual(missing.stdout, "")
         self.assertFalse((missing_root / ".ssh/id_ed25519").exists())
         self.assertFalse((self.root / "missing-pkg.log").exists())
+        self.assertEqual(list(missing_tmp.iterdir()), [])
+
+        failed_setup = self.root / "failed-termux-setup"
+        write_command(failed_setup, "exit 7")
+        failed_root = self.root / "failed-home"
+        failed_root.mkdir()
+        failed_tmp = self.root / "failed-tmp"
+        failed_tmp.mkdir()
+        failed = subprocess.run(
+            ["bash", "-c", self.readme_command(failed_setup.as_uri())],
+            cwd=failed_root,
+            env={**self.env, "HOME": str(failed_root), "TMPDIR": str(failed_tmp)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        self.assertNotEqual(failed.returncode, 0, failed.stderr)
+        self.assertFalse((failed_root / ".ssh/id_ed25519").exists())
+        self.assertEqual(list(failed_tmp.iterdir()), [])
 
     def test_ecdsa_key_fails_the_ed25519_fingerprint_assertion(self) -> None:
         negative_command = self.root / "termux-setup-ecdsa"

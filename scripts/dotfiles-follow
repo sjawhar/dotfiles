@@ -257,9 +257,12 @@ def kept_paths(repo: Path, provision: Path) -> tuple[set[str], str]:
     return {path for path in done.stdout.split("\0") if path}, ""
 
 
-def worktree_status(repo: Path) -> tuple[list[tuple[str, str]], str]:
-    """([(XY, path)] of every change git sees, error text)."""
-    done = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+def worktree_status(repo: Path, *paths: str) -> tuple[list[tuple[str, str]], str]:
+    """([(XY, path)] of changes at PATHS, or every change when PATHS is empty, plus error text)."""
+    args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    if paths:
+        args.extend(("--", *paths))
+    done = git(repo, *args)
     if done.returncode != 0:
         return [], done.stderr.strip() or f"git status exited {done.returncode}"
     entries: list[tuple[str, str]] = []
@@ -760,11 +763,17 @@ class State:
 
 
 def restore_marketplace_lock(
-    repo: Path, state: State, entries: list[tuple[str, str]], display: str, head: str = ""
+    repo: Path,
+    state: State,
+    entries: list[tuple[str, str]],
+    error: str,
+    display: str,
+    head: str = "",
+    status_paths: tuple[str, ...] = (),
 ) -> tuple[list[tuple[str, str]], str, str, bool]:
     """Restore the generated marketplace lock before judging or moving the checkout."""
     if not any(path == MARKETPLACE_LOCK for _code, path in entries):
-        return entries, "", "", False
+        return entries, error, "", False
     # This lock is a follow-managed generated pin: followers change its pins only by pulling
     # commits, never by hand-editing the live checkout. Any local change is an anomaly to discard.
     # Persist the retry before removing its dirty-lock trigger: termination afterward must not
@@ -780,7 +789,7 @@ def restore_marketplace_lock(
             f" git checkout exited {discarded.returncode}:\n{tail(discarded.stdout + discarded.stderr)}",
             False,
         )
-    entries, error = worktree_status(repo)
+    entries, error = worktree_status(repo, *status_paths)
     at_head = f" {short(head)}" if head else ""
     log(f"note: restored follow-managed {MARKETPLACE_LOCK} to HEAD{at_head}; discarded local pin anomaly")
     return entries, error, "", True
@@ -803,8 +812,10 @@ def assess_jj_and_follow(
         )
         return found, judged, facts
 
-    entries, error = worktree_status(repo)
-    entries, error, lock_error, restored = restore_marketplace_lock(repo, state, entries, display)
+    entries, error = worktree_status(repo, MARKETPLACE_LOCK)
+    entries, error, lock_error, restored = restore_marketplace_lock(
+        repo, state, entries, error, display, status_paths=(MARKETPLACE_LOCK,)
+    )
     if restored:
         facts["restored_marketplace_lock"] = True
     if lock_error:
@@ -895,7 +906,7 @@ def assess_and_follow(
 
     kept, note = kept_paths(repo, options.provision)
     entries, error = worktree_status(repo)
-    entries, error, lock_error, restored = restore_marketplace_lock(repo, state, entries, display, head)
+    entries, error, lock_error, restored = restore_marketplace_lock(repo, state, entries, error, display, head)
     if restored or lock_error:
         judged.add("merge")
     if lock_error:

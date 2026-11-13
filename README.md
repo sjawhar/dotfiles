@@ -57,7 +57,7 @@ Install Termux. Termux includes the bootstrap `curl` command. If `curl` is
 unavailable, run `pkg install -y curl`.
 
 ```bash
-f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sjawhar/dotfiles/main/phone/termux-setup -o "$f" && bash "$f"; rm -f "$f"
+f=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sjawhar/dotfiles/main/phone/termux-setup -o "$f" && bash "$f"; s=$?; rm -f "$f"; [ "$s" -eq 0 ]
 ```
 
 The command runs `bash` only after `curl` downloads the complete script. It

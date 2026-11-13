@@ -9,6 +9,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import time
 import unittest
 from pathlib import Path
 
@@ -63,6 +64,19 @@ case "$name" in
             } >> "$FAKE_LOG"
         done
         joined=" $* "
+        if [[ "$joined" == *"forward port"* ]]; then
+            if [[ "$2" =~ (oryx-port-[0-9]+-[0-9]+) ]]; then
+                printf '%s\n' "${BASH_REMATCH[1]}" > "$CURRENT_NONCE"
+            fi
+            if [[ "$2" =~ python3[[:space:]]-[[:space:]]([0-9]+) ]]; then
+                printf '%s\n' "${BASH_REMATCH[1]}" > "$FORWARD_PORT"
+            fi
+            command="$2"
+            if [[ "$command" == *"python3 -m http.server"* ]]; then
+                command="${command//timeout 90 /timeout 1 }"
+            fi
+            exec /bin/bash -c "$command"
+        fi
         if [[ "$joined" == *"oryx-laptop && cat >"* ]]; then
             [[ "${FAIL_STEP:-}" == report ]] && exit 1
             mkdir -p "$REMOTE_ROOT"
@@ -174,7 +188,22 @@ PY
             printf key > "${!next}"
             exit 0
         done
+        url="${!#}"
+        if [[ -f "$FORWARD_PORT" && "$url" == http://127.0.0.1:"$(<"$FORWARD_PORT")"/* ]]; then
+            for _ in {1..20}; do
+                if /usr/bin/curl --noproxy '*' -fsS "$url" 2>/dev/null; then
+                    exit 0
+                fi
+                /bin/sleep 0.01
+            done
+            exit 1
+        fi
         [[ -f "$CURRENT_NONCE" ]] && /bin/cat "$CURRENT_NONCE"
+        ;;
+    forward)
+        [[ "${1:-}" == port ]] || exit 2
+        trap 'exit 0' TERM INT
+        while :; do /bin/sleep 1; done
         ;;
     gpg)
         printf 'fpr:::::::::%s:\n' "$GPG_FINGERPRINT"
@@ -319,6 +348,7 @@ class TunnelSetup(unittest.TestCase):
         self.log = self.root / f"{name}.log"
         self.remote = self.root / f"remote-{name}"
         self.current_nonce = self.root / f"nonce-{name}"
+        self.forward_port = self.root / f"forward-port-{name}"
         self.version_file = self.root / f"version-{name}"
         self.jj_config = self.root / f"{name}.jjconfig.toml"
         self.jj_config.write_text('[user]\nname = "Test"\nemail = "test@example.com"\n[signing]\nbehavior = "drop"\n', encoding="utf-8")
@@ -331,6 +361,7 @@ class TunnelSetup(unittest.TestCase):
             "FAKE_LOG": str(self.log),
             "REMOTE_ROOT": str(self.remote),
             "CURRENT_NONCE": str(self.current_nonce),
+            "FORWARD_PORT": str(self.forward_port),
             "CF_VERSION_FILE": str(self.version_file),
             "CF_VERSION": "2026.10.7",
             "GPG_FINGERPRINT": "CC94B39C77AE7342A68B89628A682D308D4E5E73",
@@ -369,6 +400,7 @@ class TunnelSetup(unittest.TestCase):
             "sudo",
             "apt-get",
             "curl",
+            "forward",
             "gpg",
             "adb",
             "ss",
@@ -488,8 +520,8 @@ class TunnelSetup(unittest.TestCase):
             return pid
 
         return {
-            "supervisor_oryx": spawn(Path("/bin/bash"), ["bash", str(devbox), "--tunnel-supervisor", "oryx"]),
-            "supervisor_cf": spawn(Path("/bin/bash"), ["bash", str(devbox), "--tunnel-supervisor", "oryx-cf"]),
+            "supervisor_oryx": spawn(Path("/bin/bash"), ["/bin/bash", str(devbox), "--tunnel-supervisor", "oryx"]),
+            "supervisor_cf": spawn(Path("/bin/bash"), ["/bin/bash", str(devbox), "--tunnel-supervisor", "oryx-cf"]),
             "old_tunnel": spawn(waiter, ["ssh", "-N", "-f", "oryx-tunnel"]),
             "old_cf": spawn(waiter, ["ssh", "-N", "-f", "oryx-cf-tunnel"]),
             "unit_tunnel": spawn(waiter, ["/usr/bin/ssh", "-o", "ConnectTimeout=30", "-N", "oryx-tunnel"]),
@@ -509,7 +541,9 @@ class TunnelSetup(unittest.TestCase):
                 self.checkout(kind)
                 self.assertFalse((self.checkout_dir / "laptop/oryx-tunnel-setup").exists())
                 fixtures = self.spawn_fixtures()
+                started = time.monotonic()
                 first = self.invoke(readme=True)
+                self.assertLess(time.monotonic() - started, 20)
                 self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
                 self.assertTrue((self.checkout_dir / "laptop/oryx-tunnel-setup").exists())
                 self.assertLess(SETUP.stat().st_size, 100 * 1024)
@@ -567,6 +601,12 @@ class TunnelSetup(unittest.TestCase):
                 second = self.invoke(readme=True)
                 self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
                 self.assertEqual(self.state(), first_state)
+                tunnel_restarts = [
+                    line
+                    for line in self.lines()
+                    if line.startswith("systemctl: --user restart forward-tunnel@oryx.service ")
+                ]
+                self.assertEqual(len(tunnel_restarts), 2)
 
     def test_proxycommand_uses_token_environment_without_arguments(self) -> None:
         self.checkout("git")
