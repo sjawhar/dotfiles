@@ -107,7 +107,7 @@ python3 $S plan --inventory inv.json --protected protected.json [--releases rele
 - Judge by the classes, never by `jj workspace list` "(empty)".
 - The freshness gate (`--fresh-hours`, default 24) never proves nothing writes in a tree; `$S procs` and `$S writers` do.
 - Before you call a stale checkout's diff a revert, run `jj log -r '::@ ~ ::trunk()'`.
-- Leave alone knives fork checkouts (`knives finish`, never `rm`), Legion daemon state (`~/.local/state/legion/`) and check-in holds (paths a human said to keep).
+- Leave alone knives fork checkouts (`knives finish`, never `rm`), check-in holds (paths a human said to keep) and Legion daemon state: the registry directory `~/.local/state/legion/` and, for each daemon that its `legions.json` lists, the directory that `stateDir` names and the whole checkout (the git top level) that holds the file that `configPath` names. Read the file itself, not `legion legions` (`references/reasons.md`). Find the paths with `r=~/.local/state/legion/legions.json; jq -r '.[] | .stateDir // error("entry without stateDir")' "$r"; jq -r '.[] | .configPath // error("entry without configPath")' "$r" | while IFS= read -r c; do git -C "${c%/*}" rev-parse --show-toplevel; done`. No file, or an empty list, means that no daemon registered on this machine. Any other error means that you do not know a daemon's paths: report it, and remove nothing until you know them. Put each path in the protected set (`references/check-in.md`).
 - Never run a repo-wide `git worktree prune`. Before you forget a jj workspace, remove a git worktree, repair a worktree entry, or run `jj new` in a workspace you did not create, read `references/shared-git-store.md`.
 
 ## Phase 4: Apply
