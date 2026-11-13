@@ -1140,6 +1140,19 @@ class TunnelSetup(unittest.TestCase):
         self.assertLessEqual(int(waited.group(1)), 5)
         self.assertLess(elapsed, 25)
 
+    def test_tunnel_wait_does_not_report_a_hung_look_as_not_listening(self) -> None:
+        # When the look through ssh oryx never answers, nothing was seen of oryx's 127.0.0.1:5038.
+        # The not-up line must not say that port is not listening; it was never looked at. Against a
+        # real tunnel whose RemoteForward did listen, a hung look gave
+        # 'oryx 127.0.0.1:5038 listening: no' (scratch sshd, 2026-11-13).
+        self.checkout("git", "tunnel-look-hangs-label")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, TUNNEL_LOOK_HANGS="1", ORYX_TUNNEL_WAIT_SECONDS="3")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        lines = [line for line in self.report().splitlines() if line.startswith("self-check: tunnel not up after ")]
+        self.assertEqual(len(lines), 1, self.report())
+        self.assertNotIn("oryx 127.0.0.1:5038 listening: no", lines[0])
+
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")
         self.advance_to_current()
