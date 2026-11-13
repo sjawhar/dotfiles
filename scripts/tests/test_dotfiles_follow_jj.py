@@ -377,6 +377,21 @@ class JjSyncFailures(JjHarness):
         self.assertIn("CONFLICT", messages[0])
         self.assertNotIn("dotfiles-sync-anchor", self.jj("bookmark", "list", "-T", 'name ++ "\\n"'))
 
+    def test_trial_failure_refusal_deletes_the_anchor_bookmark(self) -> None:
+        # dotfiles-sync's third refusal of a moved working copy, "could not trial-rebase", must
+        # clean up like its CONFLICT refusals. @ holds the two local files, so the sync trials it.
+        fake_jj = Path(os.environ["PATH"].split(os.pathsep)[0]) / "jj"
+        fake_jj.unlink()
+        fake_jj.write_text(
+            f'#!/bin/sh\nfor argument in "$@"; do [ "$argument" = duplicate ] && exit 1; done\nexec "{REAL_JJ}" "$@"\n'
+        )
+        fake_jj.chmod(fake_jj.stat().st_mode | stat.S_IEXEC)
+
+        messages = self.run_follow()
+
+        self.assertIn("could not trial-rebase", messages[0])
+        self.assertNotIn("dotfiles-sync-anchor", self.jj("bookmark", "list", "-T", 'name ++ "\\n"'))
+
     def test_a_held_sync_lock_is_named_not_reported_as_a_timeout(self) -> None:
         # Follow kills dotfiles-sync after 2 x --fetch-timeout, and the sync waits
         # DOTFILES_SYNC_LOCK_WAIT (300 s by default) for its lock, so the sync's own refusal
