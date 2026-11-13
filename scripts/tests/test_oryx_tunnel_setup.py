@@ -129,6 +129,7 @@ case "$name" in
         if [[ "$joined" == *"secrets get CLOUDFLARE_API_KEY"* ]]; then
             # secretsd waits for the touch here; the test reads where the prompt stands against it.
             printf 'fake secretsd: waiting for the human-tier touch\n' >&2
+            printf 'CLOUDFLARE_API_KEY: tier human, grant live\n'
             # ssh's own failure (255) when HUMAN_TIER_SSH_EXIT is set: no secretsd answered.
             exit "${HUMAN_TIER_SSH_EXIT:-0}"
         fi
@@ -1016,6 +1017,15 @@ class TunnelSetup(unittest.TestCase):
         self.assertIn("exit 1", lines[0])
         self.assertTrue(lines[0].endswith(": failed"), lines[0])
         self.assertNotIn("refused", lines[0])
+
+    def test_human_tier_status_reaches_the_terminal_not_the_report(self) -> None:
+        # Sami reads secretsd's own status (or its "not found" / timeout) on the terminal.
+        self.checkout("git", "human-tier-terminal")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CLOUDFLARE_API_KEY: tier human, grant live", result.stdout)
+        self.assertNotIn("tier human, grant live", self.report())
 
     def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
         self.checkout("git", "adb-replies-fail")

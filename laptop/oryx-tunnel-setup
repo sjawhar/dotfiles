@@ -702,14 +702,16 @@ delivery_browser() {
 human_tier_read() {
     local status=0
     printf 'Touch the YubiKey now for the human-tier secret read.\n' >&2
-    # secrets get authorizes the key and reports its status; it never prints the value.
-    ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' >/dev/null || status=$?
+    # secrets get (never with --value) authorizes the key and prints only its tier and grant
+    # status, so its message reaches the terminal for Sami to read, and stays out of the report.
+    ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' || status=$?
     # ssh exits 255 for its own failure (oryx unreachable, no login), so secretsd never saw the
-    # request; any other non-zero status is secrets get's answer.
+    # request. secrets exits non-zero for a refusal and for other errors alike (a missing key, an
+    # unreachable secretsd, a touch that timed out), so its status says only "not granted".
     case "$status" in
         0) PROBE_VALUE="CLOUDFLARE_API_KEY granted (exit 0)" ;;
         255) PROBE_VALUE="CLOUDFLARE_API_KEY not asked: ssh to oryx failed (exit 255)" ;;
-        *) PROBE_VALUE="CLOUDFLARE_API_KEY refused (exit $status)" ;;
+        *) PROBE_VALUE="CLOUDFLARE_API_KEY not granted (exit $status)" ;;
     esac
     [[ $status -eq 0 ]]
 }
