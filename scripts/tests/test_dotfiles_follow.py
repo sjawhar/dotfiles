@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -128,11 +129,12 @@ class Harness(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_STATE"))
+            if not key.startswith(("GIT_", "BOX_HEALTH", "ENVOY", "MISE_", "DOTFILES_", "XDG_CONFIG", "XDG_STATE"))
         }
         env.update(
             HOME=str(self.home),
             PATH=f"{fakebin}:{os.environ['PATH']}",
+            XDG_CONFIG_HOME=str(root / "config"),
             FAKE_LOG=str(self.fake_log),
             FAKE_MISE_RC="0",
             GIT_CONFIG_NOSYSTEM="1",
@@ -158,6 +160,9 @@ class Harness(unittest.TestCase):
         (self.upstream / "secrets.env").write_text("COMMITTED=1\n")
         (self.upstream / "scripts").mkdir()
         (self.upstream / "scripts" / "tool").write_text("v1\n")
+        linker = self.upstream / "scripts/omp-link-rules"
+        linker.write_text("#!/bin/sh\nexit 0\n")
+        linker.chmod(linker.stat().st_mode | stat.S_IEXEC)
         (self.upstream / ".gitignore").write_text(".secrets/\nomp/*.local.yml\nomp/plugins/node_modules/\n")
         (self.upstream / "omp" / "plugins").mkdir(parents=True)
         (self.upstream / "omp" / "plugins" / "package.json").write_text(PLUGINS_V1)
@@ -232,6 +237,8 @@ class Harness(unittest.TestCase):
             "slow_sweep_interval": self.slow_sweep_interval,
             "slow_sweep_timeout": 30.0,
             "run_limit": 1170.0,
+            "no_hook_sweep": False,
+            "box_health_role": "",
         }
         values.update(overrides)
         return argparse.Namespace(**values)

@@ -22,10 +22,9 @@
 set -euo pipefail
 
 # HOSTNAME=DESTINATION, every machine by user@MagicDNS name. The entry whose name is this
-# machine's hostname syncs locally.
+# machine's hostname syncs locally. oryx follows main by its own dotfiles-follow timer.
 MACHINES=(
   sami=sami@sami
-  oryx=agent@oryx
   sami-leanperf=sami@sami-leanperf
   sami-rocqperf=sami@sami-rocqperf
 )
@@ -68,6 +67,13 @@ sync_here() {
   source ~/.dotfiles/.bashrc >/dev/null 2>&1
   set -eu
   cd ~/.dotfiles
+  local lock
+  lock="$(git rev-parse --git-common-dir)/dotfiles-sync.lock"
+  exec 8>"$lock"
+  if ! flock -w "${DOTFILES_SYNC_LOCK_WAIT:-300}" 8; then
+    echo "another dotfiles-sync holds $lock; not moved" >&2
+    return 1
+  fi
   if [ -n "$old" ] && ! git cat-file -e "$old^{commit}" 2>/dev/null; then
     git fetch -q origin "$old"
   fi

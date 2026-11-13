@@ -1,14 +1,20 @@
 # dotfiles-follow
 
-Keeps a machine's `~/.dotfiles` on origin's main by fast-forward only, then installs mise and omp pins.
-When it cannot follow or install tools, it tells the box-health owner over Envoy, once per condition.
+Keeps a machine's `~/.dotfiles` on origin's main by fast-forward only (in a colocated jj checkout,
+through `scripts/dotfiles-sync`), then installs mise and omp pins. When it cannot follow or install
+tools, it tells the box-health owner over Envoy, once per condition.
 
 Armed by `devbox/install.sh` as the `dotfiles-follow` user timer
 (`devbox/dotfiles-follow.{service,timer}`), on a Google VM only (`scripts/on-google-vm`:
-sami-devbox, dispatch://INFRA-993). The timer has `OnUnitActiveSec=10min`: it starts a run
-10 minutes after the previous one started, or at once when that run took longer (on 2026-11-06
-from 10:35Z to 12:02Z each run took 14 min 32 s and the next began the second it ended). Other
-machines are moved by `scripts/dotfiles-sync`.
+sami-devbox, dispatch://INFRA-993), and by `oryx/install.sh` on oryx. The timer has
+`OnUnitActiveSec=10min`: it starts a run 10 minutes after the previous one started, or at once
+when that run took longer (on 2026-11-06 from 10:35Z to 12:02Z each run took 14 min 32 s and the
+next began the second it ended). Other machines are moved by `scripts/dotfiles-sync`.
+
+On oryx, the drop-in `oryx/dotfiles-follow.service.d/oryx.conf` runs
+`dotfiles-follow --no-hook-sweep --box-health-role legion-home-controller` with
+`ENVOY_URL=http://127.0.0.1:9030`, oryx's personal Envoy hub, so its alerts reach the HOME
+controller role. oryx never had the leak check's hook sweep installed, so the sweep is off there.
 
 ```sh
 dotfiles-follow                  # one run, as the timer does it; alerts go over Envoy
@@ -17,12 +23,29 @@ journalctl --user -u dotfiles-follow.service -n 50
 jq . /mnt/nvme/$USER/tmp/dotfiles-follow/state.json   # open conditions, last run, last outcome
 ```
 
+`--no-hook-sweep` skips the hook sweep. It logs that configuration and opens no hook condition.
+The default runs the sweep. `--box-health-role ROLE` publishes alerts to
+`notifications.role.ROLE` after `BOX_HEALTH_OWNER`. It does not send to the SRE session when that
+publish fails. Without the flag, follow publishes to `lead-box-health`, then sends to the SRE
+session as before.
+
 ## Why
 
 The cutover rule: the dotfiles change only by commit and push, and each machine pulls. The
 follower installs the committed mise and omp pins. The marketplace lock is follow-managed:
 local changes are discarded, never published. Restoring it before the next attempt repairs
 the dirty-lock anomaly that stopped the follower after a marketplace install on 2026-11-03.
+
+## Colocated jj checkouts
+
+When `~/.dotfiles` has `.jj` and `jj --version` works, follow runs
+`~/.dotfiles/scripts/dotfiles-sync --here ""` while it holds follow's state lock. This is the only
+checkout that follow moves this way. The sync keeps the working-copy change in `@` and rebases it
+onto `main@origin`. Follow does not describe, commit, push, or abandon `@`.
+
+For this mode, following means git `HEAD` equals `origin/main`. The git dirty-file and kept-file
+checks do not apply. The sync's `UNPUBLISHED` and `CONFLICT` refusals become follow conditions.
+Follow restores the managed marketplace lock before it calls the sync.
 
 ## What one run does
 
@@ -56,10 +79,13 @@ the dirty-lock anomaly that stopped the follower after a marketplace install on 
    and 300 s marketplace-phase budget. Normal cleanup tries to restore the tracked lock in a
    `finally`, with saved bytes as fallback if `git checkout --` fails. An interrupted run may
    leave it dirty: the next run restores HEAD before fast-forwarding or retrying installation.
-   An upgrade to a catalog version other than the committed pin is a failure too. Finally,
-   `devbox/sami-devbox-check --pins` checks knives and mise pins. An alert when any step fails;
-   the next run retries, skipping marketplace plugins already at want.
-7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep,
+   An upgrade to a catalog version other than the committed pin is a failure too. Every omp
+   command removes `OMP_PROFILE` and `PI_PROFILE` from its environment. If
+   `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
+   reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives
+   and mise pins. An alert when any step fails; the next run retries, skipping marketplace
+   plugins already at want.
+7. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
    (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
    pre-push hook in each checkout of a public repository under the sweep's roots that lacks one
@@ -110,10 +136,11 @@ the dirty-lock anomaly that stopped the follower after a marketplace install on 
    wedged other sessions' shells. With the timer's back-to-back runs the walk of all roots ran
    almost without a break.
 
-It never stashes, resets, rebases, abandons or deletes. It restores only the follow-managed
-marketplace lock before dirty-file checks and after plugin commands. Other edits are discarded
-only when origin/main already holds their bytes, right before the fast-forward. Apart from
-managed-lock recovery, a refusal leaves HEAD, the index and every file as they were.
+Git mode never stashes, resets, rebases, or abandons. jj mode leaves `@` as the working copy and
+lets `dotfiles-sync` rebase it. Both modes restore only the follow-managed marketplace lock before
+dirty-file checks and after plugin commands. Other edits are discarded only when origin/main
+already holds their bytes, right before the fast-forward. Apart from managed-lock recovery, a
+refusal leaves HEAD, the index and every file as they were.
 
 ## The kept files: SECRET_FILES that git tracks
 
@@ -137,6 +164,7 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 | Condition | Headline | Clears when |
 | --- | --- | --- |
 | a change git sees, other than a kept file or the follow-managed marketplace lock | `UNCOMMITTED CHANGES` | the other checkout paths are clean |
+| `dotfiles-sync` refuses a colocated jj working-copy move | `DOTFILES SYNC REFUSED` | the sync moves `~/.dotfiles` and git `HEAD` equals `origin/main` |
 | HEAD has commits origin/main lacks | `NOT A FAST-FORWARD` | origin/main contains HEAD |
 | the commits to take change a modified kept file | `MAIN CHANGES A KEPT FILE` | they no longer do |
 | managed-lock restoration or `git merge --ff-only` failed | `FAST-FORWARD FAILED` | the managed lock is clean and HEAD is origin/main |
@@ -146,12 +174,15 @@ modified here, it refuses with `MAIN CHANGES A KEPT FILE` and names the diff to 
 
 All of one run's new conditions go in one message. Its headline considers **all open conditions**:
 if only tools/hooks remain open and HEAD is at origin/main, it says `<host> is on main, but a
-post-update step failed`. Any open fetch, dirty-checkout, ancestry, kept-file or merge condition
-keeps `DOTFILES NOT FOLLOWING MAIN on <host>`. A condition that still holds after `--escalate`
-(2 h) is said once more, with the corresponding post-update or `STILL NOT FOLLOWING MAIN`
-headline; a cleared one is said once (`DOTFILES FOLLOWING MAIN AGAIN`). Messages go where every
-box watch here sends them: `BOX_HEALTH_OWNER` (a drop-in that `ensure_box_health_owner` writes),
-else the `lead-box-health` role, else the SRE session.
+post-update step failed`. Any open fetch, dirty-checkout, sync, ancestry, kept-file, or merge
+condition keeps `DOTFILES NOT FOLLOWING MAIN on <host>`. A condition that still holds after
+`--escalate` (2 h) is said once more, with the corresponding post-update or
+`STILL NOT FOLLOWING MAIN` headline; a cleared one is said once (`DOTFILES FOLLOWING MAIN AGAIN`).
+Messages go where every box watch here sends them: `BOX_HEALTH_OWNER` (a drop-in that
+`ensure_box_health_owner` writes), else the `lead-box-health` role, else the SRE session. With
+`--box-health-role ROLE`, a run with no `BOX_HEALTH_OWNER` publishes to `notifications.role.ROLE`
+only, and sends nothing to the SRE session even when that publish fails. A role topic with no
+holder keeps the message for the next holder.
 
 The run exits 0 after a refusal: the alert is the report, so `unit-health-watch` does not say the
 same thing a second time. A2 (`devbox/sami-devbox-check`, `host_follow`) reads the state file and
@@ -176,7 +207,7 @@ run is left (`pgrep -af dotfiles-follow`). After that every run takes the same l
 
 ## Tests
 
-`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace`:
+`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_dotfiles_follow_jj`:
 each case builds a throwaway origin and clone with the real provision and check scripts, and
 stand-in `mise`, `knives` and `bun`. Refusal cases assert that HEAD, the index and each file are
 unchanged, except for follow-managed lock recovery. Marketplace cases use a stub `shims/omp`
@@ -184,3 +215,5 @@ that records commands, changes installed versions and rewrites the tracked lock.
 upgrades, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources,
 alert classification and escalation, timeout cleanup and recovery from arbitrary dirty-lock
 contents before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint.
+The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
+files keep their bytes and nothing is pushed.
