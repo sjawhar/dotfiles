@@ -62,6 +62,37 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
     # Write it BEFORE touching units or restarting: a v2 daemon refuses to start
     # without it, and a v1 daemon ignores it, so this order is safe in both
     # directions of an upgrade or rollback.
+    #
+    # A third root, dojo (SECRETSD_DOJO_DIR, default ~/src/dojo), is declared
+    # only where this machine's age key is a recipient of its secrets.env: the
+    # secrets client decrypts each agent-tier file of every root before a
+    # lookup, so a file this machine cannot open would stop every call. The key
+    # file's identity lines go only into `age-keygen -y`, whose errors can quote
+    # an identity, so its stderr is dropped and only public keys are kept.
+    SECRETSD_DOJO_DIR="${SECRETSD_DOJO_DIR:-${HOME}/src/dojo}"
+    secretsd_dojo=0
+    if [ -f "${SECRETSD_DOJO_DIR}/secrets.env" ]; then
+        secretsd_age_keygen="${MISE_INSTALLS}/age/latest/age/age-keygen"
+        [ -x "$secretsd_age_keygen" ] || secretsd_age_keygen="$(command -v age-keygen || true)"
+        secretsd_age_key_file="${HOME}/.config/sops/age/keys.txt"
+        if [ -z "$secretsd_age_keygen" ]; then
+            echo "NOTE: dojo source root not configured: age-keygen is unavailable."
+        elif [ ! -f "$secretsd_age_key_file" ]; then
+            echo "NOTE: dojo source root not configured: ~/.config/sops/age/keys.txt is absent."
+        else
+            secretsd_keys="$(
+                { grep '^AGE-SECRET-KEY-' "$secretsd_age_key_file" || true; } |
+                    "$secretsd_age_keygen" -y 2>/dev/null |
+                    grep -xE 'age1[0-9a-z]{58}' || true
+            )"
+            secretsd_recipients="$(sed -n 's/^sops_age__list_[0-9]*__map_recipient=//p' "${SECRETSD_DOJO_DIR}/secrets.env" || true)"
+            if [ -n "$secretsd_keys" ] && grep -qxF -f <(printf '%s\n' "$secretsd_keys") <<< "$secretsd_recipients"; then
+                secretsd_dojo=1
+            else
+                echo "NOTE: dojo source root not configured: this machine's age key is not a recipient of dojo secrets.env."
+            fi
+        fi
+    fi
     mkdir -p ~/.config/secretsd
     SECRETSD_CONFIG_FILE="${HOME}/.config/secretsd/config.toml"
     {
@@ -78,6 +109,11 @@ if [ -x "$SECRETSD_BIN" ] && [ -n "$UNIT_SRC" ] && \
             echo ""
             echo "[source.private]"
             echo "path = \"${DOTFILES_DIR}/.secrets\""
+        fi
+        if [ "$secretsd_dojo" -eq 1 ]; then
+            echo ""
+            echo "[source.dojo]"
+            echo "path = \"${SECRETSD_DOJO_DIR}\""
         fi
     } > "${SECRETSD_CONFIG_FILE}.new"
     if cmp -s "${SECRETSD_CONFIG_FILE}.new" "$SECRETSD_CONFIG_FILE" 2>/dev/null; then
