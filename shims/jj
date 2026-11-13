@@ -298,11 +298,13 @@ repository_option() {
 }
 
 trailer_on() {
-    local d="" configured="" repo target=""
-    d="$(repository_option "${_pargs[@]:0:_pi}")"
+    local d="" repo target=""
+    # A checked command (commit, ci, describe, desc, new) already parsed its own options, so its globals are exact. Any
+    # other command takes -R anywhere before `--`, as git_target reads it: jj accepts a global option after the command.
     if [[ -n "$_jj_command" ]]; then
-        configured="$(repository_option "${_jj_global[@]}")"
-        [[ -z "$configured" ]] || d="$configured"
+        d="$(repository_option "${_pargs[@]:0:_pi}" "${_jj_global[@]}")"
+    else
+        d="$(repository_option "${_pargs[@]}")"
     fi
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
@@ -772,7 +774,7 @@ if [[ "${_pargs[_pi]:-}" == workspace ]]; then
                     _jj_add_index=$((_jj_add_index + 2))
                     ;;
                 -R?* | --repository=* | --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=* | \
-                    -r?* | --revision=* | -m?* | --message=* | --sparse-patterns=* | --ignore-working-copy | \
+                    --name=* | -r?* | --revision=* | -m?* | --message=* | --sparse-patterns=* | --ignore-working-copy | \
                     --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager | --colocate | --no-colocate)
                     _jj_add_index=$((_jj_add_index + 1))
                     ;;
@@ -799,6 +801,8 @@ cat "$_err" >&2
 # jj names the new workspace relative to the current directory.
 _rel="$(sed -n 's/^Created workspace in "\(.*\)"$/\1/p' "$_err" | tail -1)"
 _rel="${_rel:-$_add_destination}"
+# No destination (a help request, or one the reader could not find) is nothing to lock.
+[[ -n "$_rel" ]] || exit 0
 _dest="$(realpath -m -- "$_rel")"
 [[ -f "$_dest/.git" ]] || exit 0
 if ! _out="$(git -C "$_dest" worktree lock --reason "jj shim: locked on add (AGENTC-431)" "$_dest" 2>&1)"; then

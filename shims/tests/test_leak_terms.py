@@ -2621,6 +2621,30 @@ class JjLeaks(LeakTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.description(repository, False), "clean\n")
 
+    def test_jj_message_reads_a_repository_after_the_command_for_trailer_decisions(self) -> None:
+        # A writing command the shim does not check (`jj squash`) names its repository after the command: the trailer
+        # decision is that repository's, not the current directory's.
+        overlay = self.root / f"omp-attribution-{self.session}.toml"
+        overlay.write_text(
+            f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n",
+            encoding="utf-8",
+        )
+        repository = self.repository(False)
+        made = self.jj(repository, "commit", "-m", "base", agent=False)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        result = self.jj(
+            self.root,
+            "squash",
+            "-R",
+            str(repository),
+            "-m",
+            "clean",
+            agent=False,
+            extra={"JJ_CONFIG": f"{self.config}{os.pathsep}{overlay}"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.description(repository, False, "@-"), "clean\n")
+
     def test_jj_term_locks_workspace_add_after_global_options(self) -> None:
         repository = self.repository(False)
         workspace = self.root / "workspace"
@@ -2629,6 +2653,18 @@ class JjLeaks(LeakTestCase):
         listed = self.launch(["/usr/bin/git", "-C", str(workspace), "worktree", "list", "--porcelain"], env=self.person)
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("locked jj shim: locked on add (AGENTC-431)", listed.stdout)
+
+    def test_jj_term_workspace_add_with_an_attached_name_and_help(self) -> None:
+        repository = self.repository(False)
+        workspace = self.root / "named-workspace"
+        result = self.jj(repository, "workspace", "add", "--quiet", "--name=w2", str(workspace), agent=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed = self.launch(["/usr/bin/git", "-C", str(workspace), "worktree", "list", "--porcelain"], env=self.person)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn("locked jj shim: locked on add (AGENTC-431)", listed.stdout)
+        helped = self.jj(repository, "workspace", "add", "--help", agent=False)
+        self.assertEqual(helped.returncode, 0, helped.stderr)
+        self.assertIn("Usage:", helped.stdout)
 
     def test_unreadable_lists_allow_empty_jj_new_but_refuse_a_clean_file(self) -> None:
         cases = [case for case in unreadable_lists(self.root, self.person["PATH"]) if case[0] in {"key", "missing"}]
