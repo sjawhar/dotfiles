@@ -37,9 +37,10 @@ AGENT_MARKERS = (
     "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
     "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
 )
-# A launch may start this many tasks beyond the ones this uid has when its test starts. A shim or editor that
+# A launch may start this many tasks beyond the ones this uid has when it starts. A shim or editor that
 # recurses (an earlier draft of this file fork-bombed its machine) then fails to fork instead of exhausting the
-# shared uid's tasks.
+# shared uid's tasks. The cap is read at each launch, not once per test: other sessions of the uid start and end
+# threads all the time, and a cap read at the test's start refused git's own forks after they grew by the margin.
 TASK_MARGIN = 1000
 LAUNCH_TIMEOUT = 120
 AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
@@ -130,7 +131,7 @@ class LeakTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.task_limit = live_tasks() + TASK_MARGIN
+        self.task_margin = TASK_MARGIN
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -157,11 +158,13 @@ class LeakTestCase(unittest.TestCase):
         pass_fds: tuple[int, ...] = (),
         stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
-        """ARGV in a session and process group of its own, its tasks capped at self.task_limit (RLIMIT_NPROC), stdin
-        the descriptor STDIN, else /dev/null unless INPUT is given. A command that outlives TIMEOUT fails the test
-        after its whole process group is killed, descendants holding its pipes included."""
+        """ARGV in a session and process group of its own, its tasks capped at this uid's live tasks plus
+        self.task_margin (RLIMIT_NPROC), stdin the descriptor STDIN, else /dev/null unless INPUT is given. A command
+        that outlives TIMEOUT fails the test after its whole process group is killed, descendants holding its pipes
+        included."""
         _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        limit = self.task_limit if hard == resource.RLIM_INFINITY else min(self.task_limit, hard)
+        task_limit = live_tasks() + self.task_margin
+        limit = task_limit if hard == resource.RLIM_INFINITY else min(task_limit, hard)
 
         def cap_tasks() -> None:
             resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
@@ -1007,7 +1010,7 @@ index 0000000,0000000,0000000..1111111
         else:
             self.fail("the timed-out command's background child survived the group kill")
 
-        self.task_limit = live_tasks() + 50
+        self.task_margin = 50
         spawner = (
             "import subprocess\n"
             "started = []\n"
