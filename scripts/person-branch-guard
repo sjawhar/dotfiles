@@ -1,11 +1,11 @@
 #!/bin/bash
 # person-branch-guard TOOL GIT [GIT_OPTION…] -- PUSH_ARGUMENT…: refuses a push that would create on
 # the remote a branch whose name starts with a person token. shims/git runs it on every push of an
-# agent session that is not a dry run or a request for help (`-h`, `--help`), the push jj hands to
-# git included, and shims/jj on every bookmark that jj's own push plan adds. TOOL is `git` or `jj`,
-# and picks the message prefix and the hint. GIT [GIT_OPTION…] is the git to run and its options
-# before the subcommand (`-C`, `-c`, `--git-dir`…). PUSH_ARGUMENT… is everything after `push`, as the
-# caller gave it, its `--` included.
+# agent session that is not a dry run or a request for help (`-h`, alone or in a cluster of short
+# options before any `o`, or `--help`), the push jj hands to git included, and shims/jj on every
+# bookmark that jj's own push plan adds. TOOL is `git` or `jj`, and picks the message prefix and the
+# hint. GIT [GIT_OPTION…] is the git to run and its options before the subcommand (`-C`, `-c`,
+# `--git-dir`…). PUSH_ARGUMENT… is everything after `push`, as the caller gave it, its `--` included.
 #
 # The tokens: the value of USER, the part of `git config user.email` before its `@` and each word of
 # `git config user.name`, each of three characters or more; and each name in shims/person-names, one
