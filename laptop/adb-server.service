@@ -1,0 +1,10 @@
+[Unit]
+Description=ADB server for the oryx tunnel
+
+[Service]
+ExecStart=%h/.dotfiles/laptop/adb-server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

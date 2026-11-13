@@ -1,0 +1,15 @@
+#!/bin/bash
+# Own the laptop adb server that the oryx tunnel reaches on 127.0.0.1:5037.
+set -euo pipefail
+
+sdk_adb="$HOME/Android/sdk/platform-tools/adb"
+if [[ -x "$sdk_adb" ]]; then
+    adb="$sdk_adb"
+elif adb="$(command -v adb 2>/dev/null)"; then
+    :
+else
+    echo "adb-server: adb is not installed; run laptop/oryx-tunnel-setup" >&2
+    exit 1
+fi
+
+exec "$adb" -L tcp:localhost:5037 server nodaemon
