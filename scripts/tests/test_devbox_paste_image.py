@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "devbox-paste-image"
+SCRIPT = Path(
+    os.environ.get("DEVBOX_PASTE_IMAGE_SCRIPT") or Path(__file__).resolve().parents[1] / "devbox-paste-image"
+)
 
 TAILNET = {
     "Self": {"HostName": "sami", "DNSName": "sami.tail12ec1c.ts.net."},
@@ -38,13 +41,24 @@ class PasteTarget(unittest.TestCase):
         (dotfiles / "voxtype").mkdir()
         stubs = root / "bin"
         stubs.mkdir()
+        self.no_tailscale_bin = root / "no-tailscale-bin"
+        self.no_tailscale_bin.mkdir()
+        for command in ("bash", "cat", "date", "grep", "mkdir", "mktemp", "rm", "tr"):
+            target = Path("/usr/bin") / command
+            if not target.exists():
+                target = Path("/bin") / command
+            (self.no_tailscale_bin / command).symlink_to(target)
         self.log = root / "calls.log"
         self.pasted = root / "pasted"
         (root / "tailnet.json").write_text(json.dumps(TAILNET), encoding="utf-8")
         write_executable(dotfiles / "scripts" / "focused-window-title", 'printf "%s\\n" "$STUB_TITLE"')
         write_executable(dotfiles / "voxtype" / "voxtype-paste", f'cat > "{self.pasted}"')
         write_executable(stubs / "hostname", "echo sami")
-        write_executable(stubs / "tailscale", f'cat "{root / "tailnet.json"}"')
+        write_executable(
+            stubs / "tailscale",
+            f'printf "%q " "$0" "$@" >> "{self.log}"\nprintf "\\n" >> "{self.log}"\n'
+            f'cat "{root / "tailnet.json"}"',
+        )
         write_executable(stubs / "notify-send", f'echo "notify $*" >> "{self.log}"')
         write_executable(
             stubs / "wl-paste",
@@ -56,6 +70,10 @@ class PasteTarget(unittest.TestCase):
             f'host="${{@: -2:1}}"; echo "ssh $host" >> "{self.log}"\n'
             f'HOME="{root}/remote/$host" bash -c "${{@: -1}}"',
         )
+        self.no_tailscale_stubs = root / "bin-without-tailscale"
+        self.no_tailscale_stubs.mkdir()
+        for command in ("hostname", "notify-send", "ssh", "wl-paste"):
+            (self.no_tailscale_stubs / command).symlink_to(stubs / command)
         self.remote = root / "remote"
         self.env = {
             **os.environ,
@@ -63,13 +81,21 @@ class PasteTarget(unittest.TestCase):
             "HOME": str(self.home),
             "PATH": f"{stubs}:{os.environ['PATH']}",
         }
+        self.no_tailscale_env = {
+            **self.env,
+            "PATH": f"{self.no_tailscale_stubs}:{self.no_tailscale_bin}",
+        }
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def paste(self, title: str) -> subprocess.CompletedProcess[str]:
+    def paste(self, title: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(SCRIPT)], capture_output=True, text=True, env={**self.env, "STUB_TITLE": title}, check=False
+            ["/bin/bash", str(SCRIPT)],
+            capture_output=True,
+            text=True,
+            env={**(environment or self.env), "STUB_TITLE": title},
+            check=False,
         )
 
     def calls(self) -> list[str]:
@@ -103,6 +129,16 @@ class PasteTarget(unittest.TestCase):
                 result = self.paste(title)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.machines_with_image(), {machine})
+
+    def test_oryx_prompt_titles_work_without_tailscale(self) -> None:
+        for title in ("agent@oryx: ~/src", "oryx: π omp"):
+            with self.subTest(title=title):
+                self.tearDown()
+                self.setUp()
+                self.assertIsNone(shutil.which("tailscale", path=self.no_tailscale_env["PATH"]))
+                result = self.paste(title, self.no_tailscale_env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.machines_with_image(), {"oryx"})
 
     def test_a_title_naming_no_machine_is_the_laptop(self) -> None:
         """Including a pane title whose words look like "name: text" but name no tailnet machine."""
