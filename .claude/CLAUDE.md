@@ -53,6 +53,7 @@ Before such an action, say what changes, what could break, and the safest altern
 ## Workspace
 
 - Work in a worktree under `~/src/<project>`, never in `~/` or `~/Code`.
+- A branch name names the issue or the work, never a person. Use the issue key where there is one, else a shape such as `feat/<slug>` or `fix/<slug>`. Never a person's name, login or initials. A branch that exists stays as it is: rename none.
 - Edit `~/.dotfiles` in place.
 - Long projects run under the SDD process in `skill://sdd`.
 

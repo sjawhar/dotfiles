@@ -1,7 +1,8 @@
 # shims
 
-PATH-priority wrappers: each file here shadows the binary of the same name and adds behavior
-before handing the call to the real one.
+PATH-priority wrappers: each executable file here shadows the binary of the same name and adds
+behavior before handing the call to the real one. One file is data: `person-names`, the name list
+`scripts/person-branch-guard` reads (under `git` below), which is not executable.
 
 ## What each shim adds
 
@@ -142,6 +143,15 @@ before handing the call to the real one.
   another session's unpushed commits in such a repository can be rewritten without
   `--ignore-immutable`. Read-only commands (`log`, `st`, `show`, `diff`, `op`, `bookmark`, `git`,
   …) skip the check.
+  In an agent session `jj git push` first refuses a push that would create on a remote a bookmark
+  whose name carries a person token, by the rule under `git` below. Each bookmark that jj's own
+  dry-run plan adds (`add to …`) goes to `scripts/person-branch-guard` before anything is pushed,
+  and a refusal carries jj's hint (`jj git push --named <issue-key>=<revision>`). A bookmark the
+  plan moves or deletes is not checked, and neither is a tag or a push with `--dry-run`. The
+  guard's exit 3 refuses the push and the shim exits 1. On any other non-zero status the shim
+  prints `the branch-name check failed (exit <n>); the push goes on.`, and the push goes on. This
+  check runs before the leak check below. The `git push` that jj then runs passes through
+  `shims/git`, which checks it again.
   `jj git push` also runs the shared public leak check before sending anything: in an agent
   session always, and outside one (a person's own terminal, which no git hook reaches, since
   jj runs git with `--no-verify`) wherever this machine has the check installed, found as
@@ -200,7 +210,62 @@ before handing the call to the real one.
   when no refspec has a `*`, since git's pruning deletes such a destination that already exists
   (`b:refs/remotes/origin/b` left it missing every second run on git 2.43.0) and prunes nothing
   else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
-  It also gives a `git push` that jj runs the pre-push leak check that a git push from the same
+  In an agent session every `git push` that is not a dry run, the push jj runs included, first goes
+  through `scripts/person-branch-guard`, which refuses a push that would create on the remote a
+  branch whose name carries a person token. A name carries a token when it starts with the token
+  and then `/`, `-` or `_`, compared without case: `sami/x`, `Sami-x` and `sami_x` carry `sami`,
+  and `sami` alone and `samizdat/x` do not. Only a branch counts, not a tag or another ref. The
+  tokens are the value of `USER`, the part of `git config user.email` before its `@` and each word
+  of `git config user.name`, each kept only when it has three characters or more, and every name in
+  `shims/person-names` at any length (one per line, skipping blank lines and lines that start with
+  `#`). That list holds `sami` and `sjawhar`: the guard looks up no GitHub login, so the login
+  `sjawhar` comes from the list, and `sami` stays a token where `USER` and the git identity are
+  unset.
+  The guard first lists, from local reads only, every name the push could create: the push's
+  arguments, the current branch and its `branch.<name>.merge`, each `remote.<name>.push`, and every
+  local branch for `--all`, `--branches`, `--mirror` or a prefix git takes for one (`--bra`), a
+  refspec with `@{` or a remote with `mirror` set. When no name in that list carries a token and no
+  refspec holds `*`, it asks the remote nothing. Otherwise it reads the remote once: git's own dry
+  run of the same push (`push --dry-run --porcelain`, its flags after every option of the caller's,
+  so a caller's `--no-dry-run` or `-q` changes nothing), within 10 s. It refuses each branch that a
+  destination reports as new and whose name carries a token, and a branch the remote already holds
+  passes. A read that fails before any destination answers (a refused connection, a missing path,
+  the 10 s bound) prints one line, `could not ask <remote> which branches it holds (exit <n>); the
+  push goes on.`, and the push goes on. So only a push whose list carries a token, or whose refspec
+  holds `*`, pays a remote read: one, and up to two for a jj push (`shims/jj`'s, then this shim's).
+  Every other push pays only local reads.
+  A dry run (`-n` or `--dry-run`, unless a later `--no-dry-run` clears it) is not checked, and that
+  is also how the guard's own read passes this shim when it comes from `shims/jj`. Each prefix git
+  takes for one of those options counts the same: `--dr` to `--dry-run`, `--no-dr` to
+  `--no-dry-run`. The argument after `--repo`, `--receive-pack`, `--recurse-submodules`, `--exec`
+  or `--push-option`, or after a prefix git takes for one (from `--rep`, `--rece`, `--recu`, `--e`
+  and `--pu` on), is that option's value and never makes a dry run. `--end-of-options` ends the
+  options like `--`, for this reading and for the guard's: git reads each word after either as the
+  remote or a refspec. A person's session and every command that is not a push are not checked
+  either.
+  The guard exits 0 to let the push go on and 3 to refuse it, and on 3 the shim exits 1. On any
+  other status the shim prints `the branch-name check failed (exit <n>); the push goes on.`, and on
+  a guard that is missing or not executable it prints `the branch-name check is missing (<path>);
+  the push goes on.` In both cases the push goes on. Each line of a refusal starts
+  `error: git shim: ` (`error: jj shim: ` for the push jj runs). It names each refused branch, the
+  destination URL with any user part taken out, the token and the token's source. Then come the
+  Workspace bullet of `.claude/CLAUDE.md`, word for word, and a hint to push the same commit under
+  a name that names the work, never to rename (`git push <remote> <src>:refs/heads/<issue-key>`,
+  or `jj git push --named <issue-key>=<revision>` for jj). The last line is `Nothing was pushed.`
+  Not seen by the guard: a git alias for `push`; a branch made through the GitHub API or web page;
+  a git run by its absolute path, and a jj not run through `shims/jj` whose git is not `shims/git`
+  (run by its absolute path with no `shims/` on PATH, or with a `git.executable-path` that names
+  another git); initials, and identity tokens under three characters; a token that is not at the
+  start of the name, or that is followed by `.`; jj's own identity settings (`user.*`).
+  It refuses wrongly where `USER` names no person. Every agent box sets `USER=ubuntu`, so a new
+  `ubuntu-…` branch there is refused, and `USER=root` makes `root` a token the same way. The
+  message names the token and its source (`USER`). In an agent session, the push that
+  `agentbox move` makes of a moved tree's checked-out branch to the target machine can be refused
+  when that branch is new there and its name carries a token. The move then logs that the branches
+  were not all pushed and goes on. The tree still moves: its HEAD goes as
+  `refs/agentbox-move/<hash>`, which is not a branch, and the target makes the branch from it with
+  `update-ref`. `tests/test_person_branch_guard.py` is the contract.
+  The shim also gives a `git push` that jj runs the pre-push leak check that a git push from the same
   checkout gets. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once
   per remote, so no hook runs for it. When the process that ran git is jj and the checkout is
   guarded, the shim drops `--no-verify` and adds a last `-c core.hooksPath=jj-push-hooks/`. A
