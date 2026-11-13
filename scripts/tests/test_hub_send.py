@@ -973,6 +973,19 @@ class HubSendTest(unittest.TestCase):
         )
         self.assertEqual(self.fake.post_requests(), [])
 
+    def test_signal_during_bridge_check_refuses_as_interrupted_without_post(self) -> None:
+        """A real SIGTERM or SIGINT before the post reports the plan's `REFUSED: interrupted`,
+        not an internal error: the signal handler's Interrupted must not be read as a crash."""
+        for interrupt in ("sigterm", "module"):
+            with self.subTest(interrupt=interrupt):
+                self.restart_fake()
+                self.assert_result(
+                    self.invoke(self.text_args(), interrupt=interrupt, interrupt_during_provision=True),
+                    "REFUSED: interrupted",
+                    3,
+                )
+                self.assertEqual(self.fake.post_requests(), [])
+
 
     def test_keyboard_interrupt_before_post_request_refuses_without_put(self) -> None:
         def interrupt_transaction_id(module) -> None:
