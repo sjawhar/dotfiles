@@ -392,6 +392,21 @@ class JjSyncFailures(JjHarness):
         self.assertIn("could not trial-rebase", messages[0])
         self.assertNotIn("dotfiles-sync-anchor", self.jj("bookmark", "list", "-T", 'name ++ "\\n"'))
 
+    def test_a_failed_jj_command_in_the_sync_still_deletes_the_anchor_bookmark(self) -> None:
+        # Any jj step that fails under set -e ends the sync; the anchor must not outlive it.
+        fake_jj = Path(os.environ["PATH"].split(os.pathsep)[0]) / "jj"
+        fake_jj.unlink()
+        fake_jj.write_text(
+            f'#!/bin/sh\nfor argument in "$@"; do [ "$argument" = rebase ] && exit 1; done\nexec "{REAL_JJ}" "$@"\n'
+        )
+        fake_jj.chmod(fake_jj.stat().st_mode | stat.S_IEXEC)
+
+        messages = self.run_follow()
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("DOTFILES SYNC REFUSED", messages[0])
+        self.assertNotIn("dotfiles-sync-anchor", self.jj("bookmark", "list", "-T", 'name ++ "\\n"'))
+
     def test_a_held_sync_lock_is_named_not_reported_as_a_timeout(self) -> None:
         # Follow kills dotfiles-sync after 2 x --fetch-timeout, and the sync waits
         # DOTFILES_SYNC_LOCK_WAIT (300 s by default) for its lock, so the sync's own refusal

@@ -53,7 +53,13 @@ record "$@"
 case "$name" in
     ssh)
         if [[ "${1:-}" == -G ]]; then
-            exec /usr/bin/ssh -F "$HOME/.ssh/config" -G "$2"
+            # A plain ssh reads ~/.ssh/config, then /etc/ssh/ssh_config; -F alone skips the second.
+            combined="$(/usr/bin/mktemp)"
+            { /bin/cat "$HOME/.ssh/config"; [[ -f /etc/ssh/ssh_config ]] && printf '\nMatch all\nInclude /etc/ssh/ssh_config\n'; } > "$combined"
+            status=0
+            /usr/bin/ssh -F "$combined" -G "$2" || status=$?
+            /bin/rm -f "$combined"
+            exit "$status"
         fi
         if [[ "${1:-}" == -F && "${3:-}" == -G ]]; then
             exec /usr/bin/ssh -F "$2" -G "$4"

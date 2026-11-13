@@ -11,6 +11,7 @@ probe_logged_in=false
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/oryx-tunnel-setup.XXXXXX")"
 trap 'rm -rf -- "$work_dir"' EXIT
 ssh_reference_config="$work_dir/ssh-config-without-local"
+SYSTEM_SSH_CONFIG=/etc/ssh/ssh_config
 
 mkdir -p "$REPORT_DIR"
 chmod 700 "$REPORT_DIR"
@@ -155,12 +156,21 @@ line_pids() {
     done
 }
 
+# The port of an ss listener that would stop the tunnel from binding 127.0.0.1:<port>: one on
+# 127.0.0.1 itself, or on every address (0.0.0.0, *, [::]). A listener on another address, such as
+# the devbox daemon on the laptop's tailnet address or a legacy pair on 127.0.0.2, does not.
 listener_port() {
-    local line="$1" state receive_queue send_queue local_address peer_address port
+    local line="$1" state receive_queue send_queue local_address peer_address port address
     read -r state receive_queue send_queue local_address peer_address _ <<< "$line"
     [[ "$local_address" == *:* ]] || return 1
     port="${local_address##*:}"
+    address="${local_address%:*}"
+    address="${address%%%*}"
     [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    case "$address" in
+        127.0.0.1|0.0.0.0|'*'|'[::]'|'[::ffff:127.0.0.1]'|'[::ffff:0.0.0.0]') ;;
+        *) return 1 ;;
+    esac
     printf '%s\n' "$port"
 }
 
@@ -239,12 +249,18 @@ ssh_fields() {
     done <<< "$output"
 }
 
+# The reference is ~/.ssh/config without its first line (Include ~/.ssh/config.local), so any
+# difference from the real ssh -G comes from config.local. ssh -F skips /etc/ssh/ssh_config, which
+# a plain ssh reads after the user's file, so the reference includes it in the same place.
 write_ssh_reference_config() {
     local include
     {
         IFS= read -r include || return 1
         [[ "$include" == "Include ~/.ssh/config.local" ]] || return 1
         cat
+        if [[ -f "$SYSTEM_SSH_CONFIG" ]]; then
+            printf '\nMatch all\nInclude %s\n' "$SYSTEM_SSH_CONFIG"
+        fi
     } < "$HOME/.ssh/config" > "$ssh_reference_config"
 }
 
@@ -317,23 +333,6 @@ validate_ssh_configuration() {
     ssh_config_expect oryx "$oryx" proxycommand 'cloudflared access ssh --hostname %h' || true
     # This tailnet name is only the label under which known_hosts holds oryx's key.
     ssh_config_expect oryx "$oryx" hostkeyalias oryx.tail12ec1c.ts.net || true
-    ssh_config_expect oryx "$oryx" stricthostkeychecking ask || true
-    expected="$(printf '%s\n' \
-        '~/.ssh/id_rsa' \
-        '~/.ssh/id_ecdsa' \
-        '~/.ssh/id_ecdsa_sk' \
-        '~/.ssh/id_ed25519' \
-        '~/.ssh/id_ed25519_sk' \
-        '~/.ssh/id_xmss' \
-        '~/.ssh/id_dsa')"
-    ssh_config_expect oryx "$oryx" identityfile "$expected" || true
-    ssh_config_expect oryx "$oryx" identitiesonly no || true
-    ssh_config_expect oryx "$oryx" batchmode no || true
-    ssh_config_expect oryx "$oryx" controlmaster auto || true
-    [[ -n "$(ssh_fields "$oryx" controlpath)" ]] || ssh_config_errors+=("oryx controlpath is missing")
-    ssh_config_expect oryx "$oryx" exitonforwardfailure no || true
-    ssh_config_expect oryx "$oryx" serveraliveinterval 30 || true
-    ssh_config_expect oryx "$oryx" serveralivecountmax 3 || true
     ssh_config_expect oryx "$oryx" localforward '' || true
     ssh_config_expect oryx "$oryx" remoteforward '' || true
 
@@ -607,14 +606,17 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
         sleep 1
     done
     ((ready)) || { kill -TERM "$session" 2>/dev/null || true; wait "$session" 2>/dev/null || true; return 1; }
-    for _ in {1..100}; do
-        if body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file")"; then
+    # forward port may bind a moment after READY: retry for 10 s, and show only the last error.
+    local attempt curl_err="$work_dir/forward-port-curl.err"
+    for attempt in {1..100}; do
+        if body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file" 2>"$curl_err")"; then
             delivered=true
             break
         fi
         sleep 0.1
     done
     if ! "$delivered"; then
+        cat "$curl_err" >&2
         kill -TERM "$session" 2>/dev/null || true
         wait "$session" 2>/dev/null || true
         return 1

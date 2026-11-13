@@ -84,6 +84,9 @@ sync_here() {
   if [ -d .jj ] && jj --version >/dev/null 2>&1; then
     local anchor=dotfiles-sync-anchor wc before after local_only=""
     jj bookmark create "$anchor" -r @- >/dev/null 2>&1 || jj bookmark set "$anchor" -r @- --allow-backwards >/dev/null
+    # Any exit, a failed jj command under set -e included, drops the anchor; every refusal below also
+    # drops it before it returns.
+    trap 'jj bookmark delete dotfiles-sync-anchor >/dev/null 2>&1 || true' EXIT
     # Commits under the working copy that the old main never had are this machine's own.
     [ -z "$old" ] || local_only=$(git log --oneline "$(jj log -r @- --no-graph -T 'commit_id')" ^"$old")
     wc=$(jj log -r @ --no-graph -T 'change_id')
@@ -118,11 +121,14 @@ sync_here() {
       jj new --quiet main@origin
     else
       # Trial first, on a duplicate that no working copy holds, so a conflict never reaches disk.
-      local trial trial_conflict
-      # awk reads to the end: an early `exit` would leave jj a broken pipe, which it exits 3 on.
-      trial=$(jj duplicate --color never "$wc" --onto main@origin 2>&1 | awk '/^Duplicated / && !n {print $5; n = 1}')
+      local trial trial_conflict duplicated
+      # A failed duplicate is a refusal like the others: say it and drop the anchor.
+      duplicated=$(jj duplicate --color never "$wc" --onto main@origin 2>&1) || true
+      trial=$(awk '/^Duplicated / && !n {print $5; n = 1}' <<< "$duplicated")
       if [ -z "$trial" ]; then
         echo "could not trial-rebase the working-copy change $wc onto main; not moved" >&2
+        [ -z "$duplicated" ] || printf '%s\n' "$duplicated" >&2
+        jj bookmark delete "$anchor" >/dev/null
         return 1
       fi
       trial_conflict=$(jj log -r "$trial" --no-graph -T 'conflict')
