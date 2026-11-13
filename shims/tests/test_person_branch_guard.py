@@ -493,16 +493,16 @@ class PersonBranchGuardTest(unittest.TestCase):
         self.assert_refused(self.git(w, "push", "origin", "HEAD"), "stub/slug")
         result = self.git(w, "push", "origin", "HEAD", STUB_FAIL_READ="1")
         self.assert_passed(result, "stub/slug")
-        self.assertIn("error: git shim: could not ask origin which branches it holds (exit 128); the push goes on.",
-                      result.stderr)
+        self.assertIn("error: git shim: git's dry run of this push failed (exit 128), so the branch-name check checked"
+                      " no name; the push goes on.", result.stderr)
 
     def test_a_jj_push_whose_read_of_the_remote_fails_passes(self):
         w = self.jj_repo()
         self.assert_refused(self.jj(w, "git", "push", "--named", "stub-f=@-"), "stub-f")
         result = self.jj(w, "git", "push", "--named", "stub-f=@-", STUB_FAIL_READ="1")
         self.assert_passed(result, "stub-f")
-        self.assertIn("error: jj shim: could not ask origin which branches it holds (exit 128); the push goes on.",
-                      result.stderr)
+        self.assertIn("error: jj shim: git's dry run of this push failed (exit 128), so the branch-name check checked"
+                      " no name; the push goes on.", result.stderr)
 
     def test_a_read_of_the_remote_past_its_bound_lets_the_push_through(self):
         w = self.git_repo("stub/slug")
@@ -511,7 +511,8 @@ class PersonBranchGuardTest(unittest.TestCase):
         result = self.git(w, "push", "origin", "HEAD", STUB_SLEEP_READ="15")
         elapsed = time.monotonic() - start
         self.assert_passed(result, "stub/slug")
-        self.assertIn("could not ask origin which branches it holds (exit 137); the push goes on.", result.stderr)
+        self.assertIn("git's dry run of this push gave no answer within 10 s, so the branch-name check checked no name;"
+                      " the push goes on.", result.stderr)
         self.assertGreaterEqual(elapsed, 10)
         self.assertLess(elapsed, 60)
 
@@ -522,7 +523,8 @@ class PersonBranchGuardTest(unittest.TestCase):
         result = self.git(w, "push", "origin", "HEAD")
         self.assertEqual(result.returncode, 128, result.stderr)
         self.assert_no_refusal(result)
-        self.assertIn("could not ask origin which branches it holds (exit 128); the push goes on.", result.stderr)
+        self.assertIn("git's dry run of this push failed (exit 128), so the branch-name check checked no name; the push"
+                      " goes on.", result.stderr)
         self.assertIn("does not appear to be a git repository", result.stderr)
 
     def test_an_https_remote_gets_gits_own_error_and_no_network(self):

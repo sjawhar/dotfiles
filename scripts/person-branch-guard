@@ -1,10 +1,11 @@
 #!/bin/bash
 # person-branch-guard TOOL GIT [GIT_OPTION…] -- PUSH_ARGUMENT…: refuses a push that would create on
 # the remote a branch whose name starts with a person token. shims/git runs it on every push of an
-# agent session that is not a dry run, the push jj hands to git included, and shims/jj on every
-# bookmark that jj's own push plan adds. TOOL is `git` or `jj`, and picks the message prefix and the
-# hint. GIT [GIT_OPTION…] is the git to run and its options before the subcommand (`-C`, `-c`,
-# `--git-dir`…). PUSH_ARGUMENT… is everything after `push`, as the caller gave it, its `--` included.
+# agent session that is not a dry run or a request for help (`-h`, `--help`), the push jj hands to
+# git included, and shims/jj on every bookmark that jj's own push plan adds. TOOL is `git` or `jj`,
+# and picks the message prefix and the hint. GIT [GIT_OPTION…] is the git to run and its options
+# before the subcommand (`-C`, `-c`, `--git-dir`…). PUSH_ARGUMENT… is everything after `push`, as the
+# caller gave it, its `--` included.
 #
 # The tokens: the value of USER, the part of `git config user.email` before its `@` and each word of
 # `git config user.name`, each of three characters or more; and each name in shims/person-names, one
@@ -25,8 +26,10 @@
 # option and before the caller's first `--` or `--end-of-options`, since the last of --dry-run and
 # --no-dry-run wins and -q hides the porcelain lines. Each
 # `*<TAB><src>:refs/heads/<name><TAB>[new branch]` line under a `To <url>` line is a branch that
-# destination lacks. A dry run that exits non-zero and prints no `To ` line could not ask the remote
-# (a refused connection, a missing path, the 10 s bound): it says so in one line and the push goes on.
+# destination lacks. A dry run that exits non-zero and prints no `To ` line checked no name. git may
+# have failed by itself (a refspec that matches nothing) or at the remote (a refused connection, a
+# missing path), and this cannot tell which, so its one line names no cause: only git's exit status,
+# or that the 10 s bound ran out. Then the push goes on.
 #
 # Exit 0: the push goes on. Exit 3: refused; the refusal is on stderr. Any other status: this check
 # failed. It prints nothing on stdout, which jj reads from the git it runs.
@@ -180,48 +183,6 @@ redact() {
     printf '%s' "$u"
 }
 
-# The remote the push names, for the message: its first argument that is neither an option nor an
-# option's value, else the value of --repo.
-remote="" repo="" opts=1
-for ((k = 0; k < ${#push[@]}; k++)); do
-    a="${push[k]}"
-    if ((opts)); then
-        case "$a" in
-            -- | --end-of-options)
-                opts=0
-                continue
-                ;;
-            # git reads a long option from each prefix it finds unambiguous: --repo from `--rep`,
-            # --receive-pack from `--rece`, --recurse-submodules from `--recu`, --exec from `--e` and
-            # --push-option from `--pu`. Each takes the next argument as its value, or the text after `=`.
-            --rep*=*)
-                [[ --repo != "${a%%=*}"* ]] || repo="${a#*=}"
-                continue
-                ;;
-            --rep* | --rece* | --recu* | --e* | --pu*)
-                if [[ --repo == "$a"* ]]; then
-                    repo="${push[k + 1]:-}"
-                    k=$((k + 1))
-                elif [[ --receive-pack == "$a"* || --recurse-submodules == "$a"* || --exec == "$a"* ||
-                    --push-option == "$a"* ]]; then
-                    k=$((k + 1))
-                fi
-                continue
-                ;;
-            --*) continue ;;
-            -?*)
-                # A short-option cluster whose first `o` is its last letter takes the next argument.
-                c="${a#-}"
-                [[ "${c%%o*}o" != "$c" ]] || k=$((k + 1))
-                continue
-                ;;
-        esac
-    fi
-    remote="$a"
-    break
-done
-[[ -n "$remote" ]] || remote="${repo:-the default remote}"
-
 # The caller's first `--` or `--end-of-options`: the read's own flags go just before it.
 for ((d = 0; d < ${#push[@]}; d++)); do
     [[ "${push[d]}" != -- && "${push[d]}" != --end-of-options ]] || break
@@ -248,7 +209,11 @@ while IFS= read -r line; do
     refusals+=("this push would create the branch $name on $url, and the name starts with \"${tokens[hit]}\" (${sources[hit]}), a person's name.")
 done <<< "$out"
 if ((rc != 0 && !asked)); then
-    printf '%scould not ask %s which branches it holds (exit %s); the push goes on.\n' "$prefix" "$(redact "$remote")" "$rc" >&2
+    if ((rc == 137)); then
+        printf "%sgit's dry run of this push gave no answer within 10 s, so the branch-name check checked no name; the push goes on.\n" "$prefix" >&2
+    else
+        printf "%sgit's dry run of this push failed (exit %s), so the branch-name check checked no name; the push goes on.\n" "$prefix" "$rc" >&2
+    fi
     exit 0
 fi
 ((${#refusals[@]})) || exit 0

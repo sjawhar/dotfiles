@@ -210,17 +210,17 @@ behavior before handing the call to the real one. One file is data: `person-name
   when no refspec has a `*`, since git's pruning deletes such a destination that already exists
   (`b:refs/remotes/origin/b` left it missing every second run on git 2.43.0) and prunes nothing
   else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
-  In an agent session every `git push` that is not a dry run, the push jj runs included, first goes
-  through `scripts/person-branch-guard`, which refuses a push that would create on the remote a
-  branch whose name carries a person token. A name carries a token when it starts with the token
-  and then `/`, `-` or `_`, compared without case: `sami/x`, `Sami-x` and `sami_x` carry `sami`,
-  and `sami` alone and `samizdat/x` do not. Only a branch counts, not a tag or another ref. The
-  tokens are the value of `USER`, the part of `git config user.email` before its `@` and each word
-  of `git config user.name`, each kept only when it has three characters or more, and every name in
-  `shims/person-names` at any length (one per line, skipping blank lines and lines that start with
-  `#`). That list holds `sami` and `sjawhar`: the guard looks up no GitHub login, so the login
-  `sjawhar` comes from the list, and `sami` stays a token where `USER` and the git identity are
-  unset.
+  In an agent session every `git push` that is not a dry run or a request for help, the push jj
+  runs included, first goes through `scripts/person-branch-guard`, which refuses a push that would
+  create on the remote a branch whose name carries a person token. A name carries a token when it
+  starts with the token and then `/`, `-` or `_`, compared without case: `sami/x`, `Sami-x` and
+  `sami_x` carry `sami`, and `sami` alone and `samizdat/x` do not. Only a branch counts, not a tag
+  or another ref. The tokens are the value of `USER`, the part of `git config user.email` before
+  its `@` and each word of `git config user.name`, each kept only when it has three characters or
+  more, and every name in `shims/person-names` at any length (one per line, skipping blank lines
+  and lines that start with `#`). That list holds `sami` and `sjawhar`: the guard looks up no
+  GitHub login, so the login `sjawhar` comes from the list, and `sami` stays a token where `USER`
+  and the git identity are unset.
   The guard first lists, from local reads only, every name the push could create: the push's
   arguments, the current branch and its `branch.<name>.merge`, each `remote.<name>.push`, and every
   local branch for `--all`, `--branches`, `--mirror` or a prefix git takes for one (`--bra`), a
@@ -229,11 +229,16 @@ behavior before handing the call to the real one. One file is data: `person-name
   run of the same push (`push --dry-run --porcelain`, its flags after every option of the caller's,
   so a caller's `--no-dry-run` or `-q` changes nothing), within 10 s. It refuses each branch that a
   destination reports as new and whose name carries a token, and a branch the remote already holds
-  passes. A read that fails before any destination answers (a refused connection, a missing path,
-  the 10 s bound) prints one line, `could not ask <remote> which branches it holds (exit <n>); the
-  push goes on.`, and the push goes on. So only a push whose list carries a token, or whose refspec
-  holds `*`, pays a remote read: one, and up to two for a jj push (`shims/jj`'s, then this shim's).
-  Every other push pays only local reads.
+  passes. When that dry run fails before any destination answers, the guard prints one line and the
+  push goes on: `git's dry run of this push gave no answer within 10 s, so the branch-name check
+  checked no name; the push goes on.` when the 10 s bound ran out, else `git's dry run of this push
+  failed (exit <n>), so the branch-name check checked no name; the push goes on.` Neither line names
+  a cause, because the guard cannot tell a failure in git (a refspec that matches nothing) from one
+  at the remote (a refused connection, a missing path). So only a push whose list carries a token,
+  or whose refspec holds `*`, pays a remote read: one, and up to two for a jj push (`shims/jj`'s,
+  then this shim's). Every other push pays only local reads.
+  `git push -h` and `git push --help` push nothing and are not checked: `-h` or `--help` before the
+  first `--` or `--end-of-options` lets git print its usage or open the push help as it would.
   A dry run (`-n` or `--dry-run`, unless a later `--no-dry-run` clears it) is not checked, and that
   is also how the guard's own read passes this shim when it comes from `shims/jj`. Each prefix git
   takes for one of those options counts the same: `--dr` to `--dry-run`, `--no-dr` to
