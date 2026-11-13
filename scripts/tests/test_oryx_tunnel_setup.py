@@ -168,19 +168,23 @@ case "$name" in
             # LOCAL_SOCKET_FORWARDED_SILENT: sshd forwarded the socket, and the server on it, like
             # forward's pulse.sock, sends nothing until the client speaks.
             [[ "${LOCAL_SOCKET_FORWARDED_SILENT:-}" == 1 ]] || printf 'open failed\n' >&2
-            /usr/bin/python3 - "$port" "${LOCAL_SOCKET_FORWARDED_SILENT:-}" <<'PY' &
+            # LOCAL_SOCKET_LISTEN_DELAY: seconds before the -L listens, as when the tunnel's
+            # ProxyCommand and login take that long (real time; the fake sleep does not apply).
+            /usr/bin/python3 - "$port" "${LOCAL_SOCKET_FORWARDED_SILENT:-}" "${LOCAL_SOCKET_LISTEN_DELAY:-0}" <<'PY' &
 import socket
 import sys
 import time
+time.sleep(float(sys.argv[3]))
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("127.0.0.1", int(sys.argv[1])))
-sock.listen(1)
-conn, _ = sock.accept()
-if sys.argv[2] == "1":
-    time.sleep(8)
-conn.close()
-sock.close()
+sock.listen(5)
+# A real ssh -L accepts every connection until it exits, so a client may connect more than once.
+while True:
+    conn, _ = sock.accept()
+    if sys.argv[2] == "1":
+        time.sleep(8)
+    conn.close()
 PY
             child=$!
             trap 'kill "$child" 2>/dev/null || true; exit 0' TERM INT
@@ -1045,6 +1049,17 @@ class TunnelSetup(unittest.TestCase):
             report,
         )
         self.assertNotIn("client connection failed", report)
+
+    def test_local_socket_probe_waits_for_a_tunnel_that_takes_seconds_to_listen(self) -> None:
+        # ssh binds a -L only after its ProxyCommand connects and it logs in. Against a real
+        # sshd, a ProxyCommand that waits 2 s gave 'client connection failed:
+        # ConnectionRefusedError' after the probe's fixed 1 s wait (2026-11-13), and cloudflared
+        # reaches Cloudflare's edge before the login starts. The probe must wait for the -L.
+        self.checkout("git", "local-socket-slow-tunnel")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, LOCAL_SOCKET_LISTEN_DELAY="2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("self-check: tunnel key rejects local socket forwarding: client got EOF, open failed: ok\n", self.report())
 
     def test_human_tier_ssh_failure_says_the_outcome_is_unknown(self) -> None:
         # ssh also exits 255 when the connection drops after secrets get started.
