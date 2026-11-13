@@ -57,8 +57,10 @@ VALUE_OPTION = re.compile(r"^ +(?:-(\w), )?--(?:\[no-\])?([a-z][a-z0-9-]*) [<(]"
 # What a push with such an option left open does, in both shapes, as measured with git 2.47.3.
 # "refused": git takes the read's spare --dry-run as the value, the read answers, and the guard refuses.
 # "git fails": git fails the read by itself (--recurse-submodules takes only check, on-demand or no; a
-# receive-pack program named `--dry-run` cannot run), so the push goes on, and git fails the caller's
-# command by itself too (an option with no value; `--` as the submodule mode or the program).
+# receive-pack program named `--dry-run` cannot run on the local remote this test uses), so the push
+# goes on, and git fails the caller's command by itself too (an option with no value; `--` as the
+# submodule mode or the program). A remote-helper transport such as HTTPS runs no receive-pack
+# program, so there --receive-pack and --exec take the spare --dry-run and the guard refuses.
 OPEN_OPTION_OUTCOMES = {
     "--repo": "refused",
     "--push-option": "refused",

@@ -269,9 +269,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   (run by its absolute path with no `shims/` on PATH, or with a `git.executable-path` that names
   another git); initials, and identity tokens under three characters; a token that is not at the
   start of the name, or that is followed by `.`; jj's own identity settings (`user.*`); a push whose
-  first `--` is the value of an option and is followed anywhere by an option of the caller's
-  (`git push --repo -- -v origin …`): the read takes that option as the remote or a refspec, fails,
-  and the push goes on.
+  first `--` or `--end-of-options` is the value of an option and has after it any word git reads as
+  an option, `--` or `--end-of-options` (`git push --repo -- -v origin …`, `git push -o -- -- origin
+  …`): the read takes that word as the remote or a refspec, fails, and the push goes on.
   It refuses wrongly where `USER` names no person. Every agent box sets `USER=ubuntu`, so a new
   `ubuntu-…` branch there is refused, and `USER=root` makes `root` a token the same way. The
   message names the token and its source (`USER`). In an agent session, the push that
