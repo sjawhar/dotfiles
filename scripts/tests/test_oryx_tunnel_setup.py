@@ -1285,12 +1285,25 @@ class TunnelSetup(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         report = self.report()
         self.assertIn("self-check: preview delivery: removing the preview's oryx directory failed (exit 255): failed\n", report)
-        self.assertIn("self-check: browser page delivery: removing the page's oryx directory failed (exit 255): failed\n", report)
+        self.assertIn(
+            "self-check: browser page delivery: answer: yes; removing the page's oryx directory failed (exit 255): failed\n", report
+        )
+
+    def test_preview_probe_names_both_a_failed_fetch_and_a_failed_cleanup(self) -> None:
+        self.checkout("git", "preview-fetch-and-cleanup-fail")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, PREVIEW_CURL_FAILS="1", SSH_FAILS_ON="rm -rf -- '/tmp/oryx-tunnel-setup.")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "self-check: preview delivery: fetching the preview URL failed (curl exit 7); "
+            "removing the preview's oryx directory failed (exit 255): failed\n",
+            self.report(),
+        )
 
     def test_delivery_probes_report_the_answer_they_read(self) -> None:
         for name, answers, value in (
-            ("answers-no", "n\nn\n", 'answer was not y: "n"'),
-            ("answers-none", "", "no answer read"),
+            ("answers-no", "n\nn\n", "answer: no"),
+            ("answers-none", "", "no answer (read exit 1)"),
         ):
             with self.subTest(name):
                 self.checkout("git", name)
@@ -1300,6 +1313,32 @@ class TunnelSetup(unittest.TestCase):
                 report = self.report()
                 self.assertIn(f"self-check: browser page delivery: {value}: failed\n", report)
                 self.assertIn(f"self-check: audio delivery: {value}: failed\n", report)
+
+    def test_a_typed_answer_reaches_no_report_and_no_file(self) -> None:
+        # Something pasted by mistake at a y/N prompt must stay on the terminal: the report, which
+        # is uploaded to oryx, carries only the answer's category.
+        self.checkout("git", "typed-secret")
+        self.advance_to_current()
+        typed = f"synthetic-pasted-secret-{secrets.token_hex(8)}"
+        result = self.invoke(after_sync=True, answers=f"{typed}\n{typed}\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        report = self.report()
+        self.assertIn("self-check: browser page delivery: answer: no: failed\n", report)
+        self.assertIn("self-check: audio delivery: answer: no: failed\n", report)
+        searched = 0
+        for root in (self.home, self.remote):
+            for path in root.rglob("*"):
+                if path.is_file() and not path.is_symlink():
+                    searched += 1
+                    self.assertNotIn(typed, path.read_text(encoding="utf-8", errors="ignore"), path)
+        self.assertGreater(searched, 0)
+
+    def test_a_y_without_a_final_newline_counts_as_yes(self) -> None:
+        self.checkout("git", "answer-without-newline")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, answers="y\ny")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("self-check: audio delivery: answer: yes: ok\n", self.report())
 
     def test_steps_stop_naming_a_failed_look_not_its_absence(self) -> None:
         for name, extra, message in (

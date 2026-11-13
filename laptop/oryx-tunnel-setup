@@ -689,8 +689,9 @@ printf '%s\\n' \"\$url\"")" || make_status=$?
     cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
     if ((curl_status)); then
         PROBE_VALUE="fetching the preview URL failed (curl exit $curl_status)"
-    elif ((cleanup_status)); then
-        PROBE_VALUE="removing the preview's oryx directory failed (exit $cleanup_status)"
+    fi
+    if ((cleanup_status)); then
+        PROBE_VALUE="${PROBE_VALUE:+$PROBE_VALUE; }removing the preview's oryx directory failed (exit $cleanup_status)"
     fi
     [[ $curl_status -eq 0 && $cleanup_status -eq 0 && "$body" == "$nonce" ]]
 }
@@ -766,14 +767,21 @@ fi" > "$work_dir/forward-port.out" 2>&1 &
 }
 
 ask_yes() {
-    local prompt="$1" answer
+    local prompt="$1" answer="" status=0
     printf '%s [y/N] ' "$prompt" >&2
-    if ! read -r answer; then
-        PROBE_VALUE="no answer read"
-        return 1
+    # read fails at the end of input even when it read a last line without a newline, so the
+    # answer decides, and its status counts only when nothing was read. The report carries only
+    # the answer's category, never the text: a paste at this prompt must not reach the report or oryx.
+    read -r answer || status=$?
+    if [[ "$answer" == y || "$answer" == Y ]]; then
+        PROBE_VALUE="answer: yes"
+        return 0
     fi
-    [[ "$answer" == y || "$answer" == Y ]] && return 0
-    PROBE_VALUE="answer was not y: \"$answer\""
+    if [[ -z "$answer" ]] && ((status)); then
+        PROBE_VALUE="no answer (read exit $status)"
+    else
+        PROBE_VALUE="answer: no"
+    fi
     return 1
 }
 
@@ -868,7 +876,7 @@ adb_through_tunnel() {
     output="$(ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); print(s.recv(12).decode("ascii", "replace")); s.close()'\''' 2>&1)" || status=$?
     reply="$(tail -n 1 <<< "$output" | tr -d '\r')"
     if ((status == 255)); then
-        # ssh itself failed, so the request never ran on oryx.
+        # ssh itself failed; whether the request reached oryx is unknown.
         PROBE_VALUE="ssh oryx failed (exit 255): ${reply:0:100}"
         return 1
     fi
