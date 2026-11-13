@@ -215,12 +215,14 @@ before handing the call to the real one.
   `--git-dir`, `--work-tree`, `--namespace`, `--shallow-file` and `--attr-source`, and
   attached-only forms such as `--exec-path=<path>` and `--list-cmds=<list>`. A global query or
   unknown option goes to Git unchanged, which reports its own result or error. When that command
-  is not a Git builtin, the shim reads `alias.<command>` through the real Git with those globals,
-  applies Git's quoted `split_cmdline` rules, and repeats for each ordinary alias. The expanded
-  arguments are both checked and run. A builtin never needs the configuration read. A shell alias
-  (its value starts with `!`), a bad alias, or an alias loop stays with Git and is not expanded by
-  the shim. Every caller's `git commit` without a command-line `-c core.hooksPath` gets
-  `core.hooksPath=git-hooks/` and scans after Git runs the repository's own hooks. The hook first
+  is not a Git builtin and no external `git-<command>` exists in Git's exec path or on `PATH`
+  (Git runs that before it reads an alias), the shim reads `alias.<command>` through the real Git
+  with those globals, applies Git's quoted `split_cmdline` rules, and repeats for each ordinary
+  alias. The expanded arguments are both checked and run. A builtin never needs the configuration
+  read. A shell alias (its value starts with `!`), a bad alias, or an alias loop stays with Git
+  and is not expanded by the shim. Every caller's `git commit` without a command-line
+  `-c core.hooksPath` gets `core.hooksPath=git-hooks/` and scans after Git runs the repository's
+  own hooks. The hook first
   runs the repository's `pre-commit` or `commit-msg`, with Git's same arguments and standard
   input; only a successful hook is followed by the scan. The pre-commit scan selects an empty
   attribute-source tree, `core.attributesFile=/dev/null`, and `GIT_ATTR_NOSYSTEM=1`, so tree,

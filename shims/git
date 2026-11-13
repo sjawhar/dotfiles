@@ -169,7 +169,16 @@ git_alias_changes_environment() {
 }
 
 # Expand ordinary aliases with Git's split_cmdline rules. A shell alias starts with `!`; Git
-# delegates it to a shell, so it stays outside this shim's commit and push dispatch.
+# delegates it to a shell, so it stays outside this shim's commit and push dispatch. Git 2.43's
+# run_argv (git.c) tries a builtin, then an external `git-<name>` from its exec path or PATH,
+# and reads alias.<name> only when neither exists, so a name that is an external command is
+# left to git unexpanded.
+git_external_command() {
+    local exec_path
+    exec_path="$("$_real" "${args[@]:0:i}" --exec-path 2> /dev/null)" || exec_path="$("$_real" --exec-path 2> /dev/null)" || exec_path=""
+    [[ -n "$exec_path" && -f "$exec_path/git-$1" && -x "$exec_path/git-$1" ]] && return 0
+    command -v -- "git-$1" > /dev/null 2>&1
+}
 git_expand_aliases() {
     local name
     local -a alias_words=()
@@ -177,6 +186,7 @@ git_expand_aliases() {
     while ((i < ${#args[@]})); do
         name="${args[i]}"
         git_builtin "$name" && return
+        git_external_command "$name" && return
         [[ -z "${seen[$name]:-}" ]] || {
             args=("${original_args[@]}")
             git_command_index
