@@ -51,8 +51,10 @@ if [[ "$has_config_begin" != "$has_config_end" ]]; then
     exit 1
 fi
 
-# The managed block goes first: ssh takes the first value it reads, so an older Host oryx or a
-# Host * further down cannot change where ssh oryx goes.
+# The managed block goes before the first Host or Match line: ssh takes the first value it reads,
+# so an older Host oryx or a Host * further down cannot change where ssh oryx goes. Lines above the
+# first Host or Match line apply to every host, so they stay above the block; one that would change
+# where ssh oryx goes fails the check below.
 config_tmp=$(mktemp "$ssh_dir/.config.XXXXXX")
 rest_tmp=$(mktemp "$ssh_dir/.config-rest.XXXXXX")
 if [[ -f "$config" ]]; then
@@ -66,12 +68,24 @@ if [[ -f "$config" ]]; then
         exit 1
     fi
 fi
+# Split the rest at its first Host or Match line (ssh keywords are case-insensitive).
+first_section() {
+    awk '{ word = tolower($1); sub(/=.*/, "", word) } word == "host" || word == "match" { exit } { print }' "$rest_tmp"
+}
+sections() {
+    awk 'found { print; next } { word = tolower($1); sub(/=.*/, "", word) } word == "host" || word == "match" { found = 1; print }' "$rest_tmp"
+}
+# Drop blank lines at the start and the end, the ones that used to separate the managed block.
+trim_blank() { awk 'NF { for (; held > 0; held--) print ""; print; started = 1; next } started { held++ }'; }
 {
+    preamble=$(first_section | trim_blank)
+    if [[ -n "$preamble" ]]; then
+        printf '%s\n\n' "$preamble"
+    fi
     printf '%s\n' "$managed_config"
-    if grep -q '[^[:space:]]' "$rest_tmp"; then
-        printf '\n'
-        # Drop the blank lines that used to separate the managed block from the rest.
-        awk 'started || NF { started = 1; print }' "$rest_tmp"
+    rest=$(sections | trim_blank)
+    if [[ -n "$rest" ]]; then
+        printf '\n%s\n' "$rest"
     fi
 } > "$config_tmp"
 rm -f "$rest_tmp"
@@ -84,7 +98,13 @@ effective=$(ssh -F "$config" -G oryx 2>&1) || {
     exit 1
 }
 first_value() { awk -v key="$1" '$1 == key { sub(/^[^ ]+ /, ""); print; exit }' <<< "$effective"; }
-for expected in "hostname oryx.thecybermonk.com" "user agent" "identityfile ~/.ssh/id_ed25519" \
+# IdentityFile adds to a list, so a file a line above the block names is tried too; the phone's key
+# must be in that list.
+if ! grep -Fqx 'identityfile ~/.ssh/id_ed25519' <<< "$effective"; then
+    printf 'termux-setup: ssh oryx would not offer ~/.ssh/id_ed25519; check %s\n' "$config" >&2
+    exit 1
+fi
+for expected in "hostname oryx.thecybermonk.com" "user agent" \
     "proxycommand cloudflared access ssh --hostname %h"; do
     field="${expected%% *}"
     if [[ "$(first_value "$field")" != "${expected#* }" ]]; then

@@ -232,6 +232,18 @@ exit "${PKG_EXIT:-0}"''',
         self.assertEqual(self.invoke().returncode, 0)
         self.assertEqual(self.config.read_bytes(), first)
 
+    def test_a_line_above_every_host_that_changes_ssh_oryx_fails_the_run(self) -> None:
+        # A User above the first Host line applies to oryx too and comes before the managed block,
+        # so ssh oryx would log in as someone else: the command says so and prints no key.
+        self.ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        self.config.write_text("User someone\n\nHost other\n  HostName other.example\n", encoding="utf-8")
+
+        result = self.invoke()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("ssh oryx would use user someone, not agent", result.stderr)
+
     def test_pkg_output_reaches_standard_error_only_on_failure(self) -> None:
         result = self.invoke(PKG_EXIT="1")
 
