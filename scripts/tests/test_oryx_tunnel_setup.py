@@ -129,7 +129,8 @@ case "$name" in
         if [[ "$joined" == *"secrets get CLOUDFLARE_API_KEY"* ]]; then
             # secretsd waits for the touch here; the test reads where the prompt stands against it.
             printf 'fake secretsd: waiting for the human-tier touch\n' >&2
-            exit 0
+            # ssh's own failure (255) when HUMAN_TIER_SSH_EXIT is set: no secretsd answered.
+            exit "${HUMAN_TIER_SSH_EXIT:-0}"
         fi
         if [[ "$joined" == *"forward browser grant"* ]]; then
             printf 'https://browser.example\n'
@@ -984,6 +985,19 @@ class TunnelSetup(unittest.TestCase):
             "self-check: adb through tunnel: no adb reply: ConnectionRefusedError: [Errno 111] Connection refused: failed\n",
             self.report(),
         )
+
+    def test_human_tier_line_does_not_call_an_ssh_failure_a_refusal(self) -> None:
+        # ssh exits 255 when it cannot reach oryx or log in; secretsd never saw the request, so
+        # the report must not say the key was refused.
+        self.checkout("git", "human-tier-ssh-down")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True, HUMAN_TIER_SSH_EXIT="255")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        lines = [line for line in self.report().splitlines() if line.startswith("self-check: human-tier read:")]
+        self.assertEqual(len(lines), 1, self.report())
+        self.assertIn("exit 255", lines[0])
+        self.assertTrue(lines[0].endswith(": failed"), lines[0])
+        self.assertNotIn("refused", lines[0])
 
     def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
         self.checkout("git", "before-move-unit")
