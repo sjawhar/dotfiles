@@ -270,6 +270,18 @@ class AgentboxMove(unittest.TestCase):
         # separators into one and shifts every field after an empty one.
         return [line.split("\x1f") for line in result.stdout.splitlines()]
 
+    # ── the git a move pushes with ──────────────────────────────────────────────────────────
+    def test_a_move_pushes_with_the_git_past_the_dotfiles_shim(self) -> None:
+        """A move's push goes to the same tree on another box over ssh, never to GitHub, so it skips shims/git and
+        its leak-term push check, and takes the first git past it (a stub here), as shims/git's real_git does."""
+        write_stub(self.stubs, "git", 'exec /usr/bin/git "$@"')
+        shimmed = {"PATH": ":".join([str(DOTFILES / "shims"), str(self.stubs), "/usr/bin", "/bin"])}
+        result = self.run_bash("move_real_git", shimmed)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, str(self.stubs / "git")), result.stderr)
+        # The control: the shim itself is the first git on that PATH, and a plain lookup finds it.
+        found = self.run_bash("command -v git", shimmed)
+        self.assertEqual(found.stdout.strip(), str(DOTFILES / "shims" / "git"))
+
     # ── the spec a working directory gets ───────────────────────────────────────────────────
     def test_a_canonical_checkout_is_named_as_its_own_directory_and_nothing_else(self) -> None:
         """$SRC is in every box already, so a checkout under it needs only its own path."""
