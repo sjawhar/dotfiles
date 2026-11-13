@@ -1340,6 +1340,19 @@ class TunnelSetup(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("self-check: audio delivery: answer: yes: ok\n", self.report())
 
+    def test_a_typed_yes_is_not_reported_as_no(self) -> None:
+        # Sami may type "yes" at a [y/N] prompt. Whether the command takes it as yes or asks for
+        # y, the report must not say he answered no.
+        self.checkout("git", "answer-typed-yes")
+        self.advance_to_current()
+        self.invoke(after_sync=True, answers="yes\nYes\n")
+        report = self.report()
+        for probe in ("browser page delivery", "audio delivery"):
+            with self.subTest(probe=probe):
+                lines = [line for line in report.splitlines() if line.startswith(f"self-check: {probe}:")]
+                self.assertEqual(len(lines), 1, report)
+                self.assertNotIn("answer: no", lines[0])
+
     def test_steps_stop_naming_a_failed_look_not_its_absence(self) -> None:
         for name, extra, message in (
             ("probe-ssh-down", {"SSH_FAILS_ON": "BatchMode=yes"},
