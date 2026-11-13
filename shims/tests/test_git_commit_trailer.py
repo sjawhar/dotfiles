@@ -32,7 +32,10 @@ class GitCommitTrailerTest(unittest.TestCase):
         )
         # SSH_CONNECTION in a session with no terminal is an agent's command too (INFRA-1538), so a
         # person's environment here drops it, and SSH_TTY and TMUX with it, wherever this suite is run from.
-        dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON")
+        # It drops GIT_AUTHOR_* and GIT_COMMITTER_* too: the identity is the gitconfig's above, and
+        # prepare-commit-msg stamps a replayed commit only when its author is that identity.
+        identity = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
+        dropped = (*AGENT_MARKERS, "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON", *identity)
         base = {k: v for k, v in os.environ.items() if k not in dropped and not k.startswith("GIT_CONFIG_")}
         self.plain = {**base, "PATH": f"{SHIMS}{os.pathsep}{os.environ['PATH']}", "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}
         self.agent = {**self.plain, "OMP_SESSION_ID": SESSION}

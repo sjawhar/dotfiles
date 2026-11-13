@@ -1,7 +1,8 @@
 # shims
 
-PATH-priority wrappers: each file here shadows the binary of the same name and adds behavior
-before handing the call to the real one.
+PATH-priority wrappers: each executable file here shadows the binary of the same name and adds
+behavior before handing the call to the real one. One file is data: `person-names`, the name list
+`scripts/person-branch-guard` reads (under `git` below), which is not executable.
 
 ## What each shim adds
 
@@ -182,6 +183,15 @@ before handing the call to the real one.
   unchanged. `--quiet` needs a second dry-run with only that rendering flag removed to read the
   plan. The gate does not depend on jj's git executable or git's hooks. Its nested parse also
   makes the agent `--deleted` refusal apply when globals stand between `git` and `push`.
+  In an agent session `jj git push` first refuses a push that would create on a remote a bookmark
+  whose name carries a person token, by the rule under `git` below. Each bookmark that jj's own
+  dry-run plan adds (`add to …`) goes to `scripts/person-branch-guard` before anything is pushed,
+  and a refusal carries jj's hint (`jj git push --named <issue-key>=<revision>`). A bookmark the
+  plan moves or deletes is not checked, and neither is a tag or a push with `--dry-run`. The
+  guard's exit 3 refuses the push and the shim exits 1. On any other non-zero status the shim
+  prints `the branch-name check failed (exit <n>); the push goes on.`, and the push goes on. It
+  runs after the encrypted-term check above and before the shared public leak check. The `git push` that jj then runs passes through
+  `shims/git`, which checks it again.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
   `git worktree add`, so no box can prune another box's live registration. The prune runs
   when the repository's common directory, resolved through symlinks, lies under a temporary
@@ -253,6 +263,74 @@ before handing the call to the real one.
   when no refspec has a `*`, since git's pruning deletes such a destination that already exists
   (`b:refs/remotes/origin/b` left it missing every second run on git 2.43.0) and prunes nothing
   else there; a glob refspec beside it, `--stdin` and `--multiple` leave the fetch as it was.
+  In an agent session every `git push` that is not a dry run or a request for help, the push jj
+  runs included, first goes through `scripts/person-branch-guard`, which refuses a push that would
+  create on the remote a branch whose name carries a person token. A name carries a token when it
+  starts with the token and then `/`, `-` or `_`, compared without case: `sami/x`, `Sami-x` and
+  `sami_x` carry `sami`, and `sami` alone and `samizdat/x` do not. Only a branch counts, not a tag
+  or another ref. The tokens are the value of `USER`, the part of `git config user.email` before
+  its `@` and each word of `git config user.name`, each kept only when it has three characters or
+  more, and every name in `shims/person-names` at any length (one per line, skipping blank lines
+  and lines that start with `#`). That list holds `sami` and `sjawhar`: the guard looks up no
+  GitHub login, so the login `sjawhar` comes from the list, and `sami` stays a token where `USER`
+  and the git identity are unset.
+  The guard first lists, from local reads only, every name the push could create: the push's
+  arguments, the current branch and its `branch.<name>.merge`, each `remote.<name>.push`, and every
+  local branch for `--all`, `--branches`, `--mirror` or a prefix git takes for one (`--bra`), a
+  refspec with `@{` or a remote with `mirror` set. When no name in that list carries a token and no
+  refspec holds `*`, it asks the remote nothing. Otherwise it reads the remote once, within 10 s:
+  git's own dry run of the same push. Its flags, `--dry-run --dry-run --porcelain --no-verify
+  --no-quiet --no-signed --no-recurse-submodules`, go just before the caller's first `--` or
+  `--end-of-options` (the split), or at the end when there is none, so no caller option comes
+  after them and a caller's `--no-dry-run` or `-q` changes nothing. git gives an option that takes
+  a value exactly the next argument, so a caller's option left with none (`--repo` at the end, or
+  `-o --`, whose `--` git takes as the value) takes the first, spare `--dry-run`, and the rest
+  still apply. The split follows `--no-recurse-submodules`, which takes no value, so git reads it
+  as the end of options and each argument after it as the remote or a refspec. It refuses each
+  branch that a destination reports as new and whose name carries a token, and a branch the remote
+  already holds passes. When that dry run fails before any destination answers, the guard prints
+  one line and the push goes on: `git's dry run of this push gave no answer within 10 s, so the
+  branch-name check checked no name; the push goes on.` when the 10 s bound ran out, else `git's
+  dry run of this push failed (exit <n>), so the branch-name check checked no name; the push goes
+  on.` Neither line names a cause, because the guard cannot tell a failure in git (a refspec that
+  matches nothing) from one at the remote (a refused connection, a missing path). So only a push
+  whose list carries a token, or whose refspec holds `*`, pays a remote read: one, and up to two
+  for a jj push (`shims/jj`'s, then this shim's). Every other push pays only local reads.
+  A request for help pushes nothing and is not checked: `-h`, alone or in a cluster of short options
+  before any `o` (`-uh`, `-hv`, not `-oh`, whose `h` is the value of `-o`), or `--help`, before the
+  first `--` or `--end-of-options`, lets git print its usage or open the push help as it would.
+  A dry run (`-n` or `--dry-run`, unless a later `--no-dry-run` clears it) is not checked, and that
+  is also how the guard's own read passes this shim when it comes from `shims/jj`. Each prefix git
+  takes for one of those options counts the same: `--dr` to `--dry-run`, `--no-dr` to
+  `--no-dry-run`. The argument after `--repo`, `--receive-pack`, `--recurse-submodules`, `--exec`
+  or `--push-option`, or after a prefix git takes for one (from `--rep`, `--rece`, `--recu`, `--e`
+  and `--pu` on), is that option's value and never makes a dry run. `--end-of-options` ends the
+  options like `--`, for this reading and for the guard's: git reads each word after either as the
+  remote or a refspec. A person's session and every command that is not a push are not checked
+  either.
+  The guard exits 0 to let the push go on and 3 to refuse it, and on 3 the shim exits 1. On any
+  other status the shim prints `the branch-name check failed (exit <n>); the push goes on.`, and on
+  a guard that is missing or not executable it prints `the branch-name check is missing (<path>);
+  the push goes on.` In both cases the push goes on. Each line of a refusal starts
+  `error: git shim: ` (`error: jj shim: ` for the push jj runs). It names each refused branch, the
+  destination URL with any user part taken out, the token and the token's source. Then come the
+  Workspace bullet of `.claude/CLAUDE.md`, word for word, and a hint to push the same commit under
+  a name that names the work, never to rename (`git push <remote> <src>:refs/heads/<issue-key>`,
+  or `jj git push --named <issue-key>=<revision>` for jj). The last line is `Nothing was pushed.`
+  Not seen by the guard: a git alias for `push`; a branch made through the GitHub API or web page;
+  a git run by its absolute path, and a jj not run through `shims/jj` whose git is not `shims/git`
+  (run by its absolute path with no `shims/` on PATH, or with a `git.executable-path` that names
+  another git); initials, and identity tokens under three characters; a token that is not at the
+  start of the name, or that is followed by `.`; jj's own identity settings (`user.*`); a push whose
+  first `--` or `--end-of-options` is the value of an option and has after it any word git reads as
+  an option, `--` or `--end-of-options` (`git push --repo -- -v origin …`, `git push -o -- -- origin
+  …`): the read takes that word as the remote or a refspec, fails, and the push goes on.
+  It refuses wrongly where `USER` names no person. Every agent box sets `USER=ubuntu`, so a new
+  `ubuntu-…` branch there is refused, and `USER=root` makes `root` a token the same way. The
+  message names the token and its source (`USER`). The push that `agentbox move` makes of a moved
+  tree's branches to the target machine runs the git past this shim (`move_real_git`): it goes to
+  a box over ssh, never to GitHub, so neither this check nor the leak-term gate sees it.
+  `tests/test_person_branch_guard.py` is the contract.
   Every `git push` through this shim, for every caller, gets the encrypted-term pre-push gate
   except a push from a checkout that is not guarded to one of its configured remotes. The
   destination is the one Git uses: the first non-option argument, else the last `--repo`, else
@@ -260,7 +338,8 @@ before handing the call to the real one.
   an `insteadOf` alias and any other name that is not a configured remote take the gate. The shim
   reads the push argv as Git 2.43 parses it (unique abbreviations and `--no-` forms of long
   options, bundled short options, required and optional values, `--` and `--end-of-options`); an
-  option it cannot read or an ambiguous abbreviation refuses. The gate's pre-push scans when the
+  option it cannot read or an ambiguous abbreviation refuses, and an option left without the value
+  it requires at the end goes to Git, which rejects it and pushes nothing. The gate's pre-push scans when the
   URL Git gives it, after `insteadOf`, is a public or unreadable GitHub repository
   (`scripts/github-repo-visibility`). It reads Git's update lines and the destination's live
   advertisement, then finds the commits the updates send that the destination does not hold. No

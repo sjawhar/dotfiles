@@ -1,0 +1,240 @@
+#!/bin/bash
+# person-branch-guard TOOL GIT [GIT_OPTION…] -- PUSH_ARGUMENT…: refuses a push that would create on
+# the remote a branch whose name starts with a person token. shims/git runs it on every push of an
+# agent session that is not a dry run or a request for help (`-h`, alone or in a cluster of short
+# options before any `o`, or `--help`), the push jj hands to git included, and shims/jj on every
+# bookmark that jj's own push plan adds. TOOL is `git` or `jj`, and picks the message prefix and the
+# hint. GIT [GIT_OPTION…] is the git to run and its options before the subcommand (`-C`, `-c`,
+# `--git-dir`…). PUSH_ARGUMENT… is everything after `push`, as the caller gave it, its `--` included.
+#
+# The tokens: the value of USER, the part of `git config user.email` before its `@` and each word of
+# `git config user.name`, each of three characters or more; and each name in shims/person-names, one
+# per line (blank lines and lines starting with `#` skipped), at any length. All are lowercased. A name
+# carries a token when its lowercased form starts with the token and then `/`, `-` or `_`; a name that
+# is a token and nothing more carries none.
+#
+# First, with no network, it lists every name the push could create, as a superset: each push
+# argument that is not an option (every one after `--` or `--end-of-options`, either of which ends
+# git's options), each value of remote.*.push, both split at `:` and also read without a leading
+# refs/heads/ or heads/; the current branch and its branch.<name>.merge; and every local branch when
+# the push can name one it does not spell out (--all, --branches, --mirror or a prefix git takes for
+# one, a `@{` in a refspec, a remote with mirror set). When no name of that list carries a token and
+# no refspec holds a `*`, which can create a name that no local branch has, it exits 0 and asks the
+# remote nothing. The push's own arguments are read first, and once one of them carries a token or
+# holds a `*` the local reads are skipped, since the remote read is certain.
+# Then it asks the remote with git's own dry run of the same push: the caller's arguments before its
+# first `--` or `--end-of-options`, then `--dry-run --dry-run --porcelain --no-verify --no-quiet
+# --no-signed --no-recurse-submodules`, then the caller's arguments from that split on. git gives an
+# option that takes a value exactly the one argument after it, so a caller's option left with none
+# (`--repo` at the end, or `-o --`, whose `--` git takes as the value) takes the first, spare
+# --dry-run, and the rest still apply. The split follows --no-recurse-submodules, which takes no
+# value, so git reads it as the end of options. No caller option comes after the flags, so none can
+# undo them: of --dry-run and --no-dry-run, and of --no-quiet and -q (which hides the porcelain
+# lines), the last wins. Each
+# `*<TAB><src>:refs/heads/<name><TAB>[new branch]` line under a `To <url>` line is a branch that
+# destination lacks. A dry run that exits non-zero and prints no `To ` line checked no name. git may
+# have failed by itself (a refspec that matches nothing) or at the remote (a refused connection, a
+# missing path), and this cannot tell which, so its one line names no cause: only git's exit status,
+# or that the 10 s bound ran out. Then the push goes on.
+#
+# Exit 0: the push goes on. Exit 3: refused; the refusal is on stderr. Any other status: this check
+# failed. It prints nothing on stdout, which jj reads from the git it runs.
+set -u
+
+usage() {
+    echo "usage: person-branch-guard git|jj GIT [GIT_OPTION...] -- PUSH_ARGUMENT..." >&2
+    exit 2
+}
+tool="${1:-}"
+case "$tool" in
+    git)
+        prefix='error: git shim: '
+        hint='Push the same commit under a name that names the work: git push <remote> <src>:refs/heads/<issue-key>'
+        ;;
+    jj)
+        prefix='error: jj shim: '
+        hint='Push the same revision under a name that names the work: jj git push --named <issue-key>=<revision>'
+        ;;
+    *) usage ;;
+esac
+shift
+git=()
+while (($#)) && [[ "$1" != -- ]]; do
+    git+=("$1")
+    shift
+done
+((${#git[@]} && $#)) || usage
+shift
+push=("$@")
+
+tokens=() sources=()
+# add_token WORD SOURCE MINIMUM: WORD, lowercased, as a token from SOURCE, when it has MINIMUM
+# characters or more. A token already held keeps its first source.
+add_token() {
+    local t="${1,,}" k
+    ((${#t} >= $3)) || return 0
+    for k in "${tokens[@]}"; do
+        [[ "$k" != "$t" ]] || return 0
+    done
+    tokens+=("$t")
+    sources+=("$2")
+}
+add_token "${USER:-}" USER 3
+if email="$("${git[@]}" config --get user.email 2> /dev/null)"; then
+    add_token "${email%@*}" user.email 3
+fi
+if name="$("${git[@]}" config --get user.name 2> /dev/null)"; then
+    read -r -a words <<< "$name"
+    for w in "${words[@]}"; do
+        add_token "$w" user.name 3
+    done
+fi
+list="${BASH_SOURCE[0]%/*}/../shims/person-names"
+if [[ -f "$list" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" && "$line" != '#'* ]] || continue
+        add_token "$line" shims/person-names 1
+    done < "$list"
+fi
+((${#tokens[@]})) || exit 0
+
+# carries NAME: true when NAME starts with a token and then `/`, `-` or `_`, compared as literal
+# strings, so a token holding `[` or `*` matches only itself. Sets `hit` to that token's index.
+hit=0
+carries() {
+    local n="${1,,}" k
+    for k in "${!tokens[@]}"; do
+        case "$n" in
+            "${tokens[k]}"/* | "${tokens[k]}"-* | "${tokens[k]}"_*)
+                hit=$k
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+# pieces TEXT: each side of each `:` in TEXT, a leading `+` or `^` taken off, is a name this push
+# could create, as it is and without a leading refs/heads/ or heads/. Sets `maybe` when one carries a
+# token, `glob` when one holds `*`, `every` when one holds `@{`.
+maybe=0 glob=0 every=0
+pieces() {
+    local rest="$1" p
+    while :; do
+        p="${rest%%:*}"
+        p="${p#[+^]}"
+        [[ "$p" != *'*'* ]] || glob=1
+        [[ "$p" != *'@{'* ]] || every=1
+        if carries "$p" || carries "${p#refs/heads/}" || carries "${p#heads/}"; then maybe=1; fi
+        [[ "$rest" == *:* ]] || return 0
+        rest="${rest#*:}"
+    done
+}
+opts=1
+for a in "${push[@]}"; do
+    if ((opts)); then
+        case "$a" in
+            -- | --end-of-options)
+                opts=0
+                continue
+                ;;
+            # --all, --branches, --mirror and every prefix git takes for one (`--al`, `--b`, `--m`);
+            # a word git refuses matches too, which costs only a read of the remote.
+            --al* | --b* | --m*)
+                every=1
+                continue
+                ;;
+            -*) continue ;;
+        esac
+    fi
+    pieces "$a"
+done
+if ((!maybe && !glob)); then
+    if current="$("${git[@]}" symbolic-ref -q HEAD 2> /dev/null)" && [[ "$current" == refs/heads/?* ]]; then
+        pieces "$current"
+        while IFS= read -r line; do
+            pieces "$line"
+        done < <("${git[@]}" config --get-all "branch.${current#refs/heads/}.merge" 2> /dev/null)
+    fi
+    # -z prints `<key><LF><value><NUL>`, so a remote name holding a space is read whole.
+    while IFS= read -r -d '' line; do
+        [[ "$line" != *$'\n'* ]] || pieces "${line#*$'\n'}"
+    done < <("${git[@]}" config -z --get-regexp '^remote\..*\.push$' 2> /dev/null)
+    while IFS= read -r -d '' line; do
+        [[ "${line#*$'\n'}" != true ]] || every=1
+    done < <("${git[@]}" config -z --type=bool --get-regexp '^remote\..*\.mirror$' 2> /dev/null)
+    if ((every && !maybe)); then
+        while IFS= read -r line; do
+            if carries "${line#refs/heads/}"; then
+                maybe=1
+                break
+            fi
+        done < <("${git[@]}" for-each-ref --format='%(refname)' refs/heads/ 2> /dev/null)
+    fi
+fi
+((maybe || glob)) || exit 0
+
+# The URL $1 without a user part (`//user:password@`), so a credential written into a remote URL
+# never reaches the screen.
+redact() {
+    local u="$1" rest auth
+    if [[ "$u" == *//* ]]; then
+        rest="${u#*//}"
+        auth="${rest%%/*}"
+        [[ "$auth" != *@* ]] || rest="${rest#"${auth%@*}"@}"
+        u="${u%%//*}//$rest"
+    fi
+    printf '%s' "$u"
+}
+
+# The read: the caller's arguments before its first `--` or `--end-of-options` (the split), the flags,
+# then the caller's arguments from the split on. git gives an option that takes a value exactly the
+# next argument, so an option the caller left open (at the end, or with the split as its value) takes
+# the spare first --dry-run, and the full set after it still applies; otherwise the spare is a repeat.
+# The split follows --no-recurse-submodules, which takes no value, so git reads it as the end of options.
+for ((d = 0; d < ${#push[@]}; d++)); do
+    [[ "${push[d]}" != -- && "${push[d]}" != --end-of-options ]] || break
+done
+rc=0
+out="$(timeout -s KILL 10 env GIT_TERMINAL_PROMPT=0 "${git[@]}" push "${push[@]:0:d}" \
+    --dry-run --dry-run --porcelain --no-verify --no-quiet --no-signed --no-recurse-submodules "${push[@]:d}" \
+    2> /dev/null < /dev/null)" || rc=$?
+
+url="" asked=0 refusals=()
+while IFS= read -r line; do
+    if [[ "$line" == 'To '* ]]; then
+        url="$(redact "${line#To }")"
+        asked=1
+        continue
+    fi
+    [[ "$line" == '*'$'\t'*$'\t[new branch]' ]] || continue
+    line="${line#*$'\t'}"
+    line="${line%$'\t'*}"
+    line="${line##*:}"
+    [[ "$line" == refs/heads/?* ]] || continue
+    name="${line#refs/heads/}"
+    carries "$name" || continue
+    refusals+=("this push would create the branch $name on $url, and the name starts with \"${tokens[hit]}\" (${sources[hit]}), a person's name.")
+done <<< "$out"
+if ((rc != 0 && !asked)); then
+    if ((rc == 137)); then
+        printf "%sgit's dry run of this push gave no answer within 10 s, so the branch-name check checked no name; the push goes on.\n" "$prefix" >&2
+    else
+        printf "%sgit's dry run of this push failed (exit %s), so the branch-name check checked no name; the push goes on.\n" "$prefix" "$rc" >&2
+    fi
+    exit 0
+fi
+((${#refusals[@]})) || exit 0
+{
+    for line in "${refusals[@]}"; do
+        printf '%s%s\n' "$prefix" "$line"
+    done
+    printf '%s%s\n' \
+        "$prefix" "A branch name names the issue or the work, never a person. Use the issue key where there is one, else a shape such as \`feat/<slug>\` or \`fix/<slug>\`. Never a person's name, login or initials. A branch that exists stays as it is: rename none." \
+        "$prefix" "(.claude/CLAUDE.md of the dotfiles, under Workspace.)" \
+        "$prefix" "$hint" \
+        "$prefix" "Nothing was pushed."
+} >&2
+exit 3

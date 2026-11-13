@@ -167,9 +167,11 @@ class TmuxPanes(unittest.TestCase):
         )
         self.probe.chmod(0o755)
         # shims/tmux hands a shell command to tmux through a file under XDG_RUNTIME_DIR, which
-        # must be a directory of this user's own; keep it inside this test.
+        # must be a directory of this user's own, mode exactly 0700; keep it inside this test.
+        # A setgid parent passes its bit to mkdtemp and mkdir, so chmod sets the mode outright.
         self.runtime = self.dir / "run"
         self.runtime.mkdir(mode=0o700)
+        self.runtime.chmod(0o700)
         # shims/tmux first, as it is on an agent's PATH; it finds the real tmux past itself.
         self.person_env = {
             "PATH": f"{SHIMS}{os.pathsep}{Path(TMUX).parent}{os.pathsep}/usr/bin{os.pathsep}/bin",
@@ -501,7 +503,10 @@ class TmuxMarkedArgv(unittest.TestCase):
         stub.mkdir()
         (stub / "tmux").write_text("#!/bin/bash\nprintf '%s\\n' \"$@\"\n")
         (stub / "tmux").chmod(0o755)
-        # The shim writes the command file under XDG_RUNTIME_DIR; keep it inside this test.
+        # The shim writes the command file under XDG_RUNTIME_DIR, which must be mode exactly
+        # 0700; keep it inside this test. A setgid parent passes its bit to mkdtemp, so chmod
+        # sets the mode outright.
+        self.dir.chmod(0o700)
         self.env = {"PATH": f"{SHIMS}{os.pathsep}{stub}{os.pathsep}/usr/bin{os.pathsep}/bin",
                     "HOME": str(self.dir), "TMUX_TMPDIR": str(self.dir),
                     "XDG_RUNTIME_DIR": str(self.dir)}

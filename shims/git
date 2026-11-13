@@ -4,9 +4,11 @@
 # throwaway repository, lock every `git worktree add`, let `git worktree remove` past a
 # lock of ours and no further, give every `git commit` without a command-line hooks path
 # the leak-term hooks, give every commit an omp session makes its Omp-Session trailer where
-# it does now, run the shared public leak check under its existing conditions, run the
-# encrypted leak-term check on every `git push` but one from an unguarded checkout to a
-# configured remote (its hook scans a public or unknown GitHub URL),
+# it does now, refuse every `git push`, the one jj runs included, that would create on the
+# remote a branch whose name starts with a person token (scripts/person-branch-guard), run
+# the shared public leak check under its existing conditions, run the encrypted leak-term
+# check on every `git push` but one from an unguarded checkout to a configured remote (its
+# hook scans a public or unknown GitHub URL),
 # and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
@@ -447,9 +449,9 @@ if agent_context; then
     is_agent=1
 fi
 # Say so when the SSH rule, and not a session marker, made this an agent's call: the agent-session
-# rules below (the session trailer, the worktree lock, the prune refusal, the public check of a push)
-# are otherwise silent about why, and a person whose own non-interactive ssh command this is needs
-# the escape named.
+# rules below (the session trailer, the worktree lock, the prune refusal, the branch-name refusal, the
+# public check of a push) are otherwise silent about why, and a person whose own non-interactive ssh
+# command this is needs the escape named.
 if [[ -n "${AGENT_CONTEXT_VIA_SSH:-}" ]]; then
     echo "git shim: non-interactive SSH, so an agent's call, under the agent-session rules (set AGENT_SHIM_PERSON=1 for your own)" >&2
 fi
@@ -486,7 +488,7 @@ if ((scan_commit)); then
 fi
 
 if [[ "${args[i]:-}" != push ]]; then
-    ((is_agent)) || exec "$_real" "$@"
+    agent_context || exec "$_real" "$@"
 fi
 case "${args[i]:-}" in
     commit | merge | pull | cherry-pick | revert)
@@ -771,8 +773,9 @@ push_long_parse() {
 # PUSH_REBUILT keeps every caller argument byte for byte, in order, except the options that
 # set or clear --no-verify; jj_push_gate puts back one --verify before them. The
 # repository is the first non-option argument, else the last --repo. An option git does not
-# know, an ambiguous abbreviation, or a value git would reject refuses the push; a help
-# request runs git unchanged, since git then pushes nothing.
+# know, an ambiguous abbreviation, or a value git would reject refuses the push. A help
+# request, and an option left without the value it requires at the end of the argv, run git
+# unchanged, since git then prints its usage or rejects the option and pushes nothing.
 push_parse() {
     local a position short index character options_done=0 positional_set=0 repo_set=0 repo=""
     local -a taken
@@ -803,7 +806,7 @@ push_parse() {
                 n) ((!PUSH_ATTACHED)) || push_cannot_read "$a" ;;
                 r)
                     if ((!PUSH_UNSET && !PUSH_ATTACHED)); then
-                        ((position + 1 < ${#args[@]})) || push_cannot_read "$a"
+                        ((position + 1 < ${#args[@]})) || exec "$_real" "${args[@]}"
                         ((++position))
                         PUSH_VALUE="${args[position]}"
                         taken+=("$PUSH_VALUE")
@@ -829,7 +832,7 @@ push_parse() {
                 v | q | d | n | f | u | 4 | 6) ;;
                 o)
                     if ((index + 1 == ${#short})); then
-                        ((position + 1 < ${#args[@]})) || push_cannot_read "$a"
+                        ((position + 1 < ${#args[@]})) || exec "$_real" "${args[@]}"
                         ((++position))
                         taken+=("${args[position]}")
                     fi
@@ -928,11 +931,69 @@ push_effective_repository() {
     fi
     printf '%s\n' origin
 }
+# person_branch_gate TOOL: refuses a push that would create on the remote a branch whose name starts with a
+# person token. scripts/person-branch-guard decides, from the push's own arguments and the remote's answer
+# to a dry run of it, and prints the refusal with TOOL's prefix and hint: `jj` for the push jj runs, else
+# `git`. Its exit 3 refuses; any other failure of it, or a missing guard, lets the push go on with one notice.
+# A request for help pushes nothing and is not checked: `-h`, alone or in a short-option cluster before any
+# `o` (`-uh`, `-hv`, not `-oh`, whose `h` is the value of `-o`), or `--help`, before the first `--` or
+# `--end-of-options`, either of which ends git's options, returns at once, since git then prints its usage or
+# opens the push help. A dry run creates nothing and is not checked either; that is also how the guard's own
+# dry run, which reaches this shim on jj's path, passes. Before that first `--` or `--end-of-options`, `-n`
+# and `--dry-run` set it, `--no-dry-run` clears it, and the last one wins. git takes a long option from each
+# prefix it finds unambiguous, so `--dr` to `--dry-run` set it too and `--no-dr` to `--no-dry-run` clear it.
+# A short-option cluster (`-un`) sets it when it holds `n` before any `o`, whose value is the rest
+# of the cluster, or the next argument when `o` ends it. The argument after --repo, --receive-pack,
+# --recurse-submodules, --exec and --push-option, each also from its shortest prefix git takes (`--rep`,
+# `--rece`, `--recu`, `--e`, `--pu`), and after a lone `-o` is a value and is skipped.
+person_branch_gate() {
+    local tool="$1" k a c dry=0 rc=0
+    local helper="${BASH_SOURCE[0]%/*}/../scripts/person-branch-guard"
+    for ((k = i + 1; k < ${#args[@]}; k++)); do
+        a="${args[k]}"
+        case "$a" in
+            -- | --end-of-options) break ;;
+            -h | --help) return 0 ;;
+            -n) dry=1 ;;
+            --dr*) if [[ --dry-run == "$a"* ]]; then dry=1; fi ;;
+            --no-dr*) if [[ --no-dry-run == "$a"* ]]; then dry=0; fi ;;
+            --rep* | --rece* | --recu* | --e* | --pu*)
+                if [[ --repo == "$a"* || --receive-pack == "$a"* || --recurse-submodules == "$a"* ||
+                    --exec == "$a"* || --push-option == "$a"* ]]; then
+                    k=$((k + 1))
+                fi
+                ;;
+            --*) ;;
+            -?*)
+                c="${a#-}"
+                [[ "${c%%o*}" != *h* ]] || return 0
+                [[ "${c%%o*}" != *n* ]] || dry=1
+                [[ "${c%%o*}o" != "$c" ]] || k=$((k + 1))
+                ;;
+        esac
+    done
+    ((!dry)) || return 0
+    if [[ ! -x "$helper" ]]; then
+        printf 'error: git shim: the branch-name check is missing (%s); the push goes on.\n' "$helper" >&2
+        return 0
+    fi
+    "$helper" "$tool" "$_real" "${args[@]:0:i}" -- "${args[@]:i+1}" || rc=$?
+    case "$rc" in
+        0) ;;
+        3) exit 1 ;;
+        *) printf 'error: git shim: the branch-name check failed (exit %s); the push goes on.\n' "$rc" >&2 ;;
+    esac
+}
 if [[ "${args[i]}" == push ]]; then
     unset GIT_SHIM_PUBLIC_CHECK GIT_SHIM_OWN_HOOKS GIT_SHIM_JJ_PUSH
-    push_parse
     is_jj=0
     from_jj && is_jj=1
+    # The branch-name refusal is an agent session's alone and runs first, so no route below, the
+    # unguarded checkout's own included, pushes a name it refuses.
+    if ((is_agent)); then
+        if ((is_jj)); then person_branch_gate jj; else person_branch_gate git; fi
+    fi
+    push_parse
     listing=""
     listed=0
     if listing="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)"; then listed=1; fi
