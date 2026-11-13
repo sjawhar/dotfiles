@@ -120,6 +120,24 @@ class OryxInstall(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.forward_config.read_bytes(), self.forward_bytes)
 
+    def test_run_from_a_workspace_links_the_dropin_from_home_dotfiles(self) -> None:
+        # arm_user_timer links the units from ~/.dotfiles so that a unit armed from a workspace
+        # checkout does not point into a directory that will be removed (installers/lib.sh).
+        # systemd skips a dangling drop-in, and the unit then runs the plain ExecStart: the hook
+        # sweep on, and alerts to lead-box-health and then the company SRE session.
+        workspace = self.home / "src/dotfiles-wt"
+        shutil.copytree(DOTFILES, workspace, symlinks=True, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+
+        result = subprocess.run(
+            ["/bin/bash", str(workspace / "oryx/install.sh")], env=self.env, capture_output=True, text=True
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dropin = self.home / ".config/systemd/user/dotfiles-follow.service.d/oryx.conf"
+        self.assertEqual(dropin.readlink(), self.dotfiles / "oryx/dotfiles-follow.service.d/oryx.conf")
+        shutil.rmtree(workspace)
+        self.assertTrue(dropin.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
