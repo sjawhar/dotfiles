@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -871,6 +872,18 @@ class JjPushLeakGateTest(unittest.TestCase):
         # it only narrows; and a whole `sweep` over the checkouts must install the hook in exactly the guarded ones, and
         # defer none. So a change to either reader fails here until the other follows.
         self.keep_cache_fresh()
+        # The sweep trusts a cached private for 60 s from the entry's mtime, and one of the bash calls below can take
+        # longer than that on a busy machine: the entries' mtimes are refreshed every 5 s until the test ends.
+        stop = threading.Event()
+
+        def refresh():
+            while not stop.wait(5):
+                self.keep_cache_fresh()
+
+        fresher = threading.Thread(target=refresh, daemon=True)
+        fresher.start()
+        self.addCleanup(fresher.join)
+        self.addCleanup(stop.set)
         # Neither GIT_SSH_COMMAND (which setUp sets to block git's ssh transport) nor GIT_SSH: either makes every alias
         # unknown, and the table's alias rows are about ssh -G. The "sshCommand" rows set the checkout's own.
         env = {k: v for k, v in self.env.items() if not k.startswith("GIT_CONFIG") and k not in ("GIT_SSH_COMMAND", "GIT_SSH")} \
@@ -2202,7 +2215,7 @@ class JjPushLeakGateTest(unittest.TestCase):
         # out, each in its own directory and traced with `bash -x`, that directory read as one placeholder. The traces
         # must be equal: the gate adds no command to that path. The control, the gate-less copy with one git call added
         # after the agent-session test, must trace differently, which shows the trace sees one added command. CPU time
-        # is not used: it is counted in 10 ms ticks, more than one added git call costs.
+        # is not used: here it is counted in 10 ms ticks, coarser than the cost of one added git call.
         text = (SHIMS / "git").read_text(encoding="utf-8")
         start = text.index("# jj publishes through git")
         tail = '    exec "$_real" "$@"\nfi\n'
