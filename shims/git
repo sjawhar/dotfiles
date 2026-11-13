@@ -378,13 +378,14 @@ plain_push_gate() {
 # person token. scripts/person-branch-guard decides, from the push's own arguments and the remote's answer
 # to a dry run of it, and prints the refusal with TOOL's prefix and hint: `jj` for the push jj runs, else
 # `git`. Its exit 3 refuses; any other failure of it, or a missing guard, lets the push go on with one notice.
-# A request for help pushes nothing and is not checked: `-h` or `--help` before the first `--` or
-# `--end-of-options`, either of which ends git's options, returns at once, since git then prints its usage
-# or opens the push help. A dry run creates nothing and is not checked either; that is also how the guard's
-# own dry run, which reaches this shim on jj's path, passes. Before that first `--` or `--end-of-options`,
-# `-n` and `--dry-run` set it, `--no-dry-run` clears it, and the last one wins. git takes a long option from
-# each prefix it finds unambiguous, so `--dr` to `--dry-run` set it too and `--no-dr` to `--no-dry-run`
-# clear it. A short-option cluster (`-un`) sets it when it holds `n` before any `o`, whose value is the rest
+# A request for help pushes nothing and is not checked: `-h`, alone or in a short-option cluster before any
+# `o` (`-uh`, `-hv`, not `-oh`, whose `h` is the value of `-o`), or `--help`, before the first `--` or
+# `--end-of-options`, either of which ends git's options, returns at once, since git then prints its usage or
+# opens the push help. A dry run creates nothing and is not checked either; that is also how the guard's own
+# dry run, which reaches this shim on jj's path, passes. Before that first `--` or `--end-of-options`, `-n`
+# and `--dry-run` set it, `--no-dry-run` clears it, and the last one wins. git takes a long option from each
+# prefix it finds unambiguous, so `--dr` to `--dry-run` set it too and `--no-dr` to `--no-dry-run` clear it.
+# A short-option cluster (`-un`) sets it when it holds `n` before any `o`, whose value is the rest
 # of the cluster, or the next argument when `o` ends it. The argument after --repo, --receive-pack,
 # --recurse-submodules, --exec and --push-option, each also from its shortest prefix git takes (`--rep`,
 # `--rece`, `--recu`, `--e`, `--pu`), and after a lone `-o` is a value and is skipped.
@@ -408,6 +409,7 @@ person_branch_gate() {
             --*) ;;
             -?*)
                 c="${a#-}"
+                [[ "${c%%o*}" != *h* ]] || return 0
                 [[ "${c%%o*}" != *n* ]] || dry=1
                 [[ "${c%%o*}o" != "$c" ]] || k=$((k + 1))
                 ;;

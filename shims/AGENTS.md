@@ -237,8 +237,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   at the remote (a refused connection, a missing path). So only a push whose list carries a token,
   or whose refspec holds `*`, pays a remote read: one, and up to two for a jj push (`shims/jj`'s,
   then this shim's). Every other push pays only local reads.
-  `git push -h` and `git push --help` push nothing and are not checked: `-h` or `--help` before the
-  first `--` or `--end-of-options` lets git print its usage or open the push help as it would.
+  A request for help pushes nothing and is not checked: `-h`, alone or in a cluster of short options
+  before any `o` (`-uh`, `-hv`, not `-oh`, whose `h` is the value of `-o`), or `--help`, before the
+  first `--` or `--end-of-options`, lets git print its usage or open the push help as it would.
   A dry run (`-n` or `--dry-run`, unless a later `--no-dry-run` clears it) is not checked, and that
   is also how the guard's own read passes this shim when it comes from `shims/jj`. Each prefix git
   takes for one of those options counts the same: `--dr` to `--dry-run`, `--no-dr` to
