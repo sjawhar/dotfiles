@@ -291,6 +291,28 @@ esac
                     break
                 time.sleep(0.1)
 
+    def test_timed_out_install_that_ends_inside_the_grace_is_not_killed(self) -> None:
+        # The grace gives an installer that outlives its limit time to end by itself; only one
+        # still running at the end of the grace is killed. This one ignores TERM and ends 4 s in.
+        pid_file = self.root / "mise.pid"
+        started = time.monotonic()
+        result = self.launch(
+            "--mode",
+            "ends-in-grace",
+            env=self.env(
+                DOTFILES_TOOLS_TIMEOUT="1",
+                FAKE_MISE_SLEEP="4",
+                FAKE_MISE_IGNORE_TERM="1",
+                FAKE_PID_FILE=str(pid_file),
+            ),
+            timeout=40,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assert_agent_started(result, "--mode", "ends-in-grace")
+        self.assertGreaterEqual(elapsed, 3.5, "the installer was killed before the grace ended")
+        self.assertLess(elapsed, 9, "the launch waited out the whole grace for an installer already gone")
+
     def test_timed_out_install_without_the_agent_refuses(self) -> None:
         started = time.monotonic()
         result = self.launch(env=self.env(DOTFILES_TOOLS_TIMEOUT="2", FAKE_MISE_SLEEP="5", FAKE_MISE_WRITE_AGENT="0"))
