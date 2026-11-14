@@ -4450,14 +4450,15 @@ move_progress_stop() {
     MOVE_PROGRESS_PID="" MOVE_PROGRESS_FILE=""
 }
 
-# The one EXIT trap of `agentbox move` (cmd_move): it removes the index, and for `--to` it says
-# why the command ended when no refusal did. A second `trap … EXIT` replaced the first and
-# silenced that message, so nothing else sets one.
+# The one EXIT trap of `agentbox move` (cmd_move): it removes the index and the copy's delta
+# directory, and for `--to` it says why the command ended when no refusal did. A second
+# `trap … EXIT` replaced the first and silenced that message, so nothing else sets one.
 MOVE_FORM=""
 move_exit() {
     local rc=$?
     move_progress_stop
     [[ -z "$MOVE_DEEP_INDEX_DIR" ]] || rm -rf "$MOVE_DEEP_INDEX_DIR"
+    [[ -z "$MOVE_TO_DELTA_DIR" ]] || rm -rf "$MOVE_TO_DELTA_DIR"
     if [[ "$MOVE_FORM" == --to ]] && (( rc != 0 )) && [[ -z "$MOVE_SAID" ]]; then
         echo "agentbox: move --to stopped with exit $rc and no message of its own; nothing was hung up. This is a bug: report it with the command you ran." >&2
     fi
@@ -7187,13 +7188,16 @@ move_to_exclude_other_sessions() {
 move_to_copy() {
     local target="$1" stamp="$2" label="${3:-}" excludes=() p stats start
     local since="" files
-    stats="$(mktemp)"
     # Each pass records what it saw, and every pass after the first sends only the difference.
     if [[ -z "$MOVE_TO_DELTA_DIR" ]]; then
         MOVE_TO_DELTA_DIR="$(mktemp -d)"
     elif [[ -e "$MOVE_TO_DELTA_DIR/stamp" ]]; then
         since="$MOVE_TO_DELTA_DIR/stamp"
     fi
+    # The stats file lives in the delta directory, which move_exit removes, so a relauncher a
+    # signal stops in the middle of a copy leaves neither in its TMPDIR.
+    stats="$MOVE_TO_DELTA_DIR/stats"
+    : >"$stats"
     # A second back, so a file written while the pass before it ran is in this one.
     touch -d "1 second ago" "$MOVE_TO_DELTA_DIR/stamp.new"
     move_to_delta_record mirror ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}

@@ -1867,7 +1867,9 @@ class AgentboxMove(unittest.TestCase):
         test_a_move_lists_and_refuses_what_dies_with_the_hang_up tests the refusal."""
         if accept:
             args += " --accept-orphans"
-        result = self.run_bash(f"move_own_omp() {{ echo {own}; }}\ncmd_move_to {args}")
+        # Through cmd_move, as `agentbox move --to` runs: its EXIT trap (move_exit) is what removes
+        # the run's progress file, which cmd_move_to alone left in TMPDIR.
+        result = self.run_bash(f"move_own_omp() {{ echo {own}; }}\ncmd_move {args}")
         # The hand-off is a background `setsid` (a stub here): wait for it, so it writes nothing
         # into the fixture after the test.
         if "handed to a detached relauncher" in result.stdout:
