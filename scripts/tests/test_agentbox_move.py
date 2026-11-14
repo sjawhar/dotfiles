@@ -71,9 +71,25 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+# The script refuses every path under these as too broad for a box (move_dir_too_broad), so a
+# fixture tree there is in no spec a test expects. Inside a box TMPDIR is outside them.
+REFUSED_ROOTS = ("/tmp", "/var", "/run", "/dev")
+
+
+def fixture_parent() -> str | None:
+    temp = os.path.realpath(tempfile.gettempdir())
+    if not any(temp == r or temp.startswith(r + "/") for r in REFUSED_ROOTS):
+        return None
+    parent = Path.home() / ".cache" / "agentbox-tests"
+    parent.mkdir(parents=True, exist_ok=True)
+    return str(parent)
+
+
 class AgentboxMove(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(dir=fixture_parent())
+        self.tmpdir = Path(self.temp_dir.name) / "tmpdir"
+        self.tmpdir.mkdir()
         self.root = Path(self.temp_dir.name)
         self.home = self.root / "home"
         self.home.mkdir()
@@ -110,6 +126,9 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_BOXES": str(self.boxes),
             "AGENTBOX_PROC": str(self.proc),
             "AGENTBOX_DISK": "0",
+            # The device of `/` that move_to_box_only_paths compares with: one no fixture path is
+            # on, so a fixture tree on the root filesystem is not read as a path of a box only.
+            "AGENTBOX_ROOT_DEV": str(os.stat("/proc").st_dev),
             # The session transcripts the record reader walks, the window it reads, and where
             # `move --plan` leaves what it inferred for `move --self` to union with.
             "AGENTBOX_SESSION_ROOTS": str(self.sessions),
@@ -130,6 +149,9 @@ class AgentboxMove(unittest.TestCase):
             "STUB_TMUX": str(self.root / "STUB_TMUX"),
             "STUB_DOCKER": str(self.root / "STUB_DOCKER"),
             "STUB_ENVOY": str(self.root / "STUB_ENVOY"),
+            # The script's own temporary files, inside the fixture tree that tearDown removes,
+            # not in this host's /tmp.
+            "TMPDIR": str(self.tmpdir),
         }
 
     def tearDown(self) -> None:
@@ -2936,6 +2958,8 @@ class AgentboxMove(unittest.TestCase):
         box's filesystem die with the container and reach no other machine. SPEC-skills' move
         carried /var/tmp/sc-head and sc-ablate and lost both (2026-11-04). The test is the device:
         a bind of a host path has its own, a box-only path shares the device of `/`."""
+        # The script's own read of the device of `/`, not the fixture's stand-in.
+        del self.env["AGENTBOX_ROOT_DEV"]
         self.moving_session()
         own = self.root / "box-only"
         own.mkdir()
@@ -3211,7 +3235,7 @@ class AgentboxMove(unittest.TestCase):
         and the lists are tested as functions, so the test takes the same seconds at any load."""
         big = self.root / "wt"
         big.mkdir()
-        (big / "big.bin").write_bytes(b"x" * 4096)
+        (big / "big.bin").write_bytes(b"x" * (1 << 20))
         small = self.root / "lane-small"
         small.mkdir()
         (small / "f").write_text("x", encoding="utf-8")
@@ -3219,7 +3243,7 @@ class AgentboxMove(unittest.TestCase):
         script = (f'MOVE_TO_MIRROR=("{tree}")\nMOVE_TO_MERGE=("{big}" "{small}")\nMOVE_TO_MKDIR=()\n'
                   'move_to_gate {asked}\n'
                   f'move_to_print_lists devbox "$(printf \'%s\\t%s\\n\' /proc/1/cwd "{big}" /proc/1/cwd "{tree}" | move_to_not_carried)"')
-        env = {"AGENTBOX_MOVE_GATE_BYTES": "1000"}
+        env = {"AGENTBOX_MOVE_GATE_BYTES": "100000"}
         listed = self.run_bash(script.replace("{asked}", ""), env)
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("WOULD COPY, NOT ASKED FOR", listed.stdout)
@@ -3590,8 +3614,8 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(f"the group moves when {self.TO2} run(s) `agentbox move --to devbox` too", first.stdout)
         self.assertEqual(self.jobs(), [])
         sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(sent[:2], ["send", self.TO2])
-        self.assertIn("run `agentbox move --to devbox` from your bash tool", sent[2])
+        self.assertEqual(sent[:4], ["send", "--message-file", "-", self.TO2])
+        self.assertIn("run `agentbox move --to devbox` from your bash tool", sent[4])
         # The second session says it is ready (its own `move --to`); the first one's run moves both.
         self.run_bash(f"move_to_ready_mark {self.TO2} devbox")
         both = self.move_to()
@@ -3741,13 +3765,12 @@ class AgentboxMove(unittest.TestCase):
         self.assertNotIn("runner-ab12", refused.stderr)
         self.assertNotIn("watch.py", refused.stderr)
         self.assertNotIn("watch-child.py", refused.stderr)
-        # The advice must not send the reader back to `setsid`. On this omp build a setsid
-        # child is re-parented to the omp (child subreaper) and dies when its teardown walks
-        # the tree -- which is what a move's hang-up is. Two stream leads' own relaunchers
-        # went that way on 2026-11-05, within ~2 s of the omp they had hung up, while 31 of 31
-        # survived the same step on the previous pin. A message that recommends the failing
-        # move is worse than no message.
-        self.assertIn("Detaching with `setsid` does NOT save them", refused.stderr)
+        # The advice must not send the reader back to plain `setsid`: omp's hang-up teardown
+        # signals what is reachable from it by parent link, and setsid changes the session and
+        # the process group but not the parent, so such a child dies within about 2 s of the
+        # hang-up (measured 2026-11-05; scripts/agentbox, move_orphans_gate). A message that
+        # recommends the failing move is worse than no message.
+        self.assertIn("Plain `setsid` does NOT save them", refused.stderr)
         self.assertNotIn("which outlives the pane", refused.stderr)
         self.assertIn("stream-jobs", refused.stderr)
         self.assertNotIn("systemd-run", refused.stderr)

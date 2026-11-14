@@ -8391,7 +8391,8 @@ cmd_move_to() {
 # nothing at that path (SPEC-skills lost /var/tmp/sc-head and sc-ablate, 2026-11-04).
 move_to_box_only_paths() {
     local root_dev p dev bad=()
-    root_dev="$(stat -c %d / 2>/dev/null)" || return 0
+    root_dev="${AGENTBOX_ROOT_DEV:-}"
+    [[ -n "$root_dev" ]] || root_dev="$(stat -c %d / 2>/dev/null)" || return 0
     [[ -n "$root_dev" ]] || return 0
     for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
         [[ -e "$p" ]] || continue
