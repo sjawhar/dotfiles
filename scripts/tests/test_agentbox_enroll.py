@@ -813,6 +813,27 @@ class SessionIdentity(EnrollFixture):
         self.assertIn("--enrollment ", call)
         self.assertFalse((self.run_base / "session-keys" / "sid-1").exists())
 
+    def test_unenroll_calls_returns_only_once_the_waiters_revoke_reached_the_broker(self) -> None:
+        """dispatch://INFRA-3462, testing after review round 2. unenroll_calls must not return
+        while the detached waiter still works in this test's temp dir. tearDown removes that
+        dir, and the stub's revoke (end_enrollment, a `sed -i` on the broker table) makes a
+        temp file there after the call is in the call log. At d10a9465 that failed
+        test_a_session_that_did_not_come_back_ends_its_enrollment_and_its_key in 1 of 12 runs
+        under load, with OSError: Directory not empty. Here the revoke is held 2 s after the
+        call is logged, so a helper that returns on the logged call alone fails every time."""
+        write_stub(
+            self.stub_dir,
+            "sed",
+            '[[ "$1" == -i && "${@: -1}" == "$STUB_BROKER" ]] && /bin/sleep 2\nexec /bin/sed "$@"',
+        )
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        eid = (self.hostdir / "enrollment-id").read_text().strip()
+        self.bash("unenroll_box box1", AGENTBOX_UNENROLL_GRACE="0")
+        (call,) = self.unenroll_calls()
+        self.assertIn(f"--enrollment {eid}", call)
+        rows = [line.split() for line in self.broker.read_text().splitlines()]
+        self.assertIn("ended", [row[-1] for row in rows if row and row[0] == eid], rows)
+
 
 class EnrollWhenUp(EnrollFixture):
     """`agentbox new`'s enrollment of a box that is starting, against a real child process."""
