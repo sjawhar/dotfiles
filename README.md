@@ -15,7 +15,7 @@ YubiKey when the command asks for it. Answer `y` or `N` for the browser and
 sound checks. The command installs Cloudflare Access's SSH client, replaces the
 laptop SSH configuration with the Cloudflare hosts, copies the tunnel service
 token from oryx, writes oryx's loopback forward configuration, starts the
-forward and adb user units, and ends the old tunnel.
+forward user units, and ends the old tunnel.
 
 Run `bash ~/.dotfiles/laptop/oryx-tunnel-setup` again to repeat the setup. Each
 run writes a mode-0600 report at
@@ -34,9 +34,6 @@ oryx report path. If the upload fails, it prints the local report path.
 | 12804 | RemoteForward | 127.0.0.1:12804 | PC/SC for YubiKey use |
 | 12805 | LocalForward | 127.0.0.1:12805 | Browser grant feed |
 | 12806 | RemoteForward | 127.0.0.1:12806 | Audio |
-| 5038 | RemoteForward | 127.0.0.1:5037 | adb server; on oryx use `ADB_SERVER_SOCKET=tcp:127.0.0.1:5038 adb …` |
-| 2223 | RemoteForward | sami-devbox:22 | Company Legion; on oryx use `ssh sami-devbox-via-laptop` only while the laptop is awake and on its tailnet |
-| 2224 | RemoteForward | ghost-wispr:22 | Ghost Wispr Pi's sshd (`ssh -i <key> <user>@ghost-wispr-via-laptop` on oryx) |
 
 ## Oryx
 
@@ -45,11 +42,9 @@ Run `bash ~/.dotfiles/oryx/install.sh` once on oryx. It arms the
 follows `origin/main` every 10 minutes and its alerts go to the HOME controller.
 It needs no Tailscale; the laptop command above writes oryx's forward config.
 
-Two files here are installed on oryx by hand: `oryx/ssh-config` becomes oryx's
-`~/.ssh/config` (the routes to sami-devbox and the Ghost Wispr Pi through the
-laptop), and the line in `oryx/oryx-tunnel.key-options` goes in front of the
-laptop's tunnel key in `agent`'s `~/.ssh/authorized_keys`. sshd on oryx's port
-2222 must also set `AllowStreamLocalForwarding no`.
+The line in `oryx/oryx-tunnel.key-options` is installed on oryx by hand: it goes
+in front of the laptop's tunnel key in `agent`'s `~/.ssh/authorized_keys`. sshd
+on oryx's port 2222 must also set `AllowStreamLocalForwarding no`.
 
 ## Phone
 

@@ -232,22 +232,10 @@ PY
             fi
             exit 0
         fi
-        if [[ "$joined" == *"sport = :5038"* ]]; then
+        if [[ "$joined" == *"sport = :12800"* ]]; then
             # TUNNEL_LOOK_HANGS: the look through ssh oryx hangs, as a slow Cloudflare connect can.
             [[ "${TUNNEL_LOOK_HANGS:-}" == 1 ]] && exec /bin/sleep 30
-            [[ "${TUNNEL_DOWN:-}" == 1 ]] || printf 'LISTEN 0 128 127.0.0.1:5038 0.0.0.0:*\n'
-            exit 0
-        fi
-        if [[ "$joined" == *"000chost:version"* ]]; then
-            if [[ "${ADB_FORWARD_DOWN:-}" == 1 ]]; then
-                printf 'ConnectionRefusedError: [Errno 111] Connection refused\n' >&2
-                exit 1
-            fi
-            if [[ "${ADB_REPLIES_FAIL:-}" == 1 ]]; then
-                printf 'FAIL0005nope\n'
-                exit 0
-            fi
-            printf 'OKAY00040029\n'
+            [[ "${TUNNEL_DOWN:-}" == 1 ]] || printf 'LISTEN 0 128 127.0.0.1:12800 0.0.0.0:*\n'
             exit 0
         fi
         if [[ "$joined" == " oryx id -u " ]]; then
@@ -309,9 +297,6 @@ PY
         exec "$@"
         ;;
     apt-get)
-        if [[ "${FAIL_ADB_INSTALL:-}" == 1 && "${1:-}" == install && "${2:-}" == -y && "${3:-}" == adb ]]; then
-            exit 1
-        fi
         if [[ "${1:-}" == install && " $* " == *" cloudflared="* ]]; then
             printf '%s\n' "$CF_VERSION" > "$CF_VERSION_FILE"
         fi
@@ -418,8 +403,6 @@ class TunnelSetup(unittest.TestCase):
         for path in (
             "installers/cloudflared.sh",
             "laptop/oryx-tunnel-setup",
-            "laptop/adb-server",
-            "laptop/adb-server.service",
             "README.md",
         ):
             (self.source / path).unlink()
@@ -432,8 +415,6 @@ class TunnelSetup(unittest.TestCase):
         for path in (
             "installers/cloudflared.sh",
             "laptop/oryx-tunnel-setup",
-            "laptop/adb-server",
-            "laptop/adb-server.service",
             "README.md",
         ):
             destination = self.source / path
@@ -599,7 +580,6 @@ class TunnelSetup(unittest.TestCase):
             self.home / ".config/systemd/user/forward-daemon@.service",
             self.home / ".config/systemd/user/forward-tunnel@.service",
             self.home / ".config/systemd/user/forward-tunnel@oryx.service.d/token.conf",
-            self.home / ".config/systemd/user/adb-server.service",
         )
         state: dict[str, tuple[str, bytes | str]] = {}
         for path in paths:
@@ -617,7 +597,6 @@ class TunnelSetup(unittest.TestCase):
         self.assertNotIn("move recorded", calls)
         self.assertNotIn("enable --now forward-daemon@oryx.service", calls)
         self.assertNotIn("enable --now forward-tunnel@oryx.service", calls)
-        self.assertNotIn("enable --now adb-server.service", calls)
 
     def build_reaper(self) -> tuple[Path, Path]:
         waiter_source = self.root / "waiter.c"
@@ -696,7 +675,6 @@ class TunnelSetup(unittest.TestCase):
                     "token file mode and owner",
                     "token leak search",
                     "laptop port 22: none",
-                    "adb through tunnel",
                     "tunnel key true",
                     "tunnel key forced command",
                     "tunnel key rejects remote port 12999",
@@ -720,7 +698,10 @@ class TunnelSetup(unittest.TestCase):
                 self.assertIn(":/run/user/4242/forward/pulse.sock", calls)
                 self.assertRegex(calls, r"-R /tmp/oryx-probe-[0-9]+\.sock:127\.0\.0\.1:9")
                 remote_forwards = [forward.replace("[", "").replace("]", "") for forward in self.ssh_values("oryx-tunnel").get("remoteforward", [])]
-                self.assertIn("127.0.0.1:2224 ghost-wispr:22", remote_forwards)
+                self.assertCountEqual(
+                    remote_forwards,
+                    [f"127.0.0.1:{port} 127.0.0.1:{port}" for port in (12800, 12803, 12804, 12806)],
+                )
                 self.assert_no_tokens(first.stdout, first.stderr, report, calls)
                 token = self.home / ".config/forward/tunnel-oryx.env"
                 self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
@@ -803,10 +784,33 @@ class TunnelSetup(unittest.TestCase):
 
         self.checkout("git", "inactive-unit")
         self.advance_to_current()
-        inactive = self.invoke(after_sync=True, INACTIVE_UNIT="adb-server.service")
+        inactive = self.invoke(after_sync=True, INACTIVE_UNIT="forward-tunnel@oryx.service")
         self.assertEqual(inactive.returncode, 1, inactive.stdout + inactive.stderr)
         self.assertIn("oryx-tunnel-setup: units:", inactive.stderr)
         self.assertIn("move recorded", "\n".join(self.lines()))
+
+    def test_the_command_carries_only_the_forward_channels_and_starts_no_adb_server(self) -> None:
+        self.checkout("git", "forward-channels-only")
+        self.advance_to_current()
+        result = self.invoke(after_sync=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.lines()
+        self.assertTrue(calls, "the fakes recorded nothing")
+        self.assertEqual([line for line in calls if line.startswith("adb:")], [])
+        self.assertEqual([line for line in calls if line.startswith("apt-get:") and " adb" in line], [])
+        self.assertEqual([line for line in calls if "adb-server" in line], [])
+        self.assertFalse((self.home / ".config/systemd/user/adb-server.service").exists())
+        report = self.report()
+        self.assertNotIn("adb through tunnel", report)
+        self.assertNotIn("adb-server", report)
+        tunnel = self.ssh_values("oryx-tunnel")
+        forwards = [
+            forward.replace("[", "").replace("]", "")
+            for forward in tunnel.get("remoteforward", []) + tunnel.get("localforward", [])
+        ]
+        self.assertCountEqual(
+            forwards, [f"127.0.0.1:{port} 127.0.0.1:{port}" for port in range(12800, 12807)]
+        )
 
     def test_report_upload_failure_prints_the_local_path(self) -> None:
         self.checkout("git", "report-failure")
@@ -831,32 +835,6 @@ class TunnelSetup(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.assert_no_tokens(recorded)
 
-    def test_adb_launcher_prefers_the_sdk_adb_and_runs_the_loopback_server(self) -> None:
-        launcher = DOTFILES / "laptop/adb-server"
-        home = self.root / "adb-home"
-        bin_dir = self.root / "adb-bin"
-        bin_dir.mkdir()
-        log = self.root / "adb.log"
-        for path, name in ((bin_dir / "adb", "path"), (home / "Android/sdk/platform-tools/adb", "sdk")):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f'#!/bin/bash\necho "{name} $*" >> "{log}"\n', encoding="utf-8")
-            path.chmod(0o755)
-        # PATH holds only the fake: a real adb elsewhere on PATH must not be found.
-        env = {"HOME": str(home), "PATH": str(bin_dir)}
-        sdk = subprocess.run(["/bin/bash", str(launcher)], env=env, capture_output=True, text=True, check=False)
-        self.assertEqual(sdk.returncode, 0, sdk.stderr)
-        (home / "Android/sdk/platform-tools/adb").unlink()
-        on_path = subprocess.run(["/bin/bash", str(launcher)], env=env, capture_output=True, text=True, check=False)
-        self.assertEqual(on_path.returncode, 0, on_path.stderr)
-        self.assertEqual(
-            log.read_text(encoding="utf-8").splitlines(),
-            ["sdk -L tcp:localhost:5037 server nodaemon", "path -L tcp:localhost:5037 server nodaemon"],
-        )
-        (bin_dir / "adb").unlink()
-        missing = subprocess.run(["/bin/bash", str(launcher)], env=env, capture_output=True, text=True, check=False)
-        self.assertEqual(missing.returncode, 1)
-        self.assertIn("adb is not installed", missing.stderr)
-
     def fake_ss(self, *lines: str) -> None:
         """Make the fake ss print these `ss -Hltnp` lines; PID becomes the fake's own pid. The
         self-check's look for the tunnel's preview LocalForward still finds it up."""
@@ -867,52 +845,6 @@ class TunnelSetup(unittest.TestCase):
             f'if [[ " $* " == *" -Hltnp "* ]]; then\n/bin/sed "s/PID/$$/" <<\'LINES\'\n{text}\nLINES\nfi\n'
             'if [[ " $* " == *"sport = :12802"* ]]; then\nprintf \'LISTEN 0 128 127.0.0.1:12802 0.0.0.0:*\\n\'\nfi',
         )
-
-    def path_without_adb(self) -> Path:
-        restricted = self.root / f"no-adb-bin-{self.kind}"
-        restricted.mkdir()
-        for name in (
-            "ssh",
-            "systemctl",
-            "journalctl",
-            "cloudflared",
-            "sudo",
-            "apt-get",
-            "curl",
-            "forward",
-            "gpg",
-            "ss",
-            "paplay",
-            "hostname",
-            "tailscale",
-            "mise",
-            "omp",
-            "sleep",
-        ):
-            (restricted / name).symlink_to(self.fakebin / name)
-        for name in (
-            "bash",
-            "basename",
-            "cat",
-            "chmod",
-            "cmp",
-            "date",
-            "dirname",
-            "grep",
-            "id",
-            "ln",
-            "mkdir",
-            "mktemp",
-            "mv",
-            "python3",
-            "rm",
-            "sort",
-            "stat",
-            "tee",
-            "tr",
-        ):
-            (restricted / name).symlink_to(real_binary(name))
-        return restricted
 
     def test_preflight_refuses_a_wildcard_listener_on_a_tunnel_port(self) -> None:
         # ss prints these for a listener on 0.0.0.0 and on dual-stack ::. Either one makes the
@@ -927,13 +859,6 @@ class TunnelSetup(unittest.TestCase):
                 self.fake_ss(line)
                 result = self.invoke(after_sync=True)
                 self.assert_stop_before_move(result, "preflight")
-
-    def test_preflight_ignores_a_listener_whose_port_only_starts_with_5037(self) -> None:
-        self.checkout("git", "port-prefix")
-        self.advance_to_current()
-        self.fake_ss('LISTEN 0      4096   127.0.0.1:50371 0.0.0.0:* users:(("python3",pid=PID,fd=3))')
-        result = self.invoke(after_sync=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_preflight_stops_when_ss_cannot_list_listeners(self) -> None:
         # A listing that could not be read is not "nothing listens".
@@ -1029,7 +954,6 @@ class TunnelSetup(unittest.TestCase):
             "self-check: ssh oryx true: exit 0: ok",
             "self-check: oryx SSM login: exit 0: ok",
             "self-check: human-tier read: CLOUDFLARE_API_KEY granted (exit 0): ok",
-            "self-check: adb through tunnel: reply OKAY00040029: ok",
             "self-check: tunnel key true: exit 0: ok",
             "self-check: tunnel key forced command: exit 0, no uid printed: ok",
             "self-check: tunnel key rejects remote port 12999: exit 255, Error: remote port forwarding failed for listen port 12999: ok",
@@ -1056,16 +980,6 @@ class TunnelSetup(unittest.TestCase):
             report,
         )
         self.assertNotIn("client got data", report)
-
-    def test_adb_probe_names_an_error_not_a_reply(self) -> None:
-        self.checkout("git", "adb-forward-down")
-        self.advance_to_current()
-        result = self.invoke(after_sync=True, ADB_FORWARD_DOWN="1")
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(
-            "self-check: adb through tunnel: no adb reply: ConnectionRefusedError: [Errno 111] Connection refused: failed\n",
-            self.report(),
-        )
 
     def test_human_tier_line_does_not_call_an_ssh_failure_a_refusal(self) -> None:
         # ssh exits 255 when it cannot reach oryx or log in; secretsd never saw the request, so
@@ -1160,7 +1074,7 @@ class TunnelSetup(unittest.TestCase):
         report = self.report()
         waited = re.search(
             r"self-check: tunnel not up after (\d+) s \(laptop 127\.0\.0\.1:12802 listening: no;"
-            r" oryx 127\.0\.0\.1:5038 listening: no\)\n",
+            r" oryx 127\.0\.0\.1:12800 listening: no\)\n",
             report,
         )
         self.assertIsNotNone(waited, report)
@@ -1170,7 +1084,7 @@ class TunnelSetup(unittest.TestCase):
         for name in (
             "forward doctor oryx pair", "oryx forward doctor", "preview delivery",
             "forward port delivery", "browser page delivery", "audio delivery", "browser grant delivery",
-            "human-tier read", "adb through tunnel",
+            "human-tier read",
         ):
             self.assertIn(f"self-check: {name}: not run: tunnel not up: failed\n", report)
         self.assertIn("self-check: tunnel key true: exit 0: ok\n", report)
@@ -1189,29 +1103,29 @@ class TunnelSetup(unittest.TestCase):
         self.assertLess(elapsed, 25)
 
     def test_tunnel_wait_does_not_report_a_hung_look_as_not_listening(self) -> None:
-        # When the look through ssh oryx never answers, nothing was seen of oryx's 127.0.0.1:5038.
+        # When the look through ssh oryx never answers, nothing was seen of oryx's 127.0.0.1:12800.
         # The not-up line must not say that port is not listening; it was never looked at. Against a
         # real tunnel whose RemoteForward did listen, a hung look gave
-        # 'oryx 127.0.0.1:5038 listening: no' (scratch sshd, 2026-11-13).
+        # 'oryx 127.0.0.1:<port> listening: no' (scratch sshd, 2026-11-13).
         self.checkout("git", "tunnel-look-hangs-label")
         self.advance_to_current()
         result = self.invoke(after_sync=True, TUNNEL_LOOK_HANGS="1", ORYX_TUNNEL_WAIT_SECONDS="3")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         lines = [line for line in self.report().splitlines() if line.startswith("self-check: tunnel not up after ")]
         self.assertEqual(len(lines), 1, self.report())
-        self.assertNotIn("oryx 127.0.0.1:5038 listening: no", lines[0])
+        self.assertNotIn("oryx 127.0.0.1:12800 listening: no", lines[0])
 
     def test_tunnel_wait_names_a_failed_look_on_each_side(self) -> None:
         # A look that failed saw no port, so the not-up line names the failed look, not "no".
         self.checkout("git", "tunnel-looks-fail")
         self.advance_to_current()
         result = self.invoke(
-            after_sync=True, SS_FAILS_ON="sport = :12802", SSH_FAILS_ON="sport = :5038", ORYX_TUNNEL_WAIT_SECONDS="3"
+            after_sync=True, SS_FAILS_ON="sport = :12802", SSH_FAILS_ON="sport = :12800", ORYX_TUNNEL_WAIT_SECONDS="3"
         )
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(
             "(laptop 127.0.0.1:12802 listening: look with ss failed (exit 1); "
-            "oryx 127.0.0.1:5038 listening: look through ssh oryx failed (exit 255))\n",
+            "oryx 127.0.0.1:12800 listening: look through ssh oryx failed (exit 255))\n",
             self.report(),
         )
 
@@ -1222,7 +1136,7 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(
             after_sync=True,
             SS_FAILS_ON="sport = :22 )",
-            IS_ACTIVE_UNREACHABLE="adb-server.service",
+            IS_ACTIVE_UNREACHABLE="forward-tunnel@oryx.service",
             SSH_G_FAIL_FROM="3",
             FORWARD_DOCTOR_FAILS="1",
         )
@@ -1230,7 +1144,7 @@ class TunnelSetup(unittest.TestCase):
         report = self.report()
         for line in (
             "self-check: laptop port 22: look with ss failed (exit 1): failed",
-            "self-check: unit adb-server.service: systemctl --user is-active printed "
+            "self-check: unit forward-tunnel@oryx.service: systemctl --user is-active printed "
             "Failed to connect to bus: No medium found (exit 1): failed",
             "self-check: ssh configuration: ssh -G oryx failed (exit 255): failed",
             "self-check: forward doctor devboxes: exit 1: forward doctor: daemon socket missing: failed",
@@ -1241,7 +1155,7 @@ class TunnelSetup(unittest.TestCase):
         self.checkout("git", "delivery-ssh-fails")
         self.advance_to_current()
         result = self.invoke(
-            after_sync=True, SSH_FAILS_ON="forward url|forward port|paplay|forward browser grant|000chost:version"
+            after_sync=True, SSH_FAILS_ON="forward url|forward port|paplay|forward browser grant"
         )
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         report = self.report()
@@ -1252,8 +1166,6 @@ class TunnelSetup(unittest.TestCase):
             "self-check: audio delivery: paplay through ssh oryx failed (exit 255): failed",
             "self-check: browser grant delivery: forward browser grant through ssh -t oryx failed "
             "(exit 255, tee exit 0): failed",
-            "self-check: adb through tunnel: ssh oryx failed (exit 255): "
-            "ssh: connect to host oryx.thecybermonk.com port 22: Connection timed out: failed",
         ):
             self.assertIn(line + "\n", report)
 
@@ -1418,10 +1330,11 @@ class TunnelSetup(unittest.TestCase):
     def test_unit_wait_reports_what_is_active_last_said(self) -> None:
         self.checkout("git", "unit-wait-state")
         self.advance_to_current()
-        result = self.invoke(after_sync=True, INACTIVE_UNIT="adb-server.service")
+        result = self.invoke(after_sync=True, INACTIVE_UNIT="forward-tunnel@oryx.service")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(
-            "units: adb-server.service: systemctl --user is-active printed inactive (exit 3) after 30 s\n", self.report()
+            "units: forward-tunnel@oryx.service: systemctl --user is-active printed inactive (exit 3) after 30 s\n",
+            self.report(),
         )
 
     def test_token_search_that_cannot_read_the_tree_names_grep_status(self) -> None:
@@ -1437,13 +1350,6 @@ class TunnelSetup(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("token: copied; dotfiles search: UNKNOWN (grep exit 2)\n", self.report())
 
-    def test_adb_probe_names_a_fail_reply_as_a_reply(self) -> None:
-        self.checkout("git", "adb-replies-fail")
-        self.advance_to_current()
-        result = self.invoke(after_sync=True, ADB_REPLIES_FAIL="1")
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("self-check: adb through tunnel: adb replied FAIL: FAIL0005nope: failed\n", self.report())
-
     def test_unit_link_failure_leaves_oryx_forward_unmoved(self) -> None:
         self.checkout("git", "before-move-unit")
         self.advance_to_current()
@@ -1451,15 +1357,6 @@ class TunnelSetup(unittest.TestCase):
         unit.parent.mkdir(parents=True, exist_ok=True)
         unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
         result = self.invoke(after_sync=True)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn("move recorded", "\n".join(self.lines()))
-        self.assertFalse((self.remote / "config.toml").exists())
-
-    def test_adb_install_failure_leaves_oryx_forward_unmoved(self) -> None:
-        self.checkout("git", "before-move-adb")
-        self.advance_to_current()
-        self.version_file.write_text("2026.10.7\n", encoding="utf-8")
-        result = self.invoke(after_sync=True, PATH=str(self.path_without_adb()), FAIL_ADB_INSTALL="1")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("move recorded", "\n".join(self.lines()))
         self.assertFalse((self.remote / "config.toml").exists())
@@ -1500,45 +1397,6 @@ class TunnelSetup(unittest.TestCase):
             holder.wait()
         self.assert_stop_before_move(result, "preflight")
         self.assertNotIn("is not an allowed forward process", result.stderr)
-
-    def test_preflight_names_the_failed_look_for_a_foreign_listener_on_the_adb_port(self) -> None:
-        # A process that is not adb holds 127.0.0.1:5037, and systemctl cannot say whether
-        # adb-server.service started it: the stop names that failed look, not a foreign process.
-        self.checkout("git", "preflight-adb-systemctl-down")
-        self.advance_to_current()
-        holder = subprocess.Popen(["/bin/sleep", "60"])
-        try:
-            self.fake_ss(f'LISTEN 0      128    127.0.0.1:5037 0.0.0.0:* users:(("sleep",pid={holder.pid},fd=5))')
-            result = self.invoke(after_sync=True, SYSTEMCTL_SHOW_FAILS="1")
-        finally:
-            holder.kill()
-            holder.wait()
-        self.assert_stop_before_move(result, "preflight")
-        self.assertIn(
-            "oryx-tunnel-setup: preflight: could not tell whether the listener on 127.0.0.1:5037 is adb-server.service's: "
-            "systemctl --user show -p MainPID adb-server.service failed (exit 1): ",
-            result.stderr,
-        )
-
-    def test_units_step_does_not_stop_an_adb_server_systemctl_could_not_place(self) -> None:
-        # An adb server holds 127.0.0.1:5037. When systemctl cannot say whether it is
-        # adb-server.service's own, the command must not take it for a stray server and kill it.
-        self.checkout("git", "units-adb-systemctl-down")
-        self.advance_to_current()
-        holder = subprocess.Popen(["/bin/bash", "-c", "exec -a adb /bin/sleep 60"])
-        try:
-            self.fake_ss(f'LISTEN 0      128    127.0.0.1:5037 0.0.0.0:* users:(("adb",pid={holder.pid},fd=5))')
-            result = self.invoke(after_sync=True, SYSTEMCTL_SHOW_FAILS="1")
-        finally:
-            holder.kill()
-            holder.wait()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(
-            f"oryx-tunnel-setup: units: could not tell whether the adb server on 127.0.0.1:5037 (pid {holder.pid}) "
-            "is adb-server.service's: systemctl --user show -p MainPID adb-server.service failed (exit 1)\n",
-            result.stderr,
-        )
-        self.assertFalse([line for line in self.lines() if line.startswith("adb:") and "kill-server" in line])
 
     def test_preflight_accepts_the_devbox_daemons_on_other_addresses(self) -> None:
         # The laptop's devbox daemon binds forward's default ports on the laptop's tailnet address

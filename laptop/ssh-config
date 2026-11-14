@@ -76,9 +76,6 @@ Host oryx-tunnel
   LocalForward 127.0.0.1:12801 127.0.0.1:12801
   LocalForward 127.0.0.1:12802 127.0.0.1:12802
   LocalForward 127.0.0.1:12805 127.0.0.1:12805
-  RemoteForward 127.0.0.1:5038 127.0.0.1:5037
-  RemoteForward 127.0.0.1:2223 sami-devbox:22
-  RemoteForward 127.0.0.1:2224 ghost-wispr:22
 
 # Every login key lives in 1Password, except trajectory-route's key file.
 Host *

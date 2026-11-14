@@ -203,14 +203,6 @@ listener_lines() {
     done <<< "$LISTENERS"
 }
 
-process_is_adb() {
-    local pid="$1"
-    process_is_mine "$pid" || return 1
-    process_args "$pid" || return 1
-    ((${#PROCESS_ARGS[@]})) || return 1
-    [[ "${PROCESS_ARGS[0]##*/}" == adb ]]
-}
-
 check_listener() {
     local port="$1" kind="$2" line pid saw=false belongs
     while IFS= read -r line; do
@@ -228,16 +220,6 @@ check_listener() {
                         stop preflight "could not tell whether the listener on 127.0.0.1:$port is forward's own: $UNIT_LOOK_FAILURE: $line"
                     fi
                     ((belongs == 0)) || line_allowed=false
-                    ;;
-                adb)
-                    belongs=0
-                    pid_belongs_to_unit "$pid" adb-server.service || belongs=$?
-                    if ((belongs != 0)) && ! process_is_adb "$pid"; then
-                        if ((belongs == 2)); then
-                            stop preflight "could not tell whether the listener on 127.0.0.1:$port is adb-server.service's: $UNIT_LOOK_FAILURE: $line"
-                        fi
-                        line_allowed=false
-                    fi
                     ;;
             esac
         done < <(line_pids "$line")
@@ -377,10 +359,7 @@ validate_ssh_configuration() {
         'remoteforward 127.0.0.1:12800 127.0.0.1:12800' \
         'remoteforward 127.0.0.1:12803 127.0.0.1:12803' \
         'remoteforward 127.0.0.1:12804 127.0.0.1:12804' \
-        'remoteforward 127.0.0.1:12806 127.0.0.1:12806' \
-        'remoteforward 127.0.0.1:2223 sami-devbox:22' \
-        'remoteforward 127.0.0.1:2224 ghost-wispr:22' \
-        'remoteforward 127.0.0.1:5038 127.0.0.1:5037' | sort)"
+        'remoteforward 127.0.0.1:12806 127.0.0.1:12806' | sort)"
     actual="$(
         while IFS= read -r line; do
             [[ "$line" =~ ^(localforward|remoteforward)\  ]] || continue
@@ -418,15 +397,6 @@ token_leak_result() {
         1) printf 'none\n' ;;
         *) printf 'UNKNOWN (grep exit %s)\n' "$status" ;;
     esac
-}
-
-find_adb() {
-    local sdk_adb="$HOME/Android/sdk/platform-tools/adb"
-    if [[ -x "$sdk_adb" ]]; then
-        printf '%s\n' "$sdk_adb"
-    else
-        command -v adb 2>/dev/null || true
-    fi
 }
 
 unit_active() {
@@ -496,7 +466,7 @@ self_probe() {
 
 # forward-tunnel@oryx is active as soon as ssh starts, before cloudflared connects and the forwards
 # exist. The probes that ride the tunnel run only once it carries them: the laptop's LocalForward of
-# the preview port listens, and oryx's 127.0.0.1:5038 (adb's RemoteForward) listens. 60 s covers a
+# the preview port listens, and oryx's 127.0.0.1:12800 (the daemon port's RemoteForward) listens. 60 s covers a
 # slow Cloudflare connect and one unit restart (RestartSec=10). Tests shorten it.
 TUNNEL_WAIT_SECONDS="${ORYX_TUNNEL_WAIT_SECONDS:-60}"
 tunnel_up=false
@@ -517,12 +487,12 @@ wait_for_tunnel() {
         left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
         ((left >= 1)) || left=1
         status=0
-        remote="$(timeout "$left" ssh oryx 'ss -Hltn "( sport = :5038 )"' 2>/dev/null)" || status=$?
+        remote="$(timeout "$left" ssh oryx 'ss -Hltn "( sport = :12800 )"' 2>/dev/null)" || status=$?
         if ((status == 124)); then
             remote_seen="look through ssh oryx failed (exit 124: timed out after $left s)"
         elif ((status)); then
             remote_seen="look through ssh oryx failed (exit $status)"
-        elif [[ "$remote" == *127.0.0.1:5038* ]]; then
+        elif [[ "$remote" == *127.0.0.1:12800* ]]; then
             remote_seen=yes
         else
             remote_seen=no
@@ -533,7 +503,7 @@ wait_for_tunnel() {
             return 0
         fi
         if ((SECONDS - start >= TUNNEL_WAIT_SECONDS)); then
-            report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $laptop_seen; oryx 127.0.0.1:5038 listening: $remote_seen)"
+            report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $laptop_seen; oryx 127.0.0.1:12800 listening: $remote_seen)"
             return 1
         fi
         left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
@@ -888,31 +858,6 @@ human_tier_read() {
     [[ $status -eq 0 ]]
 }
 
-adb_through_tunnel() {
-    local reply
-    # adb's host:version request answers OKAY and the server's version; nothing starts a server.
-    local output status=0
-    output="$(ssh oryx 'python3 -c '\''import socket; s = socket.create_connection(("127.0.0.1", 5038), 5); s.sendall(b"000chost:version"); print(s.recv(12).decode("ascii", "replace")); s.close()'\''' 2>&1)" || status=$?
-    reply="$(tail -n 1 <<< "$output" | tr -d '\r')"
-    if ((status == 255)); then
-        # ssh itself failed; whether the request reached oryx is unknown.
-        PROBE_VALUE="ssh oryx failed (exit 255): ${reply:0:100}"
-        return 1
-    fi
-    if [[ "$reply" == OKAY* ]]; then
-        PROBE_VALUE="reply ${reply:0:80}"
-        return 0
-    fi
-    # adb answers OKAY or FAIL; anything else is the error that stopped the request.
-    if [[ "$reply" == FAIL* ]]; then
-        PROBE_VALUE="adb replied FAIL: ${reply:0:80}"
-    else
-        PROBE_VALUE="no adb reply: ${reply:-nothing printed}"
-        PROBE_VALUE="${PROBE_VALUE:0:120}"
-    fi
-    return 1
-}
-
 
 write_probe_configs() {
     tunnel_probe="$work_dir/tunnel-probe.conf"
@@ -1111,7 +1056,6 @@ read_listeners preflight
 for port in 12800 12801 12802 12803 12804 12805 12806; do
     check_listener "$port" forward || true
 done
-check_listener 5037 adb || true
 report_line "preflight: complete"
 
 if ! bash "$DOTFILES/installers/cloudflared.sh"; then
@@ -1201,17 +1145,8 @@ mkdir -p "$HOME/.config/systemd/user/forward-tunnel@oryx.service.d" "$HOME/.conf
 if ! ensure_link "$DOTFILES/forward/forward-daemon@.service" "$HOME/.config/systemd/user/forward-daemon@.service" \
     || ! ensure_link "$DOTFILES/forward/forward-tunnel@.service" "$HOME/.config/systemd/user/forward-tunnel@.service" \
     || ! ensure_link "$DOTFILES/forward/forward-tunnel@oryx.service.d/token.conf" "$HOME/.config/systemd/user/forward-tunnel@oryx.service.d/token.conf" \
-    || ! ensure_link "$DOTFILES/laptop/adb-server.service" "$HOME/.config/systemd/user/adb-server.service" \
     || ! ensure_link "$DOTFILES/forward/config-daemon-oryx.toml" "$HOME/.config/forward/config-oryx.toml"; then
-    stop unit-files "could not install a tunnel or adb unit file"
-fi
-adb="$(find_adb)"
-if [[ -z "$adb" ]]; then
-    if ! sudo apt-get install -y adb; then
-        stop unit-files "could not install adb"
-    fi
-    adb="$(find_adb)"
-    [[ -n "$adb" ]] || stop unit-files "adb is still unavailable after installing it"
+    stop unit-files "could not install a tunnel unit file"
 fi
 if ! systemctl --user daemon-reload; then
     stop unit-files "could not reload user units"
@@ -1223,23 +1158,7 @@ if ! ssh oryx 'umask 077; mkdir -p ~/.config/forward && t=$(mktemp ~/.config/for
 fi
 report_line "move: wrote oryx ~/.config/forward/config.toml and restarted forward-serve.service"
 
-read_listeners units
-for listener in $(listener_lines 5037 | while IFS= read -r line; do line_pids "$line"; done); do
-    process_is_adb "$listener" || continue
-    belongs=0
-    pid_belongs_to_unit "$listener" adb-server.service || belongs=$?
-    if ((belongs == 2)); then
-        stop units "could not tell whether the adb server on 127.0.0.1:5037 (pid $listener) is adb-server.service's: $UNIT_LOOK_FAILURE"
-    fi
-    if ((belongs == 1)); then
-        if ! "$adb" kill-server; then
-            stop units "could not stop the existing user adb server on 127.0.0.1:5037"
-        fi
-        break
-    fi
-done
-
-for unit in forward-daemon@oryx.service forward-tunnel@oryx.service adb-server.service; do
+for unit in forward-daemon@oryx.service forward-tunnel@oryx.service; do
     if ! systemctl --user enable --now "$unit"; then
         stop units "could not enable and start $unit"
     fi
@@ -1250,10 +1169,7 @@ fi
 if ! systemctl --user restart forward-tunnel@oryx.service; then
     stop units "could not restart forward-tunnel@oryx.service"
 fi
-if ! systemctl --user restart adb-server.service; then
-    stop units "could not restart adb-server.service"
-fi
-for unit in forward-daemon@oryx.service forward-tunnel@oryx.service adb-server.service; do
+for unit in forward-daemon@oryx.service forward-tunnel@oryx.service; do
     wait_for_unit "$unit" || stop units "$unit did not become active; its last journal lines are in the report"
 done
 report_line "units: complete"
@@ -1285,7 +1201,6 @@ self_token_leak_search() {
 
 self_probe "unit forward-daemon@oryx.service" self_unit_active forward-daemon@oryx.service
 self_probe "unit forward-tunnel@oryx.service" self_unit_active forward-tunnel@oryx.service
-self_probe "unit adb-server.service" self_unit_active adb-server.service
 self_probe "devboxes daemon configuration" self_devboxes_config
 self_probe "ssh configuration" self_ssh_config
 self_probe "ssh oryx true" probe_exit ssh oryx true
@@ -1303,7 +1218,6 @@ self_probe "oryx SSM login" probe_exit ssh oryx-ssm true
 self_probe "token file mode and owner" self_token_mode
 self_probe "token leak search" self_token_leak_search
 self_probe "laptop port 22" self_laptop_port_22
-tunnel_self_probe "adb through tunnel" adb_through_tunnel
 write_probe_configs
 self_probe "tunnel key true" key_probe_true
 self_probe "tunnel key forced command" key_probe_no_shell

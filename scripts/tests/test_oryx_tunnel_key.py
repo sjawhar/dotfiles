@@ -23,7 +23,6 @@ SSH_AGENT = Path("/usr/bin/ssh-agent")
 SSH_KEYGEN = Path("/usr/bin/ssh-keygen")
 SSHD = Path("/usr/sbin/sshd")
 LAPTOP_SSH_CONFIG = DOTFILES / "laptop" / "ssh-config"
-ORYX_SSH_CONFIG = DOTFILES / "oryx" / "ssh-config"
 KEY_OPTIONS = DOTFILES / "oryx" / "oryx-tunnel.key-options"
 
 
@@ -172,19 +171,6 @@ class OryxTunnelKey(unittest.TestCase):
         self.assertEqual(option_values(tokens, "permitlisten"), remote_listens)
         self.assertEqual(option_values(tokens, "permitopen"), local_targets)
         self.assertEqual(sum(token.startswith("command=") for token in tokens), 1)
-
-    def test_company_host_uses_the_laptop_forward(self) -> None:
-        values = ssh_g(ORYX_SSH_CONFIG, "sami-devbox-via-laptop", self.home)
-        self.assertEqual(values["hostname"], ["127.0.0.1"])
-        self.assertEqual(values["port"], ["2223"])
-        self.assertEqual(values["user"], ["sami"])
-        self.assertEqual(values["hostkeyalias"], ["sami-devbox"])
-
-    def test_ghost_wispr_host_uses_the_laptop_forward(self) -> None:
-        values = ssh_g(ORYX_SSH_CONFIG, "ghost-wispr-via-laptop", self.home)
-        self.assertEqual(values["hostname"], ["127.0.0.1"])
-        self.assertEqual(values["port"], ["2224"])
-        self.assertEqual(values["hostkeyalias"], ["ghost-wispr"])
 
     def test_key_restricts_the_tunnel_and_login_agent_probe(self) -> None:
         self.assertTrue(SSHD.is_file(), f"{SSHD} is required for this test")
