@@ -327,6 +327,25 @@ esac
         self.assertIn(f"MISE_DATA_DIR={self.root / '.mise'}", install)
         self.assertIn(f"PWD={self.dotfiles}", install)
 
+    def test_relative_dotfiles_dir_finds_the_dotfiles_mise_without_mise_on_path(self) -> None:
+        # R6: mise on PATH, else $DOTFILES_DIR/bin/mise. A relative DOTFILES_DIR is supported
+        # (test_relative_dotfiles_dir_with_cdpath_starts_missing_agent), so the fallback must
+        # still name the checkout's mise after the install enters DOTFILES_DIR.
+        executable(self.dotfiles / "bin" / "mise", self.mise_body)
+        result = self.launch(
+            "--mode",
+            "relative-fallback",
+            cwd=self.root,
+            env=self.env(mise_on_path=False, DOTFILES_DIR="dotfiles"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [f"AGENT_PWD={self.root}", "AGENT_ARG=--mode", "AGENT_ARG=relative-fallback"],
+        )
+        self.assertIn(f"PWD={self.dotfiles}", self.install_record())
+
     def test_lock_waits_for_another_install_then_launches_the_agent(self) -> None:
         locker, release = self.start_locker(write_agent_after_release=True)
         launch = subprocess.Popen(
