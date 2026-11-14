@@ -31,6 +31,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -71,9 +72,45 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def process_group_gone(proc: subprocess.Popen, timeout: float) -> bool:
+    """True once no process of proc's group is alive. proc.poll() reaps the leader, since a leader
+    that has died and is not reaped is still a member of its group."""
+    deadline = time.monotonic() + timeout
+    while True:
+        proc.poll()
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def process_group_listing(pgid: int) -> str:
+    ps = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,ppid=,etimes=,args="], capture_output=True, text=True)
+    return "\n".join(line for line in ps.stdout.splitlines() if line.split()[1] == str(pgid))
+
+
+# The script refuses every path under these as too broad for a box (move_dir_too_broad), so a
+# fixture tree there is in no spec a test expects. Inside a box TMPDIR is outside them.
+REFUSED_ROOTS = ("/tmp", "/var", "/run", "/dev")
+
+
+def fixture_parent() -> str | None:
+    temp = os.path.realpath(tempfile.gettempdir())
+    if not any(temp == r or temp.startswith(r + "/") for r in REFUSED_ROOTS):
+        return None
+    parent = Path.home() / ".cache" / "agentbox-tests"
+    parent.mkdir(parents=True, exist_ok=True)
+    return str(parent)
+
+
 class AgentboxMove(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(dir=fixture_parent())
+        self.tmpdir = Path(self.temp_dir.name) / "tmpdir"
+        self.tmpdir.mkdir()
         self.root = Path(self.temp_dir.name)
         self.home = self.root / "home"
         self.home.mkdir()
@@ -110,6 +147,9 @@ class AgentboxMove(unittest.TestCase):
             "AGENTBOX_BOXES": str(self.boxes),
             "AGENTBOX_PROC": str(self.proc),
             "AGENTBOX_DISK": "0",
+            # The device of `/` that move_to_box_only_paths compares with: one no fixture path is
+            # on, so a fixture tree on the root filesystem is not read as a path of a box only.
+            "AGENTBOX_ROOT_DEV": str(os.stat("/proc").st_dev),
             # The session transcripts the record reader walks, the window it reads, and where
             # `move --plan` leaves what it inferred for `move --self` to union with.
             "AGENTBOX_SESSION_ROOTS": str(self.sessions),
@@ -130,6 +170,9 @@ class AgentboxMove(unittest.TestCase):
             "STUB_TMUX": str(self.root / "STUB_TMUX"),
             "STUB_DOCKER": str(self.root / "STUB_DOCKER"),
             "STUB_ENVOY": str(self.root / "STUB_ENVOY"),
+            # The script's own temporary files, inside the fixture tree that tearDown removes,
+            # not in this host's /tmp.
+            "TMPDIR": str(self.tmpdir),
         }
 
     def tearDown(self) -> None:
@@ -139,19 +182,16 @@ class AgentboxMove(unittest.TestCase):
     @staticmethod
     def end_relauncher(proc: subprocess.Popen[bytes]) -> None:
         """A move_to_run a test started, and everything it started, ended by its own process group:
-        a test that fails or times out must leave nothing running on this host."""
-        if proc.poll() is not None:
-            return
+        a test that fails or times out must leave nothing running on this host. The group, not the
+        leader: a relauncher that has exited can leave children in it."""
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(proc.pid, signal_number)
             except ProcessLookupError:
-                break
-            try:
-                proc.wait(timeout=20)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+                return
+            if process_group_gone(proc, 20):
+                return
+        raise AssertionError(f"still in the relauncher's group after SIGKILL:\n{process_group_listing(proc.pid)}")
 
     @staticmethod
     def pane_command(call: str) -> str:
@@ -1839,7 +1879,9 @@ class AgentboxMove(unittest.TestCase):
         test_a_move_lists_and_refuses_what_dies_with_the_hang_up tests the refusal."""
         if accept:
             args += " --accept-orphans"
-        result = self.run_bash(f"move_own_omp() {{ echo {own}; }}\ncmd_move_to {args}")
+        # Through cmd_move, as `agentbox move --to` runs: its EXIT trap (move_exit) is what removes
+        # the run's progress file, which cmd_move_to alone left in TMPDIR.
+        result = self.run_bash(f"move_own_omp() {{ echo {own}; }}\ncmd_move {args}")
         # The hand-off is a background `setsid` (a stub here): wait for it, so it writes nothing
         # into the fixture after the test.
         if "handed to a detached relauncher" in result.stdout:
@@ -2139,6 +2181,20 @@ class AgentboxMove(unittest.TestCase):
         self.assertFalse(active.exists())
 
     def test_a_relauncher_stopped_by_a_signal_says_where_and_leaves_no_active_file(self) -> None:
+        # One run for each signal the relauncher traps, each in a fixture of its own. Each run's
+        # cleanups (its end_relauncher) run before the next fixture replaces its files, also
+        # when the run fails.
+        for i, (name, number) in enumerate((("TERM", signal.SIGTERM), ("INT", signal.SIGINT), ("HUP", signal.SIGHUP))):
+            with self.subTest(signal=name):
+                if i:
+                    self.tearDown()
+                    self.setUp()
+                try:
+                    self.relauncher_stopped_by(name, number)
+                finally:
+                    self.doCleanups()
+
+    def relauncher_stopped_by(self, name: str, number: int) -> None:
         self.moving_session()
         self.set_pids(999999901)
         self.set_panes({999999900: ("%81", "agents:4.1")})
@@ -2149,11 +2205,14 @@ class AgentboxMove(unittest.TestCase):
         # The FIRST copy, before the hang-up: a signal there refuses the move with nothing hung
         # up, and that is still what a stop must do. (After the hang-up the relauncher no longer
         # stops; test_a_signal_after_the_hang_up_does_not_stop_the_relauncher covers that.)
+        # `exec`: the TERM the relauncher sends its rsync reaches the sleep.
         write_stub(self.stubs, "rsync",
                    'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
-                   f'touch "{self.root}/IN_RSYNC"; sleep 60')
+                   f'touch "{self.root}/IN_RSYNC"; exec sleep 60')
         changing = self.worktree / "written-during-the-hold.txt"
         self.assertEqual(self.move_to().returncode, 0)
+        # What the plan run (`move --to`) left in TMPDIR; the relauncher must add nothing to it.
+        before_relauncher = set(self.tmpdir.rglob("*"))
         [job] = self.jobs()
         self.set_pids()
         log = self.root / "relauncher.log"
@@ -2171,12 +2230,157 @@ class AgentboxMove(unittest.TestCase):
             time.sleep(0.1)
         self.assertTrue((self.root / "IN_RSYNC").exists(), log.read_text(encoding="utf-8"))
         self.assertTrue(active.exists())
-        proc.send_signal(15)
+        proc.send_signal(number)
         proc.wait(timeout=30)
+        self.assert_group_ended(proc, name)
         text = log.read_text(encoding="utf-8")
-        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up", text)
+        self.assertIn(f"stopped by signal {name}; state: copying to devbox, before the hang-up", text)
         self.assertNotIn("hung up after", text)
         self.assertFalse(active.exists())
+        # The rsync's error file, which holds the signal line, goes with the relauncher.
+        self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
+                          and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
+        # Nothing else the relauncher made in its TMPDIR either: the rsync stats file and the
+        # directory with merge.new, mirror.new and stamp.new. A stop by signal left both, for each
+        # of TERM, INT and HUP (HOME-211 tester, at 25b90855).
+        self.assertEqual(sorted(str(p.relative_to(self.tmpdir)) for p in set(self.tmpdir.rglob("*")) - before_relauncher),
+                         [], f"left in the relauncher's TMPDIR after signal {name}")
+
+    def test_a_plan_run_leaves_nothing_it_made_in_its_tmpdir(self) -> None:
+        """`agentbox move --to` that prepares a job and exits 0 leaves no file it made in its
+        TMPDIR: its EXIT trap (move_exit) removes the progress file (MOVE_PROGRESS_FILE). The
+        move_to helper runs the real entry, cmd_move, so the test covers that trap."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(sorted(self.tmpdir.rglob("*")), [])
+        planned = self.move_to()
+        self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
+        self.assertEqual(len(self.jobs()), 1)
+        self.assertEqual(sorted(str(p.relative_to(self.tmpdir)) for p in self.tmpdir.rglob("*")), [],
+                         "left in the plan run's TMPDIR")
+
+    def test_a_relauncher_stopped_before_its_error_writer_opens_leaves_no_error_file(self) -> None:
+        """A signal that stops the relauncher before its error writer (tee) has opened its output
+        leaves no rsync error file: the writer gets the file the relauncher opened, not its path."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        copying = self.root / "IN_RSYNC"
+        tee_waiting = self.root / "TEE_WAITING"
+        tee_go = self.root / "TEE_GO"
+        tee_timeout = self.root / "TEE_TIMEOUT"
+        write_stub(self.stubs, "rsync",
+                   'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
+                   f'touch "{copying}"; exec sleep 60')
+        self.assertEqual(self.move_to().returncode, 0)
+        # Written after the plan run, so only the relauncher's tee meets it: the gate holds tee
+        # until the test has seen the relauncher exit. A fixed delay let a late TERM come after
+        # tee had opened its output, and then a writer given the path passed too.
+        write_stub(self.stubs, "tee",
+                   f'touch "{tee_waiting}"\n'
+                   'for _ in {1..300}; do\n'
+                   f'    [[ -e "{tee_go}" ]] && break\n'
+                   '    sleep 0.1\n'
+                   'done\n'
+                   f'[[ -e "{tee_go}" ]] || touch "{tee_timeout}"\n'
+                   'exec /usr/bin/tee "$@"')
+        [job] = self.jobs()
+        self.set_pids()
+        log = self.root / "relauncher.log"
+        with log.open("w") as out:
+            proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\n'
+                                     f'move_to_hold() {{ :; }}\n'
+                                     f'move_to_run "{job}"'],
+                                    env=self.env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        self.addCleanup(self.end_relauncher, proc)
+        for _ in range(int(self.TIMEOUT * 10)):
+            if copying.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(copying.exists(), log.read_text(encoding="utf-8"))
+        for _ in range(int(self.TIMEOUT * 10)):
+            if tee_waiting.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(tee_waiting.exists(), log.read_text(encoding="utf-8"))
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
+        tee_go.touch()
+        self.assert_group_ended(proc, "TERM before the error writer opens")
+        self.assertFalse(tee_timeout.exists(), log.read_text(encoding="utf-8"))
+        self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
+                          and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
+        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up",
+                      log.read_text(encoding="utf-8"))
+
+    def assert_group_ended(self, proc: subprocess.Popen[bytes], name: str) -> None:
+        """No member of the exited relauncher's group alive within 10 s, before any cleanup; one
+        line on stderr says so, since a passing subTest prints nothing."""
+        start = time.monotonic()
+        self.assertTrue(process_group_gone(proc, 10),
+                        f"alive in the relauncher's group 10 s after it exited:\n{process_group_listing(proc.pid)}")
+        print(f"signal {name}: the relauncher's group was empty {time.monotonic() - start:.1f} s after it exited",
+              file=sys.stderr)
+
+    def test_a_relauncher_stopped_while_it_sends_a_progress_notice_says_so_after_the_notice(self) -> None:
+        """A signal while the progress subshell sends its notice waits for that send, which bash
+        does not interrupt, and the line that the relauncher is gone comes after it: no notice
+        reaches a session after that line. The envoy stub stays in its send until the TERM has
+        stopped the rsync, so the signal lands during the send however late this test sends it."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        log = self.root / "relauncher.log"
+        sending = self.root / "IN_SEND"
+        rsync_pid = self.root / "RSYNC_PID"
+        write_stub(self.stubs, "rsync",
+                   'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
+                   f'echo $$ >"{rsync_pid}"\nexec sleep 60')
+        write_stub(self.stubs, "envoy",
+                   f'{ENVOY_RECORD}\n'
+                   f'if grep -q "your move goes on" "$STUB_ENVOY" && [[ ! -e "{sending}" ]]; then\n'
+                   f'    touch "{sending}"\n'
+                   f'    pid="$(cat "{rsync_pid}")"\n'
+                   '    for _ in {1..300}; do\n'
+                   '        kill -0 "$pid" 2>/dev/null || break\n'
+                   '        sleep 0.1\n'
+                   '    done\n'
+                   '    if kill -0 "$pid" 2>/dev/null; then\n'
+                   '        echo NOSIGNAL >>"$STUB_ENVOY"\n'
+                   '    else\n'
+                   '        for _ in {1..50}; do\n'
+                   f'            if grep -q "The relauncher is gone" "{log}"; then\n'
+                   '                echo LATE >>"$STUB_ENVOY"; break\n'
+                   '            fi\n'
+                   '            sleep 0.1\n'
+                   '        done\n'
+                   '    fi\n'
+                   'fi\nexit 0')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        with log.open("w") as out:
+            proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nmove_to_hold() {{ :; }}\nmove_to_run "{job}"'],
+                                    env={**self.env, "AGENTBOX_MOVE_RSYNC_TICK": "1"}, stdout=out,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        self.addCleanup(self.end_relauncher, proc)
+        for _ in range(int(self.TIMEOUT * 10)):
+            if sending.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(sending.exists(), log.read_text(encoding="utf-8"))
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
+        self.assert_group_ended(proc, "TERM during a progress notice")
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
+        self.assertEqual(sent.count("your move goes on"), 1, sent)
+        self.assertNotIn("NOSIGNAL", sent)
+        self.assertNotIn("LATE", sent)
+        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up", log.read_text(encoding="utf-8"))
 
     def test_the_other_branches_are_pushed_before_the_hang_up(self) -> None:
         """LINUX-1248, 04:10Z: the push of every branch from a blob:none clone ran 3+ min after
@@ -2948,6 +3152,8 @@ class AgentboxMove(unittest.TestCase):
         box's filesystem die with the container and reach no other machine. SPEC-skills' move
         carried /var/tmp/sc-head and sc-ablate and lost both (2026-11-04). The test is the device:
         a bind of a host path has its own, a box-only path shares the device of `/`."""
+        # The script's own read of the device of `/`, not the fixture's stand-in.
+        del self.env["AGENTBOX_ROOT_DEV"]
         self.moving_session()
         own = self.root / "box-only"
         own.mkdir()
@@ -3223,7 +3429,7 @@ class AgentboxMove(unittest.TestCase):
         and the lists are tested as functions, so the test takes the same seconds at any load."""
         big = self.root / "wt"
         big.mkdir()
-        (big / "big.bin").write_bytes(b"x" * 4096)
+        (big / "big.bin").write_bytes(b"x" * (1 << 20))
         small = self.root / "lane-small"
         small.mkdir()
         (small / "f").write_text("x", encoding="utf-8")
@@ -3231,7 +3437,7 @@ class AgentboxMove(unittest.TestCase):
         script = (f'MOVE_TO_MIRROR=("{tree}")\nMOVE_TO_MERGE=("{big}" "{small}")\nMOVE_TO_MKDIR=()\n'
                   'move_to_gate {asked}\n'
                   f'move_to_print_lists devbox "$(printf \'%s\\t%s\\n\' /proc/1/cwd "{big}" /proc/1/cwd "{tree}" | move_to_not_carried)"')
-        env = {"AGENTBOX_MOVE_GATE_BYTES": "1000"}
+        env = {"AGENTBOX_MOVE_GATE_BYTES": "100000"}
         listed = self.run_bash(script.replace("{asked}", ""), env)
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("WOULD COPY, NOT ASKED FOR", listed.stdout)
@@ -3602,8 +3808,8 @@ class AgentboxMove(unittest.TestCase):
         self.assertIn(f"the group moves when {self.TO2} run(s) `agentbox move --to devbox` too", first.stdout)
         self.assertEqual(self.jobs(), [])
         sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(sent[:2], ["send", self.TO2])
-        self.assertIn("run `agentbox move --to devbox` from your bash tool", sent[2])
+        self.assertEqual(sent[:4], ["send", "--message-file", "-", self.TO2])
+        self.assertIn("run `agentbox move --to devbox` from your bash tool", sent[4])
         # The second session says it is ready (its own `move --to`); the first one's run moves both.
         self.run_bash(f"move_to_ready_mark {self.TO2} devbox")
         both = self.move_to()
@@ -3753,13 +3959,12 @@ class AgentboxMove(unittest.TestCase):
         self.assertNotIn("runner-ab12", refused.stderr)
         self.assertNotIn("watch.py", refused.stderr)
         self.assertNotIn("watch-child.py", refused.stderr)
-        # The advice must not send the reader back to `setsid`. On this omp build a setsid
-        # child is re-parented to the omp (child subreaper) and dies when its teardown walks
-        # the tree -- which is what a move's hang-up is. Two stream leads' own relaunchers
-        # went that way on 2026-11-05, within ~2 s of the omp they had hung up, while 31 of 31
-        # survived the same step on the previous pin. A message that recommends the failing
-        # move is worse than no message.
-        self.assertIn("Detaching with `setsid` does NOT save them", refused.stderr)
+        # The advice must not send the reader back to plain `setsid`: omp's hang-up teardown
+        # signals what is reachable from it by parent link, and setsid changes the session and
+        # the process group but not the parent, so such a child dies within about 2 s of the
+        # hang-up (measured 2026-11-05; scripts/agentbox, move_orphans_gate). A message that
+        # recommends the failing move is worse than no message.
+        self.assertIn("Plain `setsid` does NOT save them", refused.stderr)
         self.assertNotIn("which outlives the pane", refused.stderr)
         self.assertIn("stream-jobs", refused.stderr)
         self.assertNotIn("systemd-run", refused.stderr)
