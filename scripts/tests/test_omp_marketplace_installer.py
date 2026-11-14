@@ -417,6 +417,42 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "yes\n" if expected else "no\n", result.stderr)
 
+    @unittest.skipUnless(
+        "en_us.utf8" in subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.lower(),
+        "needs the en_US.UTF-8 locale, where bash's [0-9] also matches digits that are not ASCII",
+    )
+    def test_digits_that_are_not_ascii_need_equality_in_a_utf8_locale(self) -> None:
+        # A person runs the installer in a UTF-8 locale. There bash's regex [0-9] also matches
+        # digits such as U+0661 and U+FF11, while dotfiles-follow's Python [0-9] matches ASCII
+        # alone, so the two read the same lock differently. Such a version is not dotted numbers,
+        # and must equal the entry.
+        cases = (
+            ("\u0663.0", "2.0"),
+            ("2", "\u0661"),
+            ("1.\u0661", "1.0"),
+            ("0.3.\uff11", "0.3.0"),
+        )
+        for have, want in cases:
+            with self.subTest(have=have, want=want):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'set -euo pipefail; source "$1"; '
+                        'if marketplace_version_at_least "$2" "$3"; then echo yes; else echo no; fi',
+                        "_",
+                        str(self.functions),
+                        have,
+                        want,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env={**self.env, "LC_ALL": "en_US.UTF-8"},
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "no\n", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
