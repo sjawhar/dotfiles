@@ -162,8 +162,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   an editor that is the wrapper itself, and names an editor configuration it cannot read as such;
   its active guard rejects a recursive wrapper run. The
   `--deleted` refusal and trailer handling stay as they were.
-  Every `jj git` finds its nested subcommand after the same jj 0.46 global-option table that
-  finds its outer command. Therefore every `jj git <global options> push` first dry-runs its
+  One table of jj 0.46's global options (`jj_global_options`) and one reader (`jj_global_at`)
+  serve every place that reads them: the command finder, the repository of the trailer and push
+  target, the commit/describe/new parser, the push gate's flags, the `--deleted` refusal and
+  `workspace add`; a global's separate value is never read as a flag or a command.
+  `DOTFILES_JJ_SHIM_READ_GLOBALS=1` prints the command and repository that reader finds and runs
+  nothing (`tests/test_shim_global_options.py` compares it with the real jj).
+  Every `jj git` finds its nested subcommand with that same reader. Therefore every
+  `jj git <global options> push` first dry-runs its
   resolved destination plan and, for every public or unreadable GitHub URL, scans the outgoing
   commits that destination does not advertise, and the message of each annotated tag it sends:
   jj's plan names a tag's commit, but jj pushes the backing repository's `refs/tags/<name>`, so
@@ -229,7 +235,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   below); a shell alias (`!…`), `git am` and `git commit-tree` add nothing. Commits omp writes through its own git
   library never run `git`, so no shim reaches them: omp appends `PI_COMMIT_TRAILERS`, which
   `omp/extensions/session-env.ts` sets to the session's line.
-  Before it dispatches a command, the shim finds the command after every Git 2.43 global option
+  Before it dispatches a command, the shim finds the command with one table of Git 2.43's global
+  options (`git_global_options`) and one reader (`git_read_global_options`), which the alias
+  rule, the caller hooks-path check and `worktree remove`'s `-C` base also use;
+  `DOTFILES_GIT_SHIM_READ_GLOBALS=1` prints what that reader finds and runs nothing
+  (`tests/test_shim_global_options.py` compares it with the real git). The table covers every
+  global option
   in `git.c`'s `handle_options`, including separate values for `-C`, `-c`, `--config-env`,
   `--git-dir`, `--work-tree`, `--namespace`, `--shallow-file` and `--attr-source`, and
   attached-only forms such as `--exec-path=<path>` and `--list-cmds=<list>`. A global query or

@@ -384,7 +384,6 @@ EOF
     done
 fi
 
-
 # The Omp-Session trailer comes from an `omp-attribution-*.toml` overlay in
 # JJ_CONFIG (omp/extensions/session-env.ts, or the Legion extension), which jj
 # cannot make conditional on a repository. So the shim asks
