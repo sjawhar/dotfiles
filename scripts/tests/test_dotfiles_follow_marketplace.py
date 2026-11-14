@@ -382,6 +382,10 @@ class MarketplacePlugins(Harness):
             ("0.3.1", "0.3.1-beta", False),
             ("v1.0.0", "1.0.0", False),
             ("", "1.0.0", False),
+            ("9" * 4301, "9" * 4301, True),
+            ("0" * 4300 + "2", "1", True),
+            ("1", "0" * 4300 + "2", False),
+            ("1" + "0" * 4300, "9" * 4300, True),
         )
         for have, want, expected in cases:
             with self.subTest(have=have, want=want):

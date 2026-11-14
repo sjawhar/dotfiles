@@ -104,8 +104,13 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # conflicts") while exiting 0. So on a machine without the install, the stale lock entry is
 # dropped first, and after the omp calls the committed bytes are put back, whatever omp wrote, so
 # the checkout stays clean. The lock changes only by a commit.
+# Both version reads (this one and the lock's in install_marketplace_plugin) print a version that
+# is not a JSON string as json:<value>. jq -r would print the number 2 as "2", which would pass as
+# dotted numbers; dotfiles-follow needs such a version to equal the entry, and so does this.
 marketplace_plugin_version() {
-    jq -r --arg p "$1" '.plugins[$p][0].version // empty' "${DOTFILES_DIR}/omp/plugins/installed_plugins.json" 2>/dev/null || true
+    jq -r --arg p "$1" \
+        '.plugins[$p][0].version | if . == null then empty elif type == "string" then . else "json:" + tojson end' \
+        "${DOTFILES_DIR}/omp/plugins/installed_plugins.json" 2>/dev/null || true
 }
 # Succeeds when installed version $1 is at or above lock entry $2. Dotted numbers compare component
 # by component as integers (0.3.10 is above 0.3.9; 1.2 equals 1.2.0; 0.3.09 equals 0.3.9), as
@@ -140,7 +145,9 @@ marketplace_version_at_least() {
 install_marketplace_plugin() {
     local marketplace="$1" plugin="$2" lock="${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json" want have
     omp plugin marketplace list | grep -q "$marketplace" || omp plugin marketplace add "$marketplace"
-    want=$(jq -r --arg n "${plugin%@*}" '.plugins[$n].version // empty' "$lock")
+    want=$(jq -r --arg n "${plugin%@*}" \
+        '.plugins[$n].version | if . == null then empty elif type == "string" then . else "json:" + tojson end' \
+        "$lock")
     have=$(marketplace_plugin_version "$plugin")
     # The saved copy lives outside the checkout, and a failed omp call does not stop the restore
     # (set -e), so no run leaves the lock changed or a stray file in the tracked tree.

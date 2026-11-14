@@ -135,8 +135,8 @@ class OmpMarketplaceInstaller(unittest.TestCase):
 
     def prepare(
         self,
-        have: str | None,
-        want: str,
+        have: object | None,
+        want: object,
         *,
         update_rc: int = 0,
         upgrade_to: str = "0.3.1",
@@ -150,7 +150,7 @@ class OmpMarketplaceInstaller(unittest.TestCase):
             + "\n"
         ).encode()
         self.lock_path.write_bytes(self.lock_bytes)
-        plugins: dict[str, list[dict[str, str]]] = {}
+        plugins: dict[str, list[dict[str, object]]] = {}
         if have is not None:
             plugins[PLUGIN] = [{"version": have}]
         self.installed_path.write_text(json.dumps({"version": 2, "plugins": plugins}), encoding="utf-8")
@@ -306,6 +306,41 @@ class OmpMarketplaceInstaller(unittest.TestCase):
             ],
         )
 
+    def test_non_string_installed_version_is_upgraded(self) -> None:
+        self.prepare(2, "1", upgrade_to="2")
+
+        result = self.install()
+
+        self.assert_step(
+            result,
+            [
+                "plugin marketplace list",
+                "plugin marketplace update agent-skills",
+                "plugin upgrade engineering@agent-skills",
+            ],
+            [],
+        )
+        installed = json.loads(self.installed_path.read_text(encoding="utf-8"))
+        self.assertEqual(installed["plugins"][PLUGIN][0]["version"], "2")
+
+    def test_non_string_lock_version_needs_exact_equality(self) -> None:
+        self.prepare("1", 1, upgrade_to="1")
+
+        result = self.install()
+
+        self.assert_step(
+            result,
+            [
+                "plugin marketplace list",
+                "plugin marketplace update agent-skills",
+                "plugin upgrade engineering@agent-skills",
+            ],
+            [
+                "omp: engineering@agent-skills is 1, below json:1, "
+                "the lowest version omp-plugins.lock.json records"
+            ],
+        )
+
     def test_failed_catalog_refresh_reports_its_exit_code_and_restores_the_lock(self) -> None:
         self.prepare("0.3.0", "0.3.1", update_rc=8)
 
@@ -393,6 +428,10 @@ class OmpMarketplaceInstaller(unittest.TestCase):
             ("0.3.1", "0.3.1-beta", False),
             ("v1.0.0", "1.0.0", False),
             ("", "1.0.0", False),
+            ("9" * 4301, "9" * 4301, True),
+            ("0" * 4300 + "2", "1", True),
+            ("1", "0" * 4300 + "2", False),
+            ("1" + "0" * 4300, "9" * 4300, True),
         )
         for have, want, expected in cases:
             with self.subTest(have=have, want=want):

@@ -424,21 +424,27 @@ def omp_profile_is_legion() -> bool:
 def version_at_least(have: object, want: object) -> bool:
     """True when an installed marketplace version is at or above the lock's entry.
 
-    Two versions of dotted numbers compare as integers, component by component, the shorter one
-    padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals 0.3.9). When either
-    one is anything else (0.3.1-beta, an empty version, or a non-string), the two must be equal.
+    Two dotted-number versions compare component by component after leading zeros are removed; the
+    shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals 0.3.9).
+    When either one is anything else (0.3.1-beta, an empty version, or a non-string), the two
+    must be equal.
     """
     if not isinstance(have, str) or not isinstance(want, str):
         return have == want
     numeric = r"[0-9]+(?:\.[0-9]+)*"
     if not (re.fullmatch(numeric, have) and re.fullmatch(numeric, want)):
         return have == want
-    have_parts = tuple(int(component) for component in have.split("."))
-    want_parts = tuple(int(component) for component in want.split("."))
+    have_parts = [component.lstrip("0") or "0" for component in have.split(".")]
+    want_parts = [component.lstrip("0") or "0" for component in want.split(".")]
     length = max(len(have_parts), len(want_parts))
-    return have_parts + (0,) * (length - len(have_parts)) >= (
-        want_parts + (0,) * (length - len(want_parts))
-    )
+    for index in range(length):
+        have_component = have_parts[index] if index < len(have_parts) else "0"
+        want_component = want_parts[index] if index < len(want_parts) else "0"
+        if len(have_component) != len(want_component):
+            return len(have_component) > len(want_component)
+        if have_component != want_component:
+            return have_component > want_component
+    return True
 
 
 def install_marketplace_plugins(
