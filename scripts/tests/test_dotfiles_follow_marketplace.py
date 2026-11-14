@@ -466,7 +466,10 @@ class MarketplacePlugins(Harness):
             deadline = time.monotonic() + 10
             while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.02)
-            self.assertTrue(marker.exists(), "the recovery run never reached mise install")
+            if not marker.exists():
+                proc.terminate()
+                output, _ = proc.communicate(timeout=10)
+                self.fail(f"the recovery run never reached mise install:\n{output}")
             self.assert_clean_lock()
             self.assertEqual(self.version("dev-infra"), "1.0.0")
             proc.send_signal(signal.SIGTERM)

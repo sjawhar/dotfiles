@@ -1,0 +1,1235 @@
+#!/bin/bash
+# Move the laptop side of the oryx forward pair to Cloudflare Access.
+set -euo pipefail
+
+DOTFILES="$HOME/.dotfiles"
+PROC_ROOT="${PROC_ROOT:-/proc}"
+REPORT_DIR="$HOME/.local/state/oryx-laptop"
+REPORT="${ORYX_SETUP_REPORT:-$REPORT_DIR/report-$(date -u +%Y%m%dT%H%M%SZ).txt}"
+REMOTE_REPORT="~/.local/state/oryx-laptop/$(basename "$REPORT")"
+probe_logged_in=false
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/oryx-tunnel-setup.XXXXXX")"
+trap 'rm -rf -- "$work_dir"' EXIT
+ssh_reference_config="$work_dir/ssh-config-without-local"
+SYSTEM_SSH_CONFIG=/etc/ssh/ssh_config
+
+mkdir -p "$REPORT_DIR"
+chmod 700 "$REPORT_DIR"
+if [[ ! -e "$REPORT" ]]; then
+    (umask 077; : > "$REPORT")
+fi
+chmod 600 "$REPORT"
+
+report_line() {
+    printf '%s\n' "$*" >> "$REPORT"
+}
+
+upload_report() {
+    ssh oryx "umask 077; mkdir -p ~/.local/state/oryx-laptop && cat > $REMOTE_REPORT" < "$REPORT"
+}
+
+finish_after_stop() {
+    if "$probe_logged_in"; then
+        if upload_report; then
+            printf '%s\n' "$REMOTE_REPORT"
+        else
+            printf 'oryx-tunnel-setup: report: could not upload the report to oryx\n' >&2
+            printf '%s\n' "$REPORT"
+        fi
+    else
+        printf '%s\n' "$REPORT"
+    fi
+}
+
+stop() {
+    local step="$1"
+    shift
+    local why="$*"
+    report_line "$step: failed: $why"
+    printf 'oryx-tunnel-setup: %s: %s\n' "$step" "$why" >&2
+    finish_after_stop
+    exit 1
+}
+
+finish() {
+    report_line "report: complete"
+    if upload_report; then
+        printf '%s\n' "$REMOTE_REPORT"
+        return 0
+    fi
+    printf 'oryx-tunnel-setup: report: could not upload the report to oryx\n' >&2
+    printf '%s\n' "$REPORT"
+    return 1
+}
+
+process_uid() {
+    local pid="$1" key uid _
+    [[ -r "$PROC_ROOT/$pid/status" ]] || return 1
+    while read -r key uid _; do
+        [[ "$key" == "Uid:" ]] || continue
+        printf '%s\n' "$uid"
+        return 0
+    done < "$PROC_ROOT/$pid/status"
+    return 1
+}
+
+process_parent() {
+    local pid="$1" key parent _
+    [[ -r "$PROC_ROOT/$pid/status" ]] || return 1
+    while read -r key parent _; do
+        [[ "$key" == "PPid:" ]] || continue
+        printf '%s\n' "$parent"
+        return 0
+    done < "$PROC_ROOT/$pid/status"
+    return 1
+}
+
+process_is_mine() {
+    [[ "$(process_uid "$1" 2>/dev/null || true)" == "$(id -u)" ]]
+}
+
+process_args() {
+    local pid="$1"
+    [[ -r "$PROC_ROOT/$pid/cmdline" ]] || return 1
+    mapfile -d '' -t PROCESS_ARGS < "$PROC_ROOT/$pid/cmdline"
+    ((${#PROCESS_ARGS[@]}))
+}
+
+terminate_and_wait() {
+    local pid="$1" step="$2" elapsed=0
+    kill -TERM "$pid" 2>/dev/null || return 0
+    while kill -0 "$pid" 2>/dev/null; do
+        ((elapsed >= 100)) && stop "$step" "process $pid did not exit after TERM"
+        sleep 0.1
+        ((elapsed += 1))
+    done
+}
+
+stop_supervisors() {
+    local entry pid path
+    for entry in "$PROC_ROOT"/[0-9]*; do
+        [[ -d "$entry" ]] || continue
+        pid="${entry##*/}"
+        process_is_mine "$pid" || continue
+        process_args "$pid" || continue
+        ((${#PROCESS_ARGS[@]} == 4)) || continue
+        path="${PROCESS_ARGS[1]}"
+        [[ "${PROCESS_ARGS[0]##*/}" == bash && "$path" == */devbox && "${PROCESS_ARGS[2]}" == --tunnel-supervisor ]] || continue
+        # Removed devbox tunnel supervisors used oryx or oryx-cf as their final argument.
+        case "${PROCESS_ARGS[3]}" in
+            oryx|oryx-cf)
+                terminate_and_wait "$pid" supervisors
+                report_line "supervisors: ended $pid (${PROCESS_ARGS[3]})"
+                ;;
+        esac
+    done
+    report_line "supervisors: complete"
+}
+
+unit_main_pid() {
+    systemctl --user show -p MainPID --value "$1" 2>/dev/null
+}
+
+# The look that failed when pid_belongs_to_unit could not tell.
+UNIT_LOOK_FAILURE=""
+
+# Returns 0 when PID or one of its ancestors is a unit's main process, 1 when none is, and 2 when
+# systemctl --user show did not answer, so nothing told the two apart; UNIT_LOOK_FAILURE names it.
+pid_belongs_to_unit() {
+    local pid="$1"
+    shift
+    local current="$pid" main parent hops=0 unit status
+    process_is_mine "$pid" || return 1
+    while [[ "$current" =~ ^[0-9]+$ && "$current" != 0 && $hops -lt 64 ]]; do
+        for unit in "$@"; do
+            status=0
+            main="$(unit_main_pid "$unit")" || status=$?
+            if ((status)); then
+                UNIT_LOOK_FAILURE="systemctl --user show -p MainPID $unit failed (exit $status)"
+                return 2
+            fi
+            [[ "$main" == "$current" && "$main" != 0 ]] && return 0
+        done
+        parent="$(process_parent "$current" 2>/dev/null || true)"
+        [[ -n "$parent" && "$parent" != "$current" ]] || break
+        current="$parent"
+        ((hops += 1))
+    done
+    return 1
+}
+
+line_pids() {
+    local line="$1"
+    while [[ "$line" =~ pid=([0-9]+) ]]; do
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        line="${line#*pid=${BASH_REMATCH[1]}}"
+    done
+}
+
+# The port of an ss listener that would stop the tunnel from binding 127.0.0.1:<port>: one on
+# 127.0.0.1 itself, or on every address (0.0.0.0, *, [::]). A listener on another address, such as
+# the devbox daemon on the laptop's tailnet address or a legacy pair on 127.0.0.2, does not.
+listener_port() {
+    local line="$1" state receive_queue send_queue local_address peer_address port address
+    read -r state receive_queue send_queue local_address peer_address _ <<< "$line"
+    [[ "$local_address" == *:* ]] || return 1
+    port="${local_address##*:}"
+    address="${local_address%:*}"
+    address="${address%%%*}"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    case "$address" in
+        127.0.0.1|0.0.0.0|'*'|'[::]'|'[::ffff:127.0.0.1]'|'[::ffff:0.0.0.0]') ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$port"
+}
+
+# One listing of the laptop's TCP listeners, taken by read_listeners. A failed ss stops the
+# step: a listing that could not be read must never pass as "nothing listens".
+LISTENERS=""
+
+read_listeners() {
+    local step="$1"
+    local status=0
+    LISTENERS="$(ss -Hltnp)" || status=$?
+    ((status == 0)) || stop "$step" "could not list the laptop's TCP listeners with ss -Hltnp (exit $status)"
+}
+
+listener_lines() {
+    local wanted_port="$1" line port
+    while IFS= read -r line; do
+        port="$(listener_port "$line" 2>/dev/null)" || continue
+        [[ "$port" == "$wanted_port" ]] && printf '%s\n' "$line"
+    done <<< "$LISTENERS"
+}
+
+check_listener() {
+    local port="$1" kind="$2" line pid saw=false belongs
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        saw=true
+        local line_allowed=true line_has_pid=false
+        while IFS= read -r pid; do
+            [[ -n "$pid" ]] || continue
+            line_has_pid=true
+            case "$kind" in
+                forward)
+                    belongs=0
+                    pid_belongs_to_unit "$pid" forward-daemon@oryx.service forward-tunnel@oryx.service || belongs=$?
+                    if ((belongs == 2)); then
+                        stop preflight "could not tell whether the listener on 127.0.0.1:$port is forward's own: $UNIT_LOOK_FAILURE: $line"
+                    fi
+                    ((belongs == 0)) || line_allowed=false
+                    ;;
+            esac
+        done < <(line_pids "$line")
+        if ! "$line_has_pid" || ! "$line_allowed"; then
+            stop preflight "listener on 127.0.0.1:$port is not an allowed $kind process: $line"
+        fi
+    done < <(listener_lines "$port")
+    "$saw"
+}
+
+ssh_g() {
+    ssh -G "$1" 2>/dev/null
+}
+
+ssh_g_reference() {
+    ssh -F "$ssh_reference_config" -G "$1" 2>/dev/null
+}
+
+ssh_field() {
+    local output="$1" wanted="$2" key value
+    while read -r key value; do
+        [[ "$key" == "$wanted" ]] || continue
+        printf '%s\n' "$value"
+        return 0
+    done <<< "$output"
+    return 1
+}
+
+ssh_fields() {
+    local output="$1" wanted="$2" key value
+    while read -r key value; do
+        [[ "$key" == "$wanted" ]] && printf '%s\n' "$value"
+    done <<< "$output"
+}
+
+# The reference is ~/.ssh/config without its first line (Include ~/.ssh/config.local), so any
+# difference from the real ssh -G comes from config.local. ssh -F skips /etc/ssh/ssh_config, which
+# a plain ssh reads after the user's file, so the reference includes it in the same place.
+write_ssh_reference_config() {
+    local include
+    {
+        IFS= read -r include || return 1
+        [[ "$include" == "Include ~/.ssh/config.local" ]] || return 1
+        cat
+        if [[ -f "$SYSTEM_SSH_CONFIG" ]]; then
+            printf '\nMatch all\nInclude %s\n' "$SYSTEM_SSH_CONFIG"
+        fi
+    } < "$HOME/.ssh/config" > "$ssh_reference_config"
+}
+
+ssh_config_changed_values() {
+    local actual="$1" expected="$2" key value actual_display expected_display
+    local -a changes=()
+    local -A actual_values=() expected_values=() fields=()
+    while read -r key value; do
+        actual_values["$key"]+="${actual_values[$key]:+$'\n'}$value"
+        fields["$key"]=1
+    done <<< "$actual"
+    while read -r key value; do
+        expected_values["$key"]+="${expected_values[$key]:+$'\n'}$value"
+        fields["$key"]=1
+    done <<< "$expected"
+    for key in "${!fields[@]}"; do
+        [[ "${actual_values[$key]-}" == "${expected_values[$key]-}" ]] && continue
+        actual_display="${actual_values[$key]-}"
+        expected_display="${expected_values[$key]-}"
+        actual_display="${actual_display//$'\n'/, }"
+        expected_display="${expected_display//$'\n'/, }"
+        changes+=("$key=$actual_display (expected $expected_display)")
+    done
+    printf '%s; ' "${changes[@]}"
+}
+
+ssh_config_compare() {
+    local host="$1" actual="$2" expected="$3" changes
+    [[ "$actual" == "$expected" ]] && return 0
+    changes="$(ssh_config_changed_values "$actual" "$expected")"
+    ssh_config_errors+=("$host differs from ~/.ssh/config without config.local: $changes")
+    return 1
+}
+
+ssh_config_errors=()
+ssh_config_expect() {
+    local host="$1" output="$2" field="$3" expected="$4" actual actual_display expected_display
+    actual="$(ssh_fields "$output" "$field")"
+    [[ "$actual" == "$expected" ]] && return 0
+    actual_display="${actual//$'\n'/, }"
+    expected_display="${expected//$'\n'/, }"
+    ssh_config_errors+=("$host $field=$actual_display (expected $expected_display)")
+    return 1
+}
+
+# Returns 1 when the values differ from the required ones, and 2 when a look with ssh -G failed.
+validate_ssh_configuration() {
+    local oryx tunnel oryx_reference tunnel_reference expected
+    ssh_config_errors=()
+    local status=0
+    oryx="$(ssh_g oryx)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read effective Host oryx values: ssh -G oryx failed (exit $status)"); return 2; }
+    tunnel="$(ssh_g oryx-tunnel)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read effective Host oryx-tunnel values: ssh -G oryx-tunnel failed (exit $status)"); return 2; }
+    oryx_reference="$(ssh_g_reference oryx)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read reference Host oryx values: ssh -F <reference> -G oryx failed (exit $status)"); return 2; }
+    tunnel_reference="$(ssh_g_reference oryx-tunnel)" || status=$?
+    ((status == 0)) || { ssh_config_errors=("could not read reference Host oryx-tunnel values: ssh -F <reference> -G oryx-tunnel failed (exit $status)"); return 2; }
+    ssh_config_compare oryx "$oryx" "$oryx_reference" || true
+    ssh_config_compare oryx-tunnel "$tunnel" "$tunnel_reference" || true
+
+    ssh_config_expect oryx "$oryx" hostname oryx.thecybermonk.com || true
+    ssh_config_expect oryx "$oryx" user agent || true
+    ssh_config_expect oryx "$oryx" proxycommand 'cloudflared access ssh --hostname %h' || true
+    # This tailnet name is only the label under which known_hosts holds oryx's key.
+    ssh_config_expect oryx "$oryx" hostkeyalias oryx.tail12ec1c.ts.net || true
+    ssh_config_expect oryx "$oryx" localforward '' || true
+    ssh_config_expect oryx "$oryx" remoteforward '' || true
+
+    ssh_config_expect oryx-tunnel "$tunnel" hostname oryx-pcsc.thecybermonk.com || true
+    ssh_config_expect oryx-tunnel "$tunnel" user agent || true
+    ssh_config_expect oryx-tunnel "$tunnel" proxycommand 'cloudflared access ssh --hostname %h' || true
+    # This tailnet name is only the label under which known_hosts holds oryx's key.
+    ssh_config_expect oryx-tunnel "$tunnel" hostkeyalias oryx.tail12ec1c.ts.net || true
+    ssh_config_expect oryx-tunnel "$tunnel" stricthostkeychecking true || true
+    ssh_config_expect oryx-tunnel "$tunnel" identityfile '~/.ssh/oryx-tunnel' || true
+    ssh_config_expect oryx-tunnel "$tunnel" identitiesonly yes || true
+    ssh_config_expect oryx-tunnel "$tunnel" identityagent none || true
+    ssh_config_expect oryx-tunnel "$tunnel" batchmode yes || true
+    ssh_config_expect oryx-tunnel "$tunnel" controlmaster false || true
+    [[ -z "$(ssh_fields "$tunnel" controlpath)" ]] || ssh_config_errors+=("oryx-tunnel controlpath=$(ssh_fields "$tunnel" controlpath) (expected none)")
+    ssh_config_expect oryx-tunnel "$tunnel" exitonforwardfailure yes || true
+    ssh_config_expect oryx-tunnel "$tunnel" serveraliveinterval 15 || true
+    ssh_config_expect oryx-tunnel "$tunnel" serveralivecountmax 4 || true
+
+    expected="$(printf '%s\n' \
+        'localforward 127.0.0.1:12801 127.0.0.1:12801' \
+        'localforward 127.0.0.1:12802 127.0.0.1:12802' \
+        'localforward 127.0.0.1:12805 127.0.0.1:12805' \
+        'remoteforward 127.0.0.1:12800 127.0.0.1:12800' \
+        'remoteforward 127.0.0.1:12803 127.0.0.1:12803' \
+        'remoteforward 127.0.0.1:12804 127.0.0.1:12804' \
+        'remoteforward 127.0.0.1:12806 127.0.0.1:12806' | sort)"
+    actual="$(
+        while IFS= read -r line; do
+            [[ "$line" =~ ^(localforward|remoteforward)\  ]] || continue
+            line="${line//[/}"
+            line="${line//]/}"
+            printf '%s\n' "$line"
+        done <<< "$tunnel" | sort
+    )"
+    [[ "$actual" == "$expected" ]] || ssh_config_errors+=("oryx-tunnel forwards=$actual (expected $expected)")
+
+    ((${#ssh_config_errors[@]} == 0))
+}
+
+valid_token_file() {
+    local -a lines
+    mapfile -t lines < "$1"
+    ((${#lines[@]} == 2)) || return 1
+    [[ "${lines[0]}" =~ ^TUNNEL_SERVICE_TOKEN_ID=[A-Za-z0-9._-]+$ ]] || return 1
+    [[ "${lines[1]}" =~ ^TUNNEL_SERVICE_TOKEN_SECRET=[A-Za-z0-9._-]+$ ]] || return 1
+}
+
+token_leak_result() {
+    local token_file="$1" status
+    if grep -rqF -f <(
+        while IFS='=' read -r name value; do
+            [[ "$name" == TUNNEL_SERVICE_TOKEN_ID || "$name" == TUNNEL_SERVICE_TOKEN_SECRET ]] && printf '%s\n' "$value"
+        done < "$token_file"
+    ) "$DOTFILES" 2>/dev/null; then
+        printf 'FOUND\n'
+        return 0
+    else
+        status=$?
+    fi
+    case "$status" in
+        1) printf 'none\n' ;;
+        *) printf 'UNKNOWN (grep exit %s)\n' "$status" ;;
+    esac
+}
+
+unit_active() {
+    systemctl --user is-active --quiet "$1" >/dev/null 2>&1
+}
+
+wait_for_unit() {
+    local unit="$1" attempt journal
+    for attempt in {1..30}; do
+        unit_active "$unit" && return 0
+        sleep 1
+    done
+    # The last answer of is-active tells a unit that is not active from a systemctl that could not tell.
+    local state status=0
+    state="$(systemctl --user is-active "$unit" 2>&1)" || status=$?
+    report_line "units: $unit: systemctl --user is-active printed ${state:-nothing} (exit $status) after 30 s"
+    journal="$(journalctl --user -u "$unit" -n 20 --no-pager 2>&1 || true)"
+    report_line "units: $unit journal: $journal"
+    return 1
+}
+
+stop_old_masters() {
+    local socket entry pid
+    for socket in \
+        "$HOME/.ssh/sockets/tunnel-agent@oryx.tail12ec1c.ts.net" \
+        "$HOME/.ssh/sockets/tunnel-agent@oryx-pcsc.thecybermonk.com"; do
+        # These sockets belong to the removed tailnet and oryx-cf tunnel hosts.
+        # Their names remain only so this command can end an old master.
+        [[ -S "$socket" ]] || continue
+        ssh -o "ControlPath=$socket" -O exit oryx-old >/dev/null 2>&1 || true
+    done
+
+    for entry in "$PROC_ROOT"/[0-9]*; do
+        [[ -d "$entry" ]] || continue
+        pid="${entry##*/}"
+        process_is_mine "$pid" || continue
+        process_args "$pid" || continue
+        ((${#PROCESS_ARGS[@]} == 4)) || continue
+        [[ "${PROCESS_ARGS[0]##*/}" == ssh && "${PROCESS_ARGS[1]}" == -N && "${PROCESS_ARGS[2]}" == -f ]] || continue
+        # Removed devbox tunnel processes used these old SSH hosts as their final argument.
+        case "${PROCESS_ARGS[3]}" in
+            oryx-tunnel|oryx-cf-tunnel)
+                terminate_and_wait "$pid" old-tunnel
+                report_line "old-tunnel: ended $pid (${PROCESS_ARGS[3]})"
+                ;;
+        esac
+    done
+}
+
+self_failures=()
+# A probe may set PROBE_VALUE to what it saw (an exit status, a stat line, the deciding ssh line),
+# which the report carries beside ok or failed. It never holds a secret.
+PROBE_VALUE=""
+
+self_probe() {
+    local name="$1" verdict=ok
+    shift
+    PROBE_VALUE=""
+    "$@" || verdict=failed
+    if [[ -n "$PROBE_VALUE" ]]; then
+        report_line "self-check: $name: $PROBE_VALUE: $verdict"
+    else
+        report_line "self-check: $name: $verdict"
+    fi
+    [[ "$verdict" == ok ]] || self_failures+=("$name")
+}
+
+# forward-tunnel@oryx is active as soon as ssh starts, before cloudflared connects and the forwards
+# exist. The probes that ride the tunnel run only once it carries them: the laptop's LocalForward of
+# the preview port listens, and oryx's 127.0.0.1:12800 (the daemon port's RemoteForward) listens. 60 s covers a
+# slow Cloudflare connect and one unit restart (RestartSec=10). Tests shorten it.
+TUNNEL_WAIT_SECONDS="${ORYX_TUNNEL_WAIT_SECONDS:-60}"
+tunnel_up=false
+
+wait_for_tunnel() {
+    local start=$SECONDS laptop remote left status laptop_seen remote_seen
+    while :; do
+        # Each side reads yes or no only from a look that succeeded; a failed look says so.
+        status=0
+        laptop="$(ss -Hltn '( sport = :12802 )' 2>/dev/null)" || status=$?
+        if ((status)); then
+            laptop_seen="look with ss failed (exit $status)"
+        elif awk '$4 == "127.0.0.1:12802" { found = 1 } END { exit !found }' <<< "$laptop"; then
+            laptop_seen=yes
+        else
+            laptop_seen=no
+        fi
+        left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
+        ((left >= 1)) || left=1
+        status=0
+        remote="$(timeout "$left" ssh oryx 'ss -Hltn "( sport = :12800 )"' 2>/dev/null)" || status=$?
+        if ((status == 124)); then
+            remote_seen="look through ssh oryx failed (exit 124: timed out after $left s)"
+        elif ((status)); then
+            remote_seen="look through ssh oryx failed (exit $status)"
+        elif [[ "$remote" == *127.0.0.1:12800* ]]; then
+            remote_seen=yes
+        else
+            remote_seen=no
+        fi
+        if [[ "$laptop_seen" == yes && "$remote_seen" == yes ]]; then
+            tunnel_up=true
+            report_line "self-check: tunnel up after $((SECONDS - start)) s"
+            return 0
+        fi
+        if ((SECONDS - start >= TUNNEL_WAIT_SECONDS)); then
+            report_line "self-check: tunnel not up after $((SECONDS - start)) s (laptop 127.0.0.1:12802 listening: $laptop_seen; oryx 127.0.0.1:12800 listening: $remote_seen)"
+            return 1
+        fi
+        left=$((TUNNEL_WAIT_SECONDS - (SECONDS - start)))
+        sleep "$((left < 2 ? (left < 1 ? 1 : left) : 2))"
+    done
+}
+
+# A probe that rides the tunnel: it runs only when the tunnel came up, and otherwise fails as not run.
+tunnel_self_probe() {
+    local name="$1"
+    if "$tunnel_up"; then
+        self_probe "$@"
+    else
+        report_line "self-check: $name: not run: tunnel not up: failed"
+        self_failures+=("$name")
+    fi
+}
+
+# Run a command and set PROBE_VALUE to its exit status; succeed only on 0.
+probe_exit() {
+    local status=0
+    "$@" || status=$?
+    PROBE_VALUE="exit $status"
+    [[ $status -eq 0 ]]
+}
+
+# The last line of FILE that holds PATTERN, on one line, carriage returns removed.
+deciding_line() {
+    local line
+    line="$(grep -F -- "$2" "$1" | tail -n 1 | tr -d '\r')" || true
+    printf '%s' "${line:0:200}"
+}
+
+self_ssh_config() {
+    local values hostname proxycommand hostkeyalias status=0
+    values="$(ssh_g oryx)" || status=$?
+    if ((status)); then
+        PROBE_VALUE="ssh -G oryx failed (exit $status)"
+        return 1
+    fi
+    hostname="$(ssh_field "$values" hostname)"
+    proxycommand="$(ssh_field "$values" proxycommand)"
+    hostkeyalias="$(ssh_field "$values" hostkeyalias)"
+    report_line "self-check: ssh -G oryx: hostname=$hostname proxycommand=$proxycommand hostkeyalias=$hostkeyalias"
+    # This tailnet name is only the label under which known_hosts holds oryx's key.
+    [[ "$hostname" == oryx.thecybermonk.com && "$proxycommand" == 'cloudflared access ssh --hostname %h' && "$hostkeyalias" == oryx.tail12ec1c.ts.net ]]
+}
+
+self_unit_active() {
+    local unit="$1" state status=0
+    state="$(systemctl --user is-active "$unit" 2>&1)" || status=$?
+    if ((status)); then
+        # is-active prints the state (inactive, failed) when it answers, or why it could not.
+        state="${state//$'\n'/ }"
+        PROBE_VALUE="systemctl --user is-active printed ${state:-nothing} (exit $status)"
+        return 1
+    fi
+    report_line "self-check: systemctl --user is-active $unit: $state"
+    [[ "$state" == active ]]
+}
+
+self_devboxes_config() {
+    local config="$HOME/.config/forward/config.toml" contents
+    [[ -f "$config" ]] || return 1
+    contents="$(<"$config")"
+    report_line "self-check: devboxes daemon configuration: $contents"
+}
+
+self_command_output() {
+    local name="$1" output status=0
+    shift
+    output="$("$@" 2>&1)" || status=$?
+    output="${output//$'\n'/ }"
+    if ((status)); then
+        PROBE_VALUE="exit $status: ${output:0:160}"
+        return 1
+    fi
+    report_line "self-check: $name output: $output"
+}
+
+self_laptop_port_22() {
+    local listeners status=0
+    listeners="$(ss -Hltn '( sport = :22 )')" || status=$?
+    if ((status)); then
+        PROBE_VALUE="look with ss failed (exit $status)"
+        return 1
+    fi
+    if [[ -n "$listeners" ]]; then
+        listeners="${listeners//$'\n'/ }"
+        report_line "self-check: laptop port 22: $listeners"
+    else
+        report_line "self-check: laptop port 22: none"
+    fi
+}
+
+with_token_environment() {
+    (
+        set -a
+        # shellcheck disable=SC1090
+        source "$token_file"
+        set +a
+        "$@"
+    )
+}
+
+pick_free_port() {
+    python3 - <<'PY'
+import socket
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+print(sock.getsockname()[1])
+sock.close()
+PY
+}
+
+delivery_response_parts() {
+    local response="$1" line
+    DELIVERY_REMOTE_DIR=
+    DELIVERY_URL=
+    while IFS= read -r line; do
+        case "$line" in
+            ORYX_TUNNEL_TEMP_DIR=*) DELIVERY_REMOTE_DIR="${line#ORYX_TUNNEL_TEMP_DIR=}" ;;
+            http://*|https://*) DELIVERY_URL="$line" ;;
+        esac
+    done <<< "$response"
+    [[ "$DELIVERY_REMOTE_DIR" =~ ^/tmp/oryx-tunnel-setup\.[A-Za-z0-9._-]+$ && -n "$DELIVERY_URL" ]]
+}
+
+cleanup_delivery_directory() {
+    local remote_dir="$1"
+    [[ "$remote_dir" =~ ^/tmp/oryx-tunnel-setup\.[A-Za-z0-9._-]+$ ]] || return 1
+    ssh oryx "rm -rf -- '$remote_dir'" >/dev/null 2>&1
+}
+
+delivery_preview() {
+    local nonce remote_file response body make_status=0 curl_status=0 cleanup_status=0
+    nonce="oryx-preview-$(date +%s)-$RANDOM"
+    remote_file="oryx-preview-$nonce"
+    response="$(ssh oryx "d=\$(mktemp -d /tmp/oryx-tunnel-setup.XXXXXX) || exit
+printf '%s\\n' '$nonce' > \"\$d/$remote_file\"
+url=\$(forward url \"\$d/$remote_file\") || { rm -rf -- \"\$d\"; exit 1; }
+printf 'ORYX_TUNNEL_TEMP_DIR=%s\\n' \"\$d\"
+printf '%s\\n' \"\$url\"")" || make_status=$?
+    if ((make_status)); then
+        PROBE_VALUE="making the file and its URL through ssh oryx failed (exit $make_status)"
+        return 1
+    fi
+    if ! delivery_response_parts "$response"; then
+        cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" >/dev/null 2>&1 || true
+        return 1
+    fi
+    body="$(curl --noproxy '*' -fsS "$DELIVERY_URL")" || curl_status=$?
+    cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
+    if ((curl_status)); then
+        PROBE_VALUE="fetching the preview URL failed (curl exit $curl_status)"
+    fi
+    if ((cleanup_status)); then
+        PROBE_VALUE="${PROBE_VALUE:+$PROBE_VALUE; }removing the preview's oryx directory failed (exit $cleanup_status)"
+    fi
+    [[ $curl_status -eq 0 && $cleanup_status -eq 0 && "$body" == "$nonce" ]]
+}
+
+delivery_forward_port() {
+    local nonce port remote_file session ready=0 body delivered=false
+    nonce="oryx-port-$(date +%s)-$RANDOM"
+    port="$(pick_free_port)" || return 1
+    remote_file="oryx-port-$nonce"
+    ssh oryx "d=\$(mktemp -d)
+printf '%s\\n' '$nonce' > \"\$d/$remote_file\"
+(
+    cd \"\$d\"
+    timeout 90 python3 - $port <<'PY'
+import http.server
+import sys
+
+server = http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)
+server.handle_request()
+server.server_close()
+PY
+) &
+server=\$!
+timeout 90 forward port $port &
+forward=\$!
+echo READY
+if wait \$server; then
+    kill -TERM \$forward 2>/dev/null || true
+    wait \$forward 2>/dev/null || true
+    rm -rf \"\$d\"
+else
+    status=\$?
+    kill -TERM \$forward 2>/dev/null || true
+    wait \$forward 2>/dev/null || true
+    rm -rf \"\$d\"
+    exit \$status
+fi" > "$work_dir/forward-port.out" 2>&1 &
+    session=$!
+    for _ in {1..20}; do
+        grep -q '^READY$' "$work_dir/forward-port.out" && { ready=1; break; }
+        sleep 1
+    done
+    if ! ((ready)); then
+        if kill -0 "$session" 2>/dev/null; then
+            kill -TERM "$session" 2>/dev/null || true
+            wait "$session" 2>/dev/null || true
+            PROBE_VALUE="no READY from oryx within 20 s; ssh oryx was still running and was ended"
+        else
+            local session_status=0
+            wait "$session" 2>/dev/null || session_status=$?
+            PROBE_VALUE="ssh oryx exited $session_status before oryx printed READY"
+        fi
+        return 1
+    fi
+    # forward port may bind a moment after READY: retry for 10 s, and show only the last error.
+    local attempt curl_err="$work_dir/forward-port-curl.err"
+    for attempt in {1..100}; do
+        if body="$(curl --noproxy '*' -fsS "http://127.0.0.1:$port/$remote_file" 2>"$curl_err")"; then
+            delivered=true
+            break
+        fi
+        sleep 0.1
+    done
+    if ! "$delivered"; then
+        cat "$curl_err" >&2
+        kill -TERM "$session" 2>/dev/null || true
+        wait "$session" 2>/dev/null || true
+        PROBE_VALUE="fetching localhost:$port failed for 10 s: $(tail -n 1 "$curl_err" | tr -d '\r' | cut -c1-120)"
+        return 1
+    fi
+    wait "$session" || return 1
+    [[ "$body" == "$nonce" ]]
+}
+
+ask_yes() {
+    local prompt="$1" answer status attempt
+    # The report carries only the answer's category, never the text: a paste at this prompt must
+    # not reach the report or oryx. y or yes (any case, spaces trimmed) is yes; n, no or Enter is
+    # no; anything else asks once more, and a second answer not recognized fails the probe.
+    for attempt in 1 2; do
+        answer=""
+        status=0
+        printf '%s [y/N] ' "$prompt" >&2
+        # read fails at the end of input even when it read a last line without a newline, so the
+        # answer decides, and its status counts only when nothing was read.
+        read -r answer || status=$?
+        answer="${answer#"${answer%%[![:space:]]*}"}"
+        answer="${answer%"${answer##*[![:space:]]}"}"
+        case "${answer,,}" in
+            y|yes)
+                PROBE_VALUE="answer: yes"
+                return 0
+                ;;
+            n|no)
+                PROBE_VALUE="answer: no"
+                return 1
+                ;;
+            '')
+                if ((status)); then
+                    PROBE_VALUE="no answer (read exit $status)"
+                else
+                    PROBE_VALUE="answer: no"
+                fi
+                return 1
+                ;;
+        esac
+        ((attempt == 2)) || printf 'Answer y or n.\n' >&2
+    done
+    PROBE_VALUE="answer: not recognized twice"
+    return 1
+}
+
+delivery_page() {
+    local nonce remote_file response open_status=0 cleanup_status=0
+    nonce="oryx-page-$(date +%s)-$RANDOM"
+    remote_file="oryx-page-$nonce.html"
+    response="$(ssh oryx "d=\$(mktemp -d /tmp/oryx-tunnel-setup.XXXXXX) || exit
+printf '<p>%s</p>\\n' '$nonce' > \"\$d/$remote_file\"
+url=\$(forward url \"\$d/$remote_file\") || { rm -rf -- \"\$d\"; exit 1; }
+printf 'ORYX_TUNNEL_TEMP_DIR=%s\\n' \"\$d\"
+printf '%s\\n' \"\$url\"")" || open_status=$?
+    if ((open_status)); then
+        PROBE_VALUE="making the page and its URL through ssh oryx failed (exit $open_status)"
+        return 1
+    fi
+    if ! delivery_response_parts "$response"; then
+        cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" >/dev/null 2>&1 || true
+        return 1
+    fi
+    local seen=false
+    if ssh oryx "forward open '$DELIVERY_URL'"; then
+        # The browser loads the page after forward open returns, so the page stays until Sami answers.
+        ask_yes "Did the forward test page open in the browser?" && seen=true
+    else
+        open_status=$?
+        PROBE_VALUE="forward open through ssh oryx failed (exit $open_status)"
+    fi
+    cleanup_delivery_directory "$DELIVERY_REMOTE_DIR" || cleanup_status=$?
+    if ((cleanup_status)); then
+        PROBE_VALUE="${PROBE_VALUE:+$PROBE_VALUE; }removing the page's oryx directory failed (exit $cleanup_status)"
+    fi
+    [[ $open_status -eq 0 && $cleanup_status -eq 0 ]] && "$seen"
+}
+
+delivery_sound() {
+    local status=0
+    ssh oryx 'PULSE_SERVER=unix:/run/user/$(id -u)/forward/pulse.sock paplay /usr/share/sounds/freedesktop/stereo/complete.oga' || status=$?
+    if ((status)); then
+        PROBE_VALUE="paplay through ssh oryx failed (exit $status)"
+        return 1
+    fi
+    ask_yes "Did you hear the forward test sound?"
+}
+
+delivery_browser() {
+    local grant_output endpoint version
+    local -a grant_status endpoints
+    grant_output="$work_dir/browser-grant.out"
+    printf 'Touch the YubiKey now for the browser grant.\n' >&2
+    set +e
+    ssh -t oryx 'forward browser grant --ttl 5m' | tee "$grant_output"
+    grant_status=("${PIPESTATUS[@]}")
+    set -e
+    if [[ "${grant_status[0]}" -ne 0 || "${grant_status[1]}" -ne 0 ]]; then
+        PROBE_VALUE="forward browser grant through ssh -t oryx failed (exit ${grant_status[0]}, tee exit ${grant_status[1]})"
+        return 1
+    fi
+    mapfile -t endpoints < <(grep -Eo 'https?://[^[:space:]]+' "$grant_output")
+    ((${#endpoints[@]})) || return 1
+    endpoint="${endpoints[${#endpoints[@]} - 1]}"
+    local status=0
+    version="$(ssh oryx "curl -fsS '${endpoint%/}/json/version'")" || status=$?
+    if ((status)); then
+        PROBE_VALUE="fetching /json/version through ssh oryx failed (exit $status)"
+        return 1
+    fi
+    [[ "$version" == *'"Browser"'* ]]
+}
+
+human_tier_read() {
+    local status=0
+    printf 'Touch the YubiKey now for the human-tier secret read.\n' >&2
+    # secrets get (never with --value) authorizes the key and prints only its tier and grant
+    # status, so its message reaches the terminal for Sami to read, and stays out of the report.
+    ssh -t oryx 'secrets get CLOUDFLARE_API_KEY' || status=$?
+    # ssh exits 255 for its own failure: oryx unreachable or no login, but also a connection that
+    # dropped after secrets get started, so the request's outcome is unknown. secrets exits non-zero for a refusal and for other errors alike (a missing key, an
+    # unreachable secretsd, a touch that timed out), so its status says only "not granted".
+    case "$status" in
+        0) PROBE_VALUE="CLOUDFLARE_API_KEY granted (exit 0)" ;;
+        255) PROBE_VALUE="CLOUDFLARE_API_KEY ssh failed (exit 255); request outcome unknown" ;;
+        *) PROBE_VALUE="CLOUDFLARE_API_KEY not granted (exit $status)" ;;
+    esac
+    [[ $status -eq 0 ]]
+}
+
+
+write_probe_configs() {
+    tunnel_probe="$work_dir/tunnel-probe.conf"
+    login_probe="$work_dir/login-probe.conf"
+    cat > "$tunnel_probe" <<EOF
+Host oryx-probe
+  HostName oryx-pcsc.thecybermonk.com
+  User agent
+  # This tailnet name is only the label under which known_hosts holds oryx's key.
+  HostKeyAlias oryx.tail12ec1c.ts.net
+  ProxyCommand cloudflared access ssh --hostname %h
+  IdentityFile ~/.ssh/oryx-tunnel
+  IdentitiesOnly yes
+  IdentityAgent none
+  ControlMaster no
+  ControlPath none
+  BatchMode yes
+  ConnectTimeout 30
+  StrictHostKeyChecking yes
+EOF
+    cat > "$login_probe" <<EOF
+Host oryx-login-probe
+  HostName oryx.thecybermonk.com
+  User agent
+  # This tailnet name is only the label under which known_hosts holds oryx's key.
+  HostKeyAlias oryx.tail12ec1c.ts.net
+  ProxyCommand cloudflared access ssh --hostname %h
+  IdentitiesOnly no
+  IdentityAgent ~/.1password/agent.sock
+  ControlMaster no
+  ControlPath none
+  BatchMode yes
+  ConnectTimeout 30
+  StrictHostKeyChecking yes
+EOF
+}
+
+key_probe_true() {
+    probe_exit with_token_environment timeout 60 ssh -F "$tunnel_probe" oryx-probe true
+}
+
+key_probe_no_shell() {
+    local output status=0
+    output="$(with_token_environment timeout 60 ssh -F "$tunnel_probe" oryx-probe id)" || status=$?
+    # Say whether a uid came back; never write the uid itself.
+    if [[ "$output" == *uid=* ]]; then
+        PROBE_VALUE="exit $status, uid present"
+        return 1
+    fi
+    PROBE_VALUE="exit $status, no uid printed"
+    [[ $status -eq 0 ]]
+}
+
+# A tunnel-key probe that sshd must refuse: it passes when ssh exits 255 and stderr holds PATTERN.
+key_probe_refused() {
+    local pattern="$1" err="$work_dir/key-probe.err" status=0 line
+    shift
+    with_token_environment timeout 60 ssh -F "$tunnel_probe" "$@" oryx-probe >/dev/null 2>"$err" || status=$?
+    line="$(deciding_line "$err" "$pattern")"
+    PROBE_VALUE="exit $status, ${line:-no \"$pattern\" line}"
+    [[ $status -eq 255 && -n "$line" ]]
+}
+
+key_probe_denied_remote_forward() {
+    key_probe_refused 'remote port forwarding failed' -o ExitOnForwardFailure=yes -N -R 127.0.0.1:12999:127.0.0.1:9
+}
+
+key_probe_denied_stdio() {
+    key_probe_refused 'stdio forwarding failed' -W 127.0.0.1:22
+}
+
+key_probe_denied_remote_socket() {
+    # The listen path is on oryx: /tmp exists there, so only sshd's refusal can fail this forward.
+    key_probe_refused 'remote port forwarding failed' -o ExitOnForwardFailure=yes -N -R "/tmp/oryx-probe-$RANDOM$RANDOM.sock:127.0.0.1:9"
+}
+
+key_probe_denied_local_socket() {
+    local port err pid oryx_uid
+    port="$(pick_free_port)" || return 1
+    # The socket path is on oryx, so it names oryx's uid, not this laptop's.
+    oryx_uid="$(ssh oryx 'id -u')" || return 1
+    [[ "$oryx_uid" =~ ^[0-9]+$ ]] || return 1
+    err="$work_dir/local-socket.err"
+    with_token_environment timeout 60 ssh -F "$tunnel_probe" -N -L "127.0.0.1:$port:/run/user/$oryx_uid/forward/pulse.sock" oryx-probe > /dev/null 2> "$err" &
+    pid=$!
+    set +e
+    # ssh binds the -L only after cloudflared reaches Cloudflare and the key logs in, so the client
+    # retries its connect for up to 30 s while ssh runs. It prints what it saw. EOF: sshd refused
+    # the socket. Data, or a connection that stays open and silent: the socket was forwarded
+    # (forward's pulse.sock sends nothing until the client speaks). No connect: the -L never came
+    # up, so the probe proves nothing about the key.
+    local client
+    client="$(python3 - "$port" "$pid" <<'PY'
+import socket
+import sys
+import time
+
+port, ssh_pid = int(sys.argv[1]), sys.argv[2]
+
+
+def ssh_running() -> bool:
+    try:
+        with open(f"/proc/{ssh_pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+deadline = time.monotonic() + 30
+while True:
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        break
+    except OSError as error:
+        if not ssh_running():
+            # The shell adds ssh's exit status and last line (exit 4 tells it to).
+            print("client never connected; ssh exited")
+            raise SystemExit(4)
+        if time.monotonic() >= deadline:
+            print(f"client connection failed after 30 s: {type(error).__name__}")
+            raise SystemExit(2)
+        time.sleep(0.2)
+sock.settimeout(5)
+try:
+    received = sock.recv(1)
+except socket.timeout:
+    print("client connected; no data or EOF within 5 s")
+    raise SystemExit(1)
+except OSError as error:
+    print(f"client connected, then {type(error).__name__}")
+    raise SystemExit(3)
+finally:
+    sock.close()
+print("client got EOF" if received == b"" else "client got data: forwarded")
+raise SystemExit(0 if received == b"" else 1)
+PY
+)"
+    local client_status=$?
+    kill -TERM "$pid" 2>/dev/null || true
+    local ssh_status=0
+    wait "$pid" 2>/dev/null || ssh_status=$?
+    set -e
+    local line
+    line="$(deciding_line "$err" 'open failed')"
+    if [[ $client_status -eq 4 ]]; then
+        # ssh stopped before the client got in: its exit status and last line say why.
+        client="$client (exit $ssh_status)"
+        [[ -n "$line" ]] || line="ssh said: $(tail -n 1 "$err" | tr -d '\r' | cut -c1-160)"
+    fi
+    PROBE_VALUE="${client:-client printed nothing}, ${line:-no \"open failed\" line}"
+    [[ $client_status -eq 0 && "$line" == *"open failed"* ]]
+}
+
+key_probe_login_key() {
+    local output status=0
+    output="$(timeout 60 ssh -F "$login_probe" oryx-login-probe id)" || status=$?
+    # Say whether a uid came back; never write the uid itself.
+    if [[ "$output" == *uid=* ]]; then
+        PROBE_VALUE="exit $status, uid present"
+    else
+        PROBE_VALUE="exit $status, no uid printed"
+    fi
+    [[ $status -eq 0 && "$output" == *uid=* ]]
+}
+
+case "${1:-}" in
+    "")
+        ;;
+    --after-sync)
+        ;;
+    *)
+        echo "usage: oryx-tunnel-setup [--after-sync]" >&2
+        exit 64
+        ;;
+esac
+
+report_line "oryx-tunnel-setup: report=$REPORT"
+
+if [[ "${1:-}" != --after-sync ]]; then
+    stop_supervisors
+    sync_status=0
+    "$DOTFILES/scripts/dotfiles-sync" --here "" || sync_status=$?
+    if ((sync_status)); then
+        stop sync "dotfiles-sync --here failed (exit $sync_status); ~/.dotfiles may not be at origin/main"
+    fi
+    report_line "sync: complete"
+    rm -rf -- "$work_dir"
+    trap - EXIT
+    exec env ORYX_SETUP_REPORT="$REPORT" bash "$DOTFILES/laptop/oryx-tunnel-setup" --after-sync
+fi
+
+if [[ ! -f "$HOME/.ssh/oryx-tunnel" ]]; then
+    stop preflight "~/.ssh/oryx-tunnel is missing; this command never creates the key because oryx authorized_keys holds its public half"
+fi
+read_listeners preflight
+for port in 12800 12801 12802 12803 12804 12805 12806; do
+    check_listener "$port" forward || true
+done
+report_line "preflight: complete"
+
+if ! bash "$DOTFILES/installers/cloudflared.sh"; then
+    stop cloudflared "could not install cloudflared 2026.10.7"
+fi
+report_line "cloudflared: installed 2026.10.7"
+
+# shellcheck source=installers/lib.sh
+source "$DOTFILES/installers/lib.sh"
+mkdir -p "$HOME/.ssh/sockets"
+chmod 700 "$HOME/.ssh/sockets"
+if ! ensure_link "$DOTFILES/laptop/ssh-config" "$HOME/.ssh/config"; then
+    stop ssh-config "could not link ~/.ssh/config to laptop/ssh-config"
+fi
+chmod 600 "$HOME/.ssh/config"
+if ! write_ssh_reference_config; then
+    stop ssh-config "could not read the installed ~/.ssh/config without config.local"
+fi
+validation_status=0
+validate_ssh_configuration || validation_status=$?
+if ((validation_status == 2)); then
+    # A look with ssh -G failed, so nothing was compared.
+    stop ssh-config "${ssh_config_errors[*]}"
+fi
+if ((validation_status)); then
+    if [[ -f "$HOME/.ssh/config.local" ]]; then
+        stop ssh-config "~/.ssh/config.local changed effective Host oryx or Host oryx-tunnel values: ${ssh_config_errors[*]}"
+    fi
+    stop ssh-config "the installed Host oryx or Host oryx-tunnel configuration is not the required Cloudflare configuration: ${ssh_config_errors[*]}"
+fi
+report_line "ssh-config: complete"
+
+probe_status=0
+ssh -o BatchMode=yes oryx true || probe_status=$?
+if ((probe_status)); then
+    stop probe "ssh -o BatchMode=yes oryx true failed (exit $probe_status); its message is above. If it could not log in, check that your 1Password login key's public key is in agent's ~/.ssh/authorized_keys on oryx; oryx's sshd journal shows no login with that key since 2026-10-17"
+fi
+probe_logged_in=true
+report_line "probe: ssh oryx login with the 1Password login key succeeded"
+
+cutover_check=0
+ssh oryx 'test -x ~/.local/bin/oryx-edge-cutover' || cutover_check=$?
+if ((cutover_check == 1)); then
+    stop cutover "~/.local/bin/oryx-edge-cutover is missing or not executable; the parent installs it"
+elif ((cutover_check)); then
+    stop cutover "could not check for ~/.local/bin/oryx-edge-cutover through ssh oryx (exit $cutover_check)"
+fi
+cutover_output="$work_dir/cutover.out"
+printf 'Touch the YubiKey now for the oryx cutover.\n' >&2
+set +e
+ssh -t oryx '~/.local/bin/oryx-edge-cutover' 2>&1 | tr -d '\r' | tee "$cutover_output"
+cutover_status=("${PIPESTATUS[@]}")
+set -e
+cutover_text="$(<"$cutover_output")"
+report_line "cutover: output: $cutover_text"
+if [[ "${cutover_status[0]}" -ne 0 || "${cutover_status[1]}" -ne 0 || "${cutover_status[2]}" -ne 0 ]]; then
+    stop cutover "ssh -t oryx ~/.local/bin/oryx-edge-cutover exited ${cutover_status[0]} (255 is ssh's own failure); tr exited ${cutover_status[1]}, tee exited ${cutover_status[2]}"
+fi
+report_line "cutover: complete"
+
+token_dir="$HOME/.config/forward"
+token_file="$token_dir/tunnel-oryx.env"
+mkdir -p "$token_dir"
+chmod 700 "$token_dir"
+token_tmp="$(umask 077; mktemp "$token_dir/.tunnel-oryx-XXXXXX")"
+copy_status=0
+ssh oryx 'secrets CF_ACCESS_ORYX_TUNNEL_ID CF_ACCESS_ORYX_TUNNEL_SECRET -- sh -c '\''printf "TUNNEL_SERVICE_TOKEN_ID=%s\nTUNNEL_SERVICE_TOKEN_SECRET=%s\n" "$CF_ACCESS_ORYX_TUNNEL_ID" "$CF_ACCESS_ORYX_TUNNEL_SECRET"'\''' > "$token_tmp" || copy_status=$?
+if ((copy_status)); then
+    rm -f "$token_tmp"
+    stop token "could not copy the Cloudflare Access tunnel token from oryx: ssh oryx secrets failed (exit $copy_status)"
+fi
+if ! valid_token_file "$token_tmp"; then
+    rm -f "$token_tmp"
+    stop token "oryx returned a malformed Cloudflare Access tunnel token file"
+fi
+if [[ -f "$token_file" ]] && cmp -s "$token_tmp" "$token_file"; then
+    rm -f "$token_tmp"
+else
+    mv -f "$token_tmp" "$token_file"
+fi
+chmod 600 "$token_file"
+leak_result="$(token_leak_result "$token_file")"
+report_line "token: copied; dotfiles search: $leak_result"
+[[ "$leak_result" == none ]] || stop token "the dotfiles tunnel token search returned $leak_result"
+
+mkdir -p "$HOME/.config/systemd/user/forward-tunnel@oryx.service.d" "$HOME/.config/forward"
+if ! ensure_link "$DOTFILES/forward/forward-daemon@.service" "$HOME/.config/systemd/user/forward-daemon@.service" \
+    || ! ensure_link "$DOTFILES/forward/forward-tunnel@.service" "$HOME/.config/systemd/user/forward-tunnel@.service" \
+    || ! ensure_link "$DOTFILES/forward/forward-tunnel@oryx.service.d/token.conf" "$HOME/.config/systemd/user/forward-tunnel@oryx.service.d/token.conf" \
+    || ! ensure_link "$DOTFILES/forward/config-daemon-oryx.toml" "$HOME/.config/forward/config-oryx.toml"; then
+    stop unit-files "could not install a tunnel unit file"
+fi
+if ! systemctl --user daemon-reload; then
+    stop unit-files "could not reload user units"
+fi
+report_line "unit-files: complete"
+
+if ! ssh oryx 'umask 077; mkdir -p ~/.config/forward && t=$(mktemp ~/.config/forward/.config-XXXXXX.toml) && cat >"$t" && mv -f "$t" ~/.config/forward/config.toml && systemctl --user restart forward-serve.service' < "$DOTFILES/forward/config-serve-oryx.toml"; then
+    stop move "could not atomically replace oryx's forward configuration and restart forward-serve.service"
+fi
+report_line "move: wrote oryx ~/.config/forward/config.toml and restarted forward-serve.service"
+
+for unit in forward-daemon@oryx.service forward-tunnel@oryx.service; do
+    if ! systemctl --user enable --now "$unit"; then
+        stop units "could not enable and start $unit"
+    fi
+done
+if ! systemctl --user restart forward-daemon@oryx.service; then
+    stop units "could not restart forward-daemon@oryx.service"
+fi
+if ! systemctl --user restart forward-tunnel@oryx.service; then
+    stop units "could not restart forward-tunnel@oryx.service"
+fi
+for unit in forward-daemon@oryx.service forward-tunnel@oryx.service; do
+    wait_for_unit "$unit" || stop units "$unit did not become active; its last journal lines are in the report"
+done
+report_line "units: complete"
+
+stop_old_masters
+# Confirm that the old tunnel's port 12799 is gone.
+old_status=0
+old_listener="$(ssh oryx 'ss -Hltn "( sport = :12799 )"')" || old_status=$?
+((old_status == 0)) || stop old-tunnel "could not check oryx port 12799 through ssh oryx (exit $old_status)"
+[[ -z "$old_listener" ]] || stop old-tunnel "oryx still has a listener on port 12799"
+report_line "old-tunnel: complete"
+
+forward_status=0
+bash "$DOTFILES/installers/forward.sh" daemon || forward_status=$?
+if ((forward_status)); then
+    stop devbox-forward "forward.sh daemon failed (exit $forward_status); its message is above"
+fi
+report_line "devbox-forward: complete"
+
+self_token_mode() {
+    PROBE_VALUE="$(stat -c '%a %U' "$token_file")" || return 1
+    [[ "$PROBE_VALUE" == "600 $(id -un)" ]]
+}
+
+self_token_leak_search() {
+    PROBE_VALUE="$(token_leak_result "$token_file")"
+    [[ "$PROBE_VALUE" == none ]]
+}
+
+self_probe "unit forward-daemon@oryx.service" self_unit_active forward-daemon@oryx.service
+self_probe "unit forward-tunnel@oryx.service" self_unit_active forward-tunnel@oryx.service
+self_probe "devboxes daemon configuration" self_devboxes_config
+self_probe "ssh configuration" self_ssh_config
+self_probe "ssh oryx true" probe_exit ssh oryx true
+wait_for_tunnel || true
+tunnel_self_probe "forward doctor oryx pair" self_command_output "forward doctor oryx pair" "$DOTFILES/bin/mise" exec -- forward doctor --config "$HOME/.config/forward/config-oryx.toml"
+self_probe "forward doctor devboxes" self_command_output "forward doctor devboxes" "$DOTFILES/bin/mise" exec -- forward doctor
+tunnel_self_probe "oryx forward doctor" self_command_output "oryx forward doctor" ssh oryx 'forward doctor'
+tunnel_self_probe "preview delivery" delivery_preview
+tunnel_self_probe "forward port delivery" delivery_forward_port
+tunnel_self_probe "browser page delivery" delivery_page
+tunnel_self_probe "audio delivery" delivery_sound
+tunnel_self_probe "browser grant delivery" delivery_browser
+tunnel_self_probe "human-tier read" human_tier_read
+self_probe "oryx SSM login" probe_exit ssh oryx-ssm true
+self_probe "token file mode and owner" self_token_mode
+self_probe "token leak search" self_token_leak_search
+self_probe "laptop port 22" self_laptop_port_22
+write_probe_configs
+self_probe "tunnel key true" key_probe_true
+self_probe "tunnel key forced command" key_probe_no_shell
+self_probe "tunnel key rejects remote port 12999" key_probe_denied_remote_forward
+self_probe "tunnel key rejects stdio forwarding" key_probe_denied_stdio
+self_probe "tunnel key rejects remote socket forwarding" key_probe_denied_remote_socket
+self_probe "tunnel key rejects local socket forwarding" key_probe_denied_local_socket
+self_probe "login key shell" key_probe_login_key
+
+if ((${#self_failures[@]})); then
+    stop self-check "failed probes: ${self_failures[*]}"
+fi
+report_line "self-check: complete"
+
+finish || exit 1

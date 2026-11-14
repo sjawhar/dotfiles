@@ -2,14 +2,13 @@
 # sami-leanperf (dispatch://INFRA-993). Fields mean what config-serve-oryx.toml
 # says; the pair is carried over an SSH tunnel to the VM, as
 # config-serve-sami-leanperf.toml describes (forward-tunnel@sami-devbox, Host
-# sami-devbox-tunnel). While the two old boxes run, the laptop holds 127.0.0.1
-# (sami-leanperf) and 127.0.0.2 (sami-rocqperf), so this pair takes 127.0.0.3 at
-# both ends: preview URLs name 127.0.0.3:12802. The laptop dials the bridge and
-# grant feed at its 127.0.0.1 peer, where sami-leanperf's pair uses 12801 and
-# the default grant port and sami-rocqperf's 12811 and 12815, so these two move
-# to 12821 and 12825. sshd makes
-# the far-end connection from 127.0.0.1, so that is the peer, and any process on
-# this VM can reach these channels the way the laptop does.
+# sami-devbox-tunnel). Oryx's tunnel pair holds 127.0.0.1 with the default
+# ports and sami-rocqperf holds 127.0.0.2, so this pair takes 127.0.0.3 at both
+# ends: preview URLs name 127.0.0.3:12802. The laptop dials the bridge and grant
+# feed at its 127.0.0.1 peer, where oryx's pair uses 12801 and the default grant
+# port and sami-rocqperf's uses 12811 and 12815, so these two move to 12821 and
+# 12825. sshd makes the far-end connection from 127.0.0.1, so that is the peer,
+# and any process on this VM can reach these channels the way the laptop does.
 listen = "127.0.0.3"
 peer = "127.0.0.1"
 

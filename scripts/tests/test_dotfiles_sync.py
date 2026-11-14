@@ -13,7 +13,9 @@ main@origin`) conflicted and left markers in shims/gh for 20 seconds.
 
 from __future__ import annotations
 
+import fcntl
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -273,6 +275,44 @@ class SyncHere(DotfilesCheckout):
         # The old commit nothing builds on is gone; the ones under the side branch stay.
         self.assertEqual(self.jj("log", "-r", f"{old} & ::visible_heads()", "--no-graph", "-T", "commit_id"), "")
         self.assertEqual(self.jj("log", "-r", f"{a2} & ::visible_heads()", "--no-graph", "-T", "commit_id"), a2)
+
+    def test_the_common_directory_lock_refuses_without_moving_then_allows_the_move(self) -> None:
+        (self.upstream / "shared.txt").write_text("upstream edit\n")
+        self.commit_upstream("upstream")
+        parent = self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id")
+        common = self.run_ok("git", "rev-parse", "--git-common-dir", cwd=self.checkout).strip()
+        lock = self.checkout / common / "dotfiles-sync.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with lock.open("w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = subprocess.run(
+                ["bash", str(SYNC), "--here", ""],
+                env={**self.env, "DOTFILES_SYNC_LOCK_WAIT": "1"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(f"another dotfiles-sync holds {common}/dotfiles-sync.lock; not moved", result.stderr)
+            self.assertEqual(self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"), parent)
+            self.assertEqual((self.checkout / "shared.txt").read_text(), "base\n")
+        result = self.sync()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.checkout / "shared.txt").read_text(), "upstream edit\n")
+        self.assertEqual(
+            self.jj("log", "-r", "@-", "--no-graph", "-T", "commit_id"),
+            self.jj("log", "-r", "main@origin", "--no-graph", "-T", "commit_id"),
+        )
+
+
+class Machines(unittest.TestCase):
+    def test_oryx_is_not_a_sync_machine(self) -> None:
+        match = re.search(r"^MACHINES=\(\n(?P<entries>.*?)^\)", SYNC.read_text(), re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match)
+        entries = re.findall(r"^\s*(\S+?)=(\S+)\s*$", match.group("entries"), re.MULTILINE)
+        self.assertTrue(entries)
+        for name, destination in entries:
+            self.assertNotEqual(name, "oryx")
+            self.assertNotEqual(destination.rsplit("@", 1)[-1], "oryx")
 
 
 PUBLISH = Path(__file__).resolve().parents[1] / "dotfiles-publish"

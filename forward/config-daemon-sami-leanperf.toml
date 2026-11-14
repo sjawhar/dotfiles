@@ -1,9 +1,10 @@
 # Laptop role, sami-leanperf pair: run by forward-daemon@sami-leanperf.service.
-# Fields and URL policy are explained in config-daemon-oryx.toml. This pair is
-# carried over an SSH tunnel to the VM, so the daemon listens on
+# Fields and URL policy are explained in config-daemon-oryx.toml. This legacy
+# pair is carried over an SSH tunnel to the VM, so the daemon listens on
 # loopback and forward-tunnel@sami-leanperf.service carries every channel (Host
-# sami-leanperf-tunnel in ~/.ssh/config.local). oryx's pair holds the laptop's
-# tailnet address, so forward's default ports are free on 127.0.0.1 here.
+# sami-leanperf-tunnel in ~/.ssh/config.local). Oryx's tunnel pair holds the
+# laptop's 127.0.0.1 and default ports; this retained legacy config shares them
+# only until migration removes it.
 # Tunnelled connections arrive from 127.0.0.1, which any local process shares.
 listen = "127.0.0.1"
 peer = "127.0.0.1"

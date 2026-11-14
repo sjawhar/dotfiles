@@ -44,7 +44,7 @@ class ForwardInstaller(unittest.TestCase):
             "self": "100.80.0.1",
             "self-vm": "100.80.0.3",
             "sami": "100.80.0.1",
-            "oryx": "100.80.0.2",
+            "sami-leanperf": "100.80.0.2",
             "sami-devbox": "100.80.0.3",
             "sami-rocqperf": "100.80.0.5",
         }.items():
@@ -123,7 +123,7 @@ class ForwardInstaller(unittest.TestCase):
     def test_serve_stops_enabled_or_active_pcsc_bridge_before_start_without_deleting_unit(self) -> None:
         unit = self.home / ".config/systemd/user/pcscd-bridge.service"
         unit.parent.mkdir(parents=True)
-        unit.symlink_to(DOTFILES / "devbox/pcscd-bridge.service")
+        unit.write_text("[Service]\n", encoding="utf-8")
         for state in (
             {"PCSC_UNIT_FILES": "pcscd-bridge.service enabled enabled"},
             {"PCSC_ACTIVE_UNITS": "pcscd-bridge.service loaded active running Bridge"},
@@ -131,13 +131,12 @@ class ForwardInstaller(unittest.TestCase):
             with self.subTest(state=state):
                 if self.systemctl_log.exists():
                     self.systemctl_log.unlink()
-                install = self.install("serve", STUB_HOSTNAME="oryx", **state)
+                install = self.install("serve", STUB_HOSTNAME="sami-devbox", **state)
                 self.assertEqual(install.returncode, 0, install.stderr)
                 log = self.systemctl_log.read_text().splitlines()
                 self.assertLess(log.index("--user disable --now pcscd-bridge.service"),
                                 log.index("--user enable --now forward-serve"))
-                self.assertTrue(unit.is_symlink())
-                self.assertEqual(unit.resolve(), DOTFILES / "devbox/pcscd-bridge.service")
+                self.assertEqual(unit.read_text(encoding="utf-8"), "[Service]\n")
                 self.assertTrue((self.home / ".pcscd").is_dir())
 
     def test_serve_stops_and_clears_a_not_found_bridge_without_disabling_it(self) -> None:
@@ -190,7 +189,7 @@ class ForwardInstaller(unittest.TestCase):
         self.assertEqual(install.returncode, 0, install.stderr)
         config = self.installed_config()
         self.assertEqual(config["listen"], "100.80.0.1")
-        self.assertEqual(config["peers"], ["100.80.0.2", "100.80.0.3", "100.80.0.5"])
+        self.assertEqual(config["peers"], ["100.80.0.3", "100.80.0.5"])
         self.assertNotIn("peer", config)
         self.assertEqual(config["mode"], "allowlist")
         self.assertEqual(config["opener"], ["/usr/bin/xdg-open"])
@@ -204,6 +203,67 @@ class ForwardInstaller(unittest.TestCase):
         self.assertFalse(any("enable --now forward-daemon@" in line for line in log))
         unit = self.home / ".config/systemd/user/forward-daemon.service"
         self.assertEqual(unit.resolve(), self.dotfiles / "forward/forward-daemon.service")
+
+    def test_hosts_excludes_oryx(self) -> None:
+        hosts = tomllib.loads((FORWARD / "hosts.toml").read_text(encoding="utf-8"))
+        self.assertNotIn("oryx", hosts["dev_vms"])
+
+    def test_daemon_keeps_the_oryx_tunnel_units_enabled(self) -> None:
+        self.legacy_units.write_text(
+            "forward-daemon@oryx.service enabled enabled\n"
+            "forward-tunnel@oryx.service loaded active running Tunnel\n"
+            "forward-daemon@sami-leanperf.service enabled enabled\n",
+            encoding="utf-8",
+        )
+
+        install = self.install("daemon")
+
+        self.assertEqual(install.returncode, 0, install.stderr)
+        log = self.systemctl_log.read_text().splitlines()
+        self.assertIn("--user disable --now forward-daemon@sami-leanperf.service", log)
+        self.assertNotIn("--user disable --now forward-daemon@oryx.service", log)
+        self.assertNotIn("--user disable --now forward-tunnel@oryx.service", log)
+
+    def test_serve_refuses_oryx_before_tailscale_or_service_changes(self) -> None:
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text('listen = "127.0.0.1"\npeer = "127.0.0.1"\n', encoding="utf-8")
+        previous = self.config.read_bytes()
+        (self.stub_dir / "tailscale").unlink()
+
+        install = self.install("serve", STUB_HOSTNAME="oryx")
+
+        self.assertEqual(install.returncode, 1)
+        self.assertIn(
+            "forward.sh serve: oryx's forward is the loopback tunnel pair; "
+            "laptop/oryx-tunnel-setup writes its config",
+            install.stderr,
+        )
+        self.assertEqual(self.config.read_bytes(), previous)
+        self.assertFalse(self.systemctl_log.exists())
+
+    def test_oryx_tunnel_unit_and_token_file_restart_without_a_start_limit(self) -> None:
+        unit = (FORWARD / "forward-tunnel@.service").read_text(encoding="utf-8")
+        values = dict(
+            line.split("=", 1)
+            for line in unit.splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        )
+        self.assertEqual(values["Restart"], "always")
+        self.assertLessEqual(int(values["RestartSec"]), 10)
+        self.assertEqual(values["StartLimitIntervalSec"], "0")
+        token_file = FORWARD / "forward-tunnel@oryx.service.d/token.conf"
+        environment_file = next(
+            line for line in token_file.read_text(encoding="utf-8").splitlines()
+            if line.startswith("EnvironmentFile=")
+        )
+        self.assertEqual(environment_file, "EnvironmentFile=%h/.config/forward/tunnel-oryx.env")
+
+    def test_oryx_preview_url_is_allowed_by_its_daemon(self) -> None:
+        serve = load("config-serve-oryx.toml")
+        daemon = load("config-daemon-oryx.toml")
+        preview_url = f"http://{serve['listen']}:12802"
+        self.assertIn(preview_url.removeprefix("http://"), daemon["allow"])
+
 
     def test_inventory_alone_adds_a_vm_without_pair_files(self) -> None:
         (self.dotfiles / "forward/hosts.toml").write_text(
@@ -233,7 +293,7 @@ class ForwardInstaller(unittest.TestCase):
     def test_retry_restarts_daemon_after_failed_install_already_replaced_config(self) -> None:
         first = self.install("daemon")
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertIn("100.80.0.2", self.installed_config()["peers"])
+        self.assertEqual(self.installed_config()["peers"], ["100.80.0.3", "100.80.0.5"])
         (self.dotfiles / "forward/hosts.toml").write_text(
             'laptop = "sami"\ndev_vms = ["sami-devbox"]\n', encoding="utf-8",
         )
@@ -315,7 +375,7 @@ class ForwardInstaller(unittest.TestCase):
         inventory = self.dotfiles / "forward/hosts.toml"
         for contents in (
             'laptop = "sami"\ndev_vms = []\n',
-            'laptop = "sami"\ndev_vms = ["oryx", "oryx"]\n',
+            'laptop = "sami"\ndev_vms = ["sami-leanperf", "sami-leanperf"]\n',
             'laptop = "sami"\ndev_vms = ["bad name"]\n',
             'laptop = "sami"\ndev_vms = ["sami"]\n',
         ):
@@ -328,17 +388,21 @@ class ForwardInstaller(unittest.TestCase):
                 self.assertFalse(self.systemctl_log.exists())
 
     def test_duplicate_peer_address_is_not_silently_accepted(self) -> None:
+        (self.dotfiles / "forward/hosts.toml").write_text(
+            'laptop = "sami"\ndev_vms = ["sami-leanperf", "sami-devbox"]\n',
+            encoding="utf-8",
+        )
         (self.lookups / "sami-devbox").write_text("100.80.0.2\n", encoding="utf-8")
         install = self.install("daemon")
         self.assertNotEqual(install.returncode, 0)
-        self.assertIn("oryx", install.stderr)
+        self.assertIn("sami-leanperf", install.stderr)
         self.assertIn("sami-devbox", install.stderr)
         self.assertFalse(self.config.exists())
         self.assertFalse(self.systemctl_log.exists())
 
     def test_migration_disables_legacy_instances_without_deleting_artifacts(self) -> None:
         self.legacy_units.write_text(
-            "forward-daemon@oryx.service enabled enabled\n"
+            "forward-daemon@sami-leanperf.service enabled enabled\n"
             "forward-tunnel@sami-devbox.service loaded active running Tunnel\n"
             "forward-tunnel@retired-vm.service enabled enabled\n"
             "forward-daemon@.service disabled enabled\n",
@@ -363,7 +427,7 @@ class ForwardInstaller(unittest.TestCase):
         install = self.install("daemon")
         self.assertEqual(install.returncode, 0, install.stderr)
         log = self.systemctl_log.read_text().splitlines()
-        for unit in ("forward-daemon@oryx.service", "forward-tunnel@sami-devbox.service", "forward-tunnel@retired-vm.service"):
+        for unit in ("forward-daemon@sami-leanperf.service", "forward-tunnel@sami-devbox.service", "forward-tunnel@retired-vm.service"):
             self.assertIn(f"--user disable --now {unit}", log)
         self.assertNotIn("--user disable --now forward-daemon@.service", log)
         for path, contents in legacy.items():

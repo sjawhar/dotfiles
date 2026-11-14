@@ -1,0 +1,122 @@
+#!/bin/bash
+# Set up the SSH client that connects this Termux phone to oryx through Cloudflare Access.
+set -euo pipefail
+
+ssh_dir="$HOME/.ssh"
+key="$ssh_dir/id_ed25519"
+config="$ssh_dir/config"
+known_hosts="$ssh_dir/known_hosts"
+config_begin="# BEGIN phone/termux-setup oryx"
+config_end="# END phone/termux-setup oryx"
+known_hosts_line="oryx.thecybermonk.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN16uW+GsQu5KiAmxnFHlSdoz7jDM3N938v6hAZnrF53"
+managed_config=$(cat <<'EOF'
+# BEGIN phone/termux-setup oryx
+Host oryx
+  HostName oryx.thecybermonk.com
+  User agent
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+# END phone/termux-setup oryx
+EOF
+)
+
+mkdir -p "$ssh_dir"
+chmod 700 "$ssh_dir"
+
+pkg_output=$(mktemp)
+config_tmp=""
+rest_tmp=""
+trap 'rm -f "$pkg_output" "$config_tmp" "$rest_tmp"' EXIT
+if ! pkg install -y openssh cloudflared >"$pkg_output" 2>&1; then
+    cat "$pkg_output" >&2
+    exit 1
+fi
+
+if [[ ! -f "$key" ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C "phone@termux" -f "$key"
+elif [[ ! -f "$key.pub" ]]; then
+    ssh-keygen -y -f "$key" > "$key.pub"
+fi
+
+has_config_begin=0
+has_config_end=0
+if [[ -f "$config" ]]; then
+    grep -Fqx -- "$config_begin" "$config" && has_config_begin=1 || true
+    grep -Fqx -- "$config_end" "$config" && has_config_end=1 || true
+fi
+
+if [[ "$has_config_begin" != "$has_config_end" ]]; then
+    printf 'termux-setup: SSH config has an unmatched managed-block marker\n' >&2
+    exit 1
+fi
+
+# The managed block goes before the first Host or Match line: ssh takes the first value it reads,
+# so an older Host oryx or a Host * further down cannot change where ssh oryx goes. Lines above the
+# first Host or Match line apply to every host, so they stay above the block; one that would change
+# where ssh oryx goes fails the check below.
+config_tmp=$(mktemp "$ssh_dir/.config.XXXXXX")
+rest_tmp=$(mktemp "$ssh_dir/.config-rest.XXXXXX")
+if [[ -f "$config" ]]; then
+    if ! awk -v begin="$config_begin" -v end="$config_end" '
+        $0 == begin { if (inside || seen) { bad = 1; exit } inside = 1; seen = 1; next }
+        $0 == end { if (!inside) { bad = 1; exit } inside = 0; next }
+        !inside { print }
+        END { if (inside || bad) exit 1 }
+    ' "$config" > "$rest_tmp"; then
+        printf 'termux-setup: SSH config has a broken managed block\n' >&2
+        exit 1
+    fi
+fi
+# Split the rest at its first Host or Match line (ssh keywords are case-insensitive).
+first_section() {
+    awk '{ word = tolower($1); sub(/=.*/, "", word) } word == "host" || word == "match" { exit } { print }' "$rest_tmp"
+}
+sections() {
+    awk 'found { print; next } { word = tolower($1); sub(/=.*/, "", word) } word == "host" || word == "match" { found = 1; print }' "$rest_tmp"
+}
+# Drop blank lines at the start and the end, the ones that used to separate the managed block.
+trim_blank() { awk 'NF { for (; held > 0; held--) print ""; print; started = 1; next } started { held++ }'; }
+{
+    preamble=$(first_section | trim_blank)
+    if [[ -n "$preamble" ]]; then
+        printf '%s\n\n' "$preamble"
+    fi
+    printf '%s\n' "$managed_config"
+    rest=$(sections | trim_blank)
+    if [[ -n "$rest" ]]; then
+        printf '\n%s\n' "$rest"
+    fi
+} > "$config_tmp"
+rm -f "$rest_tmp"
+mv "$config_tmp" "$config"
+config_tmp=""
+
+# Check what ssh oryx will use, not what the file says.
+effective=$(ssh -F "$config" -G oryx 2>&1) || {
+    printf 'termux-setup: ssh -G oryx failed:\n%s\n' "$effective" >&2
+    exit 1
+}
+first_value() { awk -v key="$1" '$1 == key { sub(/^[^ ]+ /, ""); print; exit }' <<< "$effective"; }
+# IdentityFile adds to a list, so a file a line above the block names is tried too; the phone's key
+# must be in that list.
+if ! grep -Fqx 'identityfile ~/.ssh/id_ed25519' <<< "$effective"; then
+    printf 'termux-setup: ssh oryx would not offer ~/.ssh/id_ed25519; check %s\n' "$config" >&2
+    exit 1
+fi
+for expected in "hostname oryx.thecybermonk.com" "user agent" \
+    "proxycommand cloudflared access ssh --hostname %h"; do
+    field="${expected%% *}"
+    if [[ "$(first_value "$field")" != "${expected#* }" ]]; then
+        printf 'termux-setup: ssh oryx would use %s %s, not %s; check %s\n' \
+            "$field" "$(first_value "$field")" "${expected#* }" "$config" >&2
+        exit 1
+    fi
+done
+
+touch "$known_hosts"
+if ! grep -Fqx -- "$known_hosts_line" "$known_hosts"; then
+    printf '%s\n' "$known_hosts_line" >> "$known_hosts"
+fi
+
+cat "$key.pub"

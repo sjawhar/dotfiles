@@ -1,4 +1,4 @@
-# One laptop daemon over the tailnet
+# One laptop daemon for the Tailscale VMs
 
 ## Prerequisites and the laptop command
 
@@ -11,12 +11,14 @@ Repin `tools.forward` in `mise.toml` to that release and distribute this dotfile
 revision to the laptop and each VM first. The installer installs the selected
 Forward version if it is missing; it does not upgrade an already selected binary.
 Do not move the separate `tools.secrets` pin or restart secretsd for this migration.
-Python 3.11 or newer, a joined Tailscale client, and a working systemd user session
-are required on each machine. Forward uses `~/.config/forward/config.toml` for
-the shell, user units and agent boxes. `XDG_CONFIG_HOME` must be unset, empty or
-exactly `$HOME/.config`; installers and box channel discovery reject other
-values. The installer checks this before writing files or changing services.
-Both Forward user units also pass this config path explicitly, so a different
+Python 3.11 or newer, a joined Tailscale client on the laptop and Tailscale VMs,
+and a working systemd user session are required. Oryx is not a Tailscale VM in
+this migration: its loopback pair rides `forward-tunnel@oryx` through Cloudflare
+Access. Forward uses `~/.config/forward/config.toml` for the shell, user units
+and agent boxes. `XDG_CONFIG_HOME` must be unset, empty or exactly
+`$HOME/.config`; installers and box channel discovery reject other values. The
+installer checks this before writing files or changing services. Both Forward
+user units also pass this config path explicitly, so a different
 `XDG_CONFIG_HOME` inherited by the user manager cannot select another config.
 No laptop access or service changes occur merely from committing these files.
 
@@ -26,24 +28,25 @@ After those prerequisites, Sami runs exactly one command on the laptop:
 bash ~/.dotfiles/installers/forward.sh daemon
 ```
 
-This is migration step 2, not a dry run. It generates one daemon config, disables
-and stops legacy pair instances, and enables and restarts the single daemon and
-browser relay. The Chrome extension installs at `~/.omp/browser-relay/extension`
-regardless of the invoking omp profile; Flatpak Chrome receives read-only access
-to that same directory. The old per-pair configs, template units, keys and SSH
-configuration remain.
-The laptop channels become available to each VM when that VM completes step 3;
-coordinate steps 2 and 3 as one migration window.
+This is migration step 2, not a dry run. It generates one daemon config,
+disables and stops legacy pair instances except the `oryx` loopback tunnel pair,
+and enables and restarts the single daemon and browser relay. The Chrome
+extension installs at `~/.omp/browser-relay/extension` regardless of the
+invoking omp profile; Flatpak Chrome receives read-only access to that same
+directory. The old per-pair configs, template units, keys and SSH configuration
+remain. The laptop channels become available to each VM when that VM completes
+step 3; coordinate steps 2 and 3 as one migration window.
 
 ## Migration
 
 1. Release forward with `peers`. A single `peer` stays valid, so old pairs keep working.
 
    Complete the release, repin and distribution prerequisites above. Keep the
-   legacy `config-daemon-*.toml`, `config-serve-*.toml`, `forward-daemon@.service`
-   and `forward-tunnel@.service` in place during steps 1 through 3.
+   legacy `config-daemon-*.toml`, `config-serve-*.toml`,
+   `forward-daemon@.service` and `forward-tunnel@.service` in place during
+   steps 1 through 3, including the oryx tunnel pair files.
 
-2. Laptop: one `forward-daemon.service` with every VM's IP. Disable the `@` units.
+2. Laptop: one `forward-daemon.service` with every Tailscale VM's IP. Disable legacy `@` units, except oryx's tunnel pair.
 
    Run the one laptop command above. The installer resolves its own address with
    `tailscale ip -4` and every name in `hosts.toml` with `tailscale ip -4 <name>`.
@@ -51,21 +54,25 @@ coordinate steps 2 and 3 as one migration window.
    `~/.config/forward/config.toml`, with the shared policy from
    `daemon-policy.toml`. It disables all installed or loaded
    `forward-daemon@<pair>.service` and `forward-tunnel@<pair>.service` instances,
-   including retired names, without removing their files. It does not create a
-   key, SSH block, tunnel, port allocation or port-443 listener.
+   including retired names, except the `oryx` pair that
+   `laptop/oryx-tunnel-setup` manages. It does not create a key, SSH block,
+   tunnel, port allocation or port-443 listener.
 
 3. Each VM: an installer-made `config-serve`, then `forward doctor`.
 
-   On each VM in `hosts.toml`, run `bash ~/.dotfiles/installers/forward.sh serve`,
-   then `forward doctor`. The installer requires the VM's short hostname in
-   `dev_vms`, uses its own `tailscale ip -4` address for `listen`, and resolves the
-   inventory's laptop name to the literal `peer`. The generated serve config is
-   `~/.config/forward/config.toml`, not a committed machine-specific file. Before
-   starting serve, the installer stops and disables an installed or loaded
-   `pcscd-bridge.service`, including an active-but-disabled bridge, so Forward
-   can own `~/.pcscd/pcscd.comm`. The bridge is optional; its unit file is retained
-   when present. A loaded `not-found` bridge is stopped and its failed state
-   cleared instead of disabling a unit file that no longer exists.
+   Oryx is not in `hosts.toml`; `laptop/oryx-tunnel-setup` writes its loopback
+   serve configuration. On each VM in `hosts.toml`, run
+   `bash ~/.dotfiles/installers/forward.sh serve`, then `forward doctor`. The
+   installer requires the VM's short hostname in `dev_vms`, uses its own
+   `tailscale ip -4` address for `listen`, and resolves the inventory's laptop
+   name to the literal `peer`. The generated serve config is
+   `~/.config/forward/config.toml`, not a committed machine-specific file.
+   Before starting serve, the installer stops and disables an installed or
+   loaded `pcscd-bridge.service`, including an active-but-disabled bridge, so
+   Forward can own `~/.pcscd/pcscd.comm`. The bridge is optional; its unit file
+   is retained when present.
+   A loaded `not-found` bridge is stopped and its failed state cleared instead
+   of disabling a unit file that no longer exists.
    A failed ownership transition fails the install without starting serve. Both roles
    use Forward's default ports: URL 12800, callback bridge 12801, preview 12802,
    browser relay 12803, PC/SC 12804, grant feed 12805 and audio 12806. The callback
@@ -84,13 +91,14 @@ coordinate steps 2 and 3 as one migration window.
    Direct tailnet addresses route normally; the box does not bind the host's
    tailnet IP.
 
-4. Delete the per-pair tomls, `forward-tunnel@.service`, the tunnel branch, the ssh blocks, the 443 drop-in and the `authorized_keys` line.
+4. Remove obsolete tailnet pair artifacts, keeping oryx's tunnel pair.
 
-   Do this only after every VM passes step 3. Remove the obsolete daemon template
-   `forward-daemon@.service` and its installed per-pair config/unit links too.
-   Identify the Forward tunnel entries explicitly; leave unrelated SSH blocks,
-   keys, `authorized_keys` entries and sshd settings alone. Steps 1 through 3 do
-   not perform this cleanup, and this installer does not remove these artifacts.
+   Do this only after every VM passes step 3. Keep
+   `forward-tunnel@.service`, `forward-daemon@.service`, and the oryx pair
+   files. Remove obsolete per-pair config and unit links explicitly; leave
+   unrelated SSH blocks, keys, `authorized_keys` entries and sshd settings
+   alone. Steps 1 through 3 do not perform this cleanup, and this installer
+   does not remove these artifacts.
 
 5. Optional: add the ACL.
 
