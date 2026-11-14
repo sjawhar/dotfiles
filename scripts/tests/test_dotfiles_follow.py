@@ -63,8 +63,8 @@ FAKE_KNIVES = f"""#!/bin/sh
 echo "knives {PIN}"
 """
 FAKE_BUN = """#!/bin/sh
-# bun install --frozen-lockfile: logs where it ran, exits FAKE_BUN_RC.
-echo "bun $* in ${PWD##*/.dotfiles/}" >> "$FAKE_LOG"
+# bun install --frozen-lockfile: logs its directory and data directory, then exits FAKE_BUN_RC.
+echo "bun $* in ${PWD##*/.dotfiles/} data=${MISE_DATA_DIR-unset}" >> "$FAKE_LOG"
 [ "${FAKE_BUN_RC:-0}" = 0 ] || echo "error: lockfile had changes, but lockfile is frozen" >&2
 exit "${FAKE_BUN_RC:-0}"
 """
@@ -346,6 +346,41 @@ class InstallTools(Harness):
         self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
         records = [line for line in self.fake_log.read_text().splitlines() if line.startswith("install ")]
         self.assertEqual(records, [f"install data={self.home / '.mise'}"])
+
+    def write_recording_pin_check(self) -> None:
+        check = self.repo / "devbox/sami-devbox-check"
+        check.write_text('#!/bin/sh\necho "check data=${MISE_DATA_DIR-unset}" >> "$FAKE_LOG"\n')
+        check.chmod(0o755)
+
+    def assert_tools_use_data_directory(self, expected: Path) -> None:
+        records = self.fake_log.read_text().splitlines()
+        mise = next(record for record in records if record.startswith("install held "))
+        bun = next(record for record in records if record.startswith("bun install --frozen-lockfile "))
+        check = next(record for record in records if record.startswith("check data="))
+        self.assertEqual(mise.rsplit(" ", 1)[1], str(expected))
+        self.assertEqual(bun.rsplit("data=", 1)[1], mise.rsplit(" ", 1)[1])
+        self.assertEqual(check.removeprefix("check data="), mise.rsplit(" ", 1)[1])
+
+    def test_every_tools_command_gets_the_default_mise_data_directory(self) -> None:
+        self.assertNotIn("MISE_DATA_DIR", os.environ)
+        self.write_recording_pin_check()
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+
+        self.assert_tools_use_data_directory(self.home / ".mise")
+
+    def test_every_tools_command_gets_the_absolute_relative_mise_data_directory(self) -> None:
+        previous = Path.cwd()
+        data = self.home / "rel-data"
+        self.write_recording_pin_check()
+        try:
+            os.chdir(self.home)
+            os.environ["MISE_DATA_DIR"] = "rel-data"
+            self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        finally:
+            os.chdir(previous)
+
+        self.assert_tools_use_data_directory(data)
 
     def test_mise_install_timeout_waiting_for_the_shared_data_lock(self) -> None:
         data = self.home / "mise-data"

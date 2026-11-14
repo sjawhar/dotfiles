@@ -418,7 +418,9 @@ def omp_profile_is_legion() -> bool:
         return False
 
 
-def install_marketplace_plugins(repo: Path, timeout: float) -> str:
+def install_marketplace_plugins(
+    repo: Path, timeout: float, *, environment: dict[str, str] | None = None
+) -> str:
     """Return why an installed marketplace pin is missing; try to restore the managed lock."""
     if omp_profile_is_legion():
         return "omp plugin commands are not run because the machine profile is legion."
@@ -476,7 +478,10 @@ def install_marketplace_plugins(repo: Path, timeout: float) -> str:
                         failures.append(f"{plugin}: marketplace step's {MARKETPLACE_TIMEOUT:g}s budget exhausted; retry next run.")
                         break
                     command_timeout = min(timeout, MARKETPLACE_COMMAND_TIMEOUT, remaining)
-                    code, out = run_step([omp, *args], repo, command_timeout, clear_omp_profiles=True)
+                    code, out = run_step(
+                        [omp, *args], repo, command_timeout,
+                        clear_omp_profiles=True, environment=environment,
+                    )
                     if code != 0:
                         failures.append(f"{plugin}: `omp {' '.join(args)}` exited {code}:\n{tail(out)}")
                         break
@@ -509,7 +514,9 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
     if code != 0:
         return f"`scripts/omp-link-rules` in {display_path(repo)} exited {code}:\n{tail(out)}"
     log("rules: omp/rules/*.md linked into ~/.omp/agent/rules/")
+    # Every tools command gets this absolute directory, so it uses the same data as mise's lock.
     data = Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise").absolute()
+    environment = {"MISE_DATA_DIR": str(data)}
     lock = data / ".dotfiles-install.lock"
     wait_failure = (
         f"`mise install` in {display_path(repo)} did not start: another install held "
@@ -536,9 +543,7 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return wait_failure
-            code, out = run_step(
-                ["mise", "install"], repo, remaining, environment={"MISE_DATA_DIR": str(data)}
-            )
+            code, out = run_step(["mise", "install"], repo, remaining, environment=environment)
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
     if code != 0:
@@ -549,14 +554,16 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
     # 2026-11-03 such a hand install wrote the pin into this checkout and stopped the follower.
     plugins = repo / "omp/plugins"
     if (plugins / "package.json").is_file():
-        code, out = run_step(["bun", "install", "--frozen-lockfile"], plugins, options.mise_timeout)
+        code, out = run_step(
+            ["bun", "install", "--frozen-lockfile"], plugins, options.mise_timeout, environment=environment
+        )
         if code != 0:
             return f"`bun install --frozen-lockfile` in {display_path(plugins)} exited {code}:\n{tail(out)}"
-    why = install_marketplace_plugins(repo, options.mise_timeout)
+    why = install_marketplace_plugins(repo, options.mise_timeout, environment=environment)
     if why:
         return why
     check = repo / "devbox/sami-devbox-check"
-    code, out = run_step([str(check), "--pins"], repo, options.check_timeout)
+    code, out = run_step([str(check), "--pins"], repo, options.check_timeout, environment=environment)
     if code != 0:
         return f"`mise install` and the plugin installs passed, but `devbox/sami-devbox-check --pins` exited {code}:\n{tail(out)}"
     log(f"tools: mise install, frozen Bun install, marketplace pins and {check.name} --pins passed")
