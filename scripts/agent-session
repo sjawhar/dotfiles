@@ -33,14 +33,9 @@
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
-if [[ "$DOTFILES_DIR" != /* ]]; then
-    if [[ -d "$DOTFILES_DIR" ]]; then
-        # shellcheck disable=SC1007
-        DOTFILES_DIR="$(CDPATH= cd -- "$DOTFILES_DIR" && pwd)"
-    else
-        DOTFILES_DIR="$PWD/$DOTFILES_DIR"
-    fi
-fi
+# Absolute once, before any cd. A prefix of $PWD, not a `cd` into it, so a directory that exists
+# but cannot be entered does not end the launch here under set -e.
+[[ "$DOTFILES_DIR" = /* ]] || DOTFILES_DIR="$PWD/$DOTFILES_DIR"
 
 (( $# )) || { echo "usage: agent-session <agent> [args…]" >&2; exit 2; }
 agent="$1"
@@ -308,14 +303,7 @@ else
         mise_bin="$(command -v mise)" || mise_bin="$DOTFILES_DIR/bin/mise"
         [[ "$mise_bin" = /* ]] || mise_bin="$PWD/$mise_bin"
         export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
-        if [[ "$MISE_DATA_DIR" != /* ]]; then
-            if [[ -d "$MISE_DATA_DIR" ]]; then
-                # shellcheck disable=SC1007
-                MISE_DATA_DIR="$(CDPATH= cd -- "$MISE_DATA_DIR" && pwd)"
-            else
-                MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
-            fi
-        fi
+        [[ "$MISE_DATA_DIR" = /* ]] || MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
         mise_shims="$MISE_DATA_DIR/shims"
         # A directory it cannot make shows up below, as flock's failure to open the lock, and the
         # launch still asks mise for the agent rather than ending here under set -e.

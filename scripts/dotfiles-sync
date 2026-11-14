@@ -179,14 +179,7 @@ tools_step() (
   set -eu
 
   export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
-  if [[ "$MISE_DATA_DIR" != /* ]]; then
-    if [[ -d "$MISE_DATA_DIR" ]]; then
-      # shellcheck disable=SC1007
-      MISE_DATA_DIR="$(CDPATH= cd -- "$MISE_DATA_DIR" && pwd)"
-    else
-      MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
-    fi
-  fi
+  [[ "$MISE_DATA_DIR" = /* ]] || MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
   # A directory it cannot make is reported below, as flock's failure to open the lock.
   mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
   limit="$(tools_limit)"

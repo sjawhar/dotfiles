@@ -286,6 +286,19 @@ esac
         self.assertIn(f"MISE_DATA_DIR={data}", install)
         self.assertTrue(install.endswith("|held"), install)
 
+    @unittest.skipIf(os.geteuid() == 0, "root enters a mode-000 directory")
+    def test_a_relative_mise_data_dir_that_cannot_be_entered_still_reaches_the_refusal(self) -> None:
+        # Making the path absolute must not itself end the launch under set -e: the install then
+        # fails, `mise which` finds nothing, and the launch refuses with 127 as R6 says.
+        data = self.caller / "locked-data"
+        data.mkdir()
+        data.chmod(0)
+        self.addCleanup(data.chmod, 0o700)
+        result = self.launch(cwd=self.caller, env=self.env(MISE_DATA_DIR="locked-data"))
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn("no fakeagent on PATH other than a wrapper", result.stderr)
+
     def test_relative_mise_path_is_absolute_for_the_install(self) -> None:
         relative_mise = self.caller / "bin" / "mise"
         relative_mise.parent.mkdir()
