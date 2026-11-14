@@ -2197,6 +2197,8 @@ class AgentboxMove(unittest.TestCase):
                    f'touch "{self.root}/IN_RSYNC"; exec sleep 60')
         changing = self.worktree / "written-during-the-hold.txt"
         self.assertEqual(self.move_to().returncode, 0)
+        # What the plan run (`move --to`) left in TMPDIR; the relauncher must add nothing to it.
+        before_relauncher = set(self.tmpdir.rglob("*"))
         [job] = self.jobs()
         self.set_pids()
         log = self.root / "relauncher.log"
@@ -2224,6 +2226,11 @@ class AgentboxMove(unittest.TestCase):
         # The rsync's error file, which holds the signal line, goes with the relauncher.
         self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
                           and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
+        # Nothing else the relauncher made in its TMPDIR either: the rsync stats file and the
+        # directory with merge.new, mirror.new and stamp.new. A stop by signal left both, for each
+        # of TERM, INT and HUP (HOME-211 tester, at 25b90855).
+        self.assertEqual(sorted(str(p.relative_to(self.tmpdir)) for p in set(self.tmpdir.rglob("*")) - before_relauncher),
+                         [], f"left in the relauncher's TMPDIR after signal {name}")
 
     def test_a_relauncher_stopped_before_its_error_writer_opens_leaves_no_error_file(self) -> None:
         """A signal that stops the relauncher before its error writer (tee) has opened its output
