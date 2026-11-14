@@ -6883,7 +6883,7 @@ move_to_rsync_tick_stop() {
 }
 
 move_to_rsync() {
-    local kind="$1" stats="$2" label="${MOVE_TO_RSYNC_LABEL:-}" line sid
+    local kind="$1" stats="$2" label="${MOVE_TO_RSYNC_LABEL:-}" line sid err_fd
     shift 2
     local rc=0 err start=$SECONDS
     # The global first: a signal right after the mktemp still finds the file to remove.
@@ -6921,8 +6921,12 @@ move_to_rsync() {
     fi
     # rsync's messages are kept AND still reach the log: `2>"$err"` alone would take the
     # relauncher's own signal line with them, since a trap runs inside the redirection of the
-    # command it interrupts, and that line is the only record of a stopped move.
-    move_to_fg rsync "$@" >"$stats" 2> >(tee "$err" >&2) || rc=$?
+    # command it interrupts, and that line is the only record of a stopped move. tee gets the file
+    # this shell opened, not its path: given the path, a tee that opens it after a signal's
+    # move_to_run_exit removed it creates the file again, holding that line.
+    exec {err_fd}>"$err"
+    move_to_fg rsync "$@" >"$stats" 2> >(tee "/dev/fd/$err_fd" >&2) || rc=$?
+    exec {err_fd}>&-
     move_to_rsync_tick_stop
     say "rsync $kind: $((SECONDS - start))s, exit $rc"
     if (( rc == 24 )); then

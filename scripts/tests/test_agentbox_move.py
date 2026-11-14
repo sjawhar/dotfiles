@@ -2225,6 +2225,43 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
                           and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
 
+    def test_a_relauncher_stopped_before_its_error_writer_opens_leaves_no_error_file(self) -> None:
+        """A signal that stops the relauncher before its error writer (tee) has opened its output
+        leaves no rsync error file: the writer gets the file the relauncher opened, not its path."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        copying = self.root / "IN_RSYNC"
+        write_stub(self.stubs, "rsync",
+                   'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
+                   f'touch "{copying}"; exec sleep 60')
+        # A tee that starts 2 s late opens its output after the relauncher's exit trap removed the
+        # error file; given the path, it would create the file again with the signal line.
+        write_stub(self.stubs, "tee", 'sleep 2; exec /usr/bin/tee "$@"')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        log = self.root / "relauncher.log"
+        with log.open("w") as out:
+            proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\n'
+                                     f'move_to_hold() {{ :; }}\n'
+                                     f'move_to_run "{job}"'],
+                                    env=self.env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        self.addCleanup(self.end_relauncher, proc)
+        for _ in range(int(self.TIMEOUT * 10)):
+            if copying.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(copying.exists(), log.read_text(encoding="utf-8"))
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
+        self.assert_group_ended(proc, "TERM before the error writer opens")
+        self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
+                          and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
+        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up",
+                      log.read_text(encoding="utf-8"))
+
     def assert_group_ended(self, proc: subprocess.Popen[bytes], name: str) -> None:
         """No member of the exited relauncher's group alive within 10 s, before any cleanup; one
         line on stderr says so, since a passing subTest prints nothing."""
@@ -2237,21 +2274,37 @@ class AgentboxMove(unittest.TestCase):
     def test_a_relauncher_stopped_while_it_sends_a_progress_notice_says_so_after_the_notice(self) -> None:
         """A signal while the progress subshell sends its notice waits for that send, which bash
         does not interrupt, and the line that the relauncher is gone comes after it: no notice
-        reaches a session after that line."""
+        reaches a session after that line. The envoy stub stays in its send until the TERM has
+        stopped the rsync, so the signal lands during the send however late this test sends it."""
         self.moving_session()
         self.set_pids(999999901)
         self.set_panes({999999900: ("%81", "agents:4.1")})
         self.target()
         log = self.root / "relauncher.log"
         sending = self.root / "IN_SEND"
+        rsync_pid = self.root / "RSYNC_PID"
         write_stub(self.stubs, "rsync",
                    'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
-                   'exec sleep 60')
+                   f'echo $$ >"{rsync_pid}"\nexec sleep 60')
         write_stub(self.stubs, "envoy",
                    f'{ENVOY_RECORD}\n'
                    f'if grep -q "your move goes on" "$STUB_ENVOY" && [[ ! -e "{sending}" ]]; then\n'
-                   f'    touch "{sending}"; sleep 3\n'
-                   f'    if grep -q "The relauncher is gone" "{log}"; then echo LATE >>"$STUB_ENVOY"; fi\n'
+                   f'    touch "{sending}"\n'
+                   f'    pid="$(cat "{rsync_pid}")"\n'
+                   '    for _ in {1..300}; do\n'
+                   '        kill -0 "$pid" 2>/dev/null || break\n'
+                   '        sleep 0.1\n'
+                   '    done\n'
+                   '    if kill -0 "$pid" 2>/dev/null; then\n'
+                   '        echo NOSIGNAL >>"$STUB_ENVOY"\n'
+                   '    else\n'
+                   '        for _ in {1..50}; do\n'
+                   f'            if grep -q "The relauncher is gone" "{log}"; then\n'
+                   '                echo LATE >>"$STUB_ENVOY"; break\n'
+                   '            fi\n'
+                   '            sleep 0.1\n'
+                   '        done\n'
+                   '    fi\n'
                    'fi\nexit 0')
         self.assertEqual(self.move_to().returncode, 0)
         [job] = self.jobs()
@@ -2271,6 +2324,7 @@ class AgentboxMove(unittest.TestCase):
         self.assert_group_ended(proc, "TERM during a progress notice")
         sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
         self.assertEqual(sent.count("your move goes on"), 1, sent)
+        self.assertNotIn("NOSIGNAL", sent)
         self.assertNotIn("LATE", sent)
         self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up", log.read_text(encoding="utf-8"))
 
