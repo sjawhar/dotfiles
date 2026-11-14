@@ -3628,6 +3628,176 @@ class OutgoingLeaks(SinkRepositoryCase):
                         # A person's clean jj push still runs the public check once.
                         self.assertEqual(self.public_checks(), checks + 1)
 
+    leaky_tag_message = f"clean first line\n{TEST_TERMS[0]}\n"
+    clean_tag_message = "clean first line\nclean second line\n"
+
+    def annotated_tag(self, label: str, message: str, target: str | None = None, name: str | None = None) -> tuple[str, str, str]:
+        """An annotated tag made by the real git, named NAME or LABEL-<n>, whose message is MESSAGE, on TARGET (a commit
+        or a tag) or else on a new clean commit: its name, its object id and the commit it peels to."""
+        name = name or self.unique(label)
+        if target is None:
+            target = self.commit(f"{name}.txt", "clean", "clean", parent=self.base)
+        self.real("tag", "-a", name, "-m", message, target)
+        return name, self.real("rev-parse", f"refs/tags/{name}"), self.real("rev-parse", f"refs/tags/{name}^{{commit}}")
+
+    def sink_holds(self, url: str, object_id: str) -> bool:
+        if not self.sink(url).exists():
+            return False
+        return not self.sink_git(url, "cat-file", "--batch-check", input=f"{object_id}\n").endswith(" missing\n")
+
+    def assert_sink_ref(self, url: str, ref: str, object_id: str, kind: str) -> None:
+        self.assertEqual(self.sink_git(url, "rev-parse", "--verify", ref).strip(), object_id)
+        self.assertEqual(self.sink_git(url, "cat-file", "-t", object_id).strip(), kind)
+
+    def seed(self, url: str, object_id: str, ref: str) -> None:
+        """Put OBJECT_ID at REF in the sink of URL with the real git, which no check of this change reads."""
+        self.set_url(url)
+        self.real("push", "--no-verify", "origin", f"{object_id}:{ref}")
+
+    def assert_tag_refused(self, push, shown: str, url: str, shim: str, *absent: str) -> subprocess.CompletedProcess[str]:
+        """PUSH() is refused at line 2 of the message of the tag shown as SHOWN, the sink of URL keeps exactly the
+        refs and objects it had, and holds none of ABSENT."""
+        before = self.sink_state(url)
+        result = push()
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"error: leak terms: tag {shown} message line 2: listed leak term", result.stderr)
+        self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
+        self.assertEqual(self.sink_state(url), before, "a refused push changed the sink")
+        for object_id in absent:
+            self.assertFalse(self.sink_holds(url, object_id), result.stderr)
+        self.assert_hidden(result)
+        return result
+
+    def assert_objects_pushed(self, result: subprocess.CompletedProcess[str], url: str, *objects: str) -> None:
+        """RESULT went on and the sink of URL holds each of OBJECTS, of any type."""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for object_id in objects:
+            self.assertTrue(self.sink_holds(url, object_id), result.stderr)
+        self.assert_hidden(result)
+
+    def git_push_ref(self, source: str, ref: str, environment: dict[str, str], *options: str) -> subprocess.CompletedProcess[str]:
+        self.refresh_visibility()
+        return self.command(["git", "push", *options, "origin", f"{source}:{ref}"], environment)
+
+    def jj_push_tag(self, name: str, environment: dict[str, str], executable: bool = False) -> subprocess.CompletedProcess[str]:
+        self.jj_ok(environment, "git", "import")
+        config = ["--config", "git.executable-path=/usr/bin/git"] if executable else []
+        self.refresh_visibility()
+        return self.command(["jj", *config, "git", "push", "--tag", name], environment)
+
+    def test_push_refuses_an_annotated_tag_whose_message_holds_a_term(self) -> None:
+        # (13) annotated tags, made by the real git and imported into jj. A tag object counts by its id, at any source
+        # and destination ref and through a chain of tags, also when the remote has its commit.
+        self.init_jj()
+        leaky, clean = self.leaky_tag_message, self.clean_tag_message
+        forms = {
+            "name": lambda name, tag, commit: ["git", "push", "origin", name],
+            "tags": lambda name, tag, commit: ["git", "push", "--tags", "origin"],
+            "follow-tags": lambda name, tag, commit: ["git", "push", "--follow-tags", "origin", f"{commit}:refs/heads/{name}-branch"],
+            "full-ref": lambda name, tag, commit: ["git", "push", "origin", f"refs/tags/{name}"],
+            "other-tag-ref": lambda name, tag, commit: ["git", "push", "origin", f"{tag}:refs/tags/{name}-other"],
+            "archive-ref": lambda name, tag, commit: ["git", "push", "origin", f"{tag}:refs/archive/{name}"],
+        }
+        shown = {"other-tag-ref": "{name}-other", "archive-ref": "refs/archive/{name}"}
+        for agent, environment, url in self.combinations():
+            # (a) a leaky tag on a clean commit, in each form; the sink gets neither.
+            for form, argv in forms.items():
+                with self.subTest(case="a", kind="git", form=form, agent=agent, url=url):
+                    self.set_url(url)
+                    name, tag, commit = self.annotated_tag("git-tag", leaky)
+                    self.refresh_visibility()
+                    self.assert_tag_refused(lambda: self.command(argv(name, tag, commit), environment),
+                                            shown.get(form, "{name}").format(name=name), url, "git", tag, commit)
+            for executable in (False, True):
+                with self.subTest(case="a", kind="jj", executable=executable, agent=agent, url=url):
+                    self.set_url(url)
+                    name, tag, commit = self.annotated_tag("jj-tag", leaky)
+                    self.assert_tag_refused(lambda: self.jj_push_tag(name, environment, executable), name, url, "jj", tag, commit)
+            # (b) a leaky tag on a commit the sink already has.
+            with self.subTest(case="b", agent=agent, url=url):
+                commit = self.commit(f"{self.unique('held')}.txt", "clean", "clean", parent=self.base)
+                self.seed(url, commit, f"refs/heads/{self.unique('held')}")
+                name, tag, _ = self.annotated_tag("held-commit-tag", leaky, target=commit)
+                self.assert_tag_refused(lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment),
+                                        name, url, "git", tag)
+            # (c) a clean outer tag that points at a leaky inner tag, which shows its own name.
+            for kind in ("git", "jj"):
+                with self.subTest(case="c", kind=kind, agent=agent, url=url):
+                    self.set_url(url)
+                    inner, inner_tag, commit = self.annotated_tag(f"{kind}-inner", leaky)
+                    outer, outer_tag, _ = self.annotated_tag(f"{kind}-outer", clean, target=inner_tag)
+                    push = (lambda: self.git_push_ref(f"refs/tags/{outer}", f"refs/tags/{outer}", environment)) if kind == "git" \
+                        else (lambda: self.jj_push_tag(outer, environment))
+                    self.assert_tag_refused(push, inner, url, "git" if kind == "git" else "jj", outer_tag, inner_tag, commit)
+        # (d) a tag whose name is a term: the name is masked.
+        for agent, environment in self.callers():
+            with self.subTest(case="d", agent=agent):
+                self.set_url(self.public_url)
+                _, tag, commit = self.annotated_tag("", leaky, name=TEST_TERMS[1])
+                self.assert_tag_refused(lambda: self.git_push_ref(f"refs/tags/{TEST_TERMS[1]}", f"refs/tags/{TEST_TERMS[1]}", environment),
+                                        "<listed term>", self.public_url, "git", tag, commit)
+                self.real("tag", "-d", TEST_TERMS[1])
+        # Controls that go on. Every leaky tag above stays local, and each push below names its refs.
+        for agent, environment in self.callers():
+            for kind in ("git", "jj"):
+                with self.subTest(control="lightweight", kind=kind, agent=agent):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    name = self.unique(f"{kind}-light")
+                    commit = self.commit(f"{name}.txt", "clean", "clean", parent=self.base)
+                    self.real("tag", name, commit)
+                    pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment) if kind == "git" \
+                        else self.jj_push_tag(name, environment)
+                    self.assert_pushed(pushed, url, commit)
+                    self.assert_sink_ref(url, f"refs/tags/{name}", commit, "commit")
+                with self.subTest(control="clean-chain", kind=kind, agent=agent):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    _, inner_tag, commit = self.annotated_tag(f"{kind}-clean-inner", clean)
+                    outer, outer_tag, _ = self.annotated_tag(f"{kind}-clean-outer", clean, target=inner_tag)
+                    pushed = self.git_push_ref(f"refs/tags/{outer}", f"refs/tags/{outer}", environment) if kind == "git" \
+                        else self.jj_push_tag(outer, environment)
+                    self.assert_objects_pushed(pushed, url, outer_tag, inner_tag, commit)
+                    self.assert_sink_ref(url, f"refs/tags/{outer}", outer_tag, "tag")
+                    if kind == "git":
+                        archive = f"refs/archive/{self.unique('release')}"
+                        self.assert_objects_pushed(self.git_push_ref(outer_tag, archive, environment), url, outer_tag)
+                        self.assert_sink_ref(url, archive, outer_tag, "tag")
+                with self.subTest(control="unselected-leaky-tag", kind=kind, agent=agent):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    name, tag, commit = self.annotated_tag(f"{kind}-unselected", leaky)
+                    pushed = self.git_push_ref(commit, f"refs/heads/{name}", environment) if kind == "git" \
+                        else self.jj_push(commit, name, environment)
+                    self.assert_pushed(pushed, url, commit)
+                    self.assertFalse(self.sink_holds(url, tag))
+            with self.subTest(control="held-tag-to-a-new-ref", agent=agent):
+                url = self.fresh_public_url()
+                name, tag, commit = self.annotated_tag("seeded", leaky)
+                self.seed(url, tag, f"refs/tags/{name}")
+                again = f"refs/tags/{name}-again"
+                self.assert_objects_pushed(self.git_push_ref(tag, again, environment), url, tag)
+                self.assert_sink_ref(url, again, tag, "tag")
+            with self.subTest(control="inner-tag-held-through-an-outer-tag", agent=agent):
+                url = self.fresh_public_url()
+                _, inner_tag, _ = self.annotated_tag("held-inner", leaky)
+                outer, outer_tag, _ = self.annotated_tag("held-outer", clean, target=inner_tag)
+                self.seed(url, outer_tag, f"refs/tags/{outer}")
+                copy = f"refs/tags/{self.unique('inner-copy')}"
+                self.assert_objects_pushed(self.git_push_ref(inner_tag, copy, environment), url, inner_tag)
+                self.assert_sink_ref(url, copy, inner_tag, "tag")
+                # A new inner tag with the term, in the same place under a new outer tag, is not held, so it is refused.
+                _, new_inner_tag, _ = self.annotated_tag("new-inner", leaky)
+                self.annotated_tag("new-outer", clean, target=new_inner_tag)
+                new_copy = self.unique("inner-copy")
+                self.assert_tag_refused(lambda: self.git_push_ref(new_inner_tag, f"refs/tags/{new_copy}", environment),
+                                        new_copy, url, "git", new_inner_tag)
+            with self.subTest(control="private", agent=agent):
+                self.set_url(self.private_url)
+                name, tag, commit = self.annotated_tag("private-tag", leaky)
+                pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment)
+                self.assert_objects_pushed(pushed, self.private_url, tag, commit)
+
     def test_push_root_diff_ignores_log_configuration(self) -> None:
         (self.home / ".gitconfig").write_text(
             "[log]\n"
@@ -3991,6 +4161,14 @@ class SecrecyTrace(SinkRepositoryCase):
         commit = self.leaky_commit("git-push-content.txt")
         result, capture = self.traced(["git", "push", "origin", f"{commit}:refs/heads/hidden-git"])
         self.assert_refusal(result, capture)
+        self.assert_no_canary()
+
+    def test_hidden_git_push_annotated_tag(self) -> None:
+        # An annotated tag on a clean commit whose message alone holds the term.
+        self.real_git("tag", "-a", "hidden-tag", "-m", f"clean\n{TEST_TERMS[0]}")
+        result, capture = self.traced(["git", "push", "origin", "refs/tags/hidden-tag"])
+        self.assert_refusal(result, capture)
+        self.assertIn(b"tag hidden-tag message line 2", result.stderr)
         self.assert_no_canary()
 
     def test_hidden_jj_push(self) -> None:

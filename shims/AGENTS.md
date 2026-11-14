@@ -165,7 +165,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   Every `jj git` finds its nested subcommand after the same jj 0.46 global-option table that
   finds its outer command. Therefore every `jj git <global options> push` first dry-runs its
   resolved destination plan and, for every public or unreadable GitHub URL, scans the outgoing
-  commits that destination does not advertise. This encrypted-term check runs for every caller
+  commits that destination does not advertise, and the message of each annotated tag it sends:
+  jj's plan names a tag's commit, but jj pushes the backing repository's `refs/tags/<name>`, so
+  the shim reads that object, and refuses when that ref names another commit than the plan.
+  This encrypted-term check runs for every caller
   before the shared public leak check, and fails closed when it cannot read the plan, destination
   or a nonempty scan's term list. The shared public check remains an agent check, or a person's
   check where it is installed; `DOTFILES_JJ_NO_LEAK_CHECK=1` skips only that public check for a
@@ -342,9 +345,11 @@ behavior before handing the call to the real one. One file is data: `person-name
   it requires at the end goes to Git, which rejects it and pushes nothing. The gate's pre-push scans when the
   URL Git gives it, after `insteadOf`, is a public or unreadable GitHub repository
   (`scripts/github-repo-visibility`). It reads Git's update lines and the destination's live
-  advertisement, then finds the commits the updates send that the destination does not hold. No
-  such commit means no encrypted-list read; otherwise it scans their added result-side lines and
-  paths and their messages, read as UTF-8 and with replacement objects ignored. The
+  advertisement, then finds the commits the updates send that the destination does not hold, and
+  each annotated tag object they send that it does not hold (a tag that another sent tag points at
+  included). No such commit and no such tag message means no encrypted-list read; otherwise it
+  scans the commits' added result-side lines and paths and their messages, read as UTF-8 and with
+  replacement objects ignored, and each tag's message, named `tag <name> message line <n>`. The
   outgoing-diff producer applies the same empty attribute tree, configured-attribute override,
   and system-attribute disablement as the commit hook. A non-empty `info/attributes` makes that
   producer use `--text`; its bytes remain safe because messages use a separate NUL-delimited

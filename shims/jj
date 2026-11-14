@@ -357,7 +357,7 @@ git_target() {
 # The leak-term scanner, for the push check below and the commit, describe and new checks after it.
 _jj_scanner="${BASH_SOURCE[0]%/*}/../scripts/leak-terms-check"
 push_gate() {
-    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start dry=0
+    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start dry=0 tag_object
     local zero=0000000000000000000000000000000000000000
     local scripts="${BASH_SOURCE[0]%/*}/../scripts"
     local header='^Changes to push to (.+):$'
@@ -402,6 +402,14 @@ push_gate() {
             if [[ "$new" != "$zero" ]]; then
                 new="$(git --git-dir="$target" rev-parse --verify "$new^{commit}" 2>/dev/null)" ||
                     push_refuse "cannot resolve jj's outgoing commit. Nothing was pushed."
+                # jj's plan names a tag's commit, but jj pushes the backing repository's tag ref, an annotated tag's
+                # object and its message included, so the check reads that object. A ref that names another commit
+                # leaves unknown what jj sends.
+                if [[ "$kind" == tag ]] && tag_object="$(git --git-dir="$target" rev-parse --verify --quiet "refs/tags/$ref" 2>/dev/null)"; then
+                    [[ "$(git --git-dir="$target" rev-parse --verify "$tag_object^{commit}" 2>/dev/null)" == "$new" ]] ||
+                        push_refuse "cannot tell which object jj sends for tag $ref. Nothing was pushed."
+                    new="$tag_object"
+                fi
             fi
             if [[ "$old" != "$zero" ]]; then
                 old="$(git --git-dir="$target" rev-parse --verify "$old^{commit}" 2>/dev/null)" ||

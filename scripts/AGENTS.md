@@ -45,7 +45,8 @@ Executables covering several areas:
     when clean, 3 when they find a listed term, 2 when they cannot read a required list and 4 when
     they cannot read text. A scanner invocation whose whole input is empty does not read the list;
     `staged` produces `git diff --cached` with the same attribute policy as outgoing push diffs,
-    and `push` decides whether commits are outgoing before it reads the list. `message` decodes
+    and `push` decides which commits and annotated tag messages are outgoing before it reads the
+    list, and scans both. `message` decodes
     its input with `--encoding` (UTF-8 by default). `git-comment-char` prints the character Git
     chose for `core.commentChar=auto`, or nothing when that is not certain;
     `jj-editor-preflight <listing>` takes jj's `name<TAB>json(value)` listing of `ui.editor` and

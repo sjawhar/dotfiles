@@ -1025,16 +1025,16 @@ def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[byte
         raise TextError("git could not read outgoing commits")
 
 
-def push_updates(text: str) -> tuple[list[str], list[str]]:
-    """Read Git's pre-push updates, keeping only commits that can send content."""
-    local: list[str] = []
+def push_updates(text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Read Git's pre-push updates: each sent object with the remote ref it goes to, and the remote's prior objects."""
+    local: list[tuple[str, str]] = []
     remote: list[str] = []
     for line in newline_lines(text):
         fields = line.split()
         if len(fields) != 4 or not OBJECT_ID.fullmatch(fields[1]) or not OBJECT_ID.fullmatch(fields[3]):
             raise TextError("malformed pre-push update")
         if set(fields[1]) != {"0"}:
-            local.append(fields[1])
+            local.append((fields[2], fields[1]))
         if set(fields[3]) != {"0"}:
             remote.append(fields[3])
     return local, remote
@@ -1374,19 +1374,125 @@ def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[
     return findings
 
 
+def object_types(object_ids: Sequence[str]) -> dict[str, str]:
+    """The type of each object, in one Git call; an object this repository lacks cannot be read, so it refuses."""
+    if not object_ids:
+        return {}
+    output = git_output(
+        ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        ("\n".join(object_ids) + "\n").encode(),
+        "git could not read the outgoing objects",
+    )
+    lines = output.decode("utf-8", errors="surrogateescape").splitlines()
+    if len(lines) != len(object_ids):
+        raise TextError("git gave an incomplete list of outgoing objects")
+    types: dict[str, str] = {}
+    for object_id, line in zip(object_ids, lines, strict=True):
+        fields = line.split()
+        if len(fields) != 2 or fields[1] == "missing" or fields[0].lower() != object_id.lower():
+            raise TextError("git could not read an outgoing object")
+        types[object_id] = fields[1]
+    return types
+
+
+def tag_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
+    """The raw content of each tag object, in one Git call, with each record's size checked."""
+    if not object_ids:
+        return {}
+    output = git_output(
+        ["cat-file", "--batch"], ("\n".join(object_ids) + "\n").encode(), "git could not read the outgoing tags"
+    )
+    contents: dict[str, bytes] = {}
+    position = 0
+    for object_id in object_ids:
+        end = output.find(b"\n", position)
+        fields = output[position:end].decode("utf-8", errors="surrogateescape").split() if end >= 0 else []
+        if len(fields) != 3 or fields[0].lower() != object_id.lower() or fields[1] != "tag" or not fields[2].isdigit():
+            raise TextError("git gave a malformed tag object")
+        size = int(fields[2])
+        content = output[end + 1 : end + 1 + size]
+        if len(content) != size or output[end + 1 + size : end + 2 + size] != b"\n":
+            raise TextError("git gave a malformed tag object")
+        contents[object_id] = content
+        position = end + 2 + size
+    if position != len(output):
+        raise TextError("git gave a malformed tag object")
+    return contents
+
+
+def parse_tag(content: bytes) -> tuple[str, str, str, str]:
+    """A tag object's target, the target's type, its own tag name and its message."""
+    header, separator, message = content.partition(b"\n\n")
+    fields = dict(line.split(b" ", 1) for line in header.split(b"\n") if b" " in line)
+    target, kind, name = fields.get(b"object"), fields.get(b"type"), fields.get(b"tag")
+    if target is None or kind is None or name is None or OBJECT_ID.fullmatch(target.decode("ascii", "replace")) is None:
+        raise TextError("git gave a malformed tag object")
+    return (
+        target.decode("ascii"),
+        kind.decode("ascii", "replace"),
+        name.decode("utf-8", errors="surrogateescape"),
+        message.decode("utf-8", errors="surrogateescape") if separator else "",
+    )
+
+
+def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple[str, str, str]]:
+    """Each annotated tag object reached from STARTS, pairs of a name to show and an object id, and through each tag
+    that points at another tag, skipping every object in KNOWN: its name to show, its object id and its message. A
+    tag that another tag points at shows its own tag name."""
+    found: list[tuple[str, str, str]] = []
+    seen = set(known)
+    pending: list[tuple[str | None, str]] = list(starts)
+    while pending:
+        unique: dict[str, str | None] = {}
+        for name, object_id in pending:
+            if object_id not in seen:
+                unique.setdefault(object_id, name)
+        seen.update(unique)
+        types = object_types(sorted(unique))
+        contents = tag_objects(sorted(object_id for object_id in unique if types[object_id] == "tag"))
+        pending = []
+        for object_id, name in unique.items():
+            if types[object_id] != "tag":
+                continue
+            target, kind, own_name, message = parse_tag(contents[object_id])
+            found.append((own_name if name is None else name, object_id, message))
+            if kind == "tag":
+                pending.append((None, target))
+    return found
+
+
+def outgoing_tag_messages(updates: Sequence[tuple[str, str]], advertised: Sequence[str], held: set[str]) -> list[tuple[str, str]]:
+    """The message of each annotated tag object this push sends and the destination lacks, with the name to show:
+    the ref the push sends it to (without refs/tags/), or, for a tag that another tag points at, its own tag name.
+    The destination holds every object it advertises, and each tag that a tag it holds points at; that second read
+    runs only when the push sends a tag."""
+    starts = [(ref.removeprefix("refs/tags/"), object_id) for ref, object_id in updates]
+    known = set(advertised) | held
+    outgoing = tag_chains(starts, known)
+    if not outgoing:
+        return []
+    known |= {object_id for _, object_id, _ in tag_chains([("", object_id) for object_id in sorted(held)], set())}
+    return [(name, message) for name, _, message in tag_chains(starts, known)]
+
+
 def scan_push(text: str, remote: str, url: str) -> list[str]:
-    """Scan only commits this pre-push invocation sends and its destination lacks."""
+    """Scan only the commits and annotated tag messages this pre-push invocation sends and its destination lacks."""
     local, prior_remote = push_updates(text)
     if not local:
         return []
     destination = push_destination(remote, url)
     advertised = remote_advertisement(destination)
     held = local_object_ids([*advertised, *prior_remote])
-    commits = outgoing_commit_ids(local, sorted(held))
-    if not commits:
+    commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
+    tags = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
+    if not commits and not any(message.strip() for _, message in tags):
         return []
     matcher = load_terms()
-    return scan_outgoing_commits(commits, matcher)
+    findings = scan_outgoing_commits(commits, matcher)
+    for name, message in tags:
+        place = f"tag {mask_path(name, matcher.spans(name))} message"
+        findings.extend(scan_message(message, matcher, "verbatim", None, False, place))
+    return findings
 
 def parser() -> argparse.ArgumentParser:
     argument_parser = argparse.ArgumentParser(prog="leak-terms-check")
