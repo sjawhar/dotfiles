@@ -6,7 +6,8 @@
 Enrollment must end it every time: enrolled (key.pem and enrollment, no marker, no error) or not
 (enrollment.error, no key, no marker: the box has no broker identity and uses secretsd). The
 marker stays fresh while the launcher still works; what the host writes into the box-writable key
-dir never follows a link the box planted there; the id the host revokes is the one it recorded.
+dir never follows a link the box planted there, in the key dir or at the key dir's own name in the
+box's runtime dir; the id the host revokes is the one it recorded.
 An enrolled box whose renew is refused as not live is enrolled again by its launcher with the key
 it holds, and a box whose enrollment is live is not.
 
@@ -18,19 +19,41 @@ no-ops.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 AGENTBOX = DOTFILES / "scripts" / "agentbox"
 THUMBPRINT = "A" * 43
+
+
+@functools.cache
+def keydir_in_box_dir() -> str:
+    """Where scripts/agentbox puts a box's key dir, relative to the box's run dir ($RUN_BASE/<box>):
+    box_keydir's own answer, so every fixture here has the layout of the script under test. From
+    dispatch://INFRA-3462 on that is `agent-secrets`, beside the box's run-user/ and not in it;
+    test_agentbox_dirs.py and test_agentbox_run_user_mode.py hold the layout itself."""
+    done = subprocess.run(
+        ["bash", "-c", f'source "{AGENTBOX}"\nRUN_BASE=/run-base\nbox_keydir a-box'],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+        env={"HOME": "/nonexistent", "PATH": "/usr/bin:/bin", "DOTFILES_DIR": str(DOTFILES)},
+    )
+    return str(Path(done.stdout.strip()).relative_to("/run-base/a-box"))
 
 
 def write_stub(directory: Path, name: str, body: str) -> None:
@@ -39,21 +62,22 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-# A box's key dir is $STUB_RUN_BASE/<box>/run-user/agent-secrets. `docker run` notes whether the
-# marker is there as the box starts, then lives for a second; with STUB_RUN_UNTIL set it lives
-# until the box's renew.log holds that text (60 s at most), then ends the box's renew loop, as the
-# box's end does, and says so (`run-ended <box>`). With STUB_RUN_END_MARKER set too, the box's
-# end first writes a fresh enrollment.not-live in its key dir, which only a launcher pass made
-# after the box ended could act on. `docker exec -d` runs its script here when
-# STUB_RUN_RENEW is set: in the foreground, or with `bg` in the background as docker leaves it,
-# holding none of the test's pipes, with its pid kept for the box's end and, when
-# STUB_RENEW_AFTER is set, only once that line is in the call log. Any other `docker exec --user
-# ubuntu <box> sh -c` runs here too, as a process whose key dir is the box's. `inspect` answers
-# false until its STUB_RUNNING_AFTER'th call when that is set, as a box does while it is still
-# starting. keygen writes a key of its own each time, and a thumbprint of its own after the first.
+# A box's key dir is where box_keydir puts it, $STUB_RUN_BASE/<box>/$STUB_KEYDIR_REL. `docker run`
+# notes whether the marker is there as the box starts, then lives for a second; with
+# STUB_RUN_UNTIL set it lives until the box's renew.log holds that text (60 s at most), then ends
+# the box's renew loop, as the box's end does, and says so (`run-ended <box>`). With
+# STUB_RUN_END_MARKER set too, the box's end first writes a fresh enrollment.not-live in its key
+# dir, which only a launcher pass made after the box ended could act on. `docker exec -d` runs its
+# script here when STUB_RUN_RENEW is set: in the foreground, or with `bg` in the background as
+# docker leaves it, holding none of the test's pipes, with its pid kept for the box's end and,
+# when STUB_RENEW_AFTER is set, only once that line is in the call log. Any other `docker exec
+# --user ubuntu <box> sh -c` runs here too, as a process whose key dir is the box's. `inspect`
+# answers false until its STUB_RUNNING_AFTER'th call when that is set, as a box does while it is
+# still starting. keygen writes a key of its own each time, and a thumbprint of its own after the
+# first.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
-keydir() {{ echo "$STUB_RUN_BASE/$1/run-user/agent-secrets"; }}
+keydir() {{ echo "$STUB_RUN_BASE/$1/$STUB_KEYDIR_REL"; }}
 case "$*" in
     inspect*)
         [[ -z "${{STUB_GONE:-}}" ]] || exit 1
@@ -247,17 +271,22 @@ class EnrollFixture(unittest.TestCase):
         )
         self.run_base = self.root / "run"
         self.hostdir = self.run_base / "box1"
-        self.keydir = self.hostdir / "run-user" / "agent-secrets"
+        self.keydir = self.hostdir / keydir_in_box_dir()
+        # The key dir's name in the box's own runtime dir, run-user/ (the box's /run/user/<uid>):
+        # the key dir's mount point, and the key dir itself before dispatch://INFRA-3462.
+        self.run_user_keydir = self.hostdir / "run-user" / "agent-secrets"
         self.broker = self.root / "broker"
         self.reset_box()
 
     def reset_box(self) -> None:
         """box1 as `new` leaves it before `docker run`, with no call made and nothing at the
-        broker: for setUp, and for each subtest that needs a fresh box."""
+        broker: for setUp, and for each subtest that needs a fresh box. mount_args makes both the
+        key dir and its mount point in run-user/ (one directory at the old layout)."""
         shutil.rmtree(self.run_base, ignore_errors=True)
         self.calls.unlink(missing_ok=True)
         self.broker.unlink(missing_ok=True)
-        self.keydir.mkdir(parents=True)
+        for directory in (self.run_user_keydir, self.keydir):
+            directory.mkdir(parents=True, exist_ok=True)
         # A marker as `new` leaves it, already older than the client's 160 s trust window.
         marker = self.keydir / "enrollment.pending"
         marker.write_text("")
@@ -281,6 +310,7 @@ class EnrollFixture(unittest.TestCase):
             "AGENTBOX_DISK": "0",
             "STUB_CALLS": str(self.calls),
             "STUB_KEYDIR": str(self.keydir),
+            "STUB_KEYDIR_REL": keydir_in_box_dir(),
             "STUB_RUN_BASE": str(self.run_base),
             "STUB_THUMBPRINT": THUMBPRINT,
             "STUB_BROKER": str(self.broker),
@@ -353,6 +383,55 @@ class EnrollFixture(unittest.TestCase):
         if not log.exists():
             return []
         return [m.group(1) for m in map(self.LAUNCHER_LINE.fullmatch, log.read_text().splitlines()) if m]
+
+    def host_keydir(self, key: bytes | None = None) -> Path:
+        """A directory that stands for the host's own /run/user/<uid>/agent-secrets: the helper's
+        socket, and with `key` the key.pem a host session's client signs with before it asks the
+        socket (legion-envoy-v29.54.0 cmd/agent-secrets identity.go keyDir, main.go selectSigner)."""
+        host = self.root / "host-run-user" / "agent-secrets"
+        host.mkdir(parents=True)
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(host / "helper.sock"))
+        if key is not None:
+            (host / "key.pem").write_bytes(key)
+        return host
+
+    def link_run_user_keydir(self, target: Path) -> None:
+        """What a process in box1 can do once the box runs: move what is at the key dir's name in
+        its runtime dir aside and put a link to `target` there. run-user/ is the box's own mount
+        and box_keydir's parent is not, so this is the one link at the key dir's name a box can
+        make."""
+        self.run_user_keydir.rename(self.run_user_keydir.with_name("agent-secrets.moved"))
+        self.run_user_keydir.symlink_to(target)
+
+    @contextlib.contextmanager
+    def flip_when_pending(self, target: Path) -> Iterator[threading.Event]:
+        """A loop in box1 beside the launcher: once the key dir's name in run-user/ is a link and
+        enrollment.pending shows through it, a new link to `target` is renamed over it at once.
+        run-user/ is where the box sees its key dir at the old layout only; at the new one the
+        marker never shows there, and the loop ends unflipped when the block does (120 s at
+        most). The event is set once the loop flipped the link."""
+        link = self.run_user_keydir
+        flipped, done = threading.Event(), threading.Event()
+
+        def flip() -> None:
+            end = time.monotonic() + 120
+            while not done.is_set() and time.monotonic() < end:
+                if link.is_symlink() and os.path.lexists(link / "enrollment.pending"):
+                    new = link.with_name("agent-secrets.flip")
+                    new.symlink_to(target)
+                    new.replace(link)
+                    flipped.set()
+                    return
+                time.sleep(0.0005)
+
+        thread = threading.Thread(target=flip, daemon=True)
+        thread.start()
+        try:
+            yield flipped
+        finally:
+            done.set()
+            thread.join(timeout=10)
 
 
 class AgentboxEnroll(EnrollFixture):
@@ -427,6 +506,33 @@ class AgentboxEnroll(EnrollFixture):
         self.assertEqual(outside.read_text(), "host content\n")
         self.assertFalse((self.keydir / "enrollment.error").is_symlink())
         self.assertIn("broker unreachable", self.error())
+
+    def test_a_link_at_the_key_dirs_name_in_run_user_takes_no_host_write(self) -> None:
+        """A process in the box linked its key dir's name in its own runtime dir to the host's
+        /run/user/<uid>/agent-secrets before the box's first enrollment. While the key dir was
+        run-user/agent-secrets, enroll_box wrote the session's key.pem and the enrollment there,
+        where host sessions take key.pem before the helper's socket. The host dir keeps only its
+        socket, and the box is enrolled in its own key dir."""
+        host = self.host_keydir()
+        self.link_run_user_keydir(host)
+        result = self.enroll()
+        self.assertEqual(self.files(host), {"helper.sock"})
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        self.assertEqual(self.files(), {"key.pem", "enrollment"})
+
+    def test_a_failed_first_enrollment_through_that_link_deletes_no_host_key(self) -> None:
+        """The same link, aimed at a host dir that holds a host session's key.pem, and a first
+        enrollment that fails: a box with no session id and the broker unreachable. enroll_failed
+        removes key.pem and the marker from the key dir, which through the link were the host's.
+        The host's key.pem is still there, byte for byte, and the box ends with no identity."""
+        key = b"KEY a host session's key\n"
+        host = self.host_keydir(key)
+        self.link_run_user_keydir(host)
+        result = self.bash('if enroll_box box1 ""; then echo rc=0; else echo "rc=$?"; fi', STUB_ENROLL="fail")
+        self.assertEqual(self.files(host), {"helper.sock", "key.pem"})
+        self.assertEqual((host / "key.pem").read_bytes(), key)
+        self.assertIn("rc=1", result.stdout, result.stderr)
+        self.assert_no_identity()
 
     def test_unenroll_revokes_the_recorded_id_never_the_box_copy(self) -> None:
         (self.keydir / "enrollment").write_text("enr-other-box\n")
@@ -614,9 +720,11 @@ class SessionIdentity(EnrollFixture):
     """
 
     def second_box(self, name: str = "box2") -> Path:
-        """A box dir as mount_args makes one, for the box the session moves into."""
-        keydir = self.run_base / name / "run-user" / "agent-secrets"
-        keydir.mkdir(parents=True)
+        """A box dir as mount_args makes one, for the box the session moves into: the key dir and
+        its mount point in run-user/."""
+        keydir = self.run_base / name / keydir_in_box_dir()
+        for directory in (self.run_base / name / "run-user" / "agent-secrets", keydir):
+            directory.mkdir(parents=True, exist_ok=True)
         (keydir / "enrollment.pending").write_text("")
         return keydir
 
@@ -1037,6 +1145,62 @@ class Reenroll(EnrollFixture):
                 self.assertTrue(self.marked())
                 self.assertEqual(self.launcher_lines(), [])
 
+    def test_a_box_enroll_box_did_not_enroll_is_never_enrolled_by_a_marker(self) -> None:
+        """Only the box that enroll_box enrolled (ENROLLED_BOX) is enrolled again. A box with no
+        broker identity, or whose first enrollment failed, has no enrollment for its renew loop to
+        find not live, so a marker there is the box's own doing. The broker is ready for the pass,
+        so only that test stops it: no enroll call, no keygen, no line, and the marker left."""
+        cases = {"a box enroll_box never enrolled": ""}
+        for shape, (sid, _runtime) in self.BOXES.items():
+            cases[f"a box {shape} whose enroll_box failed"] = f'enroll_box box1 "{sid}" || true'
+        for case, first in cases.items():
+            with self.subTest(case=case):
+                self.reset_box()
+                result = self.bash(
+                    f"{first}\n"
+                    'touch "$STUB_CALLS"\nbefore=$(wc -l <"$STUB_CALLS")\n'
+                    f": >{self.MARKER}\n{self.PASS}\n"
+                    'tail -n "+$((before + 1))" "$STUB_CALLS" >"$RUN_BASE/pass-calls"\n'
+                    "echo steps-done",
+                    STUB_ENROLL="fail",
+                )
+                self.assertIn("steps-done", result.stdout, result.stderr)
+                calls = (self.run_base / "pass-calls").read_text().splitlines()
+                self.assertEqual([c for c in calls if c.startswith("enroll ") or "keygen " in c], [], calls)
+                self.assertEqual(self.launcher_lines(), [])
+                self.assertTrue(self.marked())
+
+    def test_a_link_flipped_at_the_key_dirs_name_takes_no_host_write(self) -> None:
+        """The review's case (sjawhar/dotfiles#57), for a box with a session id. The broker ended
+        the enrollment; the box removes key.pem and puts the marker, so the re-enrollment copies
+        the session's key in again. The box also moves what is at its key dir's name in run-user/
+        aside and links that name to the moved copy, and a loop beside the launcher
+        (flip_when_pending) points the link at the host's /run/user/<uid>/agent-secrets once
+        enrollment.pending shows through it. While the key dir was run-user/agent-secrets, the
+        launcher's next writes, the session's key.pem and the enrollment, went into the host dir.
+        The host dir keeps only its socket, the marker never shows through run-user/, and the
+        box's key dir holds the session's key and the new enrollment."""
+        host = self.host_keydir()
+        moved = self.run_user_keydir.with_name("agent-secrets.moved")
+        steps = "\n".join(
+            [
+                self.REVOKE,
+                'rm "$(box_keydir box1)/key.pem"',
+                f": >{self.MARKER}",
+                f'mv "{self.run_user_keydir}" "{moved}"',
+                f'ln -s "{moved}" "{self.run_user_keydir}"',
+                self.PASS,
+            ]
+        )
+        with self.flip_when_pending(host) as flipped:
+            self.run_steps("sid-1", steps)
+        self.assertEqual(self.files(host), {"helper.sock"})
+        self.assertFalse(flipped.is_set(), "enrollment.pending showed through the box's run-user/")
+        session_key = self.run_base / "session-keys" / "sid-1" / "key.pem"
+        self.assertEqual((self.keydir / "key.pem").read_bytes(), session_key.read_bytes())
+        self.assertEqual((self.keydir / "enrollment").read_text(), "enr-2\n")
+        self.assertEqual(self.launcher_lines(), self.ENROLLED_AGAIN)
+
     def test_a_hangup_during_an_attempt_leaves_stderr_where_the_trap_put_it(self) -> None:
         """cmd_new's HUP trap points stdout and stderr at /dev/null, as nothing reads a hung-up
         terminal. A hangup during the attempt's enroll call (STUB_HUP_PID) runs that trap inside
@@ -1099,12 +1263,13 @@ class CmdNew(EnrollFixture):
     """cmd_new gives a box a marker and an enrollment only when the host can enroll it, and enrolls
     it again while it runs when its renew is refused as not live."""
 
-    # The steps that need a real host are no-ops; close_box, the launcher's last step, records the
-    # enrollment id its revoke would name.
+    # The steps that need a real host are no-ops; mount_args makes the key dir and its mount point
+    # in run-user/, and close_box, the launcher's last step, records the enrollment id its revoke
+    # would name.
     NO_HOST = (
         "build_image() { :; }; ensure_network() { :; }; ensure_forwarders() { :; }\n"
         "check_box_disk_space() { :; };\n"
-        'mount_args() { mkdir -p "$(box_keydir "$1")"; }\n'
+        'mount_args() { mkdir -p "$(box_keydir "$1")" "$RUN_BASE/$1/run-user/agent-secrets"; }\n'
         "session_env() { :; }; clone_checkout() { :; }\n"
         'close_box() { echo "close_box $1 revokes=$(cat "$RUN_BASE/$1/enrollment-id" 2>/dev/null)" >>"$STUB_CALLS"; }\n'
     )
@@ -1115,7 +1280,7 @@ class CmdNew(EnrollFixture):
         result = self.bash(f"{self.NO_HOST}cmd_new repo1 -- {cmd}", **stubs)
         self.assertEqual(result.returncode, 0, result.stderr)
         (box,) = self.run_base.glob("agentbox-*")
-        return box / "run-user" / "agent-secrets"
+        return box / keydir_in_box_dir()
 
     def test_a_host_that_can_enroll_marks_and_enrolls_the_box(self) -> None:
         keydir = self.new_box(STUB_LOGIN_STATUS="0")
@@ -1147,7 +1312,7 @@ class CmdNew(EnrollFixture):
             STUB_RUN_UNTIL="enrolled again",
             **stubs,
         )
-        return keydir.parents[1].name, keydir, self.calls.read_text().splitlines()
+        return keydir.relative_to(self.run_base).parts[0], keydir, self.calls.read_text().splitlines()
 
     def assert_enrolled_again_while_it_ran(self, box: str, keydir: Path, calls: list[str], sid: str, runtime: str) -> None:
         """One re-enrollment, as recorded, before the box ended; close_box's revoke, after the box
@@ -1165,8 +1330,8 @@ class CmdNew(EnrollFixture):
     def test_an_omp_box_refused_as_not_live_is_enrolled_again_by_its_wait(self) -> None:
         """Case 6 of the plan (dispatch://INFRA-3462), a box with a session id. Its session-id
         poll ends once the id is known, so box_wait enrolls it again: its renew loop starts only
-        once box_wait's first `sleep 10` is in the call log. Nothing enrolls the box after it
-        ended: the box's end writes a fresh marker and its `docker run` exits at once, while
+        once box_wait's first `sleep 10` is in the call log. No pass after the box ended starts an
+        attempt: the box's end writes a fresh marker and its `docker run` exits at once, while
         box_wait is inside a real 10 s wait (STUB_REAL_SLEEP) that the child's exit ends, so only
         a pass after that exit could act on the marker. The marker is still there when cmd_new
         returns, and there are still two enroll calls."""

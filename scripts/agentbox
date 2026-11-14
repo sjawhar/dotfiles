@@ -90,11 +90,13 @@
 # an omp session id, the key is the host's key for that session. The host makes it under
 # $RUN_BASE/session-keys/<sid> and copies it into the box (ensure_session_key, enroll_key). A box
 # with no session id, or one whose session key the host cannot make, makes its key inside itself
-# (docker exec … agent-secrets keygen), in its private runtime dir. The launcher bind-mounts the
-# key dir into that box only. A detached `agent-secrets renew` loop in the box (start_renew,
-# RENEW_LOOP) keeps the lease, which lapses within 15 min when nothing renews it. When the broker
-# refuses renew as not live, the launcher enrolls the key the box holds again
-# (reenroll_if_not_live). A failed attempt keeps the key, and the launcher tries again later.
+# (docker exec … agent-secrets keygen), in its key dir. The key dir is the host's
+# $RUN_BASE/<box>/agent-secrets, bind-mounted on its own at /run/user/$UID_/agent-secrets in that
+# box only, and not a part of the box's runtime dir: the box can change what is in it, never where
+# it is (box_keydir). A detached `agent-secrets renew` loop in the box (start_renew, RENEW_LOOP)
+# keeps the lease, which lapses within 15 min when nothing renews it. When the broker refuses
+# renew as not live, the launcher enrolls the key the box holds again (reenroll_if_not_live). A
+# failed attempt keeps the key, and the launcher tries again later.
 # close_box revokes a box's own enrollment at once (unenroll_box). It gives a session's
 # enrollment to a detached waiter, which ends it after a grace unless another box of the session
 # uses it. A box started while the host's helper holds no live launcher credential gets no
@@ -827,16 +829,24 @@ broker_ready() {
     return 1
 }
 
-# The host side of a box's key dir: bind-mounted at /run/user/$UID_/agent-secrets in that box only.
-box_keydir() { echo "$RUN_BASE/$1/run-user/agent-secrets"; }
+# The host side of a box's key dir, bind-mounted on its own at /run/user/$UID_/agent-secrets in
+# that box only (mount_args). Its parent, $RUN_BASE/<box>, is the host's alone: no box mounts it,
+# so no box can put a link at the key dir's own name. The key dir was run-user/agent-secrets
+# before dispatch://INFRA-3462, inside the box's own runtime dir: a process in the box could
+# replace it with a link, and every host write into the key dir then went where the link pointed,
+# such as the host's /run/user/$UID_/agent-secrets, whose key.pem host sessions sign with.
+box_keydir() { echo "$RUN_BASE/$1/agent-secrets"; }
 
 # The box's key dir is the box's to write too (keygen writes key.pem there as the box's user), so
 # the host keeps its own files beside it, in $RUN_BASE/<box>, which no box mounts: each enroll
 # attempt's error (enroll.attempt-error) and the enrollment id close_box revokes (enrollment-id).
 # What agentbox itself puts in the key dir is written to a temp file in $RUN_BASE/<box> and
-# renamed into place, which replaces whatever the box left at that name (a symlink included)
-# instead of following it. The `enrollment` file is the client's own: at the pin, the host-side
-# `agent-secrets enroll` (cmdEnrollHelper) writes it atomically, through writeFileAtomic.
+# renamed into place. The rename replaces whatever the box left at the last name (a symlink
+# included) instead of following it, but it follows every directory above that name: a link at
+# the key dir's own name was followed until the key dir left the box's run-user/ (box_keydir).
+# Every directory above the last name is now the host's alone. The `enrollment` file is the
+# client's own: at the pin, the host-side `agent-secrets enroll` (cmdEnrollHelper) writes only
+# that file, through writeFileAtomic (a temp file it makes with O_EXCL, then a rename).
 put_keyfile() {
     local box="$1" name="$2" content="$3" tmp
     tmp="$(mktemp "$RUN_BASE/$box/.keyfile.XXXXXX")" || return 1
@@ -901,11 +911,14 @@ copy_keyfile() {
     cat "$src" >"$tmp" && chmod 600 "$tmp" && mv -fT "$tmp" "$(box_keydir "$box")/$name"
 }
 
-# How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error
-# (`agentbox doctor` reports it), then key.pem and the enrollment.pending marker removed, so the
-# box has no broker identity and its agents use secretsd, as when the host could not enroll it.
+# How a box's enrollment ends when it does not end enrolled: the reason in enrollment.error, which
+# the box's `agentbox doctor --here` reports, and in ENROLL_ERROR, which the host's `agentbox
+# doctor` reports without reading the box-writable file. Then key.pem and the enrollment.pending
+# marker are removed, so the box has no broker identity and its agents use secretsd, as when the
+# host could not enroll it.
 enroll_failed() {
     local keydir; keydir="$(box_keydir "$1")"
+    ENROLL_ERROR="$2"
     put_keyfile "$1" enrollment.error "$2"$'\n'
     rm -f "$keydir/key.pem" "$keydir/enrollment.pending"
     return 1
@@ -932,7 +945,7 @@ wait_for_running() {
 # ENROLLED_SKD is the session's host key dir when the enrollment is the session's, and empty when
 # it is the box's own (no session id, no host key for the session, or the 409 fallback, which
 # still passes --session-id); ENROLLED_ID is the id the last enrollment got back. ENROLL_ERROR is
-# why the last key step or enroll call failed.
+# why the last key step or enroll call failed, and after enroll_failed the reason it recorded.
 ENROLLED_BOX="" ENROLLED_SID="" ENROLLED_RUNTIME="" ENROLLED_TP="" ENROLLED_SKD="" ENROLLED_ID=""
 ENROLL_ERROR=""
 
@@ -996,10 +1009,12 @@ enroll_attempts() {
         args=(enroll --helper --runtime-id "$ENROLLED_RUNTIME" --thumbprint "$ENROLLED_TP")
         [[ -n "$ENROLLED_SID" ]] && args+=(--session-id "$ENROLLED_SID")
         put_keyfile "$box" enrollment.pending ""
-        # enroll prints the enrollment id alone, and writes it into the key dir for the box.
+        # enroll prints the enrollment id alone, and writes it into the key dir for the box. The
+        # client's rename leaves a plain file there; a link at that name is the box's, so it is a
+        # failed attempt, tested with -L and never followed.
         if eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
             agent-secrets "${args[@]}" 2>"$errfile")"; then
-            if [[ -z "$eid" || ! -s "$keydir/enrollment" ]]; then
+            if [[ -z "$eid" || -L "$keydir/enrollment" || ! -s "$keydir/enrollment" ]]; then
                 ENROLL_ERROR="agent-secrets enroll printed '$eid' and left $keydir/enrollment empty"
                 return 1
             fi
@@ -1065,11 +1080,12 @@ enroll_box() {
 
 # reenroll_box BOX: one attempt to enroll the launcher's box again, through enroll_box's broker
 # call (enroll_attempts) and never with a new key while the box holds the one it is enrolled
-# with. With key.pem in its key dir it enrolls the runtime id, thumbprint and session id the
-# ENROLLED_* globals hold, and no keygen and no key copy runs: the broker gives an enrollment
-# that is still live its own id back, and one that lapsed or was revoked a new id (under
-# --session-id, with the session's grants and pending requests carried to it). Only a box that
-# holds no key.pem gets enroll_box's key step again (enroll_key), with the 409 fallback.
+# with. With key.pem in its key dir (of any type: a link there counts, tested with -L and never
+# followed) it enrolls the runtime id, thumbprint and session id the ENROLLED_* globals hold, and
+# no keygen and no key copy runs: the broker gives an enrollment that is still live its own id
+# back, and one that lapsed or was revoked a new id (under --session-id, with the session's grants
+# and pending requests carried to it). Only a box that holds no key.pem gets enroll_box's key step
+# again (enroll_key), with the 409 fallback.
 # broker_ready comes first: a helper with no live launcher credential is a failed attempt with
 # no enroll call. Success leaves the id in ENROLLED_ID (the old one when the enrollment was live)
 # and the host's records written as enroll_box writes them. A failure keeps key.pem, puts the
@@ -1080,7 +1096,7 @@ reenroll_box() {
     keydir="$(box_keydir "$box")"
     if ! broker_ready; then
         ENROLL_ERROR="$BROKER_UNREADY"
-    elif [[ -e "$keydir/key.pem" ]]; then
+    elif [[ -L "$keydir/key.pem" || -e "$keydir/key.pem" ]]; then
         enroll_attempts "$box" 1 && return 0
     else
         put_keyfile "$box" enrollment.pending "" || true
@@ -1154,7 +1170,7 @@ box_renew_log() {
 # The launcher's answer to the renew loop's enrollment.not-live (RENEW_LOOP), run on every pass of
 # its waits for the box (cmd_new's session-id poll, box_wait). Nothing happens unless the box is
 # the one enroll_box enrolled, the marker is there, and the back-off after a failed attempt has
-# passed. The marker is the box's to write, so it is only a doorbell: tested with -e or -L and
+# passed. The marker is the box's to write, so it is only a doorbell: tested with -L, then -e, and
 # removed with rm -f, never read or opened, so a link or a FIFO there cannot make the host read a
 # host file or hang; the old id is the host's own record. One attempt (reenroll_box), then one
 # line in the box's renew.log: both ids, the same id when the enrollment was live after all, or
@@ -1173,7 +1189,7 @@ reenroll_if_not_live() {
     [[ "${interrupted:-0}" == 0 ]] || return 0
     [[ "$ENROLLED_BOX" == "$box" ]] || return 0
     keydir="$(box_keydir "$box")"
-    [[ -e "$keydir/enrollment.not-live" || -L "$keydir/enrollment.not-live" ]] || return 0
+    [[ -L "$keydir/enrollment.not-live" || -e "$keydir/enrollment.not-live" ]] || return 0
     (( SECONDS >= REENROLL_AT )) || return 0
     old="$(cat "$RUN_BASE/$box/enrollment-id" 2>/dev/null || true)"
     reenroll_box "$box" 2>/dev/null && ok=1
@@ -1977,18 +1993,26 @@ mount_args() {
     # the host sockets bound at their usual paths. Never the host's whole
     # /run/user/$UID_. secretsd/ is the token dir the omp extension writes to;
     # created here so it is the user's, 0700, not a root-owned mountpoint.
-    # agent-secrets/ holds the box's broker key (written by keygen inside the box) and its
-    # enrollment id (written by the launcher, enroll_box): tmpfs, this box only, gone with it.
     # 0700 for the directory itself, not only its key dirs: a plain mkdir takes the launcher
     # umask, 002 in these sessions, and left it 0775 (all 20 live boxes on 2026-11-04 at
     # 22:13Z). secretsd refuses to start on a runtime directory other users may write
     # ("writable by other users"), so a boxed session that started its own secretsd got none.
     # The chmod stays beside the -m, since $RUN_BASE/$box may exist already from enroll_box.
-    local run_user="$RUN_BASE/$box/run-user"
-    mkdir -p -m 700 "$run_user"
+    # /run/user/$UID_/agent-secrets is the box's key dir: its broker key (made by keygen in the
+    # box, or the session's key the launcher copies in) and its enrollment id (written by the
+    # host-side enroll): tmpfs, this box only, gone with it. It is a mount of its own, of
+    # $RUN_BASE/<box>/agent-secrets (box_keydir), and not a part of run-user/: the box can rename
+    # or replace anything in its runtime dir, so a link it put at the key dir's name there would
+    # take each host write into the key dir to wherever the link points. run-user/agent-secrets
+    # stays, 0700, as the mount point inside the run-user bind, as bus/ and forward/ do, and the
+    # host never reads or writes through it.
+    local run_user="$RUN_BASE/$box/run-user" keydir
+    keydir="$(box_keydir "$box")"
+    mkdir -p -m 700 "$run_user" "$keydir"
     mkdir -p "$run_user/bus" "$run_user/forward" "$run_user/secretsd" "$run_user/envoy" "$run_user/agent-secrets"
-    chmod 700 "$run_user" "$run_user/secretsd" "$run_user/agent-secrets"
+    chmod 700 "$run_user" "$run_user/secretsd" "$run_user/agent-secrets" "$keydir"
     a+=(-v "$run_user:/run/user/$UID_")
+    a+=(-v "$keydir:/run/user/$UID_/agent-secrets")
     a+=(-v "$(dirname "$BUS_SOCK"):/run/user/$UID_/bus")
     [[ -S "$SECRETSD_SOCK" ]] || die "secretsd socket $SECRETSD_SOCK missing (systemctl --user status secretsd.socket)"
     a+=(-v "$SECRETSD_SOCK:$SECRETSD_SOCK")
@@ -3181,8 +3205,9 @@ cmd_new() {
     mapfile -t mounts <<<"$mount_out"
     # mount_args made the key dir. From the legion #1589 release, enrollment.pending tells the
     # box's agent-secrets that an enrollment is on its way; enroll_box renews it and ends it
-    # either way. A box with no broker identity gets no marker and no key.
-    if (( use_broker )); then : >"$(box_keydir "$box")/enrollment.pending"; fi
+    # either way. A box with no broker identity gets no marker and no key. Written as every host
+    # write into the key dir is (put_keyfile), and a failure ends the launch.
+    if (( use_broker )); then put_keyfile "$box" enrollment.pending ""; fi
     local env_out
     env_out="$(session_env "$box")" || exit 1
     mapfile -t env <<<"$env_out"
@@ -3235,10 +3260,12 @@ cmd_new() {
         reap_start "$box" "$sid" "$box_started_ms"
     fi
     # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
-    # while it runs and returns once the child has exited, so nothing enrolls it after that and
-    # close_box below revokes the id the last re-enrollment recorded. A box with none goes
-    # straight to the wait below. An interrupted wait re-waits: the first return after a signal
-    # carries 128+sig, the child's real status arrives once it is reaped.
+    # while it runs and returns once the child has exited. Its last attempt comes before
+    # close_box below, which revokes the last enrollment id the host recorded. An attempt that the
+    # helper reports as failed can still make an enrollment at the broker, which the host has no
+    # record of; that one lapses at the end of its lease (agentbox/AGENTS.md). A box with none
+    # goes straight to the wait below. An interrupted wait re-waits: the first return after a
+    # signal carries 128+sig, the child's real status arrives once it is reaped.
     if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
     while :; do
         if wait "$child"; then rc=0; else rc=$?; fi
@@ -9951,9 +9978,10 @@ cmd_doctor() {
         until docker exec "$box" pgrep -x sleep >/dev/null 2>&1 || (( --tries == 0 )); do sleep 1; done
         if (( tries )); then
             # Enrolled like a box from `new` when the host can enroll one; the host rows above say
-            # why not, and the box-side checks show the rest.
+            # why not, and the box-side checks show the rest. The reason is the host's own
+            # (ENROLL_ERROR), never a read of the box-writable enrollment.error.
             if broker_ready; then
-                enroll_box "$box" "" || fail "host: enroll $box: $(cat "$(box_keydir "$box")/enrollment.error" 2>/dev/null)"
+                enroll_box "$box" "" || fail "host: enroll $box: $ENROLL_ERROR"
             fi
             # The host's durable figures of this moment, not of the launch above.
             local durable_env=()

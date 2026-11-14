@@ -40,7 +40,10 @@ class RunUserMode(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             run_user = run_base / "agentbox-modetest/run-user"
             self.assertTrue(run_user.is_dir(), f"mount_args made no runtime dir: {done.stderr}")
-            for path in (run_user, run_user / "secretsd", run_user / "agent-secrets"):
+            # The box's key dir is beside run-user/ and bound on its own (box_keydir); the
+            # run-user/agent-secrets mount point stays private too.
+            keydir = run_base / "agentbox-modetest/agent-secrets"
+            for path in (run_user, run_user / "secretsd", run_user / "agent-secrets", keydir):
                 self.assertEqual(oct(path.stat().st_mode & 0o777), "0o700", path)
 
 
