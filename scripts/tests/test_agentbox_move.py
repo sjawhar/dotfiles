@@ -2257,13 +2257,24 @@ class AgentboxMove(unittest.TestCase):
         self.set_panes({999999900: ("%81", "agents:4.1")})
         self.target()
         copying = self.root / "IN_RSYNC"
+        tee_waiting = self.root / "TEE_WAITING"
+        tee_go = self.root / "TEE_GO"
+        tee_timeout = self.root / "TEE_TIMEOUT"
         write_stub(self.stubs, "rsync",
                    'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
                    f'touch "{copying}"; exec sleep 60')
-        # A tee that starts 2 s late opens its output after the relauncher's exit trap removed the
-        # error file; given the path, it would create the file again with the signal line.
-        write_stub(self.stubs, "tee", 'sleep 2; exec /usr/bin/tee "$@"')
         self.assertEqual(self.move_to().returncode, 0)
+        # Written after the plan run, so only the relauncher's tee meets it: the gate holds tee
+        # until the test has seen the relauncher exit. A fixed delay let a late TERM come after
+        # tee had opened its output, and then a writer given the path passed too.
+        write_stub(self.stubs, "tee",
+                   f'touch "{tee_waiting}"\n'
+                   'for _ in {1..300}; do\n'
+                   f'    [[ -e "{tee_go}" ]] && break\n'
+                   '    sleep 0.1\n'
+                   'done\n'
+                   f'[[ -e "{tee_go}" ]] || touch "{tee_timeout}"\n'
+                   'exec /usr/bin/tee "$@"')
         [job] = self.jobs()
         self.set_pids()
         log = self.root / "relauncher.log"
@@ -2278,9 +2289,16 @@ class AgentboxMove(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertTrue(copying.exists(), log.read_text(encoding="utf-8"))
+        for _ in range(int(self.TIMEOUT * 10)):
+            if tee_waiting.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(tee_waiting.exists(), log.read_text(encoding="utf-8"))
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=30)
+        tee_go.touch()
         self.assert_group_ended(proc, "TERM before the error writer opens")
+        self.assertFalse(tee_timeout.exists(), log.read_text(encoding="utf-8"))
         self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
                           and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
         self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up",
