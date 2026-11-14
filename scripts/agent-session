@@ -334,10 +334,20 @@ else
         fi
 
         grace=10
-        out="$(mktemp)"
+        out_made=0
+        if out="$(mktemp 2>/dev/null)"; then
+            out_made=1
+        elif out="$(TMPDIR=/tmp mktemp 2>/dev/null)"; then
+            out_made=1
+        else
+            printf 'agent-session: cannot make a temporary file in %s or /tmp; mise install output is not kept\n' "${TMPDIR:-}" >&2
+            out=/dev/null
+        fi
         # A relative TMPDIR gives a relative name, which `mise which`'s stderr redirect, made after
         # the cd into the checkout, would read from the wrong directory.
-        [[ "$out" = /* ]] || out="$PWD/$out"
+        if [[ "$out" != /dev/null ]]; then
+            [[ "$out" = /* ]] || out="$PWD/$out"
+        fi
         rc=0
         (
             # shellcheck disable=SC1007
@@ -385,10 +395,14 @@ else
                 printf 'last lines of its output:\n' >&2
                 tail -n 20 "$out" >&2 || true
             fi
-            rm -f "$out"
+            if (( out_made )); then
+                rm -f "$out"
+            fi
             exit 127
         fi
-        rm -f "$out"
+        if (( out_made )); then
+            rm -f "$out"
+        fi
     fi
 fi
 

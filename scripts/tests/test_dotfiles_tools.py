@@ -62,7 +62,15 @@ class DotfilesTools(DotfilesCheckout):
             f"""#!/usr/bin/env bash
 set -eu
 lock="${{MISE_DATA_DIR:-$HOME/.mise}}/.dotfiles-install.lock"
-if flock -n "$lock" true; then state=free; else state=held; fi
+if flock -n -E 75 "$lock" true; then
+    state=free
+else
+    rc=$?
+    case "$rc" in
+        75) state=held ;;
+        *) state="probe-error-$rc" ;;
+    esac
+fi
 origin_main=""
 if [[ -n "${{ORIGIN_GIT:-}}" ]]; then
     origin_main="$(git --git-dir="$ORIGIN_GIT" rev-parse main)"
@@ -404,8 +412,8 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             # inside the grace with 2 s of margin on one side and 8 s on the other.
             time.sleep(4)
             self.assertTrue(Path(f"/proc/{pid}").exists(), "the survivor was killed before the grace ended")
-            during = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
-            self.assertNotEqual(during.returncode, 0, "the lock was free while the survivor still ran")
+            during = subprocess.run(["flock", "-n", "-E", "75", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            self.assertEqual(during.returncode, 75, "the lock was free while the survivor still ran")
             stdout, stderr = sync.communicate(timeout=40)
             self.assertNotEqual(sync.returncode, 0, stdout + stderr)
             self.assertIn("exited 124", stderr)
@@ -552,6 +560,19 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
 
+    def test_case_23a_tools_mode_falls_back_from_an_unusable_tmpdir(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        missing_tmp = self.root / "missing-tmp"
+        result = self._run(SYNC, "--tools", str(self.checkout), env={**self.env, "TMPDIR": str(missing_tmp)})
+
+        self.assertFalse(missing_tmp.exists())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertIn(f"tools: `mise install` passed in {self.checkout}", result.stdout)
+        self.assertIn(f"tools: `bun install --frozen-lockfile` passed in {self.checkout}/omp/plugins", result.stdout)
+
     def test_case_24_the_sync_lock_is_free_while_the_tools_step_installs(self) -> None:
         # A long install must not hold the sync lock: dotfiles-follow moves the checkout with
         # `--here`, which waits for that lock and reports a held one as a failed sync.
@@ -560,7 +581,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         probe = self.root / "sync-lock-probe"
         (self.checkout / "bin" / "mise").write_text(
             "#!/usr/bin/env bash\n"
-            f'if flock -n {sync_lock} true; then echo free; else echo held; fi > {probe}\n'
+            f'if flock -n -E 75 {sync_lock} true; then echo free; else rc=$?; case "$rc" in 75) echo held ;; *) echo probe-error-$rc ;; esac; fi > {probe}\n'
         )
         result = self.sync("local")
 
@@ -692,7 +713,7 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
             "--tools",
             str(self.checkout),
             cwd=self.root,
-            env={**self.env, "PATH": str(without_bun)},
+            env={**self.env, "PATH": str(without_bun), "TMPDIR": str(self.root / "missing-tmp")},
         )
 
         self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
@@ -700,6 +721,41 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertIn("exited 127", result.stderr)
         self.assertIn("bun: command not found", result.stderr)
         self.assertEqual(len(self.calls("mise")), 1, self.records())
+        self.assertEqual(self.calls("bun"), [], self.records())
+
+    def test_case_30a_missing_mise_reports_tools_error_with_an_unusable_tmpdir(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        (self.checkout / "bin" / "mise").rename(self.checkout / "bin" / "mise-hidden")
+        without_mise = self.root / "without-mise"
+        without_mise.mkdir()
+        for name in ("bash", "flock", "mkdir", "mktemp", "rm", "sleep", "tail", "timeout"):
+            source = next(
+                (
+                    directory / name
+                    for directory in (Path("/usr/bin"), Path("/bin"))
+                    if (directory / name).exists()
+                ),
+                None,
+            )
+            if source is None:
+                self.fail(f"required command is absent: {name}")
+            (without_mise / name).symlink_to(source)
+
+        result = self._run(
+            SYNC,
+            "--tools",
+            str(self.checkout),
+            cwd=self.root,
+            env={**self.env, "PATH": str(without_mise), "TMPDIR": str(self.root / "missing-tmp")},
+        )
+
+        self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("exited 127", result.stderr)
+        self.assertIn("mise: command not found", result.stderr)
+        self.assertEqual(self.calls("mise"), [], self.records())
         self.assertEqual(self.calls("bun"), [], self.records())
 
     def test_case_31_mise_from_a_relative_path_entry_is_absolute_before_the_checkout_cd(self) -> None:

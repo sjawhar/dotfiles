@@ -118,7 +118,14 @@ tools_error() {
 tools_run() {
   local command="$1" cwd="$2" limit="$3" output pid status waits tick='`'
   shift 3
-  output="$(mktemp)"
+  if output="$(mktemp 2>/dev/null)"; then
+    :
+  elif output="$(TMPDIR=/tmp mktemp 2>/dev/null)"; then
+    :
+  else
+    printf 'dotfiles-sync: tools step: %s%s%s in %s did not start: cannot make a temporary file in %s or /tmp\n' "$tick" "$command" "$tick" "$cwd" "${TMPDIR:-}" >&2
+    return 1
+  fi
   (
     # shellcheck disable=SC1007
     CDPATH= cd -- "$cwd" && exec timeout -k "$tools_grace" "$limit" "$@"
@@ -154,7 +161,7 @@ tools_run() {
 }
 
 tools_step() (
-  local dir limit lock mise bun output
+  local dir limit lock mise bun
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
   # shellcheck disable=SC1007
@@ -187,10 +194,7 @@ tools_step() (
   if [[ -x "$dir/bin/mise" ]]; then
     mise="$dir/bin/mise"
   elif ! mise="$(command -v mise 2>/dev/null)"; then
-    output="$(mktemp)"
-    printf 'mise: command not found\n' >"$output"
-    tools_error "mise install" "$dir" 127 "$limit" "$output"
-    rm -f "$output" || true
+    tools_error "mise install" "$dir" 127 "$limit" <(printf 'mise: command not found\n')
     return 127
   fi
   [[ "$mise" = /* ]] || mise="$PWD/$mise"
@@ -198,10 +202,7 @@ tools_step() (
 
   [[ -f "$dir/omp/plugins/package.json" ]] || return 0
   if ! bun="$(command -v bun 2>/dev/null)"; then
-    output="$(mktemp)"
-    printf 'bun: command not found\n' >"$output"
-    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" "$output"
-    rm -f "$output" || true
+    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" <(printf 'bun: command not found\n')
     return 127
   fi
   [[ "$bun" = /* ]] || bun="$PWD/$bun"

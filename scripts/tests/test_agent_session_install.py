@@ -70,7 +70,7 @@ class AgentSessionInstallTest(unittest.TestCase):
         self.record.touch()
         self.data = self.root / "mise-data"
 
-        for name in ("bash", "cat", "chmod", "flock", "id", "mkdir", "mktemp", "realpath", "rm", "sleep", "tail", "timeout"):
+        for name in ("bash", "cat", "chmod", "flock", "id", "mkdir", "mktemp", "realpath", "rm", "sleep", "tail", "timeout", "true"):
             source = next((directory / name for directory in (Path("/usr/bin"), Path("/bin")) if (directory / name).exists()), None)
             if source is None:
                 self.fail(f"required command is absent: {name}")
@@ -82,7 +82,15 @@ class AgentSessionInstallTest(unittest.TestCase):
         self.mise_body = r'''
 data="${MISE_DATA_DIR:-$HOME/.mise}"
 lock="$data/.dotfiles-install.lock"
-if flock -n "$lock" true; then state=free; else state=held; fi
+if flock -n -E 75 "$lock" true; then
+    state=free
+else
+    rc=$?
+    case "$rc" in
+        75) state=held ;;
+        *) state="probe-error-$rc" ;;
+    esac
+fi
 printf '%s|argv=%s|PWD=%s|MISE_DATA_DIR=%s|%s\n' "$1" "$*" "$PWD" "$data" "$state" >> "$RECORD"
 case "$1" in
     install)
@@ -220,6 +228,30 @@ esac
         self.assertIn(f"PWD={self.dotfiles}", install)
         self.assertIn(f"MISE_DATA_DIR={self.data}", install)
         self.assertTrue(install.endswith("|held"), install)
+        which = next(line for line in self.records() if line.startswith("which|"))
+        self.assertTrue(which.endswith("|free"), which)
+
+    def test_unusable_tmpdir_falls_back_and_launches_the_agent(self) -> None:
+        missing_tmp = self.root / "missing-tmp"
+        result = self.launch("--mode", "tmpdir-fallback", env=self.env(TMPDIR=str(missing_tmp)))
+
+        self.assertFalse(missing_tmp.exists())
+        self.assert_agent_started(result, "--mode", "tmpdir-fallback")
+        self.assertTrue(self.install_record().startswith("install|"), self.records())
+        self.assertTrue(any(line.startswith("which|argv=which fakeagent") for line in self.records()))
+
+    def test_unusable_tmpdir_without_an_agent_refuses(self) -> None:
+        missing_tmp = self.root / "missing-tmp"
+        result = self.launch(env=self.env(TMPDIR=str(missing_tmp), FAKE_MISE_WRITE_AGENT="0"))
+
+        self.assertFalse(missing_tmp.exists())
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn("no fakeagent on PATH other than a wrapper", result.stderr)
+        self.assertTrue(self.install_record().startswith("install|"), self.records())
+        self.assertTrue(any(line.startswith("which|argv=which fakeagent") for line in self.records()))
+        # The /tmp fallback keeps mise's output for the refusal.
+        self.assertIn("mise install output", result.stderr)
+        self.assertIn("mise ERROR fakeagent is not a mise bin", result.stderr)
 
     def test_relative_dotfiles_dir_with_cdpath_starts_missing_agent(self) -> None:
         result = self.launch(

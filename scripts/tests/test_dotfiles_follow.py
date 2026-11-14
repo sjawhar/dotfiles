@@ -42,10 +42,14 @@ FAKE_MISE = """#!/bin/sh
 echo "$*" >> "$FAKE_LOG"
 case "$1" in
     install)
-        if flock -n "${MISE_DATA_DIR:-$HOME/.mise}/.dotfiles-install.lock" true; then
+        if flock -n -E 75 "${MISE_DATA_DIR:-$HOME/.mise}/.dotfiles-install.lock" true; then
             lock=free
         else
-            lock=held
+            rc=$?
+            case "$rc" in
+                75) lock=held ;;
+                *) lock=probe-error-$rc ;;
+            esac
         fi
         echo "install $lock ${MISE_DATA_DIR:-$HOME/.mise}" >> "$FAKE_LOG"
         [ "${FAKE_MISE_RC:-0}" = 0 ] || echo "mise ERROR Failed to install github:sjawhar/knives@3.2.2: HTTP 403" >&2
