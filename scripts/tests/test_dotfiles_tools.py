@@ -187,6 +187,30 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[-1], "fakehost")
 
+    def test_case_03b_remote_ssh_limit_covers_the_move_the_lock_wait_and_both_commands(self) -> None:
+        # The ssh limit is the remote host's whole budget: 180 s move, 300 s sync-lock wait, and
+        # each tools command's limit plus its 10 s kill grace. Left at the move's 180 s, a remote
+        # install longer than that is killed mid-download.
+        self._install_ssh()
+        ssh = self.root / "bin" / "ssh"
+        ssh.rename(self.root / "bin" / "ssh-step")
+        ssh.write_text(
+            '#!/usr/bin/env bash\ntr "\\0" " " < /proc/$PPID/cmdline >> "$SSH_RECORD.parent"\n'
+            'echo >> "$SSH_RECORD.parent"\nexec "$(dirname "$0")/ssh-step" "$@"\n'
+        )
+        ssh.chmod(0o755)
+        for limit, outer in ((None, 1700), ("5", 510)):
+            with self.subTest(DOTFILES_TOOLS_TIMEOUT=limit):
+                Path(f"{self.ssh_record}.parent").write_text("")
+                env = dict(self.env)
+                if limit is not None:
+                    env["DOTFILES_TOOLS_TIMEOUT"] = limit
+                result = self.sync("fakehost", env=env)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                parent = Path(f"{self.ssh_record}.parent").read_text().split()
+                self.assertEqual(parent[:3], ["timeout", str(outer), "ssh"], parent)
+
     def test_case_04_default_host_list_runs_one_remote_step_per_machine(self) -> None:
         self._install_ssh()
         result = self.sync()
@@ -410,6 +434,18 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         pushed = self.run_ok("git", "rev-parse", "main", cwd=self.origin).strip()
         self.assertEqual(self.calls("mise")[0].split("|")[5], pushed)
+
+    def test_case_17b_publish_whose_push_succeeds_exits_non_zero_when_the_step_fails(self) -> None:
+        # R5: a failed install makes the run exit non-zero; the push stays.
+        change = self.local_commit()
+        result = self.publish(change, env={**self.env, "FAKE_MISE_RC": "1"})
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("mise ERROR forced failure", result.stderr)
+        self.assertEqual(self.calls("bun"), [], self.records())
+        pushed = self.run_ok("git", "show", "main:mine.txt", cwd=self.origin)
+        self.assertEqual(pushed, "mine\n")
 
     def test_case_18_publish_refused_push_runs_tools_and_keeps_failure(self) -> None:
         change = self.local_commit()

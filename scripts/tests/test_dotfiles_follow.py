@@ -316,6 +316,18 @@ class InstallTools(Harness):
         ]
         self.assertEqual(records, [f"install held {lock.parent}"])
 
+    def test_mise_install_gets_the_default_data_directory_when_none_is_set(self) -> None:
+        # Under the timer MISE_DATA_DIR is unset. mise's own default data directory is not
+        # ~/.mise, so follow must hand mise the directory its lock is in, or the install lands
+        # where no launch reads it.
+        self.assertNotIn("MISE_DATA_DIR", os.environ)
+        fakebin = Path(self.tmp.name) / "bin"
+        (fakebin / "mise").write_text('#!/bin/sh\necho "$* data=${MISE_DATA_DIR-unset}" >> "$FAKE_LOG"\n')
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        records = [line for line in self.fake_log.read_text().splitlines() if line.startswith("install ")]
+        self.assertEqual(records, [f"install data={self.home / '.mise'}"])
+
     def test_mise_install_timeout_waiting_for_the_shared_data_lock(self) -> None:
         data = self.home / "mise-data"
         data.mkdir()
