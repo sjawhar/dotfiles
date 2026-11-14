@@ -421,13 +421,15 @@ def omp_profile_is_legion() -> bool:
         return False
 
 
-def version_at_least(have: str, want: str) -> bool:
+def version_at_least(have: object, want: object) -> bool:
     """True when an installed marketplace version is at or above the lock's entry.
 
     Two versions of dotted numbers compare as integers, component by component, the shorter one
     padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals 0.3.9). When either
-    one is anything else (0.3.1-beta, or an empty version), the two must be equal.
+    one is anything else (0.3.1-beta, an empty version, or a non-string), the two must be equal.
     """
+    if not isinstance(have, str) or not isinstance(want, str):
+        return have == want
     numeric = r"[0-9]+(?:\.[0-9]+)*"
     if not (re.fullmatch(numeric, have) and re.fullmatch(numeric, want)):
         return have == want

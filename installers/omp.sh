@@ -110,9 +110,11 @@ marketplace_plugin_version() {
 # Succeeds when installed version $1 is at or above lock entry $2. Dotted numbers compare component
 # by component as integers (0.3.10 is above 0.3.9; 1.2 equals 1.2.0; 0.3.09 equals 0.3.9), as
 # digit strings without leading zeros, so no component is read as octal or overflows $(( )).
-# Any other version (0.3.1-beta, or empty) must equal the entry. Call it only in a condition.
+# Digits are ASCII 0-9 alone, listed one by one, since in a UTF-8 locale bash's [0-9] also matches
+# other digits (U+0661, U+FF11), which dotfiles-follow does not. Any other version (0.3.1-beta, or
+# empty) must equal the entry. Call it only in a condition.
 marketplace_version_at_least() {
-    local numeric='^[0-9]+(\.[0-9]+)*$' h w i n
+    local numeric='^[0123456789]+(\.[0123456789]+)*$' h w i n
     if ! [[ $1 =~ $numeric && $2 =~ $numeric ]]; then
         [ "$1" = "$2" ]
         return

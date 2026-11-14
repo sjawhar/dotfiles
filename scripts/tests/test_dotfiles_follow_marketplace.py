@@ -349,6 +349,18 @@ class MarketplacePlugins(Harness):
         ])
         self.assert_clean_lock()
 
+    def test_a_version_that_is_not_a_string_is_upgraded(self) -> None:
+        self.take_upstream()
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = None
+        self.installed_path.write_text(json.dumps(installed))
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertIn(["plugin", "marketplace", "update", "verification-skills"], self.calls())
+        self.assertIn(["plugin", "upgrade", "dev-infra@verification-skills"], self.calls())
+        self.assertEqual(self.version("dev-infra"), "2.0.0")
+        self.assert_clean_lock()
+
     def test_version_at_least_table(self) -> None:
         cases = (
             ("0.3.1", "0.3.1", True),
