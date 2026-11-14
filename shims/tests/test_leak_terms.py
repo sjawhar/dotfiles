@@ -2621,6 +2621,25 @@ class JjLeaks(LeakTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.description(repository, False), "clean\n")
 
+    def test_jj_message_accepts_an_empty_description_with_session_trailer_overlay(self) -> None:
+        overlay = self.root / f"omp-attribution-{self.session}.toml"
+        overlay.write_text(
+            f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n",
+            encoding="utf-8",
+        )
+        repository = self.repository(False)
+        result = self.jj(
+            repository,
+            "--quiet",
+            "describe",
+            "-m",
+            "",
+            agent=False,
+            extra={"JJ_CONFIG": f"{self.config}{os.pathsep}{overlay}"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+
     def test_jj_message_reads_a_repository_after_the_command_for_trailer_decisions(self) -> None:
         # A writing command the shim does not check (`jj squash`) names its repository after the command: the trailer
         # decision is that repository's, not the current directory's.
@@ -3845,6 +3864,24 @@ class OutgoingLeaks(SinkRepositoryCase):
         name, tag, commit = self.latin1_annotated_tag("latin1-clean", clean_message)
         pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)})
         self.assert_objects_pushed(pushed, self.public_url, tag, commit)
+
+    def test_held_latin1_tag_does_not_refuse_clean_tags(self) -> None:
+        self.init_jj()
+        encoding = self.command(["/usr/bin/git", "config", "--get", "i18n.commitEncoding"], self.person)
+        self.assertEqual((encoding.returncode, encoding.stdout, encoding.stderr), (1, "", ""))
+        held_name, held_tag, _ = self.latin1_annotated_tag("held-latin1", "Café clean\n")
+        self.seed(self.public_url, held_tag, f"refs/tags/{held_name}")
+
+        for kind in ("git", "jj"):
+            with self.subTest(kind=kind):
+                name, tag, commit = self.annotated_tag(f"{kind}-clean", self.clean_tag_message)
+                pushed = (
+                    self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.person)
+                    if kind == "git"
+                    else self.jj_push_tag(name, self.person)
+                )
+                self.assert_objects_pushed(pushed, self.public_url, tag, commit)
+                self.assert_sink_ref(self.public_url, f"refs/tags/{name}", tag, "tag")
 
 
     def test_push_reads_a_new_tag_with_two_cat_file_calls(self) -> None:

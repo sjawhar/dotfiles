@@ -186,6 +186,7 @@ jj_global_at() {
     _jj_global_size=0
     ((index < count)) || return 1
     option="${_pargs[index]}"
+    [[ -n "$option" ]] || return 1
     name="$option"
     entry="${jj_global_options[$name]:-}"
     if [[ -z "$entry" && "$option" == -R?* ]]; then
@@ -193,6 +194,7 @@ jj_global_at() {
         entry="${jj_global_options[$name]:-}"
     elif [[ -z "$entry" && "$option" == *=* ]]; then
         name="${option%%=*}"
+        [[ -n "$name" ]] || return 1
         entry="${jj_global_options[$name]:-}"
     fi
     [[ -n "$entry" ]] || return 1

@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_jj_lock_shim import real_jj
+
 
 REAL_GIT = "/usr/bin/git"
 SHIMS = Path(__file__).resolve().parents[1]
@@ -48,6 +50,46 @@ GLOBAL_OPTIONS = (
     ("--help", ("--help",), "stop", ("rev-parse", "--show-toplevel"), "repo"),
     ("-v", ("-v",), "stop", ("rev-parse", "--show-toplevel"), "repo"),
     ("--version", ("--version",), "stop", ("rev-parse", "--show-toplevel"), "repo"),
+)
+
+# Every Git global option appears here. The expected alias behavior comes from
+# real Git; this list only says which option forms Git accepts.
+ALIAS_GLOBAL_OPTIONS = (
+    ("-p", (("-p",),)),
+    ("--paginate", (("--paginate",),)),
+    ("-P", (("-P",),)),
+    ("--no-pager", (("--no-pager",),)),
+    ("--no-replace-objects", (("--no-replace-objects",),)),
+    ("--bare", (("--bare",),)),
+    ("--literal-pathspecs", (("--literal-pathspecs",),)),
+    ("--no-literal-pathspecs", (("--no-literal-pathspecs",),)),
+    ("--glob-pathspecs", (("--glob-pathspecs",),)),
+    ("--noglob-pathspecs", (("--noglob-pathspecs",),)),
+    ("--icase-pathspecs", (("--icase-pathspecs",),)),
+    ("--no-optional-locks", (("--no-optional-locks",),)),
+    ("-C", (("-C", "."),)),
+    ("-c", (("-c", "test.probe=from-alias"),)),
+    ("--shallow-file", (("--shallow-file", "shallow"),)),
+    ("--git-dir", (("--git-dir", ".git"), ("--git-dir=.git",))),
+    ("--work-tree", (("--work-tree", "."), ("--work-tree=.",))),
+    ("--namespace", (("--namespace", "test-space"), ("--namespace=test-space",))),
+    (
+        "--config-env",
+        (
+            ("--config-env", "test.probe=DOTFILES_GIT_PROBE"),
+            ("--config-env=test.probe=DOTFILES_GIT_PROBE",),
+        ),
+    ),
+    ("--attr-source", (("--attr-source", "HEAD"), ("--attr-source=HEAD",))),
+    ("--exec-path", (("--exec-path",), ("--exec-path={exec_path}",))),
+    ("--html-path", (("--html-path",),)),
+    ("--man-path", (("--man-path",),)),
+    ("--info-path", (("--info-path",),)),
+    ("--list-cmds", (("--list-cmds=main",),)),
+    ("-h", (("-h",),)),
+    ("--help", (("--help",),)),
+    ("-v", (("-v",),)),
+    ("--version", (("--version",),)),
 )
 
 # Rejected forms are as important as accepted forms: a future permissive reader must not move the
@@ -192,18 +234,36 @@ class GitGlobalOptions(unittest.TestCase):
         self.assertEqual(fields[1], str(self.repo.resolve()))
         self.assertEqual(fields[2:], ["-C"])
 
+    def test_non_option_words_after_global_match_real_git(self) -> None:
+        cases = (
+            ("empty", ("--no-pager", "", "status"), ""),
+            ("equals", ("--no-pager", "=x", "status"), "=x"),
+        )
+        for name, argv, command in cases:
+            with self.subTest(name=name):
+                real = self.real(*argv, cwd=self.repo)
+                fields = self.probe(argv, self.repo)
+                self.assertNotEqual(real.returncode, 0)
+                self.assertEqual(fields[0], command)
+                self.assertEqual(fields[1], str(self.repo.resolve()))
+
+    def git_global_option_names(self) -> set[str]:
+        source = (SHIMS / "git").read_text(encoding="utf-8")
+        table = source.partition("declare -A git_global_options=(\n")[2].partition("\n)\n")[0]
+        return {line.lstrip().split("]", 1)[0].removeprefix("[") for line in table.splitlines() if line.lstrip().startswith("[")}
+
     def test_alias_environment_rule_matches_git(self) -> None:
-        self.real("config", "alias.st2", "-C . status", cwd=self.repo, check=True)
-        self.real("config", "alias.st3", "-c test.probe=from-alias status", cwd=self.repo, check=True)
-        for alias in ("st2", "st3"):
-            with self.subTest(alias=alias):
-                real = self.real(alias, "--porcelain", cwd=self.repo)
-                shim = subprocess.run(["git", alias, "--porcelain"], cwd=self.repo, env=self.env,
-                                      capture_output=True, text=True, check=False)
-                self.assertEqual((shim.returncode, shim.stdout, shim.stderr),
-                                 (real.returncode, real.stdout, real.stderr))
-        self.assertIn("changes environment variables", self.real("st2", cwd=self.repo).stderr)
-        self.assertEqual(self.real("st3", "--porcelain", cwd=self.repo).returncode, 0)
+        self.assertSetEqual({option for option, _ in ALIAS_GLOBAL_OPTIONS}, self.git_global_option_names())
+        for number, (option, forms) in enumerate(ALIAS_GLOBAL_OPTIONS):
+            alias = f"global{number}"
+            for form in forms:
+                with self.subTest(option=option, form=" ".join(form)):
+                    self.real("config", f"alias.{alias}", " ".join((*self.render(form), "status")), cwd=self.repo, check=True)
+                    real = self.real(alias, "--porcelain", cwd=self.repo)
+                    shim = subprocess.run(["git", alias, "--porcelain"], cwd=self.repo, env=self.env,
+                                          capture_output=True, text=True, check=False)
+                    self.assertEqual((shim.returncode, shim.stdout, shim.stderr),
+                                     (real.returncode, real.stdout, real.stderr))
 
 
 
@@ -239,7 +299,7 @@ JJ_REJECTED_GLOBAL_OPTIONS = (
     ("config value named dry run", ("--config", "--dry-run", "root"), "root"),
 )
 
-REAL_JJ = Path("/home/agent/.mise/installs/github-sjawhar-jj/0.46.0-sami.20261008-234600/jj")
+REAL_JJ = real_jj()
 
 
 class JjGlobalOptions(unittest.TestCase):
@@ -347,6 +407,21 @@ class JjGlobalOptions(unittest.TestCase):
                 fields = self.probe(rendered, self.nested)
                 self.assertNotEqual(real.returncode, 0)
                 self.assertEqual(fields[0], command)
+
+
+    def test_non_global_words_after_describe_match_real_jj(self) -> None:
+        cases = (
+            ("empty message", ("describe", "-m", ""), 0),
+            ("equals message", ("describe", "-m", "=x"), 0),
+            ("empty positional", ("describe", ""), 2),
+        )
+        for name, argv, returncode in cases:
+            with self.subTest(name=name):
+                real = self.real(*argv, cwd=self.nested)
+                fields = self.probe(argv, self.nested)
+                self.assertEqual(real.returncode, returncode, real.stderr)
+                self.assertEqual(fields[0], "describe")
+                self.assertEqual(fields[1], str(self.repo.resolve()))
 
     def test_nested_global_option_finds_git(self) -> None:
         fields = self.probe(("git", "--config", "x=y", "push"), self.nested)

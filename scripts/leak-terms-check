@@ -1466,8 +1466,8 @@ def tag_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
     return contents
 
 
-def parse_tag(content: bytes) -> tuple[str, str, str, str]:
-    """A tag object's target, the target's type, its own tag name and its message."""
+def parse_tag(content: bytes) -> tuple[str, str, str, bytes, bytes | None]:
+    """A tag object's target, target type, name, raw message and encoding header."""
     header, separator, message = content.partition(b"\n\n")
     fields = dict(line.split(b" ", 1) for line in header.split(b"\n") if b" " in line)
     target, kind, name = fields.get(b"object"), fields.get(b"type"), fields.get(b"tag")
@@ -1477,15 +1477,16 @@ def parse_tag(content: bytes) -> tuple[str, str, str, str]:
         target.decode("ascii"),
         kind.decode("ascii", "replace"),
         name.decode("utf-8", errors="surrogateescape"),
-        decode_git_message(message, fields.get(b"encoding")) if separator else "",
+        message if separator else b"",
+        fields.get(b"encoding"),
     )
 
 
-def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple[str, str, str]]:
+def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple[str, str, bytes, bytes | None]]:
     """Each annotated tag object reached from STARTS, pairs of a name to show and an object id, and through each tag
-    that points at another tag, skipping every object in KNOWN: its name to show, its object id and its message. A
-    tag that another tag points at shows its own tag name."""
-    found: list[tuple[str, str, str]] = []
+    that points at another tag, skipping every object in KNOWN: its name to show, its object id, raw message and
+    encoding header. A tag that another tag points at shows its own tag name."""
+    found: list[tuple[str, str, bytes, bytes | None]] = []
     seen = set(known)
     pending: list[tuple[str | None, str]] = list(starts)
     while pending:
@@ -1500,8 +1501,8 @@ def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple
         for object_id, name in unique.items():
             if types[object_id] != "tag":
                 continue
-            target, kind, own_name, message = parse_tag(contents[object_id])
-            found.append((own_name if name is None else name, object_id, message))
+            target, kind, own_name, message, encoding = parse_tag(contents[object_id])
+            found.append((own_name if name is None else name, object_id, message, encoding))
             if kind == "tag":
                 pending.append((None, target))
     return found
@@ -1518,8 +1519,12 @@ def outgoing_tag_messages(updates: Sequence[tuple[str, str]], advertised: Sequen
     if not outgoing:
         return []
     held_chains = tag_chains([("", object_id) for object_id in sorted(held)], set())
-    known |= {object_id for _, object_id, _ in held_chains}
-    return [(name, message) for name, object_id, message in outgoing if object_id not in known]
+    known |= {object_id for _, object_id, _, _ in held_chains}
+    return [
+        (name, decode_git_message(message, encoding))
+        for name, object_id, message, encoding in outgoing
+        if object_id not in known
+    ]
 
 
 def scan_push(text: str, remote: str, url: str) -> list[str]:

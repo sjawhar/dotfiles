@@ -142,6 +142,7 @@ git_read_global_options() {
     git_global_directories=()
     git_global_directory="$PWD"
     git_global_environment_changed=0
+    git_global_stopped=0
     git_global_has_subcommand=0
     while ((i < count)); do
         option="${read_args[i]}"
@@ -163,7 +164,10 @@ git_read_global_options() {
             query-equals) [[ "$option" == "$name="* ]] || { i=$count; return; } ;;
         esac
         case "$syntax" in
-            stop) return ;;
+            stop)
+                git_global_stopped=1
+                return
+                ;;
             query | query-equals) i=$count; return ;;
             exec-path)
                 [[ "$option" == "$name" ]] && { i=$count; return; }
@@ -239,16 +243,17 @@ git_builtin() {
     return 1
 }
 
-# Use the shared reader on alias words too: handle_options() rejects only an option it accepted
-# before the alias command, and the table marks those that change the environment.
+# Use the shared reader on alias words too: Git leaves an alias whose global
+# option changes its environment, help or version to the real binary.
 git_alias_changes_environment() {
-    local saved_i=$i changed
+    local saved_i=$i changed stopped
     # shellcheck disable=SC2034 # The reader takes this array's name.
     local -a alias_options=("$@")
     git_read_global_options alias_options
     changed=$git_global_environment_changed
+    stopped=$git_global_stopped
     i=$saved_i
-    ((changed))
+    ((changed || stopped))
 }
 
 # Expand ordinary aliases with Git's split_cmdline rules. A shell alias starts with `!`; Git
