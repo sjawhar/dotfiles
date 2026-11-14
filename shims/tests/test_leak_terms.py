@@ -3640,6 +3640,20 @@ class OutgoingLeaks(SinkRepositoryCase):
         self.real("tag", "-a", name, "-m", message, target)
         return name, self.real("rev-parse", f"refs/tags/{name}"), self.real("rev-parse", f"refs/tags/{name}^{{commit}}")
 
+    def latin1_annotated_tag(self, label: str, message: str, target: str | None = None) -> tuple[str, str, str]:
+        """An annotated tag whose message has Latin-1 bytes and no encoding header."""
+        name = self.unique(label)
+        if target is None:
+            target = self.commit(f"{name}.txt", "clean", "clean", parent=self.base)
+        source = self.root / f"{name}.message"
+        source.write_bytes(message.encode("latin-1"))
+        self.real("tag", "-a", name, "-F", str(source), target)
+        tag = self.real("rev-parse", f"refs/tags/{name}")
+        raw = self.launch(["/usr/bin/git", "cat-file", "tag", tag], cwd=self.repo, env=self.person, text=False)
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        self.assertNotIn(b"\nencoding ", raw.stdout)
+        return name, tag, self.real("rev-parse", f"refs/tags/{name}^{{commit}}")
+
     def sink_holds(self, url: str, object_id: str) -> bool:
         if not self.sink(url).exists():
             return False
@@ -3797,6 +3811,157 @@ class OutgoingLeaks(SinkRepositoryCase):
                 name, tag, commit = self.annotated_tag("private-tag", leaky)
                 pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment)
                 self.assert_objects_pushed(pushed, self.private_url, tag, commit)
+
+    def test_push_decodes_latin1_tag_messages(self) -> None:
+        term = "Café Zorble"
+        term_file = encrypt_yaml(f"terms: |\n  {term}\n")
+        message = f"clean first line\n{term}\n"
+        clean_message = "clean first line\nCafé clean\n"
+        self.init_jj()
+        self.real("config", "i18n.commitEncoding", "ISO-8859-1")
+        for agent, environment in self.callers():
+            custom_environment = {**environment, "DOTFILES_LEAK_TERMS_FILE": str(term_file)}
+            for kind in ("git", "jj"):
+                with self.subTest(kind=kind, agent=agent):
+                    name, tag, commit = self.latin1_annotated_tag(f"{kind}-latin1", message)
+                    push = (
+                        (lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", custom_environment))
+                        if kind == "git"
+                        else (lambda: self.jj_push_tag(name, custom_environment))
+                    )
+                    result = self.assert_tag_refused(push, name, self.public_url, kind, tag, commit)
+                    self.assertNotIn(term, result.stdout + result.stderr)
+
+        name, tag, commit = self.latin1_annotated_tag("latin1-unset", message)
+        self.real("config", "--unset", "i18n.commitEncoding")
+        before = self.sink_state(self.public_url)
+        unreadable = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)})
+        self.assertNotEqual(unreadable.returncode, 0, unreadable.stderr)
+        self.assertIn("the leak-term check did not pass", unreadable.stderr)
+        self.assertEqual(self.sink_state(self.public_url), before)
+        self.assertNotIn(term, unreadable.stdout + unreadable.stderr)
+
+        self.real("config", "i18n.commitEncoding", "ISO-8859-1")
+        name, tag, commit = self.latin1_annotated_tag("latin1-clean", clean_message)
+        pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)})
+        self.assert_objects_pushed(pushed, self.public_url, tag, commit)
+
+
+    def test_push_reads_a_new_tag_with_two_cat_file_calls(self) -> None:
+        calls = self.root / "cat-file-calls"
+        write_executable(
+            self.fake / "git",
+            "#!/bin/bash\n"
+            f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}\n"
+            f"exec {shlex.quote(str(ROOT / 'shims' / 'git'))} \"$@\"\n",
+        )
+        name, tag, commit = self.annotated_tag("cat-file-count", self.clean_tag_message)
+        environment = self.person | {"GIT_EXEC_PATH": f"{self.fake}:{self.real('--exec-path')}"}
+        self.assert_objects_pushed(
+            self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment),
+            self.public_url,
+            tag,
+            commit,
+        )
+        cat_file_calls = [line for line in calls.read_text(encoding="utf-8").splitlines() if " cat-file " in f" {line} "]
+        self.assertEqual(
+            cat_file_calls,
+            ["cat-file --batch-check=%(objectname) %(objecttype)", "cat-file --batch"],
+            calls.read_text(encoding="utf-8"),
+        )
+
+    def test_push_decodes_a_latin1_commit_message(self) -> None:
+        term = "Café Zorble"
+        term_file = encrypt_yaml(f"terms: |\n  {term}\n")
+        source = self.root / "latin1-commit-message"
+        source.write_bytes(f"clean first line\n{term}\n".encode("latin-1"))
+        template = self.command(["/usr/bin/git", "commit-tree", self.real("write-tree"), "-p", self.base, "-m", "clean"], self.person)
+        self.assertEqual(template.returncode, 0, template.stderr)
+        template_raw = self.launch(
+            ["/usr/bin/git", "cat-file", "commit", template.stdout.strip()],
+            cwd=self.repo,
+            env=self.person,
+            text=False,
+        )
+        self.assertEqual(template_raw.returncode, 0, template_raw.stderr)
+        headers, separator, _ = template_raw.stdout.partition(b"\n\n")
+        self.assertEqual(separator, b"\n\n")
+        made = self.launch(
+            ["/usr/bin/git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=self.repo,
+            env=self.person,
+            input=headers + separator + source.read_bytes(),
+            text=False,
+        )
+        self.assertEqual(made.returncode, 0, made.stderr)
+        commit = made.stdout.decode("ascii").strip()
+        raw = self.launch(["/usr/bin/git", "cat-file", "commit", commit], cwd=self.repo, env=self.person, text=False)
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        self.assertNotIn(b"\nencoding ", raw.stdout)
+        self.assertIn(term.encode("latin-1"), raw.stdout)
+        self.real("config", "i18n.commitEncoding", "ISO-8859-1")
+        result = self.assert_push_refused(
+            lambda: self.git_push("origin", commit, self.unique("latin1-commit"), self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
+            commit,
+            "message line 2",
+            self.public_url,
+        )
+        self.assertNotIn(term, result.stdout + result.stderr)
+
+    def test_jj_push_hides_a_tag_name_from_a_plan_mismatch(self) -> None:
+        workspace = self.root / "noncolocated"
+        initialized = self.launch(["jj", "git", "init", str(workspace)], cwd=self.repo, env=self.person)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        target_file = workspace / ".jj" / "repo" / "store" / "git_target"
+        target = (target_file.parent / target_file.read_text(encoding="utf-8").strip()).resolve()
+        self.assertTrue(target.is_dir(), target)
+
+        def git(*arguments: str, input: str | None = None) -> str:
+            result = self.launch(["/usr/bin/git", f"--git-dir={target}", *arguments], cwd=workspace, env=self.person, input=input)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        git("config", "user.name", self.identity)
+        git("config", "user.email", "push-test@example.invalid")
+        git("remote", "add", "origin", self.public_url)
+        git("config", "remote.origin.vcs", "sink")
+        tree = git("mktree")
+        base = git("commit-tree", tree, "-m", "base")
+        planned = git("commit-tree", tree, "-p", base, "-m", "planned")
+        actual = git("commit-tree", tree, "-p", base, "-m", "actual")
+        tag = TEST_TERMS[1]
+        git("update-ref", "refs/heads/main", planned)
+        git("tag", tag, planned)
+        imported = self.launch(["jj", "git", "import"], cwd=workspace, env=self.person)
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        changed = self.root / "tag-ref-moved"
+        write_executable(
+            self.fake / "git",
+            "#!/bin/bash\n"
+            f"if [[ ! -e {shlex.quote(str(changed))} && \"$*\" == *'rev-parse --verify'* ]]; then\n"
+            f"    : > {shlex.quote(str(changed))}\n"
+            f"    /usr/bin/git --git-dir={shlex.quote(str(target))} update-ref refs/tags/{tag} {actual}\n"
+            "fi\n"
+            f"exec {shlex.quote(str(ROOT / 'shims' / 'git'))} \"$@\"\n",
+        )
+
+        for agent, environment in self.callers():
+            with self.subTest(agent=agent):
+                git("update-ref", f"refs/tags/{tag}", planned)
+                changed.unlink(missing_ok=True)
+                before = self.sink_state(self.public_url)
+                result = self.launch(
+                    ["jj", "--config", "git.executable-path=/usr/bin/git", "git", "push", "--tag", "glob:*"],
+                    cwd=workspace,
+                    env=environment,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(
+                    "cannot tell which object jj sends for a tag in the plan. Nothing was pushed.",
+                    result.stderr,
+                )
+                self.assertEqual(self.sink_state(self.public_url), before)
+                self.assert_hidden(result)
 
     def test_push_root_diff_ignores_log_configuration(self) -> None:
         (self.home / ".gitconfig").write_text(

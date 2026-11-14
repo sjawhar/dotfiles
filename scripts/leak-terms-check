@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import os
 import pwd
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import sys
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
@@ -964,6 +966,50 @@ def git_environment() -> dict[str, str]:
     """Disable replacement and system attributes so Git scans the objects it publishes."""
     return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
 
+@lru_cache(maxsize=1)
+def pushing_repository_commit_encoding() -> str | None:
+    """The configured fallback for an outgoing message that Git left in its original bytes."""
+    try:
+        completed = subprocess.run(
+            ["git", "config", "--get", "i18n.commitEncoding"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=git_environment(),
+            check=False,
+        )
+    except OSError as error:
+        raise TextError("could not read Git's commit message encoding") from error
+    if completed.returncode == 1:
+        return None
+    if completed.returncode != 0:
+        raise TextError("could not read Git's commit message encoding")
+    try:
+        return completed.stdout.removesuffix(b"\n").decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise TextError("Git configured an unknown commit message encoding") from error
+
+
+def decode_git_message(message: bytes, declared_encoding: bytes | None = None) -> str:
+    """Decode a Git message from its header, UTF-8 bytes, or the pushing repository's configured encoding."""
+    if declared_encoding is not None:
+        try:
+            encoding = declared_encoding.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise TextError("Git declared an unknown commit message encoding") from error
+    else:
+        try:
+            return message.decode("utf-8")
+        except UnicodeDecodeError:
+            encoding = pushing_repository_commit_encoding()
+            if encoding is None:
+                raise TextError("a Git message is not valid UTF-8")
+    try:
+        codec = codecs.lookup(encoding)
+        return message.decode(codec.name)
+    except (LookupError, UnicodeDecodeError) as error:
+        raise TextError("could not decode a Git message") from error
+
 
 def git_output(arguments: Sequence[str], standard_input: bytes, failure: str) -> bytes:
     """Run one Git producer and fail closed, naming it with FAILURE, when it cannot provide complete output."""
@@ -1287,7 +1333,7 @@ def scan_outgoing_messages(commits: Sequence[str], matcher: TermMatcher, finding
         if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
             raise TextError("git gave malformed commit boundaries")
         seen.add(commit)
-        findings.extend(scan_message(raw_message.decode("utf-8", errors="surrogateescape"), matcher, "verbatim", None, False,
+        findings.extend(scan_message(decode_git_message(raw_message), matcher, "verbatim", None, False,
                                      f"commit {commit[:12]} message"))
     if records or seen != expected:
         raise TextError("git gave malformed commit boundaries")
@@ -1431,7 +1477,7 @@ def parse_tag(content: bytes) -> tuple[str, str, str, str]:
         target.decode("ascii"),
         kind.decode("ascii", "replace"),
         name.decode("utf-8", errors="surrogateescape"),
-        message.decode("utf-8", errors="surrogateescape") if separator else "",
+        decode_git_message(message, fields.get(b"encoding")) if separator else "",
     )
 
 
@@ -1471,8 +1517,9 @@ def outgoing_tag_messages(updates: Sequence[tuple[str, str]], advertised: Sequen
     outgoing = tag_chains(starts, known)
     if not outgoing:
         return []
-    known |= {object_id for _, object_id, _ in tag_chains([("", object_id) for object_id in sorted(held)], set())}
-    return [(name, message) for name, _, message in tag_chains(starts, known)]
+    held_chains = tag_chains([("", object_id) for object_id in sorted(held)], set())
+    known |= {object_id for _, object_id, _ in held_chains}
+    return [(name, message) for name, object_id, message in outgoing if object_id not in known]
 
 
 def scan_push(text: str, remote: str, url: str) -> list[str]:

@@ -167,7 +167,8 @@ behavior before handing the call to the real one. One file is data: `person-name
   resolved destination plan and, for every public or unreadable GitHub URL, scans the outgoing
   commits that destination does not advertise, and the message of each annotated tag it sends:
   jj's plan names a tag's commit, but jj pushes the backing repository's `refs/tags/<name>`, so
-  the shim reads that object, and refuses when that ref names another commit than the plan.
+  the shim reads that object and refuses when it differs. This refusal says only that a tag in the
+  plan differs. A refusal for an unreadable plan update also omits the update text and its names.
   This encrypted-term check runs for every caller
   before the shared public leak check, and fails closed when it cannot read the plan, destination
   or a nonempty scan's term list. The shared public check remains an agent check, or a person's

@@ -46,8 +46,11 @@ Executables covering several areas:
     they cannot read text. A scanner invocation whose whole input is empty does not read the list;
     `staged` produces `git diff --cached` with the same attribute policy as outgoing push diffs,
     and `push` decides which commits and annotated tag messages are outgoing before it reads the
-    list, and scans both. `message` decodes
-    its input with `--encoding` (UTF-8 by default). `git-comment-char` prints the character Git
+    list, and scans both. An outgoing tag uses its `encoding` header, then strict UTF-8, then the
+    pushing repository's `i18n.commitEncoding`; outgoing commit text uses strict UTF-8 after Git's
+    conversion, then that same configured encoding. An unknown encoding or bytes that do not decode
+    makes `push` exit 4. `message` decodes its input with `--encoding` (UTF-8 by default).
+    `git-comment-char` prints the character Git
     chose for `core.commentChar=auto`, or nothing when that is not certain;
     `jj-editor-preflight <listing>` takes jj's `name<TAB>json(value)` listing of `ui.editor` and
     prints the `ui.editor=` setting that runs the wrapper, then the editor's JSON value, or exits 5

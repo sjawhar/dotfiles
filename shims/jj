@@ -504,7 +504,7 @@ push_gate() {
             if [[ "$action" =~ $add ]]; then new="${BASH_REMATCH[1]}"
             elif [[ "$action" =~ $delete ]]; then old="${BASH_REMATCH[1]}"
             elif [[ "$action" =~ $move ]]; then old="${BASH_REMATCH[2]}" new="${BASH_REMATCH[3]}"
-            else push_refuse "cannot parse jj's dry-run update: $line" "Nothing was pushed."
+            else push_refuse "cannot parse a jj dry-run update. Nothing was pushed."
             fi
             if [[ "$new" != "$zero" ]]; then
                 new="$(git --git-dir="$target" rev-parse --verify "$new^{commit}" 2>/dev/null)" ||
@@ -514,7 +514,7 @@ push_gate() {
                 # leaves unknown what jj sends.
                 if [[ "$kind" == tag ]] && tag_object="$(git --git-dir="$target" rev-parse --verify --quiet "refs/tags/$ref" 2>/dev/null)"; then
                     [[ "$(git --git-dir="$target" rev-parse --verify "$tag_object^{commit}" 2>/dev/null)" == "$new" ]] ||
-                        push_refuse "cannot tell which object jj sends for tag $ref. Nothing was pushed."
+                        push_refuse "cannot tell which object jj sends for a tag in the plan. Nothing was pushed."
                     new="$tag_object"
                 fi
             fi
@@ -525,7 +525,7 @@ push_gate() {
             if [[ "$kind" == bookmark ]]; then ref="refs/heads/$ref"; else ref="refs/tags/$ref"; fi
             updates["$remote"]+="$ref $new $ref $old"$'\n'
         elif [[ -n "$remote" && "$line" == '  '* ]]; then
-            push_refuse "cannot parse jj's dry-run update: $line" "Nothing was pushed."
+            push_refuse "cannot parse a jj dry-run update. Nothing was pushed."
         fi
     done <<< "$out"
     if ((${#remotes[@]} == 0)); then
