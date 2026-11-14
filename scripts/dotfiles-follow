@@ -31,6 +31,9 @@ What one run does:
      for registered marketplace plugins not at their committed lock versions (a best-effort lock
      restore afterward), then `devbox/sami-devbox-check --pins` (knives and mise-pin lines).
      Lock entries without an installed marketplace record are skipped; install.sh bootstraps them.
+     `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
+     --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
+     on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
   7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs) over its fast roots, under
@@ -506,7 +509,38 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
     if code != 0:
         return f"`scripts/omp-link-rules` in {display_path(repo)} exited {code}:\n{tail(out)}"
     log("rules: omp/rules/*.md linked into ~/.omp/agent/rules/")
-    code, out = run_step(["mise", "install"], repo, options.mise_timeout)
+    data = Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise")
+    lock = data / ".dotfiles-install.lock"
+    wait_failure = (
+        f"`mise install` in {display_path(repo)} did not start: another install held "
+        f"{display_path(lock)} for {options.mise_timeout:g} s"
+    )
+    deadline = time.monotonic() + options.mise_timeout
+    try:
+        data.mkdir(parents=True, exist_ok=True)
+        handle = lock.open("a")
+    except OSError as error:
+        # A tools condition like any other failed install, not a crash that skips the alert.
+        return f"`mise install` in {display_path(repo)} did not start: cannot open {display_path(lock)}: {error}"
+    with handle:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return wait_failure
+                time.sleep(min(0.1, remaining))
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return wait_failure
+            code, out = run_step(
+                ["mise", "install"], repo, remaining, environment={"MISE_DATA_DIR": str(data)}
+            )
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
     if code != 0:
         return f"`mise install` in {display_path(repo)} exited {code}:\n{tail(out)}"
     # The omp plugins main pins (omp/plugins/package.json and bun.lock), installed exactly as

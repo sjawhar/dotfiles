@@ -10,6 +10,7 @@ and asserts that HEAD, the index and every file of the checkout are as they were
 """
 
 import argparse
+import fcntl
 import gc
 import hashlib
 import importlib.machinery
@@ -17,6 +18,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -39,7 +41,16 @@ FAKE_MISE = """#!/bin/sh
 # mise install: exits FAKE_MISE_RC; mise ls --missing: lists nothing.
 echo "$*" >> "$FAKE_LOG"
 case "$1" in
-    install) [ "${FAKE_MISE_RC:-0}" = 0 ] || echo "mise ERROR Failed to install github:sjawhar/knives@3.2.2: HTTP 403" >&2; exit "${FAKE_MISE_RC:-0}" ;;
+    install)
+        if flock -n "${MISE_DATA_DIR:-$HOME/.mise}/.dotfiles-install.lock" true; then
+            lock=free
+        else
+            lock=held
+        fi
+        echo "install $lock ${MISE_DATA_DIR:-$HOME/.mise}" >> "$FAKE_LOG"
+        [ "${FAKE_MISE_RC:-0}" = 0 ] || echo "mise ERROR Failed to install github:sjawhar/knives@3.2.2: HTTP 403" >&2
+        exit "${FAKE_MISE_RC:-0}"
+        ;;
     ls) exit 0 ;;
 esac
 exit 0
@@ -290,6 +301,59 @@ class Harness(unittest.TestCase):
         self.assertEqual(self.run_follow(now=1_000_600.0), [])
         self.assertEqual(self.snapshot(), before)
         return messages
+
+
+class InstallTools(Harness):
+    def test_mise_install_holds_the_shared_data_lock(self) -> None:
+        data = self.home / "mise-data"
+        lock = data / ".dotfiles-install.lock"
+        os.environ["MISE_DATA_DIR"] = str(data)
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertTrue(lock.is_file())
+        records = [
+            line for line in self.fake_log.read_text().splitlines() if line.startswith("install ")
+        ]
+        self.assertEqual(records, [f"install held {lock.parent}"])
+
+    def test_mise_install_timeout_waiting_for_the_shared_data_lock(self) -> None:
+        data = self.home / "mise-data"
+        data.mkdir()
+        lock = data / ".dotfiles-install.lock"
+        os.environ["MISE_DATA_DIR"] = str(data)
+
+        def watchdog(_signum, _frame) -> None:
+            raise AssertionError("install_tools did not return within 15 seconds")
+
+        with open(lock, "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            previous_handler = signal.signal(signal.SIGALRM, watchdog)
+            signal.alarm(15)
+            try:
+                why = FOLLOW.install_tools(self.repo, self.options(mise_timeout=2))
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, previous_handler)
+
+        self.assertEqual(
+            why,
+            f"`mise install` in {FOLLOW.display_path(self.repo)} did not start: another install held "
+            f"{FOLLOW.display_path(lock)} for 2 s",
+        )
+        self.assertFalse(self.fake_log.exists(), "mise install ran while another process held its lock")
+
+    def test_an_unusable_mise_data_directory_is_a_tools_condition_not_a_crash(self) -> None:
+        data = self.home / "mise-data"
+        data.write_text("a file where the directory should be\n")
+        os.environ["MISE_DATA_DIR"] = str(data)
+
+        why = FOLLOW.install_tools(self.repo, self.options())
+
+        self.assertTrue(
+            why.startswith(f"`mise install` in {FOLLOW.display_path(self.repo)} did not start: cannot open "),
+            why,
+        )
+        self.assertFalse(self.fake_log.exists(), "mise install ran without its lock")
 
 
 class Follows(Harness):
