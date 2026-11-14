@@ -3061,7 +3061,7 @@ class OutgoingLeaks(SinkRepositoryCase):
         self.assertEqual(self.sink_state(self.public_url), before)
         self.assert_hidden(result)
 
-    def test_unreadable_push_allows_an_advertised_tag_but_refuses_a_new_commit(self) -> None:
+    def test_unreadable_push_refuses_an_advertised_tag_to_a_new_ref_and_a_new_commit(self) -> None:
         cases = [case for case in unreadable_lists(self.root, self.person["PATH"]) if case[0] in {"key", "missing"}]
         self.assertEqual({case[0] for case in cases}, {"key", "missing"})
         self.real("push", "origin", f"{self.base}:refs/heads/base")
@@ -3069,11 +3069,12 @@ class OutgoingLeaks(SinkRepositoryCase):
             with self.subTest(case=label, kind="tag"):
                 tag = self.unique("advertised")
                 self.real("tag", tag, self.base)
+                before = self.sink_state(self.public_url)
                 self.refresh_visibility()
                 tag_result = self.command(["git", "push", "origin", f"refs/tags/{tag}"], {**self.agent, **extra})
-                self.assertEqual(tag_result.returncode, 0, tag_result.stderr)
-                self.sink_git(self.public_url, "show-ref", "--verify", f"refs/tags/{tag}")
-                self.assert_hidden(tag_result)
+                self.assertNotEqual(tag_result.returncode, 0, tag_result.stderr)
+                self.assert_one_correction_line(tag_result, correction)
+                self.assertEqual(self.sink_state(self.public_url), before)
             with self.subTest(case=label, kind="commit"):
                 path = f"{self.unique('new')}.txt"
                 commit = self.commit(path, "clean", "clean", parent=self.base)
@@ -3701,6 +3702,21 @@ class OutgoingLeaks(SinkRepositoryCase):
         self.assert_hidden(result)
         return result
 
+    def assert_object_refused(
+        self, push, place: str, url: str, *absent: str, shim: str = "git"
+    ) -> subprocess.CompletedProcess[str]:
+        """PUSH() is refused for a non-commit object or ref name at PLACE, and changes nothing in the sink."""
+        before = self.sink_state(url)
+        result = push()
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"error: leak terms: {place}: listed leak term", result.stderr)
+        self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
+        self.assertEqual(self.sink_state(url), before, "a refused push changed the sink")
+        for object_id in absent:
+            self.assertFalse(self.sink_holds(url, object_id), result.stderr)
+        self.assert_hidden(result)
+        return result
+
     def assert_objects_pushed(self, result: subprocess.CompletedProcess[str], url: str, *objects: str) -> None:
         """RESULT went on and the sink of URL holds each of OBJECTS, of any type."""
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -3830,6 +3846,221 @@ class OutgoingLeaks(SinkRepositoryCase):
                 name, tag, commit = self.annotated_tag("private-tag", leaky)
                 pushed = self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment)
                 self.assert_objects_pushed(pushed, self.private_url, tag, commit)
+
+    def test_push_refuses_file_and_folder_objects_without_a_sent_commit(self) -> None:
+        # (14a) A direct object ref, a lightweight tag, and an annotated tag can publish a blob or tree without a commit.
+        def make(arguments: list[str], source: str) -> str:
+            result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        leaky_blob = make(["hash-object", "-w", "--stdin"], f"clean\n{self.term}\n")
+        clean_blob = make(["hash-object", "-w", "--stdin"], "clean\n")
+        nested_tree = make(["mktree"], f"100644 blob {leaky_blob}\tleaky.txt\n")
+        leaky_tree = make(["mktree"], f"040000 tree {nested_tree}\tnested\n")
+        named_tree = make(["mktree"], f"100644 blob {clean_blob}\t{TEST_TERMS[1]}.txt\n")
+
+        def tags(label: str, object_id: str) -> tuple[str, str, str]:
+            lightweight = self.unique(f"{label}-lightweight")
+            annotated = self.unique(f"{label}-annotated")
+            self.real("tag", lightweight, object_id)
+            self.real("tag", "-a", annotated, "-m", self.clean_tag_message, object_id)
+            return lightweight, annotated, self.real("rev-parse", f"refs/tags/{annotated}")
+
+        file_lightweight, file_annotated, file_tag = tags("file", leaky_blob)
+        tree_lightweight, tree_annotated, tree_tag = tags("tree", leaky_tree)
+        named_lightweight, named_annotated, named_tag = tags("named-tree", named_tree)
+        objects = (
+            (leaky_blob, f"object {leaky_blob[:12]} line 2", (leaky_blob,)),
+            (f"refs/tags/{file_lightweight}", f"object {leaky_blob[:12]} line 2", (leaky_blob,)),
+            (f"refs/tags/{file_annotated}", f"object {leaky_blob[:12]} line 2", (file_tag, leaky_blob)),
+            (leaky_tree, "nested/leaky.txt:2", (leaky_tree, nested_tree, leaky_blob)),
+            (f"refs/tags/{tree_lightweight}", "nested/leaky.txt:2", (leaky_tree, nested_tree, leaky_blob)),
+            (f"refs/tags/{tree_annotated}", "nested/leaky.txt:2", (tree_tag, leaky_tree, nested_tree, leaky_blob)),
+            (named_tree, "<listed term>.txt", (named_tree, clean_blob)),
+            (f"refs/tags/{named_lightweight}", "<listed term>.txt", (named_tree, clean_blob)),
+            (f"refs/tags/{named_annotated}", "<listed term>.txt", (named_tag, named_tree, clean_blob)),
+        )
+        for agent, environment, url in self.combinations():
+            for source, place, absent in objects:
+                with self.subTest(agent=agent, url=url, source=source, place=place):
+                    destination = (
+                        self.fresh_public_url()
+                        if url == self.public_url
+                        else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                    )
+                    self.set_url(destination)
+                    self.assert_object_refused(
+                        lambda: self.git_push_ref(source, f"refs/tags/{self.unique('object')}", environment),
+                        place,
+                        destination,
+                        *absent,
+                    )
+
+    def test_push_masks_a_folder_path_in_text_findings(self) -> None:
+        def make(arguments: list[str], source: str) -> str:
+            result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        blob = make(["hash-object", "-w", "--stdin"], f"{self.term}\n")
+        tree = make(["mktree"], f"100644 blob {blob}\t{TEST_TERMS[1]}.txt\n")
+        for agent, environment, url in self.combinations():
+            with self.subTest(agent=agent, url=url):
+                destination = (
+                    self.fresh_public_url()
+                    if url == self.public_url
+                    else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                )
+                self.set_url(destination)
+                result = self.assert_object_refused(
+                    lambda: self.git_push_ref(tree, f"refs/tags/{self.unique('masked-folder')}", environment),
+                    "<listed term>.txt",
+                    destination,
+                    tree,
+                    blob,
+                )
+                self.assertIn("error: leak terms: <listed term>.txt: listed leak term", result.stderr)
+                self.assertIn("error: leak terms: <listed term>.txt:1: listed leak term", result.stderr)
+
+    def test_push_allows_a_file_object_a_held_commit_already_has(self) -> None:
+        path = f"{self.unique('held-file')}.txt"
+        commit = self.commit(path, self.term, "clean", parent=self.base)
+        blob = self.real("rev-parse", f"{commit}:{path}")
+        for agent, environment, url in self.combinations():
+            with self.subTest(agent=agent, url=url):
+                self.seed(url, commit, f"refs/heads/{self.unique('held')}")
+                target = f"refs/tags/{self.unique('held-file')}"
+                pushed = self.git_push_ref(blob, target, environment)
+                self.assert_objects_pushed(pushed, url, blob)
+                self.assert_sink_ref(url, target, blob, "blob")
+
+    def test_push_refuses_ref_names_that_hold_a_term(self) -> None:
+        # (14b) The remote ref's display name is scanned before a clean branch, bookmark, or tag is published.
+        self.init_jj()
+        name = TEST_TERMS[1]
+        _, tag, _ = self.annotated_tag("named-tag", self.clean_tag_message, target=self.base, name=name)
+        for agent, environment, url in self.combinations():
+            with self.subTest(kind="git", agent=agent, url=url):
+                destination = (
+                    self.fresh_public_url()
+                    if url == self.public_url
+                    else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                )
+                self.set_url(destination)
+                self.assert_object_refused(
+                    lambda: self.git_push_ref("HEAD", f"refs/heads/{name}", environment),
+                    "ref <listed term>",
+                    destination,
+                )
+            with self.subTest(kind="jj", agent=agent, url=url):
+                destination = (
+                    self.fresh_public_url()
+                    if url == self.public_url
+                    else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                )
+                self.set_url(destination)
+                self.assert_object_refused(
+                    lambda: self.jj_push(self.base, name, environment),
+                    "ref <listed term>",
+                    destination,
+                    shim="jj",
+                )
+            with self.subTest(kind="tag", agent=agent, url=url):
+                destination = (
+                    self.fresh_public_url()
+                    if url == self.public_url
+                    else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                )
+                self.set_url(destination)
+                self.assert_object_refused(
+                    lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment),
+                    "ref <listed term>",
+                    destination,
+                )
+                self.assertFalse(self.sink_holds(destination, tag))
+
+    def test_push_refuses_one_commit_finding_when_it_sends_its_file_object(self) -> None:
+        # (14c) The same blob can be sent by a commit and a direct ref, but the commit scan reports it once.
+        path = f"{self.unique('same-object')}.txt"
+        commit = self.commit(path, self.term, "clean", parent=self.base)
+        blob = self.real("rev-parse", f"{commit}:{path}")
+        for agent, environment, url in self.combinations():
+            with self.subTest(agent=agent, url=url):
+                self.set_url(url)
+                result = self.assert_push_refused(
+                    lambda: self.command(
+                        [
+                            "git",
+                            "push",
+                            "origin",
+                            f"{commit}:refs/heads/{self.unique('commit')}",
+                            f"{blob}:refs/tags/{self.unique('file')}",
+                        ],
+                        environment,
+                    ),
+                    commit,
+                    f"{path}:1",
+                    url,
+                )
+                self.assertEqual(
+                    [line for line in result.stderr.splitlines() if line.endswith(": listed leak term")],
+                    [f"error: leak terms: commit {commit[:12]} {path}:1: listed leak term"],
+                )
+
+    def test_push_allows_clean_objects_and_nonpublishing_or_held_controls(self) -> None:
+        # (14 controls) Clean direct objects and names go on; a deletion reads no list; a held commit is not outgoing.
+        def make(arguments: list[str], source: str) -> str:
+            result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        clean_blob = make(["hash-object", "-w", "--stdin"], "clean\n")
+        clean_tree = make(["mktree"], f"100644 blob {clean_blob}\tclean.txt\n")
+        leaky = self.commit(f"{self.unique('held')}.txt", self.term, "clean", parent=self.base)
+        missing_list = self.root / "missing-delete-list.sops.yaml"
+        for agent, environment, url in self.combinations():
+            with self.subTest(control="clean-file-object", agent=agent, url=url):
+                self.set_url(url)
+                self.assert_objects_pushed(
+                    self.git_push_ref(clean_blob, f"refs/tags/{self.unique('clean-file')}", environment),
+                    url,
+                    clean_blob,
+                )
+            with self.subTest(control="clean-folder-object", agent=agent, url=url):
+                self.set_url(url)
+                self.assert_objects_pushed(
+                    self.git_push_ref(clean_tree, f"refs/tags/{self.unique('clean-folder')}", environment),
+                    url,
+                    clean_tree,
+                    clean_blob,
+                )
+            with self.subTest(control="clean-ref-name", agent=agent, url=url):
+                self.set_url(url)
+                self.assert_pushed(
+                    self.git_push_ref(self.base, f"refs/heads/{self.unique('clean-ref')}", environment),
+                    url,
+                    self.base,
+                )
+            with self.subTest(control="delete-ref-name", agent=agent, url=url):
+                deleted = f"refs/heads/{TEST_TERMS[1]}-{self.unique('delete')}"
+                self.seed(url, self.base, deleted)
+                result = self.git_push_ref(
+                    "",
+                    deleted,
+                    environment | {"DOTFILES_LEAK_TERMS_FILE": str(missing_list)},
+                    "--quiet",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(deleted, self.sink_state(url)[0])
+            with self.subTest(control="held-commit", agent=agent, url=url):
+                held = f"refs/heads/{self.unique('held')}"
+                self.seed(url, leaky, held)
+                self.assert_pushed(
+                    self.git_push_ref(leaky, f"refs/heads/{self.unique('held-copy')}", environment),
+                    url,
+                    leaky,
+                )
 
     def test_push_decodes_latin1_tag_messages(self) -> None:
         term = "Café Zorble"

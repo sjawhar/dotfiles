@@ -1158,6 +1158,45 @@ def outgoing_commit_ids(local: Sequence[str], held: Sequence[str]) -> list[str]:
     return commits
 
 
+def outgoing_commit_object_ids(commits: Sequence[str], held: Sequence[str]) -> set[str]:
+    """The objects reachable from sent commits, but only after a direct file or folder object needs this distinction."""
+    if not commits:
+        return set()
+    revisions = [*commits]
+    if held:
+        revisions.extend(("--not", *held))
+    output = git_output(
+        ["rev-list", "--objects", "--no-object-names", "--stdin"],
+        ("\n".join(revisions) + "\n").encode(),
+        "git could not list the outgoing commit objects",
+    )
+    try:
+        objects = output.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise TextError("git gave a malformed outgoing commit object list") from error
+    if any(OBJECT_ID.fullmatch(object_id) is None for object_id in objects):
+        raise TextError("git gave a malformed outgoing commit object list")
+    return set(objects)
+
+
+def destination_object_ids(held: Sequence[str]) -> set[str]:
+    """Every object reachable from a destination ref that this repository can read."""
+    if not held:
+        return set()
+    output = git_output(
+        ["rev-list", "--objects", "--no-object-names", "--stdin"],
+        ("\n".join(held) + "\n").encode(),
+        "git could not list the destination's objects",
+    )
+    try:
+        objects = output.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise TextError("git gave a malformed destination object list") from error
+    if any(OBJECT_ID.fullmatch(object_id) is None for object_id in objects):
+        raise TextError("git gave a malformed destination object list")
+    return set(objects)
+
+
 def nul_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
     """Yield NUL-delimited records while joining each growing record only once."""
     pieces: list[bytes] = []
@@ -1482,11 +1521,18 @@ def parse_tag(content: bytes) -> tuple[str, str, str, bytes, bytes | None]:
     )
 
 
-def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple[str, str, bytes, bytes | None]]:
-    """Each annotated tag object reached from STARTS, pairs of a name to show and an object id, and through each tag
-    that points at another tag, skipping every object in KNOWN: its name to show, its object id, raw message and
-    encoding header. A tag that another tag points at shows its own tag name."""
+@dataclass
+class TagWalk:
+    """The tag messages and every reached object type from one set of update objects."""
+
+    tags: list[tuple[str, str, bytes, bytes | None]]
+    objects: dict[str, str]
+
+
+def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> TagWalk:
+    """Walk the tag objects reached from STARTS, skipping every object in KNOWN."""
     found: list[tuple[str, str, bytes, bytes | None]] = []
+    objects: dict[str, str] = {}
     seen = set(known)
     pending: list[tuple[str | None, str]] = list(starts)
     while pending:
@@ -1496,6 +1542,7 @@ def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple
                 unique.setdefault(object_id, name)
         seen.update(unique)
         types = object_types(sorted(unique))
+        objects.update(types)
         contents = tag_objects(sorted(object_id for object_id in unique if types[object_id] == "tag"))
         pending = []
         for object_id, name in unique.items():
@@ -1505,30 +1552,145 @@ def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple
             found.append((own_name if name is None else name, object_id, message, encoding))
             if kind == "tag":
                 pending.append((None, target))
-    return found
+            elif kind in {"blob", "commit", "tree"}:
+                objects.setdefault(target, kind)
+            else:
+                raise TextError("git gave a malformed tag object")
+    return TagWalk(found, objects)
 
 
-def outgoing_tag_messages(updates: Sequence[tuple[str, str]], advertised: Sequence[str], held: set[str]) -> list[tuple[str, str]]:
-    """The message of each annotated tag object this push sends and the destination lacks, with the name to show:
-    the ref the push sends it to (without refs/tags/), or, for a tag that another tag points at, its own tag name.
-    The destination holds every object it advertises, and each tag that a tag it holds points at; that second read
-    runs only when the push sends a tag."""
+def outgoing_tag_messages(
+    updates: Sequence[tuple[str, str]], advertised: Sequence[str], held: set[str]
+) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """The outgoing tag messages and direct file or folder objects from one object walk over UPDATES."""
     starts = [(ref.removeprefix("refs/tags/"), object_id) for ref, object_id in updates]
     known = set(advertised) | held
     outgoing = tag_chains(starts, known)
-    if not outgoing:
-        return []
+    objects = {object_id: kind for object_id, kind in outgoing.objects.items() if kind in {"blob", "tree"}}
+    if not outgoing.tags and not objects:
+        return [], {}
     held_chains = tag_chains([("", object_id) for object_id in sorted(held)], set())
-    known |= {object_id for _, object_id, _, _ in held_chains}
-    return [
-        (name, decode_git_message(message, encoding))
-        for name, object_id, message, encoding in outgoing
-        if object_id not in known
-    ]
+    known.update(held_chains.objects)
+    return (
+        [
+            (name, decode_git_message(message, encoding))
+            for name, object_id, message, encoding in outgoing.tags
+            if object_id not in known
+        ],
+        {object_id: kind for object_id, kind in objects.items() if object_id not in known},
+    )
+
+
+def tree_paths(object_id: str) -> list[tuple[str, str, str]]:
+    """Every leaf kind, object and path in a folder object, with Git's raw path bytes decoded once."""
+    output = git_output(["ls-tree", "-r", "-z", object_id], b"", "git could not read an outgoing folder")
+    records = output.split(b"\0")
+    if records.pop() != b"":
+        raise TextError("git gave a malformed outgoing folder")
+    paths: list[tuple[str, str, str]] = []
+    for record in records:
+        header, separator, raw_path = record.partition(b"\t")
+        fields = header.split(b" ")
+        if (
+            not separator
+            or len(fields) != 3
+            or not fields[0].isdigit()
+            or fields[1] not in {b"blob", b"commit"}
+        ):
+            raise TextError("git gave a malformed outgoing folder")
+        try:
+            path_object = fields[2].decode("ascii")
+        except UnicodeDecodeError as error:
+            raise TextError("git gave a malformed outgoing folder") from error
+        if OBJECT_ID.fullmatch(path_object) is None:
+            raise TextError("git gave a malformed outgoing folder")
+        paths.append(
+            (fields[1].decode("ascii"), path_object, raw_path.decode("utf-8", errors="surrogateescape"))
+        )
+    return paths
+
+
+def blob_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
+    """The exact content of each file object, verified as one batch."""
+    if not object_ids:
+        return {}
+    output = git_output(
+        ["cat-file", "--batch"], ("\n".join(object_ids) + "\n").encode(), "git could not read the outgoing files"
+    )
+    contents: dict[str, bytes] = {}
+    position = 0
+    for object_id in object_ids:
+        end = output.find(b"\n", position)
+        fields = output[position:end].decode("utf-8", errors="surrogateescape").split() if end >= 0 else []
+        if len(fields) != 3 or fields[0].lower() != object_id.lower() or fields[1] != "blob" or not fields[2].isdigit():
+            raise TextError("git gave a malformed outgoing file")
+        size = int(fields[2])
+        content = output[end + 1 : end + 1 + size]
+        if len(content) != size or output[end + 1 + size : end + 2 + size] != b"\n":
+            raise TextError("git gave a malformed outgoing file")
+        contents[object_id] = content
+        position = end + 2 + size
+    if position != len(output):
+        raise TextError("git gave a malformed outgoing file")
+    return contents
+
+
+def scan_outgoing_objects(
+    objects: Mapping[str, str], commits: Sequence[str], held: set[str], matcher: TermMatcher
+) -> list[str]:
+    """Scan file objects and folder paths the destination lacks and no sent commit already includes."""
+    if not objects:
+        return []
+    held_ids = sorted(held)
+    commit_objects = outgoing_commit_object_ids(commits, held_ids)
+    destination_objects = destination_object_ids(held_ids)
+    files = {
+        object_id
+        for object_id, kind in objects.items()
+        if kind == "blob" and object_id not in destination_objects and object_id not in commit_objects
+    }
+    folders = sorted(
+        object_id
+        for object_id, kind in objects.items()
+        if kind == "tree" and object_id not in destination_objects and object_id not in commit_objects
+    )
+    folder_files: list[tuple[str, str]] = []
+    findings: list[str] = []
+    for folder in folders:
+        for kind, path_object, path in tree_paths(folder):
+            path_spans = matcher.spans(path)
+            shown = mask_path(path, path_spans)
+            if path_spans:
+                findings.extend(shown for _ in path_spans)
+            if kind == "blob" and path_object not in destination_objects and path_object not in commit_objects:
+                folder_files.append((path_object, shown))
+
+    content_ids = sorted(files | {object_id for object_id, _ in folder_files})
+    contents = blob_objects(content_ids)
+    for object_id in sorted(files):
+        content = contents[object_id]
+        if b"\0" not in content[:8000]:
+            findings.extend(
+                scan_message(
+                    content.decode("utf-8", errors="surrogateescape"),
+                    matcher,
+                    "verbatim",
+                    None,
+                    False,
+                    f"object {object_id[:12]}",
+                )
+            )
+    for object_id, shown in folder_files:
+        content = contents[object_id]
+        if b"\0" in content[:8000]:
+            continue
+        for line_number, line in enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1):
+            findings.extend(f"{shown}:{line_number}" for _ in matcher.spans(line))
+    return findings
 
 
 def scan_push(text: str, remote: str, url: str) -> list[str]:
-    """Scan only the commits and annotated tag messages this pre-push invocation sends and its destination lacks."""
+    """Scan outgoing commits, tags, direct file and folder objects, and created or updated ref names."""
     local, prior_remote = push_updates(text)
     if not local:
         return []
@@ -1536,14 +1698,19 @@ def scan_push(text: str, remote: str, url: str) -> list[str]:
     advertised = remote_advertisement(destination)
     held = local_object_ids([*advertised, *prior_remote])
     commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
-    tags = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
-    if not commits and not any(message.strip() for _, message in tags):
-        return []
+    tags, objects = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
     matcher = load_terms()
     findings = scan_outgoing_commits(commits, matcher)
     for name, message in tags:
         place = f"tag {mask_path(name, matcher.spans(name))} message"
         findings.extend(scan_message(message, matcher, "verbatim", None, False, place))
+    findings.extend(scan_outgoing_objects(objects, commits, held, matcher))
+    for remote_ref, _ in local:
+        name = remote_ref.removeprefix("refs/heads/").removeprefix("refs/tags/")
+        spans = matcher.spans(name)
+        if spans:
+            shown = mask_path(name, spans)
+            findings.extend(f"ref {shown}" for _ in spans)
     return findings
 
 def parser() -> argparse.ArgumentParser:

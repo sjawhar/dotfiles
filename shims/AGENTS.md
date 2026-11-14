@@ -171,19 +171,20 @@ behavior before handing the call to the real one. One file is data: `person-name
   Every `jj git` finds its nested subcommand with that same reader. Therefore every
   `jj git <global options> push` first dry-runs its
   resolved destination plan and, for every public or unreadable GitHub URL, scans the outgoing
-  commits that destination does not advertise, and the message of each annotated tag it sends:
-  jj's plan names a tag's commit, but jj pushes the backing repository's `refs/tags/<name>`, so
-  the shim reads that object and refuses when it differs. This refusal says only that a tag in the
-  plan differs. A refusal for an unreadable plan update also omits the update text and its names.
-  This encrypted-term check runs for every caller
-  before the shared public leak check, and fails closed when it cannot read the plan, destination
-  or a nonempty scan's term list. The shared public check remains an agent check, or a person's
-  check where it is installed; `DOTFILES_JJ_NO_LEAK_CHECK=1` skips only that public check for a
-  person's one command, never the encrypted-term check. In an agent session the variable is
-  ignored. Every destination must pass before any actual push. A failed dry-run, unreadable plan
-  or nonzero check refuses; without a check, only a destination confirmed private passes in an
-  agent session (outside one, no check means no public gate). A push that sends no commit the
-  destination lacks and no new annotated tag with a nonempty message does not load the encrypted list.
+  commits that destination does not advertise, annotated-tag messages, direct file and folder
+  objects the destination does not have and no outgoing commit includes, and each created or
+  updated ref name. jj's plan names
+  a tag's commit, but jj pushes the backing repository's `refs/tags/<name>`, so the shim reads
+  that object and refuses when it differs. This refusal says only that a tag in the plan differs.
+  A refusal for an unreadable plan update also omits the update text and its names. This
+  encrypted-term check runs for every caller before the shared public leak check, and fails closed
+  when it cannot read the plan, destination or a nonempty scan's term list. The shared public
+  check remains an agent check, or a person's check where it is installed;
+  `DOTFILES_JJ_NO_LEAK_CHECK=1` skips only that public check for a person's one command, never
+  the encrypted-term check. In an agent session the variable is ignored. Every destination must
+  pass before any actual push. A failed dry-run, unreadable plan or nonzero check refuses; without
+  a check, only a destination confirmed private passes in an agent session (outside one, no check
+  means no public gate). Only a deletion-only push does not load the encrypted list.
   The shim resolves push aliases in jj's startup invocation context: up to eight levels in an
   agent session, up to 64 outside one. A command whose first word is a builtin other than `git`
   needs no alias lookup. Lookup/decoding failures and deeper expansions refuse (a person's
