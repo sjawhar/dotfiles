@@ -41,6 +41,14 @@
 # change id, not its commit id: a rebase gives the change a new commit id, and the old one still
 # names the commit from before it. On 2026-11-02 at 16:19Z a run given a commit id pushed that old
 # commit after its rebase, was refused 3 times, and left a duplicate of the change.
+#
+# A run whose rebase moved the working copy's parent has moved the files on disk, and a move can
+# bring a new mise pin. So the EXIT trap, after it drops this run's copies, compares the parent
+# with the one recorded at the start and, when it changed, runs `dotfiles-sync --tools` in the
+# checkout (`mise install` under the install lock, then the frozen Bun install; see its header).
+# That covers a successful push, a run whose every push try was refused, and a later failure
+# under set -e or die; a step that fails makes a run that would exit 0 exit 1, and a run that
+# already failed keeps its status. A run that moves no file on disk installs nothing.
 set -euo pipefail
 
 TRIES="${DOTFILES_PUBLISH_TRIES:-3}"
@@ -49,8 +57,10 @@ die() { echo "dotfiles-publish: $*" >&2; exit 1; }
 
 [[ $# -eq 1 && "$1" != -* ]] || die "usage: dotfiles-publish <commit>"
 rev="$1"
+tools="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/dotfiles-sync"
 cd "${DOTFILES_DIR:-$HOME/.dotfiles}"
 [[ -d .jj ]] || die "$PWD is not a jj checkout"
+start="$(jj log -r @- --no-graph -T 'commit_id ++ " "')"
 # A divergent change id is no single revision to jj, so it is asked again as change_id(<id>), which
 # names each of its commits; they share the change, which settle_divergence below judges.
 change="$( { jj log -r "$rev" --no-graph -T 'change_id ++ "\n"' 2>/dev/null \
@@ -66,7 +76,18 @@ drop_copies() {
         || echo "dotfiles-publish: could not abandon this run's copies ($copies); abandon them by hand" >&2
     copies=""
 }
-trap drop_copies EXIT
+on_exit() {
+    local rc=$? end
+    drop_copies || true
+    if [[ -n "${start:-}" ]]; then
+        end="$(jj log -r @- --no-graph -T 'commit_id ++ " "' 2>/dev/null)" || end=""
+        if [[ -n "$end" && "$end" != "$start" ]]; then
+            "$tools" --tools "$PWD" || { [[ "$rc" -ne 0 ]] || rc=1; }
+        fi
+    fi
+    exit "$rc"
+}
+trap on_exit EXIT
 
 # The one visible commit of <commit>'s change now.
 current() {

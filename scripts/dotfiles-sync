@@ -6,6 +6,27 @@
 # that a commit outside it still builds on, while anything a machine holds that is neither on main
 # nor in the old history is kept and named.
 #
+# After the move, each host path runs the tools step on the machine it moved, in the same ssh
+# session for a remote host: `mise install` in the checkout, then `bun install --frozen-lockfile`
+# in omp/plugins when its package.json is there, with the mise binary and MISE_DATA_DIR (and
+# MISE_CACHE_DIR where it sets one) that the checkout's .bashrc gives a shell. It runs after every
+# move that ends on main, also when main brought nothing new, so a later sync installs a pin an
+# earlier step did not. `mise install` holds an exclusive lock on
+# $MISE_DATA_DIR/.dotfiles-install.lock, the one dotfiles-follow and agent-session take for their
+# own installs, so a launch during the install waits for it instead of finding no binary. A failed
+# `mise install` stops the step before Bun, whose mise shim could install outside that lock. Each
+# command has DOTFILES_TOOLS_TIMEOUT seconds (a whole number 1-600; default 600), the lock wait
+# included; a failure or a command past its limit prints the command, its status and the last
+# lines of its output, keeps the move, and the run exits non-zero after the other hosts. A remote
+# host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and each
+# command's limit plus its 10 s kill grace. The sync lock is released before the step, so an
+# install does not hold off another move.
+#
+# Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
+# own tools step (it reports a failed install as TOOLS NOT INSTALLED, not as a failed move);
+# --here-tools OLD is the move and then the step; --tools DIR is the step alone, which
+# dotfiles-publish runs after a rebase that moved the files.
+#
 # A jj checkout keeps its working-copy change: it is rebased onto main, and the run refuses a
 # conflict instead of resolving it. The refusal comes before the rebase: a duplicate of the
 # change is rebased onto main first and abandoned, and only a duplicate with no conflict lets the
@@ -63,6 +84,81 @@ on_main() {
   [ -n "$own" ] && [ -n "$main_hunks" ] && ! grep -qx binary <<<"$own" \
     && [ -z "$(LC_ALL=C comm -23 <(printf '%s\n' "$own") <(printf '%s\n' "$main_hunks"))" ]
 }
+
+tools_limit() {
+  local raw="${DOTFILES_TOOLS_TIMEOUT:-}" value
+  if [[ -z ${DOTFILES_TOOLS_TIMEOUT+x} ]]; then
+    printf '%s\n' 600
+    return
+  fi
+  if [[ "$raw" =~ ^0*([1-9][0-9]*)$ ]]; then
+    value="${BASH_REMATCH[1]}"
+    if (( ${#value} <= 3 && 10#$value <= 600 )); then
+      printf '%s\n' "$value"
+      return
+    fi
+  fi
+  printf 'dotfiles-sync: DOTFILES_TOOLS_TIMEOUT=%s is invalid; using 600\n' "$raw" >&2
+  printf '%s\n' 600
+}
+
+tools_error() {
+  local command="$1" dir="$2" status="$3" limit="$4" output="$5" tick='`'
+  printf 'dotfiles-sync: tools step: %s%s%s in %s exited %s' "$tick" "$command" "$tick" "$dir" "$status" >&2
+  if [[ "$status" = 124 || "$status" = 137 ]]; then
+    printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
+  fi
+  printf '\nlast lines of its output:\n' >&2
+  tail -n 20 "$output" >&2 || true
+}
+
+tools_step() (
+  local dir="$1" limit lock mise output status
+  set +eu
+  if [[ -f "$dir/.bashrc" ]]; then
+    DOTFILES_DIR="$dir"
+    export DOTFILES_DIR
+    # shellcheck disable=SC1091
+    source "$dir/.bashrc" >/dev/null 2>&1
+  fi
+  set -eu
+
+  export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+  # A directory it cannot make is reported below, as flock's failure to open the lock.
+  mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
+  limit="$(tools_limit)"
+  lock="$MISE_DATA_DIR/.dotfiles-install.lock"
+  output="$(mktemp)"
+  if [[ -x "$dir/bin/mise" ]]; then
+    mise="$dir/bin/mise"
+  elif ! mise="$(command -v mise 2>/dev/null)"; then
+    printf 'mise: command not found\n' >"$output"
+    tools_error "mise install" "$dir" 127 "$limit" "$output"
+    rm -f "$output" || true
+    return 127
+  fi
+  if timeout -k 10 "$limit" flock "$lock" "$mise" install >"$output" 2>&1; then
+    printf 'tools: %smise install%s passed in %s\n' '`' '`' "$dir"
+  else
+    status=$?
+    tools_error "mise install" "$dir" "$status" "$limit" "$output"
+    rm -f "$output" || true
+    return "$status"
+  fi
+  rm -f "$output"
+
+  [[ -f "$dir/omp/plugins/package.json" ]] || return 0
+  output="$(mktemp)"
+  if (cd "$dir/omp/plugins" && timeout -k 10 "$limit" bun install --frozen-lockfile) >"$output" 2>&1; then
+    printf 'tools: %sbun install --frozen-lockfile%s passed in %s/omp/plugins\n' '`' '`' "$dir"
+  else
+    status=$?
+    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" "$status" "$limit" "$output"
+    rm -f "$output" || true
+    return "$status"
+  fi
+  rm -f "$output"
+)
 
 sync_here() {
   local old="$1"
@@ -213,6 +309,17 @@ if [ "${1:-}" = --here ]; then
   sync_here "${2:-}"
   exit
 fi
+if [ "${1:-}" = --here-tools ]; then
+  sync_here "${2:-}"
+  exec 8>&-
+  tools_step "$HOME/.dotfiles"
+  exit
+fi
+if [ "${1:-}" = --tools ]; then
+  [[ $# -eq 2 ]] || { echo "--tools: require a checkout directory" >&2; exit 2; }
+  tools_step "$2"
+  exit
+fi
 
 old=""
 if [ "${1:-}" = --old ]; then
@@ -233,13 +340,20 @@ if [ ${#hosts[@]} -eq 0 ]; then
   for m in "${MACHINES[@]}"; do hosts+=("${m%%=*}"); done
 fi
 
+tools_timeout="$(tools_limit)"
+remote_move_timeout=180
+remote_sync_lock_wait=300
+remote_tools_grace=10
+remote_tools_commands=2
+remote_limit=$((remote_move_timeout + remote_sync_lock_wait + remote_tools_commands * (tools_timeout + remote_tools_grace)))
+
 status=0
 for h in "${hosts[@]}"; do
   echo "== $h"
   if [ "$h" = local ] || [ "$h" = "$(hostname)" ]; then
-    "$0" --here "$old" || status=1
+    DOTFILES_TOOLS_TIMEOUT="$tools_timeout" "$0" --here-tools "$old" || status=1
   else
-    timeout 180 ssh -o BatchMode=yes -o ConnectTimeout=10 "$(dest_for "$h")" bash -s -- --here "$old" < "$0" || status=1
+    timeout "$remote_limit" ssh -o BatchMode=yes -o ConnectTimeout=10 "$(dest_for "$h")" env DOTFILES_TOOLS_TIMEOUT="$tools_timeout" bash -s -- --here-tools "$old" < "$0" || status=1
   fi
 done
 exit $status
