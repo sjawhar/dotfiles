@@ -2232,6 +2232,21 @@ class AgentboxMove(unittest.TestCase):
         self.assertEqual(sorted(str(p.relative_to(self.tmpdir)) for p in set(self.tmpdir.rglob("*")) - before_relauncher),
                          [], f"left in the relauncher's TMPDIR after signal {name}")
 
+    def test_a_plan_run_leaves_nothing_it_made_in_its_tmpdir(self) -> None:
+        """`agentbox move --to` that prepares a job and exits 0 leaves no file it made in its
+        TMPDIR. At 25b90855 it left its progress file (MOVE_PROGRESS_FILE, holding 'measuring the
+        inferred directories the session did not name') for each run (HOME-211 tester)."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        self.assertEqual(sorted(self.tmpdir.rglob("*")), [])
+        planned = self.move_to()
+        self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
+        self.assertEqual(len(self.jobs()), 1)
+        self.assertEqual(sorted(str(p.relative_to(self.tmpdir)) for p in self.tmpdir.rglob("*")), [],
+                         "left in the plan run's TMPDIR")
+
     def test_a_relauncher_stopped_before_its_error_writer_opens_leaves_no_error_file(self) -> None:
         """A signal that stops the relauncher before its error writer (tee) has opened its output
         leaves no rsync error file: the writer gets the file the relauncher opened, not its path."""
