@@ -549,6 +549,19 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(probe.read_text(), "free\n")
 
+    def test_case_25_tools_mode_takes_a_relative_checkout(self) -> None:
+        # The step enters DIR before `mise install`, so a relative DIR must be made absolute
+        # first, or DIR/bin/mise no longer names the checkout's mise once the step is in DIR.
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        result = self._run(SYNC, "--tools", ".dotfiles", cwd=self.home)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
+        self.assertIn(f"tools: `mise install` passed in {self.checkout}\n", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
