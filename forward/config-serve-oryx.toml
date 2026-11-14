@@ -1,22 +1,18 @@
-# Devbox role on oryx, chosen by installers/forward.sh because this host has its
-# own file (every devbox does; a host without one fails the install). This file
-# is the reference for every config-serve-*.toml: the fields are explained here
-# once, and the other pairs say only how they differ. oryx pairs with the
-# laptop's forward-daemon@oryx (config-daemon-oryx.toml) over tailnet IPv6; that
-# file explains the literal-address rule for listen and peer.
+# Oryx's forward pair rides forward-tunnel@oryx on the laptop through
+# Cloudflare Access. This file is the reference for every config-serve-*.toml:
+# the fields are explained here once, and the other pairs say only how they
+# differ.
 #
 # listen is this machine's address, and it is what preview URLs are minted
 # against, never peer, which is the laptop, where the browser is rather than
 # where the file is. peer is the laptop's address for the pair: dialled for the
-# URL channel, and compared against for every inbound connection.
-listen = "fd7a:115c:a1e0::3336:5706"
-peer = "fd7a:115c:a1e0::8f36:1226"
+# URL channel, and compared against for every inbound connection. This tunnel
+# makes both addresses loopback and carries Forward's default ports.
+listen = "127.0.0.1"
+peer = "127.0.0.1"
 
 # The single port the laptop asks for OAuth callback hops on. Only ports a local
 # `forward open` armed, from a URL that actually named them, are reachable
 # through it, and only until the lease (forward_ttl_secs) expires.
 bridge_port = 12801
 forward_ttl_secs = 300
-
-# The SSH tunnel from scripts/devbox owns ~/.pcscd/pcscd.comm on oryx.
-pcsc_port = 0

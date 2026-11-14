@@ -168,7 +168,7 @@ if [ -d "/mnt/nvme/${USER:-$(id -un)}" ]; then
     unset _nvme_tmp _nvme_gotmp _scratch
 fi
 
-# YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: SSH-forwarded socat bridge).
+# YubiKey PC/SC: forward serve owns ~/.pcscd/pcscd.comm on machines with the marker dir (devbox: forward's pcsc channel to the laptop; oryx: forward's pcsc channel through forward-tunnel@oryx).
 if [ -d "${HOME}/.pcscd" ]; then
     export PCSCLITE_CSOCK_NAME="${HOME}/.pcscd/pcscd.comm"
 fi

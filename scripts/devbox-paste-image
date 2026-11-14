@@ -15,7 +15,7 @@
 # read innermost first:
 #   - tmux titles its terminal "<machine>: <pane title>" (.tmux.conf set-titles), and
 #     a shell prompt "<user>@<machine>: <dir>"; a name counts only when it is this
-#     laptop or a machine on the tailnet.
+#     laptop, oryx, or a machine on the tailnet.
 #   - mosh shows a remote title as "[mosh] <title>". Such a title that then names no
 #     machine is refused: the window is remote, but its machine is unknown.
 #   - Before a remote sets a title, Ghostty titles the window with its command:
@@ -30,11 +30,14 @@ readonly PASTE_DIR='.cache/omp/pasted-images'
 
 notify() { notify-send --app-name="Devbox paste" "$@"; }
 
-# The laptop's own name and every tailnet machine's, one per line, lowercase.
+# The laptop's own name, oryx, and every tailnet machine's, one per line, lowercase.
 known_machines() {
     hostname -s
-    tailscale status --json 2>/dev/null \
-        | jq -r '.Self, (.Peer // {} | .[]) | .HostName, (.DNSName | split(".")[0])' 2>/dev/null
+    printf '%s\n' oryx
+    if command -v tailscale >/dev/null 2>&1; then
+        tailscale status --json 2>/dev/null \
+            | jq -r '.Self, (.Peer // {} | .[]) | .HostName, (.DNSName | split(".")[0])' 2>/dev/null || true
+    fi
 }
 
 # The host an ssh/mosh/devbox command line names: its first argument that is not an

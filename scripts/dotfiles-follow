@@ -8,7 +8,7 @@ hand.
 
 What one run does:
 
-  1. `git fetch origin main`.
+  1. `git fetch origin main`, or `jj git fetch` through dotfiles-sync in a colocated jj checkout.
   2. Refuse, and change nothing, while the checkout holds any change git sees: a tracked file
      modified, staged, deleted or in conflict, an untracked file that no .gitignore covers, or a
      merge, rebase or cherry-pick in progress. One exception: a path that SECRET_FILES in
@@ -50,11 +50,13 @@ What one run does:
      When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
      not that the checkout failed to follow. Any open follow failure keeps the not-following headline.
 
-It never stashes, resets, rebases, abandons or deletes. It restores only the follow-managed
-marketplace lock, before judging dirty files and after plugin commands. Other edits are discarded
-only when origin/main already holds their bytes, right before the fast-forward. Apart from that
-lock recovery, a refusal leaves HEAD, the index and every file as they were. Alerts go over Envoy
-to BOX_HEALTH_OWNER when set, else the `lead-box-health` role, else the SRE session.
+In git mode, it never stashes, resets, rebases or abandons. In jj mode, dotfiles-sync rebases
+`@` and abandons commits that main already has. dotfiles-follow never describes, commits or pushes.
+It restores only the follow-managed marketplace lock, before judging dirty files and after plugin
+commands. Other edits are discarded only when origin/main already holds their bytes, right before
+the fast-forward. Apart from that lock recovery, a refusal leaves HEAD, the index and every file
+as they were. Alerts go over Envoy to BOX_HEALTH_OWNER when set, else --box-health-role when set,
+else the `lead-box-health` role, then the SRE session.
 """
 
 from __future__ import annotations
@@ -86,6 +88,7 @@ BOX_HEALTH_ROLE_TOPIC = "notifications.role.lead-box-health"
 OWNER_RE = re.compile(
     r"01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
 )
+ROLE_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 # Where the state file goes, as the sibling watches place theirs: the big disk where there is one,
 # ~/.local/state elsewhere. devbox/sami-devbox-check reads it for A2.
@@ -101,6 +104,7 @@ HEADLINE = {
     "fetch": "CANNOT FETCH origin/main",
     "dirty": "UNCOMMITTED CHANGES",
     "not-ff": "NOT A FAST-FORWARD",
+    "sync": "DOTFILES SYNC REFUSED",
     "kept-file": "MAIN CHANGES A KEPT FILE",
     "merge": "FAST-FORWARD FAILED",
     "tools": "TOOLS NOT INSTALLED",
@@ -170,11 +174,14 @@ def box_health_owner() -> str:
     return owner
 
 
-def tell_box_health(envoy: Envoy, text: str) -> str:
+def tell_box_health(envoy: Envoy, text: str, role: str = "") -> str:
     """Tell this box's health owner, and say who heard it ("" when every route refused)."""
     owner = box_health_owner()
     if owner:
         return owner if envoy.send(owner, text) else ""
+    if role:
+        topic = f"notifications.role.{role}"
+        return topic if envoy.publish(topic, text) else ""
     if envoy.publish(BOX_HEALTH_ROLE_TOPIC, text):
         return BOX_HEALTH_ROLE_TOPIC
     if envoy.send(SRE, text):
@@ -252,9 +259,12 @@ def kept_paths(repo: Path, provision: Path) -> tuple[set[str], str]:
     return {path for path in done.stdout.split("\0") if path}, ""
 
 
-def worktree_status(repo: Path) -> tuple[list[tuple[str, str]], str]:
-    """([(XY, path)] of every change git sees, error text)."""
-    done = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+def worktree_status(repo: Path, *paths: str) -> tuple[list[tuple[str, str]], str]:
+    """([(XY, path)] of changes at PATHS, or every change when PATHS is empty, plus error text)."""
+    args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    if paths:
+        args.extend(("--", *paths))
+    done = git(repo, *args)
     if done.returncode != 0:
         return [], done.stderr.strip() or f"git status exited {done.returncode}"
     entries: list[tuple[str, str]] = []
@@ -337,8 +347,24 @@ MARKETPLACE_LOCK = "omp/plugins/omp-plugins.lock.json"
 MARKETPLACE_COMMAND_TIMEOUT = 60.0
 MARKETPLACE_TIMEOUT = 300.0
 
+SYNC_FETCH_FAILURE = 75
+SYNC_TIMEOUT_MARGIN = 1.0
 
-def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
+
+def run_step(
+    argv: list[str],
+    cwd: Path,
+    timeout: float,
+    *,
+    clear_omp_profiles: bool = False,
+    environment: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    env = {**os.environ, "DOTFILES_DIR": str(cwd)}
+    if clear_omp_profiles:
+        for name in ("OMP_PROFILE", "PI_PROFILE", "PI_CODING_AGENT_DIR"):
+            env.pop(name, None)
+    if environment:
+        env.update(environment)
     try:
         proc = subprocess.Popen(
             argv,
@@ -350,7 +376,7 @@ def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
             stdin=subprocess.DEVNULL,
             start_new_session=True,
             # The check reads mise.toml from DOTFILES_DIR: this checkout's, whichever it is.
-            env={**os.environ, "DOTFILES_DIR": str(cwd)},
+            env=env,
         )
         timed_out = False
         try:
@@ -374,8 +400,25 @@ def run_step(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
         return 127, f"{' '.join(argv)}: {error}"
 
 
+def is_jj_checkout(repo: Path) -> bool:
+    """True for a colocated checkout whose jj command works."""
+    if not (repo / ".jj").is_dir():
+        return False
+    return run_step(["jj", "--version"], repo, 10)[0] == 0
+
+
+def omp_profile_is_legion() -> bool:
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    try:
+        return (config / "omp/profile").read_text().strip() == "legion"
+    except OSError:
+        return False
+
+
 def install_marketplace_plugins(repo: Path, timeout: float) -> str:
     """Return why an installed marketplace pin is missing; try to restore the managed lock."""
+    if omp_profile_is_legion():
+        return "omp plugin commands are not run because the machine profile is legion."
     plugins = repo / "omp/plugins"
     lock = repo / MARKETPLACE_LOCK
     if not lock.is_file():
@@ -430,7 +473,7 @@ def install_marketplace_plugins(repo: Path, timeout: float) -> str:
                         failures.append(f"{plugin}: marketplace step's {MARKETPLACE_TIMEOUT:g}s budget exhausted; retry next run.")
                         break
                     command_timeout = min(timeout, MARKETPLACE_COMMAND_TIMEOUT, remaining)
-                    code, out = run_step([omp, *args], repo, command_timeout)
+                    code, out = run_step([omp, *args], repo, command_timeout, clear_omp_profiles=True)
                     if code != 0:
                         failures.append(f"{plugin}: `omp {' '.join(args)}` exited {code}:\n{tail(out)}")
                         break
@@ -730,6 +773,170 @@ class State:
             pass
 
 
+
+def judge_fetch(
+    data: dict, options: argparse.Namespace, found: dict[str, str], failed: bool, command: str,
+    said: str, after: str,
+) -> None:
+    """Count runs in a row whose fetch failed; say it once --fetch-grace of them have (both modes)."""
+    if not failed:
+        data["fetch_failures"] = 0
+        return
+    failures = int(data.get("fetch_failures", 0)) + 1
+    data["fetch_failures"] = failures
+    log(f"fetch failed ({failures} run(s) in a row): {said.strip()}")
+    if failures >= options.fetch_grace:
+        found["fetch"] = (
+            f"{command} failed on the last {failures} runs; the latest said:\n{tail(said)}\n  {after}"
+        )
+
+
+def run_tools_step(
+    repo: Path, options: argparse.Namespace, state: State, deadline: float, head: str,
+    found: dict[str, str], judged: set[str], facts: dict,
+) -> None:
+    """The post-update tools step at HEAD, shared by git mode and jj mode.
+
+    A run on which a slow-root pass takes priority (slow_sweep_takes_priority: overdue, and no run
+    has left its tools for one in the last interval), and the time left still holds that whole
+    pass, leaves the tools step to the next run and makes the slow-root pass instead (sweep_hooks):
+    otherwise a tools step that fails, or runs after every fast-forward, would keep the slow roots
+    unswept for as long as it does. That run's time is on disk before the pass starts, so a pass
+    that never completes, even one whose whole run is killed, takes at most one run's tools step
+    per interval. With --no-hook-sweep there is no pass, so the tools step always runs."""
+    data = state.data
+    now = time.time()
+    if (
+        not getattr(options, "no_hook_sweep", False)
+        and slow_sweep_takes_priority(options, data, now)
+        and deadline - monotonic() >= options.slow_sweep_timeout
+    ):
+        facts["tools_deferred"] = True
+        data["slow_sweep_priority_at"] = now
+        state.commit()
+        log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
+        return
+    judged.add("tools")
+    why = install_tools(repo, options)
+    if why:
+        found["tools"] = why + f"\n  {display_path(repo)} is at {short(head)}. The next run tries again."
+    else:
+        data["tools_ok_head"] = head
+
+
+def restore_marketplace_lock(
+    repo: Path,
+    state: State,
+    entries: list[tuple[str, str]],
+    error: str,
+    display: str,
+    head: str = "",
+    status_paths: tuple[str, ...] = (),
+) -> tuple[list[tuple[str, str]], str, str, bool]:
+    """Restore the generated marketplace lock before judging or moving the checkout."""
+    if not any(path == MARKETPLACE_LOCK for _code, path in entries):
+        return entries, error, "", False
+    # This lock is a follow-managed generated pin: followers change its pins only by pulling
+    # commits, never by hand-editing the live checkout. Any local change is an anomaly to discard.
+    # Persist the retry before removing its dirty-lock trigger: termination afterward must not
+    # leave a clean lock and a stale tools-success marker that skips installation.
+    state.data["tools_ok_head"] = None
+    state.commit()
+    discarded = git(repo, "checkout", "HEAD", "--", MARKETPLACE_LOCK, timeout=15)
+    if discarded.returncode != 0:
+        return (
+            entries,
+            "",
+            f"Cannot restore follow-managed {MARKETPLACE_LOCK} to HEAD in {display};"
+            f" git checkout exited {discarded.returncode}:\n{tail(discarded.stdout + discarded.stderr)}",
+            False,
+        )
+    entries, error = worktree_status(repo, *status_paths)
+    at_head = f" {short(head)}" if head else ""
+    log(f"note: restored follow-managed {MARKETPLACE_LOCK} to HEAD{at_head}; discarded local pin anomaly")
+    return entries, error, "", True
+
+
+def assess_jj_and_follow(
+    repo: Path, options: argparse.Namespace, state: State, deadline: float
+) -> tuple[dict[str, str], set[str], dict]:
+    """Follow a colocated jj checkout through dotfiles-sync."""
+    data = state.data
+    display = display_path(repo)
+    found: dict[str, str] = {}
+    judged = set(KINDS) - {"tools", "hooks"}
+    facts: dict = {"fast_forwarded": False}
+    home_repo = (Path.home() / ".dotfiles").resolve()
+    if repo.resolve() != home_repo:
+        found["sync"] = (
+            f"{display} is a colocated jj checkout, but only {display_path(home_repo)} may be moved"
+            " by dotfiles-sync; this checkout stays in place."
+        )
+        return found, judged, facts
+
+    # dotfiles-sync moves @ onto main@origin and nothing else, so another --remote or --branch
+    # is refused before anything in the checkout changes.
+    if (options.remote, options.branch) != ("origin", "main"):
+        found["sync"] = (
+            f"{display} is a colocated jj checkout, which follows only origin/main through"
+            f" dotfiles-sync; --remote {options.remote} --branch {options.branch} is refused and"
+            " the checkout stays in place."
+        )
+        return found, judged, facts
+
+    entries, error = worktree_status(repo, MARKETPLACE_LOCK)
+    entries, error, lock_error, restored = restore_marketplace_lock(
+        repo, state, entries, error, display, status_paths=(MARKETPLACE_LOCK,)
+    )
+    if restored:
+        facts["restored_marketplace_lock"] = True
+    if lock_error:
+        found["sync"] = lock_error
+        return found, judged, facts
+    if error:
+        found["sync"] = f"git status failed before dotfiles-sync could move {display}: {error}"
+        return found, judged, facts
+
+    before = rev(repo, "HEAD")
+    target_ref = f"refs/remotes/{options.remote}/{options.branch}"
+    sync_timeout = options.fetch_timeout * 2
+    code, output = run_step(
+        [str(repo / "scripts/dotfiles-sync"), "--here", ""],
+        repo,
+        sync_timeout,
+        environment={
+            "DOTFILES_SYNC_LOCK_WAIT": f"{max(0.0, sync_timeout - SYNC_TIMEOUT_MARGIN):g}",
+        },
+    )
+    head = rev(repo, "HEAD")
+    target = rev(repo, target_ref)
+    facts.update(head=head, target=target, relation="current" if head == target and head else "not-current")
+    judge_fetch(
+        data, options, found, code == SYNC_FETCH_FAILURE, f"`jj git fetch --quiet` in {display}", output,
+        f"The sync stopped before it judged or moved {display}.",
+    )
+    if code == SYNC_FETCH_FAILURE:
+        # The sync stopped at its fetch, so it judged nothing else: an open sync condition stays open.
+        return found, {"fetch"}, facts
+    if code != 0:
+        found["sync"] = (
+            f"`scripts/dotfiles-sync --here ''` in {display} exited {code}; its working-copy"
+            f" move was refused:\n{tail(output)}"
+        )
+        return found, judged, facts
+    if not head or not target or head != target:
+        found["sync"] = (
+            f"`scripts/dotfiles-sync --here ''` finished, but HEAD is {short(head)} and"
+            f" {options.remote}/{options.branch} is {short(target)} in {display}."
+        )
+        return found, judged, facts
+    facts["fast_forwarded"] = head != before
+    if facts["fast_forwarded"]:
+        log(f"moved colocated jj checkout {display} from {short(before)} to {short(head)}")
+    if data.get("tools_ok_head") != head:
+        run_tools_step(repo, options, state, deadline, head, found, judged, facts)
+    return found, judged, facts
+
 # ------------------------------------------------------------------------------- one run
 
 
@@ -738,6 +945,8 @@ def assess_and_follow(
 ) -> tuple[dict[str, str], set[str], dict]:
     """Do the run's work, with DEADLINE (monotonic) the end of the run's time before its reserve.
     Returns ({kind: why} found now, kinds judged this run, facts)."""
+    if is_jj_checkout(repo):
+        return assess_jj_and_follow(repo, options, state, deadline)
     data = state.data
     found: dict[str, str] = {}
     judged: set[str] = {"fetch", "dirty", "not-ff"}
@@ -746,18 +955,11 @@ def assess_and_follow(
 
     fetched = git(repo, "fetch", "--quiet", options.remote, options.branch, timeout=options.fetch_timeout)
     target_ref = f"refs/remotes/{options.remote}/{options.branch}"
-    if fetched.returncode != 0:
-        failures = int(data.get("fetch_failures", 0)) + 1
-        data["fetch_failures"] = failures
-        log(f"fetch failed ({failures} run(s) in a row): {fetched.stderr.strip()}")
-        if failures >= options.fetch_grace:
-            found["fetch"] = (
-                f"`git fetch {options.remote} {options.branch}` in {display} failed on the last"
-                f" {failures} runs; the latest said:\n{tail(fetched.stderr)}\n"
-                f"  The checks below used the {target_ref} of the last fetch that worked."
-            )
-    else:
-        data["fetch_failures"] = 0
+    judge_fetch(
+        data, options, found, fetched.returncode != 0,
+        f"`git fetch {options.remote} {options.branch}` in {display}", fetched.stderr,
+        f"The checks below used the {target_ref} of the last fetch that worked.",
+    )
 
     head = rev(repo, "HEAD")
     target = rev(repo, target_ref)
@@ -768,26 +970,14 @@ def assess_and_follow(
 
     kept, note = kept_paths(repo, options.provision)
     entries, error = worktree_status(repo)
-    if any(path == MARKETPLACE_LOCK for _code, path in entries):
-        # This lock is a follow-managed generated pin: followers change its pins only by pulling
-        # commits, never by hand-editing the live checkout. Any local change is an anomaly to
-        # discard, including the marketplace write that stopped follow on 2026-11-03 and an
-        # interrupted upgrade. Restore HEAD even when the bytes differ from target or it is current.
+    entries, error, lock_error, restored = restore_marketplace_lock(repo, state, entries, error, display, head)
+    if restored or lock_error:
         judged.add("merge")
-        # Persist the retry before removing its dirty-lock trigger: termination afterward must
-        # not leave a clean lock and a stale tools-success marker that skips installation.
-        data["tools_ok_head"] = None
-        state.commit()
-        discarded = git(repo, "checkout", "HEAD", "--", MARKETPLACE_LOCK, timeout=15)
-        if discarded.returncode != 0:
-            found["merge"] = (
-                f"Cannot restore follow-managed {MARKETPLACE_LOCK} to HEAD in {display};"
-                f" git checkout exited {discarded.returncode}:\n{tail(discarded.stdout + discarded.stderr)}"
-            )
-            return found, judged, facts
+    if lock_error:
+        found["merge"] = lock_error
+        return found, judged, facts
+    if restored:
         facts["restored_marketplace_lock"] = True
-        log(f"note: restored follow-managed {MARKETPLACE_LOCK} to HEAD {short(head)}; discarded local pin anomaly")
-        entries, error = worktree_status(repo)
     # A file edited in place to exactly the bytes the target commit holds (an installer, or a
     # person, wrote main's new content before the fast-forward did) is no change to keep.
     same = same_as_target(repo, target, entries) if target != head else set()
@@ -884,30 +1074,11 @@ def assess_and_follow(
                 log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
                 head = facts["head"]
 
-    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD. A
-    # run on which a slow-root pass takes priority (slow_sweep_takes_priority: overdue, and no run
-    # has left its tools for one in the last interval), and the time left still holds that whole
-    # pass, leaves the tools step to the next run and makes the slow-root pass instead
-    # (sweep_hooks): otherwise a tools step that fails, or runs after every fast-forward, would keep
-    # the slow roots unswept for as long as it does. That run's time is on disk before the pass
-    # starts, so a pass that never completes, even one whose whole run is killed, takes at most one
-    # run's tools step per interval.
+    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
     if head == target and "dirty" not in found and (
         facts["fast_forwarded"] or data.get("tools_ok_head") != head
     ):
-        now = time.time()
-        if slow_sweep_takes_priority(options, data, now) and deadline - monotonic() >= options.slow_sweep_timeout:
-            facts["tools_deferred"] = True
-            data["slow_sweep_priority_at"] = now
-            state.commit()
-            log(f"tools: left to the next run, which retries them at {short(head)}: this run makes the overdue slow-root hook sweep pass")
-        else:
-            judged.add("tools")
-            why = install_tools(repo, options)
-            if why:
-                found["tools"] = why + f"\n  {display} is at {short(head)}. The next run tries again."
-            else:
-                data["tools_ok_head"] = head
+        run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
 
 
@@ -939,24 +1110,29 @@ def run_once(options: argparse.Namespace) -> int:
     data = state.data
     incidents: dict = data.setdefault("incidents", {})
     found, judged, facts = assess_and_follow(repo, options, state, deadline)
-    sweep_kind, budget = choose_sweep(options, data, judged, now, deadline)
-    if budget:
-        why, completed = sweep_hooks(options, sweep_kind, budget)
-    else:
-        why, completed = (
-            f"no hook sweep pass ran: this run had {max(0.0, deadline - monotonic()):.0f}s left before its"
-            f" {options.run_limit:.0f}s limit, less {alert_reserve(options):.0f}s kept for the state and alerts,"
-            f" under the {MIN_SWEEP_SECONDS:.0f}s a fast-root pass (fast_roots only) needs. The next run sweeps."
-        ), False
-    if sweep_kind == "slow" and completed:
-        data["slow_sweep_at"] = time.time()
-    hooks_incident = incidents.get("hooks")
-    # A fast-root pass does not reach the slow roots, so it cannot clear a condition a slow-root
-    # pass found; the next slow-root pass judges it.
-    if sweep_kind == "slow" or not hooks_incident or hooks_incident.get("pass") != "slow":
+    if getattr(options, "no_hook_sweep", False):
+        log("hooks: hook sweep is off by configuration")
+        sweep_kind, completed, why = "", False, ""
         judged.add("hooks")
-    if why:
-        found["hooks"] = why
+    else:
+        sweep_kind, budget = choose_sweep(options, data, judged, now, deadline)
+        if budget:
+            why, completed = sweep_hooks(options, sweep_kind, budget)
+        else:
+            why, completed = (
+                f"no hook sweep pass ran: this run had {max(0.0, deadline - monotonic()):.0f}s left before its"
+                f" {options.run_limit:.0f}s limit, less {alert_reserve(options):.0f}s kept for the state and alerts,"
+                f" under the {MIN_SWEEP_SECONDS:.0f}s a fast-root pass (fast_roots only) needs. The next run sweeps."
+            ), False
+        if sweep_kind == "slow" and completed:
+            data["slow_sweep_at"] = time.time()
+        hooks_incident = incidents.get("hooks")
+        # A fast-root pass does not reach the slow roots, so it cannot clear a condition a slow-root
+        # pass found; the next slow-root pass judges it.
+        if sweep_kind == "slow" or not hooks_incident or hooks_incident.get("pass") != "slow":
+            judged.add("hooks")
+        if why:
+            found["hooks"] = why
 
     opened: dict[str, str] = {}
     escalated: dict[str, str] = {}
@@ -1007,7 +1183,9 @@ def run_once(options: argparse.Namespace) -> int:
             changed += f" and fast-forwarded the checkout to {short(facts.get('head', ''))}"
     footer = (
         f"From dotfiles-follow on {host} (scripts/dotfiles-follow.md). {changed}:"
-        " it never stashes, resets, rebases or abandons. Only the follow-managed marketplace lock is restored."
+        " in git mode it never stashes, resets, rebases or abandons. In jj mode dotfiles-sync"
+        " rebases @ and abandons commits main already has; dotfiles-follow never describes,"
+        " commits or pushes. Only the follow-managed marketplace lock is restored."
     )
     if opened:
         headline = (
@@ -1047,7 +1225,7 @@ def run_once(options: argparse.Namespace) -> int:
     for text in messages:
         if options.print_alert:
             print(text + "\n", flush=True)
-        target = tell_box_health(envoy, text)
+        target = tell_box_health(envoy, text, getattr(options, "box_health_role", ""))
         if target:
             log(f"told {target}")
         else:
@@ -1057,6 +1235,12 @@ def run_once(options: argparse.Namespace) -> int:
         # reached nobody.
         log(f"NOBODY HEARD IT: {unheard} message(s) refused by every Envoy route; see above")
     return 0
+
+
+def health_role(value: str) -> str:
+    if not ROLE_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError("ROLE must match [a-z0-9][a-z0-9-]*")
+    return value
 
 
 def main() -> int:
@@ -1090,8 +1274,17 @@ def main() -> int:
     parser.add_argument("--slow-sweep-timeout", type=float, default=1000.0, help="one hook sweep pass over the fast and slow roots, killed after this many seconds; started only when the run has this long left before its deadline (default 1000)")
     parser.add_argument("--run-limit", type=float, default=1170.0, help="seconds the whole run may take, the unit's TimeoutStartSec; no hook sweep pass runs past it less the time kept for the state and alerts (default 1170)")
     parser.add_argument("--http-timeout", type=float, default=8.0)
+    parser.add_argument("--no-hook-sweep", action="store_true", help="skip the hook sweep for this machine")
+    parser.add_argument(
+        "--box-health-role",
+        type=health_role,
+        metavar="ROLE",
+        default=None,
+        help="publish alerts to notifications.role.ROLE after BOX_HEALTH_OWNER, without an SRE fallback",
+    )
     parser.add_argument("--print-alert", action="store_true", help="print each message to stdout as well as sending it")
     options = parser.parse_args()
+    options.box_health_role = options.box_health_role or ""
     options.repo = options.repo.absolute()
     if options.provision is None:
         options.provision = options.repo / "devbox/sami-devbox-provision"
