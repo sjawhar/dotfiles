@@ -534,6 +534,21 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
 
+    def test_case_24_the_sync_lock_is_free_while_the_tools_step_installs(self) -> None:
+        # A long install must not hold the sync lock: dotfiles-follow moves the checkout with
+        # `--here`, which waits for that lock and reports a held one as a failed sync.
+        common = self.run_ok("git", "rev-parse", "--git-common-dir", cwd=self.checkout).strip()
+        sync_lock = self.checkout / common / "dotfiles-sync.lock"
+        probe = self.root / "sync-lock-probe"
+        (self.checkout / "bin" / "mise").write_text(
+            "#!/usr/bin/env bash\n"
+            f'if flock -n {sync_lock} true; then echo free; else echo held; fi > {probe}\n'
+        )
+        result = self.sync("local")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(probe.read_text(), "free\n")
+
 
 if __name__ == "__main__":
     unittest.main()

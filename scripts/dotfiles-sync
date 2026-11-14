@@ -113,7 +113,13 @@ tools_error() {
 }
 
 tools_step() (
-  local dir="$1" limit lock mise output status
+  local dir limit lock mise output status
+  # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
+  # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
+  if ! dir="$(cd -- "$1" 2>/dev/null && pwd)"; then
+    echo "dotfiles-sync: tools step: no checkout at $1" >&2
+    return 1
+  fi
   set +eu
   if [[ -f "$dir/.bashrc" ]]; then
     DOTFILES_DIR="$dir"
@@ -137,7 +143,7 @@ tools_step() (
     rm -f "$output" || true
     return 127
   fi
-  if timeout -k 10 "$limit" flock "$lock" "$mise" install >"$output" 2>&1; then
+  if (cd "$dir" && timeout -k 10 "$limit" flock "$lock" "$mise" install) >"$output" 2>&1; then
     printf 'tools: %smise install%s passed in %s\n' '`' '`' "$dir"
   else
     status=$?
