@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import multiprocessing
 import os
+import signal
 import shutil
 import stat
 import subprocess
@@ -93,8 +94,16 @@ case "$1" in
 #!/bin/bash
 printf 'AGENT_PWD=%s\n' "$PWD"
 printf 'AGENT_ARG=%s\n' "$@"
+if [[ -n "${FAKE_AGENT_RECORD_CDPATH:-}" ]]; then
+    printf 'AGENT_CDPATH=%s\n' "$CDPATH"
+fi
 AGENT
             chmod +x "$agent"
+        fi
+        if [[ "${FAKE_MISE_IGNORE_TERM:-0}" = 1 ]]; then
+            trap '' TERM
+            printf '%s\n' "$$" > "$FAKE_PID_FILE"
+            exec sleep "${FAKE_MISE_SLEEP:-60}"
         fi
         if [[ -n "${FAKE_MISE_SLEEP:-}" ]]; then sleep "$FAKE_MISE_SLEEP"; fi
         exit "${FAKE_MISE_EXIT:-0}"
@@ -146,15 +155,21 @@ esac
         env.update(extra)
         return env
 
-    def launch(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def launch(
+        self,
+        *args: str,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout: float = 15,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(SCRIPT), "fakeagent", *args],
-            cwd=self.caller,
+            cwd=self.caller if cwd is None else cwd,
             env=self.env() if env is None else env,
             capture_output=True,
             check=False,
             text=True,
-            timeout=15,
+            timeout=timeout,
         )
 
     def records(self) -> list[str]:
@@ -206,6 +221,26 @@ esac
         self.assertIn(f"MISE_DATA_DIR={self.data}", install)
         self.assertTrue(install.endswith("|held"), install)
 
+    def test_relative_dotfiles_dir_with_cdpath_starts_missing_agent(self) -> None:
+        result = self.launch(
+            "--mode",
+            "relative-dotfiles",
+            cwd=self.root,
+            env=self.env(DOTFILES_DIR="dotfiles", CDPATH=".", FAKE_AGENT_RECORD_CDPATH="1"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                f"AGENT_PWD={self.root}",
+                "AGENT_ARG=--mode",
+                "AGENT_ARG=relative-dotfiles",
+                "AGENT_CDPATH=.",
+            ],
+        )
+        self.assertIn("agent-secrets-session", self.records())
+
     def test_failed_install_that_provides_the_agent_still_launches_it(self) -> None:
         result = self.launch("--mode", "failed-install", env=self.env(FAKE_MISE_EXIT="1"))
 
@@ -222,6 +257,39 @@ esac
         self.assert_agent_started(result, "--mode", "timed-out-install")
         self.assertIn("exited 124 (past its limit of 2 s, lock wait included)", result.stderr)
         self.assertIn("mise install output", result.stderr)
+
+    def test_timed_out_install_kills_survivor_and_releases_lock(self) -> None:
+        pid_file = self.root / "mise.pid"
+        lock = self.data / ".dotfiles-install.lock"
+        result = self.launch(
+            "--mode",
+            "survivor-killed",
+            env=self.env(
+                DOTFILES_TOOLS_TIMEOUT="2",
+                FAKE_MISE_SLEEP="60",
+                FAKE_MISE_IGNORE_TERM="1",
+                FAKE_PID_FILE=str(pid_file),
+            ),
+            timeout=40,
+        )
+
+        self.assert_agent_started(result, "--mode", "survivor-killed")
+        self.assertIn("exited 124", result.stderr)
+        self.assertTrue(pid_file.exists())
+        pid = int(pid_file.read_text().strip())
+        try:
+            self.assertFalse(Path(f"/proc/{pid}").exists(), f"survivor {pid} remains")
+            lock_probe = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            self.assertEqual(lock_probe.returncode, 0, lock_probe.stderr)
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            for _ in range(30):
+                if not Path(f"/proc/{pid}").exists():
+                    break
+                time.sleep(0.1)
 
     def test_timed_out_install_without_the_agent_refuses(self) -> None:
         started = time.monotonic()

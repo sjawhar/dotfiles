@@ -315,10 +315,32 @@ else
             fi
         fi
 
+        grace=10
         out="$(mktemp)"
         rc=0
-        (cd "$DOTFILES_DIR" && timeout -k 10 "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install) >"$out" 2>&1 || rc=$?
-        found="$(cd "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>>"$out")" || found=""
+        (
+            # shellcheck disable=SC1007
+            CDPATH= cd -- "$DOTFILES_DIR" && exec timeout -k "$grace" "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install
+        ) >"$out" 2>&1 &
+        pid=$!
+        wait "$pid" || rc=$?
+        if [[ "$rc" = 124 || "$rc" = 137 ]]; then
+            waits=$((grace * 10))
+            while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
+                sleep 0.1
+                waits=$((waits - 1))
+            done
+            if kill -0 -- "-$pid" 2>/dev/null; then
+                kill -KILL -- "-$pid" 2>/dev/null || true
+                waits=20
+                while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
+                    sleep 0.1
+                    waits=$((waits - 1))
+                done
+            fi
+        fi
+        # shellcheck disable=SC1007
+        found="$(CDPATH= cd -- "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>>"$out")" || found=""
         if [[ -n "$found" && -f "$found" && -x "$found" ]] && real="$(realpath "$found")"; then
             if [[ "${real%/*}" != */shims && "${real%/*}" != "$MISE_DATA_DIR/shims" ]]; then
                 prog="$found"

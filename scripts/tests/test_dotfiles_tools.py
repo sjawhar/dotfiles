@@ -374,11 +374,14 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertIn("exited 124", result.stderr)
         self.assertEqual(self.calls("mise"), [])
 
-    def test_case_14_install_child_keeps_lock_after_timeout(self) -> None:
+    def test_case_14_install_timeout_keeps_the_lock_through_the_grace_then_kills_the_child(self) -> None:
+        # At the limit `timeout` ends flock at once; mise, which inherited flock's locked descriptor
+        # (no -o), keeps the lock through the 10 s grace, so no second install starts beside a
+        # survivor. After the grace the step kills it, and the lock is free when the step returns.
         pid_file = self.root / "mise.pid"
         lock = self.home / ".mise" / ".dotfiles-install.lock"
-        result = self.sync(
-            "local",
+        sync = subprocess.Popen(
+            ["bash", str(SYNC), "local"],
             env={
                 **self.env,
                 "DOTFILES_TOOLS_TIMEOUT": "2",
@@ -386,27 +389,42 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
                 "FAKE_MISE_IGNORE_TERM": "1",
                 "FAKE_PID_FILE": str(pid_file),
             },
-            timeout=15,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("exited 124", result.stderr)
-        self.assertTrue(pid_file.exists())
-        pid = int(pid_file.read_text().strip())
+        pid = None
         try:
-            self.assertTrue(Path(f"/proc/{pid}").exists())
-            lock_probe = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
-            self.assertNotEqual(lock_probe.returncode, 0)
-        finally:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            for _ in range(30):
-                if not Path(f"/proc/{pid}").exists():
+            for _ in range(100):
+                if pid_file.exists() and pid_file.read_text().strip():
                     break
                 time.sleep(0.1)
-        released_probe = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
-        self.assertEqual(released_probe.returncode, 0, released_probe.stderr)
+            pid = int(pid_file.read_text().strip())
+            # The limit fires 2 s after the install starts and the kill 10 s after that; 4 s in is
+            # inside the grace with 2 s of margin on one side and 8 s on the other.
+            time.sleep(4)
+            self.assertTrue(Path(f"/proc/{pid}").exists(), "the survivor was killed before the grace ended")
+            during = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            self.assertNotEqual(during.returncode, 0, "the lock was free while the survivor still ran")
+            stdout, stderr = sync.communicate(timeout=40)
+            self.assertNotEqual(sync.returncode, 0, stdout + stderr)
+            self.assertIn("exited 124", stderr)
+            self.assertFalse(Path(f"/proc/{pid}").exists(), f"survivor {pid} remains")
+            after = subprocess.run(["flock", "-n", str(lock), "true"], capture_output=True, text=True, timeout=3)
+            self.assertEqual(after.returncode, 0, after.stderr)
+        finally:
+            if sync.poll() is None:
+                sync.kill()
+                sync.communicate()
+            if pid is not None:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                for _ in range(30):
+                    if not Path(f"/proc/{pid}").exists():
+                        break
+                    time.sleep(0.1)
 
     def test_case_15_invalid_tools_limits_warn_and_keep_default(self) -> None:
         for value in ("0", "abc", "9999"):
@@ -556,6 +574,34 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
         self.clear_records()
         result = self._run(SYNC, "--tools", ".dotfiles", cwd=self.home)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
+        self.assertIn(f"tools: `mise install` passed in {self.checkout}\n", result.stdout)
+
+    def test_case_26_relative_publish_path_with_cdpath_still_runs_the_tools_step(self) -> None:
+        # With CDPATH exported, `cd` of a relative name prints the directory it enters; a `$(cd …)`
+        # capture of the script's own directory would take that line too and name no dotfiles-sync.
+        change = self.local_commit()
+        env = {**self.env, "DOTFILES_DIR": str(self.checkout), "CDPATH": "."}
+        result = subprocess.run(
+            ["bash", "scripts/dotfiles-publish", change],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+
+    def test_case_27_tools_mode_with_cdpath_takes_a_relative_checkout(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        result = self._run(SYNC, "--tools", ".dotfiles", cwd=self.home, env={**self.env, "CDPATH": "."})
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_tools_ran()

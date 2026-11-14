@@ -16,10 +16,11 @@
 # own installs, so a launch during the install waits for it instead of finding no binary. A failed
 # `mise install` stops the step before Bun, whose mise shim could install outside that lock. Each
 # command has DOTFILES_TOOLS_TIMEOUT seconds (a whole number 1-600; default 600), the lock wait
-# included; a failure or a command past its limit prints the command, its status and the last
-# lines of its output, keeps the move, and the run exits non-zero after the other hosts. A remote
-# host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and each
-# command's limit plus its 10 s kill grace. The sync lock is released before the step, so an
+# included; at its limit it gives the command 10 s to exit, then kills every process it left so
+# its lock is free. A failure or a command past its limit prints the command, its status and the
+# last lines of its output, keeps the move, and the run exits non-zero after the other hosts. A
+# remote host's ssh limit is its parts: 180 s for the move, the 300 s default sync-lock wait, and
+# each command's limit plus that 10 s kill grace. The sync lock is released before the step, so an
 # install does not hold off another move.
 #
 # Internal modes: --here OLD is the move alone, which dotfiles-follow calls and follows with its
@@ -85,6 +86,8 @@ on_main() {
     && [ -z "$(LC_ALL=C comm -23 <(printf '%s\n' "$own") <(printf '%s\n' "$main_hunks"))" ]
 }
 
+tools_grace=10
+
 tools_limit() {
   local raw="${DOTFILES_TOOLS_TIMEOUT:-}" value
   if [[ -z ${DOTFILES_TOOLS_TIMEOUT+x} ]]; then
@@ -112,11 +115,50 @@ tools_error() {
   tail -n 20 "$output" >&2 || true
 }
 
+tools_run() {
+  local command="$1" cwd="$2" limit="$3" output pid status waits tick='`'
+  shift 3
+  output="$(mktemp)"
+  (
+    # shellcheck disable=SC1007
+    CDPATH= cd -- "$cwd" && exec timeout -k "$tools_grace" "$limit" "$@"
+  ) >"$output" 2>&1 &
+  pid=$!
+  if wait "$pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" = 124 || "$status" = 137 ]]; then
+    waits=$((tools_grace * 10))
+    while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
+      sleep 0.1
+      waits=$((waits - 1))
+    done
+    if kill -0 -- "-$pid" 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      waits=20
+      while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
+        sleep 0.1
+        waits=$((waits - 1))
+      done
+    fi
+  fi
+  if (( status == 0 )); then
+    printf 'tools: %s%s%s passed in %s\n' "$tick" "$command" "$tick" "$cwd"
+  else
+    tools_error "$command" "$cwd" "$status" "$limit" "$output"
+  fi
+  rm -f "$output" || true
+  return "$status"
+}
+
 tools_step() (
-  local dir limit lock mise output status
+  local dir limit lock mise output
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
-  if ! dir="$(cd -- "$1" 2>/dev/null && pwd)"; then
+  # shellcheck disable=SC1007
+  if ! dir="$(CDPATH= cd -- "$1" 2>/dev/null && pwd)"; then
     echo "dotfiles-sync: tools step: no checkout at $1" >&2
     return 1
   fi
@@ -134,36 +176,19 @@ tools_step() (
   mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
   limit="$(tools_limit)"
   lock="$MISE_DATA_DIR/.dotfiles-install.lock"
-  output="$(mktemp)"
   if [[ -x "$dir/bin/mise" ]]; then
     mise="$dir/bin/mise"
   elif ! mise="$(command -v mise 2>/dev/null)"; then
+    output="$(mktemp)"
     printf 'mise: command not found\n' >"$output"
     tools_error "mise install" "$dir" 127 "$limit" "$output"
     rm -f "$output" || true
     return 127
   fi
-  if (cd "$dir" && timeout -k 10 "$limit" flock "$lock" "$mise" install) >"$output" 2>&1; then
-    printf 'tools: %smise install%s passed in %s\n' '`' '`' "$dir"
-  else
-    status=$?
-    tools_error "mise install" "$dir" "$status" "$limit" "$output"
-    rm -f "$output" || true
-    return "$status"
-  fi
-  rm -f "$output"
+  tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
   [[ -f "$dir/omp/plugins/package.json" ]] || return 0
-  output="$(mktemp)"
-  if (cd "$dir/omp/plugins" && timeout -k 10 "$limit" bun install --frozen-lockfile) >"$output" 2>&1; then
-    printf 'tools: %sbun install --frozen-lockfile%s passed in %s/omp/plugins\n' '`' '`' "$dir"
-  else
-    status=$?
-    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" "$status" "$limit" "$output"
-    rm -f "$output" || true
-    return "$status"
-  fi
-  rm -f "$output"
+  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" bun install --frozen-lockfile
 )
 
 sync_here() {
@@ -349,7 +374,7 @@ fi
 tools_timeout="$(tools_limit)"
 remote_move_timeout=180
 remote_sync_lock_wait=300
-remote_tools_grace=10
+remote_tools_grace="$tools_grace"
 remote_tools_commands=2
 remote_limit=$((remote_move_timeout + remote_sync_lock_wait + remote_tools_commands * (tools_timeout + remote_tools_grace)))
 

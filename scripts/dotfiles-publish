@@ -57,7 +57,8 @@ die() { echo "dotfiles-publish: $*" >&2; exit 1; }
 
 [[ $# -eq 1 && "$1" != -* ]] || die "usage: dotfiles-publish <commit>"
 rev="$1"
-tools="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/dotfiles-sync"
+# shellcheck disable=SC1007
+tools="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/dotfiles-sync"
 cd "${DOTFILES_DIR:-$HOME/.dotfiles}"
 [[ -d .jj ]] || die "$PWD is not a jj checkout"
 start="$(jj log -r @- --no-graph -T 'commit_id ++ " "')"
