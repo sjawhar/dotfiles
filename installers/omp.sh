@@ -91,17 +91,48 @@ ensure_link "${DOTFILES_DIR}/omp/plugins" "${HOME}/.omp/plugins"
 # walking node_modules for omp.extensions, so a leftover copy double-loads the
 # extension and delivers every envoy message twice.
 rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
-# Marketplace plugins install at user scope, at the version the committed omp-plugins.lock.json
-# records. The install record (installed_plugins.json) is machine-local; the lock entry is not, and
-# omp refuses to install a plugin whose name the lock already holds ("Runtime package name ...
-# conflicts") while exiting 0. So on a machine without the install, the stale lock entry is dropped
-# first, and after the install the committed bytes are put back, whatever omp wrote, so the
-# checkout stays clean. An install behind the lock (another machine upgraded and committed the
-# lock) refreshes the marketplace catalog, which omp otherwise keeps from the day it was added, and
-# upgrades, with the committed lock put back the same way. An install that ends away from the lock
-# is reported; the lock changes only by a commit.
+# Marketplace plugins install at user scope. Each marketplace entry of the committed
+# omp-plugins.lock.json is the lowest version a machine must have: omp installs a catalog plugin
+# only at the version its catalog resolves now, so no machine can go back to an older entry. A
+# plugin at or above its entry gets no upgrade and no version warning. A plugin below it (another
+# machine upgraded and committed the lock) refreshes the marketplace catalog, which omp otherwise
+# keeps from the day it was added, and upgrades; it is reported only when it is still below
+# afterwards. Dotted numbers compare as numbers; any other version must equal the entry.
+# The install record (installed_plugins.json) is machine-local; the lock entry is not, and omp
+# refuses to install a plugin whose name the lock already holds ("Runtime package name ...
+# conflicts") while exiting 0. So on a machine without the install, the stale lock entry is
+# dropped first, and after the omp calls the committed bytes are put back, whatever omp wrote, so
+# the checkout stays clean. The lock changes only by a commit.
 marketplace_plugin_version() {
     jq -r --arg p "$1" '.plugins[$p][0].version // empty' "${DOTFILES_DIR}/omp/plugins/installed_plugins.json" 2>/dev/null || true
+}
+# Succeeds when installed version $1 is at or above lock entry $2. Dotted numbers compare component
+# by component as integers (0.3.10 is above 0.3.9; 1.2 equals 1.2.0; 0.3.09 equals 0.3.9), as
+# digit strings without leading zeros, so no component is read as octal or overflows $(( )).
+# Any other version (0.3.1-beta, or empty) must equal the entry. Call it only in a condition.
+marketplace_version_at_least() {
+    local numeric='^[0-9]+(\.[0-9]+)*$' h w i n
+    if ! [[ $1 =~ $numeric && $2 =~ $numeric ]]; then
+        [ "$1" = "$2" ]
+        return
+    fi
+    local -a have want
+    IFS=. read -ra have <<< "$1"
+    IFS=. read -ra want <<< "$2"
+    n=$(( ${#have[@]} > ${#want[@]} ? ${#have[@]} : ${#want[@]} ))
+    for (( i = 0; i < n; i++ )); do
+        h=${have[i]:-0} w=${want[i]:-0}
+        h=${h#"${h%%[!0]*}"} w=${w#"${w%%[!0]*}"}
+        if (( ${#h} != ${#w} )); then
+            (( ${#h} > ${#w} ))
+            return
+        fi
+        if [[ $h != "$w" ]]; then
+            [[ $h > "$w" ]]
+            return
+        fi
+    done
+    return 0
 }
 install_marketplace_plugin() {
     local marketplace="$1" plugin="$2" lock="${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json" want have
@@ -116,16 +147,17 @@ install_marketplace_plugin() {
     if [ -z "$have" ]; then
         jq --arg name "${plugin%@*}" 'del(.plugins[$name])' "$saved" > "$lock"
         omp plugin install "$plugin" || rc=$?
-    elif [ -n "$want" ] && [ "$have" != "$want" ]; then
+    elif [ -n "$want" ] && ! marketplace_version_at_least "$have" "$want"; then
         { omp plugin marketplace update "${plugin#*@}" && omp plugin upgrade "$plugin"; } || rc=$?
     else
-        # The catalog is checked even when the version already matches the lock. Until 2026-11-07
-        # the update ran ONLY on a mismatch, so a marketplace that had stopped resolving was
-        # invisible on any machine whose versions happened to agree: theorem-labs/verification-skills
-        # renamed its catalog to `agent-skills` and split its plugin in three, `marketplace update`
-        # began refusing outright ("Marketplace catalog name changed ... Remove and re-add"), and
-        # sami-devbox reported nothing at all because `have == want` for dev-infra kept it off that
-        # branch. It surfaced only on sami-rocqperf, which had drifted far enough to need an upgrade
+        # The catalog is checked even when the version is already at or above the lock's entry.
+        # Until 2026-11-07 the update ran ONLY on a mismatch, so a marketplace that had stopped
+        # resolving was invisible on any machine whose versions happened to agree:
+        # theorem-labs/verification-skills renamed its catalog to `agent-skills` and split its
+        # plugin in three, `marketplace update` began refusing outright ("Marketplace catalog name
+        # changed ... Remove and re-add"), and sami-devbox reported nothing at all because
+        # `have == want` for dev-infra kept it off that branch. It surfaced only on sami-rocqperf,
+        # which had drifted far enough to need an upgrade
         # -- and that machine retires under dispatch://INFRA-993. A check that runs only on a
         # mismatch cannot report a breakage that prevents mismatches from being fixed, so this one
         # does not restore the lock afterwards: it only reads, and a failure is reported, never fatal.
@@ -138,21 +170,23 @@ install_marketplace_plugin() {
     have=$(marketplace_plugin_version "$plugin")
     if [ -z "$have" ]; then
         echo "omp: installing ${plugin} failed" >&2
-    elif [ -n "$want" ] && [ "$have" != "$want" ]; then
-        echo "omp: ${plugin} is ${have}, but omp-plugins.lock.json records ${want}" >&2
+    elif [ -n "$want" ] && ! marketplace_version_at_least "$have" "$want"; then
+        echo "omp: ${plugin} is ${have}, below ${want}, the lowest version omp-plugins.lock.json records" >&2
     fi
 }
-# theorem-labs/verification-skills: Theorem's verification skills, which repos that copied them dropped,
-# and dev-infra, whose running-heavy-jobs skill sends heavy work to the cluster (dispatch://INFRA-898).
+# theorem-labs/verification-skills: the agent-skills catalog. All four of its plugins are installed
+# because the fleet uses skills from each: validation-loop (verification); designing-tasks and
+# running-task-qa (tasks); running-heavy-jobs, which sends heavy work to the cluster
+# (dispatch://INFRA-898), and maintaining-prover-forks (engineering); calling-the-model-gateway and
+# setting-up-a-dev-box-for-agents (dev-infra). Taking fewer would drop skills in daily use. Five
+# skills of the same daily work are not in this catalog: verification-before-completion is a skill
+# of the superpowers plugin, and opening-a-pr, landing-a-pr, finding-dropped-work and
+# using-transcript-store are this repository's own skills, in plugins/sjawhar/skills/.
 #
 # The catalog was renamed `verification-skills` -> `agent-skills` and the single `verification-skills`
 # plugin split into three on 2026-11-07, which broke the install outright: `omp plugin marketplace
 # update verification-skills` refuses with "Marketplace catalog name changed ... Remove and re-add",
 # so both machines sat three releases behind the lock (0.21.26 against 0.21.29) and could not catch up.
-# All four are installed because the fleet uses skills from each: verification-before-completion and
-# validation-loop (verification); designing-tasks through running-task-qa (tasks); opening-a-pr,
-# landing-a-pr, finding-dropped-work and using-transcript-store (engineering); running-heavy-jobs
-# (dev-infra). Taking fewer would drop skills in daily use.
 install_marketplace_plugin theorem-labs/verification-skills verification@agent-skills
 install_marketplace_plugin theorem-labs/verification-skills tasks@agent-skills
 install_marketplace_plugin theorem-labs/verification-skills engineering@agent-skills

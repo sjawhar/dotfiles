@@ -164,6 +164,14 @@ class MarketplacePlugins(Harness):
         self.assertEqual((self.repo / "omp/plugins/omp-plugins.lock.json").read_bytes(), self.want_lock.encode())
         self.assertEqual(self.sh("git", "status", "--porcelain", "--", "omp/plugins/omp-plugins.lock.json", cwd=self.repo), "")
 
+    def commit_wanted_lock(self, wanted: dict) -> None:
+        self.want_lock = json.dumps(wanted, indent=2) + "\n"
+        self.target = self.commit_upstream(
+            "change marketplace pin",
+            **{"omp__plugins__omp-plugins.lock.json": self.want_lock},
+        )
+        self.take_upstream()
+
     def test_changed_pins_upgrade_unchanged_and_bun_pins_do_not(self) -> None:
         self.take_upstream()
         why = FOLLOW.install_tools(self.repo, self.options())
@@ -245,17 +253,127 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.state_data()["last_outcome"], "tools")
         self.assert_clean_lock()
 
-    def test_catalog_latest_different_from_pin_is_a_tool_failure(self) -> None:
+    def test_catalog_below_the_entry_is_a_tool_failure(self) -> None:
         self.take_upstream()
         os.environ["FAKE_OMP_VERSIONS"] = json.dumps({
-            "dev-infra": "3.0.0", "verification-skills": "2.0.0", "core-ops": "2.0.0",
+            "dev-infra": "1.5.0", "verification-skills": "2.0.0", "core-ops": "2.0.0",
         })
         why = FOLLOW.install_tools(self.repo, self.options())
         self.assertIn("dev-infra", why)
-        self.assertIn("3.0.0", why)
+        self.assertIn("1.5.0", why)
         self.assertIn("2.0.0", why)
         self.assertEqual(self.version("core-ops"), "2.0.0")
         self.assert_clean_lock()
+
+    def test_installed_above_the_entry_runs_no_omp_command(self) -> None:
+        self.take_upstream()
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = "2.1.0"
+        self.installed_path.write_text(json.dumps(installed))
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertFalse(
+            any(
+                "dev-infra" in argument
+                for args in self.calls()
+                for argument in args
+            )
+        )
+        self.assert_clean_lock()
+
+    def test_upgrade_to_a_version_above_the_entry_passes(self) -> None:
+        wanted = json.loads(self.want_lock)
+        wanted["plugins"]["dev-infra"]["version"] = "0.3.1"
+        self.commit_wanted_lock(wanted)
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = "0.3.0"
+        self.installed_path.write_text(json.dumps(installed))
+        os.environ["FAKE_OMP_VERSIONS"] = json.dumps({
+            "dev-infra": "0.3.2", "verification-skills": "2.0.0", "core-ops": "2.0.0",
+        })
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertIn(["plugin", "marketplace", "update", "verification-skills"], self.calls())
+        self.assertIn(["plugin", "upgrade", "dev-infra@verification-skills"], self.calls())
+        self.assertEqual(self.version("dev-infra"), "0.3.2")
+        self.assert_clean_lock()
+
+    def test_numeric_components_compare_as_numbers(self) -> None:
+        wanted = json.loads(self.want_lock)
+        wanted["plugins"]["dev-infra"]["version"] = "0.3.9"
+        self.commit_wanted_lock(wanted)
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = "0.3.10"
+        self.installed_path.write_text(json.dumps(installed))
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertFalse(
+            any(
+                "dev-infra" in argument
+                for args in self.calls()
+                for argument in args
+            )
+        )
+        self.assert_clean_lock()
+
+    def test_a_version_that_is_not_dotted_numbers_needs_equality(self) -> None:
+        wanted = json.loads(self.want_lock)
+        wanted["plugins"]["dev-infra"]["version"] = "0.3.1"
+        self.commit_wanted_lock(wanted)
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = "0.3.1-beta"
+        self.installed_path.write_text(json.dumps(installed))
+        os.environ["FAKE_OMP_VERSIONS"] = json.dumps({
+            "dev-infra": "0.3.1", "verification-skills": "2.0.0", "core-ops": "2.0.0",
+        })
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        self.assertIn(["plugin", "upgrade", "dev-infra@verification-skills"], self.calls())
+        self.assertEqual(self.version("dev-infra"), "0.3.1")
+        self.assert_clean_lock()
+
+        wanted["plugins"]["dev-infra"]["version"] = "2.0.0"
+        self.commit_wanted_lock(wanted)
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = "partial"
+        self.installed_path.write_text(json.dumps(installed))
+        os.environ["FAKE_OMP_VERSIONS"] = json.dumps({"dev-infra": "partial"})
+        calls_before = len(self.calls())
+
+        why = FOLLOW.install_tools(self.repo, self.options())
+        self.assertIn("dev-infra", why)
+        self.assertIn("partial", why)
+        self.assertEqual(self.calls()[calls_before:], [
+            ["plugin", "marketplace", "update", "verification-skills"],
+            ["plugin", "upgrade", "dev-infra@verification-skills"],
+        ])
+        self.assert_clean_lock()
+
+    def test_version_at_least_table(self) -> None:
+        cases = (
+            ("0.3.1", "0.3.1", True),
+            ("0.3.2", "0.3.1", True),
+            ("0.3.0", "0.3.1", False),
+            ("0.3.10", "0.3.9", True),
+            ("0.3.9", "0.3.10", False),
+            ("1.2.0", "1.2", True),
+            ("1.2", "1.2.0", True),
+            ("1.2", "1.2.1", False),
+            ("0.3.09", "0.3.9", True),
+            ("0.3.08", "0.3.9", False),
+            ("10", "9", True),
+            ("99999999999999999999.0", "9.0", True),
+            ("partial", "2.0.0", False),
+            ("2.0.0", "partial", False),
+            ("partial", "partial", True),
+            ("0.3.1-beta", "0.3.1", False),
+            ("0.3.1", "0.3.1-beta", False),
+            ("v1.0.0", "1.0.0", False),
+            ("", "1.0.0", False),
+        )
+        for have, want, expected in cases:
+            with self.subTest(have=have, want=want):
+                self.assertEqual(FOLLOW.version_at_least(have, want), expected)
 
     def test_failed_catalog_update_does_not_upgrade_but_keeps_going(self) -> None:
         self.take_upstream()

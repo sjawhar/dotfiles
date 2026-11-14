@@ -72,7 +72,7 @@ Follow restores the managed marketplace lock before it calls the sync.
 5. `git merge --ff-only origin/main`. An alert when git refuses.
 6. After a fast-forward or managed-lock recovery, and on later runs until it passes at HEAD:
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
-   non-Bun marketplace plugin whose installed version differs from `omp-plugins.lock.json`,
+   non-Bun marketplace plugin below the lowest version its lock entry requires,
    `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
    `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
    `--mise-timeout`), the lock `dotfiles-sync`'s tools step and `agent-session` hold too, so
@@ -81,16 +81,19 @@ Follow restores the managed marketplace lock before it calls the sync.
    are silently skipped: these include vendored plugins such as compound-engineering and new
    marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow
    only upgrades existing installs. Multiple matching records are a reported ambiguity.
-   Each changed registered plugin is attempted even if another fails, with a 60 s command cap
+   Each below-entry registered plugin is attempted even if another fails, with a 60 s command cap
    and 300 s marketplace-phase budget. Normal cleanup tries to restore the tracked lock in a
    `finally`, with saved bytes as fallback if `git checkout --` fails. An interrupted run may
    leave it dirty: the next run restores HEAD before fast-forwarding or retrying installation.
-   An upgrade to a catalog version other than the committed pin is a failure too. Every omp
+   omp installs a catalog plugin only at the version its catalog resolves now, so no machine can go
+   back to an older entry. A plugin at or above its entry gets no upgrade or version failure. A
+   plugin below its entry refreshes its catalog and upgrades, and fails only if it remains below
+   afterward. Dotted numbers compare numerically; any other version must equal the entry. Every omp
    command removes `OMP_PROFILE`, `PI_PROFILE`, and `PI_CODING_AGENT_DIR` from its environment.
    If `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
-   reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives
-   and mise pins. An alert when any step fails; the next run retries, skipping marketplace
-   plugins already at want.
+   reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
+   mise pins. An alert when any step fails; the next run retries any marketplace plugin still below
+   its entry.
 7. Unless `--no-hook-sweep` is set, every run makes one pass of the leak check's hook sweep,
    `sweep-hooks.sh` of the leak-check tag in `~/.local/share/public-leak-check-hooks`
    (`devbox/sami-devbox-provision --only prepush` installs it; `--hooks-dir`). It installs the
@@ -214,13 +217,19 @@ run is left (`pgrep -af dotfiles-follow`). After that every run takes the same l
 
 ## Tests
 
-`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_dotfiles_follow_jj`:
-each case builds a throwaway origin and clone with the real provision and check scripts, and
-stand-in `mise`, `knives` and `bun`. Refusal cases assert that HEAD, the index and each file are
-unchanged, except for follow-managed lock recovery. Marketplace cases use a stub `shims/omp`
+`python3 -m unittest scripts.tests.test_dotfiles_follow scripts.tests.test_dotfiles_follow_marketplace scripts.tests.test_omp_marketplace_installer scripts.tests.test_dotfiles_follow_jj`:
+the follower cases build a throwaway origin and clone with the real provision and check scripts,
+and stand-in `mise`, `knives` and `bun`. Refusal cases assert that HEAD, the index and each file
+are unchanged, except for follow-managed lock recovery. Marketplace cases use a stub `shims/omp`
 that records commands, changes installed versions and rewrites the tracked lock. They cover
-upgrades, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources,
-alert classification and escalation, timeout cleanup and recovery from arbitrary dirty-lock
-contents before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint.
+upgrades, a plugin above its entry (no omp command), one upgraded above its entry (a pass), one
+still below after its upgrade (a failure), 0.3.10 above 0.3.9, versions that are not dotted
+numbers, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources, alert
+classification and escalation, timeout cleanup and recovery from arbitrary dirty-lock contents
+before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint. The
+installer module runs `install_marketplace_plugin` and `marketplace_version_at_least`, taken from
+`installers/omp.sh`, under `set -euo pipefail` with a stub `omp` on `PATH`: the same version
+cases, and a failed catalog refresh, install or upgrade still reports omp's exit status and leaves
+the lock as committed.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.
