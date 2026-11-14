@@ -264,11 +264,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/cybermonklabs/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v29.54.0"  # from v18.1.0 for the secrets broker's airlock, which v18.1.0 predates: an airlock broker's answers are unreadable to the older client, so agent-secrets refuses to run the command (INFRA-1355, which puts seven production secrets behind the airlock and cannot apply until this pin moves; INFRA-3012). The airlock arrives in merge 46c4162bc50a, first released in legion-envoy-v29.40.0, so every later release of that series carries it; v29.54.0 also carries the GitHub App narrowing fix f3960fa2d181. The helper itself moves only at a restart the installer makes with no host session registered
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:5a689ade0db939ef412b26d8a69f5cf34b3580cb3bb4604f079ede9d81346ea6" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:6a11f897ef56213c4ab832564c1ae44739e8e3ebd889646c9472b730760d1bdc" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:6fb18e36f6248135a582b3ed60b291f9f22e428011bca8b3eeaced22cdf37364" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:7dd69ef8b0ea8b7a7e097c34a513df166a9e8afaf1cfba5e348f860538cedb88" }
+version = "legion-envoy-v30.18.1"  # from v29.54.0 for INFRA-3666: every `agent-secrets secret` form now uses the credential its environment gives it, and the store's IAM decides, so a lent Google token (a GCLOUD_SAMI grant) writes a secret and a machine's own sign-in is no longer refused before the call. v29.54.0 refuses every write that is not under a person's gcloud login, which stopped the copy of GITHUB_PUBLIC_REPO_PAT (INFRA-3546) and every retag from a pod. The fix is merge df57176f7203463733cca417caf502d23ff60fa9, first released here; `gh attestation verify agent-secrets-amd64.tar.gz --source-digest df57176f72…` passes against this release. Earlier reasons that still hold: from v18.1.0 for the secrets broker's airlock, which v18.1.0 predates (INFRA-1355, INFRA-3012), and the GitHub App narrowing fix f3960fa2d181. The helper itself moves only at a restart the installer makes with no host session registered
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:7f594254cd2ad1e8315030937649d6821a5a6a4ce45ccaf52f657a892348fbd4" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:6041e75b65df20a9d9219a42a23d653251affbbfec2743c380e7ef4b514ad1f4" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:e88a21579f50fa2590fbdd5550d1574565cf1e95eed9cf29a36653a3965f84d0" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:ab0d158698a583f0d0aeb82a343ce8c65c13c8b643fad2d1e939f3bd62cf5d77" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]
