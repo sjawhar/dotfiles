@@ -551,9 +551,13 @@ providers:
     # server-side-fallback-2026-06-01 beta), or the whole request 400s. On
     # 2026-09-22 both Fable 5 and 5.1 allow only claude-opus-5 and claude-opus-4-8;
     # claude-opus-5-5 is not a valid target. At most three entries; order = preference.
+    # Bare model ids only: this list is sent to Anthropic as is, and an effort suffix
+    # (`claude-opus-4-8:high`) is no model id, so the whole request 400s and every
+    # Fable call walks the client chain instead (2026-11-12 to 2026-11-14, measured
+    # on claude-fable-5, 5-1 and 5-2).
     serverSideFallbackModels:
       - claude-opus-5
-      - claude-opus-4-8:high
+      - claude-opus-4-8
 composer:
   shape: box
 isolation:
