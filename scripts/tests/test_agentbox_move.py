@@ -2236,8 +2236,8 @@ class AgentboxMove(unittest.TestCase):
 
     def test_a_plan_run_leaves_nothing_it_made_in_its_tmpdir(self) -> None:
         """`agentbox move --to` that prepares a job and exits 0 leaves no file it made in its
-        TMPDIR. At 25b90855 it left its progress file (MOVE_PROGRESS_FILE, holding 'measuring the
-        inferred directories the session did not name') for each run (HOME-211 tester)."""
+        TMPDIR: its EXIT trap (move_exit) removes the progress file (MOVE_PROGRESS_FILE). The
+        move_to helper runs the real entry, cmd_move, so the test covers that trap."""
         self.moving_session()
         self.set_pids(999999901)
         self.set_panes({999999900: ("%81", "agents:4.1")})
