@@ -92,11 +92,12 @@
 # with no session id, or one whose session key the host cannot make, makes its key inside itself
 # (docker exec … agent-secrets keygen), in its key dir. The key dir is the host's
 # $RUN_BASE/<box>/agent-secrets, bind-mounted on its own at /run/user/$UID_/agent-secrets in that
-# box only, and not a part of the box's runtime dir: the box can change what is in it, never where
-# it is (box_keydir). A detached `agent-secrets renew` loop in the box (start_renew, RENEW_LOOP)
-# keeps the lease, which lapses within 15 min when nothing renews it. When the broker refuses
-# renew as not live, the launcher enrolls the key the box holds again (reenroll_if_not_live). A
-# failed attempt keeps the key, and the launcher tries again later.
+# box only, and not a part of the box's runtime dir: the box can change what is in it, and none of
+# its own mounts reaches where it is (box_keydir, which names the one exception). A detached
+# `agent-secrets renew` loop in the box (start_renew, RENEW_LOOP) keeps the lease, which lapses
+# within 15 min when nothing renews it. When the broker refuses renew as not live, the launcher
+# enrolls the key the box holds again (reenroll_if_not_live). A failed attempt keeps the key, and
+# the launcher tries again later.
 # close_box revokes a box's own enrollment at once (unenroll_box). It gives a session's
 # enrollment to a detached waiter, which ends it after a grace unless another box of the session
 # uses it. A box started while the host's helper holds no live launcher credential gets no
@@ -830,23 +831,28 @@ broker_ready() {
 }
 
 # The host side of a box's key dir, bind-mounted on its own at /run/user/$UID_/agent-secrets in
-# that box only (mount_args). Its parent, $RUN_BASE/<box>, is the host's alone: no box mounts it,
-# so no box can put a link at the key dir's own name. The key dir was run-user/agent-secrets
+# that box only (mount_args). Its parent is $RUN_BASE/<box>. None of the box's own mounts reaches
+# that directory unless the box was started with a --dir that covers $RUN_BASE: add_box_dir does
+# not refuse one, and `agentbox move --self --dir` lets a box ask for one. AgentBox allows this by
+# design, as segregation and not isolation (dispatch://INFRA-702/comment/41bdfb9d). Short of
+# that, no box can put a link at the key dir's own name. The key dir was run-user/agent-secrets
 # before dispatch://INFRA-3462, inside the box's own runtime dir: a process in the box could
 # replace it with a link, and every host write into the key dir then went where the link pointed,
 # such as the host's /run/user/$UID_/agent-secrets, whose key.pem host sessions sign with.
 box_keydir() { echo "$RUN_BASE/$1/agent-secrets"; }
 
 # The box's key dir is the box's to write too (keygen writes key.pem there as the box's user), so
-# the host keeps its own files beside it, in $RUN_BASE/<box>, which no box mounts: each enroll
-# attempt's error (enroll.attempt-error) and the enrollment id close_box revokes (enrollment-id).
+# the host keeps its own files beside it, in $RUN_BASE/<box>, which no box's own mounts reach (the
+# one exception is under box_keydir): each enroll attempt's error (enroll.attempt-error) and the
+# enrollment id close_box revokes (enrollment-id).
 # What agentbox itself puts in the key dir is written to a temp file in $RUN_BASE/<box> and
 # renamed into place. The rename replaces whatever the box left at the last name (a symlink
 # included) instead of following it, but it follows every directory above that name: a link at
 # the key dir's own name was followed until the key dir left the box's run-user/ (box_keydir).
-# Every directory above the last name is now the host's alone. The `enrollment` file is the
-# client's own: at the pin, the host-side `agent-secrets enroll` (cmdEnrollHelper) writes only
-# that file, through writeFileAtomic (a temp file it makes with O_EXCL, then a rename).
+# Every directory above the last name is now out of the box's reach (the exception: box_keydir).
+# The `enrollment` file is the client's own: at the pin, the host-side `agent-secrets enroll`
+# (cmdEnrollHelper) writes only that file, through writeFileAtomic (a temp file it makes with
+# O_EXCL, then a rename).
 put_keyfile() {
     local box="$1" name="$2" content="$3" tmp
     tmp="$(mktemp "$RUN_BASE/$box/.keyfile.XXXXXX")" || return 1
@@ -870,8 +876,9 @@ put_keyfile() {
 # key gets a new id. Those two ends do not cancel what a session's enrollment holds. The broker's
 # carry keeps its grants and pending requests dormant, 12 h by default. The session's next
 # enrollment takes them (enroll.go endEnrollment, adopt). The directory is under $RUN_BASE, the
-# host's own tmpfs: 0700, no box mounts it, and it clears at a reboot — which ends every session
-# anyway, so there is nothing for a key on disk to follow.
+# host's own tmpfs: 0700, out of reach of the box's own mounts (the exception: box_keydir), and it
+# clears at a reboot — which ends every session anyway, so there is nothing for a key on disk to
+# follow.
 session_keydir() { echo "$RUN_BASE/session-keys/$1"; }
 
 # The session's key and the thumbprint of it, made at that session's first box and reused by
