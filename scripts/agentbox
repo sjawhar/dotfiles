@@ -4450,14 +4450,15 @@ move_progress_stop() {
     MOVE_PROGRESS_PID="" MOVE_PROGRESS_FILE=""
 }
 
-# The one EXIT trap of `agentbox move` (cmd_move): it removes the index, and for `--to` it says
-# why the command ended when no refusal did. A second `trap … EXIT` replaced the first and
-# silenced that message, so nothing else sets one.
+# The one EXIT trap of `agentbox move` (cmd_move): it removes the index and the copy's delta
+# directory, and for `--to` it says why the command ended when no refusal did. A second
+# `trap … EXIT` replaced the first and silenced that message, so nothing else sets one.
 MOVE_FORM=""
 move_exit() {
     local rc=$?
     move_progress_stop
     [[ -z "$MOVE_DEEP_INDEX_DIR" ]] || rm -rf "$MOVE_DEEP_INDEX_DIR"
+    [[ -z "$MOVE_TO_DELTA_DIR" ]] || rm -rf "$MOVE_TO_DELTA_DIR"
     if [[ "$MOVE_FORM" == --to ]] && (( rc != 0 )) && [[ -z "$MOVE_SAID" ]]; then
         echo "agentbox: move --to stopped with exit $rc and no message of its own; nothing was hung up. This is a bug: report it with the command you ran." >&2
     fi
@@ -6864,28 +6865,52 @@ move_to_rsync_progress() {
 # group's name. A function of this file called on its own (a test, a person debugging a copy) has
 # no relauncher around it, so there is a plain one here that the relauncher's own shadows.
 say() { echo "$(date -u +%FT%TZ) agentbox: $*"; }
+# The progress subshell of the running rsync and that rsync's error file, as MOVE_TO_CHILD is its
+# rsync: globals, so a signal that ends the relauncher in the middle of the copy stops the one and
+# removes the other (move_to_run_signal, move_to_run_exit). Bash runs a trap between any two
+# commands, so a signal can land between the subshell's fork and the line that records its pid:
+# MOVE_TO_TICK_PID is then `starting`, and when $! has moved past MOVE_TO_TICK_BEFORE, the last
+# background pid before the fork, $! is the subshell.
+MOVE_TO_TICK_PID="" MOVE_TO_TICK_BEFORE="" MOVE_TO_RSYNC_ERR=""
+move_to_rsync_tick_stop() {
+    if [[ "$MOVE_TO_TICK_PID" == starting ]]; then
+        MOVE_TO_TICK_PID=""
+        [[ "${!:-}" == "$MOVE_TO_TICK_BEFORE" ]] || MOVE_TO_TICK_PID="$!"
+    fi
+    [[ -n "$MOVE_TO_TICK_PID" ]] || return 0
+    kill "$MOVE_TO_TICK_PID" 2>/dev/null || true
+    wait "$MOVE_TO_TICK_PID" 2>/dev/null || true
+    MOVE_TO_TICK_PID=""
+}
 
 move_to_rsync() {
-    local kind="$1" stats="$2" label="${MOVE_TO_RSYNC_LABEL:-}" line sid
+    local kind="$1" stats="$2" label="${MOVE_TO_RSYNC_LABEL:-}" line sid err_fd
     shift 2
-    local rc=0 err start=$SECONDS tick_pid=""
-    err="$(mktemp)"
+    local rc=0 err start=$SECONDS
+    # The global first: a signal right after the mktemp still finds the file to remove.
+    MOVE_TO_RSYNC_ERR="$(mktemp)"
+    err="$MOVE_TO_RSYNC_ERR"
     # A long pass said nothing until it ended, so its owners read it as a dead move (LANE-C's
     # merge pass, 76 minutes at 4 MB/s, 2026-11-03 14:46Z). Every MOVE_TO_RSYNC_TICK seconds the
     # pass says where it is, in the move log and to each session that waits for it.
     if (( MOVE_TO_RSYNC_TICK > 0 )); then
+        MOVE_TO_TICK_BEFORE="${!:-}" MOVE_TO_TICK_PID=starting
         (
-            # The sleep is a CHILD of this subshell, and `kill "$tick_pid"` below reaches the
-            # subshell only: measured 2026-11-05, that left seven orphaned `sleep 300` with
-            # ppid 1, each holding the inherited stdout pipe open, so a caller reading that
-            # pipe waited out the whole tick. In test_agentbox_move.py the 15 tests that do
-            # not set AGENTBOX_MOVE_RSYNC_TICK each paid 302 s for it -- 4,530 s of the
-            # suite's 4,929 s, which is why nobody ran the suite. So the subshell kills its
-            # own sleep on the way out.
-            trap 'kill "${sleep_pid:-0}" 2>/dev/null; exit 0' TERM INT
+            # NO CHILD WAITS THE TICK: `read -t` on a pipe this subshell holds both ends of
+            # waits inside bash, and a TERM runs the trap below at once. A `sleep` child
+            # outlived the subshell: measured 2026-11-05, killing the subshell alone left seven
+            # orphaned `sleep 300` with ppid 1, each holding the inherited stdout pipe open, so a
+            # caller reading that pipe waited out the whole tick (in test_agentbox_move.py the 15
+            # tests that do not set AGENTBOX_MOVE_RSYNC_TICK each paid 302 s for it, 4,530 s of
+            # the suite's 4,929 s); and a sleep forked just before the TERM, whose pid the trap
+            # did not have yet, still outlived it. Only a timeout is a tick.
+            trap 'exit 0' TERM INT
+            exec {tick_fd}<> <(:)
+            wait "$!" 2>/dev/null || true
             while :; do
-                sleep "$MOVE_TO_RSYNC_TICK" & sleep_pid=$!
-                wait "$sleep_pid" || break
+                waited=0
+                read -r -t "$MOVE_TO_RSYNC_TICK" -u "$tick_fd" || waited=$?
+                (( waited > 128 )) || break
                 line="rsync $kind: ${label:-copying} for $((SECONDS - start))s: $(move_to_rsync_progress "$stats")"
                 say "$line"
                 for sid in ${MOVE_TO_ACTIVE_SIDS[@]+"${MOVE_TO_ACTIVE_SIDS[@]}"}; do
@@ -6893,13 +6918,17 @@ move_to_rsync() {
                 done
             done
         ) &
-        tick_pid=$!
+        MOVE_TO_TICK_PID=$!
     fi
     # rsync's messages are kept AND still reach the log: `2>"$err"` alone would take the
     # relauncher's own signal line with them, since a trap runs inside the redirection of the
-    # command it interrupts, and that line is the only record of a stopped move.
-    move_to_fg rsync "$@" >"$stats" 2> >(tee "$err" >&2) || rc=$?
-    [[ -z "$tick_pid" ]] || { kill "$tick_pid" 2>/dev/null || true; wait "$tick_pid" 2>/dev/null || true; }
+    # command it interrupts, and that line is the only record of a stopped move. tee gets the file
+    # this shell opened, not its path: given the path, a tee that opens it after a signal's
+    # move_to_run_exit removed it creates the file again, holding that line.
+    exec {err_fd}>"$err"
+    move_to_fg rsync "$@" >"$stats" 2> >(tee "/dev/fd/$err_fd" >&2) || rc=$?
+    exec {err_fd}>&-
+    move_to_rsync_tick_stop
     say "rsync $kind: $((SECONDS - start))s, exit $rc"
     if (( rc == 24 )); then
         say "rsync $kind: $(grep -c "^file has vanished" "$err" || true) file(s) vanished while they were copied; the move goes on (rsync exit 24)"
@@ -6925,6 +6954,7 @@ move_to_rsync() {
         fi
     fi
     rm -f "$err"
+    MOVE_TO_RSYNC_ERR=""
     return "$rc"
 }
 
@@ -7158,13 +7188,16 @@ move_to_exclude_other_sessions() {
 move_to_copy() {
     local target="$1" stamp="$2" label="${3:-}" excludes=() p stats start
     local since="" files
-    stats="$(mktemp)"
     # Each pass records what it saw, and every pass after the first sends only the difference.
     if [[ -z "$MOVE_TO_DELTA_DIR" ]]; then
         MOVE_TO_DELTA_DIR="$(mktemp -d)"
     elif [[ -e "$MOVE_TO_DELTA_DIR/stamp" ]]; then
         since="$MOVE_TO_DELTA_DIR/stamp"
     fi
+    # The stats file lives in the delta directory, which move_exit removes, so a relauncher a
+    # signal stops in the middle of a copy leaves neither in its TMPDIR.
+    stats="$MOVE_TO_DELTA_DIR/stats"
+    : >"$stats"
     # A second back, so a file written while the pass before it ran is in this one.
     touch -d "1 second ago" "$MOVE_TO_DELTA_DIR/stamp.new"
     move_to_delta_record mirror ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"}
@@ -8391,7 +8424,8 @@ cmd_move_to() {
 # nothing at that path (SPEC-skills lost /var/tmp/sc-head and sc-ablate, 2026-11-04).
 move_to_box_only_paths() {
     local root_dev p dev bad=()
-    root_dev="$(stat -c %d / 2>/dev/null)" || return 0
+    root_dev="${AGENTBOX_ROOT_DEV:-}"
+    [[ -n "$root_dev" ]] || root_dev="$(stat -c %d / 2>/dev/null)" || return 0
     [[ -n "$root_dev" ]] || return 0
     for p in ${MOVE_TO_MIRROR[@]+"${MOVE_TO_MIRROR[@]}"} ${MOVE_TO_MERGE[@]+"${MOVE_TO_MERGE[@]}"}; do
         [[ -e "$p" ]] || continue
@@ -8833,13 +8867,21 @@ move_to_run() {
             rm -f "$MOVE_TO_HOLD/$s"
         done
     }
-    move_to_run_exit() { move_to_active_clear; move_exit; }
+    move_to_run_exit() {
+        move_to_rsync_tick_stop
+        [[ -z "$MOVE_TO_RSYNC_ERR" ]] || rm -f "$MOVE_TO_RSYNC_ERR"
+        move_to_active_clear
+        move_exit
+    }
     move_to_run_signal() {
         if (( MOVE_TO_COMMITTED )); then
             say "signal $1 while the sessions are hung up (state: $MOVE_TO_STATE); NOT stopping: the move finishes or rolls the group back, or they stay down on both machines" >&2
             return 0
         fi
         [[ -z "$MOVE_TO_CHILD" ]] || kill -TERM "$MOVE_TO_CHILD" 2>/dev/null || true
+        # Its progress subshell too, before the line below says the relauncher is gone: a
+        # progress notice it is sending ends first, and none comes after that line.
+        move_to_rsync_tick_stop
         # A hold this relauncher wrote is withdrawn, and each session told: the "ready, run --go"
         # notice is already with them, and a `--go` against a hold nobody holds hangs nothing up
         # while the session waits for a move that is gone (pivot, S4, KNOTCURVE, SPEEDCOACH and
