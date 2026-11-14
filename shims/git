@@ -95,29 +95,125 @@ agent_context() {
     fi
     return 1
 }
-# Locate the subcommand exactly past Git 2.43's global options before distinguishing an agent
-# from a person: every caller's ordinary `git commit` uses the leak-term hooks. A global query
-# or an unknown option cannot reach a subcommand, so leave I at the end and let Git report it.
-git_command_index() {
-    local option count=${#args[@]}
+# Git 2.43's handle_options() globals. Each value is value syntax|changes environment|value
+# collection. The reader below is the one place that applies this grammar before a subcommand.
+declare -A git_global_options=(
+    [-p]='no-value|0|'
+    [--paginate]='no-value|0|'
+    [-P]='no-value|1|'
+    [--no-pager]='no-value|1|'
+    [--no-replace-objects]='no-value|1|'
+    [--bare]='no-value|1|'
+    [--literal-pathspecs]='no-value|1|'
+    [--no-literal-pathspecs]='no-value|1|'
+    [--glob-pathspecs]='no-value|1|'
+    [--noglob-pathspecs]='no-value|1|'
+    [--icase-pathspecs]='no-value|1|'
+    [--no-optional-locks]='no-value|1|'
+    [-C]='separate|1|directory'
+    [-c]='separate|0|config'
+    [--shallow-file]='separate|1|'
+    [--git-dir]='separate-or-equals|1|'
+    [--work-tree]='separate-or-equals|1|'
+    [--namespace]='separate-or-equals|1|'
+    [--config-env]='separate-or-equals|0|config'
+    [--attr-source]='separate-or-equals|1|'
+    [--exec-path]='exec-path|0|'
+    [--html-path]='query|0|'
+    [--man-path]='query|0|'
+    [--info-path]='query|0|'
+    [--list-cmds]='query-equals|0|'
+    [-h]='stop|0|'
+    [--help]='stop|0|'
+    [-v]='stop|0|'
+    [--version]='stop|0|'
+)
+
+# Read Git 2.43's global options from the array named by $1. It leaves i at the subcommand,
+# records the effective configuration entries and -C directories in their order, and says whether
+# an alias changed Git's environment. A query, an unknown option, or a missing value has no
+# subcommand; help and version retain Git's historical index for their caller.
+git_read_global_options() {
+    local -n read_args="$1"
+    local option entry name syntax changes collection value config_name environment
+    local count=${#read_args[@]}
     i=0
+    git_global_configs=()
+    git_global_directories=()
+    git_global_directory="$PWD"
+    git_global_environment_changed=0
+    git_global_has_subcommand=0
     while ((i < count)); do
-        option="${args[i]}"
-        case "$option" in
-            --help | -h | --version | -v) return ;;
-            --exec-path=*) ((i += 1)) ;;
-            --exec-path?* | --exec-path | --html-path | --man-path | --info-path | --list-cmds=*) i=$count; return ;;
-            -p | --paginate | -P | --no-pager | --no-replace-objects | --bare | --literal-pathspecs | --no-literal-pathspecs | \
-                --glob-pathspecs | --noglob-pathspecs | --icase-pathspecs | --no-optional-locks) ((i += 1)) ;;
-            --git-dir | --namespace | --work-tree | -c | --config-env | --shallow-file | -C | --attr-source)
-                ((i += 2))
-                ((i <= count)) || i=$count
+        option="${read_args[i]}"
+        if [[ "$option" != -* ]]; then
+            git_global_has_subcommand=1
+            return
+        fi
+        name="$option"
+        entry="${git_global_options[$name]:-}"
+        if [[ -z "$entry" && "$option" == *=* ]]; then
+            name="${option%%=*}"
+            entry="${git_global_options[$name]:-}"
+        fi
+        [[ -n "$entry" ]] || { i=$count; return; }
+        IFS='|' read -r syntax changes collection <<< "$entry"
+        case "$syntax" in
+            no-value | separate | stop | query) [[ "$option" == "$name" ]] || { i=$count; return; } ;;
+            separate-or-equals | exec-path) ;;
+            query-equals) [[ "$option" == "$name="* ]] || { i=$count; return; } ;;
+        esac
+        case "$syntax" in
+            stop) return ;;
+            query | query-equals) i=$count; return ;;
+            exec-path)
+                [[ "$option" == "$name" ]] && { i=$count; return; }
+                ((i += 1))
+                continue
                 ;;
-            --git-dir=* | --namespace=* | --work-tree=* | --config-env=* | --attr-source=*) ((i += 1)) ;;
-            -*) i=$count; return ;;
-            *) return ;;
+            separate)
+                ((i + 1 < count)) || { i=$count; return; }
+                value="${read_args[i + 1]}"
+                ((i += 2))
+                ;;
+            separate-or-equals)
+                if [[ "$option" == "$name" ]]; then
+                    ((i + 1 < count)) || { i=$count; return; }
+                    value="${read_args[i + 1]}"
+                    ((i += 2))
+                else
+                    value="${option#*=}"
+                    ((i += 1))
+                fi
+                ;;
+            no-value) ((i += 1)) ;;
+        esac
+        ((changes)) && git_global_environment_changed=1
+        case "$collection" in
+            config)
+                if [[ "$name" == --config-env && "$value" == *=* ]]; then
+                    config_name="${value%%=*}"
+                    environment="${value#*=}"
+                    if [[ "$environment" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                        if [[ -v "$environment" ]]; then
+                            value="$config_name=${!environment}"
+                        else
+                            value="$config_name="
+                        fi
+                    fi
+                fi
+                git_global_configs+=("$value")
+                ;;
+            directory)
+                git_global_directories+=("$value")
+                if [[ "$value" == /* ]]; then
+                    git_global_directory="$value"
+                elif [[ -n "$value" ]]; then
+                    git_global_directory="$git_global_directory/$value"
+                fi
+                ;;
         esac
     done
+    return 0
 }
 
 # Git v2.43's commands[] table in git.c. Builtins run before aliases, and avoiding the alias
@@ -143,31 +239,16 @@ git_builtin() {
     return 1
 }
 
-# Return true when handle_options() rejects an alias because it changes Git's environment.
+# Use the shared reader on alias words too: handle_options() rejects only an option it accepted
+# before the alias command, and the table marks those that change the environment.
 git_alias_changes_environment() {
-    local option
+    local saved_i=$i changed
+    # shellcheck disable=SC2034 # The reader takes this array's name.
     local -a alias_options=("$@")
-    local index=0 count=${#alias_options[@]}
-    while ((index < count)); do
-        option="${alias_options[index]}"
-        case "$option" in
-            --help | -h | --version | -v) return 1 ;;
-            --exec-path=*) ((index += 1)) ;;
-            --exec-path?* | --exec-path | --html-path | --man-path | --info-path | --list-cmds=*) return 1 ;;
-            -p | --paginate) ((index += 1)) ;;
-            -P | --no-pager | --no-replace-objects | --git-dir | --git-dir=* | --namespace | --namespace=* | --work-tree | \
-                --work-tree=* | --bare | --literal-pathspecs | --no-literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | \
-                --icase-pathspecs | --no-optional-locks | --shallow-file | -C | --attr-source | --attr-source=*) return 0 ;;
-            -c | --config-env)
-                ((index += 2))
-                ((index <= count)) || return 1
-                ;;
-            --config-env=*) ((index += 1)) ;;
-            -*) return 1 ;;
-            *) return 1 ;;
-        esac
-    done
-    return 1
+    git_read_global_options alias_options
+    changed=$git_global_environment_changed
+    i=$saved_i
+    ((changed))
 }
 
 # Expand ordinary aliases with Git's split_cmdline rules. A shell alias starts with `!`; Git
@@ -196,7 +277,7 @@ git_expand_aliases() {
         git_external_command "$name" && return
         [[ -z "${seen[$name]:-}" ]] || {
             args=("${original_args[@]}")
-            git_command_index
+            git_read_global_options args
             return
         }
         alias_words=()
@@ -288,32 +369,30 @@ PY
         [[ "${alias_words[1]:-}" != "$name" ]] || return
         seen["$name"]=1
         args=("${args[@]:0:i}" "${alias_words[@]:1}" "${args[@]:i+1}")
-        git_command_index
+        git_read_global_options args
     done
 }
 
 args=("$@")
 original_args=("$@")
-git_command_index
+git_read_global_options args
+if [[ "${DOTFILES_GIT_SHIM_READ_GLOBALS:-}" == 1 ]]; then
+    git_global_probe_command=""
+    if ((git_global_has_subcommand)); then
+        git_global_probe_command="${args[i]}"
+    fi
+    printf '%s\0' "$git_global_probe_command" "$(realpath -m -- "$git_global_directory")" "${git_global_configs[@]}"
+    exit 0
+fi
 git_expand_aliases
+git_read_global_options args
 set -- "${args[@]}"
 
-# A caller who selects a hooks path owns that command, and the scanner does not run. Git's
-# `-c` takes a separate `key=value`, while --config-env accepts both separate and `=` forms.
+# A caller who selects a hooks path owns that command, and the scanner does not run. The shared
+# reader gives this loop only complete -c and --config-env entries, after it has skipped every
+# other global option's separate value.
 caller_hooks_path=0
-for ((k = 0; k < i; k++)); do
-    config=""
-    case "${args[k]}" in
-        -c | --config-env)
-            ((k + 1 < i)) || break
-            config="${args[k + 1]}"
-            ((k += 1))
-            ;;
-        --config-env=*) config="${args[k]#*=}" ;;
-        # Another global's separate value is never a -c entry, even when it reads `-c`.
-        -C | --git-dir | --work-tree | --namespace | --shallow-file | --attr-source) ((k += 1)); continue ;;
-        *) continue ;;
-    esac
+for config in "${git_global_configs[@]}"; do
     [[ "${config%%=*}" != [Cc][Oo][Rr][Ee].[Hh][Oo][Oo][Kk][Ss][Pp][Aa][Tt][Hh] ]] || {
         caller_hooks_path=1
         break
@@ -1180,17 +1259,7 @@ EOF
             fi
         done
         if ((matches != 1)); then
-            found="" base="$PWD"
-            for ((k = 0; k < i; k++)); do
-                case "${args[k]}" in
-                    -C)
-                        d="${args[k + 1]:-}"
-                        if [[ "$d" == /* ]]; then base="$d"; elif [[ -n "$d" ]]; then base="$base/$d"; fi
-                        k=$((k + 1))
-                        ;;
-                    -c | --git-dir | --work-tree | --namespace | --config-env | --exec-path) k=$((k + 1)) ;;
-                esac
-            done
+            found="" base="$git_global_directory"
             want="$target"
             [[ "$want" == /* ]] || want="$base/$want"
             real=()
