@@ -87,9 +87,10 @@ Follow restores the managed marketplace lock before it calls the sync.
    leave it dirty: the next run restores HEAD before fast-forwarding or retrying installation.
    omp installs a catalog plugin only at the version its catalog resolves now, so no machine can go
    back to an older entry. A plugin at or above its entry gets no upgrade or version failure. A
-   plugin below its entry refreshes its catalog and upgrades, and fails only if it remains below
-   afterward. Dotted numbers compare numerically; any other version must equal the entry. Every omp
-   command removes `OMP_PROFILE`, `PI_PROFILE`, and `PI_CODING_AGENT_DIR` from its environment.
+   plugin below its entry refreshes its catalog and upgrades, and is a version failure only if it is
+   still below afterward; a failed omp command is a failure whatever the version. Dotted numbers
+   compare numerically; any other version must equal the entry. Every omp command removes
+   `OMP_PROFILE`, `PI_PROFILE`, and `PI_CODING_AGENT_DIR` from its environment.
    If `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
    mise pins. An alert when any step fails; the next run retries any marketplace plugin still below

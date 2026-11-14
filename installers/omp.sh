@@ -96,8 +96,9 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # only at the version its catalog resolves now, so no machine can go back to an older entry. A
 # plugin at or above its entry gets no upgrade and no version warning. A plugin below it (another
 # machine upgraded and committed the lock) refreshes the marketplace catalog, which omp otherwise
-# keeps from the day it was added, and upgrades; it is reported only when it is still below
-# afterwards. Dotted numbers compare as numbers; any other version must equal the entry.
+# keeps from the day it was added, and upgrades; it gets a version warning only when it is still
+# below afterwards, and a failed omp command is reported whatever the version. Dotted numbers
+# compare as numbers; any other version must equal the entry.
 # The install record (installed_plugins.json) is machine-local; the lock entry is not, and omp
 # refuses to install a plugin whose name the lock already holds ("Runtime package name ...
 # conflicts") while exiting 0. So on a machine without the install, the stale lock entry is

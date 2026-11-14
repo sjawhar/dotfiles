@@ -30,9 +30,10 @@ What one run does:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
      upgrade for registered marketplace plugins below the lowest version their committed lock entries
      require (a best-effort lock restore afterward). A plugin at or above its entry gets no upgrade or
-     version failure; one below fails only if it remains below after its refresh and upgrade. Dotted
-     numbers compare numerically; any other version must equal the entry. Lock entries without an
-     installed marketplace record are skipped; install.sh bootstraps them.
+     version failure; one below is a version failure only if it is still below after its refresh and
+     upgrade, and a failed omp command is a failure whatever the version. Dotted numbers compare
+     numerically; any other version must equal the entry. Lock entries without an installed
+     marketplace record are skipped; install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
      --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
      on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
