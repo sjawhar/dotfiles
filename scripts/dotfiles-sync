@@ -154,7 +154,7 @@ tools_run() {
 }
 
 tools_step() (
-  local dir limit lock mise output
+  local dir limit lock mise bun output
   # The checkout as an absolute path: mise reads the pins of the directory it runs in, so the
   # install runs there whatever the caller's directory, and DIR/bin/mise must still name it.
   # shellcheck disable=SC1007
@@ -172,6 +172,14 @@ tools_step() (
   set -eu
 
   export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+  if [[ "$MISE_DATA_DIR" != /* ]]; then
+    if [[ -d "$MISE_DATA_DIR" ]]; then
+      # shellcheck disable=SC1007
+      MISE_DATA_DIR="$(CDPATH= cd -- "$MISE_DATA_DIR" && pwd)"
+    else
+      MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
+    fi
+  fi
   # A directory it cannot make is reported below, as flock's failure to open the lock.
   mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
   limit="$(tools_limit)"
@@ -185,10 +193,19 @@ tools_step() (
     rm -f "$output" || true
     return 127
   fi
+  [[ "$mise" = /* ]] || mise="$PWD/$mise"
   tools_run "mise install" "$dir" "$limit" flock "$lock" "$mise" install || return $?
 
   [[ -f "$dir/omp/plugins/package.json" ]] || return 0
-  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" bun install --frozen-lockfile
+  if ! bun="$(command -v bun 2>/dev/null)"; then
+    output="$(mktemp)"
+    printf 'bun: command not found\n' >"$output"
+    tools_error "bun install --frozen-lockfile" "$dir/omp/plugins" 127 "$limit" "$output"
+    rm -f "$output" || true
+    return 127
+  fi
+  [[ "$bun" = /* ]] || bun="$PWD/$bun"
+  tools_run "bun install --frozen-lockfile" "$dir/omp/plugins" "$limit" "$bun" install --frozen-lockfile
 )
 
 sync_here() {
@@ -343,7 +360,8 @@ fi
 if [ "${1:-}" = --here-tools ]; then
   sync_here "${2:-}"
   exec 8>&-
-  tools_step "$HOME/.dotfiles"
+  # sync_here ends in the checkout it moved; $PWD names it absolutely, whatever HOME holds.
+  tools_step "$PWD"
   exit
 fi
 if [ "${1:-}" = --tools ]; then

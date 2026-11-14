@@ -316,6 +316,21 @@ class InstallTools(Harness):
         ]
         self.assertEqual(records, [f"install held {lock.parent}"])
 
+    def test_relative_mise_data_directory_is_absolute_for_the_shared_lock(self) -> None:
+        previous = Path.cwd()
+        data = self.home / "rel-data"
+        try:
+            os.chdir(self.home)
+            os.environ["MISE_DATA_DIR"] = "rel-data"
+            self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+        finally:
+            os.chdir(previous)
+
+        records = [
+            line for line in self.fake_log.read_text().splitlines() if line.startswith("install ")
+        ]
+        self.assertEqual(records, [f"install held {data}"])
+
     def test_mise_install_gets_the_default_data_directory_when_none_is_set(self) -> None:
         # Under the timer MISE_DATA_DIR is unset. mise's own default data directory is not
         # ~/.mise, so follow must hand mise the directory its lock is in, or the install lands

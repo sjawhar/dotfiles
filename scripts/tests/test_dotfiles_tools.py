@@ -607,6 +607,121 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
         self.assertIn(f"tools: `mise install` passed in {self.checkout}\n", result.stdout)
+    def test_case_28_relative_mise_data_dir_uses_one_absolute_lock_directory(self) -> None:
+        (self.upstream / ".bashrc").write_text(
+            'export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"\n'
+            'export MISE_CACHE_DIR="$HOME/.cache/mise"\n'
+            'export MISE_TRUSTED_CONFIG_PATHS="$HOME/.dotfiles"\n'
+            'export PATH="$HOME/.dotfiles/bin:$PATH"\n'
+        )
+        self.commit_upstream("preserve caller mise data")
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        caller = self.root / "relative-mise-caller"
+        caller.mkdir()
+
+        result = self._run(
+            SYNC,
+            "--tools",
+            str(self.checkout),
+            cwd=caller,
+            env={**self.env, "MISE_DATA_DIR": "rel"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        mise = self.calls("mise")[0].split("|")
+        self.assertEqual(mise[2], str(caller / "rel"), self.records())
+        self.assertEqual(mise[4], "held", self.records())
+
+    def test_case_29_relative_bun_path_is_absolute_before_the_plugins_cd(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        relative_bun = self.root / "relative-bun"
+        relative_bun.mkdir()
+        (relative_bun / "bun").symlink_to(self.root / "bin" / "bun")
+        safe = self.root / "safe"
+        safe.mkdir()
+        for name in ("bash", "flock", "mkdir", "mktemp", "rm", "sleep", "tail", "timeout"):
+            source = next(
+                (
+                    directory / name
+                    for directory in (Path("/usr/bin"), Path("/bin"))
+                    if (directory / name).exists()
+                ),
+                None,
+            )
+            if source is None:
+                self.fail(f"required command is absent: {name}")
+            (safe / name).symlink_to(source)
+
+        result = self._run(
+            SYNC,
+            "--tools",
+            str(self.checkout),
+            cwd=self.root,
+            env={**self.env, "PATH": f"relative-bun:{safe}"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+
+    def test_case_30_missing_bun_reports_the_tools_error_shape(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+
+        without_bun = self.root / "without-bun"
+        without_bun.mkdir()
+        for name in ("bash", "flock", "mkdir", "mktemp", "rm", "sleep", "tail", "timeout"):
+            source = next(
+                (
+                    directory / name
+                    for directory in (Path("/usr/bin"), Path("/bin"))
+                    if (directory / name).exists()
+                ),
+                None,
+            )
+            if source is None:
+                self.fail(f"required command is absent: {name}")
+            (without_bun / name).symlink_to(source)
+
+        result = self._run(
+            SYNC,
+            "--tools",
+            str(self.checkout),
+            cwd=self.root,
+            env={**self.env, "PATH": str(without_bun)},
+        )
+
+        self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+        self.assertIn("`bun install --frozen-lockfile`", result.stderr)
+        self.assertIn("exited 127", result.stderr)
+        self.assertIn("bun: command not found", result.stderr)
+        self.assertEqual(len(self.calls("mise")), 1, self.records())
+        self.assertEqual(self.calls("bun"), [], self.records())
+
+    def test_case_31_mise_from_a_relative_path_entry_is_absolute_before_the_checkout_cd(self) -> None:
+        # With no bin/mise in the checkout the step takes mise from PATH, which can be a relative
+        # entry of the caller's directory; the runner enters the checkout before it runs it.
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        relative_mise = self.root / "relative-mise"
+        relative_mise.mkdir()
+        (self.checkout / "bin" / "mise").rename(relative_mise / "mise")
+        result = self._run(
+            SYNC,
+            "--tools",
+            str(self.checkout),
+            cwd=self.root,
+            env={**self.env, "PATH": f"relative-mise:{self.root / 'bin'}:/usr/bin:/bin"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
 
 
 if __name__ == "__main__":

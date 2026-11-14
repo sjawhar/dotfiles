@@ -509,7 +509,7 @@ def install_tools(repo: Path, options: argparse.Namespace) -> str:
     if code != 0:
         return f"`scripts/omp-link-rules` in {display_path(repo)} exited {code}:\n{tail(out)}"
     log("rules: omp/rules/*.md linked into ~/.omp/agent/rules/")
-    data = Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise")
+    data = Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise").absolute()
     lock = data / ".dotfiles-install.lock"
     wait_failure = (
         f"`mise install` in {display_path(repo)} did not start: another install held "

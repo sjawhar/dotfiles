@@ -240,6 +240,46 @@ esac
             ],
         )
         self.assertIn("agent-secrets-session", self.records())
+    def test_relative_mise_data_dir_is_absolute_for_the_locked_install(self) -> None:
+        data = self.caller / "rel-data"
+        result = self.launch(
+            "--mode",
+            "relative-data",
+            cwd=self.caller,
+            env=self.env(MISE_DATA_DIR="rel-data"),
+        )
+
+        self.assert_agent_started(result, "--mode", "relative-data")
+        install = self.install_record()
+        self.assertIn(f"MISE_DATA_DIR={data}", install)
+        self.assertTrue(install.endswith("|held"), install)
+
+    def test_relative_mise_path_is_absolute_for_the_install(self) -> None:
+        relative_mise = self.caller / "bin" / "mise"
+        relative_mise.parent.mkdir()
+        relative_mise.symlink_to(self.bin / "mise")
+        result = self.launch(
+            "--mode",
+            "relative-mise",
+            cwd=self.caller,
+            env=self.env(PATH=f"bin:{self.safe_bin}"),
+        )
+
+        self.assert_agent_started(result, "--mode", "relative-mise")
+        self.assertTrue(self.install_record().endswith("|held"), self.install_record())
+
+    def test_relative_dotfiles_dir_puts_an_absolute_shims_dir_first_on_the_agents_path(self) -> None:
+        # agent-session puts $DOTFILES_DIR/shims first on the agent's PATH; a relative entry there
+        # would name another directory as soon as the agent changes directory.
+        on_path = self.root / "on-path"
+        executable(on_path / "fakeagent", 'printf "AGENT_PATH=%s\\n" "$PATH"')
+        result = self.launch(
+            cwd=self.root,
+            env=self.env(DOTFILES_DIR="dotfiles", PATH=f"{on_path}:{self.safe_bin}"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0].split("=", 1)[1].split(":")[0], str(self.dotfiles / "shims"))
 
     def test_failed_install_that_provides_the_agent_still_launches_it(self) -> None:
         result = self.launch("--mode", "failed-install", env=self.env(FAKE_MISE_EXIT="1"))
@@ -331,6 +371,14 @@ esac
         self.assertIn("mise install output", result.stderr)
         self.assertIn("mise ERROR fakeagent is not a mise bin", result.stderr)
         self.assertTrue(any(line.startswith("which|argv=which fakeagent") for line in self.records()))
+
+    def test_relative_tmpdir_keeps_mise_which_output_in_the_refusal(self) -> None:
+        (self.root / "rel-tmp").mkdir()
+        result = self.launch(cwd=self.root, env=self.env(FAKE_MISE_WRITE_AGENT="0", TMPDIR="rel-tmp"))
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn("mise install output", result.stderr)
+        self.assertIn("mise ERROR fakeagent is not a mise bin", result.stderr)
 
     def test_mise_which_shim_is_refused(self) -> None:
         result = self.launch(env=self.env(FAKE_MISE_WHICH_SHIM="1"))
