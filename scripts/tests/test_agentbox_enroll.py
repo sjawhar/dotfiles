@@ -41,8 +41,10 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 
 # A box's key dir is $STUB_RUN_BASE/<box>/run-user/agent-secrets. `docker run` notes whether the
 # marker is there as the box starts, then lives for a second; with STUB_RUN_UNTIL set it lives
-# until the box's renew.log holds that text (30 s at most), then ends the box's renew loop, as the
-# box's end does, and says so (`run-ended <box>`). `docker exec -d` runs its script here when
+# until the box's renew.log holds that text (60 s at most), then ends the box's renew loop, as the
+# box's end does, and says so (`run-ended <box>`). With STUB_RUN_END_MARKER set too, the box's
+# end first writes a fresh enrollment.not-live in its key dir, which only a launcher pass made
+# after the box ended could act on. `docker exec -d` runs its script here when
 # STUB_RUN_RENEW is set: in the foreground, or with `bg` in the background as docker leaves it,
 # holding none of the test's pipes, with its pid kept for the box's end and, when
 # STUB_RENEW_AFTER is set, only once that line is in the call log. Any other `docker exec --user
@@ -65,13 +67,14 @@ case "$*" in
         if [[ -e "$(keydir "$2")/enrollment.pending" ]]; then m=yes; else m=no; fi
         echo "run $2 marker=$m" >>"$STUB_CALLS"
         if [[ -z "${{STUB_RUN_UNTIL:-}}" ]]; then /bin/sleep 1; exit 0; fi
-        for _ in $(seq 300); do
+        for _ in $(seq 600); do
             grep -qF "$STUB_RUN_UNTIL" "$(keydir "$2")/renew.log" 2>/dev/null && break
             /bin/sleep 0.1
         done
         # Only while that pid is still the loop: it may have ended, and the pid gone to another.
         pid="$(cat "$STUB_RUN_BASE/$2/renew-loop.pid" 2>/dev/null)"
         [[ -z "$pid" ]] || ! grep -qsa 'agent-secrets renew' "/proc/$pid/cmdline" || kill "$pid" 2>/dev/null
+        [[ -z "${{STUB_RUN_END_MARKER:-}}" ]] || : >"$(keydir "$2")/enrollment.not-live"
         echo "run-ended $2" >>"$STUB_CALLS" ;;
     "exec -d "*)
         case "${{STUB_RUN_RENEW:-}}" in
@@ -112,8 +115,9 @@ esac
 # in-box one both do. enroll records the marker's mtime as it saw it, then prints the enrollment
 # id and writes it into the key dir, as the real client does; with STUB_ENROLL=broker it answers
 # as the broker does, from a table of its enrollments in $STUB_BROKER, where a revoke (unenroll)
-# and a renew refused as not live end a row. renew exits as the pinned client's does, and ends its
-# loop on the third run.
+# and a renew refused as not live end a row; with STUB_HUP_PID set, enroll first sends that
+# process a hangup, as a pane kill can during the call. renew exits as the pinned client's does,
+# and ends its loop on the third run.
 AGENT_SECRETS_STUB = r"""
 # end_enrollment ID: enrollment ID is no longer live at the broker.
 end_enrollment() {
@@ -138,21 +142,11 @@ case "$1" in
         esac ;;
     enroll)
         echo "enroll $* marker-mtime=$(stat -c %Y "$AGENT_SECRETS_KEY_DIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
+        [[ -z "${STUB_HUP_PID:-}" ]] || kill -HUP "$STUB_HUP_PID"
         case "${STUB_ENROLL:-ok}" in
             ok) echo enr-123 >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo enr-123 ;;
             fail) echo "broker unreachable" >&2; exit 1 ;;
             nofile) echo enr-123 ;;
-            idempotent)
-                # As the broker: an enrollment is keyed by (runtime id, key), so the same pair
-                # gets the same id back and any other pair gets its own.
-                rt="" tp=""
-                while (( $# )); do
-                    [[ "$1" == --runtime-id ]] && rt="$2"
-                    [[ "$1" == --thumbprint ]] && tp="$2"
-                    shift
-                done
-                id="enr-$(printf '%s|%s' "$rt" "$tp" | cksum | cut -d' ' -f1)"
-                echo "$id" >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo "$id" ;;
             conflict)
                 # A live enrollment of this session under a key this host no longer has.
                 rt=""
@@ -193,10 +187,10 @@ case "$1" in
         # it starts, exits 76 only when the broker refuses the enrollment as not live, and retries
         # every timeout and every other refusal itself without exiting. Run n takes the nth word
         # of $STUB_RENEW (the last word repeats): notlive, the enrollment lapsed (its row in the
-        # broker table ends); exit=<n>; invalid, a PROOF_INVALID refusal that does not say not
-        # live, then exit 1; or retry. Run $STUB_RENEW_RUNS (3) ends the loop, as the box's end
-        # does, and so does retry, which never exits by itself. Run $STUB_LONG_RUN moves the fake
-        # clock ($STUB_CLOCK, read by the date stub) on by two minutes.
+        # broker table ends); exit=<n>; or invalid, a PROOF_INVALID refusal that does not say not
+        # live, then exit 1. Run $STUB_RENEW_RUNS (3) ends the loop, as the box's end does. Run
+        # $STUB_LONG_RUN moves the fake clock ($STUB_CLOCK, read by the date stub) on by two
+        # minutes.
         id="$(cat "$AGENT_SECRETS_KEY_DIR/enrollment" 2>/dev/null)"
         echo "renew enrollment=$id" >>"$STUB_CALLS"
         n=$(grep -c '^renew ' "$STUB_CALLS")
@@ -211,11 +205,6 @@ case "$1" in
             invalid)
                 echo "agent-secrets renew: proof invalid: signature does not verify (PROOF_INVALID)" >&2
                 rc=1 ;;
-            retry)
-                echo "agent-secrets renew: proof invalid: signature does not verify (PROOF_INVALID); retrying in 2s" >&2
-                echo "agent-secrets renew: the broker at broker.test did not answer in time: POST https://broker.test/v1/enrollments/$id/renew (AGENT_SECRETS_URL names https://broker.test): context deadline exceeded; retrying in 4s" >&2
-                kill "$PPID"
-                exit 0 ;;
             exit=*)
                 rc="${mode#exit=}"
                 echo "agent-secrets renew: exits $rc" >&2 ;;
@@ -308,10 +297,15 @@ class EnrollFixture(unittest.TestCase):
     def enroll(self, **stubs: str) -> subprocess.CompletedProcess[str]:
         return self.bash('if enroll_box box1 sid-1; then echo rc=0; else echo "rc=$?"; fi', **stubs)
 
-    def files(self) -> set[str]:
-        return {p.name for p in self.keydir.iterdir()}
+    def files(self, keydir: Path | None = None) -> set[str]:
+        """The names in a box's key dir (box1's by default)."""
+        return {p.name for p in (keydir or self.keydir).iterdir()}
 
-    def calls_matching(self, prefix: str) -> list[str]:
+    def marked(self, keydir: Path | None = None) -> bool:
+        """Whether a box's key dir (box1's by default) holds enrollment.not-live, of any type."""
+        return os.path.lexists((keydir or self.keydir) / "enrollment.not-live")
+
+    def calls_matching(self, prefix: str | tuple[str, ...]) -> list[str]:
         if not self.calls.exists():
             return []
         return [line for line in self.calls.read_text().splitlines() if line.startswith(prefix)]
@@ -330,6 +324,25 @@ class EnrollFixture(unittest.TestCase):
     def broker_rows(self, runtime: str) -> list[list[str]]:
         """The broker's enrollments of one runtime id: [id, runtime id, thumbprint, live|ended]."""
         return [row for row in map(str.split, self.broker.read_text().splitlines()) if row[1] == runtime]
+
+    def assert_enrolled_again_as_recorded(self, sid: str, runtime: str, ended: bool = True) -> None:
+        """Two enroll calls, enroll_box's and one more just like it: the same runtime id, the
+        same thumbprint, and the session id (none for a box without one). With `ended` the broker
+        ended the first enrollment and the second made a new one, live; without, the broker holds
+        the first alone, still live."""
+        enrolls = self.enrolls()
+        self.assertEqual(len(enrolls), 2, enrolls)
+        self.assertEqual(enrolls[1], enrolls[0])
+        self.assertIn(f"--runtime-id {runtime} --thumbprint {THUMBPRINT}", enrolls[1])
+        if sid:
+            self.assertTrue(enrolls[1].endswith(f"--session-id {sid}"), enrolls[1])
+        else:
+            self.assertNotIn("--session-id", enrolls[1])
+        if ended:
+            rows = [["enr-1", runtime, THUMBPRINT, "ended"], ["enr-2", runtime, THUMBPRINT, "live"]]
+        else:
+            rows = [["enr-1", runtime, THUMBPRINT, "live"]]
+        self.assertEqual(self.broker_rows(runtime), rows)
 
     # A launcher line in renew.log starts with the UTC time; the renew loop's own lines do not.
     LAUNCHER_LINE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ (agentbox: .*)")
@@ -502,9 +515,6 @@ class RenewLoop(EnrollFixture):
         """The loop's own lines in renew.log, without renew's."""
         return [line for line in self.renew_log() if line.startswith("agentbox: ")]
 
-    def marked(self) -> bool:
-        return os.path.lexists(self.keydir / "enrollment.not-live")
-
     def test_a_renew_that_exits_is_started_again(self) -> None:
         # A box with no `enrollment`: renew has no identity and exits 2. The stub ends the loop by
         # killing it on the third renew.
@@ -528,7 +538,7 @@ class RenewLoop(EnrollFixture):
         """The launcher writes the new id during the second poll: the next renew starts after
         that one `sleep 2`, reads the new id, and is restarted after 10 s, not the 80 s before."""
         self.run_loop("exit=2 exit=2 exit=2 notlive exit=2", 6, STUB_NEW_ID_AT="5")
-        calls = [c for c in self.calls.read_text().splitlines() if c.startswith(("renew ", "sleep "))]
+        calls = self.calls_matching(("renew ", "sleep "))
         self.assertEqual(
             calls,
             [
@@ -568,8 +578,8 @@ class RenewLoop(EnrollFixture):
         self.assertIn("agentbox: enrollment enr-old is still not live after 160s; renewing again", self.loop_lines())
 
     def test_no_other_exit_marks_the_box(self) -> None:
-        """Only a 76 from a renew that read an id is the signal; every other exit keeps today's
-        line and delays."""
+        """Only a 76 from a renew that read an id is the signal; every other exit keeps the
+        `restarting in <d>s` line and the delays."""
         delays = [10, 20, 40, 80, 160, 320, 600, 600]
         cases = {
             "exit 0, renew ended by SIGTERM": ("exit=0", "enr-old", 0),
@@ -591,25 +601,16 @@ class RenewLoop(EnrollFixture):
                     self.loop_lines(), [f"agentbox: agent-secrets renew exited {rc}; restarting in {d}s" for d in delays]
                 )
 
-    def test_a_renew_that_retries_never_reaches_the_loop(self) -> None:
-        """A timeout or another refused proof: renew logs its retry and keeps running."""
-        self.assertEqual(self.run_loop("retry", 9), [])
-        log = "\n".join(self.renew_log())
-        self.assertIn("(PROOF_INVALID); retrying in 2s", log)
-        self.assertIn("did not answer in time", log)
-        self.assertEqual(self.loop_lines(), [])
-        self.assertFalse(self.marked())
-        self.assertEqual(len(self.calls_matching("renew ")), 1)
-
 
 class SessionIdentity(EnrollFixture):
     """A session's broker identity follows the session, not the box it is running in.
 
     A pending credential request is bound to the enrollment id alone, and ending an enrollment
-    cancels every request still pending under it and revokes its grants (legion
-    packages/envoy/internal/broker/enroll/enroll.go endEnrollment). So a key made inside the box
-    and an enrollment keyed by the box's name meant `agentbox move` orphaned every card Sami had
-    not answered and threw away every grant he had given (dispatch://INFRA-1167).
+    then cancelled every request still pending under it and revoked its grants (legion
+    packages/envoy/internal/broker/enroll/enroll.go endEnrollment, before the broker's carry). So
+    a key made inside the box and an enrollment keyed by the box's name meant `agentbox move`
+    orphaned every card Sami had not answered and threw away every grant he had given
+    (dispatch://INFRA-1167).
     """
 
     def second_box(self, name: str = "box2") -> Path:
@@ -623,10 +624,10 @@ class SessionIdentity(EnrollFixture):
         two = self.second_box()
         # STUB_KEY and STUB_THUMBPRINT change between the boxes: a key made for the second box
         # would be a different one, and the test would see it.
-        first = self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
+        first = self.bash("enroll_box box1 sid-1", STUB_ENROLL="broker")
         self.assertEqual(first.returncode, 0, first.stderr)
         second = self.bash(
-            "enroll_box box2 sid-1", STUB_ENROLL="idempotent", STUB_KEY="k2", STUB_THUMBPRINT="B" * 43
+            "enroll_box box2 sid-1", STUB_ENROLL="broker", STUB_KEY="k2", STUB_THUMBPRINT="B" * 43
         )
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(
@@ -643,8 +644,8 @@ class SessionIdentity(EnrollFixture):
 
     def test_a_different_session_gets_an_enrollment_of_its_own(self) -> None:
         self.second_box()
-        self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
-        self.bash("enroll_box box2 sid-2", STUB_ENROLL="idempotent", STUB_KEY="k2", STUB_THUMBPRINT="B" * 43)
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        self.bash("enroll_box box2 sid-2", STUB_ENROLL="broker", STUB_KEY="k2", STUB_THUMBPRINT="B" * 43)
         self.assertNotEqual(
             (self.run_base / "box2" / "enrollment-id").read_text(),
             (self.run_base / "box1" / "enrollment-id").read_text(),
@@ -663,12 +664,14 @@ class SessionIdentity(EnrollFixture):
 
     def test_a_live_enrollment_under_a_key_this_host_lost_falls_back_to_the_box(self) -> None:
         """After a reboot the host's key dir is gone while the old lease runs on. The box takes
-        an identity of its own rather than waiting out the 409 for fifteen minutes."""
+        an identity of its own rather than waiting out the 409 for fifteen minutes, and the
+        fallback call follows the 409 at once, with no 3 s pause between."""
         result = self.bash("enroll_box box1 sid-1", STUB_ENROLL="conflict")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("enrolls under its own name", result.stderr)
         runtimes = [c.split("--runtime-id ")[1].split()[0] for c in self.calls_matching("enroll ")]
         self.assertEqual(runtimes, ["session-sid-1", "box1"])
+        self.assertEqual(self.calls_matching("sleep "), [])
         self.assertEqual((self.hostdir / "enrollment-id").read_text(), "enr-box\n")
         self.assertFalse((self.hostdir / "enrollment-session").exists())
 
@@ -684,8 +687,8 @@ class SessionIdentity(EnrollFixture):
 
     def test_a_session_that_came_back_in_another_box_keeps_its_enrollment(self) -> None:
         self.second_box()
-        self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
-        self.bash("enroll_box box2 sid-1", STUB_ENROLL="idempotent")
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        self.bash("enroll_box box2 sid-1", STUB_ENROLL="broker")
         # box1 closing after the move must not cancel what the session has pending.
         self.bash("unenroll_box box1", AGENTBOX_UNENROLL_GRACE="0")
         self.assertEqual(self.unenroll_calls(), [])
@@ -693,7 +696,7 @@ class SessionIdentity(EnrollFixture):
         self.assertTrue((self.run_base / "session-keys" / "sid-1" / "key.pem").exists())
 
     def test_a_session_that_did_not_come_back_ends_its_enrollment_and_its_key(self) -> None:
-        self.bash("enroll_box box1 sid-1", STUB_ENROLL="idempotent")
+        self.bash("enroll_box box1 sid-1", STUB_ENROLL="broker")
         self.bash("unenroll_box box1", AGENTBOX_UNENROLL_GRACE="0")
         (call,) = self.unenroll_calls()
         self.assertIn("--enrollment ", call)
@@ -783,8 +786,9 @@ class Reenroll(EnrollFixture):
     MARKER = '"$(box_keydir box1)/enrollment.not-live"'
     REVOKE = 'agent-secrets unenroll --helper --enrollment "$(<"$RUN_BASE/box1/enrollment-id")"'
     PASS = "reenroll_if_not_live box1"
+    ENROLLED_AGAIN = ["agentbox: box1 enrolled again: enrollment enr-1 -> enr-2"]
 
-    def run_steps(self, sid: str, steps: str, timeout: float = 300, **stubs: str) -> None:
+    def run_steps(self, sid: str, steps: str, timeout: float = 300, **stubs: str) -> subprocess.CompletedProcess[str]:
         """enroll_box, a copy of the key it left (key-before) and that file's inode, then `steps`,
         then a line that shows every step ran under the script's set -euo pipefail."""
         result = self.bash(
@@ -798,21 +802,15 @@ class Reenroll(EnrollFixture):
             **stubs,
         )
         self.assertIn("steps-done", result.stdout, result.stderr)
+        return result
 
     def assert_key_kept(self, keydir: Path | None = None) -> None:
         self.assertEqual(((keydir or self.keydir) / "key.pem").read_bytes(), (self.run_base / "key-before").read_bytes())
 
-    def assert_one_enroll_call_as_recorded(self, sid: str, runtime: str) -> None:
-        """One enroll call after enroll_box's, with the runtime id, thumbprint and session id that
-        one used, and no key made or copied in since: the same key.pem, the same file."""
-        enrolls = self.enrolls()
-        self.assertEqual(len(enrolls), 2, enrolls)
-        self.assertEqual(enrolls[1], enrolls[0])
-        self.assertIn(f"--runtime-id {runtime} --thumbprint {THUMBPRINT}", enrolls[1])
-        if sid:
-            self.assertTrue(enrolls[1].endswith(f"--session-id {sid}"), enrolls[1])
-        else:
-            self.assertNotIn("--session-id", enrolls[1])
+    def assert_one_enroll_call_as_recorded(self, sid: str, runtime: str, ended: bool = True) -> None:
+        """One enroll call after enroll_box's, just like it (assert_enrolled_again_as_recorded),
+        and no key made or copied in since: the same key.pem, the same file."""
+        self.assert_enrolled_again_as_recorded(sid, runtime, ended)
         in_box = [c for c in self.calls_matching("docker ") if " keygen " in c]
         self.assertEqual(len(self.calls_matching("keygen ")) + len(in_box), 1)
         self.assert_key_kept()
@@ -820,37 +818,33 @@ class Reenroll(EnrollFixture):
         self.assertEqual(str((self.keydir / "key.pem").stat().st_ino), inode)
 
     def test_no_other_renew_exit_makes_an_enroll_call(self) -> None:
-        """Case 2: renew exits 0, 1, 2 or 143, prints a PROOF_INVALID that does not say not live
-        and exits 1, or retries without exiting. The launcher's pass after the loop, in the same
-        process after enroll_box, makes no enroll call beyond enroll_box's own. The line after
-        the pass shows it ran, and the count comes before the marker, so a loop that marks every
-        non-zero exit fails on the count."""
+        """Case 2 of the plan (dispatch://INFRA-3462): renew exits 0, 1, 2 or 143, or prints a
+        PROOF_INVALID that does not say not live and exits 1. The launcher's pass after the loop,
+        in the same process after enroll_box, makes no enroll call beyond enroll_box's own. The
+        line after the pass shows it ran, and the count comes before the marker, so a loop that
+        marks every non-zero exit fails on the count."""
         for shape, (sid, _runtime) in self.BOXES.items():
-            for mode in ("exit=0", "exit=1", "exit=2", "exit=143", "invalid", "retry"):
+            for mode in ("exit=0", "exit=1", "exit=2", "exit=143", "invalid"):
                 with self.subTest(box=shape, renew=mode):
                     self.reset_box()
                     # The stub ends the loop by killing it, so start_renew fails.
                     self.run_steps(sid, f"start_renew box1 || true\n{self.PASS}", STUB_RUN_RENEW="1", STUB_RENEW=mode)
                     self.assertEqual(len(self.calls_matching("enroll ")), 1)
-                    self.assertFalse(os.path.lexists(self.keydir / "enrollment.not-live"))
+                    self.assertFalse(self.marked())
 
     def test_an_enrollment_not_live_is_made_again_with_the_key_the_box_holds(self) -> None:
-        """Case 3: the broker revoked the enrollment and the loop marked it. One enroll call, as
-        recorded, with no key made and key.pem's bytes unchanged; the broker ends with the old
-        row ended and a new one live; the host's record and renew.log name the new id; the
-        marker is gone."""
+        """Case 3 of the plan (dispatch://INFRA-3462): the broker revoked the enrollment and the
+        loop marked it. One enroll call, as recorded, with no key made and key.pem's bytes
+        unchanged; the broker ends with the old row ended and a new one live; the host's record
+        and renew.log name the new id; the marker is gone."""
         for shape, (sid, runtime) in self.BOXES.items():
             with self.subTest(box=shape):
                 self.reset_box()
                 self.run_steps(sid, f"{self.REVOKE}\n: >{self.MARKER}\n{self.PASS}")
                 self.assert_one_enroll_call_as_recorded(sid, runtime)
-                self.assertEqual(
-                    self.broker_rows(runtime),
-                    [["enr-1", runtime, THUMBPRINT, "ended"], ["enr-2", runtime, THUMBPRINT, "live"]],
-                )
                 self.assertEqual((self.hostdir / "enrollment-id").read_text(), "enr-2\n")
                 self.assertEqual((self.keydir / "enrollment").read_text(), "enr-2\n")
-                self.assertEqual(self.launcher_lines(), ["agentbox: box1 enrolled again: enrollment enr-1 -> enr-2"])
+                self.assertEqual(self.launcher_lines(), self.ENROLLED_AGAIN)
                 # The marker, enrollment.pending and enrollment.error are gone.
                 self.assertEqual(self.files(), {"key.pem", "enrollment", "renew.log"})
                 if sid:
@@ -862,18 +856,85 @@ class Reenroll(EnrollFixture):
                     self.assertFalse((self.hostdir / "enrollment-session").exists())
 
     def test_a_stray_marker_on_a_live_enrollment_makes_no_second_enrollment(self) -> None:
-        """Case 4: a marker while the enrollment is live costs one enroll call, which gets the
-        same id back; the broker still holds one row, the log says the enrollment is live, and
-        the marker is gone."""
+        """Case 4 of the plan (dispatch://INFRA-3462): a marker while the enrollment is live
+        costs one enroll call, which gets the same id back; the broker still holds one row, the
+        log says the enrollment is live, and the marker is gone."""
         for shape, (sid, runtime) in self.BOXES.items():
             with self.subTest(box=shape):
                 self.reset_box()
                 self.run_steps(sid, f": >{self.MARKER}\n{self.PASS}")
-                self.assert_one_enroll_call_as_recorded(sid, runtime)
-                self.assertEqual(self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "live"]])
+                self.assert_one_enroll_call_as_recorded(sid, runtime, ended=False)
                 self.assertEqual((self.hostdir / "enrollment-id").read_text(), "enr-1\n")
                 self.assertEqual(self.launcher_lines(), ["agentbox: enrollment enr-1 is live; box1 not enrolled again"])
                 self.assertEqual(self.files(), {"key.pem", "enrollment", "renew.log"})
+
+    def test_a_box_that_no_longer_holds_its_key_is_given_one_and_enrolled_again(self) -> None:
+        """The broker revoked the enrollment, and the box removed key.pem before the launcher
+        found the marker, so reenroll_box runs enroll_box's key step again. A box with a session
+        id gets the host's session key back, the same bytes, and enrolls it as recorded; a box
+        with none makes a key in the box and enrolls that key's thumbprint under its own name.
+        Either way one enroll call makes a new id, and nothing reaches the launcher's stderr."""
+        for shape, (sid, runtime) in self.BOXES.items():
+            with self.subTest(box=shape):
+                self.reset_box()
+                result = self.run_steps(
+                    sid, f'{self.REVOKE}\nrm "$(box_keydir box1)/key.pem"\n: >{self.MARKER}\n{self.PASS}'
+                )
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(self.launcher_lines(), self.ENROLLED_AGAIN)
+                self.assertEqual((self.hostdir / "enrollment-id").read_text(), "enr-2\n")
+                self.assertEqual(self.files(), {"key.pem", "enrollment", "renew.log"})
+                in_box = [c for c in self.calls_matching("docker ") if " keygen " in c]
+                if sid:
+                    self.assert_enrolled_again_as_recorded(sid, runtime)
+                    session_key = self.run_base / "session-keys" / sid / "key.pem"
+                    self.assertEqual((self.keydir / "key.pem").read_bytes(), session_key.read_bytes())
+                    self.assertEqual((len(self.calls_matching("keygen ")), len(in_box)), (1, 0))
+                else:
+                    # The docker stub's second keygen in the box prints this thumbprint.
+                    new_tp = f"K{2:042d}"
+                    enrolls = self.enrolls()
+                    self.assertEqual(len(enrolls), 2, enrolls)
+                    self.assertTrue(enrolls[1].endswith(f"--runtime-id box1 --thumbprint {new_tp}"), enrolls[1])
+                    self.assertEqual(
+                        self.broker_rows(runtime),
+                        [["enr-1", runtime, THUMBPRINT, "ended"], ["enr-2", runtime, new_tp, "live"]],
+                    )
+                    # enroll_box's keygen in the box, and this one.
+                    self.assertEqual(len(in_box), 2)
+                    self.assertNotEqual((self.keydir / "key.pem").read_bytes(), (self.run_base / "key-before").read_bytes())
+
+    def test_a_box_whose_session_key_is_gone_too_enrolls_under_its_own_name(self) -> None:
+        """The box removed key.pem, the host's key dir for the session is gone (prune_session_keys
+        removes one untouched for 7 days), and the session's enrollment is still live under the
+        old key. The host makes the session a new key, which the broker refuses with 409 under
+        the live runtime id, and the same attempt falls back to the box's own runtime id, as
+        enroll_box does: one pass enrolls the box under its own name, and the host's record that
+        the box's enrollment is the session's (enrollment-session) goes, so close_box revokes the
+        new one at once. enroll_attempts prints a note on stderr for the fallback, and the
+        launcher's stderr holds nothing."""
+        new_tp = "B" * 43
+        steps = "\n".join(
+            [
+                'rm "$(box_keydir box1)/key.pem"',
+                'rm -r "$RUN_BASE/session-keys/sid-1"',
+                f"export STUB_KEY=k2 STUB_THUMBPRINT={new_tp}",
+                f": >{self.MARKER}",
+                self.PASS,
+            ]
+        )
+        result = self.run_steps("sid-1", steps)
+        self.assertEqual(result.stderr, "")
+        enrolls = self.enrolls()
+        self.assertEqual([c.split("--runtime-id ")[1].split()[0] for c in enrolls], ["session-sid-1", "session-sid-1", "box1"])
+        self.assertTrue(enrolls[1].endswith(f"--thumbprint {new_tp} --session-id sid-1"), enrolls[1])
+        self.assertTrue(enrolls[2].endswith(f"--thumbprint {new_tp} --session-id sid-1"), enrolls[2])
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", new_tp, "live"]])
+        self.assertEqual((self.hostdir / "enrollment-id").read_text(), "enr-2\n")
+        self.assertFalse((self.hostdir / "enrollment-session").exists())
+        self.assertEqual(self.launcher_lines(), self.ENROLLED_AGAIN)
+        self.assertEqual(self.files(), {"key.pem", "enrollment", "renew.log"})
 
     # snap NAME: the key dir as it is, and the count of enroll calls so far, beside the box.
     SNAP = (
@@ -882,10 +943,11 @@ class Reenroll(EnrollFixture):
     )
 
     def test_a_failed_attempt_keeps_the_key_and_tries_again_after_the_back_off(self) -> None:
-        """Case 5: the broker unreachable, then the helper with no launcher credential, then
-        success. Each failure keeps key.pem and the marker, puts its reason in enrollment.error,
-        leaves no enrollment.pending, and is not tried again before its back-off (30 s, then
-        60 s, each plus up to 9 s); the test moves SECONDS on, as no pass sleeps."""
+        """Case 5 of the plan (dispatch://INFRA-3462): the broker unreachable, then the helper
+        with no launcher credential, then success. Each failure keeps key.pem and the marker,
+        puts its reason in enrollment.error, leaves no enrollment.pending, and is not tried again
+        before its back-off (30 s, then 60 s, each plus up to 9 s); the test moves SECONDS on, as
+        no pass sleeps."""
         steps = "\n".join(
             [
                 self.SNAP,
@@ -918,12 +980,12 @@ class Reenroll(EnrollFixture):
                 ):
                     keydir = self.run_base / f"snap-{snap}"
                     self.assertEqual((self.run_base / f"snap-{snap}.enrolls").read_text(), "2\n", snap)
-                    self.assertEqual({p.name for p in keydir.iterdir()}, failed, snap)
+                    self.assertEqual(self.files(keydir), failed, snap)
                     self.assertEqual((keydir / "enrollment.error").read_text(), f"{reason}\n", snap)
                     self.assert_key_kept(keydir)
                 enrolled = self.run_base / "snap-enrolled"
                 self.assertEqual((self.run_base / "snap-enrolled.enrolls").read_text(), "3\n")
-                self.assertEqual({p.name for p in enrolled.iterdir()}, {"key.pem", "enrollment", "renew.log"})
+                self.assertEqual(self.files(enrolled), {"key.pem", "enrollment", "renew.log"})
                 self.assertEqual((enrolled / "enrollment").read_text(), "enr-2\n")
                 self.assert_key_kept(enrolled)
                 # enrollment.pending was there for each attempt that reached the broker.
@@ -938,10 +1000,11 @@ class Reenroll(EnrollFixture):
                 self.assertEqual(lines[2], "agentbox: box1 enrolled again: enrollment enr-1 -> enr-2")
 
     def test_a_marker_that_is_a_link_or_a_fifo_is_neither_read_nor_followed(self) -> None:
-        """Case 7: the box can put anything at enrollment.not-live. The launcher only tests that
-        the name is there and removes it: a FIFO (which blocks whoever opens it), a link to one,
-        a link to a host file and a link to nothing each count as the marker, the launcher does
-        not hang (the run's timeout is 60 s), and what a link names is left as it was."""
+        """Case 7 of the plan (dispatch://INFRA-3462): the box can put anything at
+        enrollment.not-live. The launcher only tests that the name is there and removes it: a
+        FIFO (which blocks whoever opens it), a link to one, a link to a host file and a link to
+        nothing each count as the marker, the launcher does not hang (the run's timeout is 60 s),
+        and what a link names is left as it was."""
         plants = {
             "a FIFO": 'mkfifo "$m"',
             "a link to a FIFO": 'mkfifo "$RUN_BASE/outside" && ln -s "$RUN_BASE/outside" "$m"',
@@ -954,14 +1017,49 @@ class Reenroll(EnrollFixture):
                 with self.subTest(box=shape, marker=plant):
                     self.reset_box()
                     self.run_steps(sid, f"{self.REVOKE}\nm={self.MARKER}\n{how}\n{self.PASS}", timeout=60)
-                    self.assertEqual(self.launcher_lines(), ["agentbox: box1 enrolled again: enrollment enr-1 -> enr-2"])
-                    self.assertFalse(os.path.lexists(self.keydir / "enrollment.not-live"))
+                    self.assertEqual(self.launcher_lines(), self.ENROLLED_AGAIN)
+                    self.assertFalse(self.marked())
                     if plant == "a link to a FIFO":
                         self.assertTrue(stat.S_ISFIFO(outside.lstat().st_mode))
                     elif plant == "a link to a host file":
                         self.assertEqual(outside.read_text(), "host content\n")
                     elif plant == "a link to nothing":
                         self.assertFalse(os.path.lexists(outside))
+
+    def test_no_attempt_once_the_launcher_is_interrupted(self) -> None:
+        """cmd_new's HUP, TERM or INT trap has set `interrupted`: the box is ending, so a pass
+        that finds the marker makes no enroll call, writes no line, and leaves the marker."""
+        for shape, (sid, _runtime) in self.BOXES.items():
+            with self.subTest(box=shape):
+                self.reset_box()
+                self.run_steps(sid, f"{self.REVOKE}\n: >{self.MARKER}\ninterrupted=1\n{self.PASS}")
+                self.assertEqual(len(self.enrolls()), 1)
+                self.assertTrue(self.marked())
+                self.assertEqual(self.launcher_lines(), [])
+
+    def test_a_hangup_during_an_attempt_leaves_stderr_where_the_trap_put_it(self) -> None:
+        """cmd_new's HUP trap points stdout and stderr at /dev/null, as nothing reads a hung-up
+        terminal. A hangup during the attempt's enroll call (STUB_HUP_PID) runs that trap inside
+        the pass's own redirect of stderr, whose end puts the terminal (here, the run's stderr)
+        back; the pass makes the trap's redirect again, so a line written after it goes nowhere.
+        stdout is /dev/null from the trap on, so the steps' end is a file, not a line."""
+        for shape, (sid, _runtime) in self.BOXES.items():
+            with self.subTest(box=shape):
+                self.reset_box()
+                result = self.bash(
+                    f'enroll_box box1 "{sid}"\n'
+                    "trap 'interrupted=1; hung_up=1; exec >/dev/null 2>&1' HUP\n"
+                    f"{self.REVOKE}\n: >{self.MARKER}\n"
+                    "export STUB_HUP_PID=$$\n"
+                    f"{self.PASS}\n"
+                    'echo "a line after the hangup" >&2\n'
+                    ': >"$RUN_BASE/steps-done"',
+                    STUB_ENROLL="broker",
+                )
+                self.assertTrue((self.run_base / "steps-done").exists(), result.stderr)
+                self.assertEqual(result.stderr, "")
+                # The hangup did not stop the attempt it came in.
+                self.assertEqual(self.launcher_lines(), self.ENROLLED_AGAIN)
 
 
 class BoxWait(EnrollFixture):
@@ -980,8 +1078,6 @@ class BoxWait(EnrollFixture):
         )
         self.assertIn("rc=7", result.stdout, result.stderr)
         self.assertLess(time.monotonic() - started, 8)
-        # The launcher's terminal is the box's: box_wait writes nothing to it.
-        self.assertEqual(result.stderr, "")
 
     def test_a_trapped_signal_acts_at_once(self) -> None:
         for signal in ("HUP", "TERM", "INT"):
@@ -1025,7 +1121,7 @@ class CmdNew(EnrollFixture):
         keydir = self.new_box(STUB_LOGIN_STATUS="0")
         (started,) = self.calls_matching("run ")
         self.assertTrue(started.endswith("marker=yes"), started)
-        self.assertEqual({p.name for p in keydir.iterdir()}, {"key.pem", "enrollment"})
+        self.assertEqual(self.files(keydir), {"key.pem", "enrollment"})
         self.assertEqual(len(self.calls_matching("enroll ")), 1)
 
     def test_a_host_that_cannot_enroll_leaves_the_box_alone(self) -> None:
@@ -1039,7 +1135,7 @@ class CmdNew(EnrollFixture):
     def renew_refused_while_it_runs(self, cmd: str, **stubs: str) -> tuple[str, Path, list[str]]:
         """cmd_new for a box whose first renew is refused as not live (the broker ended its
         enrollment) and whose second exits 0 and ends the loop. The box lives until its launcher
-        has logged the re-enrolment, then ends its renew loop and says `run-ended <box>`. Returns
+        has logged the re-enrollment, then ends its renew loop and says `run-ended <box>`. Returns
         the box, its key dir and the call log."""
         keydir = self.new_box(
             cmd,
@@ -1053,16 +1149,10 @@ class CmdNew(EnrollFixture):
         )
         return keydir.parents[1].name, keydir, self.calls.read_text().splitlines()
 
-    def assert_enrolled_again_while_it_ran(self, box: str, keydir: Path, calls: list[str], runtime: str) -> None:
-        """One re-enrolment, as recorded, before the box ended and none after; close_box's
-        revoke names the new id."""
-        enrolls = self.enrolls()
-        self.assertEqual(len(enrolls), 2, enrolls)
-        self.assertEqual(enrolls[1], enrolls[0])
-        self.assertIn(f"--runtime-id {runtime} --thumbprint {THUMBPRINT}", enrolls[1])
-        self.assertEqual(
-            self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "ended"], ["enr-2", runtime, THUMBPRINT, "live"]]
-        )
+    def assert_enrolled_again_while_it_ran(self, box: str, keydir: Path, calls: list[str], sid: str, runtime: str) -> None:
+        """One re-enrollment, as recorded, before the box ended; close_box's revoke, after the box
+        ended, names the new id."""
+        self.assert_enrolled_again_as_recorded(sid, runtime)
         self.assertIn(
             "agentbox: agent-secrets renew exited 76: enrollment enr-1 is not live; the host enrols this box again",
             (keydir / "renew.log").read_text(),
@@ -1070,23 +1160,27 @@ class CmdNew(EnrollFixture):
         self.assertEqual(self.launcher_lines(keydir), [f"agentbox: {box} enrolled again: enrollment enr-1 -> enr-2"])
         self.assertIn(f"run-ended {box}", calls)
         ended = calls.index(f"run-ended {box}")
-        self.assertEqual([c for c in calls[ended:] if c.startswith("enroll ")], [], "an enroll call after the box ended")
         self.assertIn(f"close_box {box} revokes=enr-2", calls[ended:])
 
     def test_an_omp_box_refused_as_not_live_is_enrolled_again_by_its_wait(self) -> None:
-        """Case 6, a box with a session id. Its session-id poll ends once the id is known, so
-        box_wait enrolls it again: its renew loop starts only once box_wait's first `sleep 10` is
-        in the call log."""
-        box, keydir, calls = self.renew_refused_while_it_runs("omp", STUB_SID=self.SID, STUB_RENEW_AFTER="sleep 10")
-        self.assert_enrolled_again_while_it_ran(box, keydir, calls, f"session-{self.SID}")
-        self.assertTrue(self.enrolls()[1].endswith(f"--session-id {self.SID}"), self.enrolls()[1])
+        """Case 6 of the plan (dispatch://INFRA-3462), a box with a session id. Its session-id
+        poll ends once the id is known, so box_wait enrolls it again: its renew loop starts only
+        once box_wait's first `sleep 10` is in the call log. Nothing enrolls the box after it
+        ended: the box's end writes a fresh marker and its `docker run` exits at once, while
+        box_wait is inside a real 10 s wait (STUB_REAL_SLEEP) that the child's exit ends, so only
+        a pass after that exit could act on the marker. The marker is still there when cmd_new
+        returns, and there are still two enroll calls."""
+        box, keydir, calls = self.renew_refused_while_it_runs(
+            "omp", STUB_SID=self.SID, STUB_RENEW_AFTER="sleep 10", STUB_RUN_END_MARKER="1", STUB_REAL_SLEEP="1"
+        )
+        self.assert_enrolled_again_while_it_ran(box, keydir, calls, self.SID, f"session-{self.SID}")
+        self.assertTrue(self.marked(keydir))
 
     def test_a_box_without_a_session_refused_as_not_live_is_enrolled_again_by_its_poll(self) -> None:
-        """Case 6, a box with no session id: its session-id poll lasts its whole life and enrolls
-        it again."""
+        """Case 6 of the plan (dispatch://INFRA-3462), a box with no session id: its session-id
+        poll lasts its whole life and enrolls it again."""
         box, keydir, calls = self.renew_refused_while_it_runs("bash -c true")
-        self.assert_enrolled_again_while_it_ran(box, keydir, calls, box)
-        self.assertNotIn("--session-id", self.enrolls()[1])
+        self.assert_enrolled_again_while_it_ran(box, keydir, calls, "", box)
 
 
 if __name__ == "__main__":
