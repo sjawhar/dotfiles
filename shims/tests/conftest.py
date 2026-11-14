@@ -5,9 +5,8 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-import pytest
-
 from leak_terms_fixture import fixture_environment
+from test_person_branch_guard import PersonBranchGuardTest
 
 
 def pytest_configure() -> None:
@@ -34,19 +33,23 @@ def _sops_directory() -> str:
     return str(directory)
 
 
-@pytest.fixture(autouse=True)
-def _leak_terms_in_environments_built_from_nothing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    # test_person_branch_guard builds each command's environment from nothing, so neither the list above nor sops
-    # reaches its commits through the shims. Its env() gets the list's three variables and, last on PATH, a directory
-    # holding only sops.
-    cls = request.cls
-    if cls is None or cls.__name__ != "PersonBranchGuardTest":
-        return
-    built = cls.env
+# test_person_branch_guard builds each command's environment from nothing, so neither the list above nor sops reaches
+# its commits through the shims. Its env() gets the list's variables and, last on PATH, a directory holding only sops.
+# The class is imported by name so a rename fails here at once; subclasses inherit the wrapped env(). The file itself
+# is #53's and stays as main has it.
+_person_branch_guard_env = PersonBranchGuardTest.env
 
-    def env(self, *args, **kwargs):
-        result = {**built(self, *args, **kwargs), **fixture_environment()}
-        result["PATH"] = os.pathsep.join([result["PATH"], _sops_directory()])
-        return result
 
-    monkeypatch.setattr(cls, "env", env)
+def _fixture_person_branch_guard_env(self, *args, **kwargs):
+    result = {**_person_branch_guard_env(self, *args, **kwargs), **fixture_environment()}
+    result["PATH"] = os.pathsep.join([result["PATH"], _sops_directory()])
+    return result
+
+
+PersonBranchGuardTest.env = _fixture_person_branch_guard_env
+
+
+def pytest_collection_modifyitems(items) -> None:
+    for item in items:
+        if item.module.__name__ == "test_person_branch_guard":
+            assert item.module.PersonBranchGuardTest is PersonBranchGuardTest
