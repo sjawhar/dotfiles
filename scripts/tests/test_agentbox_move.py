@@ -31,6 +31,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -69,6 +70,26 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path = directory / name
     path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def process_group_gone(proc: subprocess.Popen, timeout: float) -> bool:
+    """True once no process of proc's group is alive. proc.poll() reaps the leader, since a leader
+    that has died and is not reaped is still a member of its group."""
+    deadline = time.monotonic() + timeout
+    while True:
+        proc.poll()
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def process_group_listing(pgid: int) -> str:
+    ps = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,ppid=,etimes=,args="], capture_output=True, text=True)
+    return "\n".join(line for line in ps.stdout.splitlines() if line.split()[1] == str(pgid))
 
 
 # The script refuses every path under these as too broad for a box (move_dir_too_broad), so a
@@ -161,19 +182,16 @@ class AgentboxMove(unittest.TestCase):
     @staticmethod
     def end_relauncher(proc: subprocess.Popen[bytes]) -> None:
         """A move_to_run a test started, and everything it started, ended by its own process group:
-        a test that fails or times out must leave nothing running on this host."""
-        if proc.poll() is not None:
-            return
+        a test that fails or times out must leave nothing running on this host. The group, not the
+        leader: a relauncher that has exited can leave children in it."""
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(proc.pid, signal_number)
             except ProcessLookupError:
-                break
-            try:
-                proc.wait(timeout=20)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+                return
+            if process_group_gone(proc, 20):
+                return
+        raise AssertionError(f"still in the relauncher's group after SIGKILL:\n{process_group_listing(proc.pid)}")
 
     @staticmethod
     def pane_command(call: str) -> str:
@@ -2149,6 +2167,20 @@ class AgentboxMove(unittest.TestCase):
         self.assertFalse(active.exists())
 
     def test_a_relauncher_stopped_by_a_signal_says_where_and_leaves_no_active_file(self) -> None:
+        # One run for each signal the relauncher traps, each in a fixture of its own. Each run's
+        # cleanups (its end_relauncher) run before the next fixture replaces its files, also
+        # when the run fails.
+        for i, (name, number) in enumerate((("TERM", signal.SIGTERM), ("INT", signal.SIGINT), ("HUP", signal.SIGHUP))):
+            with self.subTest(signal=name):
+                if i:
+                    self.tearDown()
+                    self.setUp()
+                try:
+                    self.relauncher_stopped_by(name, number)
+                finally:
+                    self.doCleanups()
+
+    def relauncher_stopped_by(self, name: str, number: int) -> None:
         self.moving_session()
         self.set_pids(999999901)
         self.set_panes({999999900: ("%81", "agents:4.1")})
@@ -2159,9 +2191,10 @@ class AgentboxMove(unittest.TestCase):
         # The FIRST copy, before the hang-up: a signal there refuses the move with nothing hung
         # up, and that is still what a stop must do. (After the hang-up the relauncher no longer
         # stops; test_a_signal_after_the_hang_up_does_not_stop_the_relauncher covers that.)
+        # `exec`: the TERM the relauncher sends its rsync reaches the sleep.
         write_stub(self.stubs, "rsync",
                    'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
-                   f'touch "{self.root}/IN_RSYNC"; sleep 60')
+                   f'touch "{self.root}/IN_RSYNC"; exec sleep 60')
         changing = self.worktree / "written-during-the-hold.txt"
         self.assertEqual(self.move_to().returncode, 0)
         [job] = self.jobs()
@@ -2181,12 +2214,65 @@ class AgentboxMove(unittest.TestCase):
             time.sleep(0.1)
         self.assertTrue((self.root / "IN_RSYNC").exists(), log.read_text(encoding="utf-8"))
         self.assertTrue(active.exists())
-        proc.send_signal(15)
+        proc.send_signal(number)
         proc.wait(timeout=30)
+        self.assert_group_ended(proc, name)
         text = log.read_text(encoding="utf-8")
-        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up", text)
+        self.assertIn(f"stopped by signal {name}; state: copying to devbox, before the hang-up", text)
         self.assertNotIn("hung up after", text)
         self.assertFalse(active.exists())
+        # The rsync's error file, which holds the signal line, goes with the relauncher.
+        self.assertEqual([p.name for p in self.tmpdir.rglob("*") if p.is_file()
+                          and "stopped by signal" in p.read_text(encoding="utf-8", errors="replace")], [])
+
+    def assert_group_ended(self, proc: subprocess.Popen[bytes], name: str) -> None:
+        """No member of the exited relauncher's group alive within 10 s, before any cleanup; one
+        line on stderr says so, since a passing subTest prints nothing."""
+        start = time.monotonic()
+        self.assertTrue(process_group_gone(proc, 10),
+                        f"alive in the relauncher's group 10 s after it exited:\n{process_group_listing(proc.pid)}")
+        print(f"signal {name}: the relauncher's group was empty {time.monotonic() - start:.1f} s after it exited",
+              file=sys.stderr)
+
+    def test_a_relauncher_stopped_while_it_sends_a_progress_notice_says_so_after_the_notice(self) -> None:
+        """A signal while the progress subshell sends its notice waits for that send, which bash
+        does not interrupt, and the line that the relauncher is gone comes after it: no notice
+        reaches a session after that line."""
+        self.moving_session()
+        self.set_pids(999999901)
+        self.set_panes({999999900: ("%81", "agents:4.1")})
+        self.target()
+        log = self.root / "relauncher.log"
+        sending = self.root / "IN_SEND"
+        write_stub(self.stubs, "rsync",
+                   'case "$*" in *-before\\ *) ;; *) exit 0 ;; esac\n'
+                   'exec sleep 60')
+        write_stub(self.stubs, "envoy",
+                   f'{ENVOY_RECORD}\n'
+                   f'if grep -q "your move goes on" "$STUB_ENVOY" && [[ ! -e "{sending}" ]]; then\n'
+                   f'    touch "{sending}"; sleep 3\n'
+                   f'    if grep -q "The relauncher is gone" "{log}"; then echo LATE >>"$STUB_ENVOY"; fi\n'
+                   'fi\nexit 0')
+        self.assertEqual(self.move_to().returncode, 0)
+        [job] = self.jobs()
+        self.set_pids()
+        with log.open("w") as out:
+            proc = subprocess.Popen(["bash", "-c", f'source "{AGENTBOX}"\nmove_to_hold() {{ :; }}\nmove_to_run "{job}"'],
+                                    env={**self.env, "AGENTBOX_MOVE_RSYNC_TICK": "1"}, stdout=out,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        self.addCleanup(self.end_relauncher, proc)
+        for _ in range(int(self.TIMEOUT * 10)):
+            if sending.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(sending.exists(), log.read_text(encoding="utf-8"))
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
+        self.assert_group_ended(proc, "TERM during a progress notice")
+        sent = (self.root / "STUB_ENVOY").read_text(encoding="utf-8")
+        self.assertEqual(sent.count("your move goes on"), 1, sent)
+        self.assertNotIn("LATE", sent)
+        self.assertIn("stopped by signal TERM; state: copying to devbox, before the hang-up", log.read_text(encoding="utf-8"))
 
     def test_the_other_branches_are_pushed_before_the_hang_up(self) -> None:
         """LINUX-1248, 04:10Z: the push of every branch from a blob:none clone ran 3+ min after
