@@ -820,12 +820,13 @@ class SessionIdentity(EnrollFixture):
 
     def test_unenroll_calls_returns_only_once_the_waiters_revoke_reached_the_broker(self) -> None:
         """dispatch://INFRA-3462, testing after review round 2. unenroll_calls must not return
-        while the detached waiter still works in this test's temp dir. tearDown removes that
-        dir, and the stub's revoke (end_enrollment, a `sed -i` on the broker table) makes a
-        temp file there after the call is in the call log. At d10a9465 that failed
-        test_a_session_that_did_not_come_back_ends_its_enrollment_and_its_key in 1 of 12 runs
-        under load, with OSError: Directory not empty. Here the revoke is held 2 s after the
-        call is logged, so a helper that returns on the logged call alone fails every time."""
+        while the detached waiter still works in this test's temp dir, because tearDown removes
+        that dir. The stub's revoke (end_enrollment, a `sed -i` on the broker table) makes a temp
+        file there, so the stub logs its unenroll call only after the revoke, and unenroll_calls
+        returns on the logged call. At d10a9465 the stub logged the call first, and
+        test_a_session_that_did_not_come_back_ends_its_enrollment_and_its_key failed in 1 of 12
+        runs under load, with OSError: Directory not empty. Here the revoke is held 2 s, so a stub
+        that logs its call before the revoke fails this test every time."""
         write_stub(
             self.stub_dir,
             "sed",
