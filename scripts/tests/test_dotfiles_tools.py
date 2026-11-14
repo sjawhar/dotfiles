@@ -96,6 +96,12 @@ exit "$rc"
         )
         path.chmod(0o755)
 
+    @staticmethod
+    def _write_failing_mktemp(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/usr/bin/env bash\nexit 1\n")
+        path.chmod(0o755)
+
     def _install_ssh(self) -> None:
         ssh = self.root / "bin" / "ssh"
         ssh.write_text(
@@ -527,6 +533,20 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_tools_ran()
 
+    def test_case_21a_publish_from_home_with_relative_dotfiles_dir_runs_tools_after_rebase(self) -> None:
+        change = self.local_commit()
+        (self.upstream / "upstream.txt").write_text("upstream\n")
+        self.commit_upstream("upstream")
+
+        result = self.publish(
+            change,
+            cwd=self.home,
+            env={**self.env, "DOTFILES_DIR": ".dotfiles", "ORIGIN_GIT": str(self.origin)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+
     def test_case_22_publish_uses_checkout_mise_without_path_or_mise_environment(self) -> None:
         minimal_bin = self.root / "without-mise"
         minimal_bin.mkdir()
@@ -572,6 +592,78 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         self.assert_tools_ran()
         self.assertIn(f"tools: `mise install` passed in {self.checkout}", result.stdout)
         self.assertIn(f"tools: `bun install --frozen-lockfile` passed in {self.checkout}/omp/plugins", result.stdout)
+
+    def test_case_23e_a_failure_after_the_tmp_fallback_shows_the_last_lines_of_its_output(self) -> None:
+        # The /tmp fallback keeps the output in a file, so a failure reports its last lines rather
+        # than "its output is above".
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        result = self._run(
+            SYNC, "--tools", str(self.checkout),
+            env={**self.env, "TMPDIR": str(self.root / "missing-tmp"), "FAKE_MISE_RC": "7"},
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("exited 7", result.stderr)
+        self.assertIn("last lines of its output:\nmise ERROR forced failure", result.stderr)
+        self.assertNotIn("no temporary file could be made", result.stderr)
+
+    def test_case_23f_tools_mode_with_a_relative_tmpdir_runs_the_step(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        (self.root / "rel-tmp").mkdir()
+        result = self._run(SYNC, "--tools", str(self.checkout), cwd=self.root, env={**self.env, "TMPDIR": "rel-tmp"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertEqual(list((self.root / "rel-tmp").iterdir()), [])
+
+    def test_case_23b_tools_mode_runs_when_no_temporary_file_can_be_made(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        self._write_failing_mktemp(self.checkout / "bin" / "mktemp")
+
+        result = self._run(SYNC, "--tools", str(self.checkout))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no temporary file could be made", result.stderr)
+        self.assertIn(f"tools: `mise install` passed in {self.checkout}", result.stdout)
+        self.assertIn(f"tools: `bun install --frozen-lockfile` passed in {self.checkout}/omp/plugins", result.stdout)
+        self.assert_tools_ran()
+
+    def test_case_23c_tools_mode_reports_a_failure_when_no_temporary_file_can_be_made(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        self._write_failing_mktemp(self.checkout / "bin" / "mktemp")
+
+        result = self._run(SYNC, "--tools", str(self.checkout), env={**self.env, "FAKE_MISE_RC": "7"})
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("exited 7", result.stderr)
+        self.assertIn("mise ERROR forced failure", result.stderr)
+        self.assertIn("its output is above on stderr", result.stderr)
+        self.assertEqual(len(self.calls("mise")), 1, self.records())
+        self.assertEqual(self.calls("bun"), [], self.records())
+
+    @unittest.skipIf(os.geteuid() == 0, "root enters a mode-000 directory")
+    def test_case_23d_tools_mode_uses_tmp_after_a_mode_000_tmpdir(self) -> None:
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        blocked_tmp = self.root / "blocked-tmp"
+        blocked_tmp.mkdir()
+        blocked_tmp.chmod(0)
+        self.addCleanup(lambda: blocked_tmp.chmod(0o700) if blocked_tmp.exists() else None)
+
+        result = self._run(SYNC, "--tools", str(self.checkout), env={**self.env, "TMPDIR": str(blocked_tmp)})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
 
     def test_case_24_the_sync_lock_is_free_while_the_tools_step_installs(self) -> None:
         # A long install must not hold the sync lock: dotfiles-follow moves the checkout with
@@ -654,6 +746,35 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         mise = self.calls("mise")[0].split("|")
         self.assertEqual(mise[2], str(caller / "rel"), self.records())
         self.assertEqual(mise[4], "held", self.records())
+
+    @unittest.skipIf(os.geteuid() == 0, "root enters a mode-000 directory")
+    def test_case_28a_tools_mode_reports_the_flock_error_for_an_inaccessible_mise_data_dir(self) -> None:
+        (self.upstream / ".bashrc").write_text(
+            'export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"\n'
+            'export MISE_CACHE_DIR="$HOME/.cache/mise"\n'
+            'export MISE_TRUSTED_CONFIG_PATHS="$HOME/.dotfiles"\n'
+            'export PATH="$HOME/.dotfiles/bin:$PATH"\n'
+        )
+        self.commit_upstream("preserve inaccessible mise data")
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        blocked_data = self.root / "blocked-mise-data"
+        blocked_data.mkdir()
+        blocked_data.chmod(0)
+        self.addCleanup(lambda: blocked_data.chmod(0o700) if blocked_data.exists() else None)
+
+        result = self._run(
+            SYNC,
+            "--tools",
+            str(self.checkout),
+            env={**self.env, "MISE_DATA_DIR": str(blocked_data)},
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("`mise install`", result.stderr)
+        self.assertIn("exited ", result.stderr)
+        self.assertIn("flock:", result.stderr)
 
     def test_case_29_relative_bun_path_is_absolute_before_the_plugins_cd(self) -> None:
         moved = self.sync("local")

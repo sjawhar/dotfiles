@@ -94,6 +94,9 @@ fi
 printf '%s|argv=%s|PWD=%s|MISE_DATA_DIR=%s|%s\n' "$1" "$*" "$PWD" "$data" "$state" >> "$RECORD"
 case "$1" in
     install)
+        if [[ "${FAKE_MISE_STDOUT:-0}" = 1 ]]; then
+            printf 'mise install stdout\n'
+        fi
         printf 'mise install output\n' >&2
         if [[ "${FAKE_MISE_WRITE_AGENT:-1}" = 1 ]]; then
             agent="$data/installs/fakeagent/1.0/bin/fakeagent"
@@ -183,6 +186,11 @@ esac
     def records(self) -> list[str]:
         return self.record.read_text(encoding="utf-8").splitlines()
 
+    def failing_mktemp_dir(self) -> Path:
+        directory = self.root / "failing-mktemp"
+        executable(directory / "mktemp", "exit 1")
+        return directory
+
     def assert_agent_started(self, result: subprocess.CompletedProcess[str], *args: str) -> None:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -240,6 +248,51 @@ esac
         self.assertTrue(self.install_record().startswith("install|"), self.records())
         self.assertTrue(any(line.startswith("which|argv=which fakeagent") for line in self.records()))
 
+    def test_mktemp_failure_sends_install_output_to_stderr_and_starts_the_agent(self) -> None:
+        failing_mktemp = self.failing_mktemp_dir()
+        result = self.launch(
+            "--mode",
+            "no-mktemp",
+            env=self.env(
+                PATH=f"{failing_mktemp}:{self.bin}:{self.safe_bin}",
+                FAKE_MISE_STDOUT="1",
+            ),
+        )
+
+        self.assert_agent_started(result, "--mode", "no-mktemp")
+        self.assertIn("cannot make a temporary file", result.stderr)
+        self.assertIn("mise install stdout", result.stderr)
+        self.assertIn("mise install output", result.stderr)
+        self.assertNotIn("mise install stdout", result.stdout)
+
+    def test_mktemp_failure_refusal_reports_install_and_which_output_on_stderr(self) -> None:
+        failing_mktemp = self.failing_mktemp_dir()
+        result = self.launch(
+            env=self.env(
+                PATH=f"{failing_mktemp}:{self.bin}:{self.safe_bin}",
+                FAKE_MISE_EXIT="7",
+                FAKE_MISE_WRITE_AGENT="0",
+            )
+        )
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("no fakeagent on PATH other than a wrapper", result.stderr)
+        self.assertIn("mise install output", result.stderr)
+        self.assertIn("mise ERROR fakeagent is not a mise bin", result.stderr)
+        self.assertIn("its output is above on stderr", result.stderr)
+
+    @unittest.skipIf(os.geteuid() == 0, "root enters a mode-000 directory")
+    def test_mode_000_tmpdir_falls_back_and_launches_the_agent(self) -> None:
+        blocked_tmp = self.root / "blocked-tmp"
+        blocked_tmp.mkdir()
+        blocked_tmp.chmod(0)
+        self.addCleanup(lambda: blocked_tmp.chmod(0o700) if blocked_tmp.exists() else None)
+
+        result = self.launch("--mode", "mode-000-tmpdir", env=self.env(TMPDIR=str(blocked_tmp)))
+
+        self.assert_agent_started(result, "--mode", "mode-000-tmpdir")
+
     def test_unusable_tmpdir_without_an_agent_refuses(self) -> None:
         missing_tmp = self.root / "missing-tmp"
         result = self.launch(env=self.env(TMPDIR=str(missing_tmp), FAKE_MISE_WRITE_AGENT="0"))
@@ -252,6 +305,17 @@ esac
         # The /tmp fallback keeps mise's output for the refusal.
         self.assertIn("mise install output", result.stderr)
         self.assertIn("mise ERROR fakeagent is not a mise bin", result.stderr)
+
+    def test_the_tmp_fallback_keeps_the_last_lines_for_a_failed_install(self) -> None:
+        # With the /tmp fallback the output is kept in a file: a failed install shows its last
+        # lines, and nothing says the temporary file could not be made.
+        result = self.launch(
+            env=self.env(TMPDIR=str(self.root / "missing-tmp"), FAKE_MISE_WRITE_AGENT="0", FAKE_MISE_EXIT="1")
+        )
+
+        self.assertEqual(result.returncode, 127, result.stderr)
+        self.assertIn("exited 1\nlast lines of its output:\n", result.stderr)
+        self.assertNotIn("cannot make a temporary file", result.stderr)
 
     def test_relative_dotfiles_dir_with_cdpath_starts_missing_agent(self) -> None:
         result = self.launch(

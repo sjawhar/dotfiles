@@ -111,26 +111,35 @@ tools_error() {
   if [[ "$status" = 124 || "$status" = 137 ]]; then
     printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
   fi
-  printf '\nlast lines of its output:\n' >&2
-  tail -n 20 "$output" >&2 || true
+  if [[ -n "$output" ]]; then
+    printf '\nlast lines of its output:\n' >&2
+    tail -n 20 "$output" >&2 || true
+  else
+    printf '\nits output is above on stderr\n' >&2
+  fi
 }
 
 tools_run() {
-  local command="$1" cwd="$2" limit="$3" output pid status waits tick='`'
+  local command="$1" cwd="$2" limit="$3" output="" output_made=0 output_fd pid status waits tick='`'
   shift 3
   if output="$(mktemp 2>/dev/null)"; then
-    :
+    output_made=1
   elif output="$(TMPDIR=/tmp mktemp 2>/dev/null)"; then
-    :
+    output_made=1
   else
-    printf 'dotfiles-sync: tools step: %s%s%s in %s did not start: cannot make a temporary file in %s or /tmp\n' "$tick" "$command" "$tick" "$cwd" "${TMPDIR:-}" >&2
-    return 1
+    printf 'dotfiles-sync: tools step: %s%s%s in %s: no temporary file could be made in %s or /tmp; command output goes to stderr\n' "$tick" "$command" "$tick" "$cwd" "${TMPDIR:-<unset>}" >&2
+  fi
+  if (( output_made )); then
+    exec {output_fd}>"$output"
+  else
+    exec {output_fd}>&2
   fi
   (
     # shellcheck disable=SC1007
     CDPATH= cd -- "$cwd" && exec timeout -k "$tools_grace" "$limit" "$@"
-  ) >"$output" 2>&1 &
+  ) >&"$output_fd" 2>&1 &
   pid=$!
+  exec {output_fd}>&-
   if wait "$pid"; then
     status=0
   else
@@ -156,7 +165,9 @@ tools_run() {
   else
     tools_error "$command" "$cwd" "$status" "$limit" "$output"
   fi
-  rm -f "$output" || true
+  if (( output_made )); then
+    rm -f "$output" || true
+  fi
   return "$status"
 }
 

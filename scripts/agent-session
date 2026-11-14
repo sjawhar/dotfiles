@@ -323,24 +323,27 @@ else
 
         grace=10
         out_made=0
+        out=""
         if out="$(mktemp 2>/dev/null)"; then
             out_made=1
         elif out="$(TMPDIR=/tmp mktemp 2>/dev/null)"; then
             out_made=1
         else
-            printf 'agent-session: cannot make a temporary file in %s or /tmp; mise install output is not kept\n' "${TMPDIR:-}" >&2
-            out=/dev/null
+            printf 'agent-session: cannot make a temporary file in %s or /tmp; mise install output goes to stderr\n' "${TMPDIR:-<unset>}" >&2
         fi
         # A relative TMPDIR gives a relative name, which `mise which`'s stderr redirect, made after
         # the cd into the checkout, would read from the wrong directory.
-        if [[ "$out" != /dev/null ]]; then
+        if (( out_made )); then
             [[ "$out" = /* ]] || out="$PWD/$out"
+            exec {out_fd}>"$out"
+        else
+            exec {out_fd}>&2
         fi
         rc=0
         (
             # shellcheck disable=SC1007
             CDPATH= cd -- "$DOTFILES_DIR" && exec timeout -k "$grace" "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install
-        ) >"$out" 2>&1 &
+        ) >&"$out_fd" 2>&1 &
         pid=$!
         wait "$pid" || rc=$?
         if [[ "$rc" = 124 || "$rc" = 137 ]]; then
@@ -358,8 +361,13 @@ else
                 done
             fi
         fi
+        exec {out_fd}>&-
         # shellcheck disable=SC1007
-        found="$(CDPATH= cd -- "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>>"$out")" || found=""
+        if (( out_made )); then
+            found="$(CDPATH= cd -- "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>>"$out")" || found=""
+        else
+            found="$(CDPATH= cd -- "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>&2)" || found=""
+        fi
         if [[ -n "$found" && -f "$found" && -x "$found" ]] && real="$(realpath "$found")"; then
             if [[ "${real%/*}" != */shims && "${real%/*}" != "$MISE_DATA_DIR/shims" ]]; then
                 prog="$found"
@@ -373,15 +381,23 @@ else
             if [[ "$rc" = 124 || "$rc" = 137 ]]; then
                 printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
             fi
-            printf '\nlast lines of its output:\n' >&2
-            tail -n 20 "$out" >&2 || true
+            if (( out_made )); then
+                printf '\nlast lines of its output:\n' >&2
+                tail -n 20 "$out" >&2 || true
+            else
+                printf '\nits output is above on stderr\n' >&2
+            fi
             reported_output=1
         fi
         if [[ -z "$prog" ]]; then
             echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
             if [[ -z "$reported_output" ]]; then
-                printf 'last lines of its output:\n' >&2
-                tail -n 20 "$out" >&2 || true
+                if (( out_made )); then
+                    printf 'last lines of its output:\n' >&2
+                    tail -n 20 "$out" >&2 || true
+                else
+                    printf 'its output is above on stderr\n' >&2
+                fi
             fi
             if (( out_made )); then
                 rm -f "$out"
