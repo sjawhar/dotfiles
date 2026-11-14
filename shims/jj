@@ -1,16 +1,19 @@
 #!/bin/bash
-# jj-lock-shim: every workspace `jj workspace add` creates in a colocated repo gets
-# its git worktree locked. From inside an agent box every other box's workspace
-# path looks missing, and an unlocked registration under <store>/.git/worktrees/
-# can disappear (AGENTC-431); a locked one survives, and `jj workspace forget`
-# still removes it. In an agent session it refuses `jj git push --deleted`, refuses
-# a push whose plan adds to a remote a bookmark whose name starts with a person
+# jj-lock-shim: every workspace `jj workspace add` creates in a colocated repo
+# gets its git worktree locked. This shim also refuses listed leak terms in the
+# diffs and explicit or editor-written descriptions of commit, ci, describe,
+# desc and new. From inside an agent box every other box's workspace path looks
+# missing, and an unlocked registration under <store>/.git/worktrees/ can
+# disappear (AGENTC-431); a locked one survives, and `jj workspace forget` still
+# removes it. In an agent session it refuses `jj git push --deleted`, refuses a
+# push whose plan adds to a remote a bookmark whose name starts with a person
 # token (scripts/person-branch-guard), and checks outgoing GitHub pushes with the
-# shared public leak check. Outside one it runs the same check on `jj git push`
-# wherever this machine has the check
-# installed (dispatch://BET-706), unless DOTFILES_JJ_NO_LEAK_CHECK=1. Where
-# scripts/omp-session-trailer says no, it drops the session's Omp-Session trailer.
-# Everything else goes straight to the real jj.
+# shared public leak check. Every `jj git push`
+# also dry-runs each destination and scans a public or unreadable GitHub
+# destination's outgoing commits for listed leak terms before that existing
+# gate; a person's DOTFILES_JJ_NO_LEAK_CHECK=1 skips only the public check.
+# Where scripts/omp-session-trailer says no, it drops the session's
+# Omp-Session trailer. Everything else goes straight to the real jj.
 set -euo pipefail
 
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
@@ -121,12 +124,12 @@ find_leak_check() {
 }
 # Who the push gate runs for: `agent` in an agent session; `person` outside one, on a machine with the check
 # installed and DOTFILES_JJ_NO_LEAK_CHECK not 1; empty otherwise. A person's own `jj git push` from a terminal
-# reaches no git hook (jj runs git with --no-verify) and no other gate (shims/git checks only agent sessions),
-# so where the check is installed this shim checks it (Sami, dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5:
-# "Add a hook somehow to my devbox for these leaks"). A machine without the check (a laptop) is unchanged, and
-# DOTFILES_JJ_NO_LEAK_CHECK=1 skips it for one command, as `git push --no-verify` does for git. In an agent
-# session that variable is ignored and the rule is as before: without a check only a confirmed-private
-# destination passes.
+# reaches no ordinary git hook (jj runs git with --no-verify) and no other public-check gate: shims/git installs
+# the encrypted term hook but preserves this public-check decision. So where the check is installed this shim checks
+# it (Sami, dispatch://BET-64/ask/0b96691d-1104-4a08-bda7-e544a32215b5: "Add a hook somehow to my devbox for these
+# leaks"). A machine without the check (a laptop) is unchanged, and DOTFILES_JJ_NO_LEAK_CHECK=1 skips it for one
+# command, as `git push --no-verify` does for git. In an agent session that variable is ignored and the rule is as
+# before: without a check only a confirmed-private destination passes.
 _gate=""
 if agent_context; then
     _gate=agent
@@ -140,49 +143,183 @@ push_refuse() {
         printf 'error: jj shim: to push this one command without the public leak check, run it with DOTFILES_JJ_NO_LEAK_CHECK=1.\n' >&2
     exit 1
 }
-# Locate the subcommand past jj's global options, same approach as shims/git's
-# search for `worktree`.
+push_term_refuse() {
+    printf 'error: jj shim: %s\n' "$@" >&2
+    exit 1
+}
+# alias_refuse SUBJECT: an alias the shim cannot resolve may be a push, so the command is refused; where the push
+# gate runs, as push_refuse refuses.
+alias_refuse() {
+    [[ -z "$_gate" ]] || push_refuse "$1. Nothing was pushed."
+    printf 'jj shim: %s. Nothing was changed.\n' "$1" >&2
+    exit 1
+}
 _pargs=("$@")
+# jj 0.46 global options from `jj --help`. Each value is its syntax and
+# canonical name. jj_global_at() is the only reader for this grammar.
+declare -A jj_global_options=(
+    [-R]='value|--repository'
+    [--repository]='value|--repository'
+    [--at-operation]='value|--at-operation'
+    [--at-op]='value|--at-operation'
+    [--color]='value|--color'
+    [--config]='value|--config'
+    [--config-file]='value|--config-file'
+    [--ignore-working-copy]='no-value|--ignore-working-copy'
+    [--no-integrate-operation]='no-value|--no-integrate-operation'
+    [--ignore-immutable]='no-value|--ignore-immutable'
+    [--debug]='no-value|--debug'
+    [--quiet]='no-value|--quiet'
+    [--no-pager]='no-value|--no-pager'
+    [-h]='stop|--help'
+    [--help]='stop|--help'
+    [-V]='stop|--version'
+    [--version]='stop|--version'
+)
+
+# Read one jj global at an index in _pargs. A success sets its canonical name,
+# value and word count. -R accepts both attached forms, and -R=PATH means PATH.
+jj_global_at() {
+    local index="${1:-0}" option name entry syntax count=${#_pargs[@]}
+    _jj_global_name=""
+    _jj_global_value=""
+    _jj_global_size=0
+    ((index < count)) || return 1
+    option="${_pargs[index]}"
+    name="$option"
+    entry="${jj_global_options[$name]:-}"
+    if [[ -z "$entry" && "$option" == -R?* ]]; then
+        name=-R
+        entry="${jj_global_options[$name]:-}"
+    elif [[ -z "$entry" && "$option" == *=* ]]; then
+        name="${option%%=*}"
+        entry="${jj_global_options[$name]:-}"
+    fi
+    [[ -n "$entry" ]] || return 1
+    IFS='|' read -r syntax _jj_global_name <<< "$entry"
+    case "$syntax" in
+        no-value | stop)
+            [[ "$option" == "$name" ]] || return 1
+            _jj_global_size=1
+            ;;
+        value)
+            if [[ "$option" == "$name" ]]; then
+                ((index + 1 < count)) || return 1
+                _jj_global_value="${_pargs[index + 1]}"
+                _jj_global_size=2
+            elif [[ "$name" == -? ]]; then
+                _jj_global_value="${option#"$name"}"
+                _jj_global_value="${_jj_global_value#=}"
+                _jj_global_size=1
+            elif [[ "$option" == "$name="* ]]; then
+                _jj_global_value="${option#*=}"
+                _jj_global_size=1
+            else
+                return 1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# Locate a subcommand past jj 0.46's global options. Call it with the first
+# token to inspect, so nested commands use the same table.
 command_index() {
-    _pi=0
+    _pi="${1:-0}"
     while ((_pi < ${#_pargs[@]})); do
+        if jj_global_at "$_pi"; then
+            case "$_jj_global_name" in
+                --help | --version) return ;;
+            esac
+            ((_pi += _jj_global_size))
+            continue
+        fi
         case "${_pargs[_pi]}" in
-            -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
-            -*) _pi=$((_pi + 1)) ;;
+            --) _pi=$((_pi + 1)); break ;;
+            -*) break ;;
             *) break ;;
         esac
     done
 }
+
+# Return the last -R value before --. Every other global value is skipped by
+# jj_global_at(), so it cannot be mistaken for a repository path.
+repository_option() {
+    local index=0 result=""
+    while ((index < ${#_pargs[@]})); do
+        [[ "${_pargs[index]}" == -- ]] && break
+        if jj_global_at "$index"; then
+            [[ "$_jj_global_name" != --repository ]] || result="$_jj_global_value"
+            ((index += _jj_global_size))
+        else
+            ((index += 1))
+        fi
+    done
+    printf '%s' "$result"
+}
+
+# Resolve a repository argument as trailer_on() does, returning the workspace
+# root above it. A path outside a workspace stays as its normalized path.
+workspace_root() {
+    local d="${1:-$PWD}" original
+    [[ "$d" == /* ]] || d="$PWD/$d"
+    d="$(realpath -m -- "$d")"
+    original="$d"
+    while [[ ! -d "$d/.jj" ]]; do
+        [[ "$d" != / ]] || { printf '%s' "$original"; return 0; }
+        d="${d%/*}"
+        [[ -n "$d" ]] || d=/
+    done
+    printf '%s' "$d"
+}
+
 command_index
-# Expands the command's aliases as jj will, so the push gate sees the push. A builtin as the first word (any but `git`
-# is no push) needs no alias work: the loop returns before reading the aliases. An agent session keeps its cap of 8
-# levels. A person's command is followed up to 64 levels (round 8b: deeper aliases are legitimate) and, since the shim
-# cannot prove an alias it could not resolve is not a push (round 8c), it refuses past that, or when the aliases cannot
-# be read or decoded, as the agent path does; the refusal names DOTFILES_JJ_NO_LEAK_CHECK=1 (push_refuse). One case is
-# left to jj: a cycle (an alias name seen twice in one expansion), which jj refuses itself ("Recursive alias
-# definition"), running nothing; the gate is dropped so jj gives its own error.
+if [[ "${DOTFILES_JJ_SHIM_READ_GLOBALS:-}" == 1 ]]; then
+    _jj_probe_command=""
+    if ((_pi < ${#_pargs[@]})) && [[ "${_pargs[_pi]}" != -* ]]; then
+        _jj_probe_command="${_pargs[_pi]}"
+    fi
+    _jj_probe_index=0
+    while ((_jj_probe_index < ${#_pargs[@]})); do
+        if jj_global_at "$_jj_probe_index"; then
+            case "$_jj_global_name" in
+                --help | --version) _jj_probe_command="" ;;
+            esac
+            ((_jj_probe_index += _jj_global_size))
+        else
+            ((_jj_probe_index += 1))
+        fi
+    done
+    printf '%s\0%s\0' "$_jj_probe_command" "$(workspace_root "$(repository_option)")"
+    exit 0
+fi
+# Expand aliases for every caller so the checked argv is the argv jj executes.
+# Agents retain the eight-level cap; people get 64 levels and leave a cycle to
+# jj, which reports its recursive-alias error without running the command.
 resolve_aliases() {
-    local name config="" loaded=0 depth cap=8
+    local name config="" loaded=0 depth cap
     local -a alias=()
     local -A seen=()
-    [[ "$_gate" != person ]] || cap=64
+    if [[ "$_gate" == agent ]]; then cap=8; else cap=64; fi
     for ((depth = 0; depth <= cap; depth++)); do
         name="${_pargs[_pi]:-}"
         case "$name" in
-            "" | abandon | absorb | backout | bisect | bookmark | b | commit | ci | config | describe | desc | diff | diffedit | duplicate | edit | evolog | file | fix | gerrit | git | help | interdiff | log | metaedit | new | next | op | operation | parallelize | prev | rebase | redo | resolve | restore | revert | root | show | sign | simplify-parents | sparse | split | squash | status | st | tag | undo | unsign | util | version | workspace) return 0 ;;
+            "" | -h | --help | -V | --version | abandon | absorb | backout | bisect | bookmark | b | commit | ci | config | describe | desc | diff | diffedit | duplicate | edit | evolog | file | fix | gerrit | git | help | interdiff | log | metaedit | new | next | op | operation | parallelize | prev | rebase | redo | resolve | restore | revert | root | show | sign | simplify-parents | sparse | split | squash | status | st | tag | undo | unsign | util | version | workspace) return 0 ;;
         esac
-        ((depth < cap)) || push_refuse "alias expansion exceeds $cap levels. Nothing was pushed."
-        if [[ "$_gate" == person && -n "${seen[$name]:-}" ]]; then
-            _gate=""
+        if ((depth >= cap)); then
+            alias_refuse "alias expansion exceeds $cap levels"
+        fi
+        if [[ "$_gate" != agent && -n "${seen[$name]:-}" ]]; then
             return 0
         fi
         seen[$name]=1
         if ((loaded == 0)); then
             # jj expands aliases in its invocation context BEFORE applying -R
             # or --config/--config-file. Including those here could read a
-            # different alias from the one jj will execute and miss a push.
-            config="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" --no-pager --color=never config list aliases --include-defaults --template 'name ++ " = " ++ value ++ "\n"' 2>/dev/null)" ||
-                push_refuse "cannot read alias configuration for $name. Nothing was pushed."
+            # different alias from the one jj will execute.
+            if ! config="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" --no-pager --color=never config list aliases --include-defaults --template 'name ++ " = " ++ value ++ "\n"' 2>/dev/null)"; then
+                alias_refuse "cannot read alias configuration for $name"
+            fi
             loaded=1
         fi
         # Decode TOML without shell evaluation; NUL delimiters preserve every
@@ -206,18 +343,31 @@ for value in result:
         case "${alias[0]:-}" in
             missing) return 0 ;;
             found) _pargs=("${_pargs[@]:0:_pi}" "${alias[@]:1}" "${_pargs[@]:_pi+1}") ;;
-            *) push_refuse "cannot resolve alias $name. Nothing was pushed." ;;
+            *) alias_refuse "cannot resolve alias $name" ;;
         esac
         command_index
     done
 }
-if [[ "$_gate" == agent ]]; then
-    resolve_aliases
-    if [[ "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
-        for _parg in "${_pargs[@]:_pi+2}"; do
-            [[ "$_parg" == -- ]] && break
-            if [[ "$_parg" == --deleted ]]; then
-                cat >&2 << 'EOF'
+resolve_aliases
+set -- "${_pargs[@]}"
+_jj_git_pi=-1
+if [[ "${_pargs[_pi]:-}" == git ]]; then
+    _jj_outer_pi=$_pi
+    command_index "$((_pi + 1))"
+    _jj_git_pi=$_pi
+    _pi=$_jj_outer_pi
+fi
+if [[ "$_gate" == agent && $_jj_git_pi -ge 0 && "${_pargs[_jj_git_pi]:-}" == push ]]; then
+    _jj_deleted_index=$((_jj_git_pi + 1))
+    while ((_jj_deleted_index < ${#_pargs[@]})); do
+        _parg="${_pargs[_jj_deleted_index]}"
+        [[ "$_parg" == -- ]] && break
+        if jj_global_at "$_jj_deleted_index"; then
+            ((_jj_deleted_index += _jj_global_size))
+            continue
+        fi
+        if [[ "$_parg" == --deleted ]]; then
+            cat >&2 << 'EOF'
 jj shim: `jj git push --deleted` is refused in an agent session.
 --deleted pushes every deleted bookmark and tag in the repo, not just yours —
 there is no per-name form (`jj git push --help`) — so in a checkout shared by
@@ -228,10 +378,10 @@ Delete and push only your own bookmark:
   jj bookmark delete <name>
   jj git push --bookmark <name>
 EOF
-                exit 1
-            fi
-        done
-    fi
+            exit 1
+        fi
+        ((_jj_deleted_index += 1))
+    done
 fi
 
 # The Omp-Session trailer comes from an `omp-attribution-*.toml` overlay in
@@ -250,14 +400,12 @@ fi
 # `git config` read and, where that sets nothing, a `git remote` and a
 # `git rev-parse`; any other command, an alias included, pays it.
 _pre=()
+
 trailer_on() {
-    local d="" repo target="" a prev=""
-    for a in "$@"; do
-        [[ "$a" == -- ]] && break
-        case "$prev" in -R | --repository) d="$a" ;; esac
-        case "$a" in --repository=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
-        prev="$a"
-    done
+    local d="" repo target=""
+    # jj accepts globals after the command, so this shared reader scans the
+    # expanded argv through --.
+    d="$(repository_option)"
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
     d="${d%/}"
@@ -279,13 +427,10 @@ trailer_on() {
     "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" git --git-dir="$target" > /dev/null 2>&1
 }
 git_target() {
-    local d="" repo target="" a prev=""
-    for a in "$@"; do
-        [[ "$a" == -- ]] && break
-        case "$prev" in -R | --repository) d="$a" ;; esac
-        case "$a" in --repository=* | -R=*) d="${a#*=}" ;; -R?*) d="${a#-R}" ;; esac
-        prev="$a"
-    done
+    local d="" repo target=""
+    # jj accepts globals after `git push`, too. This reader skips each global
+    # option's value, so that value cannot be mistaken for a repository key.
+    d="$(repository_option)"
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
     d="${d%/}"
@@ -307,8 +452,10 @@ git_target() {
     printf '%s\n' "$target"
 }
 
+# The leak-term scanner, for the push check below and the commit, describe and new checks after it.
+_jj_scanner="${BASH_SOURCE[0]%/*}/../scripts/leak-terms-check"
 push_gate() {
-    local target out rc=0 a remote="" kind ref action old new url slug check pointer visibility line dry=0
+    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start index dry=0 tag_object
     local zero=0000000000000000000000000000000000000000
     local scripts="${BASH_SOURCE[0]%/*}/../scripts"
     local header='^Changes to push to (.+):$'
@@ -316,10 +463,19 @@ push_gate() {
     local add='^add to ([0-9a-f]+)$' delete='^delete from ([0-9a-f]+)$'
     local move='^move (forward|backward|sideways) from ([0-9a-f]+) to ([0-9a-f]+)$'
     local -a display=() remotes=() adds=()
-    local -A updates=()
-    for a in "${_pargs[@]:_pi+2}"; do
+    local -A updates=() push_urls=()
+    start=$((_jj_git_pi + 1))
+    index=$start
+    while ((index < ${#_pargs[@]})); do
+        a="${_pargs[index]}"
         [[ "$a" == -- ]] && break
-        case "$a" in --help | -h) return 0 ;; --dry-run) dry=1 ;; esac
+        if jj_global_at "$index"; then
+            [[ "$_jj_global_name" != --help ]] || return 0
+            ((index += _jj_global_size))
+            continue
+        fi
+        [[ "$a" != --dry-run ]] || dry=1
+        ((index += 1))
     done
     target="$(git_target "$@")" || push_refuse "cannot find the backing git repository. Nothing was pushed."
     [[ -n "$target" ]] || push_refuse "cannot find the backing git repository. Nothing was pushed."
@@ -347,11 +503,19 @@ push_gate() {
             if [[ "$action" =~ $add ]]; then new="${BASH_REMATCH[1]}"
             elif [[ "$action" =~ $delete ]]; then old="${BASH_REMATCH[1]}"
             elif [[ "$action" =~ $move ]]; then old="${BASH_REMATCH[2]}" new="${BASH_REMATCH[3]}"
-            else push_refuse "cannot parse jj's dry-run update: $line" "Nothing was pushed."
+            else push_refuse "cannot parse a jj dry-run update. Nothing was pushed."
             fi
             if [[ "$new" != "$zero" ]]; then
                 new="$(git --git-dir="$target" rev-parse --verify "$new^{commit}" 2>/dev/null)" ||
                     push_refuse "cannot resolve jj's outgoing commit. Nothing was pushed."
+                # jj's plan names a tag's commit, but jj pushes the backing repository's tag ref, an annotated tag's
+                # object and its message included, so the check reads that object. A ref that names another commit
+                # leaves unknown what jj sends.
+                if [[ "$kind" == tag ]] && tag_object="$(git --git-dir="$target" rev-parse --verify --quiet "refs/tags/$ref" 2>/dev/null)"; then
+                    [[ "$(git --git-dir="$target" rev-parse --verify "$tag_object^{commit}" 2>/dev/null)" == "$new" ]] ||
+                        push_refuse "cannot tell which object jj sends for a tag in the plan. Nothing was pushed."
+                    new="$tag_object"
+                fi
             fi
             if [[ "$old" != "$zero" ]]; then
                 old="$(git --git-dir="$target" rev-parse --verify "$old^{commit}" 2>/dev/null)" ||
@@ -360,13 +524,39 @@ push_gate() {
             if [[ "$kind" == bookmark ]]; then ref="refs/heads/$ref"; else ref="refs/tags/$ref"; fi
             updates["$remote"]+="$ref $new $ref $old"$'\n'
         elif [[ -n "$remote" && "$line" == '  '* ]]; then
-            push_refuse "cannot parse jj's dry-run update: $line" "Nothing was pushed."
+            push_refuse "cannot parse a jj dry-run update. Nothing was pushed."
         fi
     done <<< "$out"
     if ((${#remotes[@]} == 0)); then
         [[ "$out" == *'Nothing changed.'* ]] || push_refuse "jj's dry-run gave no readable push plan. Nothing was pushed."
         return 0
     fi
+    sshcmd="$(git --git-dir="$target" config --get core.sshCommand 2> /dev/null)" || sshcmd=""
+    for remote in "${remotes[@]}"; do
+        urls="$(git --git-dir="$target" remote get-url --push --all "$remote" 2>/dev/null)" ||
+            push_term_refuse "cannot read push remote $remote. Nothing was pushed."
+        [[ -n "$urls" ]] || push_term_refuse "push remote $remote has no URL. Nothing was pushed."
+        push_urls[$remote]="$urls"
+        while IFS= read -r url; do
+            visibility="$(GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-$sshcmd}" "$scripts/github-repo-visibility" "$url" 2> /dev/null)" ||
+                visibility=unknown
+            case "$visibility" in private | internal | not-github) continue ;; esac
+            [[ -n "${updates[$remote]}" ]] || push_term_refuse "jj's dry-run gave no updates for $remote. Nothing was pushed."
+            term_rc=0
+            term_out="$(
+                printf '%s' "${updates[$remote]}" | GIT_DIR="$target" "$_jj_scanner" push --remote "$remote" --url "$url" 2>&1
+                statuses=("${PIPESTATUS[@]}")
+                ((statuses[0] == 0)) || exit "${statuses[0]}"
+                exit "${statuses[1]}"
+            )" || term_rc=$?
+            if ((term_rc)); then
+                while IFS= read -r line; do [[ -z "$line" ]] || printf 'error: %s\n' "$line"; done <<< "$term_out" >&2
+                ((term_rc == 3)) && push_term_refuse "this push to $url holds a listed leak term. Nothing was pushed."
+                push_term_refuse "the leak-term check did not pass, so this push to $url is refused. Nothing was pushed."
+            fi
+        done <<< "$urls"
+    done
+    [[ -n "$_gate" ]] || return 0
     # In an agent session, a bookmark the plan adds to a remote, whose name starts with a person token, is
     # refused before anything is pushed: scripts/person-branch-guard asks the remote whether it holds the name,
     # and prints the refusal with jj's hint. A move or a delete creates nothing and is not sent to it, and
@@ -388,10 +578,7 @@ push_gate() {
     find_leak_check
     check="$_check" pointer="$_pointer"
     for remote in "${remotes[@]}"; do
-        local urls
-        urls="$(git --git-dir="$target" remote get-url --push --all "$remote" 2>/dev/null)" ||
-            push_refuse "cannot read push remote $remote. Nothing was pushed."
-        [[ -n "$urls" ]] || push_refuse "push remote $remote has no URL. Nothing was pushed."
+        # The loop above refused a remote whose URLs it could not read.
         while IFS= read -r url; do
             slug="$("$scripts/github-repo-visibility" --slug "$url")" ||
                 push_refuse "cannot identify push remote $remote. Nothing was pushed."
@@ -410,17 +597,254 @@ push_gate() {
                 push_refuse "the public leak check did not pass (exit $rc). Nothing was pushed."
             fi
             [[ -z "$out" ]] || printf '%s\n' "$out" >&2
-        done <<< "$urls"
+        done <<< "${push_urls[$remote]}"
     done
 }
-# The agent case resolved aliases above, before its --deleted refusal.
-if [[ "$_gate" == person ]]; then resolve_aliases; fi
-if [[ -n "$_gate" && "${_pargs[_pi]:-}" == git && "${_pargs[_pi + 1]:-}" == push ]]; then
+if [[ $_jj_git_pi -ge 0 && "${_pargs[_jj_git_pi]:-}" == push ]]; then
     # Execute the same expanded argv that is checked, not a second alias lookup.
-    set -- "${_pargs[@]}"
     push_gate "$@"
 fi
-# Alias expansion is for the push guards; keep the existing trailer dispatch.
+
+_jj_final_config=()
+_jj_stdin=0
+_jj_stdin_text=""
+_jj_editor=0
+_jj_interactive=0
+_jj_help=0
+_jj_command=""
+_jj_global=()
+# Options after the caller's globals for a diff: --ignore-working-copy once a describe's revset read took the snapshot.
+_jj_diff_options=()
+_jj_positions=()
+_jj_revisions=()
+_jj_messages=()
+_jj_editor_ids=()
+
+jj_scan_refuse() {
+    printf 'jj shim: %s; nothing changed\n' "$1" >&2
+    exit 1
+}
+# jj_scan_diff REVISION PREFIX [FILESETS...]
+jj_scan_diff() {
+    local revision=$1 prefix=$2
+    shift 2
+    local -a statuses filesets=()
+    (($#)) && filesets=(-- "$@")
+    if DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" "${_jj_global[@]}" "${_jj_diff_options[@]}" --no-pager --color=never \
+        diff --git -r "$revision" "${filesets[@]}" | "$_jj_scanner" diff --place-prefix "$prefix"; then
+        statuses=("${PIPESTATUS[@]}")
+    else
+        statuses=("${PIPESTATUS[@]}")
+    fi
+    ((statuses[0] == 0)) || jj_scan_refuse "cannot read the diff for the leak-term check"
+    ((statuses[1] == 0)) || jj_scan_refuse "the leak-term check did not pass"
+}
+jj_scan_message() {
+    local text=$1 place=$2
+    local -a statuses
+    if printf '%s' "$text" | "$_jj_scanner" message --place "$place"; then
+        statuses=("${PIPESTATUS[@]}")
+    else
+        statuses=("${PIPESTATUS[@]}")
+    fi
+    ((statuses[0] == 0)) || jj_scan_refuse "cannot read the message for the leak-term check"
+    ((statuses[1] == 0)) || jj_scan_refuse "the leak-term check did not pass"
+}
+
+# Scan the -m texts as jj joins them: each paragraph ends in a newline, with a blank line between two.
+jj_scan_messages() {
+    local paragraph joined="" completed=0
+    for paragraph in "${_jj_messages[@]}"; do
+        ((completed)) && joined+=$'\n'
+        if [[ -n "$paragraph" && "$paragraph" != *$'\n' ]]; then
+            paragraph+=$'\n'
+        fi
+        joined+="$paragraph"
+        completed=1
+    done
+    jj_scan_message "$joined" "commit message"
+}
+
+jj_enable_editor() {
+    local named preflight ids mode rc=0
+    if ! named="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" "${_jj_global[@]}" --no-pager --color=never config list --include-defaults ui.editor -T 'name ++ "\t" ++ json(value) ++ "\n"')"; then
+        jj_scan_refuse "cannot read jj's configured editor for the leak-term check"
+    fi
+    # Its first line is the ui.editor setting that runs the wrapper, its second the editor jj would run. The
+    # statuses are the scanner's EDITOR_UNREADABLE_EXIT and EDITOR_WRAPPER_EXIT.
+    preflight="$("$_jj_scanner" jj-editor-preflight "$named")" || rc=$?
+    case "$rc" in
+        0) ;;
+        5) jj_scan_refuse "cannot read jj's configured editor for the leak-term check" ;;
+        6) jj_scan_refuse "configured jj editor resolves to leak-terms-check" ;;
+        *) jj_scan_refuse "cannot set the jj editor wrapper for the leak-term check" ;;
+    esac
+    if ((${#_jj_editor_ids[@]} > 1)); then mode=bulk; else mode=single; fi
+    local IFS=,
+    ids="${_jj_editor_ids[*]}"
+    export DOTFILES_JJ_EDITOR="${preflight#*$'\n'}" DOTFILES_JJ_EDITOR_MODE="$mode" DOTFILES_JJ_EDITOR_IDS="$ids"
+    _jj_final_config=(--config "${preflight%%$'\n'*}")
+}
+jj_parse_protected() {
+    local index=0 token after_options=0
+    case "${_pargs[_pi]:-}" in commit | ci | describe | desc | new) _jj_command="${_pargs[_pi]}" ;; *) return 0 ;; esac
+    while ((index < ${#_pargs[@]})); do
+        token="${_pargs[index]}"
+        if ((index == _pi)); then
+            ((index += 1))
+            continue
+        fi
+        if ((after_options)); then
+            case "$_jj_command" in
+                commit | ci) _jj_positions+=("$token") ;;
+                describe | desc) _jj_revisions+=("$token") ;;
+            esac
+            ((index += 1))
+            continue
+        fi
+        if [[ "$token" == -- ]]; then
+            after_options=1
+            ((index += 1))
+            continue
+        fi
+        if jj_global_at "$index"; then
+            case "$_jj_global_name" in
+                --help | --version)
+                    _jj_help=1
+                    return 0
+                    ;;
+            esac
+            _jj_global+=("${_pargs[@]:index:_jj_global_size}")
+            ((index += _jj_global_size))
+            continue
+        fi
+        if ((index < _pi)); then
+            jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
+        fi
+        case "$token" in
+            -m | --message)
+                ((index + 1 < ${#_pargs[@]})) || jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
+                _jj_messages+=("${_pargs[index + 1]}")
+                ((index += 2))
+                continue
+                ;;
+            -m?*) _jj_messages+=("${token:2}"); ((index += 1)); continue ;;
+            --message=*) _jj_messages+=("${token#*=}"); ((index += 1)); continue ;;
+        esac
+        case "$_jj_command" in
+            commit | ci)
+                case "$token" in
+                    -i | --interactive) _jj_interactive=1 ;;
+                    --tool)
+                        ((index + 1 < ${#_pargs[@]})) || jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
+                        _jj_interactive=1
+                        ((index += 2))
+                        continue
+                        ;;
+                    --tool=*) _jj_interactive=1 ;;
+                    --editor) _jj_editor=1 ;;
+                    -*) jj_scan_refuse "cannot read option $token, so the leak-term check cannot run" ;;
+                    *) _jj_positions+=("$token") ;;
+                esac
+                ;;
+            describe | desc)
+                case "$token" in
+                    -r | --revision)
+                        ((index + 1 < ${#_pargs[@]})) || jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
+                        _jj_revisions+=("${_pargs[index + 1]}")
+                        ((index += 2))
+                        continue
+                        ;;
+                    -r?*) _jj_revisions+=("${token:2}") ;;
+                    --revision=*) _jj_revisions+=("${token#*=}") ;;
+                    --stdin) _jj_stdin=1 ;;
+                    --editor) _jj_editor=1 ;;
+                    -*) jj_scan_refuse "cannot read option $token, so the leak-term check cannot run" ;;
+                    *) _jj_revisions+=("$token") ;;
+                esac
+                ;;
+            new)
+                case "$token" in
+                    --no-edit) ;;
+                    -A | -B | -o | -r | --insert-after | --after | --insert-before | --before)
+                        ((index + 1 < ${#_pargs[@]})) || jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
+                        ((index += 2))
+                        continue
+                        ;;
+                    -A?* | -B?* | -o?* | -r?* | --insert-after=* | --after=* | --insert-before=* | --before=*) ;;
+                    -*) jj_scan_refuse "cannot read option $token, so the leak-term check cannot run" ;;
+                esac
+                ;;
+        esac
+        ((index += 1))
+    done
+}
+jj_parse_protected
+if [[ -n "$_jj_command" ]] && ((_jj_help == 0)); then
+    case "$_jj_command" in
+        commit | ci)
+            if ((_jj_interactive)); then
+                jj_scan_diff @ ""
+            else
+                jj_scan_diff @ "" "${_jj_positions[@]}"
+            fi
+            if ((${#_jj_messages[@]} && !_jj_editor)); then jj_scan_messages; fi
+            if ((!${#_jj_messages[@]} || _jj_editor)); then jj_enable_editor; fi
+            ;;
+        describe | desc)
+            ((${#_jj_revisions[@]})) || _jj_revisions=(@)
+            declare -A _jj_scanned=()
+            for _jj_revision in "${_jj_revisions[@]}"; do
+                if ! _jj_ids="$(DOTFILES_JJ_SHIM="$BASHPID $_handed" "$_real" "${_jj_global[@]}" --no-pager --color=never log --no-graph -r "$_jj_revision" -T 'commit_id ++ "\n"')"; then
+                    jj_scan_refuse "cannot resolve revision $_jj_revision for the leak-term check"
+                fi
+                # That read snapshotted the working copy, and the diff of a fixed commit id needs no other.
+                [[ " ${_jj_global[*]} " == *" --ignore-working-copy "* ]] || _jj_diff_options=(--ignore-working-copy)
+                mapfile -t _jj_id_list <<< "$_jj_ids"
+                for _jj_id in "${_jj_id_list[@]}"; do
+                    # A commit two revsets select is read once.
+                    [[ -n "$_jj_id" && -z "${_jj_scanned[$_jj_id]:-}" ]] || continue
+                    _jj_scanned[$_jj_id]=1
+                    _jj_editor_ids+=("${_jj_id:0:12}")
+                    jj_scan_diff "$_jj_id" "commit ${_jj_id:0:12} "
+                done
+            done
+            if ((_jj_stdin)); then
+                # Read whole into memory, never a file (no message is written to disk): a reader that reports
+                # its own status, so a read error refuses instead of reading as an empty description. Bash
+                # drops NUL bytes from a variable, so the reader refuses one (a description is text), and the
+                # trailing sentinel keeps final newlines, which $(...) strips.
+                _jj_stdin_status=0
+                _jj_stdin_text="$(python3 -c '
+import sys
+try:
+    data = sys.stdin.buffer.read()
+except OSError:
+    raise SystemExit(2)
+if b"\0" in data:
+    raise SystemExit(3)
+sys.stdout.buffer.write(data + b"x")
+' 2> /dev/null)" || _jj_stdin_status=$?
+                case "$_jj_stdin_status" in
+                    0) _jj_stdin_text="${_jj_stdin_text%x}" ;;
+                    3) jj_scan_refuse "cannot read a NUL byte in a description from standard input" ;;
+                    *) jj_scan_refuse "cannot read the description from standard input" ;;
+                esac
+                ((!_jj_editor)) && jj_scan_message "$_jj_stdin_text" "commit message"
+            elif ((${#_jj_messages[@]} && !_jj_editor)); then
+                jj_scan_messages
+            fi
+            if ((!${#_jj_messages[@]} && !_jj_stdin || _jj_editor)); then jj_enable_editor; fi
+            ;;
+        new)
+            jj_scan_diff @ ""
+            if ((${#_jj_messages[@]})); then jj_scan_messages; fi
+            ;;
+    esac
+fi
+
+# Alias expansion is complete; keep the existing trailer dispatch on the exact
+# expanded argv that passed the leak-term check.
 _pargs=("$@")
 command_index
 if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
@@ -431,26 +855,80 @@ if [[ ":${JJ_CONFIG:-}:" == *"/omp-attribution-"* ]]; then
             ;;
     esac
 fi
-unset _pargs _pi _parg
 
-_add=0 _prev=""
-for _a in "$@"; do
-    if [[ "$_prev" == workspace && "$_a" == add ]]; then _add=1; break; fi
-    _prev="$_a"
-done
-((_add)) || exec "$_real" "${_pre[@]}" "$@"
+_jj_exec=("$@")
+if ((${#_jj_final_config[@]})); then
+    _jj_exec=()
+    _jj_config_inserted=0
+    for _jj_argument in "$@"; do
+        if [[ "$_jj_argument" == -- && $_jj_config_inserted == 0 ]]; then
+            _jj_exec+=("${_jj_final_config[@]}")
+            _jj_config_inserted=1
+        fi
+        _jj_exec+=("$_jj_argument")
+    done
+    ((_jj_config_inserted)) || _jj_exec+=("${_jj_final_config[@]}")
+fi
+
+if ((_jj_stdin)); then
+    # The bytes checked, through a pipe from a subshell that sets the marker and execs jj; the shim exits with jj's
+    # status.
+    if printf '%s' "$_jj_stdin_text" |
+        (DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"); then
+        _jj_statuses=("${PIPESTATUS[@]}")
+    else
+        _jj_statuses=("${PIPESTATUS[@]}")
+    fi
+    exit "${_jj_statuses[1]}"
+fi
+_add=0
+_add_destination=""
+if [[ "${_pargs[_pi]:-}" == workspace ]]; then
+    _jj_workspace_pi=$_pi
+    command_index "$((_pi + 1))"
+    if [[ "${_pargs[_pi]:-}" == add ]]; then
+        _add=1
+        _jj_add_index=$((_pi + 1))
+        while ((_jj_add_index < ${#_pargs[@]})); do
+            _jj_add_option="${_pargs[_jj_add_index]}"
+            if jj_global_at "$_jj_add_index"; then
+                case "$_jj_global_name" in
+                    --help | --version) break ;;
+                esac
+                ((_jj_add_index += _jj_global_size))
+                continue
+            fi
+            case "$_jj_add_option" in
+                --name | -r | --revision | -m | --message | --sparse-patterns)
+                    _jj_add_index=$((_jj_add_index + 2))
+                    ;;
+                --name=* | -r?* | --revision=* | -m?* | --message=* | --sparse-patterns=* | --colocate | --no-colocate)
+                    _jj_add_index=$((_jj_add_index + 1))
+                    ;;
+                --) _add_destination="${_pargs[_jj_add_index + 1]:-}"; break ;;
+                -*) break ;;
+                *) _add_destination="$_jj_add_option"; break ;;
+            esac
+        done
+    fi
+    _pi=$_jj_workspace_pi
+fi
+unset _pargs _pi _parg
+((_add)) || exec "$_real" "${_pre[@]}" "${_jj_exec[@]}"
 
 _err="$(mktemp)"
 trap 'rm -f "$_err"' EXIT
 _rc=0
 # In a subshell that names its own pid in the marker, since a hand-back re-enters
 # this shim in that pid.
-(DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec "$_real" "$@") 2> "$_err" || _rc=$?
+(DOTFILES_JJ_SHIM="$BASHPID $_handed"; exec "$_real" "${_jj_exec[@]}") 2> "$_err" || _rc=$?
 cat "$_err" >&2
 ((_rc == 0)) || exit "$_rc"
 
 # jj names the new workspace relative to the current directory.
 _rel="$(sed -n 's/^Created workspace in "\(.*\)"$/\1/p' "$_err" | tail -1)"
+_rel="${_rel:-$_add_destination}"
+# No destination (a help request, or one the reader could not find) is nothing to lock.
 [[ -n "$_rel" ]] || exit 0
 _dest="$(realpath -m -- "$_rel")"
 [[ -f "$_dest/.git" ]] || exit 0

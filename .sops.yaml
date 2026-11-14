@@ -13,7 +13,8 @@ creation_rules:
   # and a machine key listed after the YubiKey makes that machine wait on the
   # card (through the pcsc tunnel on a devbox) on every agent-tier read before
   # its own key is tried. Add a new machine key above the YubiKey line, then run
-  # `sops updatekeys secrets.env`, which writes recipients in this order.
+  # `sops updatekeys secrets.env` and `sops updatekeys leak-terms.sops.yaml`, which
+  # write recipients in this order.
   - age:
       - age1jf63nvl6uenkwalyysa5hqv0k7ks5k6mjggqxlj7fwwp0gnkfvxszyxd2q
       - age1fqk0qjphxdtglmqgkc2aedy5edn3jykwxkffnygsg5wkzaf5vcqshyajyp

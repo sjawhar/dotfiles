@@ -6848,6 +6848,25 @@ move_to_fg() {
     return "$rc"
 }
 
+# The first git on PATH that is not shims/git (its header names git-worktree-shim), as shims/git's
+# own real_git finds it; else plain `git`. A move pushes a tree's commits to the same tree on another
+# box over ssh (`<user>@<host>:<path>`), never to GitHub, so the shims' public-push leak-term check
+# does not apply; through the shim the ssh URL reads as of unknown visibility and the push would be
+# scanned and could be refused. The push already runs with --no-verify, so no leak check ran before.
+move_real_git() {
+    local IFS=':' dir candidate header
+    for dir in $PATH; do
+        candidate="$dir/git"
+        [[ -f "$candidate" && -x "$candidate" ]] || continue
+        header=""
+        IFS= read -r -n 512 -d '' header < "$candidate" || true
+        [[ "$header" == *git-worktree-shim* ]] && continue
+        printf '%s\n' "$candidate"
+        return
+    done
+    printf 'git\n'
+}
+
 # One rsync of a move. A file that the session writes while the copy walks it is normal - a
 # session at work has temporary files (`...packet.json_.gstmp`, an editor's `.#file`) - and rsync
 # ends with 24 ("some files vanished"). That is NOT a failure: the pass after the hang-up copies
@@ -7648,7 +7667,7 @@ move_to_git_native_prepush() {
         fi
         if (( ${#refs[@]} == 0 )); then
             "$log" "the branches of $common are on $target already ($((SECONDS - start))s)"
-        elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git --git-dir="$common" push --quiet --no-verify \
+        elif GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg "$(move_real_git)" --git-dir="$common" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "${refs[@]}" >/dev/null 2>&1; then
             "$log" "pushed ${#refs[@]} branch(es) of $common before the hang-up ($((SECONDS - start))s)"
             mkdir -p "${stamp%/*}" && : >"$stamp"
@@ -7684,7 +7703,7 @@ move_to_git_native_push() {
         if move_commit_on_origin "$w" "$head" \
             && move_remote "$target" "git --git-dir=$(printf '%q' "$common") fetch --quiet --no-write-fetch-head origin $(printf '%q' "$head"):$(printf '%q' "$tag")" </dev/null; then
             :
-        elif ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg git -C "$w" push --quiet --no-verify \
+        elif ! GIT_SSH_COMMAND="${MOVE_TO_SSH[*]}" move_to_fg "$(move_real_git)" -C "$w" push --quiet --no-verify \
             "$MOVE_TO_USER@$target:$common" "+HEAD:$tag" 2>&1; then
             MOVE_TO_WHY="git push of $w to $target:$common failed"
             return 1

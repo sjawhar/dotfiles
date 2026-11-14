@@ -1,0 +1,1617 @@
+#!/usr/bin/env python3
+"""Check diffs, commit messages, and outgoing commits against the encrypted leak-term list."""
+from __future__ import annotations
+
+import argparse
+import codecs
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import threading
+import sys
+from functools import lru_cache
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, Mapping, Sequence
+
+
+LIST_EXIT = 2
+FOUND_EXIT = 3
+TEXT_EXIT = 4
+# jj-editor-preflight: jj's editor configuration cannot be read, or it names this wrapper.
+EDITOR_UNREADABLE_EXIT = 5
+EDITOR_WRAPPER_EXIT = 6
+EDITOR_GUARD = "DOTFILES_JJ_EDITOR_WRAPPER_ACTIVE"
+SCISSORS = "------------------------ >8 ------------------------"
+
+
+class ListError(Exception):
+    """The encrypted term list could not be read."""
+
+
+class TextError(Exception):
+    """The caller's diff or message could not be read."""
+
+def newline_lines(text: str) -> list[str]:
+    """Split only on the newline byte used by git and jj diff formats."""
+    lines = text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def passwd_home() -> Path:
+    """Return the home directory from passwd, independent of a caller's HOME."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def term_file(environment: Mapping[str, str]) -> Path:
+    configured = environment.get("DOTFILES_LEAK_TERMS_FILE")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent.parent / "leak-terms.sops.yaml"
+
+
+def sops_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Prepare sops's environment without changing the caller's process environment."""
+    result = dict(environment)
+    sops_home = result.get("DOTFILES_LEAK_TERMS_SOPS_HOME")
+    if sops_home:
+        result["HOME"] = sops_home
+        result["XDG_CONFIG_HOME"] = sops_home
+        return result
+
+    key_variables = ("SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD")
+    if any(result.get(name) for name in key_variables):
+        return result
+
+    home = Path(result.get("HOME", str(passwd_home())))
+    config_home = Path(result.get("XDG_CONFIG_HOME", str(home / ".config")))
+    configured_key = config_home / "sops" / "age" / "keys.txt"
+    fallback_key = passwd_home() / ".config" / "sops" / "age" / "keys.txt"
+    if not configured_key.exists() and fallback_key.exists():
+        result["SOPS_AGE_KEY_FILE"] = str(fallback_key)
+    return result
+
+
+def list_error(message: str) -> ListError:
+    return ListError(f"leak terms: {message}")
+
+
+def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
+    """Decrypt and parse the list, retaining every term only in process memory."""
+    environment = dict(os.environ if environment is None else environment)
+    source = term_file(environment)
+    if not source.is_file():
+        raise list_error("the term list is missing; run scripts/dotfiles-sync local")
+
+    try:
+        completed = subprocess.run(
+            ["sops", "--decrypt", "--output-type", "json", str(source)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=sops_environment(environment),
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise list_error("sops is not on PATH; install sops with mise") from error
+    except subprocess.TimeoutExpired as error:
+        raise list_error("sops timed out while reading the term list; fix it with sops edit leak-terms.sops.yaml") from error
+    except OSError as error:
+        raise list_error("sops could not read the term list; fix it with sops edit leak-terms.sops.yaml") from error
+
+    if completed.returncode == 128:
+        raise list_error(
+            "no age key can decrypt the term list; add this machine's age key to .sops.yaml "
+            "above the YubiKey line and run sops updatekeys leak-terms.sops.yaml on a machine that can decrypt the list"
+        )
+    if completed.returncode != 0:
+        raise list_error("the term list is not valid sops; fix it with sops edit leak-terms.sops.yaml")
+
+    try:
+        decoded = json.loads(completed.stdout.decode("utf-8", errors="surrogateescape"))
+        terms_value = decoded["terms"] if isinstance(decoded, dict) else None
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise list_error("the term list is not a block of lines; fix it with sops edit leak-terms.sops.yaml") from error
+    if not isinstance(terms_value, str):
+        raise list_error("the term list is not a block of lines; fix it with sops edit leak-terms.sops.yaml")
+    terms = [line.strip() for line in terms_value.splitlines()]
+    terms = [line for line in terms if line and not line.startswith("#")]
+    if not terms:
+        raise list_error("the term list holds no term; add a term with sops edit leak-terms.sops.yaml")
+    return TermMatcher(terms)
+
+
+@dataclass(frozen=True)
+class Span:
+    start: int
+    end: int
+
+
+class TermMatcher:
+    """Case-folded, whitespace-flexible matching while keeping source-string positions."""
+
+    def __init__(self, terms: Sequence[str]):
+        patterns: list[re.Pattern[str]] = []
+        seen: set[str] = set()
+        for term in terms:
+            pieces = re.split(r"[ \t]+", term.casefold())
+            pattern = r"[ \t]+".join(re.escape(piece) for piece in pieces)
+            if pattern and pattern not in seen:
+                patterns.append(re.compile(pattern))
+                seen.add(pattern)
+        self._patterns = patterns
+
+    @staticmethod
+    def _origins(text: str) -> list[int]:
+        """The index in TEXT of each character of text.casefold(): str.casefold folds each character on its own."""
+        origins: list[int] = []
+        for index, character in enumerate(text):
+            origins.extend([index] * len(character.casefold()))
+        return origins
+
+    def spans(self, text: str) -> list[Span]:
+        folded = text.casefold()
+        matches = [match for pattern in self._patterns for match in pattern.finditer(folded) if match.start() != match.end()]
+        if not matches:
+            return []
+        # Only a text that holds a term pays for the per-character offset map.
+        origins = self._origins(text)
+        found = [Span(origins[match.start()], origins[match.end() - 1] + 1) for match in matches]
+        return sorted(found, key=lambda span: (span.start, span.end))
+
+
+def c_escape(text: str) -> str:
+    escaped: list[str] = []
+    for character in text:
+        if character == "\\":
+            escaped.append("\\\\")
+        elif character == "\n":
+            escaped.append("\\n")
+        elif character == "\r":
+            escaped.append("\\r")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif ord(character) < 32 or ord(character) == 127:
+            escaped.append(f"\\x{ord(character):02x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
+
+
+def mask_path(path: str, spans: Sequence[Span]) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    for span in spans:
+        if span.end <= cursor:
+            continue
+        if span.start < cursor:
+            cursor = max(cursor, span.end)
+            continue
+        pieces.append(path[cursor:span.start])
+        pieces.append("<listed term>")
+        cursor = span.end
+    pieces.append(path[cursor:])
+    return c_escape("".join(pieces))
+
+
+def decode_c_quoted(value: str, start: int = 0) -> tuple[str, int] | None:
+    """Decode Git's C-style quoted filename and return the next character index."""
+    if start >= len(value) or value[start] != '"':
+        return None
+    raw = bytearray()
+    index = start + 1
+    while index < len(value):
+        character = value[index]
+        if character == '"':
+            return raw.decode("utf-8", errors="surrogateescape"), index + 1
+        if character != "\\":
+            raw.extend(character.encode("utf-8", errors="surrogateescape"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(value):
+            return None
+        escaped = value[index]
+        simple = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+        if escaped in simple:
+            raw.extend(simple[escaped].encode())
+            index += 1
+        elif escaped in {'"', "\\"}:
+            raw.extend(escaped.encode())
+            index += 1
+        elif escaped in "01234567":
+            digits = escaped
+            index += 1
+            for _ in range(2):
+                if index < len(value) and value[index] in "01234567":
+                    digits += value[index]
+                    index += 1
+                else:
+                    break
+            raw.append(int(digits, 8))
+        else:
+            raw.extend(escaped.encode("utf-8", errors="surrogateescape"))
+            index += 1
+    return None
+
+
+def git_header_candidates(header: str) -> list[tuple[str, str]]:
+    """Return every syntactically possible old/new path pair in a Git diff header."""
+    value = header.removeprefix("diff --git ")
+    first = decode_c_quoted(value)
+    if first:
+        old_path, index = first
+        if index >= len(value) or value[index] != " ":
+            return []
+        second = decode_c_quoted(value, index + 1)
+        if not second or second[1] != len(value):
+            return []
+        new_path, _ = second
+        if old_path.startswith("a/") and new_path.startswith("b/"):
+            return [(old_path[2:], new_path[2:])]
+        return []
+
+    if not value.startswith("a/"):
+        return []
+    candidates: list[tuple[str, str]] = []
+    for delimiter in range(2, len(value)):
+        if value.startswith(" b/", delimiter):
+            candidates.append((value[2:delimiter], value[delimiter + 3:]))
+    return candidates
+
+
+def parse_git_header(candidates: Sequence[tuple[str, str]]) -> tuple[str, str] | None:
+    """Extract the unchanged path pair only when the raw header's candidates prove it."""
+    equal = [(old_path, new_path) for old_path, new_path in candidates if old_path == new_path]
+    if len(equal) == 1:
+        return equal[0]
+    return None
+
+
+def parse_diff_path(value: str, prefix: str) -> str | None:
+    """Read one side of a --- or +++ line without accepting a timestamp."""
+    if value == "/dev/null":
+        return None
+    quoted = decode_c_quoted(value)
+    if quoted:
+        path, index = quoted
+        if index != len(value) and not value[index:].startswith("\t"):
+            return None
+    else:
+        path = value.split("\t", 1)[0]
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix):]
+
+
+def parse_extended_path(value: str) -> str | None:
+    """Read a path that fills the rest of its line: a rename or copy extended header, or a combined diff header."""
+    quoted = decode_c_quoted(value)
+    if quoted:
+        path, index = quoted
+        return path if index == len(value) else None
+    return value or None
+
+
+def parse_combined_header(header: str) -> str | None:
+    """Extract the sole path reported by diff --cc and diff --combined."""
+    if header.startswith("diff --cc "):
+        return parse_extended_path(header.removeprefix("diff --cc "))
+    if header.startswith("diff --combined "):
+        return parse_extended_path(header.removeprefix("diff --combined "))
+    return None
+
+
+def parse_range(value: str) -> tuple[int, int] | None:
+    matched = re.fullmatch(r"(\d+)(?:,(\d+))?", value)
+    if not matched:
+        return None
+    return int(matched.group(1)), int(matched.group(2) or "1")
+
+
+def parse_unified_hunk(line: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    matched = re.fullmatch(r"@@ -([^ ]+) \+([^ ]+) @@(?:.*)", line)
+    if not matched:
+        return None
+    old_range = parse_range(matched.group(1))
+    new_range = parse_range(matched.group(2))
+    if old_range is None or new_range is None:
+        return None
+    return old_range, new_range
+
+
+def parse_combined_hunk(line: str) -> tuple[list[tuple[int, int]], tuple[int, int]] | None:
+    matched = re.fullmatch(r"(@{3,}) (.+) \1(?:.*)", line)
+    if not matched:
+        return None
+    prefix = matched.group(1)
+    values = matched.group(2).split()
+    parent_values = [value[1:] for value in values if value.startswith("-")]
+    result_values = [value[1:] for value in values if value.startswith("+")]
+    if len(prefix) - 1 != len(parent_values) or len(result_values) != 1:
+        return None
+    parents = [parse_range(value) for value in parent_values]
+    result = parse_range(result_values[0])
+    if result is None or any(value is None for value in parents):
+        return None
+    return [value for value in parents if value is not None], result
+
+
+def header_end(lines: Sequence[str], start: int) -> int:
+    """Find the next metadata line after a raw jj diff header.
+
+    jj leaves filenames raw in ``diff --git`` headers, including literal newlines. Each extended header line git and
+    jj print after ``diff --git`` is a marker; after ``diff --cc`` git prints ``index`` first, so its ``mode`` line
+    needs none.
+    """
+    markers = ("diff --git ", "diff --cc ", "diff --combined ", "old mode ", "new mode ", "deleted file mode ",
+               "new file mode ", "similarity index ", "dissimilarity index ", "rename from ", "rename to ",
+               "copy from ", "copy to ", "index ", "--- ", "+++ ", "Binary files ", "GIT binary patch", "@@ ", "@@@ ")
+    index = start + 1
+    while index < len(lines) and not lines[index].startswith(markers):
+        index += 1
+    return index
+
+
+@dataclass
+class FileRecord:
+    """One file of a diff: the paths its header proves, what its extended headers say, and its shown path."""
+
+    path: str | None
+    old_path: str | None
+    candidates: list[tuple[str, str]]
+    resolved: bool
+    deleted: bool = False
+    new_file: bool = False
+    rename_from: str | None = None
+    rename_to: str | None = None
+    shown: str | None = None
+
+
+def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
+    lines = newline_lines(text)
+    findings: list[str] = []
+    current: FileRecord | None = None
+
+    def display_path(record: FileRecord, path_spans: Sequence[Span] | None = None) -> str:
+        """The result path as a finding shows it, built once per path."""
+        if record.shown is None:
+            assert record.path is not None
+            record.shown = mask_path(record.path, matcher.spans(record.path) if path_spans is None else path_spans)
+        return record.shown
+
+    def finish(record: FileRecord | None) -> None:
+        if record is None:
+            return
+        if not record.resolved:
+            raise TextError("cannot resolve a result path from the diff header")
+        if record.deleted:
+            return
+        assert record.path is not None
+        path_spans = matcher.spans(record.path)
+        if path_spans:
+            place = place_prefix + display_path(record, path_spans)
+            findings.extend(place for _ in path_spans)
+
+    def begin(header: str, kind: str) -> FileRecord:
+        if kind == "combined":
+            path = parse_combined_header(header)
+            return FileRecord(path, path, [], path is not None)
+        candidates = git_header_candidates(header)
+        pair = parse_git_header(candidates)
+        return FileRecord(pair[1] if pair else None, pair[0] if pair else None, candidates, pair is not None)
+
+    def resolve_rename(record: FileRecord) -> None:
+        if record.rename_from is None or record.rename_to is None:
+            return
+        pair = (record.rename_from, record.rename_to)
+        if record.candidates.count(pair) == 1:
+            record.old_path, record.path = pair
+            record.resolved = True
+            record.shown = None
+
+    def add_content(record: FileRecord, line_number: int, content: str) -> None:
+        if not record.resolved:
+            raise TextError("cannot resolve a result path from the diff header")
+        content_spans = matcher.spans(content)
+        if content_spans:
+            place = f"{place_prefix}{display_path(record)}:{line_number}"
+            findings.extend(place for _ in content_spans)
+
+    def consume_unified(start: int, record: FileRecord) -> int:
+        parsed = parse_unified_hunk(lines[start])
+        if parsed is None:
+            raise TextError("malformed unified hunk")
+        (old_line, old_count), (new_line, new_count) = parsed
+        old_seen = new_seen = 0
+        index = start + 1
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith(("diff --git ", "diff --cc ", "diff --combined ", "@@ ", "@@@ ")):
+                break
+            if line.startswith("\\ No newline at end of file"):
+                index += 1
+                continue
+            if not line or line[0] not in "+- ":
+                break
+            marker, content = line[0], line[1:]
+            if marker in "- ":
+                old_seen += 1
+            if marker in "+ ":
+                new_seen += 1
+                if marker == "+":
+                    add_content(record, new_line, content)
+                new_line += 1
+            if old_seen > old_count or new_seen > new_count:
+                raise TextError("malformed unified hunk count")
+            index += 1
+        if old_seen != old_count or new_seen != new_count:
+            raise TextError("malformed unified hunk count")
+        return index
+
+    def consume_combined(start: int, record: FileRecord) -> int:
+        parsed = parse_combined_hunk(lines[start])
+        if parsed is None:
+            raise TextError("malformed combined hunk")
+        parents, (new_line, new_count) = parsed
+        seen = [0] * len(parents)
+        new_seen = 0
+        index = start + 1
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith(("diff --git ", "diff --cc ", "diff --combined ", "@@ ", "@@@ ")):
+                break
+            if line.startswith("\\ No newline at end of file"):
+                index += 1
+                continue
+            if len(line) < len(parents) or any(marker not in "+- " for marker in line[:len(parents)]):
+                break
+            marks, content = line[:len(parents)], line[len(parents):]
+            for parent, marker in enumerate(marks):
+                if marker == "-" or ("-" not in marks and marker == " "):
+                    seen[parent] += 1
+            result_present = "-" not in marks
+            if result_present:
+                new_seen += 1
+                if all(marker == "+" for marker in marks):
+                    add_content(record, new_line, content)
+                new_line += 1
+            if any(seen[index] > parents[index][1] for index in range(len(parents))) or new_seen > new_count:
+                raise TextError("malformed combined hunk count")
+            index += 1
+        if any(seen[index] != parents[index][1] for index in range(len(parents))) or new_seen != new_count:
+            raise TextError("malformed combined hunk count")
+        return index
+
+    def path_line_end(start: int, marker: str, prefix: str, expected_path: str | None) -> int | None:
+        if expected_path is None:
+            return start + 1 if lines[start] == f"{marker}/dev/null" else None
+        if "\n" not in expected_path:
+            parsed = parse_diff_path(lines[start].removeprefix(marker), prefix)
+            return start + 1 if parsed == expected_path else None
+        expected = f"{prefix}{expected_path}"
+        pieces = expected.split("\n")
+        if lines[start] != f"{marker}{pieces[0]}":
+            return None
+        if any(start + offset >= len(lines) or lines[start + offset] != piece for offset, piece in enumerate(pieces[1:], 1)):
+            return None
+        return start + len(pieces)
+
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("diff --git "):
+            finish(current)
+            end = header_end(lines, index)
+            current = begin("\n".join(lines[index:end]), "git")
+            index = end
+            continue
+        if line.startswith(("diff --cc ", "diff --combined ")):
+            finish(current)
+            end = header_end(lines, index)
+            current = begin("\n".join(lines[index:end]), "combined")
+            index = end
+            continue
+        if current is None:
+            if line.startswith("@@"):
+                raise TextError("hunk has no file header")
+            index += 1
+            continue
+        if line.startswith("new file mode "):
+            current.new_file = True
+        elif line.startswith("deleted file mode "):
+            if not current.resolved:
+                raise TextError("cannot resolve a result path from the diff header")
+            current.deleted = True
+        elif line.startswith(("rename from ", "copy from ")):
+            current.rename_from = parse_extended_path(line.split(" ", 2)[2])
+            resolve_rename(current)
+        elif line.startswith(("rename to ", "copy to ")):
+            current.rename_to = parse_extended_path(line.split(" ", 2)[2])
+            resolve_rename(current)
+        elif line.startswith("--- "):
+            end = path_line_end(index, "--- ", "a/", current.old_path)
+            if not current.resolved or (end is None and not (current.new_file and line == "--- /dev/null")):
+                raise TextError("a source path does not match the diff header")
+            if end is not None:
+                index = end
+                continue
+        elif line.startswith("+++ "):
+            end = path_line_end(index, "+++ ", "b/", current.path)
+            if not current.resolved or (end is None and not (current.deleted and line == "+++ /dev/null")):
+                raise TextError("a result path does not match the diff header")
+            if end is not None:
+                index = end
+                continue
+        elif line.startswith("@@@"):
+            index = consume_combined(index, current)
+            continue
+        elif line.startswith("@@"):
+            index = consume_unified(index, current)
+            continue
+        index += 1
+    finish(current)
+    return findings
+
+
+def cleaned_message(text: str, cleanup: str, comment_char: str | None, cut_at_scissors: bool) -> list[str]:
+    lines = newline_lines(text)
+    needs_cut = bool(comment_char) and (cut_at_scissors or cleanup == "scissors")
+    if needs_cut:
+        cut_line = f"{comment_char} {SCISSORS}"
+        for index, line in enumerate(lines):
+            if line == cut_line:
+                lines = lines[:index]
+                break
+    if cleanup == "verbatim":
+        return lines
+
+    stripped: list[str] = []
+    for line in lines:
+        value = line.rstrip(" \t\v\f\r")
+        if cleanup == "strip" and comment_char and value.startswith(comment_char):
+            continue
+        stripped.append(value)
+
+    while stripped and not stripped[0]:
+        stripped.pop(0)
+    while stripped and not stripped[-1]:
+        stripped.pop()
+
+    collapsed: list[str] = []
+    previous_blank = False
+    for line in stripped:
+        blank = not line
+        if blank and previous_blank:
+            continue
+        collapsed.append(line)
+        previous_blank = blank
+    return collapsed
+
+
+def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: str | None, cut_at_scissors: bool, place: str) -> list[str]:
+    lines = cleaned_message(text, cleanup, comment_char, cut_at_scissors)
+    findings: list[str] = []
+    for line_number, line in enumerate(lines, start=1):
+        findings.extend(f"{place} line {line_number}" for _ in matcher.spans(line))
+    return findings
+
+
+def print_findings(findings: Sequence[str]) -> None:
+    for place in findings:
+        print(f"leak terms: {place}: listed leak term", file=sys.stderr)
+    print(
+        "leak terms: remove the term from the text, or if it is not private remove it from the list with "
+        "sops edit leak-terms.sops.yaml",
+        file=sys.stderr,
+    )
+
+
+def rust_lines(text: str) -> list[str]:
+    """Split text as Rust's str::lines(), including its CRLF normalization."""
+    return [line.removesuffix("\r") for line in newline_lines(text)]
+
+
+def clean_jj_description(lines: Sequence[str]) -> str:
+    """Apply jj 0.46's cleanup_description_lines rules."""
+    kept: list[str] = []
+    for line in lines:
+        if line.startswith("JJ: ignore-rest"):
+            break
+        if not line.startswith("JJ:"):
+            kept.append(line)
+    description = "\n".join(kept).strip("\n")
+    return f"{description}\n" if description else ""
+
+
+def jj_sections(text: str, mode: str, expected_ids: Sequence[str]) -> list[tuple[str | None, str]]:
+    """Apply jj's single- or multi-description cleanup with validated bulk headers."""
+    lines = rust_lines(text)
+    if mode == "single":
+        return [(None, clean_jj_description(lines))]
+    if mode != "bulk" or not expected_ids or any(re.fullmatch(r"[0-9a-f]{12}", value) is None for value in expected_ids):
+        raise ValueError("cannot read jj editor descriptions")
+
+    expected = set(expected_ids)
+    sections: list[tuple[str, list[str]]] = []
+    current: list[str] | None = None
+    current_id: str | None = None
+    seen: set[str] = set()
+    header = re.compile(r"JJ: describe ([0-9a-f]{12}) -------\Z")
+    for line in lines:
+        if line.startswith("JJ: describe "):
+            matched = header.fullmatch(line)
+            if matched is None or matched.group(1) not in expected or matched.group(1) in seen:
+                raise ValueError("cannot read jj editor descriptions")
+            if current is not None and current_id is not None:
+                sections.append((current_id, current))
+            current_id = matched.group(1)
+            current = []
+            seen.add(current_id)
+        elif current is None:
+            if line and not line.startswith("JJ:"):
+                raise ValueError("cannot read jj editor descriptions")
+        else:
+            current.append(line)
+    if current is not None and current_id is not None:
+        sections.append((current_id, current))
+    if seen != expected:
+        raise ValueError("cannot read jj editor descriptions")
+    return [(commit_id, clean_jj_description(section_lines)) for commit_id, section_lines in sections]
+
+
+def rust_shlex_split(value: str) -> list[str] | None:
+    """Copy shlex 2.0.1 token, comment, quote, and backslash handling."""
+    words: list[str] = []
+    index = 0
+    length = len(value)
+    while index < length:
+        while index < length and value[index] in " \t\n":
+            index += 1
+        if index == length:
+            break
+        if value[index] == "#":
+            newline = value.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        word: list[str] = []
+        while index < length:
+            character = value[index]
+            if character in " \t\n":
+                break
+            if character == "\\":
+                index += 1
+                if index == length:
+                    return None
+                if value[index] != "\n":
+                    word.append(value[index])
+                index += 1
+                continue
+            if character == "'":
+                index += 1
+                end = value.find("'", index)
+                if end < 0:
+                    return None
+                word.append(value[index:end])
+                index = end + 1
+                continue
+            if character == '"':
+                index += 1
+                while index < length and value[index] != '"':
+                    if value[index] != "\\":
+                        word.append(value[index])
+                        index += 1
+                        continue
+                    index += 1
+                    if index == length:
+                        return None
+                    escaped = value[index]
+                    if escaped in '$`"\\':
+                        word.append(escaped)
+                    elif escaped != "\n":
+                        word.extend(("\\", escaped))
+                    index += 1
+                if index == length:
+                    return None
+                index += 1
+                continue
+            word.append(character)
+            index += 1
+        words.append("".join(word))
+    return words
+
+
+def split_jj_command(value: str) -> list[str]:
+    """Copy jj 0.46's CommandNameAndArgs string splitting without a shell."""
+    if '"' in value or "'" in value:
+        parsed = rust_shlex_split(value)
+        if parsed is not None:
+            return parsed
+    return value.split(" ")
+
+
+def jj_editor_listing(listing: str) -> str:
+    """Return ui.editor's JSON value from `jj config list` NAME<TAB>JSON lines: a `ui.editor` line as jj gives it, or a
+    table's `ui.editor.command` and `ui.editor.env.<NAME>` lines as {"env": …, "command": …}."""
+    values: dict[str, str] = {}
+    for line in newline_lines(listing):
+        name, separator, value = line.partition("\t")
+        if not separator:
+            raise ValueError("could not read jj's configured editor")
+        values[name] = value
+    if list(values) == ["ui.editor"]:
+        return values["ui.editor"]
+    try:
+        command = json.loads(values.pop("ui.editor.command"))
+        environment = {}
+        for name, value in values.items():
+            if not name.startswith("ui.editor.env."):
+                raise ValueError("could not read jj's configured editor")
+            environment[name.removeprefix("ui.editor.env.")] = json.loads(value)
+    except (KeyError, json.JSONDecodeError) as error:
+        raise ValueError("could not read jj's configured editor") from error
+    return json.dumps({"env": environment, "command": command}, separators=(",", ":"))
+
+
+def jj_editor_configuration(value: str) -> tuple[list[str], dict[str, str] | None]:
+    """Decode the JSON value of ui.editor (jj_editor_listing)."""
+    try:
+        configured = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("could not read jj's configured editor") from error
+    environment: dict[str, str] | None = None
+    if isinstance(configured, str):
+        command = split_jj_command(configured)
+    elif isinstance(configured, list) and configured and all(isinstance(item, str) for item in configured):
+        command = list(configured)
+    elif (
+        isinstance(configured, dict)
+        and isinstance(configured.get("env"), dict)
+        and isinstance(configured.get("command"), list)
+        and configured["command"]
+        and all(isinstance(item, str) for item in configured["command"])
+        and all(isinstance(key, str) and isinstance(item, str) for key, item in configured["env"].items())
+    ):
+        command = list(configured["command"])
+        environment = dict(configured["env"])
+    else:
+        raise ValueError("could not read jj's configured editor")
+    return command, environment
+
+
+def jj_editor_command(value: str, path: str, line_number: int) -> tuple[list[str], dict[str, str] | None]:
+    """Build the same command jj 0.46's TextEditor builds for the selected editor."""
+    command, environment = jj_editor_configuration(value)
+    variables = {"path": path, "line": str(line_number)}
+    pattern = re.compile(r"\$([a-z0-9_]+)\b")
+    path_in_arguments = any("path" in pattern.findall(argument) for argument in command[1:])
+
+    def substitute(argument: str) -> str:
+        return pattern.sub(lambda match: variables.get(match.group(1), match.group(0)), argument)
+
+    command = [substitute(argument) for argument in command]
+    if not path_in_arguments:
+        command.append(path)
+    return command, environment
+
+
+def editor_is_wrapper(command: Sequence[str]) -> bool:
+    """Return whether the resolved editor executable is this wrapper."""
+    if not command:
+        return True
+    executable = command[0]
+    candidate = Path(executable) if os.path.sep in executable else shutil.which(executable)
+    if candidate is None:
+        return False
+    try:
+        return Path(candidate).resolve() == Path(__file__).resolve()
+    except OSError:
+        return False
+
+
+def jj_editor_preflight(listing: str) -> int:
+    """Print the ui.editor setting that runs this wrapper, then the configured editor's JSON value for
+    DOTFILES_JJ_EDITOR. A configuration that cannot be read, or an editor that is this wrapper, prints nothing."""
+    try:
+        value = jj_editor_listing(listing)
+        command, _ = jj_editor_configuration(value)
+    except ValueError:
+        return EDITOR_UNREADABLE_EXIT
+    if editor_is_wrapper(command):
+        return EDITOR_WRAPPER_EXIT
+    print("ui.editor=" + json.dumps([str(Path(__file__).resolve()), "jj-editor"]))
+    print(value)
+    return 0
+
+
+def jj_editor(path: str) -> int:
+    """Run jj's selected editor, then inspect its cleaned descriptions."""
+    if os.environ.get(EDITOR_GUARD):
+        print("leak terms: recursive jj editor wrapper refused", file=sys.stderr)
+        return LIST_EXIT
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as error:
+        print(f"leak terms: cannot read jj editor file: {error}", file=sys.stderr)
+        return 1
+    line_number = 1
+    for line in rust_lines(text):
+        if not line.startswith("JJ:"):
+            break
+        line_number += 1
+    configured = os.environ.get("DOTFILES_JJ_EDITOR")
+    if configured is None:
+        print("leak terms: cannot read jj's configured editor", file=sys.stderr)
+        return 1
+    try:
+        command, configured_environment = jj_editor_command(configured, path, line_number)
+    except ValueError as error:
+        print(f"leak terms: {error}", file=sys.stderr)
+        return 1
+    if editor_is_wrapper(command):
+        print("leak terms: recursive jj editor wrapper refused", file=sys.stderr)
+        return LIST_EXIT
+    try:
+        matcher = load_terms()
+    except ListError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    environment = {**os.environ, **(configured_environment or {}), EDITOR_GUARD: "1"}
+    try:
+        completed = subprocess.run(command, env=environment, check=False)
+    except OSError as error:
+        print(f"leak terms: could not run jj editor: {error}", file=sys.stderr)
+        return 1
+    if completed.returncode < 0:
+        os.kill(os.getpid(), -completed.returncode)
+    if completed.returncode:
+        return completed.returncode
+
+    try:
+        edited = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        print(f"leak terms: cannot read jj editor file: {error}", file=sys.stderr)
+        return 1
+    mode = os.environ.get("DOTFILES_JJ_EDITOR_MODE", "single")
+    expected_ids = [value for value in os.environ.get("DOTFILES_JJ_EDITOR_IDS", "").split(",") if value]
+    try:
+        sections = jj_sections(edited, mode, expected_ids)
+    except ValueError:
+        print("leak terms: cannot read jj editor descriptions", file=sys.stderr)
+        return 1
+    findings: list[str] = []
+    for commit_id, description in sections:
+        place = "commit message" if commit_id is None else f"description of {commit_id}"
+        findings.extend(scan_message(description, matcher, "verbatim", None, False, place))
+    if not findings:
+        return 0
+    print_findings(findings)
+    return 1
+
+# git 2.43's candidate order for core.commentChar=auto (builtin/commit.c).
+COMMENT_CANDIDATES = "#;@!$%^&|:"
+TRAILER_LINE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:")
+
+
+def adjust_comment_line_char(text: str) -> str | None:
+    """Copy git 2.43's adjust_comment_line_char: a line starts after \\n or \\r."""
+    if "#" not in text:
+        return "#"
+    blocked = set()
+    if text and text[0] in COMMENT_CANDIDATES:
+        blocked.add(text[0])
+    for index, character in enumerate(text[:-1]):
+        if character in "\n\r" and text[index + 1] in COMMENT_CANDIDATES:
+            blocked.add(text[index + 1])
+    return next((candidate for candidate in COMMENT_CANDIDATES if candidate not in blocked), None)
+
+
+def git_block_character(lines: Sequence[str], candidate: str) -> bool:
+    """Whether lines end with a block git wrote in candidate, as git writes its status.
+
+    git writes a blank line, then lines that each start with its character; only blank lines
+    and trailers (`Token: value`, which interpret-trailers may append) follow. A character
+    that starts a line of the message fails, because git's own lines follow that line.
+    """
+    first = next((index for index, line in enumerate(lines) if line.startswith(candidate)), None)
+    if first is None or first == 0 or lines[first - 1] != "":
+        return False
+    return all(
+        line.startswith(candidate) or line == "" or TRAILER_LINE.match(line) is not None
+        for line in lines[first:]
+    )
+
+
+def git_comment_char(text: str, editor_ran: bool, status_shown: bool, cut_line_written: bool) -> str | None:
+    """Return the character git 2.43 chose for core.commentChar=auto, or None when unsure.
+
+    Without the editor or the status, git wrote nothing into the file, so the file is the
+    text git chose from. Otherwise git's comment block follows the message: when git wrote
+    its cut line (scissors or verbose, two lines with both), every cut line in the file must
+    have one character, which is git's; else exactly one candidate must end the file as git's
+    block. None reads every line.
+    """
+    if not (editor_ran and status_shown):
+        return adjust_comment_line_char(text)
+    lines = newline_lines(text)
+    if cut_line_written:
+        cut = {line[0] for line in lines if line[:1] in tuple(COMMENT_CANDIDATES) and line[1:] == f" {SCISSORS}"}
+        return cut.pop() if len(cut) == 1 else None
+    found = [candidate for candidate in COMMENT_CANDIDATES if git_block_character(lines, candidate)]
+    return found[0] if len(found) == 1 else None
+
+
+def read_stdin(encoding: str = "utf-8") -> str:
+    try:
+        return sys.stdin.buffer.read().decode(encoding, errors="surrogateescape")
+    except (LookupError, UnicodeDecodeError) as error:
+        raise TextError(f"cannot decode standard input as {encoding}") from error
+    except OSError as error:
+        raise TextError("could not read standard input") from error
+
+
+OBJECT_ID = re.compile(r"[0-9A-Fa-f]{40,64}\Z")
+TRANSPORT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*::")
+
+
+def git_environment() -> dict[str, str]:
+    """Disable replacement and system attributes so Git scans the objects it publishes."""
+    return {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1"}
+
+@lru_cache(maxsize=1)
+def pushing_repository_commit_encoding() -> str | None:
+    """The configured fallback for an outgoing message that Git left in its original bytes."""
+    try:
+        completed = subprocess.run(
+            ["git", "config", "--get", "i18n.commitEncoding"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=git_environment(),
+            check=False,
+        )
+    except OSError as error:
+        raise TextError("could not read Git's commit message encoding") from error
+    if completed.returncode == 1:
+        return None
+    if completed.returncode != 0:
+        raise TextError("could not read Git's commit message encoding")
+    try:
+        return completed.stdout.removesuffix(b"\n").decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise TextError("Git configured an unknown commit message encoding") from error
+
+
+def decode_git_message(message: bytes, declared_encoding: bytes | None = None) -> str:
+    """Decode a Git message from its header, UTF-8 bytes, or the pushing repository's configured encoding."""
+    if declared_encoding is not None:
+        try:
+            encoding = declared_encoding.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise TextError("Git declared an unknown commit message encoding") from error
+    else:
+        try:
+            return message.decode("utf-8")
+        except UnicodeDecodeError:
+            encoding = pushing_repository_commit_encoding()
+            if encoding is None:
+                raise TextError("a Git message is not valid UTF-8")
+    try:
+        codec = codecs.lookup(encoding)
+        return message.decode(codec.name)
+    except (LookupError, UnicodeDecodeError) as error:
+        raise TextError("could not decode a Git message") from error
+
+
+def git_output(arguments: Sequence[str], standard_input: bytes, failure: str) -> bytes:
+    """Run one Git producer and fail closed, naming it with FAILURE, when it cannot provide complete output."""
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            input=standard_input,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=git_environment(),
+            check=False,
+        )
+    except OSError as error:
+        raise TextError(failure) from error
+    if completed.returncode:
+        raise TextError(failure)
+    return completed.stdout
+
+
+def git_chunks(arguments: Sequence[str], standard_input: bytes) -> Iterator[bytes]:
+    """Yield one Git producer's output without collecting every outgoing diff."""
+    try:
+        process = subprocess.Popen(
+            ["git", *arguments],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=git_environment(),
+        )
+    except OSError as error:
+        raise TextError("could not run git while reading outgoing commits") from error
+    assert process.stdin is not None
+    assert process.stdout is not None
+    write_errors: list[OSError] = []
+
+    def write_input() -> None:
+        try:
+            process.stdin.write(standard_input)
+        except BrokenPipeError:
+            pass
+        except OSError as error:
+            write_errors.append(error)
+        finally:
+            try:
+                process.stdin.close()
+            except OSError as error:
+                write_errors.append(error)
+
+    writer = threading.Thread(target=write_input)
+    writer.start()
+    try:
+        while chunk := process.stdout.read1(65536):
+            yield chunk
+    finally:
+        process.stdout.close()
+        writer.join()
+        status = process.wait()
+    if write_errors or status:
+        raise TextError("git could not read outgoing commits")
+
+
+def push_updates(text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Read Git's pre-push updates: each sent object with the remote ref it goes to, and the remote's prior objects."""
+    local: list[tuple[str, str]] = []
+    remote: list[str] = []
+    for line in newline_lines(text):
+        fields = line.split()
+        if len(fields) != 4 or not OBJECT_ID.fullmatch(fields[1]) or not OBJECT_ID.fullmatch(fields[3]):
+            raise TextError("malformed pre-push update")
+        if set(fields[1]) != {"0"}:
+            local.append((fields[2], fields[1]))
+        if set(fields[3]) != {"0"}:
+            remote.append(fields[3])
+    return local, remote
+
+
+def push_destination(remote: str, url: str) -> str:
+    """Use the same transport for advertisement reads that Git uses for the push."""
+    if TRANSPORT_URL.match(url):
+        return url
+    try:
+        configured = subprocess.run(
+            ["git", "config", "--get", f"remote.{remote}.vcs"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=git_environment(),
+            check=False,
+        )
+    except OSError as error:
+        raise TextError("could not read the push transport") from error
+    if configured.returncode == 0:
+        helper = configured.stdout.decode("utf-8", errors="surrogateescape").strip()
+        if helper:
+            return f"{helper}::{url}"
+    elif configured.returncode != 1:
+        raise TextError("could not read the push transport")
+    return url
+
+
+def local_object_ids(candidates: Sequence[str]) -> set[str]:
+    """Return the advertised IDs that this repository actually has, in one Git call."""
+    if not candidates:
+        return set()
+    output = git_output(
+        ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        ("\n".join(candidates) + "\n").encode(),
+        "git could not check which advertised objects this repository holds",
+    )
+    lines = output.decode("utf-8", errors="surrogateescape").splitlines()
+    if len(lines) != len(candidates):
+        raise TextError("git gave an incomplete object advertisement")
+    result: set[str] = set()
+    for candidate, line in zip(candidates, lines, strict=True):
+        fields = line.split()
+        if len(fields) < 2 or not OBJECT_ID.fullmatch(fields[0]):
+            raise TextError("git gave a malformed object advertisement")
+        if fields[1] != "missing":
+            result.add(candidate)
+    return result
+
+
+def remote_advertisement(destination: str) -> list[str]:
+    """Read all refs advertised by the exact transport Git will use to push."""
+    output = git_output(["ls-remote", "--", destination], b"", "git could not read the destination's advertised refs")
+    object_ids: list[str] = []
+    for line in output.decode("utf-8", errors="surrogateescape").splitlines():
+        fields = line.split("\t", 1)
+        if len(fields) != 2 or not OBJECT_ID.fullmatch(fields[0]):
+            raise TextError("git gave a malformed remote advertisement")
+        object_ids.append(fields[0])
+    return object_ids
+
+
+def outgoing_commit_ids(local: Sequence[str], held: Sequence[str]) -> list[str]:
+    """List exactly the commits sent to this destination, preserving Git's topo order."""
+    revisions = [*local]
+    if held:
+        revisions.extend(("--not", *held))
+    output = git_output(
+        ["rev-list", "--topo-order", "--stdin"], ("\n".join(revisions) + "\n").encode(), "git could not list the outgoing commits"
+    )
+    commits = output.decode("ascii", errors="strict").splitlines()
+    if any(OBJECT_ID.fullmatch(commit) is None for commit in commits):
+        raise TextError("git gave a malformed outgoing commit list")
+    return commits
+
+
+def nul_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
+    """Yield NUL-delimited records while joining each growing record only once."""
+    pieces: list[bytes] = []
+    for chunk in chunks:
+        start = 0
+        while True:
+            boundary = chunk.find(b"\0", start)
+            if boundary < 0:
+                if start < len(chunk):
+                    pieces.append(chunk[start:])
+                break
+            pieces.append(chunk[start:boundary])
+            yield b"".join(pieces)
+            pieces.clear()
+            start = boundary + 1
+    if pieces:
+        yield b"".join(pieces)
+
+
+def newline_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
+    """Yield newline-delimited byte records while joining each growing record only once."""
+    pieces: list[bytes] = []
+    for chunk in chunks:
+        start = 0
+        while True:
+            boundary = chunk.find(b"\n", start)
+            if boundary < 0:
+                if start < len(chunk):
+                    pieces.append(chunk[start:])
+                break
+            pieces.append(chunk[start:boundary])
+            yield b"".join(pieces)
+            pieces.clear()
+            start = boundary + 1
+    if pieces:
+        yield b"".join(pieces)
+
+
+@dataclass
+class DiffHunk:
+    """The remaining parent and result lines that make a streamed diff hunk unambiguous."""
+
+    parents: list[int]
+    result: int
+    combined: bool
+
+
+def hunk_start(line: bytes) -> DiffHunk | None:
+    """Return the hunk counts for LINE, refusing a malformed hunk header."""
+    if line.startswith(b"@@@ "):
+        parsed = parse_combined_hunk(line.decode("utf-8", errors="surrogateescape"))
+        if parsed is None:
+            raise TextError("git gave a malformed combined hunk")
+        parents, (_, result) = parsed
+        counts = [count for _, count in parents]
+        return DiffHunk(counts, result, True) if any(counts) or result else None
+    if line.startswith(b"@@ "):
+        parsed = parse_unified_hunk(line.decode("utf-8", errors="surrogateescape"))
+        if parsed is None:
+            raise TextError("git gave a malformed unified hunk")
+        (_, old), (_, new) = parsed
+        return DiffHunk([old], new, False) if old or new else None
+    return None
+
+
+def consume_hunk_line(line: bytes, hunk: DiffHunk) -> DiffHunk | None:
+    """Consume one physical diff line, returning None only after its declared counts end."""
+    if line.startswith(b"\\ No newline at end of file"):
+        return hunk
+    if hunk.combined:
+        if len(line) < len(hunk.parents) or any(marker not in b"+- " for marker in line[:len(hunk.parents)]):
+            raise TextError("git gave a malformed combined hunk")
+        marks = line[:len(hunk.parents)]
+        for index, marker in enumerate(marks):
+            if marker == ord("-") or (ord("-") not in marks and marker == ord(" ")):
+                hunk.parents[index] -= 1
+        if ord("-") not in marks:
+            hunk.result -= 1
+        if any(count < 0 for count in hunk.parents) or hunk.result < 0:
+            raise TextError("git gave a malformed combined hunk count")
+    else:
+        if not line or line[0] not in b"+- ":
+            raise TextError("git gave a malformed unified hunk")
+        marker = line[0]
+        if marker in b"- ":
+            hunk.parents[0] -= 1
+        if marker in b"+ ":
+            hunk.result -= 1
+        if hunk.parents[0] < 0 or hunk.result < 0:
+            raise TextError("git gave a malformed unified hunk count")
+    return None if not any(hunk.parents) and hunk.result == 0 else hunk
+
+
+def outgoing_diff_records(chunks: Iterator[bytes]) -> Iterator[tuple[str, bytes]]:
+    """Frame `git log --format=commit %H` output without trusting bytes inside a diff hunk."""
+    current: str | None = None
+    diff = bytearray()
+    hunk: DiffHunk | None = None
+    for line in newline_records(chunks):
+        if hunk is None:
+            boundary = re.fullmatch(rb"commit ([0-9A-Fa-f]{40,64})", line)
+            if boundary:
+                if current is not None:
+                    yield current, bytes(diff)
+                current = boundary.group(1).decode("ascii")
+                diff.clear()
+                continue
+        if current is None:
+            if line:
+                raise TextError("git gave malformed commit boundaries")
+            continue
+        diff.extend(line)
+        diff.append(ord("\n"))
+        if hunk is None:
+            hunk = hunk_start(line)
+        else:
+            hunk = consume_hunk_line(line, hunk)
+    if hunk is not None:
+        raise TextError("git gave a malformed diff hunk count")
+    if current is not None:
+        yield current, bytes(diff)
+
+
+def empty_attribute_tree() -> str:
+    """Create the empty tree Git uses as an attribute source without changing refs or the index."""
+    output = git_output(["mktree"], b"", "git could not create an empty attribute tree")
+    try:
+        value = output.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise TextError("git gave an invalid empty attribute tree") from error
+    tree = value.removesuffix("\n")
+    if value != f"{tree}\n" or OBJECT_ID.fullmatch(tree) is None:
+        raise TextError("git gave an invalid empty attribute tree")
+    return tree
+
+
+def info_attributes_present() -> bool:
+    """Report whether this repository has the one higher-precedence attribute source Git cannot disable."""
+    output = git_output(["rev-parse", "--git-path", "info/attributes"], b"", "git could not read info attributes")
+    path = Path(output.decode("utf-8", errors="surrogateescape").removesuffix("\n"))
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError as error:
+        raise TextError("git could not read info attributes") from error
+
+
+def scan_outgoing_messages(commits: Sequence[str], matcher: TermMatcher, findings: list[str]) -> None:
+    """Scan commit messages from a NUL-framed producer, where Git messages cannot contain NUL."""
+    arguments = [
+        "log",
+        "--encoding=UTF-8",
+        "--no-walk=unsorted",
+        "--stdin",
+        "-z",
+        "--format=tformat:%H%x00%B",
+        "--no-show-signature",
+        "--no-notes",
+        "--no-decorate",
+    ]
+    expected = set(commits)
+    seen: set[str] = set()
+    records: list[bytes] = []
+    for raw in nul_records(git_chunks(arguments, ("\n".join(commits) + "\n").encode())):
+        records.append(raw)
+        if len(records) != 2:
+            continue
+        raw_commit, raw_message = records
+        records.clear()
+        try:
+            commit = raw_commit.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise TextError("git gave malformed commit boundaries") from error
+        if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
+            raise TextError("git gave malformed commit boundaries")
+        seen.add(commit)
+        findings.extend(scan_message(decode_git_message(raw_message), matcher, "verbatim", None, False,
+                                     f"commit {commit[:12]} message"))
+    if records or seen != expected:
+        raise TextError("git gave malformed commit boundaries")
+
+
+DIFF_OPTIONS = (
+    "--cc",
+    "-U0",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-color",
+    "--no-renames",
+    "--no-relative",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--submodule=short",
+    "--ignore-submodules=none",
+    "--diff-algorithm=myers",
+)
+
+
+def scan_diff_arguments(command: str, command_arguments: Sequence[str]) -> list[str]:
+    """Return one text-only diff producer with the shared outgoing and staged attribute policy."""
+    arguments = [
+        "-c",
+        "core.attributesFile=/dev/null",
+        "--attr-source",
+        empty_attribute_tree(),
+        "-c",
+        "core.quotePath=false",
+        command,
+        *command_arguments,
+        *DIFF_OPTIONS,
+    ]
+    if info_attributes_present():
+        arguments.append("--text")
+    return arguments
+
+
+def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[str]) -> None:
+    """Scan a byte-streamed diff producer, framing commits only outside hunk content."""
+    arguments = scan_diff_arguments(
+        "log",
+        [
+            "--no-walk=unsorted",
+            "--stdin",
+            "--format=commit %H",
+            "--root",
+            "--no-show-signature",
+            "--no-notes",
+            "--no-decorate",
+        ],
+    )
+    expected = set(commits)
+    seen: set[str] = set()
+    for commit, raw_diff in outgoing_diff_records(git_chunks(arguments, ("\n".join(commits) + "\n").encode())):
+        if OBJECT_ID.fullmatch(commit) is None or commit not in expected or commit in seen:
+            raise TextError("git gave malformed commit boundaries")
+        seen.add(commit)
+        findings.extend(scan_diff(raw_diff.decode("utf-8", errors="surrogateescape"), matcher, f"commit {commit[:12]} "))
+    if seen != expected:
+        raise TextError("git gave malformed commit boundaries")
+
+
+def scan_staged_diff() -> list[str]:
+    """Scan the staged diff under the same attribute policy and Git environment as an outgoing diff."""
+    raw_diff = git_output(
+        scan_diff_arguments("diff", ["--cached"]),
+        b"",
+        "git could not read staged diff",
+    )
+    if not raw_diff:
+        return []
+    return scan_diff(raw_diff.decode("utf-8", errors="surrogateescape"), load_terms(), "")
+
+
+def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
+    """Scan outgoing messages and diffs with separate producers and verified boundaries."""
+    if not commits:
+        return []
+    findings: list[str] = []
+    scan_outgoing_messages(commits, matcher, findings)
+    scan_outgoing_diffs(commits, matcher, findings)
+    return findings
+
+
+def object_types(object_ids: Sequence[str]) -> dict[str, str]:
+    """The type of each object, in one Git call; an object this repository lacks cannot be read, so it refuses."""
+    if not object_ids:
+        return {}
+    output = git_output(
+        ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        ("\n".join(object_ids) + "\n").encode(),
+        "git could not read the outgoing objects",
+    )
+    lines = output.decode("utf-8", errors="surrogateescape").splitlines()
+    if len(lines) != len(object_ids):
+        raise TextError("git gave an incomplete list of outgoing objects")
+    types: dict[str, str] = {}
+    for object_id, line in zip(object_ids, lines, strict=True):
+        fields = line.split()
+        if len(fields) != 2 or fields[1] == "missing" or fields[0].lower() != object_id.lower():
+            raise TextError("git could not read an outgoing object")
+        types[object_id] = fields[1]
+    return types
+
+
+def tag_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
+    """The raw content of each tag object, in one Git call, with each record's size checked."""
+    if not object_ids:
+        return {}
+    output = git_output(
+        ["cat-file", "--batch"], ("\n".join(object_ids) + "\n").encode(), "git could not read the outgoing tags"
+    )
+    contents: dict[str, bytes] = {}
+    position = 0
+    for object_id in object_ids:
+        end = output.find(b"\n", position)
+        fields = output[position:end].decode("utf-8", errors="surrogateescape").split() if end >= 0 else []
+        if len(fields) != 3 or fields[0].lower() != object_id.lower() or fields[1] != "tag" or not fields[2].isdigit():
+            raise TextError("git gave a malformed tag object")
+        size = int(fields[2])
+        content = output[end + 1 : end + 1 + size]
+        if len(content) != size or output[end + 1 + size : end + 2 + size] != b"\n":
+            raise TextError("git gave a malformed tag object")
+        contents[object_id] = content
+        position = end + 2 + size
+    if position != len(output):
+        raise TextError("git gave a malformed tag object")
+    return contents
+
+
+def parse_tag(content: bytes) -> tuple[str, str, str, str]:
+    """A tag object's target, the target's type, its own tag name and its message."""
+    header, separator, message = content.partition(b"\n\n")
+    fields = dict(line.split(b" ", 1) for line in header.split(b"\n") if b" " in line)
+    target, kind, name = fields.get(b"object"), fields.get(b"type"), fields.get(b"tag")
+    if target is None or kind is None or name is None or OBJECT_ID.fullmatch(target.decode("ascii", "replace")) is None:
+        raise TextError("git gave a malformed tag object")
+    return (
+        target.decode("ascii"),
+        kind.decode("ascii", "replace"),
+        name.decode("utf-8", errors="surrogateescape"),
+        decode_git_message(message, fields.get(b"encoding")) if separator else "",
+    )
+
+
+def tag_chains(starts: Sequence[tuple[str, str]], known: set[str]) -> list[tuple[str, str, str]]:
+    """Each annotated tag object reached from STARTS, pairs of a name to show and an object id, and through each tag
+    that points at another tag, skipping every object in KNOWN: its name to show, its object id and its message. A
+    tag that another tag points at shows its own tag name."""
+    found: list[tuple[str, str, str]] = []
+    seen = set(known)
+    pending: list[tuple[str | None, str]] = list(starts)
+    while pending:
+        unique: dict[str, str | None] = {}
+        for name, object_id in pending:
+            if object_id not in seen:
+                unique.setdefault(object_id, name)
+        seen.update(unique)
+        types = object_types(sorted(unique))
+        contents = tag_objects(sorted(object_id for object_id in unique if types[object_id] == "tag"))
+        pending = []
+        for object_id, name in unique.items():
+            if types[object_id] != "tag":
+                continue
+            target, kind, own_name, message = parse_tag(contents[object_id])
+            found.append((own_name if name is None else name, object_id, message))
+            if kind == "tag":
+                pending.append((None, target))
+    return found
+
+
+def outgoing_tag_messages(updates: Sequence[tuple[str, str]], advertised: Sequence[str], held: set[str]) -> list[tuple[str, str]]:
+    """The message of each annotated tag object this push sends and the destination lacks, with the name to show:
+    the ref the push sends it to (without refs/tags/), or, for a tag that another tag points at, its own tag name.
+    The destination holds every object it advertises, and each tag that a tag it holds points at; that second read
+    runs only when the push sends a tag."""
+    starts = [(ref.removeprefix("refs/tags/"), object_id) for ref, object_id in updates]
+    known = set(advertised) | held
+    outgoing = tag_chains(starts, known)
+    if not outgoing:
+        return []
+    held_chains = tag_chains([("", object_id) for object_id in sorted(held)], set())
+    known |= {object_id for _, object_id, _ in held_chains}
+    return [(name, message) for name, object_id, message in outgoing if object_id not in known]
+
+
+def scan_push(text: str, remote: str, url: str) -> list[str]:
+    """Scan only the commits and annotated tag messages this pre-push invocation sends and its destination lacks."""
+    local, prior_remote = push_updates(text)
+    if not local:
+        return []
+    destination = push_destination(remote, url)
+    advertised = remote_advertisement(destination)
+    held = local_object_ids([*advertised, *prior_remote])
+    commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
+    tags = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
+    if not commits and not any(message.strip() for _, message in tags):
+        return []
+    matcher = load_terms()
+    findings = scan_outgoing_commits(commits, matcher)
+    for name, message in tags:
+        place = f"tag {mask_path(name, matcher.spans(name))} message"
+        findings.extend(scan_message(message, matcher, "verbatim", None, False, place))
+    return findings
+
+def parser() -> argparse.ArgumentParser:
+    argument_parser = argparse.ArgumentParser(prog="leak-terms-check")
+    modes = argument_parser.add_subparsers(dest="mode", required=True)
+    diff = modes.add_parser("diff")
+    diff.add_argument("--place-prefix", default="")
+    staged = modes.add_parser("staged")
+    message = modes.add_parser("message")
+    message.add_argument("--cleanup", choices=("verbatim", "whitespace", "strip", "scissors"), default="verbatim")
+    message.add_argument("--comment-char")
+    message.add_argument("--cut-at-scissors", action="store_true")
+    message.add_argument("--place", default="commit message")
+    message.add_argument("--encoding", default="utf-8")
+    comment_char = modes.add_parser("git-comment-char")
+    comment_char.add_argument("--editor-ran", choices=("0", "1"), required=True)
+    comment_char.add_argument("--status-shown", choices=("0", "1"), required=True)
+    comment_char.add_argument("--cut-line-written", choices=("0", "1"), required=True)
+    jj_editor_parser = modes.add_parser("jj-editor")
+    jj_editor_parser.add_argument("file")
+    jj_preflight = modes.add_parser("jj-editor-preflight")
+    jj_preflight.add_argument("listing")
+    push = modes.add_parser("push")
+    push.add_argument("--remote", required=True)
+    push.add_argument("--url", required=True)
+    return argument_parser
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    args = parser().parse_args(arguments)
+    if args.mode == "jj-editor":
+        return jj_editor(args.file)
+    if args.mode == "jj-editor-preflight":
+        return jj_editor_preflight(args.listing)
+    try:
+        text = "" if args.mode == "staged" else read_stdin(args.encoding if args.mode == "message" else "utf-8")
+    except TextError as error:
+        print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
+        return TEXT_EXIT
+
+    if args.mode == "git-comment-char":
+        character = git_comment_char(
+            text, args.editor_ran == "1", args.status_shown == "1", args.cut_line_written == "1"
+        )
+        if character is not None:
+            print(character)
+        return 0
+
+    try:
+        if args.mode == "push":
+            findings = scan_push(text, args.remote, args.url)
+        elif args.mode == "staged":
+            findings = scan_staged_diff()
+        elif not text:
+            findings = []
+        else:
+            matcher = load_terms()
+            if args.mode == "diff":
+                findings = scan_diff(text, matcher, args.place_prefix)
+            else:
+                findings = scan_message(text, matcher, args.cleanup, args.comment_char, args.cut_at_scissors, args.place)
+    except ListError as error:
+        print(error, file=sys.stderr)
+        return LIST_EXIT
+    except TextError as error:
+        print(f"leak terms: cannot read text to check: {error}", file=sys.stderr)
+        return TEXT_EXIT
+
+    if not findings:
+        return 0
+    print_findings(findings)
+    return FOUND_EXIT
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
