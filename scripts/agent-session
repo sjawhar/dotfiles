@@ -24,10 +24,18 @@
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
-#     the directory; either would hand the call back to a launcher.
+#     the directory; either would hand the call back to a launcher. When there is none (a move of
+#     the checkout brought a pin nothing installed yet), it runs `mise install` once in the
+#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step does,
+#     so a launch during a mover's install waits for it; then, whatever the install's result, it
+#     asks `mise which <agent>` for the pinned binary and execs that when it is not a wrapper, and
+#     exits 127 only when it is missing. A failed install's last lines go to stderr, never stdout.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+# Absolute once, before any cd. A prefix of $PWD, not a `cd` into it, so a directory that exists
+# but cannot be entered does not end the launch here under set -e.
+[[ "$DOTFILES_DIR" = /* ]] || DOTFILES_DIR="$PWD/$DOTFILES_DIR"
 
 (( $# )) || { echo "usage: agent-session <agent> [args…]" >&2; exit 2; }
 agent="$1"
@@ -292,8 +300,113 @@ else
         break
     done
     if [[ -z "$prog" ]]; then
-        echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
-        exit 127
+        mise_bin="$(command -v mise)" || mise_bin="$DOTFILES_DIR/bin/mise"
+        [[ "$mise_bin" = /* ]] || mise_bin="$PWD/$mise_bin"
+        export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+        [[ "$MISE_DATA_DIR" = /* ]] || MISE_DATA_DIR="$PWD/$MISE_DATA_DIR"
+        mise_shims="$MISE_DATA_DIR/shims"
+        # A directory it cannot make shows up below, as flock's failure to open the lock, and the
+        # launch still asks mise for the agent rather than ending here under set -e.
+        mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
+
+        limit=600
+        if [[ -n ${DOTFILES_TOOLS_TIMEOUT+x} ]]; then
+            raw="$DOTFILES_TOOLS_TIMEOUT"
+            if [[ "$raw" =~ ^0*([1-9][0-9]*)$ ]] \
+                && value="${BASH_REMATCH[1]}" \
+                && (( ${#value} <= 3 && 10#$value <= 600 )); then
+                limit="$value"
+            else
+                printf 'agent-session: DOTFILES_TOOLS_TIMEOUT=%s is invalid; using 600\n' "$raw" >&2
+            fi
+        fi
+
+        grace=10
+        out_made=0
+        out=""
+        if out="$(mktemp 2>/dev/null)"; then
+            out_made=1
+        elif out="$(TMPDIR=/tmp mktemp 2>/dev/null)"; then
+            out_made=1
+        else
+            printf 'agent-session: cannot make a temporary file in %s or /tmp; mise install output goes to stderr\n' "${TMPDIR:-<unset>}" >&2
+        fi
+        # A relative TMPDIR gives a relative name, which `mise which`'s stderr redirect, made after
+        # the cd into the checkout, would read from the wrong directory.
+        if (( out_made )); then
+            [[ "$out" = /* ]] || out="$PWD/$out"
+            exec {out_fd}>"$out"
+        else
+            exec {out_fd}>&2
+        fi
+        rc=0
+        (
+            # shellcheck disable=SC1007
+            CDPATH= cd -- "$DOTFILES_DIR" && exec timeout -k "$grace" "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install
+        ) >&"$out_fd" 2>&1 &
+        pid=$!
+        wait "$pid" || rc=$?
+        if [[ "$rc" = 124 || "$rc" = 137 ]]; then
+            waits=$((grace * 10))
+            while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
+                sleep 0.1
+                waits=$((waits - 1))
+            done
+            if kill -0 -- "-$pid" 2>/dev/null; then
+                kill -KILL -- "-$pid" 2>/dev/null || true
+                waits=20
+                while (( waits > 0 )) && kill -0 -- "-$pid" 2>/dev/null; do
+                    sleep 0.1
+                    waits=$((waits - 1))
+                done
+            fi
+        fi
+        exec {out_fd}>&-
+        # shellcheck disable=SC1007
+        if (( out_made )); then
+            found="$(CDPATH= cd -- "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>>"$out")" || found=""
+        else
+            found="$(CDPATH= cd -- "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>&2)" || found=""
+        fi
+        if [[ -n "$found" && -f "$found" && -x "$found" ]] && real="$(realpath "$found")"; then
+            if [[ "${real%/*}" != */shims && "${real%/*}" != "$MISE_DATA_DIR/shims" ]]; then
+                prog="$found"
+            fi
+        fi
+
+        reported_output=""
+        if (( rc != 0 )); then
+            tick='`'
+            printf 'agent-session: %smise install%s in %s exited %s' "$tick" "$tick" "$DOTFILES_DIR" "$rc" >&2
+            if [[ "$rc" = 124 || "$rc" = 137 ]]; then
+                printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
+            fi
+            if (( out_made )); then
+                printf '\nlast lines of its output:\n' >&2
+                tail -n 20 "$out" >&2 || true
+            else
+                printf '\nits output is above on stderr\n' >&2
+            fi
+            reported_output=1
+        fi
+        if [[ -z "$prog" ]]; then
+            echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
+            if [[ -z "$reported_output" ]]; then
+                if (( out_made )); then
+                    printf 'last lines of its output:\n' >&2
+                    tail -n 20 "$out" >&2 || true
+                else
+                    printf 'its output is above on stderr\n' >&2
+                fi
+            fi
+            if (( out_made )); then
+                rm -f "$out"
+            fi
+            exit 127
+        fi
+        if (( out_made )); then
+            rm -f "$out"
+        fi
     fi
 fi
 
