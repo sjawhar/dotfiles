@@ -202,10 +202,15 @@ case "$1" in
                 echo "$id" >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo "$id" ;;
         esac ;;
     unenroll)
-        echo "unenroll $*" >>"$STUB_CALLS"
+        # The call is logged only once its revoke is done: unenroll_calls returns on the logged
+        # call, and tearDown then removes the dir the revoke's `sed -i` writes in.
+        call="unenroll $*"
         id=""
         while (( $# )); do [[ "$1" == --enrollment ]] && id="$2"; shift; done
-        end_enrollment "$id" ;;
+        end_enrollment "$id"
+        rc=$?
+        echo "$call" >>"$STUB_CALLS"
+        exit "$rc" ;;
     renew)
         # As the pinned client (legion-envoy-v29.54.0) in a box: renew reads `enrollment` once as
         # it starts, exits 76 only when the broker refuses the enrollment as not live, and retries
