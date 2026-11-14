@@ -483,6 +483,21 @@ env FAKE_REMOTE_HOST="$destination" bash -c "$remote"
         mise = self.calls("mise")[0].split("|")
         self.assertEqual(mise[:4], ["mise install", str(self.checkout), str(self.home / ".mise"), str(self.home / ".cache/mise")])
 
+    def test_case_23_tools_mode_installs_in_the_named_checkout_from_any_directory(self) -> None:
+        # `--tools DIR` names the checkout the step installs. Run from another directory, the
+        # step must still run `mise install` in DIR: mise reads the directory's mise.toml, so an
+        # install run elsewhere reports "passed in DIR" while DIR's pins stay missing.
+        moved = self.sync("local")
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.clear_records()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        result = self._run(SYNC, "--tools", str(self.checkout), cwd=elsewhere)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_tools_ran()
+        self.assertEqual(self.calls("mise")[0].split("|")[1], str(self.checkout), self.records())
+
 
 if __name__ == "__main__":
     unittest.main()
