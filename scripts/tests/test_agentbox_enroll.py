@@ -784,11 +784,14 @@ class SessionIdentity(EnrollFixture):
         self.assertFalse((self.hostdir / "enrollment-session").exists())
 
     def unenroll_calls(self, deadline: float = 20.0) -> list[str]:
-        """The waiter unenroll_box leaves behind is detached; wait for it to have run."""
+        """The waiter unenroll_box leaves behind is detached; wait for it to reach one of its
+        ends: its unenroll call in the call log, or a line in unenroll.log that says it left the
+        enrollment alone. Any other line there is not enough: the waiter logs 'ending enrollment'
+        before it calls unenroll."""
         log = self.run_base / "session-keys" / "unenroll.log"
         end = time.time() + deadline
         while time.time() < end:
-            if log.exists() and log.read_text().strip():
+            if self.calls_matching("unenroll ") or (log.exists() and "left alone" in log.read_text()):
                 break
             time.sleep(0.2)
         return self.calls_matching("unenroll ")

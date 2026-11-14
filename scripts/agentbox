@@ -955,10 +955,10 @@ ENROLL_ERROR=""
 # and the runtime id `session-<sid>`, so the same session in a new box gets the same enrollment id
 # back and keeps the cards Sami has not answered and the grants he has given. A box with no
 # session id (a `--` command that is not omp, `doctor`, an `omp --no-session` run) keeps the old
-# shape: a key generated INSIDE the box by a process in its namespaces, into its private runtime
-# dir (tmpfs, this box only), enrolled under the box's own name, with only the public thumbprint
-# coming back. keygen writes over the key the box holds, so the re-enrollment runs this only for a
-# box that holds none. Status 1 with the reason in ENROLL_ERROR.
+# shape: a key generated INSIDE the box by a process in its namespaces, into its key dir
+# (box_keydir), enrolled under the box's own name, with only the public thumbprint coming back.
+# keygen writes over the key the box holds, so the re-enrollment runs this only for a box that
+# holds none. Status 1 with the reason in ENROLL_ERROR.
 enroll_key() {
     local box="$1" sid="$2" errfile tp="" skd="" runtime="$1"
     errfile="$RUN_BASE/$box/enroll.attempt-error"
@@ -1015,7 +1015,7 @@ enroll_attempts() {
         if eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
             agent-secrets "${args[@]}" 2>"$errfile")"; then
             if [[ -z "$eid" || -L "$keydir/enrollment" || ! -s "$keydir/enrollment" ]]; then
-                ENROLL_ERROR="agent-secrets enroll printed '$eid' and left $keydir/enrollment empty"
+                ENROLL_ERROR="agent-secrets enroll gave no enrollment id, or left no plain, non-empty enrollment file in $keydir (it printed '$eid')"
                 return 1
             fi
             printf '%s\n' "$eid" >"$RUN_BASE/$box/enrollment-id"
