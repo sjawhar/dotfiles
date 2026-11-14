@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import pwd
 import re
@@ -24,6 +25,58 @@ SSH_KEYGEN = Path("/usr/bin/ssh-keygen")
 SSHD = Path("/usr/sbin/sshd")
 LAPTOP_SSH_CONFIG = DOTFILES / "laptop" / "ssh-config"
 KEY_OPTIONS = DOTFILES / "oryx" / "oryx-tunnel.key-options"
+
+_PROC = Path("/proc")
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
+_PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+
+
+class _StoppedBySignal(BaseException):
+    """A signal deferred until the test finalizer has stopped its children."""
+
+
+def process_table() -> dict[int, tuple[str, int, int]]:
+    """Return each process's state, parent pid, and start tick from /proc."""
+    processes: dict[int, tuple[str, int, int]] = {}
+    for directory in _PROC.iterdir():
+        if not directory.name.isdecimal():
+            continue
+        try:
+            _, fields = (directory / "stat").read_text(encoding="utf-8").rsplit(")", 1)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        values = fields.split()
+        processes[int(directory.name)] = (values[0], int(values[1]), int(values[19]))
+    if os.getpid() not in processes:
+        raise AssertionError("full /proc scan did not find this process")
+    return processes
+
+
+def current_boot_tick() -> int:
+    uptime = float((_PROC / "uptime").read_text(encoding="utf-8").split()[0])
+    return int(uptime * os.sysconf("SC_CLK_TCK")) - 1
+
+
+def get_child_subreaper() -> int:
+    value = ctypes.c_int()
+    if _PRCTL(_PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return value.value
+
+
+def set_child_subreaper(value: int) -> None:
+    if _PRCTL(_PR_SET_CHILD_SUBREAPER, value, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def process_cmdline(pid: int) -> str:
+    try:
+        return (_PROC / str(pid) / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").rstrip()
+    except (FileNotFoundError, ProcessLookupError):
+        return "<vanished>"
 
 
 def read_options_line() -> str:
@@ -145,13 +198,163 @@ class UnixServer:
 
 class OryxTunnelKey(unittest.TestCase):
     def setUp(self) -> None:
+        self._finish_registered = False
+        self._final_phase_started = False
+        self._sweep_done = False
+        self._subreaper_restored = False
+        self._temp_dir_cleaned = False
+        self._handlers_restored = False
+        self._signal_redelivered = False
+        self._recorded_signal: int | None = None
+        self._previous_subreaper: int | None = None
+        self._handlers: dict[int, object] = {}
+        self._initial_children: set[tuple[int, int]] = set()
+        self._boot_tick = 0
+        self._sweep_ready = False
+        self.addCleanup(self._finish)
+        self._finish_registered = True
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.home = self.root / "home"
         self.home.mkdir()
+        self._previous_subreaper = get_child_subreaper()
+        set_child_subreaper(1)
+        processes = process_table()
+        self._initial_children = {
+            (pid, start_time)
+            for pid, (_, parent_pid, start_time) in processes.items()
+            if parent_pid == os.getpid()
+        }
+        self._boot_tick = current_boot_tick()
+        self._sweep_ready = True
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            previous = signal.getsignal(signum)
+            if previous is not None and previous is not signal.SIG_IGN:
+                signal.signal(signum, self._stop_by_signal)
+                self._handlers[signum] = previous
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    def _stop_by_signal(self, signum: int, frame: object) -> None:
+        if self._recorded_signal is None:
+            self._recorded_signal = signum
+            if not self._final_phase_started:
+                raise _StoppedBySignal(signum)
+
+    def _owned_children(self, processes: dict[int, tuple[str, int, int]]) -> dict[int, tuple[str, int, int]]:
+        return {
+            pid: process
+            for pid, process in processes.items()
+            if (
+                process[1] == os.getpid()
+                and (pid, process[2]) not in self._initial_children
+                and process[2] >= self._boot_tick
+            )
+        }
+
+    def _sweep(self) -> None:
+        if not self._sweep_ready:
+            return
+        deadline = time.monotonic() + 10
+        seen: set[tuple[int, int]] = set()
+        reaped: set[tuple[int, int]] = set()
+        terminated: dict[tuple[int, int], float] = {}
+        killed: set[tuple[int, int]] = set()
+        empty_since: float | None = None
+        while True:
+            processes = process_table()
+            owned = self._owned_children(processes)
+            owned_keys = {(pid, process[2]) for pid, process in owned.items()}
+            reaped.update(seen - owned_keys)
+            now = time.monotonic()
+            for pid, (state, _, start_time) in owned.items():
+                child = (pid, start_time)
+                seen.add(child)
+                if state == "Z":
+                    try:
+                        waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        reaped.add(child)
+                    else:
+                        if waited_pid == pid:
+                            reaped.add(child)
+                    continue
+                if child not in terminated:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    terminated[child] = now
+                elif now - terminated[child] >= 3 and child not in killed:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    killed.add(child)
+                try:
+                    waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    reaped.add(child)
+                else:
+                    if waited_pid == pid:
+                        reaped.add(child)
+            if not owned and seen <= reaped:
+                if empty_since is not None and now - empty_since >= 0.05:
+                    return
+                empty_since = now
+            else:
+                empty_since = None
+            if now >= deadline:
+                remaining = "; ".join(
+                    f"pid={pid} state={state} cmdline={process_cmdline(pid)!r}"
+                    for pid, (state, _, _) in owned.items()
+                )
+                raise AssertionError(f"timed out reaping test children: {remaining}")
+            time.sleep(min(0.05, deadline - now))
+
+    def _finish(self) -> None:
+        if not getattr(self, "_finish_registered", False):
+            return
+        self._final_phase_started = True
+        steps = (
+            ("_sweep_done", self._sweep),
+            ("_subreaper_restored", self._restore_subreaper),
+            ("_temp_dir_cleaned", self._clean_temp_dir),
+            ("_handlers_restored", self._restore_handlers),
+        )
+        first_error: BaseException | None = None
+        for flag, step in steps:
+            if getattr(self, flag):
+                continue
+            setattr(self, flag, True)
+            try:
+                step()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if self._recorded_signal is not None and not self._signal_redelivered:
+            self._signal_redelivered = True
+            signal.raise_signal(self._recorded_signal)
+        if first_error is not None:
+            raise first_error
+
+    def _restore_subreaper(self) -> None:
+        if self._previous_subreaper is not None:
+            set_child_subreaper(self._previous_subreaper)
+
+    def _clean_temp_dir(self) -> None:
+        temp_dir = getattr(self, "temp_dir", None)
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+    def _restore_handlers(self) -> None:
+        for signum, previous in self._handlers.items():
+            signal.signal(signum, previous)
+
+    def run(self, result: unittest.TestResult | None = None) -> unittest.TestResult | None:
+        try:
+            return super().run(result)
+        finally:
+            self.doCleanups()
+            self._finish()
 
     def test_options_match_the_tunnel_forwards(self) -> None:
         values = ssh_g(LAPTOP_SSH_CONFIG, "oryx-tunnel", self.home)
@@ -248,7 +451,7 @@ class OryxTunnelKey(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
         )
-        self.addCleanup(self.stop_sshd_by_pid_file, sshd, pid_file)
+        self.addCleanup(stop_process, sshd)
         self.wait_for_sshd(sshd, pid_file, sshd_port, sshd_log)
 
         user = pwd.getpwuid(os.getuid()).pw_name
@@ -482,16 +685,6 @@ class OryxTunnelKey(unittest.TestCase):
             except OSError:
                 time.sleep(0.05)
         self.fail(f"local forward did not listen on {port}")
-
-    def stop_sshd_by_pid_file(self, process: subprocess.Popen[str], pid_file: Path) -> None:
-        if process.poll() is None and pid_file.exists():
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            os.kill(pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.kill(pid, signal.SIGKILL)
-                process.wait(timeout=5)
 
     @staticmethod
     def stop_agent(pid: int) -> None:
