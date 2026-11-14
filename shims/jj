@@ -154,23 +154,145 @@ alias_refuse() {
     printf 'jj shim: %s. Nothing was changed.\n' "$1" >&2
     exit 1
 }
-# Locate a subcommand past jj 0.46's global options. Call it with the first token
-# to inspect, so nested commands use the same table.
 _pargs=("$@")
+# jj 0.46 global options from `jj --help`. Each value is its syntax and
+# canonical name. jj_global_at() is the only reader for this grammar.
+declare -A jj_global_options=(
+    [-R]='value|--repository'
+    [--repository]='value|--repository'
+    [--at-operation]='value|--at-operation'
+    [--at-op]='value|--at-operation'
+    [--color]='value|--color'
+    [--config]='value|--config'
+    [--config-file]='value|--config-file'
+    [--ignore-working-copy]='no-value|--ignore-working-copy'
+    [--no-integrate-operation]='no-value|--no-integrate-operation'
+    [--ignore-immutable]='no-value|--ignore-immutable'
+    [--debug]='no-value|--debug'
+    [--quiet]='no-value|--quiet'
+    [--no-pager]='no-value|--no-pager'
+    [-h]='stop|--help'
+    [--help]='stop|--help'
+    [-V]='stop|--version'
+    [--version]='stop|--version'
+)
+
+# Read one jj global at an index in _pargs. A success sets its canonical name,
+# value and word count. -R accepts both attached forms, and -R=PATH means PATH.
+jj_global_at() {
+    local index="${1:-0}" option name entry syntax count=${#_pargs[@]}
+    _jj_global_name=""
+    _jj_global_value=""
+    _jj_global_size=0
+    ((index < count)) || return 1
+    option="${_pargs[index]}"
+    name="$option"
+    entry="${jj_global_options[$name]:-}"
+    if [[ -z "$entry" && "$option" == -R?* ]]; then
+        name=-R
+        entry="${jj_global_options[$name]:-}"
+    elif [[ -z "$entry" && "$option" == *=* ]]; then
+        name="${option%%=*}"
+        entry="${jj_global_options[$name]:-}"
+    fi
+    [[ -n "$entry" ]] || return 1
+    IFS='|' read -r syntax _jj_global_name <<< "$entry"
+    case "$syntax" in
+        no-value | stop)
+            [[ "$option" == "$name" ]] || return 1
+            _jj_global_size=1
+            ;;
+        value)
+            if [[ "$option" == "$name" ]]; then
+                ((index + 1 < count)) || return 1
+                _jj_global_value="${_pargs[index + 1]}"
+                _jj_global_size=2
+            elif [[ "$name" == -? ]]; then
+                _jj_global_value="${option#"$name"}"
+                _jj_global_value="${_jj_global_value#=}"
+                _jj_global_size=1
+            elif [[ "$option" == "$name="* ]]; then
+                _jj_global_value="${option#*=}"
+                _jj_global_size=1
+            else
+                return 1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# Locate a subcommand past jj 0.46's global options. Call it with the first
+# token to inspect, so nested commands use the same table.
 command_index() {
     _pi="${1:-0}"
     while ((_pi < ${#_pargs[@]})); do
+        if jj_global_at "$_pi"; then
+            case "$_jj_global_name" in
+                --help | --version) return ;;
+            esac
+            ((_pi += _jj_global_size))
+            continue
+        fi
         case "${_pargs[_pi]}" in
-            -R | --repository | --at-operation | --at-op | --color | --config | --config-file) _pi=$((_pi + 2)) ;;
-            -R?* | --repository=* | --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=*) _pi=$((_pi + 1)) ;;
-            --ignore-working-copy | --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager) _pi=$((_pi + 1)) ;;
             --) _pi=$((_pi + 1)); break ;;
             -*) break ;;
             *) break ;;
         esac
     done
 }
+
+# Return the last -R value before --. Every other global value is skipped by
+# jj_global_at(), so it cannot be mistaken for a repository path.
+repository_option() {
+    local index=0 result=""
+    while ((index < ${#_pargs[@]})); do
+        [[ "${_pargs[index]}" == -- ]] && break
+        if jj_global_at "$index"; then
+            [[ "$_jj_global_name" != --repository ]] || result="$_jj_global_value"
+            ((index += _jj_global_size))
+        else
+            ((index += 1))
+        fi
+    done
+    printf '%s' "$result"
+}
+
+# Resolve a repository argument as trailer_on() does, returning the workspace
+# root above it. A path outside a workspace stays as its normalized path.
+workspace_root() {
+    local d="${1:-$PWD}" original
+    [[ "$d" == /* ]] || d="$PWD/$d"
+    d="$(realpath -m -- "$d")"
+    original="$d"
+    while [[ ! -d "$d/.jj" ]]; do
+        [[ "$d" != / ]] || { printf '%s' "$original"; return 0; }
+        d="${d%/*}"
+        [[ -n "$d" ]] || d=/
+    done
+    printf '%s' "$d"
+}
+
 command_index
+if [[ "${DOTFILES_JJ_SHIM_READ_GLOBALS:-}" == 1 ]]; then
+    _jj_probe_command=""
+    if ((_pi < ${#_pargs[@]})) && [[ "${_pargs[_pi]}" != -* ]]; then
+        _jj_probe_command="${_pargs[_pi]}"
+    fi
+    _jj_probe_index=0
+    while ((_jj_probe_index < ${#_pargs[@]})); do
+        if jj_global_at "$_jj_probe_index"; then
+            case "$_jj_global_name" in
+                --help | --version) _jj_probe_command="" ;;
+            esac
+            ((_jj_probe_index += _jj_global_size))
+        else
+            ((_jj_probe_index += 1))
+        fi
+    done
+    printf '%s\0%s\0' "$_jj_probe_command" "$(workspace_root "$(repository_option)")"
+    exit 0
+fi
 # Expand aliases for every caller so the checked argv is the argv jj executes.
 # Agents retain the eight-level cap; people get 64 levels and leave a cycle to
 # jj, which reports its recursive-alias error without running the command.
@@ -236,8 +358,14 @@ if [[ "${_pargs[_pi]:-}" == git ]]; then
     _pi=$_jj_outer_pi
 fi
 if [[ "$_gate" == agent && $_jj_git_pi -ge 0 && "${_pargs[_jj_git_pi]:-}" == push ]]; then
-    for _parg in "${_pargs[@]:_jj_git_pi+1}"; do
+    _jj_deleted_index=$((_jj_git_pi + 1))
+    while ((_jj_deleted_index < ${#_pargs[@]})); do
+        _parg="${_pargs[_jj_deleted_index]}"
         [[ "$_parg" == -- ]] && break
+        if jj_global_at "$_jj_deleted_index"; then
+            ((_jj_deleted_index += _jj_global_size))
+            continue
+        fi
         if [[ "$_parg" == --deleted ]]; then
             cat >&2 << 'EOF'
 jj shim: `jj git push --deleted` is refused in an agent session.
@@ -252,8 +380,10 @@ Delete and push only your own bookmark:
 EOF
             exit 1
         fi
+        ((_jj_deleted_index += 1))
     done
 fi
+
 
 # The Omp-Session trailer comes from an `omp-attribution-*.toml` overlay in
 # JJ_CONFIG (omp/extensions/session-env.ts, or the Legion extension), which jj
@@ -271,43 +401,12 @@ fi
 # `git config` read and, where that sets nothing, a `git remote` and a
 # `git rev-parse`; any other command, an alias included, pays it.
 _pre=()
-# Return the last repository path from a sequence of jj global options. Callers
-# give only option ranges, so a value that belongs to another global is skipped.
-repository_option() {
-    local index=0 option result=""
-    local -a options=("$@")
-    while ((index < ${#options[@]})); do
-        option="${options[index]}"
-        case "$option" in
-            -R | --repository)
-                ((index + 1 < ${#options[@]})) || break
-                result="${options[index + 1]}"
-                ((index += 2))
-                ;;
-            -R=*) result="${option#*=}"; ((index += 1)) ;;
-            -R?*) result="${option#-R}"; ((index += 1)) ;;
-            --repository=*) result="${option#*=}"; ((index += 1)) ;;
-            --at-operation | --at-op | --color | --config | --config-file) ((index += 2)) ;;
-            --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=* | \
-                --ignore-working-copy | --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager)
-                ((index += 1))
-                ;;
-            --) break ;;
-            *) ((index += 1)) ;;
-        esac
-    done
-    printf '%s' "$result"
-}
 
 trailer_on() {
     local d="" repo target=""
-    # A checked command (commit, ci, describe, desc, new) already parsed its own options, so its globals are exact. Any
-    # other command takes -R anywhere before `--`, as git_target reads it: jj accepts a global option after the command.
-    if [[ -n "$_jj_command" ]]; then
-        d="$(repository_option "${_pargs[@]:0:_pi}" "${_jj_global[@]}")"
-    else
-        d="$(repository_option "${_pargs[@]}")"
-    fi
+    # jj accepts globals after the command, so this shared reader scans the
+    # expanded argv through --.
+    d="$(repository_option)"
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
     d="${d%/}"
@@ -332,7 +431,7 @@ git_target() {
     local d="" repo target=""
     # jj accepts globals after `git push`, too. This reader skips each global
     # option's value, so that value cannot be mistaken for a repository key.
-    d="$(repository_option "${_pargs[@]}")"
+    d="$(repository_option)"
     d="${d:-$PWD}"
     [[ "$d" == /* ]] || d="$PWD/$d"
     d="${d%/}"
@@ -357,7 +456,7 @@ git_target() {
 # The leak-term scanner, for the push check below and the commit, describe and new checks after it.
 _jj_scanner="${BASH_SOURCE[0]%/*}/../scripts/leak-terms-check"
 push_gate() {
-    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start dry=0 tag_object
+    local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start index dry=0 tag_object
     local zero=0000000000000000000000000000000000000000
     local scripts="${BASH_SOURCE[0]%/*}/../scripts"
     local header='^Changes to push to (.+):$'
@@ -367,9 +466,17 @@ push_gate() {
     local -a display=() remotes=() adds=()
     local -A updates=() push_urls=()
     start=$((_jj_git_pi + 1))
-    for a in "${_pargs[@]:start}"; do
+    index=$start
+    while ((index < ${#_pargs[@]})); do
+        a="${_pargs[index]}"
         [[ "$a" == -- ]] && break
-        case "$a" in --help | -h) return 0 ;; --dry-run) dry=1 ;; esac
+        if jj_global_at "$index"; then
+            [[ "$_jj_global_name" != --help ]] || return 0
+            ((index += _jj_global_size))
+            continue
+        fi
+        [[ "$a" != --dry-run ]] || dry=1
+        ((index += 1))
     done
     target="$(git_target "$@")" || push_refuse "cannot find the backing git repository. Nothing was pushed."
     [[ -n "$target" ]] || push_refuse "cannot find the backing git repository. Nothing was pushed."
@@ -601,28 +708,17 @@ jj_parse_protected() {
             ((index += 1))
             continue
         fi
-        case "$token" in
-            -h | --help | -V | --version)
-                _jj_help=1
-                return 0
-                ;;
-            -R | --repository | --at-operation | --at-op | --color | --config | --config-file)
-                ((index + 1 < ${#_pargs[@]})) || jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
-                _jj_global+=("$token" "${_pargs[index + 1]}")
-                ((index += 2))
-                continue
-                ;;
-            -R?* | --repository=* | --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=*)
-                _jj_global+=("$token")
-                ((index += 1))
-                continue
-                ;;
-            --ignore-working-copy | --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager)
-                _jj_global+=("$token")
-                ((index += 1))
-                continue
-                ;;
-        esac
+        if jj_global_at "$index"; then
+            case "$_jj_global_name" in
+                --help | --version)
+                    _jj_help=1
+                    return 0
+                    ;;
+            esac
+            _jj_global+=("${_pargs[@]:index:_jj_global_size}")
+            ((index += _jj_global_size))
+            continue
+        fi
         if ((index < _pi)); then
             jj_scan_refuse "cannot read option $token, so the leak-term check cannot run"
         fi
@@ -796,14 +892,18 @@ if [[ "${_pargs[_pi]:-}" == workspace ]]; then
         _jj_add_index=$((_pi + 1))
         while ((_jj_add_index < ${#_pargs[@]})); do
             _jj_add_option="${_pargs[_jj_add_index]}"
+            if jj_global_at "$_jj_add_index"; then
+                case "$_jj_global_name" in
+                    --help | --version) break ;;
+                esac
+                ((_jj_add_index += _jj_global_size))
+                continue
+            fi
             case "$_jj_add_option" in
-                -R | --repository | --at-operation | --at-op | --color | --config | --config-file | \
-                    --name | -r | --revision | -m | --message | --sparse-patterns)
+                --name | -r | --revision | -m | --message | --sparse-patterns)
                     _jj_add_index=$((_jj_add_index + 2))
                     ;;
-                -R?* | --repository=* | --at-operation=* | --at-op=* | --color=* | --config=* | --config-file=* | \
-                    --name=* | -r?* | --revision=* | -m?* | --message=* | --sparse-patterns=* | --ignore-working-copy | \
-                    --no-integrate-operation | --ignore-immutable | --debug | --quiet | --no-pager | --colocate | --no-colocate)
+                --name=* | -r?* | --revision=* | -m?* | --message=* | --sparse-patterns=* | --colocate | --no-colocate)
                     _jj_add_index=$((_jj_add_index + 1))
                     ;;
                 --) _add_destination="${_pargs[_jj_add_index + 1]:-}"; break ;;

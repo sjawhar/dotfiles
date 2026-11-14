@@ -206,5 +206,190 @@ class GitGlobalOptions(unittest.TestCase):
         self.assertEqual(self.real("st3", "--porcelain", cwd=self.repo).returncode, 0)
 
 
+
+
+JJ_VALUE_GLOBAL_OPTIONS = (
+    ("short repository", "-R", "{other}", True),
+    ("repository", "--repository", "{other}", False),
+    ("at operation", "--at-operation", "@", False),
+    ("at op", "--at-op", "@", False),
+    ("color", "--color", "never", False),
+    ("config", "--config", 'ui.default-command="status"', False),
+    ("config file", "--config-file", "{config_file}", False),
+)
+
+JJ_FLAG_GLOBAL_OPTIONS = (
+    "--ignore-working-copy",
+    "--no-integrate-operation",
+    "--ignore-immutable",
+    "--debug",
+    "--quiet",
+    "--no-pager",
+)
+
+JJ_STOP_GLOBAL_OPTIONS = ("-h", "--help", "-V", "--version")
+
+# The last row is a valid Clap option parse whose value fails jj's config
+# validation. The reader still identifies root and does not read --dry-run.
+JJ_REJECTED_GLOBAL_OPTIONS = (
+    ("long value attached without equals", ("--repository{other}", "root"), ""),
+    ("boolean with equals", ("--quiet=true", "root"), ""),
+    ("config file consumes command", ("--config-file", "root"), ""),
+    ("short repository consumes command", ("-R", "root"), ""),
+    ("config value named dry run", ("--config", "--dry-run", "root"), "root"),
+)
+
+REAL_JJ = Path("/home/agent/.mise/installs/github-sjawhar-jj/0.46.0-sami.20261008-234600/jj")
+
+
+class JjGlobalOptions(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="jj-global-options-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.config = self.tmp / "config.toml"
+        self.config.write_text('[user]\nname = "Shim Test"\nemail = "shim-test@example.invalid"\n')
+        self.extra_config = self.tmp / "extra.toml"
+        self.extra_config.write_text("")
+        self.repo = self.tmp / "repo"
+        self.other = self.tmp / "other"
+        self.env = {
+            "HOME": str(self.home),
+            "JJ_CONFIG": str(self.config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "PATH": os.pathsep.join([str(SHIMS), str(REAL_JJ.parent), os.environ["PATH"]]),
+        }
+        self.real("git", "init", "--colocate", str(self.repo), cwd=self.tmp, check=True)
+        self.real("git", "init", "--colocate", str(self.other), cwd=self.tmp, check=True)
+        self.nested = self.repo / "nested"
+        self.nested.mkdir()
+
+    def real(self, *argv: str, cwd: Path, check: bool = False) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run([str(REAL_JJ), *argv], cwd=cwd, env=self.env, capture_output=True, text=True, check=False)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def git(self, *argv: str, cwd: Path, check: bool = False) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(["/usr/bin/git", *argv], cwd=cwd, env=self.env, capture_output=True, text=True, check=False)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def shim(self, *argv: str, cwd: Path, **extra_env: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["jj", *argv], cwd=cwd, env={**self.env, **extra_env}, capture_output=True, text=True, check=False)
+
+    def probe(self, argv: tuple[str, ...], cwd: Path) -> list[str]:
+        result = self.shim(*argv, cwd=cwd, DOTFILES_JJ_SHIM_READ_GLOBALS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        fields = result.stdout.encode().split(b"\0")
+        self.assertEqual(fields.pop(), b"", result.stdout)
+        self.assertEqual(len(fields), 2, result.stdout)
+        return [field.decode() for field in fields]
+
+    def render(self, argv: tuple[str, ...]) -> tuple[str, ...]:
+        values = {
+            "repo": str(self.repo),
+            "other": str(self.other),
+            "config_file": str(self.extra_config),
+        }
+        return tuple(value.format(**values) for value in argv)
+
+    def assert_root_matches_real(self, argv: tuple[str, ...]) -> None:
+        real = self.real(*argv, cwd=self.nested)
+        fields = self.probe(argv, self.nested)
+        roots = {str(self.repo.resolve()), str(self.other.resolve())}
+        runs_root = real.returncode == 0 and real.stdout.strip() in roots
+        self.assertTrue(runs_root, (real.returncode, real.stdout, real.stderr))
+        self.assertEqual(fields[0], "root")
+        self.assertEqual(fields[1], real.stdout.strip())
+
+    def value_forms(self, option: str, value: str, short: bool) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        forms = [
+            ("separate before", (option, value, "root")),
+            ("equals before", (f"{option}={value}", "root")),
+            ("separate after", ("root", option, value)),
+            ("equals after", ("root", f"{option}={value}")),
+        ]
+        if short:
+            forms.extend([
+                ("attached before", (f"{option}{value}", "root")),
+                ("attached equals before", (f"{option}={value}", "root")),
+                ("attached after", ("root", f"{option}{value}")),
+                ("attached equals after", ("root", f"{option}={value}")),
+            ])
+        return tuple(forms)
+
+    def test_global_options_match_real_jj(self) -> None:
+        for name, option, value, short in JJ_VALUE_GLOBAL_OPTIONS:
+            for form, argv in self.value_forms(option, self.render((value,))[0], short):
+                with self.subTest(option=name, form=form):
+                    self.assert_root_matches_real(argv)
+        for option in JJ_FLAG_GLOBAL_OPTIONS:
+            for form, argv in (("before", (option, "root")), ("after", ("root", option))):
+                with self.subTest(option=option, form=form):
+                    self.assert_root_matches_real(argv)
+        for option in JJ_STOP_GLOBAL_OPTIONS:
+            for form, argv in (("before", (option, "root")), ("after", ("root", option))):
+                with self.subTest(option=option, form=form):
+                    real = self.real(*argv, cwd=self.nested)
+                    fields = self.probe(argv, self.nested)
+                    self.assertFalse(real.returncode == 0 and real.stdout.strip() == str(self.repo.resolve()))
+                    self.assertEqual(fields[0], "")
+
+    def test_rejected_global_options_record_jjs_parse(self) -> None:
+        for name, argv, command in JJ_REJECTED_GLOBAL_OPTIONS:
+            with self.subTest(option=name):
+                rendered = self.render(argv)
+                real = self.real(*rendered, cwd=self.nested)
+                fields = self.probe(rendered, self.nested)
+                self.assertNotEqual(real.returncode, 0)
+                self.assertEqual(fields[0], command)
+
+    def test_nested_global_option_finds_git(self) -> None:
+        fields = self.probe(("git", "--config", "x=y", "push"), self.nested)
+        self.assertEqual(fields, ["git", str(self.repo.resolve())])
+
+    def test_global_values_are_not_push_flags(self) -> None:
+        self.git("config", "user.name", "Shim Test", cwd=self.repo, check=True)
+        self.git("config", "user.email", "shim-test@example.invalid", cwd=self.repo, check=True)
+        (self.repo / "tracked").write_text("tracked\n")
+        self.git("add", "tracked", cwd=self.repo, check=True)
+        self.git("commit", "-qm", "init", cwd=self.repo, check=True)
+        commit = self.git("rev-parse", "HEAD", cwd=self.repo, check=True).stdout.strip()
+        sink = self.tmp / "sink"
+        self.git("init", "--bare", str(sink), cwd=self.tmp, check=True)
+        self.git("remote", "add", "origin", str(sink), cwd=self.repo, check=True)
+        fake_bin = self.tmp / "fake-bin"
+        fake_bin.mkdir()
+        fake = fake_bin / "jj"
+        fake.write_text(
+            "#!/bin/bash\n"
+            "if [[ \" $* \" == *\" --config --dry-run \"* ]]; then\n"
+            "    printf 'Changes to push to origin:\\n'\n"
+            f"    printf '  bookmark: sami-x [add to {commit}]\\n'\n"
+            "else\n"
+            "    printf 'Nothing changed.\\n'\n"
+            "fi\n"
+        )
+        fake.chmod(0o755)
+        env = {
+            "AGENT_SHIM_AGENT": "1",
+            "PATH": os.pathsep.join([str(SHIMS), str(fake_bin), os.environ["PATH"]]),
+        }
+        cases = (
+            ("dry run config value", ("git", "push", "--config", "--dry-run"), 1,
+             "would create the branch sami-x"),
+            ("deleted config value", ("git", "push", "--config", "--deleted"), 0,
+             ""),
+        )
+        for name, argv, returncode, message in cases:
+            with self.subTest(value=name):
+                result = self.shim(*argv, cwd=self.repo, **env)
+                self.assertEqual(result.returncode, returncode, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("is refused in an agent session", result.stderr)
 if __name__ == "__main__":
     unittest.main()
