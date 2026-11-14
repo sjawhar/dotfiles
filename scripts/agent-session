@@ -24,7 +24,12 @@
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
-#     the directory; either would hand the call back to a launcher.
+#     the directory; either would hand the call back to a launcher. When there is none (a move of
+#     the checkout brought a pin nothing installed yet), it runs `mise install` once in the
+#     checkout, holding $MISE_DATA_DIR/.dotfiles-install.lock as dotfiles-sync's tools step does,
+#     so a launch during a mover's install waits for it; then, whatever the install's result, it
+#     asks `mise which <agent>` for the pinned binary and execs that when it is not a wrapper, and
+#     exits 127 only when it is missing. A failed install's last lines go to stderr, never stdout.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -292,8 +297,55 @@ else
         break
     done
     if [[ -z "$prog" ]]; then
-        echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
-        exit 127
+        mise_bin="$(command -v mise)" || mise_bin="$DOTFILES_DIR/bin/mise"
+        export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
+        # A directory it cannot make shows up below, as flock's failure to open the lock, and the
+        # launch still asks mise for the agent rather than ending here under set -e.
+        mkdir -p "$MISE_DATA_DIR" 2>/dev/null || true
+
+        limit=600
+        if [[ -n ${DOTFILES_TOOLS_TIMEOUT+x} ]]; then
+            raw="$DOTFILES_TOOLS_TIMEOUT"
+            if [[ "$raw" =~ ^0*([1-9][0-9]*)$ ]] \
+                && value="${BASH_REMATCH[1]}" \
+                && (( ${#value} <= 3 && 10#$value <= 600 )); then
+                limit="$value"
+            else
+                printf 'agent-session: DOTFILES_TOOLS_TIMEOUT=%s is invalid; using 600\n' "$raw" >&2
+            fi
+        fi
+
+        out="$(mktemp)"
+        rc=0
+        (cd "$DOTFILES_DIR" && timeout -k 10 "$limit" flock "$MISE_DATA_DIR/.dotfiles-install.lock" "$mise_bin" install) >"$out" 2>&1 || rc=$?
+        found="$(cd "$DOTFILES_DIR" && "$mise_bin" which "$agent" 2>>"$out")" || found=""
+        if [[ -n "$found" && -f "$found" && -x "$found" ]] && real="$(realpath "$found")"; then
+            if [[ "${real%/*}" != */shims && "${real%/*}" != "$MISE_DATA_DIR/shims" ]]; then
+                prog="$found"
+            fi
+        fi
+
+        reported_output=""
+        if (( rc != 0 )); then
+            tick='`'
+            printf 'agent-session: %smise install%s in %s exited %s' "$tick" "$tick" "$DOTFILES_DIR" "$rc" >&2
+            if [[ "$rc" = 124 || "$rc" = 137 ]]; then
+                printf ' (past its limit of %s s, lock wait included)' "$limit" >&2
+            fi
+            printf '\nlast lines of its output:\n' >&2
+            tail -n 20 "$out" >&2 || true
+            reported_output=1
+        fi
+        if [[ -z "$prog" ]]; then
+            echo "agent-session: no $agent on PATH other than a wrapper (a shims/ dir, $mise_shims); a mise-managed agent needs its pinned version installed (mise install)" >&2
+            if [[ -z "$reported_output" ]]; then
+                printf 'last lines of its output:\n' >&2
+                tail -n 20 "$out" >&2 || true
+            fi
+            rm -f "$out"
+            exit 127
+        fi
+        rm -f "$out"
     fi
 fi
 
