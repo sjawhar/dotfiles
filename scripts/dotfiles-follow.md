@@ -74,6 +74,9 @@ Follow restores the managed marketplace lock before it calls the sync.
    `mise install`, `bun install --frozen-lockfile` in `omp/plugins`, then, for each registered
    non-Bun marketplace plugin whose installed version differs from `omp-plugins.lock.json`,
    `shims/omp plugin marketplace update <source>` and `shims/omp plugin upgrade <name>@<source>`.
+   `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
+   `--mise-timeout`), the lock `dotfiles-sync`'s tools step and `agent-session` hold too, so
+   installs on one `MISE_DATA_DIR` never run side by side and a launch waits for a running install.
    A unique `installed_plugins.json` record identifies its source. Lock entries with no record
    are silently skipped: these include vendored plugins such as compound-engineering and new
    marketplace plugins not yet bootstrapped. Bootstrapping stays an `install.sh` job; follow

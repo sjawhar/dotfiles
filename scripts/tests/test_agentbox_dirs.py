@@ -16,6 +16,7 @@ need a real host replaced by no-ops. The docker stub records `docker run`'s argu
 from __future__ import annotations
 
 import os
+import socket
 import stat
 import subprocess
 import tempfile
@@ -88,6 +89,9 @@ class AgentboxDirs(unittest.TestCase):
             "AGENT_SECRETS_URL": "https://broker.example",
             "STUB_RUN_ARGS": str(self.run_args),
             "AGENTBOX_BOXES": str(self.boxes),
+            # Each box's run dir, which holds its key dir, in the fixture and not in this host's
+            # /run/user/<uid>/agentbox.
+            "AGENTBOX_RUN_BASE": str(self.root / "run"),
             "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache"),
             # The limits are tested in scripts/tests/test_agentbox_limits.py; a box here needs no
             # filesystem of its own, which would want root.
@@ -110,8 +114,9 @@ class AgentboxDirs(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def launch(self, *options: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
-        script = f'source "{AGENTBOX}"\n{NO_HOST}cmd_new {" ".join(options)} -- omp\n'
+    def launch(self, *options: str, prelude: str = "", **extra_env: str) -> subprocess.CompletedProcess[str]:
+        """cmd_new with `options`, after `prelude`: shell lines run once the script is sourced."""
+        script = f'source "{AGENTBOX}"\n{prelude}{NO_HOST}cmd_new {" ".join(options)} -- omp\n'
         return subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
@@ -121,8 +126,8 @@ class AgentboxDirs(unittest.TestCase):
             timeout=120,
         )
 
-    def run_args_of(self, *options: str, **extra_env: str) -> list[str]:
-        result = self.launch(*options, **extra_env)
+    def run_args_of(self, *options: str, prelude: str = "", **extra_env: str) -> list[str]:
+        result = self.launch(*options, prelude=prelude, **extra_env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.run_args.read_text(encoding="utf-8").splitlines()
 
@@ -548,6 +553,29 @@ class AgentboxDirs(unittest.TestCase):
         args = self.run_args_of(f"--dir {key_dir}")
         self.assertIn(f"{key_dir}:{key_dir}", args, args)
         self.assertNotIn(f"{key_dir}:{key_dir}:ro", args, args)
+
+    def test_the_key_dir_is_a_mount_of_its_own_under_no_other_bind(self) -> None:
+        """A box can replace anything in a directory it has bound read-write, a link at the key
+        dir's name included, and each host write into the key dir then follows that link
+        (dispatch://INFRA-3462). So the key dir (box_keydir) is bound on its own, at the path the
+        box's agent-secrets client reads, and no other bind's source is the key dir or a
+        directory above it. The key dir was run-user/agent-secrets before, inside the source of
+        the box's /run/user/<uid>. The secretsd socket is the fixture's, so the launch does not
+        depend on this host's."""
+        secretsd = self.root / "secretsd.sock"
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(secretsd))
+        args = self.run_args_of("--dir", str(self.lane), prelude=f'SECRETSD_SOCK="{secretsd}"\n')
+        box = args[args.index("--name") + 1]
+        found = subprocess.run(
+            ["bash", "-c", f'source "{AGENTBOX}"\nbox_keydir "{box}"'],
+            capture_output=True, text=True, env=self.env, check=True, timeout=60,
+        )
+        keydir = Path(found.stdout.strip())
+        self.assertTrue(keydir.is_relative_to(self.root / "run" / box), keydir)
+        binds = self.binds_of(args)
+        holding = [b for b in binds if Path(b.split(":")[0]) in (keydir, *keydir.parents)]
+        self.assertEqual(holding, [f"{keydir}:/run/user/{os.getuid()}/agent-secrets"], binds)
 
 
 if __name__ == "__main__":

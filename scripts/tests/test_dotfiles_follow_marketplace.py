@@ -32,6 +32,10 @@ plugins = repo / "omp/plugins"
 args = sys.argv[1:]
 with Path(os.environ["FAKE_OMP_LOG"]).open("a") as log:
     log.write(json.dumps(args) + "\n")
+data_log = os.environ.get("FAKE_OMP_DATA_LOG")
+if data_log:
+    with Path(data_log).open("a") as log:
+        log.write(os.environ.get("MISE_DATA_DIR", "unset") + "\n")
 # Both successful commands and midway failures can rewrite the tracked lock.
 (plugins / "omp-plugins.lock.json").write_text('{"plugins": {}, "rewritten": true}\n')
 if args[:3] == ["plugin", "marketplace", "update"] and len(args) == 4:
@@ -149,6 +153,10 @@ class MarketplacePlugins(Harness):
     def calls(self) -> list[list[str]]:
         return [json.loads(line) for line in self.omp_log.read_text().splitlines()] if self.omp_log.exists() else []
 
+    def data_calls(self) -> list[str]:
+        path = Path(os.environ["FAKE_OMP_DATA_LOG"])
+        return path.read_text().splitlines() if path.exists() else []
+
     def version(self, name: str) -> str:
         return json.loads(self.installed_path.read_text())["plugins"][f"{name}@{self.sources[name]}"][0]["version"]
 
@@ -177,6 +185,19 @@ class MarketplacePlugins(Harness):
         self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
         self.assertEqual(len(self.calls()), 6)
         self.assert_clean_lock()
+
+    def test_marketplace_commands_get_the_mise_data_directory(self) -> None:
+        self.assertNotIn("MISE_DATA_DIR", os.environ)
+        os.environ["FAKE_OMP_DATA_LOG"] = str(self.home.parent / "omp-data.log")
+        self.take_upstream()
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+
+        records = self.fake_log.read_text().splitlines()
+        mise = next(record for record in records if record.startswith("install held "))
+        self.assertEqual(mise.rsplit(" ", 1)[1], str(self.home / ".mise"))
+        self.assertGreater(len(self.calls()), 0)
+        self.assertEqual(self.data_calls(), [mise.rsplit(" ", 1)[1]] * len(self.calls()))
 
     def test_midway_failures_aggregate_and_do_not_stop_other_plugins(self) -> None:
         self.take_upstream()

@@ -48,6 +48,10 @@ class DotfilesCheckout(unittest.TestCase):
         bin_dir.mkdir()
         for name in ("jj", "git"):
             (bin_dir / name).symlink_to(real_binary(name))
+        for name in ("mise", "bun"):
+            stand_in = bin_dir / name
+            stand_in.write_text("#!/bin/sh\nexit 0\n")
+            stand_in.chmod(0o755)
         self.home = root / "home"
         self.home.mkdir()
         jj_config = root / "jj.toml"
