@@ -1,0 +1,30 @@
+name: omp-extensions-test
+
+# A bad gate file stops every feature of omp/extensions/experiments on the dev box, so every change
+# to omp/extensions runs its tests. The push trigger covers a change pushed to main with no pull
+# request, such as the one-line change that turns a gate off.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "omp/extensions/**"
+      - ".github/workflows/omp-extensions-test.yml"
+  pull_request:
+    paths:
+      - "omp/extensions/**"
+      - ".github/workflows/omp-extensions-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # The version mise.toml pins for the dev box.
+          bun-version: "1.4.4"
+      - name: bun test
+        run: bun test omp/extensions/__tests__/

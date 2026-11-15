@@ -13,7 +13,7 @@
 // name. A session with no file (--no-session) draws from its own id.
 import { createHash } from "node:crypto";
 
-export const FEATURES = ["selfcompact", "proactive_memory", "skill_gate", "judge_log", "rules_refresh", "askgate_block", "bash_gate_leading"] as const;
+export const FEATURES = ["selfcompact", "proactive_memory", "skill_gate", "judge_log", "rules_refresh", "askgate_block", "bash_gate_leading", "aa_noop", "infra805_skill", "infra805_selfcheck"] as const;
 export type Feature = (typeof FEATURES)[number];
 export const GATES = ["on", "off", "random"] as const;
 export type Gate = (typeof GATES)[number];
@@ -23,6 +23,10 @@ export type Resolution = { gate: Gate; draw: "on" | "off"; on: boolean };
 export type ExperimentRecord = { v: 1; rootSessionId: string; features: Record<Feature, Resolution> };
 
 export const ENTRY_TYPE = "experiments";
+/** The custom type of the entry a feature of text-arms.ts appends, in either arm, at the point where the treatment reaches the session in the on arm. */
+export const EXPOSURE_ENTRY_TYPE = "experiments-exposure";
+/** One exposure: the feature, the arm of the session, its gate (`off` writes no entry), the root session id (rootIdFromPath, else the session's own id) and the time (ISO 8601, UTC). */
+export type ExposureRecord = { v: 1; feature: Feature; arm: "on" | "off"; gate: Exclude<Gate, "off">; rootSessionId: string; at: string };
 const ENV_PREFIX = "OMP_EXPERIMENT_";
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** The uuid after `Z_` in a session file path (the root's id for its own file and its subagents' files alike). */

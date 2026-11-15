@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import gateFile from "../experiments/gates.json" with { type: "json" };
-import { draw, ENTRY_TYPE, type ExperimentRecord, FEATURES, resolve, resolveGates, rootSessionId } from "../experiments/gates";
+import { draw, ENTRY_TYPE, EXPOSURE_ENTRY_TYPE, type ExperimentRecord, type ExposureRecord, envName, FEATURES, type Feature, resolve, resolveGates, rootSessionId } from "../experiments/gates";
+import selfcheckText from "../experiments/infra805-selfcheck.md" with { type: "text" };
+import skillText from "../experiments/infra805-skill.md" with { type: "text" };
 import { DEFAULT_RULES, ompModules } from "./omp-interceptor";
 
 // The entry imports the memory agent's and the judge log's bindings, which import @oh-my-pi/pi-ai; that resolves only inside omp.
@@ -10,10 +12,12 @@ mock.module("@oh-my-pi/pi-coding-agent/exec/settings", () => ({ cfgBashIntercept
 mock.module("@oh-my-pi/pi-coding-agent/tools/bash-interceptor", () => ompModules.interceptor);
 mock.module("@oh-my-pi/pi-coding-agent/tools/shell-tokenize", () => ompModules.tokenize);
 
-const ALL_RANDOM = { selfcompact: "random", proactive_memory: "random", skill_gate: "random", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" };
+const ALL_RANDOM: Record<string, string> = Object.fromEntries(FEATURES.map(feature => [feature, "random"]));
 const ids = Array.from({ length: 400 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 const ROOT = "01a0f8aa-2f87-720f-8260-1d84b54c192b";
 const ROOT_FILE = `/home/u/.omp/agent/sessions/-tmp-x/2026-10-01T18-11-37-991Z_${ROOT}.jsonl`;
+/** The session file of a root session whose id is `id`. */
+const rootFile = (id: string) => `/home/u/.omp/agent/sessions/-tmp-x/2026-10-01T18-11-37-991Z_${id}.jsonl`;
 
 describe("the draw", () => {
 	test("is stable for a root session: the same id draws the same features every time", () => {
@@ -27,8 +31,8 @@ describe("the draw", () => {
 			expect(on).toBeLessThan(250);
 		}
 		for (const a of FEATURES) for (const b of FEATURES) if (a < b) expect(ids.filter(id => draw(id, a) !== draw(id, b)).length).toBeGreaterThan(150);
-		// 2^8 combinations need more ids than the bounds above: 400 draws leave many of them unseen.
-		const many = Array.from({ length: 2_000 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
+		// 2^10 combinations need more ids than the bounds above: 400 draws leave many of them unseen.
+		const many = Array.from({ length: 10_000 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 		const combinations = new Set(many.map(id => FEATURES.map(f => (draw(id, f) ? 1 : 0)).join("")));
 		expect(combinations.size).toBe(2 ** FEATURES.length);
 	});
@@ -56,7 +60,7 @@ describe("resolveGates", () => {
 	});
 	test("OMP_EXPERIMENT_<FEATURE> overrides the file for that feature only", () => {
 		const gates = resolveGates(ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_SKILL_GATE: "on", OTHER: "x" });
-		expect(gates).toEqual({ selfcompact: "off", proactive_memory: "random", skill_gate: "on", judge_log: "random", rules_refresh: "random", askgate_block: "random", bash_gate_leading: "random" });
+		expect(gates).toEqual({ ...ALL_RANDOM, selfcompact: "off", skill_gate: "on" });
 	});
 	test.each([
 		["a variable whose value is not a gate", ALL_RANDOM, { OMP_EXPERIMENT_SELFCOMPACT: "maybe" }, /OMP_EXPERIMENT_SELFCOMPACT must be on, off or random, got "maybe"/],
@@ -71,6 +75,25 @@ describe("resolveGates", () => {
 	});
 });
 
+describe("the gate file", () => {
+	test("parses, and holds a gate for every feature in FEATURES and for nothing else", () => {
+		expect(() => resolveGates(gateFile, {})).not.toThrow();
+		expect(Object.keys(gateFile).sort()).toEqual([...FEATURES].sort());
+	});
+	test("sets the three features of the eval method's experiments off", () => {
+		const record = resolve(resolveGates(gateFile, {}), ROOT);
+		for (const feature of ["aa_noop", "infra805_skill", "infra805_selfcheck"] as const) {
+			expect(gateFile[feature]).toBe("off");
+			expect(record.features[feature].on).toBe(false);
+		}
+	});
+	test("the skill text is SKILL.md of cybermonklabs/legion at d806232f, unchanged (git blob cab9f7bf)", () => {
+		const bytes = new TextEncoder().encode(skillText);
+		const blob = new Bun.CryptoHasher("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+		expect(blob).toBe("cab9f7bf7937ded98538de09226e0aab7289e811");
+	});
+});
+
 describe("the extension", () => {
 	type Handler = (event: unknown, ctx: unknown) => unknown;
 	const saved = { ...process.env };
@@ -82,8 +105,9 @@ describe("the extension", () => {
 		Object.assign(process.env, saved);
 	});
 
-	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. */
-	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown }> = []) {
+	type Delivered = { message: { customType: string; content: string; display: boolean } };
+	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. Its branch is its entries unless `setBranch` replaces it. */
+	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown }> = [], kind: "main" | "sub" = "main") {
 		Object.assign(process.env, env);
 		const { default: experiments } = await import("../experiments/index");
 		const handlers = new Map<string, Handler[]>();
@@ -98,9 +122,9 @@ describe("the extension", () => {
 			getActiveTools: () => ["bash", "read", "grep", "glob", "edit", "write"],
 		};
 		experiments(pi as never);
-		let branch: () => unknown[] = () => [];
+		let branch: () => unknown[] = () => entries;
 		const ctx = {
-			agent: { kind: "main" },
+			agent: { kind },
 			sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => ROOT, getEntries: () => entries, getBranch: () => branch() },
 		};
 		const emit = async (event: string, payload: unknown) => {
@@ -117,6 +141,19 @@ describe("the extension", () => {
 			gh: () => emit("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "gh pr create --fill" } }) as Promise<{ block?: boolean } | undefined>,
 			bash: (command: string) => emit("tool_call", { toolName: "bash", toolCallId: "c2", input: { command } }) as Promise<{ block?: boolean; reason?: string } | undefined>,
 			setBranch: (fn: typeof branch) => (branch = fn),
+			exposures: () => entries.filter(e => e.customType === EXPOSURE_ENTRY_TYPE).map(e => e.data as ExposureRecord),
+			/** Every before_agent_start result of one prompt, in handler order. */
+			prompt: async (reason: "prompt" | "revive" = "prompt") => {
+				const results: Delivered[] = [];
+				for (const handler of handlers.get("before_agent_start") ?? []) {
+					const result = await handler({ type: "before_agent_start", reason, prompt: "Design the cache.", systemPrompt: ["You are omp."] }, ctx);
+					if (result !== undefined) results.push(result as Delivered);
+				}
+				return results;
+			},
+			/** The next request, holding the prompt and the custom messages `delivered` put in. */
+			request: (delivered: Delivered[]) =>
+				emit("context", { type: "context", messages: [{ role: "user", content: "Design the cache.", timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))] }),
 		};
 	}
 	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
@@ -173,5 +210,131 @@ describe("the extension", () => {
 		b.setBranch(() => []);
 		expect(await b.gh()).toBeUndefined();
 		expect((await b.bash("cat f"))?.block).toBe(true);
+	});
+
+	describe("the three features of the eval method's experiments", () => {
+		const TEXTS: ReadonlyArray<[Feature, string | undefined]> = [
+			["aa_noop", undefined],
+			["infra805_skill", skillText],
+			["infra805_selfcheck", selfcheckText],
+		];
+		/** What the handler of `feature` puts in at a prompt: one hidden custom message with its text, or nothing. */
+		const deliveryOf = (feature: Feature, text: string | undefined): Delivered[] => (text === undefined ? [] : [{ message: { customType: feature, content: text, display: false } }]);
+
+		test.each(TEXTS)("%s in the on arm adds its text and writes one entry with arm on when the text reaches the session, and no other while the entry stays in the context", async (feature, text) => {
+			const drawnOn = ids.find(id => draw(id, feature)) as string;
+			for (const [gate, file, root] of [["on", ROOT_FILE, ROOT], ["random", rootFile(drawnOn), drawnOn]] as const) {
+				const b = await bind({ [envName(feature)]: gate }, file);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(delivered).toEqual(deliveryOf(feature, text));
+				expect(b.exposures()).toEqual([]);
+				expect(await b.request(delivered)).toBeUndefined();
+				expect(b.exposures()).toEqual([{ v: 1, feature, arm: "on", gate, rootSessionId: root, at: expect.any(String) }]);
+				const { at } = b.exposures()[0];
+				expect(new Date(at).toISOString()).toBe(at);
+				expect(Math.abs(Date.parse(at) - Date.now())).toBeLessThan(60_000);
+				expect(await b.prompt()).toEqual([]);
+				await b.request(delivered);
+				expect(b.exposures()).toHaveLength(1);
+			}
+		});
+		test.each(TEXTS)("%s in the off arm of a random gate adds no text and writes one entry with arm off at the next request", async feature => {
+			const drawnOff = ids.find(id => !draw(id, feature)) as string;
+			const b = await bind({ [envName(feature)]: "random" }, rootFile(drawnOff));
+			await b.start();
+			expect(b.records()[0].features[feature]).toEqual({ gate: "random", draw: "off", on: false });
+			expect(await b.prompt()).toEqual([]);
+			expect(b.exposures()).toEqual([]);
+			expect(await b.request([])).toBeUndefined();
+			expect(b.exposures()).toEqual([{ v: 1, feature, arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
+			expect(await b.prompt()).toEqual([]);
+			await b.request([]);
+			expect(b.exposures()).toHaveLength(1);
+		});
+		test.each(TEXTS)("%s with its gate off adds nothing and writes no entry", async (feature, text) => {
+			const b = await bind({ [envName(feature)]: "off" });
+			await b.start();
+			expect(await b.prompt()).toEqual([]);
+			await b.request(deliveryOf(feature, text));
+			expect(b.exposures()).toEqual([]);
+		});
+		test("the exposure entry of the on arm waits for the request whose messages hold the text", async () => {
+			const b = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+			await b.start();
+			const delivered = await b.prompt();
+			await b.request([]);
+			expect(b.exposures()).toEqual([]);
+			await b.request(delivered);
+			expect(b.exposures()).toHaveLength(1);
+		});
+		test("aa_noop changes no prompt, request or tool call: its two arms differ only in the arm of its exposure entry", async () => {
+			const run = async (root: string) => {
+				const env = { ...allOff, OMP_EXPERIMENT_SKILL_GATE: "on", OMP_EXPERIMENT_RULES_REFRESH: "on", OMP_EXPERIMENT_BASH_GATE_LEADING: "on", OMP_EXPERIMENT_AA_NOOP: "random" };
+				const b = await bind(env, rootFile(root));
+				await b.start();
+				const seen = [await b.prompt(), await b.request([]), await b.gh(), await b.bash("ls d && cat f"), await b.bash("cat f")];
+				expect(b.entries.filter(e => e.customType !== ENTRY_TYPE && e.customType !== EXPOSURE_ENTRY_TYPE)).toEqual([]);
+				const [exposure, ...rest] = b.exposures();
+				expect(rest).toEqual([]);
+				const { rootSessionId: _root, at: _at, ...kept } = exposure;
+				return { seen, kept };
+			};
+			const on = await run(ids.find(id => draw(id, "aa_noop")) as string);
+			const off = await run(ids.find(id => !draw(id, "aa_noop")) as string);
+			expect(on.seen).toEqual(off.seen);
+			expect(on.kept).toEqual({ v: 1, feature: "aa_noop", arm: "on", gate: "random" });
+			expect(off.kept).toEqual({ ...on.kept, arm: "off" });
+		});
+		test("a text arm that throws is logged and stops for the session; the other features keep running", async () => {
+			const b = await bind({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+			await b.start();
+			// The first reader of the branch at a prompt is aa_noop, the first text arm.
+			let calls = 0;
+			b.setBranch(() => {
+				if (calls++ === 0) throw new Error("branch unavailable");
+				return b.entries;
+			});
+			const delivered = await b.prompt();
+			expect(b.errors).toEqual([expect.stringContaining("aa_noop failed in before_agent_start")]);
+			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
+			await b.request(delivered);
+			b.entries.push({ type: "compaction" });
+			await b.request(await b.prompt());
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck", "infra805_skill", "infra805_selfcheck"]);
+			expect((await b.gh())?.block).toBe(true);
+		});
+		test("with both INFRA-805 gates on, a prompt gets the skill and then the self-check, and each writes its own exposure entry", async () => {
+			const b = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" });
+			await b.start();
+			const delivered = await b.prompt();
+			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
+			await b.request(delivered);
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
+		});
+		test("a subagent gets no text and writes no exposure entry, and a revive puts nothing in", async () => {
+			const all = { OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" };
+			const sub = await bind(all, ROOT_FILE.replace(/\.jsonl$/, "/Worker.jsonl"), [], "sub");
+			await sub.start();
+			expect(await sub.prompt()).toEqual([]);
+			await sub.request([]);
+			expect(sub.exposures()).toEqual([]);
+			const main = await bind(all);
+			await main.start();
+			expect(await main.prompt("revive")).toEqual([]);
+		});
+		test("the text goes in again after a compaction removes it, and not again when the session resumes", async () => {
+			const b = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+			await b.start();
+			await b.request(await b.prompt());
+			const resumed = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, b.entries);
+			await resumed.start();
+			expect(await resumed.prompt()).toEqual([]);
+			resumed.entries.push({ type: "compaction" });
+			const again = await resumed.prompt();
+			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
+			await resumed.request(again);
+			expect(resumed.exposures()).toHaveLength(2);
+		});
 	});
 });
