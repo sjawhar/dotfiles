@@ -8,7 +8,8 @@
 # installed before Docker, Docker would not know the runtime. Ubuntu 24.04 with its 6.8 or later
 # kernel is supported from 0.7.1 (its release notes).
 #
-# Idempotent: installs unless the pinned version is fully installed (status `install ok installed`).
+# Idempotent: installs unless the pinned version is fully installed (dpkg status `installed`; a
+# held package counts).
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -20,8 +21,8 @@ SYSBOX_DEB_SHA256=9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261
 
 ((EUID == 0)) || { echo "sysbox.sh: run as root (devbox/gce-host.sh)" >&2; exit 1; }
 
-# The package's fully installed status reads `install ok installed 0.7.1.linux`.
-if [[ "$(dpkg-query -W -f='${Status} ${Version}' sysbox-ce 2>/dev/null || true)" == "install ok installed ${SYSBOX_VERSION}".* ]]; then
+# The package's fully installed dpkg status and version read `installed 0.7.1.linux`.
+if [[ "$(dpkg-query -W -f='${db:Status-Status} ${Version}' sysbox-ce 2>/dev/null || true)" == "installed ${SYSBOX_VERSION}".* ]]; then
     echo "sysbox.sh: sysbox-ce $SYSBOX_VERSION already installed"
 else
     command -v docker >/dev/null || { echo "sysbox.sh: install Docker first (installers/docker.sh)" >&2; exit 1; }
