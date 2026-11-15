@@ -39,7 +39,11 @@
 // prompt gets an `experiments-exposure` entry in either arm. A Legion pane gets an
 // `experiments-excluded` entry instead, and no text (text-arms.ts). A session with no such prompt gets
 // neither. The join lists a session with no such prompt, and an excluded session, apart. A gate that
-// is `off` runs none of their handlers.
+// is `off` runs none of their handlers. One rule holds for them whatever the gate: a text reaches the
+// model only while the current arm of its feature is on. After their handlers, a scrub for each of
+// them (scrubText of text-arms.ts) runs outside the gate and the guard. It removes the text of the
+// feature from each request when the current arm is not on, when the feature stopped after a throw,
+// and in a Legion pane.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import bashGate from "./bash-gate";
 import gateFile from "./gates.json" with { type: "json" };
@@ -49,7 +53,7 @@ import proactiveMemory from "./proactive-memory";
 import rulesRefresh from "./rules-refresh";
 import selfcompact from "./selfcompact";
 import skillGate from "./skill-gate";
-import { aaNoop, infra805Selfcheck, infra805Skill, type TextArm } from "./text-arms";
+import { aaNoop, infra805Selfcheck, infra805Skill, scrubText, type TextArm } from "./text-arms";
 
 /** Registration order is handler order within an event: SelfCompact reads the request's tail before the memory agent appends its reminder, and the context line goes on whatever is last. */
 const REGISTRATIONS: ReadonlyArray<[Feature, (pi: ExtensionAPI) => void]> = [
@@ -127,5 +131,9 @@ export default function experiments(pi: ExtensionAPI): void {
 			view(feature, () => current !== undefined && current.features[feature].gate !== "off"),
 			() => (current as ExperimentRecord).features[feature],
 		);
+	}
+	// Registered last, outside the gate and the guard, so each runs after every text arm's own handlers, in every request.
+	for (const [feature] of TEXT_ARMS) {
+		pi.on("context", scrubText(feature, () => current?.features[feature].on === true && !stopped.has(feature)) as never);
 	}
 }

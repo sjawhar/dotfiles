@@ -29,7 +29,8 @@
 // Which sessions. index.ts runs these handlers while the gate of the feature is `on` or `random`, in
 // both arms, and gives each handler the resolution of its feature (gates.ts). A gate that is `off`,
 // in gates.json or by its variable, runs no handler: the feature is in no experiment, and the session
-// gets no text and no entry. A handler that throws stops its own feature for the rest of the session.
+// gets no new text and no entry. A handler that throws stops its own feature until the next
+// resolution (index.ts): its handlers do not run, so it adds no text and writes no entry.
 // A Legion pane (LEGION_TREE, LEGION_ROLE or LEGION_CONTROLLER set, as proactive-memory-core.ts reads
 // them) is outside the experiments. The INFRA-805 experiment of the spec of INFRA-3189 leaves Legion
 // designs out until a Legion route exists. So in a Legion pane the handler adds no text and writes no
@@ -59,11 +60,20 @@
 // trigger (the `context` event). In the on arm of a feature with a text, the handler waits for the
 // first request whose messages hold the text, so the entry says that the text reached the model.
 //
-// No text without its entry. When the append of the exposure entry fails, the handler logs the
-// error, removes the text of its feature from the messages of that request, and stops: until the
-// next resolution (index.ts), it adds no text, writes no entry, and removes its text from every
-// request. The text stays in the session file, so a later resolution that finds the text in the
-// context and no entry writes the entry at the next request that holds the text.
+// The invariant: a text reaches the model only while the current arm of the session for its feature
+// is on. index.ts registers, for each feature of this file, the scrub of scrubText, after the
+// handlers of every feature of this file. The scrub runs for every request, whatever the gate (`off`
+// included) and whatever the failure state. It removes each custom message of the feature from the
+// request when the current resolution of the feature is not on (gate `off`, or the draw off), when the
+// feature stopped after a throw, before the first resolution, and in a Legion pane. A text that an
+// earlier resolution put in the session file stays there, but it reaches the model again only in a
+// later resolution whose arm is on. So:
+//   - When a gate goes from `random` to `off` (D13), a resumed session sends no text from its next
+//     request on.
+//   - No text goes out without its entry. When the exposure append (or any other handler of the
+//     feature) throws, the feature stops, and the scrub removes the text from that request and from
+//     every later one. A later resolution in the on arm that finds the text in the context and no
+//     entry writes the entry at the next request that holds the text.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { EXCLUDED_ENTRY_TYPE, EXPOSURE_ENTRY_TYPE, type ExcludedRecord, type ExposureRecord, type Feature, type Resolution, rootSessionId } from "./gates";
 import selfcheck from "./infra805-selfcheck.md" with { type: "text" };
@@ -83,10 +93,20 @@ type ContextEvent = { messages: Message[] };
 /** A feature of this file: index.ts registers it with a view of `pi` and a reader of the resolution of the feature in the current session. */
 export type TextArm = (pi: ExtensionAPI, resolution: () => Resolution) => void;
 
+/** Whether this process is a Legion pane, read as proactive-memory-core.ts reads it. */
+const legionPane = () => LEGION_ENV.some(name => process.env[name] !== undefined && process.env[name] !== "");
+
+/** The scrub of `feature`: a `context` handler that removes each custom message of `feature` from the request unless `on()` says that the current arm of the feature is on and the feature runs. In a Legion pane it removes them always. */
+export function scrubText(feature: Feature, on: () => boolean): (event: ContextEvent) => { messages: Message[] } | undefined {
+	const legion = legionPane();
+	const isText = (m: Message) => m.role === "custom" && m.customType === feature;
+	return event => (!legion && on()) || !event.messages.some(isText) ? undefined : { messages: event.messages.filter(m => !isText(m)) };
+}
+
 /** The feature that, in the on arm, puts `text` into the context of a top-level session, and in both arms records the exposure. With no text it puts nothing there in either arm. */
 export function textArm(feature: Feature, text: string | undefined): TextArm {
 	return (pi, resolution) => {
-		if (LEGION_ENV.some(name => process.env[name] !== undefined && process.env[name] !== "")) {
+		if (legionPane()) {
 			pi.on("before_agent_start", (event: StartEvent, ctx: Ctx) => {
 				if (event.reason === "revive" || ctx.agent.kind !== "main") return undefined;
 				const sm = ctx.sessionManager;
@@ -98,22 +118,16 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			});
 			return;
 		}
-		const isText = (m: Message) => m.role === "custom" && m.customType === feature;
-		/** The result that removes the text of this feature from a request, or undefined when the request holds none. */
-		const withoutText = (messages: Message[]) => (messages.some(isText) ? { messages: messages.filter(m => !isText(m)) } : undefined);
 		// The arm and the gate of the latest trigger, until its exposure entry is written.
 		let pending: Pick<ExposureRecord, "arm" | "gate"> | undefined;
-		// Set when an append fails: no more text or entries, and the text is removed from each request.
-		let withdrawn = false;
 		const reset = () => {
 			pending = undefined;
-			withdrawn = false;
 		};
 		pi.on("session_start", reset);
 		pi.on("session_switch", reset);
 		pi.on("session_branch", reset);
 		pi.on("before_agent_start", (event: StartEvent, ctx: Ctx) => {
-			if (withdrawn || event.reason === "revive" || ctx.agent.kind !== "main") return undefined;
+			if (event.reason === "revive" || ctx.agent.kind !== "main") return undefined;
 			const { gate, on } = resolution();
 			if (gate === "off") return undefined;
 			const arm = on ? "on" : "off";
@@ -128,20 +142,12 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			return arm === "on" && text !== undefined && !textKept ? { message: { customType: feature, content: text, display: false } } : undefined;
 		});
 		pi.on("context", (event: ContextEvent, ctx: Ctx) => {
-			if (withdrawn) return withoutText(event.messages);
 			if (!pending) return undefined;
-			if (pending.arm === "on" && text !== undefined && !event.messages.some(isText)) return undefined;
-			try {
-				const sm = ctx.sessionManager;
-				const record: ExposureRecord = { v: 1, feature, ...pending, rootSessionId: rootSessionId(sm.getSessionFile(), sm.getSessionId()), at: new Date().toISOString() };
-				pi.appendEntry(EXPOSURE_ENTRY_TYPE, record);
-			} catch (error) {
-				withdrawn = true;
-				pi.logger.error(`experiments: ${feature} failed in context. It stays off for the rest of this session, and its text is removed from each request.`, {
-					error: error instanceof Error ? (error.stack ?? error.message) : String(error),
-				});
-				return withoutText(event.messages);
-			}
+			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature)) return undefined;
+			const sm = ctx.sessionManager;
+			const record: ExposureRecord = { v: 1, feature, ...pending, rootSessionId: rootSessionId(sm.getSessionFile(), sm.getSessionId()), at: new Date().toISOString() };
+			// A throw here stops the feature (index.ts), and the scrub then removes its text from this request.
+			pi.appendEntry(EXPOSURE_ENTRY_TYPE, record);
 			pending = undefined;
 			return undefined;
 		});
