@@ -145,8 +145,9 @@ describe("the extension", () => {
 			return out;
 		};
 		type Message = { role: string; customType?: string; content?: unknown; [key: string]: unknown };
-		/** One request: every context handler over `input`, each getting what the one before it returned, as omp runs them. Returns the messages that go out. */
-		const send = async (input: Message[]): Promise<Message[]> => {
+		type Payload = { messages: Array<{ role: string; content: unknown }> };
+		/** A conversion of the session's messages: every context handler over `input`, each getting what the one before it returned, as omp runs them. Alone, it is one that sends nothing (`/dump`, the first of a native compaction's two). Returns the messages it gives the provider. */
+		const convert = async (input: Message[]): Promise<Message[]> => {
 			let messages = input;
 			for (const handler of handlers.get("context") ?? []) {
 				const result = (await handler({ type: "context", messages }, ctx)) as { messages?: Message[] } | undefined;
@@ -154,6 +155,38 @@ describe("the extension", () => {
 			}
 			return messages;
 		};
+		/** The body a provider builds from `messages`, shaped as the Anthropic Messages API's: a custom or developer message is a user turn of one text block, a tool result a user turn of one tool_result block. */
+		const wire = (messages: Message[]): Payload => ({
+			messages: messages.map(m => {
+				if (m.role === "custom" || m.role === "developer") return { role: "user", content: [{ type: "text", text: m.content }] };
+				if (m.role === "toolResult") return { role: "user", content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: m.content }] };
+				if (m.role === "compactionSummary") return { role: "user", content: m.summary };
+				return { role: m.role, content: m.content };
+			}),
+		});
+		let built: unknown;
+		let sent: unknown;
+		/** One provider request: every before_provider_request handler over `payload`, each getting what the one before it returned, as omp runs them. Alone, it is a request that went past the context handlers (an advisor's, a cache-warming replay). Returns the payload that goes out. */
+		const dispatch = async (payload: unknown): Promise<unknown> => {
+			built = payload;
+			let out = payload;
+			for (const handler of handlers.get("before_provider_request") ?? []) {
+				const result = await handler({ type: "before_provider_request", payload: out }, ctx);
+				if (result !== undefined) out = result;
+			}
+			sent = out;
+			return out;
+		};
+		/** One request of the session: a conversion, then the provider request built from it. Returns the messages the context handlers gave the provider. */
+		const send = async (input: Message[]): Promise<Message[]> => {
+			const messages = await convert(input);
+			await dispatch(wire(messages));
+			return messages;
+		};
+		const NAMED: ReadonlyArray<[Feature, string]> = [
+			["infra805_skill", skillText],
+			["infra805_selfcheck", selfcheckText],
+		];
 		return {
 			entries,
 			errors,
@@ -169,7 +202,19 @@ describe("the extension", () => {
 			excluded: () => entries.filter(e => e.customType === EXCLUDED_ENTRY_TYPE).map(e => e.data as ExcludedRecord),
 			/** Every before_agent_start handler of one prompt, in order; a wake's reason is `revive`. */
 			prompt: (reason: "prompt" | "revive" = "prompt") => emit("before_agent_start", { type: "before_agent_start", reason, prompt: "Design the cache.", systemPrompt: ["You are omp."] }),
+			convert,
 			send,
+			sideRequest: dispatch,
+			/** The payload of the latest provider request as it was built, and as it went out. */
+			built: () => built,
+			sent: () => sent as Payload,
+			/** The features whose whole text is a message of the latest payload that went out, in order. */
+			sentTexts: () =>
+				(sent as Payload).messages.flatMap(m => {
+					const block: unknown = Array.isArray(m.content) && m.content.length === 1 ? m.content[0] : undefined;
+					const only = typeof block === "object" && block !== null && "text" in block ? block.text : m.content;
+					return NAMED.filter(([, text]) => text === only).map(([feature]) => feature);
+				}),
 		};
 	}
 	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
@@ -222,7 +267,7 @@ describe("the extension", () => {
 			throw new Error("branch unavailable");
 		});
 		expect(await b.gh()).toBeUndefined();
-		expect(b.errors).toEqual([expect.stringContaining("skill_gate failed in tool_call")]);
+		expect(b.errors).toEqual([expect.stringContaining("skill_gate failed in tool_call; it stays off until the next resolution")]);
 		b.setBranch(() => []);
 		expect(await b.gh()).toBeUndefined();
 		expect((await b.bash("cat f"))?.block).toBe(true);
@@ -269,10 +314,12 @@ describe("the extension", () => {
 				const shaken: Message = { ...RESULT, content: [{ type: "text", text: "[shaken ~120 tokens — recover: artifact://2 (region 1)]" }] };
 				for (const request of [[PROMPT], [PROMPT, CALL, RESULT], [PROMPT, CALL, RESULT, REPLY], [PROMPT, CALL, shaken, REPLY]]) {
 					expect(await b.send(request)).toEqual([placed, ...request]);
+					expect(b.sentTexts()).toEqual([feature]);
 				}
 				expect(await b.prompt("revive")).toBeUndefined();
 				const woken = [PROMPT, CALL, RESULT, REPLY, WAKE];
 				expect(await b.send(woken)).toEqual([placed, ...woken]);
+				expect(b.sentTexts()).toEqual([feature]);
 				expect(JSON.stringify(b.entries)).not.toContain(JSON.stringify(text));
 			}
 		});
@@ -291,7 +338,9 @@ describe("the extension", () => {
 			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" });
 			await b.start();
 			expect(await b.send([COPIES[2], PROMPT, COPIES[0]])).toEqual([SKILL, SELFCHECK, PROMPT]);
+			expect(b.sentTexts()).toEqual(["infra805_skill", "infra805_selfcheck"]);
 			expect(await b.send([COPIES[1], PROMPT, CALL, COPIES[2], RESULT])).toEqual([SKILL, SELFCHECK, PROMPT, CALL, RESULT]);
+			expect(b.sentTexts()).toEqual(["infra805_skill", "infra805_selfcheck"]);
 			expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"], ["infra805_selfcheck", "on"]]);
 		});
 		test("a subagent draws from its root, records its own assignment and exposure in its own file, and each of its requests carries the text of its root's arm, a wake's included", async () => {
@@ -330,6 +379,30 @@ describe("the extension", () => {
 				expect(b.exposures()).toHaveLength(1);
 			}
 		});
+		test.each([...TEXTS, ["aa_noop", undefined] as const])("%s writes no exposure entry for a conversion that sends nothing (/dump, the first of a native compaction's two), and the next provider request writes exactly one", async (feature, text) => {
+			const b = await bindArms({ [envName(feature)]: "on" });
+			await b.start();
+			await b.prompt();
+			expect(await b.convert([PROMPT])).toEqual(text === undefined ? [PROMPT] : [textMessage(feature, text), PROMPT]);
+			await b.convert([SUMMARY, PROMPT]);
+			expect(b.exposures()).toEqual([]);
+			await b.send([SUMMARY, PROMPT, CALL, RESULT]);
+			expect(b.exposures()).toEqual([{ v: 1, feature, arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
+			await b.convert([PROMPT]);
+			await b.send([PROMPT, CALL, RESULT, REPLY]);
+			expect(b.exposures()).toHaveLength(1);
+		});
+		test("a provider request that went past the context handlers (an advisor's, a local summarizer's) carries no text, so it writes no on-arm exposure entry; the next request that carries the text writes it", async () => {
+			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+			await b.start();
+			await b.convert([PROMPT]);
+			const advisor = { messages: [{ role: "user", content: "Review the last turn." }] };
+			expect(await b.sideRequest(advisor)).toBe(advisor);
+			expect(b.exposures()).toEqual([]);
+			await b.send([PROMPT]);
+			expect(b.sentTexts()).toEqual(["infra805_skill"]);
+			expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"]]);
+		});
 		test("a resumed session gets no second exposure entry under the same recorded resolution, and gets one at its first request when its file holds none after that resolution", async () => {
 			const ended = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
 			await ended.start();
@@ -350,6 +423,7 @@ describe("the extension", () => {
 			expect(await off.send(request)).toEqual(without);
 			await off.start();
 			expect(await off.send(request)).toEqual(without);
+			expect(off.sentTexts()).toEqual([]);
 			expect(await off.send([NATIVE, CALL, RESULT, ...request])).toEqual([NATIVE, CALL, RESULT, ...without]);
 			expect(off.exposures()).toEqual([]);
 			const drawnOff = ids.find(id => !draw(id, "infra805_skill") && !draw(id, "infra805_selfcheck")) as string;
@@ -368,6 +442,7 @@ describe("the extension", () => {
 					const before = structuredClone(request);
 					expect(await b.send(request)).toBe(request);
 					expect(request).toEqual(before);
+					expect(b.sent()).toBe(b.built());
 				}
 				const seen = [await b.prompt(), await b.gh(), await b.bash("ls d && cat f"), await b.bash("cat f")];
 				expect(b.entries.filter(e => e.customType !== ENTRY_TYPE && e.customType !== EXPOSURE_ENTRY_TYPE)).toEqual([]);
@@ -382,21 +457,25 @@ describe("the extension", () => {
 			expect(on.kept).toEqual({ v: 1, feature: "aa_noop", arm: "on", gate: "random" });
 			expect(off.kept).toEqual({ ...on.kept, arm: "off" });
 		});
-		test("a failed exposure append stops its feature, logged: that request and every later one carry none of its text, the other features run on, and the next resolution starts it again", async () => {
+		test("a failed exposure append stops its feature, logged: the payload of that request and every later request carry none of its text, the other features run on, and the next resolution starts it again", async () => {
 			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
 			await b.start();
 			b.setAppendFailure((customType, data) => customType === EXPOSURE_ENTRY_TYPE && (data as ExposureRecord).feature === "infra805_skill");
-			expect(await b.send([PROMPT])).toEqual([SELFCHECK, PROMPT]);
-			expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in context")]);
+			// The conversion placed the skill before the append; the provider request writes the entry, and its throw takes the skill out of the payload.
+			expect(await b.send([PROMPT])).toEqual([SKILL, SELFCHECK, PROMPT]);
+			expect(b.sentTexts()).toEqual(["infra805_selfcheck"]);
+			expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in before_provider_request; it stays off until the next resolution")]);
 			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
 			b.setAppendFailure(() => false);
 			expect(await b.send([COPIES[0], PROMPT, CALL, RESULT])).toEqual([SELFCHECK, PROMPT, CALL, RESULT]);
+			expect(b.sentTexts()).toEqual(["infra805_selfcheck"]);
 			await b.prompt();
 			expect(await b.send([PROMPT, CALL, RESULT, REPLY])).toEqual([SELFCHECK, PROMPT, CALL, RESULT, REPLY]);
 			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
 			expect((await b.gh())?.block).toBe(true);
 			await b.start();
 			expect(await b.send([PROMPT])).toEqual([SKILL, SELFCHECK, PROMPT]);
+			expect(b.sentTexts()).toEqual(["infra805_skill", "infra805_selfcheck"]);
 			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck", "infra805_skill"]);
 			expect(b.errors).toHaveLength(1);
 		});
@@ -584,6 +663,75 @@ describe("the extension", () => {
 				expect(records[1].features.infra805_selfcheck).toMatchObject({ gate: "on", on: true });
 				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_skill", "infra805_selfcheck"]);
 				expect(b.errors).toHaveLength(1);
+			});
+			test("a text arm stopped by a failed exposure append runs again when a live resolution takes effect: one new exposure entry, and its text is back; a stopped feature that is not a text arm stays stopped", async () => {
+				const drawnOn = ids.find(id => draw(id, "infra805_skill")) as string;
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({ OMP_EXPERIMENT_SKILL_GATE: "on" }, rootFile(drawnOn), [], "main", path);
+				await b.start();
+				b.setBranch(() => {
+					throw new Error("branch unavailable");
+				});
+				expect(await b.gh()).toBeUndefined();
+				b.setBranch(() => b.entries);
+				b.setAppendFailure(customType => customType === EXPOSURE_ENTRY_TYPE);
+				await b.send([PROMPT]);
+				expect(b.sentTexts()).toEqual([]);
+				expect(b.errors).toEqual([expect.stringContaining("skill_gate failed in tool_call; it stays off until the next resolution"), expect.stringContaining("infra805_skill failed in before_provider_request; it stays off until the next resolution")]);
+				b.setAppendFailure(() => false);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
+				expect(b.exposures()).toEqual([]);
+				writeGates({ infra805_skill: "random" }, 2_000);
+				expect(await b.send([PROMPT, CALL, RESULT, REPLY])).toEqual([SKILL, PROMPT, CALL, RESULT, REPLY]);
+				expect(b.sentTexts()).toEqual(["infra805_skill"]);
+				expect(b.records().map(r => r.features.infra805_skill.gate)).toEqual(["on", "random"]);
+				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "random", rootSessionId: drawnOn, at: expect.any(String) }]);
+				expect(await b.gh()).toBeUndefined();
+				expect(b.errors).toHaveLength(2);
+			});
+			test("a gates.json that adds a feature, drops one, or gives another feature a value that is not a gate still sets the text gates, and logs nothing", async () => {
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, ROOT_FILE, [], "main", path);
+				await b.start();
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
+				const { selfcompact: _dropped, ...kept } = gateFile;
+				writeGates(JSON.stringify({ ...kept, skill_gate: "maybe", a_later_feature: "random", aa_noop: "off", infra805_skill: "off", infra805_selfcheck: "on" }), 2_000);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([SELFCHECK, PROMPT, CALL, RESULT]);
+				expect(b.records().map(r => [r.features.infra805_skill.gate, r.features.infra805_selfcheck.gate])).toEqual([["on", "off"], ["off", "on"]]);
+				expect(b.records()[1].features.skill_gate).toEqual(b.records()[0].features.skill_gate);
+				expect(b.errors).toEqual([]);
+			});
+			test("a text gate that is missing or is not a gate keeps its last good value, logged once for that version of the file, and the other text gates follow the file", async () => {
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, ROOT_FILE, [], "main", path);
+				await b.start();
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
+				writeGates({ infra805_skill: "maybe", infra805_selfcheck: "on" }, 2_000);
+				expect(await b.send([PROMPT])).toEqual([SKILL, SELFCHECK, PROMPT]);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([SKILL, SELFCHECK, PROMPT, CALL, RESULT]);
+				expect(b.errors).toEqual([expect.stringContaining('gives no gate for infra805_skill ("maybe")')]);
+				const { infra805_skill: _missing, ...rest } = { ...gateFile, aa_noop: "off", infra805_selfcheck: "on" };
+				writeGates(JSON.stringify(rest), 3_000);
+				expect(await b.send([PROMPT])).toEqual([SKILL, SELFCHECK, PROMPT]);
+				expect(b.errors).toEqual([expect.stringContaining('("maybe")'), expect.stringContaining("gives no gate for infra805_skill (missing)")]);
+				writeGates({ infra805_skill: "off", infra805_selfcheck: "on" }, 4_000);
+				expect(await b.send([PROMPT])).toEqual([SELFCHECK, PROMPT]);
+				expect(b.records().map(r => [r.features.infra805_skill.gate, r.features.infra805_selfcheck.gate])).toEqual([["on", "off"], ["on", "on"], ["off", "on"]]);
+				expect(b.errors).toHaveLength(2);
+			});
+			test("a cache-warming replay of a request that carried the text goes out without it once the arm is off, and writes no entry", async () => {
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, ROOT_FILE, [], "main", path);
+				await b.start();
+				await b.send([PROMPT, CALL, RESULT]);
+				const carried = b.sent();
+				expect(b.sentTexts()).toEqual(["infra805_skill"]);
+				writeGates({ infra805_skill: "off" }, 2_000);
+				await b.prompt();
+				expect(b.records().map(r => r.features.infra805_skill.gate)).toEqual(["on", "off"]);
+				await b.sideRequest(carried);
+				expect(b.sent()).toEqual({ messages: carried.messages.slice(1) });
+				expect(b.exposures()).toHaveLength(1);
 			});
 		});
 	});

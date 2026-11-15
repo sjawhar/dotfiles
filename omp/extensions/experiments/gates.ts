@@ -38,7 +38,7 @@ const ROOT_IN_PATH = new RegExp(`Z_(${UUID})`);
 const BARE_ID = new RegExp(`^${UUID}$`);
 
 const isFeature = (name: string): name is Feature => (FEATURES as readonly string[]).includes(name);
-const isGate = (value: unknown): value is Gate => typeof value === "string" && (GATES as readonly string[]).includes(value);
+export const isGate = (value: unknown): value is Gate => typeof value === "string" && (GATES as readonly string[]).includes(value);
 
 export const envName = (feature: Feature) => `${ENV_PREFIX}${feature.toUpperCase()}`;
 
