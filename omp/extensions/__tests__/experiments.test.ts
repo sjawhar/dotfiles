@@ -166,9 +166,9 @@ describe("the extension", () => {
 				for (const { message } of results) entries.push({ type: "custom_message", ...message });
 				return results;
 			},
-			/** The next request, holding the prompt and the custom messages of `delivered`. Each context handler gets the messages the one before it returned, as in omp. Returns the custom types of the custom messages that go out. */
-			request: async (delivered: Delivered[]) => {
-				let messages: Array<{ role: string; customType?: string }> = [{ role: "user", content: "Design the cache.", timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))];
+			/** The next request: `input`, the message that started the run (a typed user prompt unless given), then the custom messages of `delivered`. Each context handler gets the messages the one before it returned, as in omp. Returns the custom types of the custom messages that go out. */
+			request: async (delivered: Delivered[], input: Record<string, unknown> = { role: "user", content: "Design the cache.", attribution: "user" }) => {
+				let messages: Array<{ role: string; customType?: string }> = [{ role: "user", ...input, timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))];
 				for (const handler of handlers.get("context") ?? []) {
 					const result = (await handler({ type: "context", messages }, ctx)) as { messages?: typeof messages } | undefined;
 					if (result?.messages) messages = result.messages;
@@ -471,7 +471,13 @@ describe("the extension", () => {
 			const skillOff = await bindArms({ ...all, OMP_EXPERIMENT_INFRA805_SKILL: "off", [name]: "x" });
 			await skillOff.start();
 			await skillOff.prompt();
+			await skillOff.request([]);
 			expect(skillOff.excluded().map(e => e.feature)).toEqual(["aa_noop", "infra805_selfcheck"]);
+			const synthetic = await bindArms({ ...all, [name]: "x" });
+			await synthetic.start();
+			await synthetic.prompt();
+			await synthetic.request([], { role: "developer", content: "Continue.", attribution: "agent", synthetic: true });
+			expect(synthetic.excluded()).toEqual([]);
 			const outside = await bindArms({ ...all, [name]: "" });
 			await outside.start();
 			const delivered = await outside.prompt();
@@ -561,6 +567,93 @@ describe("the extension", () => {
 				expect(await b.prompt()).toEqual([]);
 				expect(await b.request(delivered)).toEqual([]);
 				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
+			});
+			test("a gate going from on to random with the draw on between a prompt and its request sends no text and writes no entry; the next prompt sends the text and records it", async () => {
+				const drawnOn = ids.find(id => draw(id, "infra805_skill")) as string;
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, rootFile(drawnOn), [], "main", path);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
+				writeGates({ infra805_skill: "random" }, 2_000);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "random", rootSessionId: drawnOn, at: expect.any(String) }]);
+			});
+			test("a failed append of a new resolution keeps it proposed: logged once, the text arms send nothing and write nothing until it is recorded, the other features run on, and the next event records it", async () => {
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({ OMP_EXPERIMENT_SKILL_GATE: "on" }, ROOT_FILE, [], "main", path);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				b.setAppendFailure(customType => customType === ENTRY_TYPE);
+				writeGates({ infra805_skill: "on", infra805_selfcheck: "on" }, 2_000);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.errors).toEqual([expect.stringContaining("cannot record their new resolution")]);
+				expect(b.records()).toHaveLength(1);
+				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
+				expect((await b.gh())?.block).toBe(true);
+				b.setAppendFailure(() => false);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				const records = b.records();
+				expect(records).toHaveLength(2);
+				expect(records[1].features.infra805_selfcheck).toMatchObject({ gate: "on", on: true });
+				const next = await b.prompt();
+				expect(next).toEqual(deliveryOf("infra805_selfcheck", selfcheckText));
+				expect(await b.request([...delivered, ...next])).toEqual(["infra805_skill", "infra805_selfcheck"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
+				expect(b.errors).toHaveLength(1);
+			});
+		});
+
+		describe("only a user prompt (architect ruling 48e7077f, item 2) triggers the text and the exposure", () => {
+			const ON = { OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" };
+			test("a typed user prompt sends the text and records both features", async () => {
+				const b = await bindArms(ON);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(await b.request(delivered, { role: "user", content: "Design the cache.", attribution: "user" })).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
+			});
+			test("a user-invoked skill message sends the text and records both features", async () => {
+				const b = await bindArms(ON);
+				await b.start();
+				const delivered = await b.prompt();
+				const skillPrompt = { role: "custom", customType: "skill-prompt", content: "Run the review skill.", attribution: "user", display: true };
+				expect(await b.request(delivered, skillPrompt)).toEqual(["skill-prompt", "infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
+			});
+			test.each([
+				["a synthetic prompt", { role: "developer", content: "Continue.", attribution: "agent", synthetic: true }],
+				["a synthetic user message", { role: "user", content: "Continue.", synthetic: true }],
+				["an agent-attributed user message", { role: "user", content: "From the parent agent.", attribution: "agent" }],
+				["a skill message the agent loaded", { role: "custom", customType: "skill-prompt", content: "Autoloaded.", attribution: "agent", display: true }],
+			])("%s sends no text and records nothing; a later typed prompt sends the kept text and records it", async (_label, input) => {
+				const b = await bindArms(ON);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
+				// The first request decides the trigger, and a later request of the same run still sends no text.
+				expect(await b.request(delivered, input)).not.toContain("infra805_skill");
+				expect(await b.request(delivered, input)).not.toContain("infra805_skill");
+				expect(b.exposures()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
+			});
+			test("a context that keeps the text with no exposure entry and no trigger sends none of it", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
+				await b.start();
+				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
+				expect(b.exposures()).toHaveLength(1);
 			});
 		});
 	});
