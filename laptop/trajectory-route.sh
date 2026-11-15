@@ -5,6 +5,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
 # =============================================================================
 # trajectory-route - Trajectory's prod VPC and internal.trajectorylabs.com DNS
 # through the devbox (`ssh trajectory-route`), for a machine on Theorem's tailnet.
+#
+# A person runs it by hand, after laptop/install.sh, on a machine that must
+# reach Trajectory (laptop/install.sh does not run it):
+#   bash laptop/trajectory-route.sh
+# The route works once the public key it makes (~/.ssh/trajectory-route.pub,
+# which it prints) is in ubuntu's ~/.ssh/authorized_keys on sami-agents, and
+# while the Trajectory AWS sign-in is valid.
 # =============================================================================
 echo "--- trajectory-route (Trajectory VPC through the devbox) ---"
 
