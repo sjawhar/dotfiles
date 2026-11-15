@@ -244,9 +244,6 @@ source "${LAPTOP_DIR}/cosmic-settings.sh"
 # One tailnet daemon serves every VM in forward/hosts.toml; this runs migration step 2.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
 
-# shellcheck source=laptop/trajectory-route.sh
-source "${LAPTOP_DIR}/trajectory-route.sh"
-
 # =============================================================================
 # Desktop apps (separate installers)
 # =============================================================================

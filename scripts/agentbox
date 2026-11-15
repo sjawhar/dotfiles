@@ -1361,7 +1361,7 @@ fresh_process() {
 }
 
 # The canonical checkouts, one name per line: each entry of $SRC that holds a .git. Hidden entries
-# and plain directories there (~/src/.cloudflare, ~/src/.hawk-token) are not checkouts.
+# and plain directories there (~/src/.cloudflare) are not checkouts.
 repos() {
     local d
     for d in "$SRC"/*; do
@@ -9618,14 +9618,14 @@ ok() { echo "ok   $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 
 # The checks whose answer is a property of THIS MACHINE's logins and not of the box: the
-# agent-tier store, the Docker Hub helper that reads it, the instance role, Hawk and Google.
+# agent-tier store, the Docker Hub helper that reads it, the instance role, and Google.
 # One definition, run on both sides, because a box can only be as logged in as the host under
 # it: doctor calls a difference a box defect and says so, and where neither side answers it
 # names the missing host login instead of a FAIL a session would read as its own box being
 # broken (sami-rocqperf, 2026-10-31: no GHCR_PULL_TOKEN or DOCKER_HUB_OAT in any agent-tier
-# file, no EC2 instance role, and no route to the Hawk gateway - every one of them a fact
-# about the machine). Each probe prints its own detail and exits non-zero when it cannot
-# answer. The single quotes are the point: everything expands where it runs.
+# file and no EC2 instance role - every one of them a fact about the machine). Each probe prints
+# its own detail and exits non-zero when it cannot answer. The single quotes are the point:
+# everything expands where it runs.
 # shellcheck disable=SC2016
 PROBE_FUNCS='
 probe_secrets() {
@@ -9642,14 +9642,6 @@ probe_aws() {
     arn="$(timeout 20 aws sts get-caller-identity --query Arn --output text 2>&1)"
     case "$arn" in arn:aws:*) echo "default profile: ${arn##*/}"; return 0;; esac
     echo "$arn"; return 1
-}
-probe_hawk() {
-    # The token is the only thing on stdout; the reason a mint failed is the last of what it
-    # said on stderr, after any progress line, and one run has to answer both.
-    f="$(mktemp)"; e="$(timeout 90 hawk-token 2>&1 >"$f")"; t="$(tr -d "[:space:]" <"$f")"; rm -f "$f"
-    case "$t" in *.*.*) echo "mints (${#t} bytes)"; return 0;; esac
-    printf "%s" "$e" | grep -v "^[[:space:]]*$" | tail -1
-    return 1
 }
 probe_google() {
     g="$(timeout 40 google-user-token 2>&1 >/dev/null)" && { echo "mints"; return 0; }
@@ -9730,7 +9722,6 @@ probe_label() {
         secrets)     echo "secrets agent-tier" ;;
         dockerhub)   echo "Docker Hub effective credential route" ;;
         aws)         echo "aws" ;;
-        hawk)        echo "hawk-token" ;;
         google)      echo "google-user-token" ;;
         gcloud)      echo "gcloud auth list" ;;
         gke)         echo "kubectl auth can-i create jobs (builds)" ;;
@@ -9741,13 +9732,12 @@ probe_command() {
         secrets)     echo "secrets GHCR_PULL_TOKEN -- sh -c 'echo \${#GHCR_PULL_TOKEN}'" ;;
         dockerhub)   echo "$DOTFILES_DIR/scripts/docker-registry-auth-check https://index.docker.io/v1/ retrieve --timeout 20" ;;
         aws)         echo "aws sts get-caller-identity" ;;
-        hawk)        echo "hawk-token" ;;
         google)      echo "google-user-token" ;;
         gcloud)      echo "gcloud auth list" ;;
         gke)         echo "kubectl --context gke_theorem-agent-infra_us-west1_dispatch -n builds auth can-i create jobs" ;;
     esac
 }
-PROBE_NAMES=(secrets dockerhub aws hawk google gcloud gke)
+PROBE_NAMES=(secrets dockerhub aws google gcloud gke)
 # The box side of doctor, run under bash inside a throwaway box. The single
 # quotes are the point: everything expands inside the box.
 # shellcheck disable=SC2016
@@ -9756,7 +9746,7 @@ set -u
 fails=0
 ok() { echo "ok   box: $*"; }
 fail() { echo "FAIL box: $*"; fails=$((fails + 1)); }
-for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets hawk-token agent-secrets; do
+for t in omp jj gh knives aws gws kubectl pulumi docker socat google-chrome pip psql sqlite3 wget forward secrets agent-secrets; do
     command -v "$t" >/dev/null 2>&1 && ok "tool $t" || fail "tool $t does not resolve"
 done
 for d in .config/agent-secrets; do
@@ -9834,7 +9824,7 @@ fi
 # The host-dependent credentials: the box answers, the host answers the same probes, and
 # cmd_doctor compares the two (PROBE_FUNCS). Nothing is judged here, where the answer of the
 # host is not known.
-probe_run secrets dockerhub aws hawk google gcloud gke
+probe_run secrets dockerhub aws google gcloud gke
 # Envoy and Dispatch as a box session reads them: the envoy.json `envoy config-path` names (for a
 # session without a profile of its own, the neutral file of the host, agentbox/mounts), the switch
 # of each section, the listener through `envoy` itself (the URL in the file or the default, through

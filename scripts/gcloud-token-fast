@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # gcloud-token-fast: print an OAuth access token for this machine's active gcloud
 # identity, from a tmpfs cache, so omp's `!command` budget (10 s) never races
-# gcloud's own start-up against this box's load -- the same reason
-# scripts/hawk-token-fast exists (load average was 228 when this was written,
-# 2026-10-30, and a cold `gcloud auth print-access-token` costs ~2.5 s unloaded).
+# gcloud's own start-up against this box's load. The load average was 228 when this was written
+# (2026-10-30), and a cold `gcloud auth print-access-token` call costs ~2.5 s unloaded.
 #
 # It backs the `google-vertex` provider in omp/models.local.yml: Vertex AI takes a
 # bearer token of the box's keyless identity (Azure WIF -> impersonation of
