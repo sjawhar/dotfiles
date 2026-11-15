@@ -62,7 +62,9 @@ sudo dpkg -i ./sysbox-ce_0.7.1.linux_amd64.deb
 
 Both ways install the package's dependencies with apt and the checked file itself with `dpkg -i`:
 apt given the `.deb` file can install a configured source's copy of the same version instead
-([Debian bug #1058934](https://bugs.debian.org/1058934)).
+([Debian bug #1058934](https://bugs.debian.org/1058934)). The 0.7.1 file has both a `Pre-Depends`
+and a `Depends` field; for a file that lacks one, leave that argument out, because `apt-get satisfy`
+refuses an empty one.
 
 You do not edit Docker's configuration by hand, and `sysbox-runc` need not be the default runtime:
 `scripts/agentbox` passes `--runtime sysbox-runc` itself. Check it:
