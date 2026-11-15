@@ -144,7 +144,7 @@ describe("the extension", () => {
 			for (const handler of handlers.get(event) ?? []) out = (await handler(payload, ctx)) ?? out;
 			return out;
 		};
-		type Message = { role: string; customType?: string; content?: unknown };
+		type Message = { role: string; customType?: string; content?: unknown; [key: string]: unknown };
 		let sent: Message[] = [];
 		/** Runs every context handler over `input`, each getting what the one before it returned, as omp does. */
 		const send = async (input: Message[]): Promise<Message[]> => {
@@ -181,17 +181,9 @@ describe("the extension", () => {
 			/** The next request: `input`, the message that started the run (a typed user prompt unless given), then the custom messages of `delivered`. Each context handler gets the messages the one before it returned, as in omp. Returns the custom types of the custom messages that go out. */
 			request: async (delivered: Delivered[], input: Record<string, unknown> = { role: "user", content: "Design the cache.", attribution: "user" }) =>
 				(await send([{ role: "user", ...input, timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))])).filter(m => m.role === "custom").map(m => m.customType),
-			/** A pre-prompt compaction's request: the stored branch, which ends in the previous run's assistant message, without the new prompt. Returns the custom types that go out. */
-			compactionRequest: async (kept: Delivered[] = []) =>
-				(
-					await send([
-						{ role: "user", content: "An earlier prompt.", attribution: "user", timestamp: 0 },
-						...kept.map(d => ({ role: "custom", ...d.message, timestamp: 0 })),
-						{ role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: 0 },
-					])
-				)
-					.filter(m => m.role === "custom")
-					.map(m => m.customType),
+			/** A request of omp's compaction: `messages`, a part of the session file, which never holds the new prompt. Returns the custom types that go out. */
+			compactionRequest: async (messages: Message[]) =>
+				(await send(messages)).filter(m => m.role === "custom").map(m => m.customType),
 			/** The custom messages that went out in the latest request, with their content. */
 			sentCustom: () => sent.filter(m => m.role === "custom"),
 		};
@@ -263,8 +255,23 @@ describe("the extension", () => {
 		const bindArms: typeof bind = (env, ...rest) => bind({ ...TEXT_OFF, ...env }, ...rest);
 		/** What the handler of `feature` puts in at a prompt: one hidden custom message with its text, or nothing. */
 		const deliveryOf = (feature: Feature, text: string | undefined): Delivered[] => (text === undefined ? [] : [{ message: { customType: feature, content: text, display: false } }]);
-		/** The skill's text as a session file keeps it after an earlier prompt. */
-		const KEPT_SKILL = { type: "custom_message", customType: "infra805_skill", content: skillText, display: false };
+		/** The skill's text as a session file keeps it after an earlier prompt, and as a request carries it (omp gives it its entry's time in epoch milliseconds). */
+		const KEPT_SKILL = { type: "custom_message", customType: "infra805_skill", content: skillText, display: false, timestamp: new Date(5).toISOString() };
+		const KEPT_SKILL_MESSAGE = { role: "custom", customType: "infra805_skill", content: skillText, display: false, timestamp: 5 };
+		/** An earlier exchange as the session file keeps it: a typed prompt, a reply that calls a tool, the tool's result, and the closing reply. */
+		const EARLIER = [
+			{ role: "user", content: "An earlier prompt.", attribution: "user", timestamp: 10 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }], timestamp: 11 },
+			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "a" }], timestamp: 12 },
+			{ role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: 13 },
+		];
+		const STORED = EARLIER.map(message => ({ type: "message", message }));
+		/** The part of the session file that a compaction's request holds, by where omp cut it (findCutPoint cuts at a user or an assistant message): after the closing reply, inside the turn, or at the turn's first reply. */
+		const CUTS = [
+			["the closing reply", EARLIER],
+			["a tool result", EARLIER.slice(0, 3)],
+			["the older prompt", EARLIER.slice(0, 1)],
+		] as const;
 
 		test.each(TEXTS)("%s in the on arm adds its text and writes one entry with arm on when the text reaches the session, and no other while the entry stays in the context", async (feature, text) => {
 			const drawnOn = ids.find(id => draw(id, feature)) as string;
@@ -304,14 +311,20 @@ describe("the extension", () => {
 			expect(await b.request(deliveryOf(feature, text))).toEqual([]);
 			expect(b.exposures()).toEqual([]);
 		});
-		test("the exposure entry of the on arm waits for the request whose messages hold the text", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+		test("the exposure entry of the on arm needs the run's first request to hold the text: a run whose first request lacks it writes none, and the next user prompt puts the text in and writes it", async () => {
+			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
 			await b.start();
-			const delivered = await b.prompt();
-			await b.request([]);
+			expect(await b.prompt()).toEqual([]);
+			// The pre-prompt compaction drops the kept copy: the run's first request holds the typed prompt and not the text.
+			b.entries.push({ type: "compaction" });
+			expect(await b.request([])).toEqual([]);
+			// A later request of the same run writes no entry and sends no text, even one that holds a whole copy.
+			expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
 			expect(b.exposures()).toEqual([]);
-			await b.request(delivered);
-			expect(b.exposures()).toHaveLength(1);
+			const again = await b.prompt();
+			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
+			expect(await b.request(again)).toEqual(["infra805_skill"]);
+			expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
 		});
 		test("aa_noop changes no prompt, request or tool call: its two arms differ only in the arm of its exposure entry", async () => {
 			const run = async (root: string) => {
@@ -412,11 +425,10 @@ describe("the extension", () => {
 			expect(await b.request(again)).toEqual(["infra805_skill"]);
 			expect(b.exposures()).toHaveLength(1);
 		});
-		test("a context that keeps the text but no exposure entry gets no second text, and gets the entry at the next request that holds the text", async () => {
+		test("a context that keeps the text but no exposure entry gets no second text, and the run's first request, which holds the kept text, gets the entry", async () => {
 			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
 			await b.start();
 			expect(await b.prompt()).toEqual([]);
-			await b.request([]);
 			expect(b.exposures()).toEqual([]);
 			expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
 			expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"]]);
@@ -707,24 +719,44 @@ describe("the extension", () => {
 			});
 		});
 
-		describe("a pre-prompt compaction's request between a trigger and the run's first request", () => {
-			test("neither takes the trigger nor writes an entry; the run's first request does both", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+		describe("a compaction's request between a trigger and the run's first request", () => {
+			// The typed prompt of `request` is older than every stored message, as a follow-up queued during the earlier run is: it counts because the session file did not hold it at the trigger.
+			test.each(CUTS)("whose part ends in %s neither takes the trigger nor writes an entry; the run's first request does both", async (_label, part) => {
+				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, STORED);
 				await b.start();
 				const delivered = await b.prompt();
-				expect(await b.compactionRequest()).toEqual([]);
+				expect(await b.compactionRequest([...part])).toEqual([]);
 				expect(b.exposures()).toEqual([]);
 				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
 				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
 			});
-			test("in a Legion pane, leaves the excluded entry for the run's first request", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", LEGION_ROLE: "architect" });
+			test.each(CUTS)("whose part ends in %s, in a Legion pane, leaves the excluded entry for the run's first request", async (_label, part) => {
+				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", LEGION_ROLE: "architect" }, ROOT_FILE, STORED);
 				await b.start();
 				await b.prompt();
-				await b.compactionRequest();
+				await b.compactionRequest([...part]);
 				expect(b.excluded()).toEqual([]);
 				await b.request([]);
 				expect(b.excluded().map(e => e.feature)).toEqual(["aa_noop"]);
+			});
+			test("with a message that a context handler added after the trigger (proactive memory's reminder) neither takes the trigger nor writes an entry", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, STORED);
+				await b.start();
+				const delivered = await b.prompt();
+				const reminder = { role: "developer", content: [{ type: "text", text: "<memory_context>Check the cache.</memory_context>" }], attribution: "agent", timestamp: Date.now() + 60_000 };
+				expect(await b.compactionRequest([...EARLIER.slice(0, 3), reminder])).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
+			});
+			test("that holds a whole kept copy sends none of it and writes no entry; the run's first request does both", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [...STORED, KEPT_SKILL]);
+				await b.start();
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.compactionRequest([...EARLIER, KEPT_SKILL_MESSAGE])).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"]]);
 			});
 		});
 
@@ -775,7 +807,7 @@ describe("the extension", () => {
 			test.each([
 				["a synthetic prompt", { role: "developer", content: "Continue.", attribution: "agent", synthetic: true }],
 				["an agent-attributed user message", { role: "user", content: "From the parent agent.", attribution: "agent" }],
-			])("an owed entry whose text a pre-prompt compaction dropped stays owed through %s that adds a fresh copy: no text and no entry until the next typed prompt, which sends the text and writes one entry", async (_label, input) => {
+			])("an entry whose text a pre-prompt compaction dropped is not written through %s that adds a fresh copy: no text and no entry until the next typed prompt, which sends the text and writes one entry", async (_label, input) => {
 				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
 				await b.start();
 				expect(await b.prompt()).toEqual(deliveryOf("infra805_skill", skillText));
@@ -792,13 +824,12 @@ describe("the extension", () => {
 				expect(await b.request(fresh)).toEqual(["infra805_skill"]);
 				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
 			});
-			test("an owed entry alone lets no text out: a compaction request that holds a whole copy sends none of it", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
+			test("a run whose first request lacked the text sends none of it in a later compaction's request that holds a whole copy", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [...STORED, KEPT_SKILL]);
 				await b.start();
 				expect(await b.prompt()).toEqual([]);
-				// The run's first request lacks the text, so the entry stays owed.
 				expect(await b.request([])).toEqual([]);
-				expect(await b.compactionRequest(deliveryOf("infra805_skill", skillText))).toEqual([]);
+				expect(await b.compactionRequest([...EARLIER, KEPT_SKILL_MESSAGE])).toEqual([]);
 				expect(b.exposures()).toEqual([]);
 			});
 		});

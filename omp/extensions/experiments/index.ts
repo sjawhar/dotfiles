@@ -58,8 +58,8 @@
 // the new resolution takes effect for the text arms only once that entry is recorded. A failed append
 // keeps it proposed, is logged once, and is tried again at every later before_agent_start and context
 // event. Until it is recorded the text arms do not run, and the scrubs remove their text. Each new
-// proposal and each recorded resolution moves a count (`generation`), and a trigger or an owed entry
-// made under an older count is stale (text-arms.ts). A file that cannot be read or parsed is logged
+// proposal and each recorded resolution moves a count (`generation`), and a trigger made under an
+// older count is stale (text-arms.ts). A file that cannot be read or parsed is logged
 // once, and the text arms keep their last good gates. So an `off` push stops the text at the next
 // request of every running session, and a gate that goes `random` assigns at the next user prompt.
 // Every other feature keeps the gates it read at load.
@@ -151,7 +151,7 @@ export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 	let proposed: ExperimentRecord | undefined;
 	let proposalLogged = false;
 	// Counts each change of the text arms' state in force: each new proposal and each recorded resolution, through `off`
-	// included. A trigger or an owed exposure entry made under an older count is stale (text-arms.ts).
+	// included. A trigger made under an older count is stale (text-arms.ts).
 	let generation = 0;
 	/** Appends `proposed`. On success the text arms run under it. On a throw it stays proposed, is logged once, and is tried again at the next event. Never throws. */
 	const recordProposed = () => {

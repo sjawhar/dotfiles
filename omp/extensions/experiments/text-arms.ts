@@ -49,15 +49,22 @@
 // mise.toml) runs before_agent_start for a direct prompt (synthetic ones included), for a queued
 // batch that holds user messages, and for a user-authored wake. Its event carries `reason` (`prompt`
 // or `revive`), the prompt's text, its images and the system prompt. It carries no message, so no
-// attribution and no synthetic flag, and the branch does not hold the new message yet. The first
-// request of the run carries the messages, with their roles, attribution, synthetic flags and custom
-// types. So the handler decides at that first request: the run started at a user prompt when a
-// message after the last assistant message is a user prompt (startsWithUserPrompt). That one test
-// decides both the exposure entry and whether a text that the trigger added may go out.
-// Between before_agent_start and the run, omp can run a pre-prompt compaction, whose request (a
-// `context` event) holds the stored branch without the new prompt. A `context` event whose messages
-// hold nothing after the last assistant message is such a request: the handler leaves its trigger
-// and its owed entry for the run's first real request, and writes nothing.
+// attribution and no synthetic flag, and the branch does not hold the new message yet. So the handler
+// decides at the run's first request, which carries the run's input with its roles, attribution,
+// synthetic flags and custom types. The run started at a user prompt when that input holds one. That
+// one test decides both the exposure entry and whether a text that the trigger added may go out.
+//
+// The run's first request. omp can send other requests between before_agent_start and the run. A
+// pre-prompt compaction, or a background one, sends a part of the session file to its summarizer. omp
+// can cut that part inside a turn, so it can end in an assistant message, a tool result or an older
+// prompt. So the handler does not read the shape of a request. At the trigger it notes the time, and
+// the role and the time of each message on the branch (snapshot). The input of the run in a request is
+// each user, developer or custom message that was made no later than the trigger and was not on the
+// branch then (runInput). A compaction's request holds only stored messages. A message that a
+// `context` handler adds, such as proactive memory's reminder, is made after the trigger. So the first
+// request that holds such input is the run's first request. A queued follow-up counts too, although
+// it is older than the replies that omp stored after it. Until that request the handler decides
+// nothing and writes nothing.
 //
 // The trigger. The trigger is a before_agent_start of a top-level session that is not a revive. The
 // context of the model is the part of the branch at or after its lower bound (contextLowerBound of
@@ -70,31 +77,33 @@
 //     altered copy does not count, so the next user prompt puts the whole text in again.
 //   - The entry. The handler owes an exposure entry when the context holds no exposure entry of this
 //     feature in this arm. So the entry comes once for each arm while it stays in the context.
-// At the first request after the trigger, the handler keeps the owed entry only when the run started
-// at a user prompt. A text that the trigger added for a run that did not start at a user prompt is
-// withheld: the scrub removes it until a later run starts at a user prompt.
+// At the run's first request, the handler writes the owed entry only when the run started at a user
+// prompt. A text that the trigger added for a run that did not start at a user prompt is withheld: the
+// scrub removes it until a later run starts at a user prompt.
 // A resumed session does not get either again while both stay in its context. A subagent never
 // triggers. The unit of the experiments is the root session, and the skill tells its reader to
 // start fresh subagents, so a subagent that reads it can start more.
 // Known limits: the text goes in only at a user prompt. A compaction at the start of a turn (the
 // pre-prompt compaction above) or inside it can remove the text, and an omp shake can alter it. The
 // scrub then keeps the altered copy out, and the whole text comes back at the next user prompt. A side
-// turn whose `context` event falls between a trigger and its first request, and that ends in a
-// message that is not an assistant message, would be read as that request [INFERENCE: omp starts the
-// run right after before_agent_start and the pre-prompt compaction].
+// turn (`/btw`) whose message was made before the trigger, and whose request falls between the
+// trigger and the run's first request, would be read as that request [INFERENCE: rare. That side turn
+// is not a user prompt, so the trigger writes no entry, and a text it added waits for the next user
+// prompt].
 //
 // The text goes in as one hidden custom message (display false). Its custom type is the name of the
 // feature, and omp sends it with the prompt. The model reads it, but the person at the session does
 // not see the arm of the session. In the off arm, and for aa_noop, the handler adds nothing.
 //
 // Exposure. The handler appends one `experiments-exposure` entry (ExposureRecord of gates.ts: the
-// feature, the arm, the gate, the root session id and the time) at the first request after a trigger
-// that started at a user prompt. In the on arm of a feature with a text, the handler waits for the
-// first request whose messages hold the whole text, so the entry says that the text reached the model.
-// When the state in force changed after the trigger (the count of index.ts moved, for example when a
-// gate went `off` and back on), the trigger is stale. It writes no entry, a text it added is withheld,
-// and the next user prompt triggers again under the state now in force. An owed entry that went stale
-// before it was written is dropped the same way.
+// feature, the arm, the gate, the root session id and the time) at the run's first request, when the
+// run started at a user prompt and the trigger owes the entry. In the on arm of a feature with a text,
+// that request must hold the whole text, so the entry says that the text reached the model. A run
+// whose first request does not hold it (a pre-prompt compaction removed a kept copy) writes no entry,
+// and no later request of that run writes one. The next user prompt then puts the text in again and
+// owes the entry again. When the state in force changed after the trigger (the count of index.ts
+// moved, for example when a gate went `off` and back on), the trigger is stale. It writes no entry, a
+// text it added is withheld, and the next user prompt triggers again under the state now in force.
 //
 // The invariant: a text reaches the model only while the current arm of the session for its feature
 // is on, and only with its entry. index.ts registers, for each feature of this file, the scrub of
@@ -105,11 +114,10 @@
 //   - The feature did not stop after a throw, and the process is not a Legion pane.
 //   - The text is not withheld (above).
 //   - The context holds an exposure entry of the feature in the on arm, or this request's own exposure
-//     append succeeded. The second needs no read of the branch. An owed entry that is not written yet
-//     lets nothing out.
-// The handler writes no owed entry while the text is withheld: the entry stays owed until a run that
-// starts at a user prompt clears the withholding, and is written at that run's request that holds the
-// whole text. So no entry is written for a request whose text the scrub then removes.
+//     append succeeded. The second needs no read of the branch.
+// The handler writes an entry only at the first request of a run that started at a user prompt, and
+// that run clears the withholding. So no entry is written for a request whose text the scrub then
+// removes.
 // A throw of the permit (a branch that cannot be read) goes through the feature's logged failure path
 // (index.ts): the feature stops until the next resolution, and the scrub removes the text.
 // The scrub always removes a custom message of the feature whose content is not the text byte for
@@ -122,7 +130,7 @@
 //   - No text goes out without its entry. When the exposure append (or any other handler of the
 //     feature) throws, the feature stops, and the scrub removes the text from that request and from
 //     every later one. A later resolution in the on arm that finds the text in the context and no
-//     entry writes the entry at the next request after a user prompt that holds the text.
+//     entry writes the entry at the first request of the next run that starts at a user prompt.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { EXCLUDED_ENTRY_TYPE, EXPOSURE_ENTRY_TYPE, type ExcludedRecord, type ExposureRecord, type Feature, type Resolution, rootSessionId } from "./gates";
 import selfcheck from "./infra805-selfcheck.md" with { type: "text" };
@@ -136,7 +144,7 @@ type Ctx = {
 	sessionManager: { getBranch(): readonly Entry[]; getSessionFile(): string | undefined; getSessionId(): string };
 };
 type StartEvent = { reason?: "prompt" | "revive" };
-type Message = { role: string; customType?: string; content?: unknown; attribution?: string; synthetic?: boolean };
+type Message = { role: string; customType?: string; content?: unknown; attribution?: string; synthetic?: boolean; timestamp?: unknown };
 type ContextEvent = { messages: Message[] };
 /** The arm and the gate of a trigger. */
 type Arm = Pick<ExposureRecord, "arm" | "gate">;
@@ -144,15 +152,37 @@ type Arm = Pick<ExposureRecord, "arm" | "gate">;
 /** omp's custom type for a `/skill:` prompt (SKILL_PROMPT_MESSAGE_TYPE of @oh-my-pi/pi-tui). */
 const SKILL_PROMPT = "skill-prompt";
 
-/** Whether the input that started this run (the messages after the last assistant message) holds a user prompt, as architect ruling 48e7077f item 2 defines it. */
-export function startsWithUserPrompt(messages: readonly Message[]): boolean {
-	for (let i = messages.length - 1; i >= 0 && messages[i].role !== "assistant"; i--) {
-		const m = messages[i];
-		if (m.role === "user" && m.synthetic !== true && m.attribution !== "agent") return true;
-		if (m.role === "custom" && m.customType === SKILL_PROMPT && m.attribution === "user") return true;
-	}
-	return false;
+/** Whether `m` is a user prompt, as architect ruling 48e7077f item 2 defines it. */
+function isUserPrompt(m: Message): boolean {
+	if (m.role === "user") return m.synthetic !== true && m.attribution !== "agent";
+	return m.role === "custom" && m.customType === SKILL_PROMPT && m.attribution === "user";
 }
+
+/** The roles of the messages that can start a run: a prompt, a synthetic prompt, a queued user message, a skill prompt or a wake. */
+const INPUT_ROLES: Record<string, true> = { user: true, developer: true, custom: true };
+/** A message's key: its role and its timestamp, as a request carries them. omp gives a stored custom message the epoch milliseconds of its entry's ISO time (getMessageFromEntry, customMessageEntryMessage). */
+const keyOf = (role: string, timestamp: unknown) => `${role}:${String(timestamp)}`;
+
+/** What a trigger saw: the keys of the messages on the branch, and the time. */
+type Snapshot = { stored: ReadonlySet<string>; at: number };
+function snapshot(branch: readonly Entry[]): Snapshot {
+	const stored = new Set<string>();
+	for (const e of branch) {
+		if (e.type === "message") {
+			const m = e.message as { role?: unknown; timestamp?: unknown } | undefined;
+			if (typeof m?.role === "string") stored.add(keyOf(m.role, m.timestamp));
+		} else if (e.type === "custom_message" && typeof e.timestamp === "string") stored.add(keyOf("custom", new Date(e.timestamp).getTime()));
+	}
+	return { stored, at: Date.now() };
+}
+
+/**
+ * The input of the run of a trigger in a request: its messages of an input role that were made no later than the trigger
+ * and were not on the branch then. Only the run's first request holds one: a compaction's request holds only stored
+ * messages, and a message that a `context` handler adds is made after the trigger.
+ */
+const runInput = (messages: readonly Message[], seen: Snapshot) =>
+	messages.filter(m => INPUT_ROLES[m.role] === true && typeof m.timestamp === "number" && m.timestamp <= seen.at && !seen.stored.has(keyOf(m.role, m.timestamp)));
 
 /** Whether the text of a feature of this file may go out in the session of `ctx`, apart from the checks of index.ts. */
 export type Permit = (ctx: Ctx) => boolean;
@@ -190,30 +220,29 @@ export function scrubText(feature: Feature, text: string | undefined, permits: P
 	};
 }
 
-/** Whether the request holds nothing after its last assistant message: the run's input is not in it yet, as in omp's pre-prompt compaction request. */
-const beforeRunInput = (messages: readonly Message[]) => messages.length === 0 || messages[messages.length - 1].role === "assistant";
-
 /** The feature that, in the on arm, puts `text` into the context of a top-level session, and in both arms records the exposure. With no text it puts nothing there in either arm. */
 export function textArm(feature: Feature, text: string | undefined): TextArm {
 	return (pi, resolution, generation) => {
 		const rootOf = (ctx: Ctx) => rootSessionId(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId());
 		if (legionPane()) {
-			// Set by a trigger, until the first request after it.
-			let triggered = false;
+			// What the latest trigger saw, until its run's first request.
+			let trigger: Snapshot | undefined;
 			const reset = () => {
-				triggered = false;
+				trigger = undefined;
 			};
 			pi.on("session_start", reset);
 			pi.on("session_switch", reset);
 			pi.on("session_branch", reset);
 			pi.on("before_agent_start", (event: StartEvent, ctx: Ctx) => {
-				if (event.reason !== "revive" && ctx.agent.kind === "main") triggered = true;
+				if (event.reason !== "revive" && ctx.agent.kind === "main") trigger = snapshot(ctx.sessionManager.getBranch());
 				return undefined;
 			});
 			pi.on("context", (event: ContextEvent, ctx: Ctx) => {
-				if (!triggered || beforeRunInput(event.messages)) return undefined;
-				triggered = false;
-				if (!startsWithUserPrompt(event.messages)) return undefined;
+				if (!trigger) return undefined;
+				const input = runInput(event.messages, trigger);
+				if (input.length === 0) return undefined;
+				trigger = undefined;
+				if (!input.some(isUserPrompt)) return undefined;
 				const excluded = ctx.sessionManager.getBranch().some(e => e.type === "custom" && e.customType === EXCLUDED_ENTRY_TYPE && (e.data as Partial<ExcludedRecord> | undefined)?.feature === feature);
 				if (excluded) return undefined;
 				const record: ExcludedRecord = { v: 1, feature, reason: "legion_pane", rootSessionId: rootOf(ctx), at: new Date().toISOString() };
@@ -222,17 +251,14 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			});
 			return { permit: () => false, text };
 		}
-		// The latest trigger, until the first request after it: its arm, the count it was made under, whether it owes an entry, and whether it added the text.
-		let trigger: (Arm & { generation: number; owes: boolean; added: boolean }) | undefined;
-		// The entry owed by a trigger that started at a user prompt, with the count it was made under, until it is written.
-		let pending: (Arm & { generation: number }) | undefined;
+		// The latest trigger, until its run's first request: its arm, the count it was made under, whether it owes an entry, whether it added the text, and what it saw.
+		let trigger: (Arm & Snapshot & { generation: number; owes: boolean; added: boolean }) | undefined;
 		// Set when a trigger added the text for a run that did not start at a user prompt, or for a stale trigger, until a run that starts at a user prompt.
 		let withheld = false;
 		// Request-local: set when this request's exposure append succeeded, so this request's scrub needs no branch read.
 		let recorded = false;
 		const reset = () => {
 			trigger = undefined;
-			pending = undefined;
 			withheld = false;
 			recorded = false;
 		};
@@ -251,33 +277,27 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				return e.type === "custom" && e.customType === EXPOSURE_ENTRY_TYPE && data?.feature === feature && data.arm === arm;
 			});
 			const add = arm === "on" && text !== undefined && !kept.some(e => e.type === "custom_message" && e.customType === feature && e.content === text);
-			trigger = { arm, gate, generation: generation(), owes: !exposed, added: add };
+			trigger = { arm, gate, generation: generation(), owes: !exposed, added: add, ...snapshot(branch) };
 			return add ? { message: { customType: feature, content: text, display: false } } : undefined;
 		});
 		pi.on("context", (event: ContextEvent, ctx: Ctx) => {
 			recorded = false;
-			// A pre-prompt compaction's request: the trigger and the owed entry wait for the run's first real request.
-			if (beforeRunInput(event.messages)) return undefined;
-			if (trigger) {
-				const t = trigger;
-				trigger = undefined;
-				if (t.generation === generation() && startsWithUserPrompt(event.messages)) {
-					withheld = false;
-					if (t.owes) pending = { arm: t.arm, gate: t.gate, generation: t.generation };
-				} else if (t.added) withheld = true;
-			}
-			if (!pending) return undefined;
-			if (pending.generation !== generation()) {
-				pending = undefined;
+			if (!trigger) return undefined;
+			// A request with no input of the run (a compaction's): the trigger waits for the run's first request.
+			const input = runInput(event.messages, trigger);
+			if (input.length === 0) return undefined;
+			const t = trigger;
+			trigger = undefined;
+			if (t.generation !== generation() || !input.some(isUserPrompt)) {
+				if (t.added) withheld = true;
 				return undefined;
 			}
-			// A withheld text does not go out, so the owed entry waits for the user prompt that clears it.
-			if (withheld) return undefined;
-			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature && m.content === text)) return undefined;
-			const record: ExposureRecord = { v: 1, feature, arm: pending.arm, gate: pending.gate, rootSessionId: rootOf(ctx), at: new Date().toISOString() };
+			withheld = false;
+			if (!t.owes) return undefined;
+			if (t.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature && m.content === text)) return undefined;
+			const record: ExposureRecord = { v: 1, feature, arm: t.arm, gate: t.gate, rootSessionId: rootOf(ctx), at: new Date().toISOString() };
 			// A throw here stops the feature (index.ts), and the scrub then removes its text from this request.
 			pi.appendEntry(EXPOSURE_ENTRY_TYPE, record);
-			pending = undefined;
 			recorded = true;
 			return undefined;
 		});
