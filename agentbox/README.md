@@ -56,8 +56,13 @@ On any other machine, the same steps by hand (version and sha256 from the
 ```bash
 curl -fsSLO https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb
 echo "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5  sysbox-ce_0.7.1.linux_amd64.deb" | sha256sum -c -
-sudo apt-get install -y ./sysbox-ce_0.7.1.linux_amd64.deb
+sudo apt-get satisfy -y --no-install-recommends "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Pre-Depends)" "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Depends)"
+sudo dpkg -i ./sysbox-ce_0.7.1.linux_amd64.deb
 ```
+
+Both ways install the package's dependencies with apt and the checked file itself with `dpkg -i`:
+apt given the `.deb` file can install a configured source's copy of the same version instead
+([Debian bug #1058934](https://bugs.debian.org/1058934)).
 
 You do not edit Docker's configuration by hand, and `sysbox-runc` need not be the default runtime:
 `scripts/agentbox` passes `--runtime sysbox-runc` itself. Check it:

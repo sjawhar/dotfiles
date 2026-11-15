@@ -28,12 +28,16 @@ if [[ "$(dpkg-query -W -f='${Version}' tailscale 2>/dev/null || true)" == "$TAIL
 else
     ts_tmp="$(mktemp -d)"
     ts_deb="$ts_tmp/tailscale_${TAILSCALE_VERSION}_amd64.deb"
-    curl -fsSL --retry 3 -o "$ts_deb" \
-        "https://pkgs.tailscale.com/stable/ubuntu/pool/tailscale_${TAILSCALE_VERSION}_amd64.deb"
-    echo "$TAILSCALE_DEB_SHA256  $ts_deb" | sha256sum -c --quiet -
-    # apt-get, not dpkg -i, so the package's dependency (iptables) comes with it.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$ts_deb"
-    rm -rf "$ts_tmp"
+    # The checked file itself, never apt's copy of it (install_checked_deb, installers/lib.sh).
+    if curl -fsSL --retry 3 -o "$ts_deb" \
+        "https://pkgs.tailscale.com/stable/ubuntu/pool/tailscale_${TAILSCALE_VERSION}_amd64.deb" \
+        && install_checked_deb "$ts_deb" "$TAILSCALE_DEB_SHA256"; then
+        rm -rf -- "$ts_tmp"
+    else
+        ts_status=$?
+        rm -rf -- "$ts_tmp"
+        exit "$ts_status"
+    fi
     echo "tailscale.sh: installed tailscale $TAILSCALE_VERSION"
 fi
 # The package enables tailscaled; a machine without systemd running (a container) has no daemon.

@@ -79,6 +79,29 @@ ensure_json() {
     jq "$transform" "$file" > "$tmp" && mv "$tmp" "$real"
 }
 
+# apt 2.8 can install a configured source's same-version copy instead of a local file
+# (Debian bug #1058934), so apt gets only dependency fields and dpkg gets the checked file.
+# Every step returns its own failure because `||` and `if` callers disable `set -e` inside it.
+install_checked_deb() {
+    local deb="$1" expected="$2"
+    local actual pre_depends depends
+    local -a deps=()
+    actual="$(sha256sum -- "$deb")" || return 1
+    actual="${actual%% *}"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "install_checked_deb: SHA-256 of $deb is $actual, expected $expected; installed nothing" >&2
+        return 1
+    fi
+    pre_depends="$(dpkg-deb --field "$deb" Pre-Depends)" || return 1
+    depends="$(dpkg-deb --field "$deb" Depends)" || return 1
+    if [[ -n "$pre_depends" ]]; then deps+=("$pre_depends"); fi
+    if [[ -n "$depends" ]]; then deps+=("$depends"); fi
+    if ((${#deps[@]})); then
+        DEBIAN_FRONTEND=noninteractive apt-get satisfy -y --no-install-recommends "${deps[@]}" || return 1
+    fi
+    DEBIAN_FRONTEND=noninteractive dpkg -i "$deb"
+}
+
 # Give a box watch's service the session that owns THIS machine's box health, from
 # BOX_HEALTH_OWNER in the installer's environment. The service units are committed and
 # symlinked, so the per-machine value goes in a drop-in beside the link, never in the unit
