@@ -100,20 +100,12 @@ def _test_name() -> str | None:
     return None
 
 
-def _agent_pid() -> int:
-    frame = inspect.currentframe()
+def _agent_pid_from_env(kwargs: dict[str, Any]) -> int:
+    """The sshd test passes env=agent_env, which holds SSH_AGENT_PID, to its ssh-add call."""
     try:
-        frame = frame.f_back if frame is not None else None
-        while frame is not None:
-            if frame.f_code.co_name == _AGENT_TEST:
-                value = frame.f_locals.get("agent_pid")
-                if isinstance(value, int):
-                    return value
-                raise RuntimeError("agent trigger could not find agent_pid")
-            frame = frame.f_back
-    finally:
-        del frame
-    raise RuntimeError("agent trigger could not find the sshd test frame")
+        return int(kwargs["env"]["SSH_AGENT_PID"])
+    except (KeyError, TypeError):
+        raise RuntimeError("agent trigger requires env['SSH_AGENT_PID']") from None
 
 
 def _process_state(pid: int) -> str | None:
@@ -165,8 +157,9 @@ def _send_signal_and_wait(trigger: str, signum: int, target: str) -> None:
     )
 
 
-def _agent_signal(trigger: Trigger, signum: int, target: str) -> None:
-    agent_pid = _agent_pid()
+def _agent_signal(
+    trigger: Trigger, signum: int, target: str, agent_pid: int
+) -> None:
     agent_state = _process_state(agent_pid)
     agent_alive = agent_state is not None and agent_state != "Z"
     _write_event(
@@ -217,7 +210,7 @@ def install_trigger() -> None:
             command_name = _command_name(arguments)
 
             if name == "fail" and command_name == "ssh-add" and trigger.claim():
-                agent_pid = _agent_pid()
+                agent_pid = _agent_pid_from_env(kwargs)
                 _write_event(
                     name,
                     signum=None,
@@ -233,6 +226,7 @@ def install_trigger() -> None:
                 "agent-hup",
                 "agent-term-group",
             } and command_name == "ssh-add" and trigger.claim():
+                agent_pid = _agent_pid_from_env(kwargs)
                 signals = {
                     "agent-term": signal.SIGTERM,
                     "agent-int": signal.SIGINT,
@@ -240,7 +234,7 @@ def install_trigger() -> None:
                     "agent-term-group": signal.SIGTERM,
                 }
                 target = "group" if name == "agent-term-group" else "pid"
-                _agent_signal(trigger, signals[name], target)
+                _agent_signal(trigger, signals[name], target, agent_pid)
             elif name == "run-sshd-test" and command_name == "ssh-add" and trigger.claim():
                 popenargs, kwargs = _replace_command(
                     popenargs, kwargs, ["/usr/bin/sleep", "60"]
