@@ -31,9 +31,10 @@ What one run does:
      upgrade for registered marketplace plugins below the lowest version their committed lock entries
      require (a best-effort lock restore afterward). A plugin at or above its entry gets no upgrade or
      version failure; one below is a version failure only if it is still below after its refresh and
-     upgrade, and a failed omp command is a failure whatever the version. Dotted numbers compare
-     numerically; any other version must equal the entry. Lock entries without an installed
-     marketplace record are skipped; install.sh bootstraps them.
+     upgrade, and a failed omp command is a failure whatever the version. Dotted-number strings
+     compare numerically; other strings must equal the entry, and a version that is not a string
+     never satisfies it. Lock entries without an installed marketplace record are skipped;
+     install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
      --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
      on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
@@ -424,18 +425,15 @@ def omp_profile_is_legion() -> bool:
 def version_at_least(have: object, want: object) -> bool:
     """True when an installed marketplace version is at or above the lock's entry.
 
-    Two strings that fully match the ASCII dotted-number pattern compare component by component
-    after leading zeros are removed; the shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10
-    is above 0.3.9, 0.3.09 equals 0.3.9). Every other pair must have the same JSON type and value.
+    Two ASCII dotted-number strings compare component by component after leading zeros are removed;
+    the shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals
+    0.3.9). Other strings must be equal. A version that is not a string never satisfies an entry.
     """
+    if not isinstance(have, str) or not isinstance(want, str):
+        return False
     numeric = r"[0-9]+(?:\.[0-9]+)*"
-    if not (
-        isinstance(have, str)
-        and isinstance(want, str)
-        and re.fullmatch(numeric, have)
-        and re.fullmatch(numeric, want)
-    ):
-        return json.dumps(have) == json.dumps(want)
+    if not (re.fullmatch(numeric, have) and re.fullmatch(numeric, want)):
+        return have == want
     have_parts = [component.lstrip("0") or "0" for component in have.split(".")]
     want_parts = [component.lstrip("0") or "0" for component in want.split(".")]
     length = max(len(have_parts), len(want_parts))
@@ -521,10 +519,21 @@ def install_marketplace_plugins(
                     current = json.loads(installed_path.read_text()).get("plugins", {}).get(plugin, [])
                     have = current[0].get("version") if current else None
                     if not version_at_least(have, want):
-                        failures.append(
-                            f"{plugin} is {have or 'not installed'}, below {want}, the lowest version "
-                            f"{display_path(lock)} records."
-                        )
+                        if have is not None and not isinstance(have, str):
+                            failures.append(
+                                f"{plugin}'s installed record holds {json.dumps(have)}, "
+                                "which is not a version string."
+                            )
+                        elif not isinstance(want, str):
+                            failures.append(
+                                f"{display_path(lock)} records {json.dumps(want)} for {plugin}, "
+                                "which is not a version string."
+                            )
+                        else:
+                            failures.append(
+                                f"{plugin} is {have or 'not installed'}, below {want}, the lowest version "
+                                f"{display_path(lock)} records."
+                            )
             except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
                 failures.append(f"{name}: cannot install marketplace pin: {error}")
     finally:

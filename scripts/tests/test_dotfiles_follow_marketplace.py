@@ -17,7 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
-from scripts.tests.marketplace_version_cases import CASES, MISSING
+from scripts.tests.marketplace_version_cases import CASES, MISSING, RAW_CASES
 
 
 FAKE_OMP = r'''#!/usr/bin/env python3
@@ -362,12 +362,43 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assert_clean_lock()
 
+    def test_non_string_installed_version_is_reported_after_upgrade(self) -> None:
+        self.take_upstream()
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = {"b": 2, "a": 1}
+        self.installed_path.write_text(json.dumps(installed))
+        os.environ["FAKE_OMP_VERSIONS"] = json.dumps({
+            "dev-infra": {"b": 2, "a": 1},
+            "verification-skills": "2.0.0",
+            "core-ops": "2.0.0",
+        })
+
+        why = FOLLOW.install_tools(self.repo, self.options())
+
+        self.assertIn(["plugin", "marketplace", "update", "verification-skills"], self.calls())
+        self.assertIn(["plugin", "upgrade", "dev-infra@verification-skills"], self.calls())
+        self.assertIn(
+            'dev-infra@verification-skills\'s installed record holds {"b": 2, "a": 1}, '
+            "which is not a version string.",
+            why,
+        )
+        self.assertNotIn("below", why)
+        self.assert_clean_lock()
+
     def test_version_at_least_table(self) -> None:
         for have, want, expected in CASES:
             with self.subTest(have=have, want=want):
                 have = None if have is MISSING else have
                 want = None if want is MISSING else want
                 self.assertEqual(FOLLOW.version_at_least(have, want), expected)
+
+    def test_version_at_least_raw_json_table(self) -> None:
+        for have_json_text, want_json_text, expected in RAW_CASES:
+            with self.subTest(have=have_json_text, want=want_json_text):
+                self.assertEqual(
+                    FOLLOW.version_at_least(json.loads(have_json_text), json.loads(want_json_text)),
+                    expected,
+                )
 
     def test_failed_catalog_update_does_not_upgrade_but_keeps_going(self) -> None:
         self.take_upstream()

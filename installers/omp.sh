@@ -97,19 +97,22 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # plugin at or above its entry gets no upgrade and no version warning. A plugin below it (another
 # machine upgraded and committed the lock) refreshes the marketplace catalog, which omp otherwise
 # keeps from the day it was added, and upgrades; it gets a version warning only when it is still
-# below afterwards, and a failed omp command is reported whatever the version. Dotted numbers
-# compare as numbers; any other version must equal the entry.
+# below afterwards, and a failed omp command is reported whatever the version. Dotted-number
+# strings compare as numbers; any other string must equal the entry, and a version that is not a
+# string never satisfies it.
 # The install record (installed_plugins.json) is machine-local; the lock entry is not, and omp
 # refuses to install a plugin whose name the lock already holds ("Runtime package name ...
 # conflicts") while exiting 0. So on a machine without the install, the stale lock entry is
 # dropped first, and after the omp calls the committed bytes are put back, whatever omp wrote, so
 # the checkout stays clean. The lock changes only by a commit.
-# Null and missing values print nothing. A value printed raw is exactly a string of ASCII dotted
-# numbers. Every other non-null value is printed as json: plus its JSON text, so two reads are
-# equal exactly when the JSON values are equal (type and value), and command substitution cannot
-# cut a trailing newline.
+# Null and missing values print nothing. A dotted-number string prints raw. Another string has a
+# str: prefix and its JSON text; a non-string has a json: prefix and its JSON text. The prefix keeps
+# the value's kind clear, and JSON text keeps command substitution from cutting a trailing newline.
 marketplace_version_text() {
-    jq -r 'if . == null then empty elif type == "string" and test("\\A[0-9]+(\\.[0-9]+)*\\z") then . else "json:" + tojson end'
+    jq -r 'if . == null then empty
+        elif type == "string" and test("\\A[0-9]+(\\.[0-9]+)*\\z") then .
+        elif type == "string" then "str:" + tojson
+        else "json:" + tojson end'
 }
 marketplace_plugin_version() {
     jq -c --arg p "$1" '.plugins[$p][0].version' \
@@ -119,14 +122,18 @@ marketplace_lock_version() {
     jq -c --arg n "$1" '.plugins[$n].version' \
         "${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json" | marketplace_version_text
 }
-# Succeeds when installed version $1 is at or above lock entry $2. Dotted numbers compare component
-# by component as integers (0.3.10 is above 0.3.9; 1.2 equals 1.2.0; 0.3.09 equals 0.3.9), as
-# digit strings without leading zeros, so no component is read as octal or overflows $(( )).
+# Succeeds when installed version $1 satisfies lock entry $2. It returns 1 for empty values or
+# non-string JSON values. Dotted numbers compare component by component as integers (0.3.10 is above
+# 0.3.9; 1.2 equals 1.2.0; 0.3.09 equals 0.3.9), as digit strings without leading zeros, so no
+# component is read as octal or overflows $(( )).
 # Digits are ASCII 0-9 alone, listed one by one, since in a UTF-8 locale bash's [0-9] also matches
-# other digits (U+0661, U+FF11), which dotfiles-follow does not. Any other version (0.3.1-beta, or
-# empty) must equal the entry. Call it only in a condition.
+# other digits (U+0661, U+FF11), which dotfiles-follow does not. Other string values must be exactly
+# equal. Call it only in a condition.
 marketplace_version_at_least() {
     local numeric='^[0123456789]+(\.[0123456789]+)*$' h w i n
+    if [ -z "$1" ] || [ -z "$2" ] || [[ $1 == json:* || $2 == json:* ]]; then
+        return 1
+    fi
     if ! [[ $1 =~ $numeric && $2 =~ $numeric ]]; then
         [ "$1" = "$2" ]
         return
@@ -177,7 +184,7 @@ install_marketplace_plugin() {
         # mismatch cannot report a breakage that prevents mismatches from being fixed, so this one
         # does not restore the lock afterwards: it only reads, and a failure is reported, never fatal.
         omp plugin marketplace update "${plugin#*@}" >/dev/null 2>&1 \
-            || echo "omp: marketplace ${plugin#*@} no longer resolves; ${plugin} is pinned at ${have} and cannot be upgraded" >&2
+            || echo "omp: marketplace ${plugin#*@} no longer resolves; ${plugin} is pinned at ${have#str:} and cannot be upgraded" >&2
     fi
     cp "$saved" "$lock"
     rm -f "$saved"
@@ -186,7 +193,13 @@ install_marketplace_plugin() {
     if [ -z "$have" ]; then
         echo "omp: installing ${plugin} failed" >&2
     elif [ -n "$want" ] && ! marketplace_version_at_least "$have" "$want"; then
-        echo "omp: ${plugin} is ${have}, below ${want}, the lowest version omp-plugins.lock.json records" >&2
+        if [[ $have == json:* ]]; then
+            echo "omp: ${plugin} is recorded as ${have#json:}, which is not a version string" >&2
+        elif [[ $want == json:* ]]; then
+            echo "omp: omp-plugins.lock.json records ${want#json:} for ${plugin}, which is not a version string" >&2
+        else
+            echo "omp: ${plugin} is ${have#str:}, below ${want#str:}, the lowest version omp-plugins.lock.json records" >&2
+        fi
     fi
 }
 # theorem-labs/verification-skills: the agent-skills catalog. All four of its plugins are installed

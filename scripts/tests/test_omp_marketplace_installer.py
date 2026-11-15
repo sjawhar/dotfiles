@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.tests.marketplace_version_cases import CASES, MISSING
+from scripts.tests.marketplace_version_cases import CASES, MISSING, RAW_CASES
 
 
 INSTALLER = Path(__file__).resolve().parents[2] / "installers/omp.sh"
@@ -59,8 +59,13 @@ fi
 if [ "$1" = plugin ] && [ "$2" = upgrade ]; then
     rewrite_lock
     installed="${DOTFILES_DIR}/omp/plugins/installed_plugins.json"
-    jq --arg plugin "$3" --arg version "$FAKE_OMP_UPGRADE_TO" \
-        '.plugins[$plugin][0].version = $version' "$installed" > "$installed.tmp"
+    if [ -n "$FAKE_OMP_UPGRADE_TO_JSON" ]; then
+        jq --arg plugin "$3" --argjson version "$FAKE_OMP_UPGRADE_TO_JSON" \
+            '.plugins[$plugin][0].version = $version' "$installed" > "$installed.tmp"
+    else
+        jq --arg plugin "$3" --arg version "$FAKE_OMP_UPGRADE_TO" \
+            '.plugins[$plugin][0].version = $version' "$installed" > "$installed.tmp"
+    fi
     mv "$installed.tmp" "$installed"
     exit "$FAKE_OMP_UPGRADE_RC"
 fi
@@ -128,6 +133,7 @@ class OmpMarketplaceInstaller(unittest.TestCase):
             "FAKE_OMP_LOG": str(self.log_path),
             "FAKE_OMP_UPDATE_RC": "0",
             "FAKE_OMP_UPGRADE_TO": "0.3.1",
+            "FAKE_OMP_UPGRADE_TO_JSON": "",
             "FAKE_OMP_UPGRADE_RC": "0",
             "FAKE_OMP_INSTALL_TO": "0.3.1",
             "FAKE_OMP_INSTALL_RC": "0",
@@ -144,6 +150,7 @@ class OmpMarketplaceInstaller(unittest.TestCase):
         *,
         update_rc: int = 0,
         upgrade_to: str = "0.3.1",
+        upgrade_to_json: object | None = None,
         upgrade_rc: int = 0,
         install_to: str = "0.3.1",
         install_rc: int = 0,
@@ -161,6 +168,9 @@ class OmpMarketplaceInstaller(unittest.TestCase):
         self.env.update({
             "FAKE_OMP_UPDATE_RC": str(update_rc),
             "FAKE_OMP_UPGRADE_TO": upgrade_to,
+            "FAKE_OMP_UPGRADE_TO_JSON": (
+                "" if upgrade_to_json is None else json.dumps(upgrade_to_json, separators=(",", ":"))
+            ),
             "FAKE_OMP_UPGRADE_RC": str(upgrade_rc),
             "FAKE_OMP_INSTALL_TO": install_to,
             "FAKE_OMP_INSTALL_RC": str(install_rc),
@@ -305,7 +315,7 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 "plugin upgrade engineering@agent-skills",
             ],
             [
-                'omp: engineering@agent-skills is json:"partial", below 0.3.1, '
+                'omp: engineering@agent-skills is "partial", below 0.3.1, '
                 "the lowest version omp-plugins.lock.json records"
             ],
         )
@@ -340,7 +350,7 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 "plugin upgrade engineering@agent-skills",
             ],
             [
-                'omp: engineering@agent-skills is json:"2\\n", below 1, '
+                'omp: engineering@agent-skills is "2\\n", below 1, '
                 "the lowest version omp-plugins.lock.json records"
             ],
         )
@@ -411,7 +421,31 @@ class OmpMarketplaceInstaller(unittest.TestCase):
         installed = json.loads(self.installed_path.read_text(encoding="utf-8"))
         self.assertEqual(installed["plugins"][PLUGIN][0]["version"], "2")
 
-    def test_non_string_lock_version_needs_exact_equality(self) -> None:
+    def test_non_string_installed_objects_are_reported_after_upgrade(self) -> None:
+        cases = (
+            ({"b": 2, "a": 1}, {"a": 1, "b": 2}),
+            ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+        )
+        for have, want in cases:
+            with self.subTest(have=have, want=want):
+                self.prepare(have, want, upgrade_to_json=have)
+
+                result = self.install()
+
+                self.assert_step(
+                    result,
+                    [
+                        "plugin marketplace list",
+                        "plugin marketplace update agent-skills",
+                        "plugin upgrade engineering@agent-skills",
+                    ],
+                    [
+                        "omp: engineering@agent-skills is recorded as "
+                        f"{json.dumps(have, separators=(',', ':'))}, which is not a version string"
+                    ],
+                )
+
+    def test_non_string_lock_version_is_reported(self) -> None:
         self.prepare("1", 1, upgrade_to="1")
 
         result = self.install()
@@ -424,8 +458,8 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 "plugin upgrade engineering@agent-skills",
             ],
             [
-                "omp: engineering@agent-skills is 1, below json:1, "
-                "the lowest version omp-plugins.lock.json records"
+                "omp: omp-plugins.lock.json records 1 for engineering@agent-skills, "
+                "which is not a version string"
             ],
         )
 
@@ -516,6 +550,41 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                     },
                 }
                 self.lock_path.write_text(json.dumps(lock), encoding="utf-8")
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'set -euo pipefail; source "$1"; '
+                        'if marketplace_version_at_least "$(marketplace_plugin_version "$2")" '
+                        '"$(marketplace_lock_version engineering)"; then echo yes; else echo no; fi',
+                        "_",
+                        str(self.functions),
+                        PLUGIN,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "yes\n" if expected else "no\n", result.stderr)
+
+    def test_version_at_least_raw_json_table(self) -> None:
+        environment = self.env
+        if "en_us.utf8" in subprocess.run(
+            ["locale", "-a"], capture_output=True, text=True, check=False
+        ).stdout.lower():
+            environment = {**self.env, "LC_ALL": "en_US.UTF-8"}
+        for have_json_text, want_json_text, expected in RAW_CASES:
+            with self.subTest(have=have_json_text, want=want_json_text):
+                self.installed_path.write_text(
+                    f'{{"version":2,"plugins":{{"{PLUGIN}":[{{"version":{have_json_text}}}]}}}}',
+                    encoding="utf-8",
+                )
+                self.lock_path.write_text(
+                    f'{{"plugins":{{"engineering":{{"version":{want_json_text}}}}}}}',
+                    encoding="utf-8",
+                )
                 result = subprocess.run(
                     [
                         "bash",
