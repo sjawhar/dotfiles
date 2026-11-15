@@ -1111,6 +1111,39 @@ class OpenAttempts(EnrollFixture):
         self.assertIn(f"--runtime-id box1 --thumbprint K{2:042d} keydir=", before[-1])
         self.assert_one_learn_call("box1")
 
+    def test_each_open_key_of_a_box_is_learned(self) -> None:
+        """enroll_box's calls, with the key made first in the box (THUMBPRINT), end with the
+        outcome not known while the broker made enr-1; then enr-1 ends at the broker. reenroll_box
+        finds no key.pem, makes a new key in the box, and its one call, with that key's thumbprint,
+        also ends with the outcome not known while the broker made enr-2. The launcher holds two
+        open entries of box1. The close learns each: THUMBPRINT first, which the broker refuses 409
+        because enr-2 is live under the other key, then the new key, which gets enr-2 back. One
+        unenroll call, of enr-2, and both rows have ended."""
+        new_tp = f"K{2:042d}"
+        self.close(
+            'enroll_box box1 "" || true\nagent-secrets unenroll --helper --enrollment enr-1\nreenroll_box box1 || true',
+            STUB_ENROLL="unknown",
+        )
+        learns = self.learn_calls()
+        self.assertEqual(
+            [args for args, _ in learns],
+            [
+                f"enroll --helper --runtime-id box1 --thumbprint {THUMBPRINT}",
+                f"enroll --helper --runtime-id box1 --thumbprint {new_tp}",
+            ],
+        )
+        for _, keydir in learns:
+            self.assertFalse(keydir.is_relative_to(self.hostdir), keydir)
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-2"])
+        self.assertEqual(
+            self.broker_rows("box1"),
+            [["enr-1", "box1", THUMBPRINT, "ended"], ["enr-2", "box1", new_tp, "ended"]],
+        )
+        log = self.unenroll_log()
+        self.assertEqual(len(log), 2, log)
+        self.assertTrue(log[0].startswith(f"box1: open attempt '{self.OWN_OPEN}' not learned: "), log)
+        self.assertEqual(log[1], "box1: enrollment enr-2 (runtime id box1) revoked")
+
     def test_a_session_whose_first_enrollment_ends_open_is_learned_after_its_grace(self) -> None:
         """Session sid-1's `owner` names box0, an earlier box of the session that is gone. Each
         enroll call of box1 for the session ends with its outcome not known, so box1 records no id,
@@ -1138,6 +1171,55 @@ class OpenAttempts(EnrollFixture):
                 "box1: enrollment enr-1 (runtime id session-sid-1) revoked",
             ],
         )
+
+    def close_after_the_fallback(self, words: str) -> Path:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone. Then
+        enroll_box box1 sid-1 with STUB_ENROLL=`words`, whose second word is `conflict`: the first
+        call is for the session, the second is refused 409, and the 409 fallback enrolls under
+        box1 with the same key from the third call on. Then the close, with a grace of 0 s.
+        Returns the session's key dir."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        self.close("enroll_box box1 sid-1 || true", STUB_ENROLL=words, AGENTBOX_UNENROLL_GRACE="0")
+        return skd
+
+    def test_an_open_session_call_and_an_open_call_after_the_fallback_are_each_learned(self) -> None:
+        """close_after_the_fallback with the first call and every call under box1 ending with the
+        outcome not known: the broker made enr-1 for session-sid-1 and enr-2 for box1, and the
+        launcher holds one open entry of each kind. The close learns box1's at once and the
+        waiter learns the session's: one learn call for each, two unenroll calls, both rows
+        ended, and the session's key dir removed."""
+        skd = self.close_after_the_fallback("unknown conflict unknown")
+        self.assertEqual(
+            sorted(args for args, _ in self.learn_calls()),
+            [
+                f"enroll --helper --runtime-id box1 --thumbprint {THUMBPRINT}",
+                f"enroll --helper --runtime-id session-sid-1 --thumbprint {THUMBPRINT}",
+            ],
+        )
+        self.assertEqual(
+            sorted(self.revokes_after_close()),
+            ["unenroll --helper --enrollment enr-1", "unenroll --helper --enrollment enr-2"],
+        )
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
+        self.assertFalse(skd.exists())
+
+    def test_a_success_after_the_fallback_keeps_the_open_session_call(self) -> None:
+        """close_after_the_fallback with the first call ending with the outcome not known (the
+        broker made enr-1 for session-sid-1) and the fallback's call succeeding (enr-2, box1's
+        own). The success settles only its own identity, so the session's entry stays open: the
+        close revokes enr-2 at once, and the waiter learns session-sid-1 and revokes enr-1. Both
+        rows have ended."""
+        self.close_after_the_fallback("unknown conflict broker")
+        self.assert_one_learn_call("session-sid-1")
+        self.assertEqual(
+            sorted(self.revokes_after_close()),
+            ["unenroll --helper --enrollment enr-1", "unenroll --helper --enrollment enr-2"],
+        )
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
 
     # box1 enrolls for session sid-1 (enr-1, recorded). The broker revokes enr-1, and the launcher's
     # call to enroll the box again ends with its outcome not known while the broker makes enr-2.
