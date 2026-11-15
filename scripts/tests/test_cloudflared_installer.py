@@ -20,7 +20,7 @@ LIBRARY = DOTFILES / "installers" / "lib.sh"
 VERSION = "2026.10.7"
 FINGERPRINT = "CC94B39C77AE7342A68B89628A682D308D4E5E73"
 PIN_TEXT = (
-    "# Pinned by installers/cloudflared.sh; change VERSION there to upgrade.\n"
+    "# Pinned by installers/cloudflared.sh; to upgrade, change VERSION, SHA256_AMD64 and SHA256_ARM64 there.\n"
     "Package: cloudflared\n"
     f"Pin: version {VERSION}\n"
     "Pin-Priority: 1001\n"

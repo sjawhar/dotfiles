@@ -46,7 +46,7 @@ fi
 preferences="${INSTALL_ROOT}${PREFERENCES}"
 sudo mkdir -p "$(dirname "$preferences")"
 sudo tee "$preferences" >/dev/null <<EOF
-# Pinned by installers/cloudflared.sh; change VERSION there to upgrade.
+# Pinned by installers/cloudflared.sh; to upgrade, change VERSION, SHA256_AMD64 and SHA256_ARM64 there.
 Package: cloudflared
 Pin: version $VERSION
 Pin-Priority: 1001
