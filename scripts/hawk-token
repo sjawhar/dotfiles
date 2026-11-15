@@ -388,7 +388,7 @@ bootstrap_first_run() {
     fi
     log "first run: cloning agent-c main into $root/agent-c (about a minute)"
     begin_attempt
-    if build_slot "$root/agent-c" && publish agent-c && touch "$stamp"; then
+    if build_slot "$root/agent-c" 1>&2 && publish agent-c && touch "$stamp"; then
         end_attempt_ok
         release_lock
         return 0

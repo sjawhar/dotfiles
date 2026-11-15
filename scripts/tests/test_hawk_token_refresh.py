@@ -140,6 +140,9 @@ try:
                 partial.rename(pack / "pack-from-fetch.pack")
         status = 1 if settings.get("fetch_fail") else 0
     elif action == "clone":
+        stdout_noise = settings.get("stdout_noise", "")
+        if stdout_noise:
+            sys.stdout.write(stdout_noise)
         destination = Path(argv[-1])
         if settings.get("clone_fail"):
             status = 1
@@ -158,7 +161,11 @@ sys.exit(status)
     uv = f'''#!/usr/bin/env python3
 {common}
 started = time.time()
-status = 1 if control("uv", {{}}).get("fail") else 0
+settings = control("uv", {{}})
+stdout_noise = settings.get("stdout_noise", "")
+if stdout_noise:
+    sys.stdout.write(stdout_noise)
+status = 1 if settings.get("fail") else 0
 record("uv", sys.argv[1:], started, time.time())
 sys.exit(status)
 '''
@@ -931,6 +938,21 @@ class SessionCalls(HawkTokenFixture):
         self.assertEqual(result.stdout, self.token + "\n")
         self.assertEqual((self.root / "last-good-token").read_text(encoding="utf-8").strip(), self.token)
         self.assertEqual([call["name"] for call in self.calls()], ["timeout", "mint"])
+
+    def test_first_bootstrap_redirects_build_stdout_to_stderr(self) -> None:
+        self.set_control("git", {"stdout_noise": "git clone stdout noise\n"})
+        self.set_control("uv", {"stdout_noise": "uv sync stdout noise\n"})
+
+        result = self.session_call()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, self.token + "\n")
+        self.assertIn("git clone stdout noise\n", result.stderr)
+        self.assertIn("uv sync stdout noise\n", result.stderr)
+        self.assertEqual(len(self.git_calls("clone")), 1)
+        current = self.root / "current"
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(os.readlink(current), "agent-c")
 
     def test_session_argument_reaches_mint_without_overwriting_the_cache(self) -> None:
         self.make_live(fresh=True)
