@@ -829,11 +829,21 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
 
         self.legacy_units.write_text("", encoding="utf-8")
         self.reset_oryx_service_state()
-        foreign = "LISTEN 0 4096 127.0.0.1:12802 0.0.0.0:* users:((\"other\",pid=999,fd=3))"
-        start = self.install("daemon", SS_ALWAYS="1", SS_LINES=foreign)
-        self.assertEqual(start.returncode, 1)
-        self.assertIn("forward.sh daemon: oryx: start failed:", start.stderr)
-        self.assertIn(foreign, start.stderr)
+        for local_address in ("127.0.0.1:12802", "0.0.0.0:12802", "*:12805", "[::]:12801"):
+            with self.subTest(local_address=local_address):
+                self.reset_oryx_service_state()
+                foreign = f"LISTEN 0 4096 {local_address} 0.0.0.0:* users:((\"other\",pid=999,fd=3))"
+                start = self.install("daemon", SS_ALWAYS="1", SS_LINES=foreign)
+                self.assertEqual(start.returncode, 1)
+                self.assertIn("forward.sh daemon: oryx: start failed:", start.stderr)
+                self.assertIn(foreign, start.stderr)
+
+        # Another pair's loopback address on the same port does not block oryx's.
+        self.reset_oryx_service_state()
+        other_pair = "LISTEN 0 4096 127.0.0.2:12802 0.0.0.0:* users:((\"ssh\",pid=999,fd=3))"
+        not_blocked = self.install("daemon", SS_ALWAYS="1", SS_LINES=other_pair)
+        self.assertIn("forward.sh daemon: oryx: start: started forward-oryx", not_blocked.stdout)
+        self.assertIn("forward.sh daemon: oryx: connected failed:", not_blocked.stderr)
 
         self.reset_oryx_service_state()
         wrong_parent = self.install("daemon", PS_PPID="999")

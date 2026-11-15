@@ -294,14 +294,23 @@ ${legacy_active}"
 oryx_foreign_listener() {
     local listeners
     local listener
+    local local_address
+    local address
+    local port
 
     if ! listeners="$(ss -Hltnp)"; then
         ORYX_ERROR="could not inspect listeners with ss -Hltnp"
         return 2
     fi
     while read -r listener; do
-        case "$listener" in
-            *127.0.0.1:12801*|*127.0.0.1:12802*|*127.0.0.1:12805*)
+        read -r _ _ _ local_address _ <<< "$listener"
+        port="${local_address##*:}"
+        address="${local_address%:*}"
+        address="${address%%%*}"
+        case "$port" in 12801|12802|12805) ;; *) continue ;; esac
+        # A wildcard listener on the port blocks ssh's 127.0.0.1 bind as surely as a loopback one.
+        case "$address" in
+            127.0.0.1|0.0.0.0|'*'|'[::]'|'[::ffff:127.0.0.1]'|'[::ffff:0.0.0.0]')
                 ORYX_LISTENER="$listener"
                 return 0
                 ;;
