@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pwd
 import re
@@ -18,7 +19,7 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 README = DOTFILES / "README.md"
 SETUP = DOTFILES / "laptop" / "oryx-tunnel-setup"
-
+CLOUDFLARED_FIXTURE = b"cloudflared test release package\n"
 
 
 def real_binary(name: str) -> str:
@@ -263,13 +264,16 @@ PY
         fi
         ;;
     curl)
+        url="${!#}"
         for ((index = 1; index <= $#; index += 1)); do
             [[ "${!index}" == -o ]] || continue
             next=$((index + 1))
-            printf key > "${!next}"
-            exit 0
+            if [[ "$url" == https://github.com/cloudflare/cloudflared/releases/download/*/cloudflared-linux-*.deb ]]; then
+                /bin/cp "$CF_RELEASE_FILE" "${!next}"
+                exit 0
+            fi
+            exit 22
         done
-        url="${!#}"
         if [[ -f "$FORWARD_PORT" && "$url" == http://127.0.0.1:"$(<"$FORWARD_PORT")"/* ]]; then
             if [[ "${FORWARD_CURL_FAILS:-}" == 1 ]]; then
                 printf 'curl: (7) Failed to connect to 127.0.0.1\n' >&2
@@ -290,21 +294,27 @@ PY
         fi
         [[ -f "$CURRENT_NONCE" ]] && /bin/cat "$CURRENT_NONCE"
         ;;
+    dpkg)
+        if [[ "${1:-}" == --print-architecture ]]; then
+            printf 'amd64\n'
+            exit 0
+        fi
+        if [[ "${1:-}" == -i ]]; then
+            for argument in "$@"; do
+                [[ "$argument" == *.deb && -f "$argument" ]] || continue
+                printf '%s\n' "$CF_VERSION" > "$CF_VERSION_FILE"
+                exit 0
+            done
+        fi
+        exit 2
+        ;;
     forward)
         [[ "${1:-}" == port ]] || exit 2
         trap 'exit 0' TERM INT
         while :; do /bin/sleep 1; done
         ;;
-    gpg)
-        printf 'fpr:::::::::%s:\n' "$GPG_FINGERPRINT"
-        ;;
     sudo)
         exec "$@"
-        ;;
-    apt-get)
-        if [[ "${1:-}" == install && " $* " == *" cloudflared="* ]]; then
-            printf '%s\n' "$CF_VERSION" > "$CF_VERSION_FILE"
-        fi
         ;;
     systemctl)
         if [[ " $* " == *" is-active "* ]]; then
@@ -425,6 +435,17 @@ class TunnelSetup(unittest.TestCase):
             destination = self.source / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(DOTFILES / path, destination)
+        cloudflared = self.source / "installers/cloudflared.sh"
+        rewritten, replacements = re.subn(
+            r"^SHA256_AMD64=.*$",
+            f"SHA256_AMD64={hashlib.sha256(CLOUDFLARED_FIXTURE).hexdigest()}",
+            cloudflared.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+        self.assertEqual(replacements, 1)
+        cloudflared.write_text(rewritten, encoding="utf-8")
+        self.cloudflared_fixture_file = self.root / "cloudflared-linux-amd64.deb"
+        self.cloudflared_fixture_file.write_bytes(CLOUDFLARED_FIXTURE)
         self.command(self.git, "add", "-A", cwd=self.source, env=env)
         self.command(self.git, "commit", "-q", "-m", "current checkout", cwd=self.source, env=env)
         self.origin = self.root / "origin.git"
@@ -456,6 +477,8 @@ class TunnelSetup(unittest.TestCase):
         self.checkout_dir = self.home / ".dotfiles"
         self.fakebin = self.root / f"fakebin-{name}"
         self.fakebin.mkdir()
+        self.tmpdir = self.root / f"tmp-{name}"
+        self.tmpdir.mkdir()
         self.log = self.root / f"{name}.log"
         # Another run's fixtures share this machine, so expose only this test's processes.
         self.proc_root = self.root / f"proc-{name}"
@@ -474,6 +497,7 @@ class TunnelSetup(unittest.TestCase):
         self.env = {
             **self.git_env(self.home),
             "PATH": f"{self.fakebin}:/usr/bin:/bin",
+            "TMPDIR": str(self.tmpdir),
             "ORYX_SETUP_FAKEBIN": str(self.fakebin),
             "FAKE_LOG": str(self.log),
             "PROC_ROOT": str(self.proc_root),
@@ -486,7 +510,7 @@ class TunnelSetup(unittest.TestCase):
             "SSH_G_CALLS": str(self.root / f"ssh-g-calls-{name}"),
             "CF_VERSION_FILE": str(self.version_file),
             "CF_VERSION": "2026.10.7",
-            "GPG_FINGERPRINT": "CC94B39C77AE7342A68B89628A682D308D4E5E73",
+            "CF_RELEASE_FILE": str(self.cloudflared_fixture_file),
             "FAKE_TOKEN_ID": self.token_id,
             "FAKE_TOKEN_SECRET": self.token_secret,
             "INSTALL_ROOT": str(self.root / f"install-root-{name}"),
@@ -520,10 +544,9 @@ class TunnelSetup(unittest.TestCase):
             "journalctl",
             "cloudflared",
             "sudo",
-            "apt-get",
+            "dpkg",
             "curl",
             "forward",
-            "gpg",
             "adb",
             "ss",
             "paplay",
@@ -962,13 +985,9 @@ class TunnelSetup(unittest.TestCase):
         result = self.invoke(readme=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         install_root = Path(self.env["INSTALL_ROOT"])
-        for path in (
-            install_root / "etc/apt/sources.list.d/cloudflared.list",
-            install_root / "etc/apt/preferences.d/cloudflared.pref",
-        ):
-            with self.subTest(path=str(path)):
-                # apt's non-root readers (apt list, apt-cache policy) need group and other read.
-                self.assertEqual(oct(stat.S_IMODE(path.stat().st_mode) & 0o044), oct(0o044))
+        path = install_root / "etc/apt/preferences.d/cloudflared.pref"
+        # apt's non-root readers (apt list, apt-cache policy) need group and other read.
+        self.assertEqual(oct(stat.S_IMODE(path.stat().st_mode) & 0o044), oct(0o044))
 
     def test_bootstrap_leaves_no_work_dir_behind(self) -> None:
         self.checkout("git", "workdir")
