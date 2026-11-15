@@ -578,6 +578,20 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
     def apt_environment(self) -> dict[str, str]:
         return {**os.environ, "APT_CONFIG": str(self.apt_config)}
 
+    def real_apt_fake_environment(
+        self, pin_dir: Path, apt_capture: Path
+    ) -> dict[str, str]:
+        return {
+            **self.env,
+            "REAL_APT_CONFIG": str(self.apt_config),
+            "REAL_APT_GET": self.real_apt_get,
+            "REAL_APT_CAPTURE": str(apt_capture),
+            "REAL_DPKG": self.real_dpkg,
+            "REAL_EMPTY_STATUS": str(self.empty_status),
+            "REAL_INSTALL_TREE": str(self.install_root),
+            "REAL_PIN_DIR": str(pin_dir),
+        }
+
     @staticmethod
     def apt_options(status: Path, preferences: Path) -> list[str]:
         return [
@@ -723,12 +737,12 @@ if (( ! install )); then
     exit 100
 fi
 
-if ! APT_CONFIG="$REAL_APT_CONFIG" "$REAL_APT_GET" \
+result=0
+APT_CONFIG="$REAL_APT_CONFIG" "$REAL_APT_GET" \
     -o "Dir::State::status=$REAL_EMPTY_STATUS" \
     -o "Dir::Etc::preferencesparts=$REAL_PIN_DIR" \
-    -d --print-uris -y "$@" > "$REAL_APT_CAPTURE" 2>&1
-then
-    result=$?
+    -d --print-uris -y "$@" > "$REAL_APT_CAPTURE" 2>&1 || result=$?
+if (( result != 0 )); then
     cat "$REAL_APT_CAPTURE" >&2
     exit "$result"
 fi
@@ -751,6 +765,44 @@ fi
 "$REAL_DPKG" --force-not-root --root="$REAL_INSTALL_TREE" --log=/dev/null --unpack "${uri#file:}"
 printf '%s\n' "2026.10.7" > "$CF_VERSION_FILE"''',
         )
+
+    def test_real_apt_fake_passes_apt_failure_status_through(self) -> None:
+        self.write_real_apt_fake()
+        pin_dir = self.install_root / "etc/apt/preferences.d"
+        pin_dir.mkdir(parents=True)
+        apt_capture = self.root / "installer-apt-output.txt"
+        arguments = [
+            "install",
+            "-y",
+            str(self.root / "missing/cloudflared-linux-amd64.deb"),
+        ]
+        fake = subprocess.run(
+            [str(self.bin_dir / "apt-get"), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=self.real_apt_fake_environment(pin_dir, apt_capture),
+        )
+        direct = subprocess.run(
+            [
+                self.real_apt_get,
+                *self.apt_options(self.empty_status, pin_dir),
+                "-d",
+                "--print-uris",
+                "-y",
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=self.apt_environment(),
+        )
+        self.assertEqual(direct.returncode, 100, self.output(direct))
+        self.assertNotEqual(fake.returncode, 0, self.output(fake))
+        self.assertEqual(fake.returncode, direct.returncode, self.output(fake))
+        self.assertRegex(fake.stderr, r"(?m)^E:")
 
     def test_upgrade_control_then_installer_pin_keeps_the_installed_release(self) -> None:
         isolation = self.run_apt_config()
@@ -812,13 +864,7 @@ printf '%s\n' "2026.10.7" > "$CF_VERSION_FILE"''',
         pin_dir = self.install_root / "etc/apt/preferences.d"
         apt_capture = self.root / "installer-apt-output.txt"
         result = self.install(
-            REAL_APT_CONFIG=str(self.apt_config),
-            REAL_APT_GET=self.real_apt_get,
-            REAL_APT_CAPTURE=str(apt_capture),
-            REAL_DPKG=self.real_dpkg,
-            REAL_EMPTY_STATUS=str(self.empty_status),
-            REAL_INSTALL_TREE=str(self.install_root),
-            REAL_PIN_DIR=str(pin_dir),
+            **self.real_apt_fake_environment(pin_dir, apt_capture)
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_checked_deb_installed()
