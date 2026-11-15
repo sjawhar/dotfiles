@@ -363,7 +363,7 @@ oryx_is_stale() {
         ORYX_ERROR="could not read forward-oryx's start time"
         return 2
     fi
-    if outcome="$(python3 - "$started" \
+    if outcome="$(python3 -I - "$started" \
         "$config_home/forward/tunnel-oryx.env" \
         "$DOTFILES_DIR/forward/forward-oryx.service" \
         "$DOTFILES_DIR/forward/forward-oryx" \
@@ -380,9 +380,8 @@ try:
     started = datetime.strptime(
         sys.argv[1], "%a %Y-%m-%d %H:%M:%S.%f UTC"
     ).replace(tzinfo=timezone.utc)
-except ValueError as error:
-    print(f"could not parse forward-oryx's start time: {error}", file=sys.stderr)
-    print("start")
+except ValueError:
+    print(f"forward-oryx has no usable start time: {sys.argv[1]}")
     raise SystemExit(2)
 
 newest = 0
@@ -390,26 +389,29 @@ for path in sys.argv[2:]:
     try:
         mtime_ns = os.stat(path).st_mtime_ns
     except OSError as error:
-        print(f"could not read the mtime of {path}: {error}", file=sys.stderr)
-        print(f"mtime:{path}")
+        print(f"could not read the mtime of {path}: {error}")
         raise SystemExit(2)
     newest = max(newest, mtime_ns)
 
 started_us = calendar.timegm(started.utctimetuple()) * 1_000_000 + started.microsecond
-raise SystemExit(0 if started_us * 1_000 <= newest else 1)
+print("stale" if started_us * 1_000 <= newest else "current")
 PY
 )"; then
-        return 0
+        status=0
     else
         status=$?
     fi
-    if (( status == 1 )); then
+    if (( status == 0 )) && [[ "$outcome" == stale ]]; then
+        return 0
+    fi
+    if (( status == 0 )) && [[ "$outcome" == current ]]; then
         return 1
     fi
-    case "$outcome" in
-        mtime:*) ORYX_ERROR="could not read the mtime of ${outcome#mtime:}" ;;
-        *) ORYX_ERROR="forward-oryx has no usable start time" ;;
-    esac
+    if (( status == 2 )) && [[ -n "$outcome" ]]; then
+        ORYX_ERROR="$outcome"
+        return 2
+    fi
+    ORYX_ERROR="could not compare forward-oryx's start time with its files (python3 exited $status)"
     return 2
 }
 
