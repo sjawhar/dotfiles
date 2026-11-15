@@ -47,7 +47,7 @@
 // guard. It removes the text of the feature from each request unless the session has a recorded
 // resolution whose arm for the feature is on, the feature did not stop after a throw, and the
 // feature's own permit holds (text-arms.ts: not a Legion pane, the text not withheld, and an exposure
-// entry in the context, owed under the state now in force, or appended by this same request). A throw
+// entry in the context or appended by this same request). A throw
 // of a permit goes through the feature's logged failure path, and the scrub removes the text.
 // The text arms, and only they, also follow gates.json as it is on disk while omp runs. At each
 // before_agent_start and each context event, the extension looks at the mtime and the size of the

@@ -772,6 +772,35 @@ describe("the extension", () => {
 				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
 				expect(b.exposures()).toHaveLength(1);
 			});
+			test.each([
+				["a synthetic prompt", { role: "developer", content: "Continue.", attribution: "agent", synthetic: true }],
+				["an agent-attributed user message", { role: "user", content: "From the parent agent.", attribution: "agent" }],
+			])("an owed entry whose text a pre-prompt compaction dropped stays owed through %s that adds a fresh copy: no text and no entry until the next typed prompt, which sends the text and writes one entry", async (_label, input) => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+				await b.start();
+				expect(await b.prompt()).toEqual(deliveryOf("infra805_skill", skillText));
+				// The pre-prompt compaction drops the text: the run's first request holds the typed prompt and not the text.
+				b.entries.push({ type: "compaction" });
+				expect(await b.request([])).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				const fresh = await b.prompt();
+				expect(fresh).toEqual(deliveryOf("infra805_skill", skillText));
+				expect(await b.request(fresh, input)).toEqual([]);
+				expect(await b.request(fresh, input)).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(fresh)).toEqual(["infra805_skill"]);
+				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
+			});
+			test("an owed entry alone lets no text out: a compaction request that holds a whole copy sends none of it", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
+				await b.start();
+				expect(await b.prompt()).toEqual([]);
+				// The run's first request lacks the text, so the entry stays owed.
+				expect(await b.request([])).toEqual([]);
+				expect(await b.compactionRequest(deliveryOf("infra805_skill", skillText))).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+			});
 		});
 	});
 });

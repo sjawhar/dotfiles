@@ -104,9 +104,12 @@
 //   - The session has a recorded resolution (index.ts), and the current arm of the feature is on.
 //   - The feature did not stop after a throw, and the process is not a Legion pane.
 //   - The text is not withheld (above).
-//   - The context holds an exposure entry of the feature in the on arm, or the feature owes an entry
-//     made under the state now in force, or this request's own exposure append succeeded. The last
-//     needs no read of the branch.
+//   - The context holds an exposure entry of the feature in the on arm, or this request's own exposure
+//     append succeeded. The second needs no read of the branch. An owed entry that is not written yet
+//     lets nothing out.
+// The handler writes no owed entry while the text is withheld: the entry stays owed until a run that
+// starts at a user prompt clears the withholding, and is written at that run's request that holds the
+// whole text. So no entry is written for a request whose text the scrub then removes.
 // A throw of the permit (a branch that cannot be read) goes through the feature's logged failure path
 // (index.ts): the feature stops until the next resolution, and the scrub removes the text.
 // The scrub always removes a custom message of the feature whose content is not the text byte for
@@ -268,6 +271,8 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				pending = undefined;
 				return undefined;
 			}
+			// A withheld text does not go out, so the owed entry waits for the user prompt that clears it.
+			if (withheld) return undefined;
 			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature && m.content === text)) return undefined;
 			const record: ExposureRecord = { v: 1, feature, arm: pending.arm, gate: pending.gate, rootSessionId: rootOf(ctx), at: new Date().toISOString() };
 			// A throw here stops the feature (index.ts), and the scrub then removes its text from this request.
@@ -276,10 +281,10 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			recorded = true;
 			return undefined;
 		});
+		// Every condition here lets out a text that has its entry: one this request wrote, or one in the context.
 		const permit: Permit = ctx => {
 			if (withheld) return false;
 			if (recorded) return true;
-			if (pending?.arm === "on" && pending.generation === generation()) return true;
 			const branch = ctx.sessionManager.getBranch();
 			for (let i = branch.length - 1, low = contextLowerBound(branch); i >= low; i--) {
 				const e = branch[i];
