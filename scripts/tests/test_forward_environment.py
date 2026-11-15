@@ -120,10 +120,18 @@ case "$*" in
         fi
         ;;
     *show*MainPID*)
-        cat "$SYSTEMCTL_MAIN_PID"
+        if [[ " $* " == *" --value "* ]]; then
+            cat "$SYSTEMCTL_MAIN_PID"
+        else
+            printf 'MainPID=%s\\n' "$(<"$SYSTEMCTL_MAIN_PID")"
+        fi
         ;;
     *show*ActiveState*)
-        cat "$SYSTEMCTL_ACTIVE"
+        if [[ " $* " == *" --value "* ]]; then
+            cat "$SYSTEMCTL_ACTIVE"
+        else
+            printf 'ActiveState=%s\\n' "$(<"$SYSTEMCTL_ACTIVE")"
+        fi
         ;;
     *enable?forward-oryx)
         printf 'enabled\\n' > "$SYSTEMCTL_ENABLED"
