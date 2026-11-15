@@ -144,6 +144,18 @@ describe("the extension", () => {
 			for (const handler of handlers.get(event) ?? []) out = (await handler(payload, ctx)) ?? out;
 			return out;
 		};
+		type Message = { role: string; customType?: string; content?: unknown };
+		let sent: Message[] = [];
+		/** Runs every context handler over `input`, each getting what the one before it returned, as omp does. */
+		const send = async (input: Message[]): Promise<Message[]> => {
+			let messages = input;
+			for (const handler of handlers.get("context") ?? []) {
+				const result = (await handler({ type: "context", messages }, ctx)) as { messages?: Message[] } | undefined;
+				if (result?.messages) messages = result.messages;
+			}
+			sent = messages;
+			return messages;
+		};
 		return {
 			entries,
 			errors,
@@ -167,14 +179,21 @@ describe("the extension", () => {
 				return results;
 			},
 			/** The next request: `input`, the message that started the run (a typed user prompt unless given), then the custom messages of `delivered`. Each context handler gets the messages the one before it returned, as in omp. Returns the custom types of the custom messages that go out. */
-			request: async (delivered: Delivered[], input: Record<string, unknown> = { role: "user", content: "Design the cache.", attribution: "user" }) => {
-				let messages: Array<{ role: string; customType?: string }> = [{ role: "user", ...input, timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))];
-				for (const handler of handlers.get("context") ?? []) {
-					const result = (await handler({ type: "context", messages }, ctx)) as { messages?: typeof messages } | undefined;
-					if (result?.messages) messages = result.messages;
-				}
-				return messages.filter(m => m.role === "custom").map(m => m.customType);
-			},
+			request: async (delivered: Delivered[], input: Record<string, unknown> = { role: "user", content: "Design the cache.", attribution: "user" }) =>
+				(await send([{ role: "user", ...input, timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))])).filter(m => m.role === "custom").map(m => m.customType),
+			/** A pre-prompt compaction's request: the stored branch, which ends in the previous run's assistant message, without the new prompt. Returns the custom types that go out. */
+			compactionRequest: async (kept: Delivered[] = []) =>
+				(
+					await send([
+						{ role: "user", content: "An earlier prompt.", attribution: "user", timestamp: 0 },
+						...kept.map(d => ({ role: "custom", ...d.message, timestamp: 0 })),
+						{ role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: 0 },
+					])
+				)
+					.filter(m => m.role === "custom")
+					.map(m => m.customType),
+			/** The custom messages that went out in the latest request, with their content. */
+			sentCustom: () => sent.filter(m => m.role === "custom"),
 		};
 	}
 	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
@@ -665,6 +684,47 @@ describe("the extension", () => {
 				expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in the context scrub")]);
 				expect(await b.request(delivered)).toEqual([]);
 				expect(b.errors).toHaveLength(1);
+			});
+		});
+
+		describe("a copy of the text that omp's shake altered", () => {
+			// omp's shake splices `[shaken ~N tokens — recover: artifact://… (region N)]` over a fenced block of a kept custom message (session-maintenance.ts #shakeElidePlaceholder).
+			const SHAKEN = skillText.replace(/```text\n[\s\S]*?\n```/, "[shaken ~780 tokens — recover: artifact://1 (region 1)]");
+			const shakenCopy: Delivered = { message: { customType: "infra805_skill", content: SHAKEN, display: false } };
+			test("does not count as the text: the scrub keeps it out, and the next user prompt puts the whole text in again", async () => {
+				expect(SHAKEN).not.toBe(skillText);
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+				await b.start();
+				expect(await b.request(await b.prompt())).toEqual(["infra805_skill"]);
+				const kept = b.entries.find(e => e.type === "custom_message" && e.customType === "infra805_skill") as { content: unknown };
+				kept.content = SHAKEN;
+				expect(await b.request([shakenCopy])).toEqual([]);
+				const again = await b.prompt();
+				expect(again).toEqual(deliveryOf("infra805_skill", skillText));
+				expect(await b.request([shakenCopy, ...again])).toEqual(["infra805_skill"]);
+				expect(b.sentCustom()).toEqual([{ role: "custom", customType: "infra805_skill", content: skillText, display: false, timestamp: 2 }]);
+				expect(b.exposures()).toHaveLength(1);
+			});
+		});
+
+		describe("a pre-prompt compaction's request between a trigger and the run's first request", () => {
+			test("neither takes the trigger nor writes an entry; the run's first request does both", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+				await b.start();
+				const delivered = await b.prompt();
+				expect(await b.compactionRequest()).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
+			});
+			test("in a Legion pane, leaves the excluded entry for the run's first request", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", LEGION_ROLE: "architect" });
+				await b.start();
+				await b.prompt();
+				await b.compactionRequest();
+				expect(b.excluded()).toEqual([]);
+				await b.request([]);
+				expect(b.excluded().map(e => e.feature)).toEqual(["aa_noop"]);
 			});
 		});
 

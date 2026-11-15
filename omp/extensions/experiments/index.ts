@@ -74,7 +74,7 @@ import proactiveMemory from "./proactive-memory";
 import rulesRefresh from "./rules-refresh";
 import selfcompact from "./selfcompact";
 import skillGate from "./skill-gate";
-import { aaNoop, infra805Selfcheck, infra805Skill, type Permit, scrubText, type TextArm } from "./text-arms";
+import { aaNoop, infra805Selfcheck, infra805Skill, type Permit, scrubText, type TextArm, type TextArmHandle } from "./text-arms";
 
 /** Registration order is handler order within an event: SelfCompact reads the request's tail before the memory agent appends its reminder, and the context line goes on whatever is last. */
 const REGISTRATIONS: ReadonlyArray<[Feature, (pi: ExtensionAPI) => void]> = [
@@ -241,7 +241,7 @@ export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 	for (const [feature, register] of REGISTRATIONS) register(view(feature, () => current?.features[feature].on === true));
 	// A text arm runs only after a resolution, and while no resolution waits to be recorded, so its reader always finds the recorded one.
 	const textRuns = (feature: Feature) => current !== undefined && proposed === undefined && current.features[feature].gate !== "off";
-	const permits: Array<[Feature, Permit]> = TEXT_ARMS.map(([feature, register]) => [
+	const handles: Array<[Feature, TextArmHandle]> = TEXT_ARMS.map(([feature, register]) => [
 		feature,
 		register(
 			view(feature, () => textRuns(feature)),
@@ -251,8 +251,8 @@ export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 	]);
 	// Registered last, outside the gate and the guard, so each runs after every text arm's own handlers, in every request.
 	// A throw of a permit goes through the feature's logged failure path, and the scrub removes the text.
-	for (const [feature, permit] of permits) {
+	for (const [feature, { permit, text }] of handles) {
 		const on = (ctx: Parameters<Permit>[0]) => current !== undefined && proposed === undefined && current.features[feature].on && !stopped.has(feature) && permit(ctx);
-		pi.on("context", scrubText(feature, on, error => fail(feature, "the context scrub", error)) as never);
+		pi.on("context", scrubText(feature, text, on, error => fail(feature, "the context scrub", error)) as never);
 	}
 }

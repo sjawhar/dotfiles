@@ -45,23 +45,29 @@
 //
 // The user prompt. Architect ruling 48e7077f, item 2: a user prompt is a user-role message with no
 // `agent` attribution that is not synthetic, or a user-invoked skill message (custom type
-// `skill-prompt`, attribution `user`). omp 18.20.2 runs before_agent_start for a direct prompt
-// (synthetic ones included), for a queued batch that holds user messages, and for a user-authored
-// wake. Its event carries `reason` (`prompt` or `revive`), the prompt's text, its images and the
-// system prompt. It carries no message, so no attribution and no synthetic flag, and the branch does
-// not hold the new message yet. The first `context` event after it carries the messages of the
-// request, with their roles, attribution, synthetic flags and custom types. So the handler decides
-// at that first request: the run started at a user prompt when a message after the last assistant
-// message is a user prompt (startsWithUserPrompt). That one test decides both the exposure entry and
-// whether a text that the trigger added may go out.
+// `skill-prompt`, attribution `user`). The omp the dev box pins (18.18.6-sami.20261110-032522, in
+// mise.toml) runs before_agent_start for a direct prompt (synthetic ones included), for a queued
+// batch that holds user messages, and for a user-authored wake. Its event carries `reason` (`prompt`
+// or `revive`), the prompt's text, its images and the system prompt. It carries no message, so no
+// attribution and no synthetic flag, and the branch does not hold the new message yet. The first
+// request of the run carries the messages, with their roles, attribution, synthetic flags and custom
+// types. So the handler decides at that first request: the run started at a user prompt when a
+// message after the last assistant message is a user prompt (startsWithUserPrompt). That one test
+// decides both the exposure entry and whether a text that the trigger added may go out.
+// Between before_agent_start and the run, omp can run a pre-prompt compaction, whose request (a
+// `context` event) holds the stored branch without the new prompt. A `context` event whose messages
+// hold nothing after the last assistant message is such a request: the handler leaves its trigger
+// and its owed entry for the run's first real request, and writes nothing.
 //
 // The trigger. The trigger is a before_agent_start of a top-level session that is not a revive. The
 // context of the model is the part of the branch at or after its lower bound (contextLowerBound of
 // skill-gate.ts: the entry after the latest reset, or the first kept entry of the latest compaction).
 // At the trigger the handler makes two separate decisions:
-//   - The text. In the on arm, the handler adds the text when the context holds no custom message
-//     whose custom type is the name of the feature. So the text goes in at the first prompt, and
-//     again after a reset or a compaction removes that message, also when the exposure entry stays.
+//   - The text. In the on arm, the handler adds the text when no custom message of the feature in
+//     the context holds the text byte for byte. So the text goes in at the first prompt, and again
+//     after a reset or a compaction removes that message, also when the exposure entry stays. omp's
+//     shake can splice a placeholder (`[shaken ~N tokens …]`) into a kept custom message. Such an
+//     altered copy does not count, so the next user prompt puts the whole text in again.
 //   - The entry. The handler owes an exposure entry when the context holds no exposure entry of this
 //     feature in this arm. So the entry comes once for each arm while it stays in the context.
 // At the first request after the trigger, the handler keeps the owed entry only when the run started
@@ -70,10 +76,12 @@
 // A resumed session does not get either again while both stay in its context. A subagent never
 // triggers. The unit of the experiments is the root session, and the skill tells its reader to
 // start fresh subagents, so a subagent that reads it can start more.
-// Known limits: the text goes in only at a user prompt, so a compaction inside a turn removes it for
-// the rest of that turn, and it comes back at the next user prompt. A side turn whose `context` event
-// falls between a trigger and its first request would be read as that request [INFERENCE: omp starts
-// the run at once after before_agent_start].
+// Known limits: the text goes in only at a user prompt. A compaction at the start of a turn (the
+// pre-prompt compaction above) or inside it can remove the text, and an omp shake can alter it. The
+// scrub then keeps the altered copy out, and the whole text comes back at the next user prompt. A side
+// turn whose `context` event falls between a trigger and its first request, and that ends in a
+// message that is not an assistant message, would be read as that request [INFERENCE: omp starts the
+// run right after before_agent_start and the pre-prompt compaction].
 //
 // The text goes in as one hidden custom message (display false). Its custom type is the name of the
 // feature, and omp sends it with the prompt. The model reads it, but the person at the session does
@@ -82,7 +90,7 @@
 // Exposure. The handler appends one `experiments-exposure` entry (ExposureRecord of gates.ts: the
 // feature, the arm, the gate, the root session id and the time) at the first request after a trigger
 // that started at a user prompt. In the on arm of a feature with a text, the handler waits for the
-// first request whose messages hold the text, so the entry says that the text reached the model.
+// first request whose messages hold the whole text, so the entry says that the text reached the model.
 // When the state in force changed after the trigger (the count of index.ts moved, for example when a
 // gate went `off` and back on), the trigger is stale. It writes no entry, a text it added is withheld,
 // and the next user prompt triggers again under the state now in force. An owed entry that went stale
@@ -101,6 +109,8 @@
 //     needs no read of the branch.
 // A throw of the permit (a branch that cannot be read) goes through the feature's logged failure path
 // (index.ts): the feature stops until the next resolution, and the scrub removes the text.
+// The scrub always removes a custom message of the feature whose content is not the text byte for
+// byte (a copy that omp's shake altered), so an altered treatment never reaches the model.
 // A text that an earlier resolution put in the session file stays there, but it reaches the model
 // again only under these rules. So:
 //   - When a gate goes from `random` to `off` (D13), a running session sends no text from its next
@@ -123,7 +133,7 @@ type Ctx = {
 	sessionManager: { getBranch(): readonly Entry[]; getSessionFile(): string | undefined; getSessionId(): string };
 };
 type StartEvent = { reason?: "prompt" | "revive" };
-type Message = { role: string; customType?: string; attribution?: string; synthetic?: boolean };
+type Message = { role: string; customType?: string; content?: unknown; attribution?: string; synthetic?: boolean };
 type ContextEvent = { messages: Message[] };
 /** The arm and the gate of a trigger. */
 type Arm = Pick<ExposureRecord, "arm" | "gate">;
@@ -143,29 +153,42 @@ export function startsWithUserPrompt(messages: readonly Message[]): boolean {
 
 /** Whether the text of a feature of this file may go out in the session of `ctx`, apart from the checks of index.ts. */
 export type Permit = (ctx: Ctx) => boolean;
+/** What a registered feature of this file gives index.ts for its scrub: its permit, and its text (undefined for aa_noop). */
+export type TextArmHandle = { permit: Permit; text: string | undefined };
 /**
  * A feature of this file: index.ts registers it with a view of `pi`, a reader of the resolution of the feature in the
- * current session, and a reader of the count of changes of that state (index.ts `generation`), and gives its scrub the
- * permit it returns.
+ * current session, and a reader of the count of changes of that state (index.ts `generation`), and builds its scrub
+ * from the handle it returns.
  */
-export type TextArm = (pi: ExtensionAPI, resolution: () => Resolution, generation: () => number) => Permit;
+export type TextArm = (pi: ExtensionAPI, resolution: () => Resolution, generation: () => number) => TextArmHandle;
 
 /** Whether this process is a Legion pane, read as proactive-memory-core.ts reads it. */
 const legionPane = () => LEGION_ENV.some(name => process.env[name] !== undefined && process.env[name] !== "");
 
-/** The scrub of `feature`: a `context` handler that removes each custom message of `feature` from the request unless `permits(ctx)` holds. A throw of `permits` goes to `failed`, and the text is removed. */
-export function scrubText(feature: Feature, permits: Permit, failed: (error: unknown) => void): (event: ContextEvent, ctx: Ctx) => { messages: Message[] } | undefined {
-	const isText = (m: Message) => m.role === "custom" && m.customType === feature;
+/**
+ * The scrub of `feature`: a `context` handler that removes each custom message of `feature` from the request, except a
+ * copy that holds `text` byte for byte while `permits(ctx)` holds. So an altered copy (omp's shake) never goes out.
+ * `permits` is read only when the request holds a whole copy. A throw of it goes to `failed`, and the copies are removed.
+ */
+export function scrubText(feature: Feature, text: string | undefined, permits: Permit, failed: (error: unknown) => void): (event: ContextEvent, ctx: Ctx) => { messages: Message[] } | undefined {
+	const ofFeature = (m: Message) => m.role === "custom" && m.customType === feature;
 	return (event, ctx) => {
-		if (!event.messages.some(isText)) return undefined;
-		try {
-			if (permits(ctx)) return undefined;
-		} catch (error) {
-			failed(error);
+		if (!event.messages.some(ofFeature)) return undefined;
+		let permitted = false;
+		if (text !== undefined && event.messages.some(m => ofFeature(m) && m.content === text)) {
+			try {
+				permitted = permits(ctx);
+			} catch (error) {
+				failed(error);
+			}
 		}
-		return { messages: event.messages.filter(m => !isText(m)) };
+		const keep = (m: Message) => !ofFeature(m) || (permitted && m.content === text);
+		return event.messages.every(keep) ? undefined : { messages: event.messages.filter(keep) };
 	};
 }
+
+/** Whether the request holds nothing after its last assistant message: the run's input is not in it yet, as in omp's pre-prompt compaction request. */
+const beforeRunInput = (messages: readonly Message[]) => messages.length === 0 || messages[messages.length - 1].role === "assistant";
 
 /** The feature that, in the on arm, puts `text` into the context of a top-level session, and in both arms records the exposure. With no text it puts nothing there in either arm. */
 export function textArm(feature: Feature, text: string | undefined): TextArm {
@@ -185,7 +208,7 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				return undefined;
 			});
 			pi.on("context", (event: ContextEvent, ctx: Ctx) => {
-				if (!triggered) return undefined;
+				if (!triggered || beforeRunInput(event.messages)) return undefined;
 				triggered = false;
 				if (!startsWithUserPrompt(event.messages)) return undefined;
 				const excluded = ctx.sessionManager.getBranch().some(e => e.type === "custom" && e.customType === EXCLUDED_ENTRY_TYPE && (e.data as Partial<ExcludedRecord> | undefined)?.feature === feature);
@@ -194,7 +217,7 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				pi.appendEntry(EXCLUDED_ENTRY_TYPE, record);
 				return undefined;
 			});
-			return () => false;
+			return { permit: () => false, text };
 		}
 		// The latest trigger, until the first request after it: its arm, the count it was made under, whether it owes an entry, and whether it added the text.
 		let trigger: (Arm & { generation: number; owes: boolean; added: boolean }) | undefined;
@@ -224,12 +247,14 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				const data = e.data as Partial<ExposureRecord> | undefined;
 				return e.type === "custom" && e.customType === EXPOSURE_ENTRY_TYPE && data?.feature === feature && data.arm === arm;
 			});
-			const add = arm === "on" && text !== undefined && !kept.some(e => e.type === "custom_message" && e.customType === feature);
+			const add = arm === "on" && text !== undefined && !kept.some(e => e.type === "custom_message" && e.customType === feature && e.content === text);
 			trigger = { arm, gate, generation: generation(), owes: !exposed, added: add };
 			return add ? { message: { customType: feature, content: text, display: false } } : undefined;
 		});
 		pi.on("context", (event: ContextEvent, ctx: Ctx) => {
 			recorded = false;
+			// A pre-prompt compaction's request: the trigger and the owed entry wait for the run's first real request.
+			if (beforeRunInput(event.messages)) return undefined;
 			if (trigger) {
 				const t = trigger;
 				trigger = undefined;
@@ -243,7 +268,7 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				pending = undefined;
 				return undefined;
 			}
-			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature)) return undefined;
+			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature && m.content === text)) return undefined;
 			const record: ExposureRecord = { v: 1, feature, arm: pending.arm, gate: pending.gate, rootSessionId: rootOf(ctx), at: new Date().toISOString() };
 			// A throw here stops the feature (index.ts), and the scrub then removes its text from this request.
 			pi.appendEntry(EXPOSURE_ENTRY_TYPE, record);
@@ -251,7 +276,7 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			recorded = true;
 			return undefined;
 		});
-		return ctx => {
+		const permit: Permit = ctx => {
 			if (withheld) return false;
 			if (recorded) return true;
 			if (pending?.arm === "on" && pending.generation === generation()) return true;
@@ -263,6 +288,7 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			}
 			return false;
 		};
+		return { permit, text };
 	};
 }
 
