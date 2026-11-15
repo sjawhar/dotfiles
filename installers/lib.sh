@@ -15,6 +15,9 @@ ensure_link() {
         echo "ensure_link: $2 is a directory, not a link to $1; move what it holds that you want into $1, remove it, then re-run" >&2
         return 1
     fi
+    if [[ -L $2 && "$(readlink -- "$2")" == "$1" ]]; then
+        return 0
+    fi
     if [[ -e $2 && ! -L $2 ]] && ! cmp -s "$1" "$2"; then
         echo "ensure_link: $2 is a file that differs from $1; copy it over $1 to keep it or delete it, then re-run" >&2
         diff -u "$1" "$2" >&2 || true

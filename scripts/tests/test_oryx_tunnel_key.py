@@ -23,7 +23,7 @@ SSH_ADD = Path("/usr/bin/ssh-add")
 SSH_AGENT = Path("/usr/bin/ssh-agent")
 SSH_KEYGEN = Path("/usr/bin/ssh-keygen")
 SSHD = Path("/usr/sbin/sshd")
-LAPTOP_SSH_CONFIG = DOTFILES / "laptop" / "ssh-config"
+FORWARD_ORYX_SSH_CONFIG = DOTFILES / "forward" / "forward-oryx.ssh-config"
 KEY_OPTIONS = DOTFILES / "oryx" / "oryx-tunnel.key-options"
 
 _PROC = Path("/proc")
@@ -344,7 +344,7 @@ class OryxTunnelKey(unittest.TestCase):
             self._finish()
 
     def test_options_match_the_tunnel_forwards(self) -> None:
-        values = ssh_g(LAPTOP_SSH_CONFIG, "oryx-tunnel", self.home)
+        values = ssh_g(FORWARD_ORYX_SSH_CONFIG, "oryx", self.home)
         remote_listens = {forward_parts(value)[0] for value in values.get("remoteforward", [])}
         local_targets = {forward_parts(value)[1] for value in values.get("localforward", [])}
         line = read_options_line()
@@ -365,7 +365,7 @@ class OryxTunnelKey(unittest.TestCase):
     def test_key_restricts_the_tunnel_and_login_agent_probe(self) -> None:
         self.assertTrue(SSHD.is_file(), f"{SSHD} is required for this test")
         key_options = read_options_line()
-        tunnel_values = ssh_g(LAPTOP_SSH_CONFIG, "oryx-tunnel", self.home)
+        tunnel_values = ssh_g(FORWARD_ORYX_SSH_CONFIG, "oryx", self.home)
         remote_forwards = [forward_parts(value) for value in tunnel_values.get("remoteforward", [])]
         local_forwards = [forward_parts(value) for value in tunnel_values.get("localforward", [])]
         endpoints = {listen for listen, _ in remote_forwards} | {target for _, target in local_forwards}

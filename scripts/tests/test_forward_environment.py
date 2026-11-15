@@ -3,27 +3,42 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "forward.sh"
 BASHRC = DOTFILES / ".bashrc"
 FORWARD = DOTFILES / "forward"
-
+TOKEN_ID = "fake-id.access"
+TOKEN_SECRET = "fakesecret-forward-oryx"
+TOKEN_FIXTURE = (
+    f"TUNNEL_SERVICE_TOKEN_ID={TOKEN_ID}\n"
+    f"TUNNEL_SERVICE_TOKEN_SECRET={TOKEN_SECRET}\n"
+)
+ORYX_TOKEN_COMMAND = (
+    "secrets CF_ACCESS_ORYX_TUNNEL_ID CF_ACCESS_ORYX_TUNNEL_SECRET -- sh -c "
+    "'printf \"TUNNEL_SERVICE_TOKEN_ID=%s\\nTUNNEL_SERVICE_TOKEN_SECRET=%s\\n\" "
+    "\"$CF_ACCESS_ORYX_TUNNEL_ID\" \"$CF_ACCESS_ORYX_TUNNEL_SECRET\"'"
+)
 
 def write_executable(path: Path, body: str) -> None:
     path.write_text(f"#!/bin/bash\nset -euo pipefail\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-class ForwardInstaller(unittest.TestCase):
+class ForwardInstallerHarness(unittest.TestCase):
+    """A scratch dotfiles and HOME with stubs; holds no tests of its own."""
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -38,8 +53,23 @@ class ForwardInstaller(unittest.TestCase):
         self.stub_dir.mkdir()
         self.lookups.mkdir()
         self.systemctl_log = self.root / "systemctl.log"
+        self.call_log = self.root / "calls.log"
         self.legacy_units = self.root / "legacy-units"
+        self.token_fixture = self.root / "token-fixture"
+        self.enrol_stdin = self.root / "enrol-stdin"
+        self.systemctl_enabled = self.root / "systemctl-enabled"
+        self.systemctl_active = self.root / "systemctl-active"
+        self.systemctl_main_pid = self.root / "systemctl-main-pid"
+        self.systemctl_timestamp = self.root / "systemctl-timestamp"
+        self.systemctl_timestamp_default = self.root / "systemctl-timestamp-default"
         self.legacy_units.write_text("", encoding="utf-8")
+        self.call_log.write_text("", encoding="utf-8")
+        self.token_fixture.write_text(TOKEN_FIXTURE, encoding="utf-8")
+        self.systemctl_enabled.write_text("disabled\n", encoding="utf-8")
+        self.systemctl_active.write_text("inactive\n", encoding="utf-8")
+        self.systemctl_main_pid.write_text("4242\n", encoding="utf-8")
+        self.systemctl_timestamp.write_text("", encoding="utf-8")
+        self.systemctl_timestamp_default.write_text("", encoding="utf-8")
         for name, address in {
             "self": "100.80.0.1",
             "self-vm": "100.80.0.3",
@@ -52,6 +82,12 @@ class ForwardInstaller(unittest.TestCase):
         (self.dotfiles / "agent-secrets").mkdir()
         for name in ("broker-url.sh", "broker.env"):
             shutil.copyfile(DOTFILES / "agent-secrets" / name, self.dotfiles / "agent-secrets" / name)
+        (self.dotfiles / "installers").mkdir()
+        write_executable(
+            self.dotfiles / "installers" / "cloudflared.sh",
+            '''printf 'cloudflared installer\\n' >> "$CALL_LOG"
+if [[ -n "${CLOUDFLARED_FAIL:-}" ]]; then exit "$CLOUDFLARED_FAIL"; fi''',
+        )
         write_executable(
             self.dotfiles / "bin" / "mise",
             '''case "$*" in
@@ -61,21 +97,154 @@ class ForwardInstaller(unittest.TestCase):
         )
         write_executable(
             self.stub_dir / "systemctl",
-            '''printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
-            if [[ -n "${SYSTEMCTL_FAIL:-}" && "$*" == "$SYSTEMCTL_FAIL" ]]; then exit 1; fi
-            case "$*" in
-                *list-unit-files*--type=service) printf '%s\n' "${PCSC_UNIT_FILES:-}" ;;
-                *list-units*pcscd-bridge.service) printf '%s\n' "${PCSC_ACTIVE_UNITS:-}" ;;
-                *list-units*|*list-unit-files*) cat "$LEGACY_UNITS" ;;
-            esac''',
+            '''printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+printf 'systemctl %s\\n' "$*" >> "$CALL_LOG"
+if [[ -n "${SYSTEMCTL_FAIL:-}" && "$*" == "$SYSTEMCTL_FAIL" ]]; then
+    [[ -z "${SYSTEMCTL_FAIL_STDERR:-}" ]] || printf '%s\n' "$SYSTEMCTL_FAIL_STDERR" >&2
+    exit 1
+fi
+case "$*" in
+    *is-enabled?forward-oryx)
+        cat "$SYSTEMCTL_ENABLED"
+        [[ "$(<"$SYSTEMCTL_ENABLED")" == enabled ]]
+        ;;
+    *is-active?forward-oryx)
+        cat "$SYSTEMCTL_ACTIVE"
+        [[ "$(<"$SYSTEMCTL_ACTIVE")" == active ]]
+        ;;
+    *show*ExecMainStartTimestamp*)
+        if [[ " $* " == *" --timestamp=us+utc "* ]]; then
+            timestamp_file="$SYSTEMCTL_TIMESTAMP"
+        else
+            timestamp_file="$SYSTEMCTL_TIMESTAMP_DEFAULT"
+        fi
+        if [[ " $* " == *" --value "* ]]; then
+            cat "$timestamp_file"
+        else
+            printf 'ExecMainStartTimestamp=%s\\n' "$(<"$timestamp_file")"
+        fi
+        ;;
+    *show*MainPID*)
+        if [[ " $* " == *" --value "* ]]; then
+            cat "$SYSTEMCTL_MAIN_PID"
+        else
+            printf 'MainPID=%s\\n' "$(<"$SYSTEMCTL_MAIN_PID")"
+        fi
+        ;;
+    *show*ActiveState*)
+        if [[ " $* " == *" --value "* ]]; then
+            cat "$SYSTEMCTL_ACTIVE"
+        else
+            printf 'ActiveState=%s\\n' "$(<"$SYSTEMCTL_ACTIVE")"
+        fi
+        ;;
+    *enable?forward-oryx)
+        printf 'enabled\\n' > "$SYSTEMCTL_ENABLED"
+        ;;
+    *start?forward-oryx|*restart?forward-oryx)
+        printf 'active\\n' > "$SYSTEMCTL_ACTIVE"
+        printf '4242\\n' > "$SYSTEMCTL_MAIN_PID"
+        /usr/bin/python3 - "$SYSTEMCTL_TIMESTAMP" "$SYSTEMCTL_TIMESTAMP_DEFAULT" <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+moment = datetime.now(timezone.utc)
+Path(sys.argv[1]).write_text(
+    moment.strftime("%a %Y-%m-%d %H:%M:%S.%f UTC\\n"), encoding="utf-8"
+)
+Path(sys.argv[2]).write_text(
+    moment.strftime("%a %Y-%m-%d %H:%M:%S UTC\\n"), encoding="utf-8"
+)
+PY
+        ;;
+    *list-unit-files*--type=service) printf '%s\\n' "${PCSC_UNIT_FILES:-}" ;;
+    *list-units*pcscd-bridge.service) printf '%s\\n' "${PCSC_ACTIVE_UNITS:-}" ;;
+    *list-units*|*list-unit-files*) cat "$LEGACY_UNITS" ;;
+esac''',
         )
         write_executable(self.stub_dir / "hostname", 'echo "${STUB_HOSTNAME:-sami-devbox}"')
         write_executable(
             self.stub_dir / "tailscale",
             '''[[ "$#" -ge 2 && "$#" -le 3 && "$1" == ip && "$2" == -4 ]] || exit 2
-            cat "$TAILSCALE_FIXTURES/${3:-$TAILSCALE_SELF}"''',
+cat "$TAILSCALE_FIXTURES/${3:-$TAILSCALE_SELF}"''',
         )
-        write_executable(self.stub_dir / "ssh-keygen", "exit 99")
+        write_executable(
+            self.stub_dir / "ssh",
+            '''{
+    printf 'ssh'
+    for argument in "$@"; do printf ' [%s]' "$argument"; done
+    printf '\\n'
+} >> "$CALL_LOG"
+if [[ "$#" -eq 2 && "$1" == oryx && "$2" == '~/.local/bin/oryx-tunnel-enrol' ]]; then
+    cat > "$ENROL_STDIN"
+    printf 'SHA256:fake (ED25519)\\n'
+    exit "${ENROL_FAIL:-0}"
+fi
+if [[ "$#" -eq 2 && "$1" == oryx && "$2" == "$ORYX_TOKEN_COMMAND" ]]; then
+    cat "$TOKEN_FIXTURE"
+    if [[ "${SSH_CANARY:-}" == 1 ]]; then printf 'stub SSH canary\\n' >&2; fi
+    exit "${TOKEN_FAIL:-0}"
+fi
+if [[ " $* " == *" -O exit "* ]]; then exit 0; fi
+echo "unexpected ssh call: $*" >&2
+exit 97''',
+        )
+        write_executable(
+            self.stub_dir / "ssh-keygen",
+            '''{
+    printf 'ssh-keygen'
+    for argument in "$@"; do printf ' [%s]' "$argument"; done
+    printf '\\n'
+} >> "$CALL_LOG"
+if [[ "$1" == -q ]]; then shift; fi
+if [[ "$1" == -t && "$2" == ed25519 ]]; then
+    for ((index = 1; index <= $#; index++)); do
+        if [[ "${!index}" == -f ]]; then
+            next=$((index + 1))
+            key="${!next}"
+            printf 'fake private key\\n' > "$key"
+            printf 'ssh-ed25519 AAAAfake oryx-tunnel\\n' > "$key.pub"
+            exit 0
+        fi
+    done
+fi
+if [[ "$1" == -y && "$2" == -f ]]; then
+    printf 'ssh-ed25519 AAAAfake oryx-tunnel\\n'
+    exit 0
+fi
+if [[ "$1" == -l && "$2" == -f ]]; then
+    printf '256 SHA256:fake oryx-tunnel (ED25519)\\n'
+    exit 0
+fi
+exit 98''',
+        )
+        write_executable(
+            self.stub_dir / "pgrep",
+            '''{
+    printf 'pgrep'
+    for argument in "$@"; do printf ' [%s]' "$argument"; done
+    printf '\\n'
+} >> "$CALL_LOG"
+printf '%s\\n' "${PGREP_PIDS:-}"''',
+        )
+        write_executable(
+            self.stub_dir / "ss",
+            '''printf 'ss %s\\n' "$*" >> "$CALL_LOG"
+if [[ "${SS_ALWAYS:-}" == 1 || "$(<"$SYSTEMCTL_ACTIVE")" == active ]]; then
+    printf '%s\\n' "${SS_LINES//PID/${SS_PID}}"
+fi''',
+        )
+        write_executable(
+            self.stub_dir / "ps",
+            '''{
+    printf 'ps'
+    for argument in "$@"; do printf ' [%s]' "$argument"; done
+    printf '\\n'
+} >> "$CALL_LOG"
+[[ "$*" == "-o ppid= -p "* ]] || exit 2
+printf ' %s\\n' "$PS_PPID"''',
+        )
         write_executable(self.stub_dir / "flatpak", "exit 1")
         self.env = {
             "DOTFILES_DIR": str(self.dotfiles),
@@ -83,19 +252,36 @@ class ForwardInstaller(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.config_home),
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "SYSTEMCTL_LOG": str(self.systemctl_log),
+            "CALL_LOG": str(self.call_log),
             "LEGACY_UNITS": str(self.legacy_units),
+            "TOKEN_FIXTURE": str(self.token_fixture),
+            "ENROL_STDIN": str(self.enrol_stdin),
+            "ORYX_TOKEN_COMMAND": ORYX_TOKEN_COMMAND,
+            "SYSTEMCTL_ENABLED": str(self.systemctl_enabled),
+            "SYSTEMCTL_ACTIVE": str(self.systemctl_active),
+            "SYSTEMCTL_MAIN_PID": str(self.systemctl_main_pid),
+            "SYSTEMCTL_TIMESTAMP": str(self.systemctl_timestamp),
+            "SYSTEMCTL_TIMESTAMP_DEFAULT": str(self.systemctl_timestamp_default),
             "TAILSCALE_FIXTURES": str(self.lookups),
+            "SS_LINES": 'LISTEN 0 4096 127.0.0.1:12802 0.0.0.0:* users:(("forward",pid=PID,fd=3))',
+            "SS_PID": "4243",
+            "PS_PPID": "4242",
+            "FORWARD_ORYX_SETTLE_SECONDS": "0",
+            "FORWARD_ORYX_WAIT_SECONDS": "2",
         }
         self.config = self.config_home / "forward" / "config.toml"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def install(self, role: str, **env: str) -> subprocess.CompletedProcess[str]:
+    def install(
+        self, role: str, *, cwd: Path | None = None, **env: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(INSTALLER), role],
             capture_output=True,
             text=True,
+            cwd=cwd,
             env={**self.env, "TAILSCALE_SELF": "self-vm" if role == "serve" else "self", **env},
             timeout=30,
             check=False,
@@ -104,6 +290,8 @@ class ForwardInstaller(unittest.TestCase):
     def installed_config(self) -> dict:
         return tomllib.loads(self.config.read_text(encoding="utf-8"))
 
+
+class ForwardInstaller(ForwardInstallerHarness):
     def test_serve_generates_own_tailnet_address_and_literal_laptop_peer(self) -> None:
         install = self.install("serve")
         self.assertEqual(install.returncode, 0, install.stderr)
@@ -208,19 +396,17 @@ class ForwardInstaller(unittest.TestCase):
         hosts = tomllib.loads((FORWARD / "hosts.toml").read_text(encoding="utf-8"))
         self.assertNotIn("oryx", hosts["dev_vms"])
 
-    def test_daemon_keeps_the_oryx_tunnel_units_enabled(self) -> None:
+    def test_daemon_failure_before_oryx_keeps_its_old_units_running(self) -> None:
         self.legacy_units.write_text(
             "forward-daemon@oryx.service enabled enabled\n"
-            "forward-tunnel@oryx.service loaded active running Tunnel\n"
-            "forward-daemon@sami-leanperf.service enabled enabled\n",
+            "forward-tunnel@oryx.service loaded active running Tunnel\n",
             encoding="utf-8",
         )
 
-        install = self.install("daemon")
+        install = self.install("daemon", SYSTEMCTL_FAIL="--user enable --now forward-daemon")
 
-        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertNotEqual(install.returncode, 0)
         log = self.systemctl_log.read_text().splitlines()
-        self.assertIn("--user disable --now forward-daemon@sami-leanperf.service", log)
         self.assertNotIn("--user disable --now forward-daemon@oryx.service", log)
         self.assertNotIn("--user disable --now forward-tunnel@oryx.service", log)
 
@@ -234,29 +420,12 @@ class ForwardInstaller(unittest.TestCase):
 
         self.assertEqual(install.returncode, 1)
         self.assertIn(
-            "forward.sh serve: oryx's forward is the loopback tunnel pair; "
-            "laptop/oryx-tunnel-setup writes its config",
+            "forward.sh serve: oryx's forward serve config is written by "
+            "oryx-edge-cutover (sjawhar/dojo platform/oryx-edge)",
             install.stderr,
         )
         self.assertEqual(self.config.read_bytes(), previous)
         self.assertFalse(self.systemctl_log.exists())
-
-    def test_oryx_tunnel_unit_and_token_file_restart_without_a_start_limit(self) -> None:
-        unit = (FORWARD / "forward-tunnel@.service").read_text(encoding="utf-8")
-        values = dict(
-            line.split("=", 1)
-            for line in unit.splitlines()
-            if "=" in line and not line.lstrip().startswith("#")
-        )
-        self.assertEqual(values["Restart"], "always")
-        self.assertLessEqual(int(values["RestartSec"]), 10)
-        self.assertEqual(values["StartLimitIntervalSec"], "0")
-        token_file = FORWARD / "forward-tunnel@oryx.service.d/token.conf"
-        environment_file = next(
-            line for line in token_file.read_text(encoding="utf-8").splitlines()
-            if line.startswith("EnvironmentFile=")
-        )
-        self.assertEqual(environment_file, "EnvironmentFile=%h/.config/forward/tunnel-oryx.env")
 
     def test_oryx_preview_url_is_allowed_by_its_daemon(self) -> None:
         serve = load("config-serve-oryx.toml")
@@ -439,6 +608,38 @@ class ForwardInstaller(unittest.TestCase):
             self.assertEqual((ssh_dir / name).read_text(), "keep me\n")
         self.assertFalse(self.config.is_symlink())
 
+    def test_migration_allows_no_legacy_unit_files(self) -> None:
+        legacy_globs = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@*.service forward-tunnel@*.service"
+        )
+
+        install = self.install("daemon", SYSTEMCTL_FAIL=legacy_globs)
+
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertIn(legacy_globs, self.systemctl_log.read_text().splitlines())
+
+    def test_migration_reports_legacy_unit_listing_failure(self) -> None:
+        legacy_globs = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@*.service forward-tunnel@*.service"
+        )
+        systemctl_error = "Failed to connect to bus: No medium found"
+
+        install = self.install(
+            "daemon",
+            SYSTEMCTL_FAIL=legacy_globs,
+            SYSTEMCTL_FAIL_STDERR=systemctl_error,
+        )
+
+        self.assertEqual(install.returncode, 1)
+        self.assertIn(
+            "forward.sh daemon: cannot list legacy unit files; "
+            "check systemctl --user before retrying migration step 2.",
+            install.stderr,
+        )
+        self.assertIn(systemctl_error, install.stderr)
+
     def test_systemd_failure_does_not_report_a_successful_install(self) -> None:
         for command in ("--user enable --now forward-daemon", "--user restart forward-daemon"):
             with self.subTest(command=command):
@@ -469,6 +670,442 @@ class ForwardInstaller(unittest.TestCase):
         self.assertEqual(shell.returncode, 0, shell.stderr)
         self.assertEqual(shell.stdout, "")
 
+
+class ForwardOryxInstaller(ForwardInstallerHarness):
+    def call_lines(self) -> list[str]:
+        return self.call_log.read_text(encoding="utf-8").splitlines()
+
+    def clear_call_log(self) -> None:
+        self.call_log.write_text("", encoding="utf-8")
+        self.systemctl_log.unlink(missing_ok=True)
+        # A later run's enrolment must leave its own stdin, not the earlier run's.
+        self.enrol_stdin.unlink(missing_ok=True)
+
+    def reset_oryx_service_state(self) -> None:
+        self.systemctl_enabled.write_text("disabled\n", encoding="utf-8")
+        self.systemctl_active.write_text("inactive\n", encoding="utf-8")
+        self.systemctl_main_pid.write_text("4242\n", encoding="utf-8")
+        self.systemctl_timestamp.write_text("", encoding="utf-8")
+        self.systemctl_timestamp_default.write_text("", encoding="utf-8")
+
+    @staticmethod
+    def systemd_timestamp(timestamp_ns: int) -> str:
+        seconds, nanoseconds = divmod(timestamp_ns, 1_000_000_000)
+        moment = datetime.fromtimestamp(seconds, timezone.utc)
+        return (
+            f"{moment.strftime('%a %Y-%m-%d %H:%M:%S')}.{nanoseconds // 1_000:06d} UTC\n"
+        )
+
+    @staticmethod
+    def systemd_default_timestamp(timestamp_ns: int) -> str:
+        seconds, _ = divmod(timestamp_ns, 1_000_000_000)
+        moment = datetime.fromtimestamp(seconds, timezone.utc)
+        return moment.strftime("%a %Y-%m-%d %H:%M:%S UTC\n")
+
+    def set_oryx_start(self, timestamp_ns: int) -> None:
+        self.systemctl_timestamp.write_text(
+            self.systemd_timestamp(timestamp_ns), encoding="utf-8"
+        )
+        self.systemctl_timestamp_default.write_text(
+            self.systemd_default_timestamp(timestamp_ns), encoding="utf-8"
+        )
+
+    def token_file(self) -> Path:
+        return self.config_home / "forward" / "tunnel-oryx.env"
+
+    def assert_no_tokens(self, *streams: tuple[str, str]) -> None:
+        for stream, text in streams:
+            for value in (TOKEN_ID, TOKEN_SECRET):
+                self.assertFalse(value in text, f"{stream} holds the fake token")
+
+    def assert_oryx_success(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.endswith(
+            "forward.sh daemon: oryx: connected: forward-oryx is running\n"
+        ))
+
+    def add_old_token_dropin(self) -> Path:
+        directory = self.home / ".config/systemd/user/forward-tunnel@oryx.service.d"
+        directory.mkdir(parents=True)
+        token_conf = directory / "token.conf"
+        token_conf.symlink_to(self.dotfiles / "forward" / "missing-token.conf")
+        return token_conf
+
+    def path_state(self, path: Path) -> tuple[int, int, int]:
+        state = os.lstat(path)
+        return state.st_ino, state.st_mtime_ns, stat.S_IMODE(state.st_mode)
+
+    def test_first_run_installs_and_cuts_over_oryx(self) -> None:
+        self.legacy_units.write_text(
+            "forward-daemon@oryx.service enabled enabled\n"
+            "forward-tunnel@oryx.service loaded active running Tunnel\n",
+            encoding="utf-8",
+        )
+        token_conf = self.add_old_token_dropin()
+        decoy = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(
+            lambda: decoy.terminate() if decoy.poll() is None else None
+        )
+
+        result = self.install("daemon", PGREP_PIDS=str(decoy.pid))
+
+        self.assert_oryx_success(result)
+        decoy.wait(timeout=5)
+        lines = self.call_lines()
+        cloudflared = lines.index("cloudflared installer")
+        keygen = next(index for index, line in enumerate(lines) if line.startswith("ssh-keygen [-q] [-t]"))
+        enrol = lines.index("ssh [oryx] [~/.local/bin/oryx-tunnel-enrol]")
+        token = lines.index(f"ssh [oryx] [{ORYX_TOKEN_COMMAND}]")
+        unit_reload = next(
+            index
+            for index, line in enumerate(lines)
+            if index > token and line == "systemctl --user daemon-reload"
+        )
+        daemon_disable = lines.index("systemctl --user disable --now forward-daemon@oryx.service")
+        tunnel_disable = lines.index("systemctl --user disable --now forward-tunnel@oryx.service")
+        start = lines.index("systemctl --user start forward-oryx")
+        self.assertLess(cloudflared, keygen)
+        self.assertLess(keygen, enrol)
+        self.assertLess(enrol, token)
+        self.assertLess(token, unit_reload)
+        self.assertLess(unit_reload, daemon_disable)
+        self.assertLess(daemon_disable, tunnel_disable)
+        self.assertLess(tunnel_disable, start)
+        self.assertEqual(
+            self.enrol_stdin.read_text(encoding="utf-8"),
+            "ssh-ed25519 AAAAfake oryx-tunnel\n",
+        )
+        token = self.token_file()
+        self.assertEqual(token.read_text(encoding="utf-8"), TOKEN_FIXTURE)
+        self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
+        unit = self.home / ".config/systemd/user/forward-oryx.service"
+        self.assertTrue(unit.is_symlink())
+        self.assertEqual(unit.resolve(), self.dotfiles / "forward/forward-oryx.service")
+        self.assertFalse(token_conf.exists())
+        self.assertFalse(token_conf.is_symlink())
+        self.assertFalse(token_conf.parent.exists())
+        for step in ("cloudflared", "key", "enrol", "token", "unit", "old units", "start", "connected"):
+            self.assertIn(f"forward.sh daemon: oryx: {step}:", result.stdout)
+
+    def test_second_run_keeps_every_oryx_file_unchanged(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        files = [
+            self.home / ".ssh/oryx-tunnel",
+            self.home / ".ssh/oryx-tunnel.pub",
+            self.token_file(),
+            self.home / ".config/systemd/user/forward-oryx.service",
+        ]
+        before = {path: self.path_state(path) for path in files}
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        self.assertEqual({path: self.path_state(path) for path in files}, before)
+        self.assertEqual(
+            self.enrol_stdin.read_text(encoding="utf-8"),
+            "ssh-ed25519 AAAAfake oryx-tunnel\n",
+        )
+        lines = self.call_lines()
+        self.assertFalse(any(line.startswith("ssh-keygen [-q] [-t]") for line in lines))
+        self.assertFalse("systemctl --user start forward-oryx" in lines)
+        self.assertFalse("systemctl --user restart forward-oryx" in lines)
+        self.assertEqual(list(self.token_file().parent.glob(".tunnel-oryx-*")), [])
+
+    def test_run_after_the_old_units_are_gone_succeeds(self) -> None:
+        # systemd 255 prints nothing and exits 1 when list-unit-files matches no
+        # unit file, by exact name or by glob. forward-daemon@oryx and
+        # forward-tunnel@oryx have no unit file once the first run disabled them,
+        # and a new laptop never had one.
+        no_old_unit_files = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@oryx.service forward-tunnel@oryx.service"
+        )
+        self.legacy_units.write_text(
+            "forward-tunnel@oryx.service enabled enabled\n", encoding="utf-8"
+        )
+        self.assert_oryx_success(self.install("daemon"))
+        self.legacy_units.write_text("", encoding="utf-8")
+        self.clear_call_log()
+
+        result = self.install("daemon", SYSTEMCTL_FAIL=no_old_unit_files)
+
+        self.assert_oryx_success(result)
+        self.assertFalse("systemctl --user restart forward-oryx" in self.call_lines())
+
+    def test_old_unit_listing_failure_reports_systemctl_error(self) -> None:
+        old_unit_files = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@oryx.service forward-tunnel@oryx.service"
+        )
+        systemctl_error = "Failed to connect to bus: No medium found"
+
+        result = self.install(
+            "daemon",
+            SYSTEMCTL_FAIL=old_unit_files,
+            SYSTEMCTL_FAIL_STDERR=systemctl_error,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: old units failed:", result.stderr)
+        self.assertIn(systemctl_error, result.stderr)
+
+    def test_failed_enrolment_stops_before_cutover_and_retries_the_key(self) -> None:
+        failed = self.install("daemon", ENROL_FAIL="1")
+
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: enrol failed:", failed.stderr)
+        lines = self.call_lines()
+        self.assertFalse(f"ssh [oryx] [{ORYX_TOKEN_COMMAND}]" in lines)
+        self.assertFalse(any("disable --now forward-" in line for line in lines))
+        self.assertFalse("systemctl --user start forward-oryx" in lines)
+        public_key = self.home / ".ssh/oryx-tunnel.pub"
+        enrolled_key = public_key.read_text(encoding="utf-8")
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        self.assertEqual(public_key.read_text(encoding="utf-8"), enrolled_key)
+        self.assertEqual(self.enrol_stdin.read_text(encoding="utf-8"), enrolled_key)
+        self.assertFalse(any(line.startswith("ssh-keygen [-q] [-t]") for line in self.call_lines()))
+
+    def test_token_rotation_restarts_even_at_the_same_second(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        token = self.token_file()
+        self.set_oryx_start(token.stat().st_mtime_ns)
+        rotated = (
+            "TUNNEL_SERVICE_TOKEN_ID=fake-id-rotated.access\n"
+            "TUNNEL_SERVICE_TOKEN_SECRET=fakesecret-rotated\n"
+        )
+        self.token_fixture.write_text(rotated, encoding="utf-8")
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        self.assertEqual(token.read_text(encoding="utf-8"), rotated)
+        self.assertEqual(self.call_lines().count("systemctl --user restart forward-oryx"), 1)
+
+    def test_failed_rotation_retries_when_the_service_is_stale(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        rotated = (
+            "TUNNEL_SERVICE_TOKEN_ID=fake-id-retry.access\n"
+            "TUNNEL_SERVICE_TOKEN_SECRET=fakesecret-retry\n"
+        )
+        self.token_fixture.write_text(rotated, encoding="utf-8")
+
+        failed = self.install("daemon", SYSTEMCTL_FAIL="--user restart forward-oryx")
+
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: start failed:", failed.stderr)
+        self.assertEqual(self.token_file().read_text(encoding="utf-8"), rotated)
+        self.set_oryx_start(self.token_file().stat().st_mtime_ns - 1_000_000)
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        self.assertEqual(self.call_lines().count("systemctl --user restart forward-oryx"), 1)
+
+    def test_token_failures_preserve_the_previous_file_and_cleanup(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        token = self.token_file()
+        before = self.path_state(token)
+        contents = token.read_text(encoding="utf-8")
+
+        for name, fixture, extra in (
+            ("ssh failure", TOKEN_FIXTURE, {"TOKEN_FAIL": "1"}),
+            ("malformed output", "TUNNEL_SERVICE_TOKEN_ID=bad\n", {}),
+        ):
+            with self.subTest(name=name):
+                self.token_fixture.write_text(fixture, encoding="utf-8")
+                self.clear_call_log()
+                result = self.install("daemon", **extra)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("forward.sh daemon: oryx: token failed:", result.stderr)
+                self.assertEqual(self.path_state(token), before)
+                self.assertEqual(token.read_text(encoding="utf-8"), contents)
+                self.assertEqual(list(token.parent.glob(".tunnel-oryx-*")), [])
+                self.assertFalse(
+                    any("disable --now forward-" in line for line in self.call_lines())
+                )
+
+    def test_no_stream_holds_a_fake_token(self) -> None:
+        results = [
+            self.install("daemon", SSH_CANARY="1"),
+            self.install("daemon"),
+            self.install("daemon", ENROL_FAIL="1"),
+            self.install("daemon", TOKEN_FAIL="1"),
+        ]
+        self.assertIn("stub SSH canary", results[0].stderr)
+
+        for index, result in enumerate(results):
+            self.assert_no_tokens(
+                (f"stdout for run {index}", result.stdout),
+                (f"stderr for run {index}", result.stderr),
+            )
+        self.assert_no_tokens(("installer call log", self.call_log.read_text(encoding="utf-8")))
+
+    def test_failures_after_cutover_name_the_step(self) -> None:
+        self.legacy_units.write_text("forward-tunnel@oryx.service enabled enabled\n", encoding="utf-8")
+        old_units = self.install(
+            "daemon",
+            SYSTEMCTL_FAIL="--user disable --now forward-tunnel@oryx.service",
+        )
+        self.assertEqual(old_units.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: old units failed:", old_units.stderr)
+
+        self.legacy_units.write_text("", encoding="utf-8")
+        self.reset_oryx_service_state()
+        for local_address in ("127.0.0.1:12802", "0.0.0.0:12802", "*:12805", "[::]:12801"):
+            with self.subTest(local_address=local_address):
+                self.reset_oryx_service_state()
+                foreign = f"LISTEN 0 4096 {local_address} 0.0.0.0:* users:((\"other\",pid=999,fd=3))"
+                start = self.install("daemon", SS_ALWAYS="1", SS_LINES=foreign)
+                self.assertEqual(start.returncode, 1)
+                self.assertIn("forward.sh daemon: oryx: start failed:", start.stderr)
+                self.assertIn(foreign, start.stderr)
+
+        # Another pair's loopback address on the same port does not block oryx's.
+        self.reset_oryx_service_state()
+        other_pair = "LISTEN 0 4096 127.0.0.2:12802 0.0.0.0:* users:((\"ssh\",pid=999,fd=3))"
+        not_blocked = self.install("daemon", SS_ALWAYS="1", SS_LINES=other_pair)
+        self.assertIn("forward.sh daemon: oryx: start: started forward-oryx", not_blocked.stdout)
+        self.assertIn("forward.sh daemon: oryx: connected failed:", not_blocked.stderr)
+
+        self.reset_oryx_service_state()
+        wrong_parent = self.install("daemon", PS_PPID="999")
+        self.assertEqual(wrong_parent.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: connected failed:", wrong_parent.stderr)
+
+        self.reset_oryx_service_state()
+        no_listener = self.install("daemon", SS_LINES="")
+        self.assertEqual(no_listener.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: connected failed:", no_listener.stderr)
+
+    def test_staleness_does_not_restart_when_start_is_later_in_same_second(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        timestamp = 1_900_000_000
+        token_mtime = timestamp * 1_000_000_000 + 100_000_000
+        os.utime(self.token_file(), ns=(token_mtime, token_mtime))
+        self.set_oryx_start(timestamp * 1_000_000_000 + 500_000_000)
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        lines = self.call_lines()
+        self.assertFalse("systemctl --user start forward-oryx" in lines)
+        self.assertFalse("systemctl --user restart forward-oryx" in lines)
+        self.assertIn("forward.sh daemon: oryx: connected: forward-oryx is running", result.stdout)
+
+    def test_staleness_restarts_when_file_is_later_in_same_second(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        timestamp = 1_900_000_000
+        token_mtime = timestamp * 1_000_000_000 + 500_000_000
+        os.utime(self.token_file(), ns=(token_mtime, token_mtime))
+        self.set_oryx_start(timestamp * 1_000_000_000 + 100_000_000)
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        self.assertEqual(self.call_lines().count("systemctl --user restart forward-oryx"), 1)
+
+    def test_staleness_python_failure_stops_without_restart(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        self.set_oryx_start(time.time_ns() + 60_000_000_000)
+        self.clear_call_log()
+        write_executable(
+            self.stub_dir / "python3",
+            '''if [[ "$#" -eq 10 && "$1" == -I && "$2" == - &&
+    "$3" =~ ^[A-Z][a-z]{2}\\ [0-9]{4}-[0-9]{2}-[0-9]{2}\\ [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}\\ UTC$ ]]; then
+    printf 'Traceback (most recent call last): unexpected test failure\\n' >&2
+    exit 1
+fi
+exec /usr/bin/python3 "$@"''',
+        )
+
+        result = self.install("daemon")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: start failed:", result.stderr)
+        self.assertFalse(any("restart forward-oryx" in line for line in self.call_lines()))
+
+    def test_staleness_ignores_calendar_in_installer_working_directory(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        cwd = self.root / "installer-cwd"
+        cwd.mkdir()
+        (cwd / "calendar.py").write_text(
+            'raise RuntimeError("calendar must not be imported from the working directory")\n',
+            encoding="utf-8",
+        )
+        started = time.time_ns()
+        self.set_oryx_start(started)
+        token_mtime = started + 1_000_000
+        os.utime(self.token_file(), ns=(token_mtime, token_mtime))
+        self.clear_call_log()
+
+        result = self.install("daemon", cwd=cwd)
+
+        self.assert_oryx_success(result)
+        self.assertEqual(self.call_lines().count("systemctl --user restart forward-oryx"), 1)
+
+    def test_already_running_and_fresh_stays_running(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        self.systemctl_enabled.write_text("enabled\n", encoding="utf-8")
+        self.systemctl_active.write_text("active\n", encoding="utf-8")
+        self.set_oryx_start(time.time_ns() + 60_000_000_000)
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        lines = self.call_lines()
+        self.assertFalse("systemctl --user start forward-oryx" in lines)
+        self.assertFalse("systemctl --user restart forward-oryx" in lines)
+        self.assertIn("forward.sh daemon: oryx: connected: forward-oryx is running", result.stdout)
+
+    def test_pgrep_pattern_matches_only_the_old_tunnel_processes(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        expected = f"pgrep [-u] [{os.getuid()}] [-x] [-f] [ssh -N -f oryx(-cf)?-tunnel]"
+        self.assertIn(expected, self.call_lines())
+
+        processes = [
+            subprocess.Popen(["perl", "-e", f'$0 = "{name}"; sleep 300;'])
+            for name in (
+                "ssh -N -f oryx-tunnel",
+                "ssh -N -f oryx-cf-tunnel",
+                "ssh -N -f oryx-tunnel-x",
+            )
+        ]
+        try:
+            time.sleep(0.1)
+            result = subprocess.run(
+                [
+                    "pgrep",
+                    "-x",
+                    "-f",
+                    "ssh -N -f oryx(-cf)?-tunnel",
+                    "-P",
+                    str(os.getpid()),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            matched = {int(value) for value in result.stdout.splitlines()}
+            self.assertTrue(processes[0].pid in matched)
+            self.assertTrue(processes[1].pid in matched)
+            self.assertFalse(processes[2].pid in matched)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
 
 def preview_host(address: str) -> str:
     """How a preview URL's host reaches the allowlist: IPv6 keeps its brackets."""

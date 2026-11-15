@@ -11,10 +11,10 @@ Repin `tools.forward` in `mise.toml` to that release and distribute this dotfile
 revision to the laptop and each VM first. The installer installs the selected
 Forward version if it is missing; it does not upgrade an already selected binary.
 Do not move the separate `tools.secrets` pin or restart secretsd for this migration.
-Python 3.11 or newer, a joined Tailscale client on the laptop and Tailscale VMs,
-and a working systemd user session are required. Oryx is not a Tailscale VM in
-this migration: its loopback pair rides `forward-tunnel@oryx` through Cloudflare
-Access. Forward uses `~/.config/forward/config.toml` for the shell, user units
+Python 3.11 or newer, a joined Tailscale client on the laptop and each VM, and a
+working systemd user session are required. Oryx is not a Tailscale VM: its
+loopback pair rides `forward-oryx` through Cloudflare Access. Forward uses
+`~/.config/forward/config.toml` for the shell, user units
 and agent boxes. `XDG_CONFIG_HOME` must be unset, empty or exactly
 `$HOME/.config`; installers and box channel discovery reject other values. The
 installer checks this before writing files or changing services. Both Forward
@@ -29,13 +29,13 @@ bash ~/.dotfiles/installers/forward.sh daemon
 ```
 
 This is migration step 2, not a dry run. It generates one daemon config,
-disables and stops legacy pair instances except the `oryx` loopback tunnel pair,
-and enables and restarts the single daemon and browser relay. The Chrome
-extension installs at `~/.omp/browser-relay/extension` regardless of the
-invoking omp profile; Flatpak Chrome receives read-only access to that same
-directory. The old per-pair configs, template units, keys and SSH configuration
-remain. The laptop channels become available to each VM when that VM completes
-step 3; coordinate steps 2 and 3 as one migration window.
+removes the old oryx template instances, installs `forward-oryx`, and enables
+and restarts the single daemon and browser relay. The Chrome extension installs
+at `~/.omp/browser-relay/extension` regardless of the invoking omp profile;
+Flatpak Chrome receives read-only access to that same directory. The generic
+templates and the devbox pair configs, keys and SSH configuration remain. The
+laptop channels become available to each VM when that VM completes step 3;
+coordinate steps 2 and 3 as one migration window.
 
 ## Migration
 
@@ -43,25 +43,25 @@ step 3; coordinate steps 2 and 3 as one migration window.
 
    Complete the release, repin and distribution prerequisites above. Keep the
    legacy `config-daemon-*.toml`, `config-serve-*.toml`,
-   `forward-daemon@.service` and `forward-tunnel@.service` in place during
-   steps 1 through 3, including the oryx tunnel pair files.
+   `forward-daemon@.service` and `forward-tunnel@.service` in place for the
+   legacy devbox pairs.
 
-2. Laptop: one `forward-daemon.service` with every Tailscale VM's IP. Disable legacy `@` units, except oryx's tunnel pair.
+2. Laptop: one `forward-daemon.service` with every Tailscale VM's IP, and
+   `forward-oryx` for oryx.
 
    Run the one laptop command above. The installer resolves its own address with
    `tailscale ip -4` and every name in `hosts.toml` with `tailscale ip -4 <name>`.
    It writes literal IPv4 addresses, not names, into
    `~/.config/forward/config.toml`, with the shared policy from
-   `daemon-policy.toml`. It disables all installed or loaded
-   `forward-daemon@<pair>.service` and `forward-tunnel@<pair>.service` instances,
-   including retired names, except the `oryx` pair that
-   `laptop/oryx-tunnel-setup` manages. It does not create a key, SSH block,
-   tunnel, port allocation or port-443 listener.
+   `daemon-policy.toml`. It disables legacy `forward-daemon@<pair>.service` and
+   `forward-tunnel@<pair>.service` instances, including retired names and the
+   old oryx instances. It then installs `forward-oryx`, which connects to oryx
+   with its own key and Cloudflare Access service token.
 
 3. Each VM: an installer-made `config-serve`, then `forward doctor`.
 
-   Oryx is not in `hosts.toml`; `laptop/oryx-tunnel-setup` writes its loopback
-   serve configuration. On each VM in `hosts.toml`, run
+   Oryx is not in `hosts.toml`; `oryx-edge-cutover` writes its loopback serve
+   configuration. On each VM in `hosts.toml`, run
    `bash ~/.dotfiles/installers/forward.sh serve`, then `forward doctor`. The
    installer requires the VM's short hostname in `dev_vms`, uses its own
    `tailscale ip -4` address for `listen`, and resolves the inventory's laptop
@@ -91,14 +91,14 @@ step 3; coordinate steps 2 and 3 as one migration window.
    Direct tailnet addresses route normally; the box does not bind the host's
    tailnet IP.
 
-4. Remove obsolete tailnet pair artifacts, keeping oryx's tunnel pair.
+4. Remove obsolete tailnet pair artifacts.
 
    Do this only after every VM passes step 3. Keep
-   `forward-tunnel@.service`, `forward-daemon@.service`, and the oryx pair
-   files. Remove obsolete per-pair config and unit links explicitly; leave
-   unrelated SSH blocks, keys, `authorized_keys` entries and sshd settings
-   alone. Steps 1 through 3 do not perform this cleanup, and this installer
-   does not remove these artifacts.
+   `forward-tunnel@.service` and `forward-daemon@.service` for legacy devbox
+   pairs. The daemon installer removes the old oryx instances. Remove obsolete
+   per-pair config and unit links explicitly; leave unrelated SSH blocks, keys,
+   `authorized_keys` entries and sshd settings alone. Steps 1 through 3 do not
+   remove the devbox artifacts.
 
 5. Optional: add the ACL.
 
