@@ -115,7 +115,7 @@ Git needs configuring even though day-to-day work is all jj: agent worktrees und
 
 ### Three identities
 
-`sami@trajectorylabs.net` is the default for both tools. `sami@thecybermonk.com` and `sami@theorem.dev` are opt-in per repo, except where a rule applies them:
+`sami@trajectorylabs.net` is the default for both tools, except on a machine whose `~/.config/git/identity.gitconfig` and `~/.config/jj/config.toml` set another. oryx sets `sami@thecybermonk.com` in both (HOME-216). `.gitconfig` includes that machine file right after its `[user]` section, and git skips it where it is missing. The two rules below and a repository's own identity still win over either default. `sami@thecybermonk.com` and `sami@theorem.dev` are opt-in per repo, except where a rule applies them:
 
 - **sjawhar/legion** uses `sami@thecybermonk.com`. `.gitconfig` includes `cybermonk-identity.gitconfig` for every clone whose remote is sjawhar/legion, and `.jjconfig.toml` scopes it to Legion's jj checkouts by path, since jj has no remote condition.
 - **Every theorem-labs repository** uses `sami@theorem.dev`. `.gitconfig` includes `theorem-identity.gitconfig` for every clone whose remote is in the theorem-labs organization, and `.jjconfig.toml` scopes it to jj checkouts under `~/Code/personal/theorem`.
