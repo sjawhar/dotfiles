@@ -59,6 +59,8 @@ CACHE_MIN_TTL_SECONDS=300
 REFRESH_SECONDS="${HAWK_TOKEN_REFRESH_SECONDS:-21600}"
 REFRESH_ARG=__hawk_token_background_refresh
 refresh_env=()
+validation_err=''
+err=''
 mkdir -p "$root"
 
 log() { echo "hawk-token: $*" >&2; }
@@ -171,6 +173,9 @@ on_exit() {
     if [ "$attempt_finished" -ne 1 ]; then
         touch "$failed"
     fi
+    if [ -n "$validation_err" ]; then
+        rm -f "$validation_err"
+    fi
     return "$rc"
 }
 
@@ -186,7 +191,7 @@ end_attempt_ok() {
 # leftover from a killed run. Every step fails explicitly: errexit does not apply
 # inside a function called as an `if` condition.
 build_slot() {
-    local slot=$1 scratch validation_err validation_output
+    local slot=$1 scratch validation_output
     if [ -d "$slot/.git" ]; then
         find "$slot/.git" -name '*.lock' -type f -delete || return 1
         (
@@ -207,10 +212,12 @@ build_slot() {
     validation_err="$(mktemp "$root/.validation.XXXXXX")" || return 1
     if "$slot/.venv/bin/hawk-token" --api-url "$HAWK_API_URL" >/dev/null 2>"$validation_err"; then
         rm -f "$validation_err"
+        validation_err=''
         return 0
     fi
     validation_output="$(tail -n 5 "$validation_err" | redact)"
     rm -f "$validation_err"
+    validation_err=''
     log "validation mint failed: $validation_output"
     return 1
 }
@@ -457,12 +464,16 @@ probe_hawk() {
 # timer_mint is separate from the session mint loop: its 60 seconds start only after
 # any foreground refresh. It prints no token, even after a successful mint.
 timer_mint() {
-    local mint_bin err out='' rc=0
+    local mint_bin out='' rc=0
     mint_bin="$(readlink -f "$current")/.venv/bin/hawk-token"
     err="$(mktemp)" || {
         log "could not create a mint stderr file"
         return 1
     }
+    trap 'rm -f "$err"' EXIT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
     out="$(timeout 60 "$mint_bin" --api-url "$HAWK_API_URL" 2>"$err")" || rc=$?
     if [ -n "$out" ]; then
         if save_token "$out"; then
