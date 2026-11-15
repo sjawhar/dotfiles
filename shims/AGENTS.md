@@ -184,7 +184,8 @@ behavior before handing the call to the real one. One file is data: `person-name
   the encrypted-term check. In an agent session the variable is ignored. Every destination must
   pass before any actual push. A failed dry-run, unreadable plan or nonzero check refuses; without
   a check, only a destination confirmed private passes in an agent session (outside one, no check
-  means no public gate). Only a deletion-only push does not load the encrypted list.
+  means no public gate). A push that creates or updates no ref (only deletions, or nothing to change)
+  does not load the encrypted list.
   The shim resolves push aliases in jj's startup invocation context: up to eight levels in an
   agent session, up to 64 outside one. A command whose first word is a builtin other than `git`
   needs no alias lookup. Lookup/decoding failures and deeper expansions refuse (a person's
