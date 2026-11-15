@@ -112,8 +112,7 @@ describe("the extension", () => {
 		Object.assign(process.env, saved);
 	});
 
-	type Delivered = { message: { customType: string; content: string; display: boolean } };
-	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. Its branch is its entries unless `setBranch` replaces it. The text arms follow `gatesPath` when one is given, else the committed gates.json, which no test writes. */
+	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. Its branch is its entries unless `setBranch` replaces it, and its read of the session file is its entries unless `setEntries` replaces it. The text arms follow `gatesPath` when one is given, else the committed gates.json, which no test writes. */
 	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown; [key: string]: unknown }> = [], kind: "main" | "sub" = "main", gatesPath?: string) {
 		Object.assign(process.env, env);
 		const { default: experiments, bindExperiments } = await import("../experiments/index");
@@ -135,9 +134,10 @@ describe("the extension", () => {
 		if (gatesPath === undefined) experiments(pi as never);
 		else bindExperiments(pi as never, gatesPath);
 		let branch: () => unknown[] = () => entries;
+		let readEntries: () => unknown[] = () => entries;
 		const ctx = {
 			agent: { kind },
-			sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => ROOT, getEntries: () => entries, getBranch: () => branch() },
+			sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => ROOT, getEntries: () => readEntries(), getBranch: () => branch() },
 		};
 		const emit = async (event: string, payload: unknown) => {
 			let out: unknown;
@@ -145,15 +145,13 @@ describe("the extension", () => {
 			return out;
 		};
 		type Message = { role: string; customType?: string; content?: unknown; [key: string]: unknown };
-		let sent: Message[] = [];
-		/** Runs every context handler over `input`, each getting what the one before it returned, as omp does. */
+		/** One request: every context handler over `input`, each getting what the one before it returned, as omp runs them. Returns the messages that go out. */
 		const send = async (input: Message[]): Promise<Message[]> => {
 			let messages = input;
 			for (const handler of handlers.get("context") ?? []) {
 				const result = (await handler({ type: "context", messages }, ctx)) as { messages?: Message[] } | undefined;
 				if (result?.messages) messages = result.messages;
 			}
-			sent = messages;
 			return messages;
 		};
 		return {
@@ -165,27 +163,13 @@ describe("the extension", () => {
 			gh: () => emit("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "gh pr create --fill" } }) as Promise<{ block?: boolean } | undefined>,
 			bash: (command: string) => emit("tool_call", { toolName: "bash", toolCallId: "c2", input: { command } }) as Promise<{ block?: boolean; reason?: string } | undefined>,
 			setBranch: (fn: typeof branch) => (branch = fn),
+			setEntries: (fn: typeof readEntries) => (readEntries = fn),
 			setAppendFailure: (fn: typeof appendFails) => (appendFails = fn),
 			exposures: () => entries.filter(e => e.customType === EXPOSURE_ENTRY_TYPE).map(e => e.data as ExposureRecord),
 			excluded: () => entries.filter(e => e.customType === EXCLUDED_ENTRY_TYPE).map(e => e.data as ExcludedRecord),
-			/** Every before_agent_start result of one prompt, in handler order. Each message goes on the branch as omp stores it, a `custom_message` entry. */
-			prompt: async (reason: "prompt" | "revive" = "prompt") => {
-				const results: Delivered[] = [];
-				for (const handler of handlers.get("before_agent_start") ?? []) {
-					const result = await handler({ type: "before_agent_start", reason, prompt: "Design the cache.", systemPrompt: ["You are omp."] }, ctx);
-					if (result !== undefined) results.push(result as Delivered);
-				}
-				for (const { message } of results) entries.push({ type: "custom_message", ...message });
-				return results;
-			},
-			/** The next request: `input`, the message that started the run (a typed user prompt unless given), then the custom messages of `delivered`. Each context handler gets the messages the one before it returned, as in omp. Returns the custom types of the custom messages that go out. */
-			request: async (delivered: Delivered[], input: Record<string, unknown> = { role: "user", content: "Design the cache.", attribution: "user" }) =>
-				(await send([{ role: "user", ...input, timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))])).filter(m => m.role === "custom").map(m => m.customType),
-			/** A request of omp's compaction: `messages`, a part of the session file, which never holds the new prompt. Returns the custom types that go out. */
-			compactionRequest: async (messages: Message[]) =>
-				(await send(messages)).filter(m => m.role === "custom").map(m => m.customType),
-			/** The custom messages that went out in the latest request, with their content. */
-			sentCustom: () => sent.filter(m => m.role === "custom"),
+			/** Every before_agent_start handler of one prompt, in order; a wake's reason is `revive`. */
+			prompt: (reason: "prompt" | "revive" = "prompt") => emit("before_agent_start", { type: "before_agent_start", reason, prompt: "Design the cache.", systemPrompt: ["You are omp."] }),
+			send,
 		};
 	}
 	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
@@ -245,93 +229,147 @@ describe("the extension", () => {
 	});
 
 	describe("the three features of the eval method's experiments", () => {
-		const TEXTS: ReadonlyArray<[Feature, string | undefined]> = [
-			["aa_noop", undefined],
+		const TEXTS: ReadonlyArray<[Feature, string]> = [
 			["infra805_skill", skillText],
 			["infra805_selfcheck", selfcheckText],
 		];
 		/** The three gates of this block start off in every session here, whatever gates.json commits, so a change of gates.json (S8 step 4) changes no test. */
 		const TEXT_OFF = { OMP_EXPERIMENT_AA_NOOP: "off", OMP_EXPERIMENT_INFRA805_SKILL: "off", OMP_EXPERIMENT_INFRA805_SELFCHECK: "off" };
 		const bindArms: typeof bind = (env, ...rest) => bind({ ...TEXT_OFF, ...env }, ...rest);
-		/** What the handler of `feature` puts in at a prompt: one hidden custom message with its text, or nothing. */
-		const deliveryOf = (feature: Feature, text: string | undefined): Delivered[] => (text === undefined ? [] : [{ message: { customType: feature, content: text, display: false } }]);
-		/** The skill's text as a session file keeps it after an earlier prompt, and as a request carries it (omp gives it its entry's time in epoch milliseconds). */
-		const KEPT_SKILL = { type: "custom_message", customType: "infra805_skill", content: skillText, display: false, timestamp: new Date(5).toISOString() };
-		const KEPT_SKILL_MESSAGE = { role: "custom", customType: "infra805_skill", content: skillText, display: false, timestamp: 5 };
-		/** An earlier exchange as the session file keeps it: a typed prompt, a reply that calls a tool, the tool's result, and the closing reply. */
-		const EARLIER = [
-			{ role: "user", content: "An earlier prompt.", attribution: "user", timestamp: 10 },
-			{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }], timestamp: 11 },
-			{ role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "a" }], timestamp: 12 },
-			{ role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: 13 },
+		type Message = { role: string; [key: string]: unknown };
+		/** The message that carries the text of `feature` in a request. */
+		const textMessage = (feature: Feature, text: string): Message => ({ role: "custom", customType: feature, content: text, display: false, attribution: "user", timestamp: 0 });
+		const SKILL = textMessage("infra805_skill", skillText);
+		const SELFCHECK = textMessage("infra805_selfcheck", selfcheckText);
+		/** A run as its requests carry it: a typed prompt, a reply that calls a tool, the tool's result, the closing reply, and a wake from a peer. */
+		const PROMPT: Message = { role: "user", content: "Design the cache.", attribution: "user", timestamp: 100 };
+		const CALL: Message = { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }], timestamp: 101 };
+		const RESULT: Message = { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "a" }], timestamp: 102 };
+		const REPLY: Message = { role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: 103 };
+		const WAKE: Message = { role: "custom", customType: "envoy-wake", content: "A message from a peer.", display: true, attribution: "agent", timestamp: 104 };
+		/** A compaction summary that omp sends as text, and one that it replays as a native Anthropic compaction block. */
+		const SUMMARY: Message = { role: "compactionSummary", summary: "Earlier work.", tokensBefore: 1000, timestamp: 90 };
+		const NATIVE: Message = { ...SUMMARY, providerPayload: { type: "anthropicCompaction" } };
+		/** Copies of the texts as an earlier version of this extension stored them, one altered by omp's shake (`[shaken ~N tokens …]` over a fenced block). */
+		const SHAKEN = skillText.replace(/```text\n[\s\S]*?\n```/, "[shaken ~780 tokens — recover: artifact://1 (region 1)]");
+		const COPIES: Message[] = [
+			{ role: "custom", customType: "infra805_skill", content: skillText, display: false, attribution: "user", timestamp: 5 },
+			{ role: "custom", customType: "infra805_skill", content: SHAKEN, display: false, attribution: "user", timestamp: 6 },
+			{ role: "custom", customType: "infra805_selfcheck", content: selfcheckText, display: false, attribution: "user", timestamp: 7 },
 		];
-		const STORED = EARLIER.map(message => ({ type: "message", message }));
-		/** The part of the session file that a compaction's request holds, by where omp cut it (findCutPoint cuts at a user or an assistant message): after the closing reply, inside the turn, or at the turn's first reply. */
-		const CUTS = [
-			["the closing reply", EARLIER],
-			["a tool result", EARLIER.slice(0, 3)],
-			["the older prompt", EARLIER.slice(0, 1)],
-		] as const;
 
-		test.each(TEXTS)("%s in the on arm adds its text and writes one entry with arm on when the text reaches the session, and no other while the entry stays in the context", async (feature, text) => {
+		test.each(TEXTS)("%s in the on arm puts its whole text once into every request at the same early position: a prompt, tool turns, a shake of earlier messages, a wake; nothing of it is stored", async (feature, text) => {
+			expect(SHAKEN).not.toBe(skillText);
 			const drawnOn = ids.find(id => draw(id, feature)) as string;
-			for (const [gate, file, root] of [["on", ROOT_FILE, ROOT], ["random", rootFile(drawnOn), drawnOn]] as const) {
+			for (const [gate, file] of [["on", ROOT_FILE], ["random", rootFile(drawnOn)]] as const) {
 				const b = await bindArms({ [envName(feature)]: gate }, file);
 				await b.start();
-				const delivered = await b.prompt();
-				expect(delivered).toEqual(deliveryOf(feature, text));
+				expect(await b.prompt()).toBeUndefined();
+				const placed = textMessage(feature, text);
+				const shaken: Message = { ...RESULT, content: [{ type: "text", text: "[shaken ~120 tokens — recover: artifact://2 (region 1)]" }] };
+				for (const request of [[PROMPT], [PROMPT, CALL, RESULT], [PROMPT, CALL, RESULT, REPLY], [PROMPT, CALL, shaken, REPLY]]) {
+					expect(await b.send(request)).toEqual([placed, ...request]);
+				}
+				expect(await b.prompt("revive")).toBeUndefined();
+				const woken = [PROMPT, CALL, RESULT, REPLY, WAKE];
+				expect(await b.send(woken)).toEqual([placed, ...woken]);
+				expect(JSON.stringify(b.entries)).not.toContain(JSON.stringify(text));
+			}
+		});
+		test("after a compaction the texts go before a summary that omp sends as text, and after a native compaction block with the assistant turn folded into it, the same in each request until the next compaction", async () => {
+			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" });
+			await b.start();
+			const text = [SUMMARY, PROMPT, CALL, RESULT];
+			expect(await b.send(text)).toEqual([SKILL, SELFCHECK, ...text]);
+			expect(await b.send([...text, REPLY])).toEqual([SKILL, SELFCHECK, ...text, REPLY]);
+			expect(await b.send([NATIVE, PROMPT])).toEqual([NATIVE, SKILL, SELFCHECK, PROMPT]);
+			expect(await b.send([NATIVE, CALL, RESULT, PROMPT])).toEqual([NATIVE, CALL, RESULT, SKILL, SELFCHECK, PROMPT]);
+			expect(await b.send([NATIVE, CALL, RESULT, PROMPT, REPLY])).toEqual([NATIVE, CALL, RESULT, SKILL, SELFCHECK, PROMPT, REPLY]);
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
+		});
+		test("with both INFRA-805 arms on, every request carries the skill and then the self-check, stored copies of either taken out, and each feature writes its own exposure entry", async () => {
+			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" });
+			await b.start();
+			expect(await b.send([COPIES[2], PROMPT, COPIES[0]])).toEqual([SKILL, SELFCHECK, PROMPT]);
+			expect(await b.send([COPIES[1], PROMPT, CALL, COPIES[2], RESULT])).toEqual([SKILL, SELFCHECK, PROMPT, CALL, RESULT]);
+			expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"], ["infra805_selfcheck", "on"]]);
+		});
+		test("a subagent draws from its root, records its own assignment and exposure in its own file, and each of its requests carries the text of its root's arm, a wake's included", async () => {
+			const drawnOn = ids.find(id => draw(id, "infra805_skill")) as string;
+			const drawnOff = ids.find(id => !draw(id, "infra805_skill")) as string;
+			for (const [root, on] of [[drawnOn, true], [drawnOff, false]] as const) {
+				const sub = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "random" }, rootFile(root).replace(/\.jsonl$/, "/Worker.jsonl"), [], "sub");
+				await sub.start();
+				expect(sub.records()[0].features.infra805_skill).toEqual({ gate: "random", draw: on ? "on" : "off", on });
+				const turn = [PROMPT, CALL, RESULT];
+				expect(await sub.send(turn)).toEqual(on ? [SKILL, ...turn] : turn);
+				await sub.prompt("revive");
+				const woken = [...turn, REPLY, WAKE];
+				expect(await sub.send(woken)).toEqual(on ? [SKILL, ...woken] : woken);
+				expect(sub.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: on ? "on" : "off", gate: "random", rootSessionId: root, at: expect.any(String) }]);
+			}
+		});
+		test.each([...TEXTS, ["aa_noop", undefined] as const])("%s writes one exposure entry at the first request after its resolution is recorded, in both arms of an on or random gate, and none again under that resolution", async (feature, text) => {
+			const drawnOn = ids.find(id => draw(id, feature)) as string;
+			const drawnOff = ids.find(id => !draw(id, feature)) as string;
+			const cases = [["on", ROOT_FILE, ROOT, "on"], ["random", rootFile(drawnOn), drawnOn, "on"], ["random", rootFile(drawnOff), drawnOff, "off"]] as const;
+			for (const [gate, file, root, arm] of cases) {
+				const b = await bindArms({ [envName(feature)]: gate }, file);
+				await b.start();
+				await b.prompt();
 				expect(b.exposures()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(text === undefined ? [] : [feature]);
-				expect(b.exposures()).toEqual([{ v: 1, feature, arm: "on", gate, rootSessionId: root, at: expect.any(String) }]);
+				// The request at which the on arm's entry is written carries the text.
+				expect(await b.send([PROMPT])).toEqual(arm === "on" && text !== undefined ? [textMessage(feature, text), PROMPT] : [PROMPT]);
+				expect(b.exposures()).toEqual([{ v: 1, feature, arm, gate, rootSessionId: root, at: expect.any(String) }]);
 				const { at } = b.exposures()[0];
 				expect(new Date(at).toISOString()).toBe(at);
 				expect(Math.abs(Date.parse(at) - Date.now())).toBeLessThan(60_000);
-				expect(await b.prompt()).toEqual([]);
-				await b.request(delivered);
+				await b.send([PROMPT, CALL, RESULT]);
+				await b.prompt();
+				await b.send([PROMPT, CALL, RESULT, REPLY]);
 				expect(b.exposures()).toHaveLength(1);
 			}
 		});
-		test.each(TEXTS)("%s in the off arm of a random gate adds no text and writes one entry with arm off at the next request", async feature => {
-			const drawnOff = ids.find(id => !draw(id, feature)) as string;
-			const b = await bindArms({ [envName(feature)]: "random" }, rootFile(drawnOff));
-			await b.start();
-			expect(b.records()[0].features[feature]).toEqual({ gate: "random", draw: "off", on: false });
-			expect(await b.prompt()).toEqual([]);
-			expect(b.exposures()).toEqual([]);
-			expect(await b.request([])).toEqual([]);
-			expect(b.exposures()).toEqual([{ v: 1, feature, arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
-			expect(await b.prompt()).toEqual([]);
-			await b.request([]);
-			expect(b.exposures()).toHaveLength(1);
+		test("a resumed session gets no second exposure entry under the same recorded resolution, and gets one at its first request when its file holds none after that resolution", async () => {
+			const ended = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+			await ended.start();
+			const resumed = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, ended.entries);
+			await resumed.start();
+			expect(resumed.records()).toHaveLength(1);
+			expect(await resumed.send([PROMPT])).toEqual([SKILL, PROMPT]);
+			expect(resumed.exposures()).toHaveLength(1);
+			const again = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, resumed.entries);
+			await again.start();
+			expect(await again.send([PROMPT, CALL, RESULT])).toEqual([SKILL, PROMPT, CALL, RESULT]);
+			expect(again.exposures()).toHaveLength(1);
 		});
-		test.each(TEXTS)("%s with its gate off adds nothing, writes no entry, and lets no text of its feature through", async (feature, text) => {
-			const b = await bindArms({ [envName(feature)]: "off" });
-			await b.start();
-			expect(await b.prompt()).toEqual([]);
-			expect(await b.request(deliveryOf(feature, text))).toEqual([]);
-			expect(b.exposures()).toEqual([]);
+		test("no request carries a text, and every stored copy is taken out, while the arm is not on: before the first resolution, gate off, draw off", async () => {
+			const request = [COPIES[0], PROMPT, COPIES[1], CALL, RESULT, COPIES[2]];
+			const without = [PROMPT, CALL, RESULT];
+			const off = await bindArms({});
+			expect(await off.send(request)).toEqual(without);
+			await off.start();
+			expect(await off.send(request)).toEqual(without);
+			expect(await off.send([NATIVE, CALL, RESULT, ...request])).toEqual([NATIVE, CALL, RESULT, ...without]);
+			expect(off.exposures()).toEqual([]);
+			const drawnOff = ids.find(id => !draw(id, "infra805_skill") && !draw(id, "infra805_selfcheck")) as string;
+			const control = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "random", OMP_EXPERIMENT_INFRA805_SELFCHECK: "random" }, rootFile(drawnOff));
+			await control.start();
+			expect(await control.send(request)).toEqual(without);
+			expect(await control.send([PROMPT])).toEqual([PROMPT]);
+			expect(control.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "off"], ["infra805_selfcheck", "off"]]);
 		});
-		test("the exposure entry of the on arm needs the run's first request to hold the text: a run whose first request lacks it writes none, and the next user prompt puts the text in and writes it", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
-			await b.start();
-			expect(await b.prompt()).toEqual([]);
-			// The pre-prompt compaction drops the kept copy: the run's first request holds the typed prompt and not the text.
-			b.entries.push({ type: "compaction" });
-			expect(await b.request([])).toEqual([]);
-			// A later request of the same run writes no entry and sends no text, even one that holds a whole copy.
-			expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-			expect(b.exposures()).toEqual([]);
-			const again = await b.prompt();
-			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
-			expect(await b.request(again)).toEqual(["infra805_skill"]);
-			expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
-		});
-		test("aa_noop changes no prompt, request or tool call: its two arms differ only in the arm of its exposure entry", async () => {
+		test("aa_noop changes no request, prompt or tool call in either arm: its two arms differ only in the arm of its exposure entry", async () => {
 			const run = async (root: string) => {
 				const env = { ...allOff, OMP_EXPERIMENT_SKILL_GATE: "on", OMP_EXPERIMENT_RULES_REFRESH: "on", OMP_EXPERIMENT_BASH_GATE_LEADING: "on", OMP_EXPERIMENT_AA_NOOP: "random" };
 				const b = await bindArms(env, rootFile(root));
 				await b.start();
-				const seen = [await b.prompt(), await b.request([]), await b.gh(), await b.bash("ls d && cat f"), await b.bash("cat f")];
+				for (const request of [[PROMPT], [PROMPT, CALL, RESULT, REPLY, WAKE], [SUMMARY, PROMPT, CALL, RESULT], [NATIVE, CALL, RESULT, PROMPT]]) {
+					const before = structuredClone(request);
+					expect(await b.send(request)).toBe(request);
+					expect(request).toEqual(before);
+				}
+				const seen = [await b.prompt(), await b.gh(), await b.bash("ls d && cat f"), await b.bash("cat f")];
 				expect(b.entries.filter(e => e.customType !== ENTRY_TYPE && e.customType !== EXPOSURE_ENTRY_TYPE)).toEqual([]);
 				const [exposure, ...rest] = b.exposures();
 				expect(rest).toEqual([]);
@@ -344,177 +382,88 @@ describe("the extension", () => {
 			expect(on.kept).toEqual({ v: 1, feature: "aa_noop", arm: "on", gate: "random" });
 			expect(off.kept).toEqual({ ...on.kept, arm: "off" });
 		});
-		test("a text arm that throws is logged and stops for the session; the other features keep running", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
-			await b.start();
-			// The first reader of the branch at a prompt is aa_noop, the first text arm.
-			let calls = 0;
-			b.setBranch(() => {
-				if (calls++ === 0) throw new Error("branch unavailable");
-				return b.entries;
-			});
-			const delivered = await b.prompt();
-			expect(b.errors).toEqual([expect.stringContaining("aa_noop failed in before_agent_start")]);
-			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
-			await b.request(delivered);
-			b.entries.push({ type: "compaction" });
-			await b.request(await b.prompt());
-			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck", "infra805_skill", "infra805_selfcheck"]);
-			expect((await b.gh())?.block).toBe(true);
-		});
-		test("a text arm that throws in any handler keeps its kept text out of every request, and the other features run on", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" }, ROOT_FILE, [KEPT_SKILL]);
-			await b.start();
-			// aa_noop is off here, so the first reader of the branch at a prompt is infra805_skill.
-			let calls = 0;
-			b.setBranch(() => {
-				if (calls++ === 0) throw new Error("branch unavailable");
-				return b.entries;
-			});
-			const delivered = await b.prompt();
-			expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in before_agent_start")]);
-			expect(delivered).toEqual(deliveryOf("infra805_selfcheck", selfcheckText));
-			const history = [...deliveryOf("infra805_skill", skillText), ...delivered];
-			expect(await b.request(history)).toEqual(["infra805_selfcheck"]);
-			expect(await b.request(history)).toEqual(["infra805_selfcheck"]);
-			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
-			expect((await b.gh())?.block).toBe(true);
-		});
-		test("with both INFRA-805 gates on, a prompt gets the skill and then the self-check, and each writes its own exposure entry", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" });
-			await b.start();
-			const delivered = await b.prompt();
-			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
-			await b.request(delivered);
-			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
-		});
-		test("a subagent gets no text and writes no exposure entry, and a revive puts nothing in", async () => {
-			const all = { OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" };
-			const sub = await bindArms(all, ROOT_FILE.replace(/\.jsonl$/, "/Worker.jsonl"), [], "sub");
-			await sub.start();
-			expect(await sub.prompt()).toEqual([]);
-			await sub.request([]);
-			expect(sub.exposures()).toEqual([]);
-			const main = await bindArms(all);
-			await main.start();
-			expect(await main.prompt("revive")).toEqual([]);
-		});
-		test("the text goes in again after a compaction removes it, and not again when the session resumes", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
-			await b.start();
-			await b.request(await b.prompt());
-			const resumed = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, b.entries);
-			await resumed.start();
-			expect(await resumed.prompt()).toEqual([]);
-			resumed.entries.push({ type: "compaction" });
-			const again = await resumed.prompt();
-			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
-			await resumed.request(again);
-			expect(resumed.exposures()).toHaveLength(2);
-		});
-		test("the text goes in again when the context keeps the exposure entry but not the text, and no second entry is written", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
-			await b.start();
-			await b.request(await b.prompt());
-			const text = b.entries.find(e => e.type === "custom_message" && e.customType === "infra805_skill");
-			const [exposure] = b.entries.filter(e => e.customType === EXPOSURE_ENTRY_TYPE);
-			// A compaction whose first kept entry is the exposure entry: the text before it is out of the context.
-			b.setBranch(() => [{ ...text, id: "t" }, { ...exposure, id: "x" }, { type: "compaction", id: "c", firstKeptEntryId: "x" }]);
-			const again = await b.prompt();
-			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
-			expect(await b.request(again)).toEqual(["infra805_skill"]);
-			expect(b.exposures()).toHaveLength(1);
-		});
-		test("a context that keeps the text but no exposure entry gets no second text, and the run's first request, which holds the kept text, gets the entry", async () => {
-			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
-			await b.start();
-			expect(await b.prompt()).toEqual([]);
-			expect(b.exposures()).toEqual([]);
-			expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
-			expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"]]);
-		});
-		test("a resume that keeps the text with no exposure entry sends none of it when the arm is no longer on: random with the draw off writes an entry with arm off, off writes none", async () => {
-			const drawnOff = ids.find(id => !draw(id, "infra805_skill")) as string;
-			const control = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "random" }, rootFile(drawnOff), [KEPT_SKILL]);
-			await control.start();
-			expect(await control.prompt()).toEqual([]);
-			expect(await control.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-			expect(control.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
-			const disabled = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "off" }, ROOT_FILE, [KEPT_SKILL]);
-			await disabled.start();
-			expect(await disabled.prompt()).toEqual([]);
-			expect(await disabled.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-			expect(disabled.exposures()).toEqual([]);
-		});
-		test("a treated session whose gate goes off sends no text of that feature from its next request on; a request before the first resolution sends none", async () => {
-			const treated = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" });
-			expect(await treated.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-			await treated.start();
-			const delivered = await treated.prompt();
-			expect(await treated.request(delivered)).toEqual(["infra805_skill", "infra805_selfcheck"]);
-			const resumed = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "off", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" }, ROOT_FILE, treated.entries);
-			await resumed.start();
-			expect(await resumed.prompt()).toEqual([]);
-			expect(await resumed.request(delivered)).toEqual(["infra805_selfcheck"]);
-			expect(resumed.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
-		});
-		test("when the exposure append fails, no request carries that feature's text, the feature stops and is logged, and the other features run on", async () => {
+		test("a failed exposure append stops its feature, logged: that request and every later one carry none of its text, the other features run on, and the next resolution starts it again", async () => {
 			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
 			await b.start();
 			b.setAppendFailure((customType, data) => customType === EXPOSURE_ENTRY_TYPE && (data as ExposureRecord).feature === "infra805_skill");
-			const delivered = await b.prompt();
-			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
-			expect(await b.request(delivered)).toEqual(["infra805_selfcheck"]);
+			expect(await b.send([PROMPT])).toEqual([SELFCHECK, PROMPT]);
 			expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in context")]);
 			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
-			// Later requests carry both texts from the session's history. The skill's text stays out, also once the append works again.
 			b.setAppendFailure(() => false);
-			expect(await b.request(delivered)).toEqual(["infra805_selfcheck"]);
-			expect(await b.prompt()).toEqual([]);
-			expect(await b.request(delivered)).toEqual(["infra805_selfcheck"]);
+			expect(await b.send([COPIES[0], PROMPT, CALL, RESULT])).toEqual([SELFCHECK, PROMPT, CALL, RESULT]);
+			await b.prompt();
+			expect(await b.send([PROMPT, CALL, RESULT, REPLY])).toEqual([SELFCHECK, PROMPT, CALL, RESULT, REPLY]);
 			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
 			expect((await b.gh())?.block).toBe(true);
-			// The next resolution finds the skill's text in the context and no entry: the entry goes in with the next request that holds the text.
 			await b.start();
-			expect(await b.prompt()).toEqual([]);
-			expect(await b.request(delivered)).toEqual(["infra805_skill", "infra805_selfcheck"]);
+			expect(await b.send([PROMPT])).toEqual([SKILL, SELFCHECK, PROMPT]);
 			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck", "infra805_skill"]);
+			expect(b.errors).toHaveLength(1);
 		});
-		test.each(LEGION_ENV)("a Legion pane (%s set) gets one excluded entry per feature whose gate is on or random, no exposure entry and no text, and an empty value is not a Legion pane", async name => {
+		test("a text arm whose handler throws stops, logged: no request carries its text from that one on, and the other features run on", async () => {
+			const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+			await b.start();
+			// aa_noop is off here, so the first reader of the session file at a request is infra805_skill.
+			let calls = 0;
+			b.setEntries(() => {
+				if (calls++ === 0) throw new Error("the session file cannot be read");
+				return b.entries;
+			});
+			expect(await b.send([COPIES[0], PROMPT])).toEqual([SELFCHECK, PROMPT]);
+			expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in context")]);
+			expect(await b.send([COPIES[0], PROMPT, CALL, RESULT])).toEqual([SELFCHECK, PROMPT, CALL, RESULT]);
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
+			expect((await b.gh())?.block).toBe(true);
+		});
+		test.each(LEGION_ENV)("a Legion pane (%s set) gets one excluded entry per feature whose gate is on or random at its first request, no exposure entry and no text, and an empty value is not a Legion pane", async name => {
 			const all = { OMP_EXPERIMENT_AA_NOOP: "random", OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" };
 			const legion = await bindArms({ ...all, [name]: "x" });
 			await legion.start();
 			expect(legion.records()[0].features.infra805_skill.on).toBe(true);
-			expect(await legion.prompt("revive")).toEqual([]);
+			await legion.prompt();
 			expect(legion.excluded()).toEqual([]);
-			expect(await legion.prompt()).toEqual([]);
-			expect(await legion.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-			expect(legion.exposures()).toEqual([]);
+			expect(await legion.send([COPIES[0], PROMPT, COPIES[2]])).toEqual([PROMPT]);
 			expect(legion.excluded()).toEqual(
 				(["aa_noop", "infra805_skill", "infra805_selfcheck"] as const).map(feature => ({ v: 1, feature, reason: "legion_pane", rootSessionId: ROOT, at: expect.any(String) })),
 			);
-			expect(await legion.prompt()).toEqual([]);
+			expect(await legion.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
+			expect(legion.exposures()).toEqual([]);
+			expect(legion.excluded()).toHaveLength(3);
 			const resumed = await bindArms({ ...all, [name]: "x" }, ROOT_FILE, legion.entries);
 			await resumed.start();
-			expect(await resumed.prompt()).toEqual([]);
+			expect(await resumed.send([PROMPT])).toEqual([PROMPT]);
 			expect(resumed.excluded()).toHaveLength(3);
 			expect(resumed.exposures()).toEqual([]);
 			const skillOff = await bindArms({ ...all, OMP_EXPERIMENT_INFRA805_SKILL: "off", [name]: "x" });
 			await skillOff.start();
-			await skillOff.prompt();
-			await skillOff.request([]);
+			await skillOff.send([PROMPT]);
 			expect(skillOff.excluded().map(e => e.feature)).toEqual(["aa_noop", "infra805_selfcheck"]);
-			const synthetic = await bindArms({ ...all, [name]: "x" });
-			await synthetic.start();
-			await synthetic.prompt();
-			await synthetic.request([], { role: "developer", content: "Continue.", attribution: "agent", synthetic: true });
-			expect(synthetic.excluded()).toEqual([]);
 			const outside = await bindArms({ ...all, [name]: "" });
 			await outside.start();
-			const delivered = await outside.prompt();
-			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
-			await outside.request(delivered);
+			expect(await outside.send([PROMPT])).toEqual([SKILL, SELFCHECK, PROMPT]);
 			expect(outside.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill", "infra805_selfcheck"]);
+			expect(outside.excluded()).toEqual([]);
+		});
+
+		describe("an `experiments` entry that cannot be appended at a resolution", () => {
+			test("keeps every text out and writes no exposure until it is recorded, is tried again at every later event and logged once, and the other features run under the new resolution at once", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+				b.setAppendFailure(customType => customType === ENTRY_TYPE);
+				await b.start();
+				expect(b.records()).toEqual([]);
+				await b.prompt();
+				expect(await b.send([COPIES[0], PROMPT])).toEqual([PROMPT]);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
+				expect(b.exposures()).toEqual([]);
+				expect(b.errors).toEqual([expect.stringContaining("cannot record their new resolution")]);
+				expect((await b.gh())?.block).toBe(true);
+				b.setAppendFailure(() => false);
+				// The entry is recorded first at the next request, and that request carries the text.
+				expect(await b.send([PROMPT, CALL, RESULT, REPLY])).toEqual([SKILL, PROMPT, CALL, RESULT, REPLY]);
+				expect(b.records()).toEqual([resolve(resolveGates(gateFile, { ...TEXT_OFF, OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_SKILL_GATE: "on" }), ROOT)]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
+				expect(b.errors).toHaveLength(1);
+			});
 		});
 
 		describe("gates.json changed on disk while omp runs", () => {
@@ -531,24 +480,23 @@ describe("the extension", () => {
 			});
 			afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-			test("an off gate written while a session runs stops the text at the next request, with an `experiments` entry and no new exposure, and the other features keep their load-time gates", async () => {
+			test("an off gate written while a session runs takes the text out of the next request, with an `experiments` entry and no new exposure, and the other features keep their load-time gates", async () => {
 				writeGates({ infra805_skill: "on", bash_gate_leading: "off" }, 1_000);
 				const b = await bind({}, ROOT_FILE, [], "main", path);
 				await b.start();
 				const [first] = b.records();
 				expect(first.features.infra805_skill).toMatchObject({ gate: "on", on: true });
 				expect(first.features.bash_gate_leading.gate).toBe(gateFile.bash_gate_leading);
-				const delivered = await b.prompt();
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
 				expect(b.exposures()).toHaveLength(1);
 				writeGates({ infra805_skill: "off", bash_gate_leading: "off" }, 2_000);
-				expect(await b.request(delivered)).toEqual([]);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
 				const records = b.records();
 				expect(records).toHaveLength(2);
 				expect(records[1].features.infra805_skill).toMatchObject({ gate: "off", on: false });
 				expect(records[1].features.bash_gate_leading).toEqual(first.features.bash_gate_leading);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual([]);
+				await b.prompt();
+				expect(await b.send([PROMPT, CALL, RESULT, REPLY])).toEqual([PROMPT, CALL, RESULT, REPLY]);
 				expect(b.exposures()).toHaveLength(1);
 				expect(b.records()).toHaveLength(2);
 			});
@@ -556,281 +504,86 @@ describe("the extension", () => {
 				writeGates({ infra805_skill: "on" }, 1_000);
 				const b = await bind({}, ROOT_FILE, [], "main", path);
 				await b.start();
-				const delivered = await b.prompt();
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
 				writeGates("{ not json", 2_000);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
+				await b.prompt();
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
 				expect(b.errors).toEqual([expect.stringContaining(`the text arms cannot read the gates in ${path}`)]);
 				expect(b.records()).toHaveLength(1);
 				writeGates({ infra805_skill: "off" }, 3_000);
-				expect(await b.request(delivered)).toEqual([]);
+				expect(await b.send([PROMPT])).toEqual([PROMPT]);
 				expect(b.records()).toHaveLength(2);
 				expect(b.errors).toHaveLength(1);
 			});
-			test.each([true, false])("aa_noop going random mid-process (draw on: %p) makes the next prompt write an `experiments` entry and an exposure entry with the drawn arm", async drawnOn => {
+			test.each([true, false])("aa_noop going random mid-process (draw on: %p) records an `experiments` entry at the next prompt, and the next request writes an exposure entry with the drawn arm and changes nothing", async drawnOn => {
 				const id = ids.find(i => draw(i, "aa_noop") === drawnOn) as string;
 				const arm = drawnOn ? "on" : "off";
 				writeGates({}, 1_000);
 				const b = await bind({}, rootFile(id), [], "main", path);
 				await b.start();
-				await b.request(await b.prompt());
+				await b.send([PROMPT]);
 				expect(b.exposures()).toEqual([]);
 				writeGates({ aa_noop: "random" }, 2_000);
-				expect(await b.prompt()).toEqual([]);
+				await b.prompt();
 				const records = b.records();
 				expect(records).toHaveLength(2);
 				expect(records[1].features.aa_noop).toEqual({ gate: "random", draw: arm, on: drawnOn });
-				expect(await b.request([])).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				const request = [PROMPT];
+				expect(await b.send(request)).toBe(request);
 				expect(b.exposures()).toEqual([{ v: 1, feature: "aa_noop", arm, gate: "random", rootSessionId: id, at: expect.any(String) }]);
 			});
-			test("a gate change between a prompt and its request voids that trigger: no entry for the old arm, and the next prompt records the arm in force", async () => {
-				const drawnOff = ids.find(id => !draw(id, "infra805_skill")) as string;
-				writeGates({ infra805_skill: "on" }, 1_000);
-				const b = await bind({}, rootFile(drawnOff), [], "main", path);
-				await b.start();
-				const delivered = await b.prompt();
-				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
-				writeGates({ infra805_skill: "random" }, 2_000);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
-			});
-			test("a gate going from on to random with the draw on between a prompt and its request sends no text and writes no entry; the next prompt sends the text and records it", async () => {
+			test("each recorded resolution under an on or random gate gets its own exposure entry: on, random with the draw on, off, random again, and a change of another feature", async () => {
 				const drawnOn = ids.find(id => draw(id, "infra805_skill")) as string;
 				writeGates({ infra805_skill: "on" }, 1_000);
 				const b = await bind({}, rootFile(drawnOn), [], "main", path);
 				await b.start();
-				const delivered = await b.prompt();
-				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
 				writeGates({ infra805_skill: "random" }, 2_000);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "random", rootSessionId: drawnOn, at: expect.any(String) }]);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([SKILL, PROMPT, CALL, RESULT]);
+				writeGates({ infra805_skill: "off" }, 3_000);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
+				writeGates({ infra805_skill: "random" }, 4_000);
+				expect(await b.send([PROMPT, CALL, RESULT, REPLY])).toEqual([SKILL, PROMPT, CALL, RESULT, REPLY]);
+				writeGates({ infra805_skill: "random", aa_noop: "random" }, 5_000);
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
+				await b.send([PROMPT, CALL, RESULT]);
+				expect(b.records().map(r => r.features.infra805_skill.gate)).toEqual(["on", "random", "off", "random", "random"]);
+				const skillExposures = b.exposures().filter(e => e.feature === "infra805_skill");
+				expect(skillExposures.map(e => [e.arm, e.gate])).toEqual([["on", "on"], ["on", "random"], ["on", "random"], ["on", "random"]]);
 			});
-			test("a failed append of a new resolution keeps it proposed: logged once, the text arms send nothing and write nothing until it is recorded, the other features run on, and the next event records it", async () => {
+			test("a gate going from on to random with the draw off takes the text out from the next request and records an exposure entry in the off arm", async () => {
+				const drawnOff = ids.find(id => !draw(id, "infra805_skill")) as string;
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, rootFile(drawnOff), [], "main", path);
+				await b.start();
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
+				writeGates({ infra805_skill: "random" }, 2_000);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
+				expect(b.exposures().map(e => [e.arm, e.gate])).toEqual([["on", "on"], ["off", "random"]]);
+			});
+			test("a failed append of a new resolution keeps it proposed: logged once, the text arms write nothing and no request carries a text until it is recorded, the other features run on, and the next event records it", async () => {
 				writeGates({ infra805_skill: "on" }, 1_000);
 				const b = await bind({ OMP_EXPERIMENT_SKILL_GATE: "on" }, ROOT_FILE, [], "main", path);
 				await b.start();
-				const delivered = await b.prompt();
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(await b.send([PROMPT])).toEqual([SKILL, PROMPT]);
 				b.setAppendFailure(customType => customType === ENTRY_TYPE);
 				writeGates({ infra805_skill: "on", infra805_selfcheck: "on" }, 2_000);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual([]);
+				expect(await b.send([PROMPT])).toEqual([PROMPT]);
+				await b.prompt();
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([PROMPT, CALL, RESULT]);
 				expect(b.errors).toEqual([expect.stringContaining("cannot record their new resolution")]);
 				expect(b.records()).toHaveLength(1);
 				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
 				expect((await b.gh())?.block).toBe(true);
 				b.setAppendFailure(() => false);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(await b.send([PROMPT, CALL, RESULT])).toEqual([SKILL, SELFCHECK, PROMPT, CALL, RESULT]);
 				const records = b.records();
 				expect(records).toHaveLength(2);
 				expect(records[1].features.infra805_selfcheck).toMatchObject({ gate: "on", on: true });
-				const next = await b.prompt();
-				expect(next).toEqual(deliveryOf("infra805_selfcheck", selfcheckText));
-				expect(await b.request([...delivered, ...next])).toEqual(["infra805_skill", "infra805_selfcheck"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_skill", "infra805_selfcheck"]);
 				expect(b.errors).toHaveLength(1);
-			});
-			test("a prompt under on, the gate off before its request and on again before an assistant message: no exposure and no text until a new user prompt", async () => {
-				writeGates({ infra805_skill: "on" }, 1_000);
-				const b = await bind({}, ROOT_FILE, [], "main", path);
-				await b.start();
-				const delivered = await b.prompt();
-				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
-				writeGates({ infra805_skill: "off" }, 2_000);
-				expect(await b.request(delivered)).toEqual([]);
-				writeGates({ infra805_skill: "on" }, 3_000);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
-			});
-		});
-
-		describe("an `experiments` entry that cannot be appended at a resolution", () => {
-			test("keeps the text arms closed and is tried again at every later event, logged once; the other features run under the new resolution at once", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
-				b.setAppendFailure(customType => customType === ENTRY_TYPE);
-				await b.start();
-				expect(b.records()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-				expect(await b.request([])).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(b.errors).toEqual([expect.stringContaining("cannot record their new resolution")]);
-				expect((await b.gh())?.block).toBe(true);
-				b.setAppendFailure(() => false);
-				expect(await b.request([])).toEqual([]);
-				expect(b.records()).toEqual([resolve(resolveGates(gateFile, { ...TEXT_OFF, OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_SKILL_GATE: "on" }), ROOT)]);
-				const delivered = await b.prompt();
-				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
-				expect(b.errors).toHaveLength(1);
-			});
-		});
-
-		describe("a branch read that throws after a successful exposure append", () => {
-			test("lets that request carry the text and the entry; at the next request the permit's throw is logged, the feature stops, and the text stays out", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
-				await b.start();
-				const delivered = await b.prompt();
-				b.setBranch(() => {
-					throw new Error("branch unavailable");
-				});
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
-				expect(b.errors).toEqual([]);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in the context scrub")]);
-				expect(await b.request(delivered)).toEqual([]);
-				expect(b.errors).toHaveLength(1);
-			});
-		});
-
-		describe("a copy of the text that omp's shake altered", () => {
-			// omp's shake splices `[shaken ~N tokens — recover: artifact://… (region N)]` over a fenced block of a kept custom message (session-maintenance.ts #shakeElidePlaceholder).
-			const SHAKEN = skillText.replace(/```text\n[\s\S]*?\n```/, "[shaken ~780 tokens — recover: artifact://1 (region 1)]");
-			const shakenCopy: Delivered = { message: { customType: "infra805_skill", content: SHAKEN, display: false } };
-			test("does not count as the text: the scrub keeps it out, and the next user prompt puts the whole text in again", async () => {
-				expect(SHAKEN).not.toBe(skillText);
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
-				await b.start();
-				expect(await b.request(await b.prompt())).toEqual(["infra805_skill"]);
-				const kept = b.entries.find(e => e.type === "custom_message" && e.customType === "infra805_skill") as { content: unknown };
-				kept.content = SHAKEN;
-				expect(await b.request([shakenCopy])).toEqual([]);
-				const again = await b.prompt();
-				expect(again).toEqual(deliveryOf("infra805_skill", skillText));
-				expect(await b.request([shakenCopy, ...again])).toEqual(["infra805_skill"]);
-				expect(b.sentCustom()).toEqual([{ role: "custom", customType: "infra805_skill", content: skillText, display: false, timestamp: 2 }]);
-				expect(b.exposures()).toHaveLength(1);
-			});
-		});
-
-		describe("a compaction's request between a trigger and the run's first request", () => {
-			// The typed prompt of `request` is older than every stored message, as a follow-up queued during the earlier run is: it counts because the session file did not hold it at the trigger.
-			test.each(CUTS)("whose part ends in %s neither takes the trigger nor writes an entry; the run's first request does both", async (_label, part) => {
-				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, STORED);
-				await b.start();
-				const delivered = await b.prompt();
-				expect(await b.compactionRequest([...part])).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
-			});
-			test.each(CUTS)("whose part ends in %s, in a Legion pane, leaves the excluded entry for the run's first request", async (_label, part) => {
-				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", LEGION_ROLE: "architect" }, ROOT_FILE, STORED);
-				await b.start();
-				await b.prompt();
-				await b.compactionRequest([...part]);
-				expect(b.excluded()).toEqual([]);
-				await b.request([]);
-				expect(b.excluded().map(e => e.feature)).toEqual(["aa_noop"]);
-			});
-			test("with a message that a context handler added after the trigger (proactive memory's reminder) neither takes the trigger nor writes an entry", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, STORED);
-				await b.start();
-				const delivered = await b.prompt();
-				const reminder = { role: "developer", content: [{ type: "text", text: "<memory_context>Check the cache.</memory_context>" }], attribution: "agent", timestamp: Date.now() + 60_000 };
-				expect(await b.compactionRequest([...EARLIER.slice(0, 3), reminder])).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
-			});
-			test("that holds a whole kept copy sends none of it and writes no entry; the run's first request does both", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [...STORED, KEPT_SKILL]);
-				await b.start();
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.compactionRequest([...EARLIER, KEPT_SKILL_MESSAGE])).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"]]);
-			});
-		});
-
-		describe("only a user prompt (architect ruling 48e7077f, item 2) triggers the text and the exposure", () => {
-			const ON = { OMP_EXPERIMENT_AA_NOOP: "on", OMP_EXPERIMENT_INFRA805_SKILL: "on" };
-			test("a typed user prompt sends the text and records both features", async () => {
-				const b = await bindArms(ON);
-				await b.start();
-				const delivered = await b.prompt();
-				expect(await b.request(delivered, { role: "user", content: "Design the cache.", attribution: "user" })).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
-			});
-			test("a user-invoked skill message sends the text and records both features", async () => {
-				const b = await bindArms(ON);
-				await b.start();
-				const delivered = await b.prompt();
-				const skillPrompt = { role: "custom", customType: "skill-prompt", content: "Run the review skill.", attribution: "user", display: true };
-				expect(await b.request(delivered, skillPrompt)).toEqual(["skill-prompt", "infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
-			});
-			test.each([
-				["a synthetic prompt", { role: "developer", content: "Continue.", attribution: "agent", synthetic: true }],
-				["a synthetic user message", { role: "user", content: "Continue.", synthetic: true }],
-				["an agent-attributed user message", { role: "user", content: "From the parent agent.", attribution: "agent" }],
-				["a skill message the agent loaded", { role: "custom", customType: "skill-prompt", content: "Autoloaded.", attribution: "agent", display: true }],
-			])("%s sends no text and records nothing; a later typed prompt sends the kept text and records it", async (_label, input) => {
-				const b = await bindArms(ON);
-				await b.start();
-				const delivered = await b.prompt();
-				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
-				// The first request decides the trigger, and a later request of the same run still sends no text.
-				expect(await b.request(delivered, input)).not.toContain("infra805_skill");
-				expect(await b.request(delivered, input)).not.toContain("infra805_skill");
-				expect(b.exposures()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
-				expect(b.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill"]);
-			});
-			test("a context that keeps the text with no exposure entry and no trigger sends none of it", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [KEPT_SKILL]);
-				await b.start();
-				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
-				expect(b.exposures()).toHaveLength(1);
-			});
-			test.each([
-				["a synthetic prompt", { role: "developer", content: "Continue.", attribution: "agent", synthetic: true }],
-				["an agent-attributed user message", { role: "user", content: "From the parent agent.", attribution: "agent" }],
-			])("an entry whose text a pre-prompt compaction dropped is not written through %s that adds a fresh copy: no text and no entry until the next typed prompt, which sends the text and writes one entry", async (_label, input) => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
-				await b.start();
-				expect(await b.prompt()).toEqual(deliveryOf("infra805_skill", skillText));
-				// The pre-prompt compaction drops the text: the run's first request holds the typed prompt and not the text.
-				b.entries.push({ type: "compaction" });
-				expect(await b.request([])).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				const fresh = await b.prompt();
-				expect(fresh).toEqual(deliveryOf("infra805_skill", skillText));
-				expect(await b.request(fresh, input)).toEqual([]);
-				expect(await b.request(fresh, input)).toEqual([]);
-				expect(b.exposures()).toEqual([]);
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request(fresh)).toEqual(["infra805_skill"]);
-				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
-			});
-			test("a run whose first request lacked the text sends none of it in a later compaction's request that holds a whole copy", async () => {
-				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [...STORED, KEPT_SKILL]);
-				await b.start();
-				expect(await b.prompt()).toEqual([]);
-				expect(await b.request([])).toEqual([]);
-				expect(await b.compactionRequest([...EARLIER, KEPT_SKILL_MESSAGE])).toEqual([]);
-				expect(b.exposures()).toEqual([]);
 			});
 		});
 	});
