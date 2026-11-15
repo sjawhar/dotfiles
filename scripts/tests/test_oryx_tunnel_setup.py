@@ -297,9 +297,16 @@ PY
     dpkg)
         if [[ "${1:-}" == --print-architecture ]]; then
             printf 'amd64\n'
-        else
-            exec /usr/bin/dpkg "$@"
+            exit 0
         fi
+        if [[ "${1:-}" == -i ]]; then
+            for argument in "$@"; do
+                [[ "$argument" == *.deb && -f "$argument" ]] || continue
+                printf '%s\n' "$CF_VERSION" > "$CF_VERSION_FILE"
+                exit 0
+            done
+        fi
+        exit 2
         ;;
     forward)
         [[ "${1:-}" == port ]] || exit 2
@@ -308,15 +315,6 @@ PY
         ;;
     sudo)
         exec "$@"
-        ;;
-    apt-get)
-        if [[ "${1:-}" == install ]]; then
-            for argument in "$@"; do
-                [[ "$argument" == *.deb && -f "$argument" ]] || continue
-                printf '%s\n' "$CF_VERSION" > "$CF_VERSION_FILE"
-                break
-            done
-        fi
         ;;
     systemctl)
         if [[ " $* " == *" is-active "* ]]; then
@@ -546,7 +544,6 @@ class TunnelSetup(unittest.TestCase):
             "journalctl",
             "cloudflared",
             "sudo",
-            "apt-get",
             "dpkg",
             "curl",
             "forward",

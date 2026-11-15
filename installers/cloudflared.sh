@@ -53,7 +53,9 @@ Pin-Priority: 1001
 EOF
 sudo chmod 0644 "$preferences"
 
-sudo apt-get install -y --allow-downgrades "$deb"
+# Use dpkg, not apt-get: apt could use a same-version configured cloudflared instead of this checked file.
+# This release has no dependencies.
+sudo dpkg -i "$deb"
 
 if ! has_pinned_version; then
     echo "cloudflared: installed version is not $VERSION" >&2

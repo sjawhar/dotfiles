@@ -35,6 +35,12 @@ def write_command(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def sha256_file(path: Path) -> str:
+    """Hash a file, so a mismatch reports two digests instead of megabytes of bytes."""
+    with path.open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
+
+
 class InstallerHarness:
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -111,6 +117,17 @@ fi''',
             r'''echo "dpkg $*" >> "$CALL_LOG"
 if [[ "${1:-}" == --print-architecture ]]; then
     printf '%s\n' "$FAKE_ARCH"
+elif [[ "${1:-}" == -i ]]; then
+    for argument in "$@"; do
+        if [[ "$argument" == *.deb ]]; then
+            digest="$(sha256sum "$argument" | cut -d' ' -f1)"
+            printf 'dpkg-saw %s %s\n' "$digest" "$argument" >> "$CALL_LOG"
+        fi
+    done
+    if [[ "${DPKG_FAILS:-}" == 1 ]]; then
+        exit 1
+    fi
+    printf '%s\n' "${DPKG_INSTALLS_VERSION:-2026.10.7}" > "$CF_VERSION_FILE"
 else
     exit 2
 fi''',
@@ -143,14 +160,10 @@ printf 'fpr:::::::::{FINGERPRINT}:\n' ''',
     def _standard_apt_get_fake() -> str:
         return r'''echo "apt-get $*" >> "$CALL_LOG"
 
+update=0
 install=0
 pinned_version=0
-update=0
 for argument in "$@"; do
-    if [[ "$argument" == *.deb ]]; then
-        digest="$(sha256sum "$argument" | cut -d' ' -f1)"
-        printf 'apt-get-saw %s %s\n' "$digest" "$argument" >> "$CALL_LOG"
-    fi
     if [[ "$argument" == update ]]; then
         update=1
     elif [[ "$argument" == install ]]; then
@@ -163,16 +176,12 @@ done
 if (( update )); then
     exit 0
 fi
-if (( pinned_version )); then
+if (( install && pinned_version )); then
     printf "E: Version '2026.10.7' for 'cloudflared' was not found\n" >&2
     exit 100
 fi
-if [[ "${APT_FAILS:-}" == 1 ]]; then
-    exit 100
-fi
-if (( install )); then
-    printf '%s\n' "${APT_INSTALLS_VERSION:-2026.10.7}" > "$CF_VERSION_FILE"
-fi'''
+printf 'fake apt-get: unexpected call\n' >&2
+exit 100'''
 
     def serve_payload(self, payload: bytes) -> None:
         self.payload.write_bytes(payload)
@@ -218,19 +227,17 @@ fi'''
         self.assertEqual(len(curl_calls), 1, calls)
         self.assertIn(release_url, curl_calls[0])
 
-        install_prefix = "sudo apt-get install -y --allow-downgrades "
+        install_prefix = "sudo dpkg -i "
         install_calls = [call for call in calls if call.startswith(install_prefix)]
         self.assertEqual(len(install_calls), 1, calls)
         release_path = Path(install_calls[0][len(install_prefix) :])
         self.assertTrue(str(release_path).startswith(f"{self.tmpdir}{os.sep}"), release_path)
         self.assertEqual(release_path.name, f"cloudflared-linux-{arch}.deb")
-        self.assertTrue(
-            str(release_path).endswith(".deb"),
-            "apt-get rejects a local package path without a .deb suffix",
-        )
+        self.assertTrue(str(release_path).endswith(".deb"), release_path)
 
         digest = hashlib.sha256(payload).hexdigest()
-        self.assertEqual(calls.count(f"apt-get-saw {digest} {release_path}"), 1, calls)
+        self.assertEqual(calls.count(f"dpkg-saw {digest} {release_path}"), 1, calls)
+        self.assertFalse(any(call.startswith("apt-get ") for call in calls), calls)
 
     def assert_no_legacy_repository_setup(self) -> None:
         self.assertFalse(
@@ -241,7 +248,7 @@ fi'''
         )
         calls = self.calls()
         self.assertFalse(any(call.startswith("gpg ") for call in calls), calls)
-        self.assertFalse(any("apt-get update" in call for call in calls), calls)
+        self.assertFalse(any(call.startswith("apt-get ") for call in calls), calls)
 
     def assert_clean_release_install(self, arch: str, payload: bytes) -> None:
         self.assert_release_file_install(arch, payload)
@@ -249,6 +256,7 @@ fi'''
         self.assert_no_legacy_repository_setup()
         self.assertEqual(self.version_file.read_text(encoding="utf-8").strip(), VERSION)
         self.assert_tmpdir_empty()
+
 
 class CloudflaredInstaller(InstallerHarness, unittest.TestCase):
 
@@ -283,7 +291,7 @@ class CloudflaredInstaller(InstallerHarness, unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("i386", result.stderr)
         calls = self.calls()
-        for command in ("curl ", "sudo ", "apt-get "):
+        for command in ("curl ", "sudo ", "dpkg -i ", "apt-get "):
             self.assertFalse(any(call.startswith(command) for call in calls), calls)
         self.assertFalse(self.install_root.exists())
         self.assert_tmpdir_empty()
@@ -302,6 +310,7 @@ class CloudflaredInstaller(InstallerHarness, unittest.TestCase):
         self.assertIn("installed nothing", result.stderr)
         calls = self.calls()
         self.assertFalse(any(call.startswith("sudo ") for call in calls), calls)
+        self.assertFalse(any(call.startswith("dpkg -i ") for call in calls), calls)
         self.assertFalse(any(call.startswith("apt-get ") for call in calls), calls)
         self.assertFalse(self.install_root.exists())
         self.assert_tmpdir_empty()
@@ -316,6 +325,7 @@ class CloudflaredInstaller(InstallerHarness, unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
         self.assertFalse(any(call.startswith("sudo ") for call in calls), calls)
+        self.assertFalse(any(call.startswith("dpkg -i ") for call in calls), calls)
         self.assertFalse(any(call.startswith("apt-get ") for call in calls), calls)
         self.assert_tmpdir_empty()
 
@@ -366,35 +376,53 @@ class CloudflaredInstaller(InstallerHarness, unittest.TestCase):
         self.serve_payload(payload)
         self.use_digest("amd64", payload)
 
-        result = self.install(APT_INSTALLS_VERSION="2026.11.0")
+        result = self.install(DPKG_INSTALLS_VERSION="2026.11.0")
 
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(f"cloudflared: installed version is not {VERSION}", result.stderr)
         self.assert_tmpdir_empty()
 
-    def test_apt_failure_removes_the_temporary_release_file(self) -> None:
-        payload = b"cloudflared release with a failing apt invocation\n"
+    def test_dpkg_failure_removes_the_temporary_release_file(self) -> None:
+        payload = b"cloudflared release with a failing dpkg invocation\n"
         self.serve_payload(payload)
         self.use_digest("amd64", payload)
 
-        result = self.install(APT_FAILS="1")
+        result = self.install(DPKG_FAILS="1")
 
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assert_tmpdir_empty()
 
 
 @unittest.skipUnless(
-    all(shutil.which(command) for command in ("apt-get", "apt-cache", "dpkg-deb")),
-    "requires apt-get, apt-cache, and dpkg-deb",
+    all(
+        shutil.which(command)
+        for command in ("apt-get", "apt-cache", "apt-config", "dpkg", "dpkg-deb")
+    ),
+    "requires apt-get, apt-cache, apt-config, dpkg, and dpkg-deb",
 )
 class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.real_apt_get = shutil.which("apt-get")
         self.real_apt_cache = shutil.which("apt-cache")
+        self.real_apt_config = shutil.which("apt-config")
+        self.real_dpkg = shutil.which("dpkg")
         self.real_dpkg_deb = shutil.which("dpkg-deb")
         self.assertTrue(
-            all((self.real_apt_get, self.real_apt_cache, self.real_dpkg_deb))
+            all(
+                (
+                    self.real_apt_get,
+                    self.real_apt_cache,
+                    self.real_apt_config,
+                    self.real_dpkg,
+                    self.real_dpkg_deb,
+                )
+            )
+        )
+        # dpkg needs the sbin directories in PATH for ldconfig and start-stop-daemon.
+        self.env["PATH"] = (
+            f"{self.bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:"
+            "/usr/bin:/sbin:/bin"
         )
 
         self.apt_root = self.root / "apt"
@@ -405,6 +433,10 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
         self.status = self.apt_root / "var/lib/dpkg/status"
         self.empty_status = self.apt_root / "var/lib/dpkg/empty-status"
         self.empty_preferences = self.root / "empty-preferences"
+        self.empty_apt_parts = self.root / "empty-apt-conf.d"
+        self.missing_source_list = self.root / "missing-sources.list"
+        self.missing_apt_main = self.root / "missing-apt.conf"
+        self.apt_config = self.root / "apt.conf"
         self.repo = self.apt_root / "repo"
         for directory in (
             self.source_parts,
@@ -412,13 +444,73 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
             self.cache / "archives/partial",
             self.status.parent,
             self.empty_preferences,
+            self.empty_apt_parts,
             self.repo,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+        self.status.write_text("", encoding="utf-8")
         self.empty_status.write_text("", encoding="utf-8")
-        self._write_repository()
+        self._write_apt_config()
         self.deb = self._release_deb()
         self.deb_bytes = self.deb.read_bytes()
+        self.repository_deb = self._repository_deb()
+        self._write_repository()
+
+    def _write_apt_config(self) -> None:
+        self.apt_config.write_text(
+            "\n".join(
+                (
+                    f'Dir "{self.apt_root}";',
+                    f'Dir::State "{self.state}";',
+                    f'Dir::State::status "{self.status}";',
+                    f'Dir::Cache "{self.cache}";',
+                    f'Dir::Etc "{self.etc}";',
+                    f'Dir::Etc::sourcelist "{self.missing_source_list}";',
+                    f'Dir::Etc::sourceparts "{self.source_parts}";',
+                    f'Dir::Etc::parts "{self.empty_apt_parts}";',
+                    f'Dir::Etc::main "{self.missing_apt_main}";',
+                    f'Dir::Etc::preferencesparts "{self.empty_preferences}";',
+                    'Debug::NoLocking "true";',
+                    'APT::Architecture "amd64";',
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _build_deb(
+        self,
+        package_root: Path,
+        output: Path,
+        version: str,
+        cloudflared: bytes,
+        control_text: str | None = None,
+    ) -> Path:
+        control = package_root / "DEBIAN/control"
+        binary = package_root / "usr/bin/cloudflared"
+        control.parent.mkdir(parents=True, exist_ok=True)
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        if control_text is None:
+            control_text = (
+                "Package: cloudflared\n"
+                f"Version: {version}\n"
+                "Architecture: amd64\n"
+                "Maintainer: Cloudflared installer test <test@example.invalid>\n"
+                "Description: Minimal cloudflared package for apt pin testing\n"
+            )
+        control.write_text(control_text, encoding="utf-8")
+        binary.write_bytes(cloudflared)
+        binary.chmod(0o755)
+        result = subprocess.run(
+            [self.real_dpkg_deb, "--build", "-Zgzip", str(package_root), str(output)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        output_text = self.output(result)
+        self.assertEqual(result.returncode, 0, output_text)
+        return output
 
     def _release_deb(self) -> Path:
         configured = os.environ.get("CLOUDFLARED_DEB")
@@ -428,30 +520,38 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
             self.assertTrue(release_deb.is_file(), f"missing {release_deb}")
             return release_deb
 
-        package_root = self.root / "minimal-cloudflared"
-        control = package_root / "DEBIAN/control"
-        control.parent.mkdir(parents=True)
-        control.write_text(
-            "Package: cloudflared\n"
-            f"Version: {VERSION}\n"
-            "Architecture: amd64\n"
-            "Maintainer: Cloudflared installer test <test@example.invalid>\n"
-            "Description: Minimal cloudflared package for apt pin testing\n",
-            encoding="utf-8",
+        return self._build_deb(
+            self.root / "checked-cloudflared",
+            self.root / "cloudflared-linux-amd64.deb",
+            VERSION,
+            b"checked cloudflared release file\n",
         )
-        release_deb = self.root / "cloudflared-linux-amd64.deb"
+
+    def _deb_control(self, deb: Path) -> str:
         result = subprocess.run(
-            [self.real_dpkg_deb, "--build", str(package_root), str(release_deb)],
+            [self.real_dpkg_deb, "-f", str(deb)],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
         )
-        output = self.output(result)
-        self.assertEqual(result.returncode, 0, output)
-        return release_deb
+        self.assertEqual(result.returncode, 0, self.output(result))
+        return result.stdout
+
+    def _repository_deb(self) -> Path:
+        return self._build_deb(
+            self.root / "repository-cloudflared",
+            self.repo / f"cloudflared_{VERSION}_amd64.deb",
+            VERSION,
+            b"repository cloudflared release file\n",
+            self._deb_control(self.deb),
+        )
 
     def _write_repository(self) -> None:
+        repository_digest = hashlib.sha256(self.repository_deb.read_bytes()).hexdigest()
+        # The same-version entry lists the checked .deb's Size: apt takes an index entry with the
+        # same control fields and Size as the command-line file's package and fetches it from the
+        # repository. A hostile repository would pad its file to that size.
         (self.repo / "Packages").write_text(
             "Package: cloudflared\n"
             "Version: 2026.11.0\n"
@@ -459,7 +559,12 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
             "Maintainer: Cloudflared installer test <test@example.invalid>\n"
             "Filename: cloudflared_2026.11.0_amd64.deb\n"
             "Size: 1\n"
-            "Description: Newer package offered by the local repository\n",
+            "Description: Newer package offered by the local repository\n"
+            "\n"
+            f"{self._deb_control(self.deb)}"
+            f"Filename: {self.repository_deb.name}\n"
+            f"Size: {self.deb.stat().st_size}\n"
+            f"SHA256: {repository_digest}\n",
             encoding="utf-8",
         )
         (self.source_parts / "local.list").write_text(
@@ -470,28 +575,16 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
     def output(result: subprocess.CompletedProcess[str]) -> str:
         return f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
-    def apt_options(self, status: Path, preferences: Path) -> list[str]:
+    def apt_environment(self) -> dict[str, str]:
+        return {**os.environ, "APT_CONFIG": str(self.apt_config)}
+
+    @staticmethod
+    def apt_options(status: Path, preferences: Path) -> list[str]:
         return [
-            "-o",
-            f"Dir={self.apt_root}",
             "-o",
             f"Dir::State::status={status}",
             "-o",
-            f"Dir::Etc={self.etc}",
-            "-o",
-            "Dir::Etc::sourcelist=-",
-            "-o",
-            f"Dir::Etc::sourceparts={self.source_parts}",
-            "-o",
             f"Dir::Etc::preferencesparts={preferences}",
-            "-o",
-            f"Dir::Cache={self.cache}",
-            "-o",
-            f"Dir::State={self.state}",
-            "-o",
-            "Debug::NoLocking=1",
-            "-o",
-            "APT::Architecture=amd64",
         ]
 
     def run_apt(
@@ -503,6 +596,7 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
             text=True,
             timeout=30,
             check=False,
+            env=self.apt_environment(),
         )
 
     def run_apt_cache(
@@ -514,6 +608,17 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
             text=True,
             timeout=30,
             check=False,
+            env=self.apt_environment(),
+        )
+
+    def run_apt_config(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self.real_apt_config, "dump"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=self.apt_environment(),
         )
 
     def write_installed_status(self) -> None:
@@ -530,6 +635,76 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _prepare_install_tree(self) -> None:
+        dpkg_state = self.install_root / "var/lib/dpkg"
+        for directory in (
+            dpkg_state / "updates",
+            dpkg_state / "info",
+            dpkg_state / "triggers",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        (dpkg_state / "status").write_text("", encoding="utf-8")
+
+    def _extract_deb(self, deb: Path, destination: Path) -> None:
+        result = subprocess.run(
+            [self.real_dpkg_deb, "-x", str(deb), str(destination)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, self.output(result))
+
+    def _regular_files_in_deb(self, deb: Path) -> list[Path]:
+        result = subprocess.run(
+            [self.real_dpkg_deb, "-c", str(deb)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(result.returncode, 0, self.output(result))
+        files = []
+        for line in result.stdout.splitlines():
+            if line.startswith("-"):
+                fields = line.split(maxsplit=5)
+                self.assertEqual(len(fields), 6, line)
+                self.assertTrue(fields[5].startswith("./"), line)
+                files.append(Path(fields[5][2:]))
+        return files
+
+    def assert_checked_deb_installed(self) -> None:
+        checked_files = self._regular_files_in_deb(self.deb)
+        checked_tree = self.root / "checked-deb"
+        self._extract_deb(self.deb, checked_tree)
+        for relative_path in checked_files:
+            expected = checked_tree / relative_path
+            installed = self.install_root / relative_path
+            self.assertTrue(installed.is_file(), installed)
+            self.assertEqual(sha256_file(installed), sha256_file(expected), installed)
+
+    def write_real_dpkg_fake(self) -> None:
+        write_command(
+            self.bin_dir,
+            "dpkg",
+            r'''echo "dpkg $*" >> "$CALL_LOG"
+if [[ "${1:-}" == --print-architecture ]]; then
+    printf 'amd64\n'
+elif [[ "${1:-}" == -i ]]; then
+    for argument in "$@"; do
+        if [[ "$argument" == *.deb ]]; then
+            digest="$(sha256sum "$argument" | cut -d' ' -f1)"
+            printf 'dpkg-saw %s %s\n' "$digest" "$argument" >> "$CALL_LOG"
+            "$REAL_DPKG" --force-not-root --root="$REAL_INSTALL_TREE" --log=/dev/null --unpack "$argument"
+        fi
+    done
+    printf '%s\n' "2026.10.7" > "$CF_VERSION_FILE"
+else
+    exit 2
+fi''',
+        )
+
     def write_real_apt_fake(self) -> None:
         write_command(
             self.bin_dir,
@@ -538,29 +713,56 @@ class RealAptKeepsThePin(InstallerHarness, unittest.TestCase):
 
 install=0
 for argument in "$@"; do
-    if [[ "$argument" == *.deb ]]; then
-        digest="$(sha256sum "$argument" | cut -d' ' -f1)"
-        printf 'apt-get-saw %s %s\n' "$digest" "$argument" >> "$CALL_LOG"
-    fi
     if [[ "$argument" == install ]]; then
         install=1
     fi
 done
 
-if (( install )); then
-    mapfile -t options < "$REAL_APT_OPTIONS"
-    if "$REAL_APT_GET" -s "${options[@]}" "$@" > "$APT_CAPTURE" 2>&1
-    then
-        printf '%s\n' "2026.10.7" > "$CF_VERSION_FILE"
-    else
-        result=$?
-        cat "$APT_CAPTURE" >&2
-        exit "$result"
-    fi
-fi''',
+if (( ! install )); then
+    printf 'fake apt-get: unexpected call\n' >&2
+    exit 100
+fi
+
+if ! APT_CONFIG="$REAL_APT_CONFIG" "$REAL_APT_GET" \
+    -o "Dir::State::status=$REAL_EMPTY_STATUS" \
+    -o "Dir::Etc::preferencesparts=$REAL_PIN_DIR" \
+    -d --print-uris -y "$@" > "$REAL_APT_CAPTURE" 2>&1
+then
+    result=$?
+    cat "$REAL_APT_CAPTURE" >&2
+    exit "$result"
+fi
+
+uri=''
+while IFS= read -r line; do
+    case "$line" in
+        "'file:"*)
+            uri="${line:1}"
+            uri="${uri%%\'*}"
+            break
+            ;;
+    esac
+done < "$REAL_APT_CAPTURE"
+if [[ -z "$uri" ]]; then
+    cat "$REAL_APT_CAPTURE" >&2
+    exit 1
+fi
+
+"$REAL_DPKG" --force-not-root --root="$REAL_INSTALL_TREE" --log=/dev/null --unpack "${uri#file:}"
+printf '%s\n' "2026.10.7" > "$CF_VERSION_FILE"''',
         )
 
     def test_upgrade_control_then_installer_pin_keeps_the_installed_release(self) -> None:
+        isolation = self.run_apt_config()
+        self.assertEqual(isolation.returncode, 0, self.output(isolation))
+        self.assertNotIn("Post-Invoke", isolation.stdout, self.output(isolation))
+        self.assertNotIn("Pre-Invoke", isolation.stdout, self.output(isolation))
+        self.assertNotRegex(
+            isolation.stdout,
+            r"(?m)^DPkg::.*(?:Invoke|Install-Pkgs)",
+            self.output(isolation),
+        )
+
         update = self.run_apt(["update"], self.empty_status, self.empty_preferences)
         self.assertEqual(update.returncode, 0, self.output(update))
 
@@ -568,7 +770,7 @@ fi''',
             ["policy", "cloudflared"], self.empty_status, self.empty_preferences
         )
         self.assertEqual(unpinned_policy.returncode, 0, self.output(unpinned_policy))
-        self.assertIn("2026.11.0", self.output(unpinned_policy), self.output(unpinned_policy))
+        self.assertIn("2026.11.0", unpinned_policy.stdout, self.output(unpinned_policy))
 
         self.write_installed_status()
         upgrade_without_pin = self.run_apt(
@@ -577,48 +779,90 @@ fi''',
         self.assertEqual(upgrade_without_pin.returncode, 0, self.output(upgrade_without_pin))
         self.assertIn(
             "Inst cloudflared [2026.10.7] (2026.11.0",
-            self.output(upgrade_without_pin),
+            upgrade_without_pin.stdout,
             self.output(upgrade_without_pin),
         )
 
+        hazard_preferences = self.root / "hazard-preferences"
+        hazard_preferences.mkdir()
+        (hazard_preferences / "cloudflared.pref").write_text(
+            PIN_TEXT, encoding="utf-8"
+        )
+        hazard = self.run_apt(
+            [
+                "-d",
+                "--print-uris",
+                "-y",
+                "install",
+                "--allow-downgrades",
+                str(self.deb),
+            ],
+            self.empty_status,
+            hazard_preferences,
+        )
+        self.assertEqual(hazard.returncode, 0, self.output(hazard))
+        self.assertIn(str(self.repository_deb), hazard.stdout, self.output(hazard))
+        self.assertNotIn(str(self.deb), hazard.stdout, self.output(hazard))
+
+        self._prepare_install_tree()
         self.serve_payload(self.deb_bytes)
         self.use_digest("amd64", self.deb_bytes)
-        apt_capture = self.root / "installer-apt-output.txt"
+        self.write_real_dpkg_fake()
         self.write_real_apt_fake()
         pin_dir = self.install_root / "etc/apt/preferences.d"
-        apt_options = self.root / "real-apt-options"
-        apt_options.write_text(
-            "\n".join(self.apt_options(self.empty_status, pin_dir)) + "\n",
+        apt_capture = self.root / "installer-apt-output.txt"
+        result = self.install(
+            REAL_APT_CONFIG=str(self.apt_config),
+            REAL_APT_GET=self.real_apt_get,
+            REAL_APT_CAPTURE=str(apt_capture),
+            REAL_DPKG=self.real_dpkg,
+            REAL_EMPTY_STATUS=str(self.empty_status),
+            REAL_INSTALL_TREE=str(self.install_root),
+            REAL_PIN_DIR=str(pin_dir),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_checked_deb_installed()
+        repository_tree = self.root / "repository-deb"
+        self._extract_deb(self.repository_deb, repository_tree)
+        self.assertNotEqual(
+            sha256_file(self.install_root / "usr/bin/cloudflared"),
+            sha256_file(repository_tree / "usr/bin/cloudflared"),
+        )
+        checked_digest = hashlib.sha256(self.deb_bytes).hexdigest()
+        calls = self.calls()
+        install_prefix = "sudo dpkg -i "
+        install_calls = [call for call in calls if call.startswith(install_prefix)]
+        self.assertEqual(len(install_calls), 1, calls)
+        release_path = install_calls[0][len(install_prefix) :]
+        self.assertEqual(
+            calls.count(f"dpkg-saw {checked_digest} {release_path}"), 1, calls
+        )
+
+        installed_status = self.install_root / "var/lib/dpkg/status"
+        installed_status.write_text(
+            installed_status.read_text(encoding="utf-8").replace(
+                "install ok unpacked", "install ok installed"
+            ),
             encoding="utf-8",
         )
-
-        result = self.install(
-            REAL_APT_GET=self.real_apt_get,
-            REAL_APT_OPTIONS=str(apt_options),
-            APT_CAPTURE=str(apt_capture),
+        upgrade_with_pin = self.run_apt(
+            ["-s", "upgrade"], installed_status, pin_dir
         )
-        apt_output = apt_capture.read_text(encoding="utf-8") if apt_capture.exists() else ""
-        self.assertEqual(result.returncode, 0, f"{result.stderr}\n{apt_output}")
-        self.assertIn(
-            "Inst cloudflared (2026.10.7 local-deb [amd64])",
-            apt_output,
-            apt_output,
-        )
-
-        upgrade_with_pin = self.run_apt(["-s", "upgrade"], self.status, pin_dir)
         self.assertEqual(upgrade_with_pin.returncode, 0, self.output(upgrade_with_pin))
         self.assertFalse(
             any(
                 line.startswith("Inst cloudflared")
-                for line in self.output(upgrade_with_pin).splitlines()
+                for line in upgrade_with_pin.stdout.splitlines()
             ),
             self.output(upgrade_with_pin),
         )
 
-        pinned_policy = self.run_apt_cache(["policy", "cloudflared"], self.status, pin_dir)
+        pinned_policy = self.run_apt_cache(
+            ["policy", "cloudflared"], installed_status, pin_dir
+        )
         self.assertEqual(pinned_policy.returncode, 0, self.output(pinned_policy))
         self.assertIn(
-            f"Candidate: {VERSION}", self.output(pinned_policy), self.output(pinned_policy)
+            f"Candidate: {VERSION}", pinned_policy.stdout, self.output(pinned_policy)
         )
 
 
