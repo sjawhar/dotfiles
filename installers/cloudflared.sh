@@ -1,14 +1,11 @@
 #!/bin/bash
-# Install Cloudflare Access's SSH client at the same pin as dojo's
-# platform/oryx-edge/deploy/install-cloudflared.sh.
+# Install Cloudflare Access's SSH client from its pinned GitHub release file, checked by SHA-256,
+# at the same version as dojo's platform/oryx-edge/deploy/install-cloudflared.sh.
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 VERSION=2026.10.7
-KEY_FPR=CC94B39C77AE7342A68B89628A682D308D4E5E73
-KEYRING=/usr/share/keyrings/cloudflare-main.gpg
-SOURCE_LIST=/etc/apt/sources.list.d/cloudflared.list
 PREFERENCES=/etc/apt/preferences.d/cloudflared.pref
 INSTALL_ROOT="${INSTALL_ROOT:-}"
 
@@ -22,39 +19,41 @@ if has_pinned_version; then
     exit 0
 fi
 
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o "$tmp"
+# Published in https://github.com/cloudflare/cloudflared/releases/tag/2026.10.7.
+SHA256_AMD64=70b1a1e0f46033ffc8d90b406e554044ba6cbf2e4360295ef1163aed31e09393
+SHA256_ARM64=d9407eb6e70ac31f54978a6b408a0320b51b664a6d0b498248692d7ac56bf836
 
-fingerprint="$(gpg --show-keys --with-colons "$tmp" | while IFS=: read -r kind _ _ _ _ _ _ _ _ value _; do
-    if [[ "$kind" == fpr ]]; then
-        printf '%s\n' "$value"
-        break
-    fi
-done)"
-if [[ "$fingerprint" != "$KEY_FPR" ]]; then
-    echo "cloudflared: apt key fingerprint does not match the pinned Cloudflare key; stop" >&2
+arch="$(dpkg --print-architecture)"
+case "$arch" in
+    amd64) expected=$SHA256_AMD64 ;;
+    arm64) expected=$SHA256_ARM64 ;;
+    *)
+        echo "cloudflared: no release file for architecture $arch; stop" >&2
+        exit 1
+        ;;
+esac
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf -- "$tmp_dir"' EXIT
+deb="$tmp_dir/cloudflared-linux-$arch.deb"
+curl -fsSL --retry 3 -o "$deb" "https://github.com/cloudflare/cloudflared/releases/download/$VERSION/cloudflared-linux-$arch.deb"
+actual="$(sha256sum "$deb" | cut -d' ' -f1)"
+if [[ "$actual" != "$expected" ]]; then
+    echo "cloudflared: SHA-256 of cloudflared-linux-$arch.deb is $actual, expected $expected; installed nothing" >&2
     exit 1
 fi
 
-keyring="${INSTALL_ROOT}${KEYRING}"
-source_list="${INSTALL_ROOT}${SOURCE_LIST}"
 preferences="${INSTALL_ROOT}${PREFERENCES}"
-sudo mkdir -p "$(dirname "$keyring")" "$(dirname "$source_list")" "$(dirname "$preferences")"
-sudo install -m 0644 "$tmp" "$keyring"
-printf 'deb [signed-by=%s] https://pkg.cloudflare.com/cloudflared any main\n' "$KEYRING" \
-    | sudo tee "$source_list" >/dev/null
+sudo mkdir -p "$(dirname "$preferences")"
 sudo tee "$preferences" >/dev/null <<EOF
 # Pinned by installers/cloudflared.sh; change VERSION there to upgrade.
 Package: cloudflared
 Pin: version $VERSION
 Pin-Priority: 1001
 EOF
-sudo chmod 0644 "$source_list" "$preferences"
+sudo chmod 0644 "$preferences"
 
-sudo apt-get update -o Dir::Etc::sourcelist=sources.list.d/cloudflared.list \
-    -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
-sudo apt-get install -y --allow-downgrades "cloudflared=$VERSION"
+sudo apt-get install -y --allow-downgrades "$deb"
 
 if ! has_pinned_version; then
     echo "cloudflared: installed version is not $VERSION" >&2
