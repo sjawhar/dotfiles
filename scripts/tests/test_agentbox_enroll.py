@@ -26,6 +26,7 @@ import functools
 import os
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -33,7 +34,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -62,6 +63,13 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path = directory / name
     path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def wait_until(test: Callable[[], bool], seconds: float) -> None:
+    """Return once `test` answers true, asked every 0.05 s, or after `seconds` whatever it answers."""
+    end = time.monotonic() + seconds
+    while not test() and time.monotonic() < end:
+        time.sleep(0.05)
 
 
 # A box's key dir is where box_keydir puts it, $STUB_RUN_BASE/<box>/$STUB_KEYDIR_REL. `docker run`
@@ -150,13 +158,17 @@ esac
 #   fail      "broker unreachable", exit 1
 #   known     the pinned client's ENROLL_FAILED line, exit 1
 #   draining  its DRAINING line, exit 1
+#   knownsecond  a warning line, then the ENROLL_FAILED line, exit 1
 #   conflict  a 409 refusal for a session's runtime id, enr-box for any other
 #   broker    the broker's answer (broker_enroll), as the real client prints and writes it
-# and six words for a call whose outcome the client cannot tell, each of which makes the
+# and nine words for a call whose outcome the client cannot tell, each of which makes the
 # enrollment at the broker as `broker` does: nofile (exit 0 with the id, and no enrollment file),
 # unknown (the pinned client's ENROLL_OUTCOME_UNKNOWN line), noreply (its line for a helper that
-# gave no answer), oldclient (its line for an old helper's empty reply) and unwritable (its line
-# for an id it could not write), each exit 1, and signal (a SIGHUP to itself: no line, exit 129).
+# gave no answer), oldclient (its line for an old helper's empty reply), unwritable (its line for
+# an id it could not write), buried (a line for a helper that gave no answer, with the
+# ENROLL_FAILED line inside its parentheses), indented (a space, then the ENROLL_FAILED line) and
+# warnfirst (a warning line, then the ENROLL_OUTCOME_UNKNOWN line), each exit 1, and signal (a
+# SIGHUP to itself: no line, exit 129).
 # A learn call (unenroll_learn: no --session-id, and a key dir under $STUB_RUN_BASE/learn.) takes
 # the words of $STUB_LEARN instead (broker by default), and with STUB_LEARN_AFTER set it answers
 # only once that file exists (120 s at most). With STUB_HUP_PID set, a box's enroll call first
@@ -233,6 +245,7 @@ case "$1" in
             fail) echo "broker unreachable" >&2; exit 1 ;;
             known) echo "agent-secrets enroll: ENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not enroll this runtime" >&2; exit 1 ;;
             draining) echo "agent-secrets enroll: DRAINING: the helper is shutting down and takes no new calls" >&2; exit 1 ;;
+            knownsecond) printf '%s\n' "agent-secrets: warning: something" "agent-secrets enroll: ENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not enroll this runtime" >&2; exit 1 ;;
             conflict)
                 # A live enrollment of this session under a key this host no longer has.
                 case "$rt" in
@@ -242,7 +255,7 @@ case "$1" in
             broker)
                 id="$(broker_enroll "$rt" "$tp")" || { echo "$ALREADY_ENROLLED" >&2; exit 1; }
                 echo "$id" >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo "$id" ;;
-            nofile|unknown|noreply|oldclient|signal|unwritable)
+            nofile|unknown|noreply|oldclient|signal|unwritable|buried|indented|warnfirst)
                 id="$(broker_enroll "$rt" "$tp")"
                 case "$mode" in
                     nofile) echo "$id" ;;
@@ -251,6 +264,9 @@ case "$1" in
                     oldclient) echo "agent-secrets enroll: helper reply is not one JSON object: unexpected end of JSON input" >&2; exit 1 ;;
                     signal) kill -HUP "$$" ;;
                     unwritable) echo "agent-secrets enroll: the broker made enrollment $id, but this command could not write its id to $AGENT_SECRETS_KEY_DIR/enrollment: permission denied" >&2; exit 1 ;;
+                    buried) echo "agent-secrets enroll: the helper gave no answer (read unix @->helper.sock: agent-secrets enroll: ENROLL_FAILED: broker 403). So it is not known if the broker made the enrollment." >&2; exit 1 ;;
+                    indented) echo " agent-secrets enroll: ENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not enroll this runtime" >&2; exit 1 ;;
+                    warnfirst) printf '%s\n' "agent-secrets: warning: something" "agent-secrets enroll: ENROLL_OUTCOME_UNKNOWN: the broker's answer did not come back within 20s" >&2; exit 1 ;;
                 esac ;;
             *) echo "unexpected STUB_ENROLL word $mode" >&2; exit 99 ;;
         esac ;;
@@ -365,9 +381,15 @@ class EnrollFixture(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def bash(self, body: str, timeout: float = 300, **stubs: str) -> subprocess.CompletedProcess[str]:
-        script = f'source "{AGENTBOX}"\nRUN_BASE="{self.run_base}"\n{body}\n'
-        env = {
+    def bash_script(self, body: str) -> str:
+        """`body`, after the lines that source scripts/agentbox and set its RUN_BASE to the temp
+        dir's run dir."""
+        return f'source "{AGENTBOX}"\nRUN_BASE="{self.run_base}"\n{body}\n'
+
+    def bash_env(self, **stubs: str) -> dict[str, str]:
+        """The environment a bash_script runs in: the stubs first on PATH, the temp dir's paths for
+        the script and the stubs, and `stubs` over them."""
+        return {
             "HOME": str(self.home),
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "DOTFILES_DIR": str(DOTFILES),
@@ -388,12 +410,19 @@ class EnrollFixture(unittest.TestCase):
             "STUB_BROKER": str(self.broker),
             **stubs,
         }
+
+    def bash(self, body: str, timeout: float = 300, **stubs: str) -> subprocess.CompletedProcess[str]:
         # 300 s, not 60: the slow-box test below deliberately runs 400 passes of the wait, each
         # forking a stub `docker`, and on this host at load 300-550 that alone takes over a
         # minute (it timed out at 60 s on 2026-11-01, on HEAD as well as on the change under
         # test). Every other case here finishes in seconds, so the larger cap only bites a hang.
         return subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, env=env, check=False, timeout=timeout
+            ["bash", "-c", self.bash_script(body)],
+            capture_output=True,
+            text=True,
+            env=self.bash_env(**stubs),
+            check=False,
+            timeout=timeout,
         )
 
     def enroll(self, **stubs: str) -> subprocess.CompletedProcess[str]:
@@ -941,7 +970,8 @@ class OpenAttempts(EnrollFixture):
     one bash process (`close`). The body writes a `close` line into the call log before the close,
     so the calls after that line are the close's, and ends with `wait`: the close's detached
     processes are children of the body's shell, so it returns once they have ended, before
-    tearDown removes the dir they write in. They log to session-keys/unenroll.log.
+    tearDown removes the dir they write in. They log to session-keys/unenroll.log. The case that
+    kills the body's process group waits for the detached process's line in that log instead.
     """
 
     OWN_OPEN = f"own box1 {THUMBPRINT}"
@@ -1030,6 +1060,30 @@ class OpenAttempts(EnrollFixture):
                 before, after = self.calls_around_close("enroll ")
                 self.assertEqual(len(before), 10, before)
                 self.assertEqual(after, [])
+
+    def test_a_known_code_where_it_does_not_count_leaves_the_call_open(self) -> None:
+        """Each of enroll_box's calls exits 1 while the broker made the enrollment, and no line of
+        its stderr starts with a known code: the ENROLL_FAILED line inside the text of a line for a
+        helper that gave no answer (buried), the ENROLL_FAILED line after a space (indented), or a
+        warning line and then the ENROLL_OUTCOME_UNKNOWN line (warnfirst). Then close_box. The close
+        makes one learn call, for box1 and the key's thumbprint, and one unenroll call, of enr-1;
+        the broker's row of enr-1 has ended."""
+        for word in ("buried", "indented", "warnfirst"):
+            with self.subTest(enroll=word):
+                self.reset_box()
+                self.close('enroll_box box1 "" || true', STUB_ENROLL=word)
+                self.assert_one_learn_call("box1")
+                self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+                self.assertEqual(self.broker_rows("box1"), [["enr-1", "box1", THUMBPRINT, "ended"]])
+
+    def test_a_known_code_at_the_start_of_a_later_line_leaves_nothing_to_learn(self) -> None:
+        """Each of enroll_box's ten calls is refused with a warning line and then the ENROLL_FAILED
+        line (knownsecond): the code starts the second line of the stderr, not the first. The
+        close makes no enroll call."""
+        self.close('enroll_box box1 "" || true', STUB_ENROLL="knownsecond")
+        before, after = self.calls_around_close("enroll ")
+        self.assertEqual(len(before), 10, before)
+        self.assertEqual(after, [])
 
     def test_a_recorded_success_settles_an_earlier_open_attempt(self) -> None:
         """The first call ends with its outcome not known while the broker made enr-1; the retry,
@@ -1281,6 +1335,44 @@ class OpenAttempts(EnrollFixture):
         )
         self.assert_one_learn_call("box1")
         self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+
+    def test_a_kill_of_the_launchers_process_group_does_not_stop_the_learn_call(self) -> None:
+        """The body runs in a process group of its own, as a launcher does, and sleeps once
+        close_box has returned. Each enroll call of box1 (no session id) ends with its outcome not
+        known, and the learn call answers only once a file exists (STUB_LEARN_AFTER). Once
+        close_box has returned (within 120 s), the body's process group gets SIGKILL, as a
+        cancelled `agentbox move` sends it 30 s after TERM (move_to_cancel_start), and then the
+        file is written. Within 60 s unenroll.log holds one line, the revoke of enr-1 (runtime id
+        box1), and the broker's row of enr-1 has ended."""
+        gate = self.root / "learn-gate"
+        returned = self.root / "close-box-returned"
+        revoked = "box1: enrollment enr-1 (runtime id box1) revoked"
+        # /bin/sleep, not the stub, which returns at once: the body is still in its process group
+        # when the kill comes.
+        body = (
+            'enroll_box box1 "" || true\necho close >>"$STUB_CALLS"\nclose_box box1 ""\n'
+            f': >"{returned}"\n/bin/sleep 60'
+        )
+        proc = subprocess.Popen(
+            ["bash", "-c", self.bash_script(body)],
+            env=self.bash_env(STUB_GONE="1", STUB_ENROLL="unknown", STUB_LEARN_AFTER=str(gate)),
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            wait_until(returned.exists, 120)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
+            gate.write_text("")
+        # The revoke line is the detached process's last write, so waiting for it also keeps that
+        # process from outliving the temp dir.
+        wait_until(lambda: revoked in self.unenroll_log(), 60)
+        self.assertTrue(returned.exists(), "close_box did not return")
+        self.assertEqual(self.unenroll_log(), [revoked])
+        self.assertEqual(self.broker_rows("box1"), [["enr-1", "box1", THUMBPRINT, "ended"]])
 
     def test_a_hangup_stops_the_attempts_and_the_close_learns_the_one_made(self) -> None:
         """A HUP comes during enroll_box's first call (STUB_HUP_PID), and a HUP trap sets
