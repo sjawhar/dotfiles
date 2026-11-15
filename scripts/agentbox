@@ -1983,15 +1983,11 @@ ensure_forward_channels() {
 # 2026-11-02 every route to it from a box failed and two lanes waited on it - the box's own
 # loopback, the box network's gateway, docker0's 172.17.0.1, and the tailnet (`tailscale serve`'s
 # :8449 listener is bound to the tailscale0 device, so a packet from a box bridge never reaches
-# it). 5432 is the Cloud SQL Auth Proxy to agents-postgres
-# (omp/cloud-sql-proxy-agents-postgres.service): omp's session store writes a session's transcript
-# to the omp_sessions database through it (dispatch://INFRA-1192), and the DSN names 127.0.0.1:5432,
-# so the relay has to put the listener back on that exact address for one DSN to serve the host and
-# every box. The instance takes no raw TCP from here at all - measured 2026-11-04, its public
-# 136.117.143.83 and its private 10.54.0.8 both refuse 5432 and 6432 from the host and from inside a
-# box - so the proxy, and this relay, are the whole route. AGENTBOX_LOOPBACK_PORTS (space-separated
-# ports) replaces the list.
-read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005 5432}"
+# it). The database proxy on 5432 (omp/cloud-sql-proxy-agents-postgres.service) is not relayed:
+# agentbox has no route to omp's session database, and a box resumes a session only from its
+# transcript file (Sami, dispatch://INFRA-1720/ask/16322992). AGENTBOX_LOOPBACK_PORTS
+# (space-separated ports) replaces the list.
+read -r -a LOOPBACK_SERVICE_PORTS <<<"${AGENTBOX_LOOPBACK_PORTS-5005}"
 LOOPBACK_SERVICES=()
 loopback_services() {
     LOOPBACK_SERVICES=()
@@ -2329,20 +2325,17 @@ mount_args() {
     # and so an in-box fetch, when the host had none, lands in the host's cache.
     mkdir -p -m 700 "/run/user/$UID_/envoy"
     a+=(-v "/run/user/$UID_/envoy:/run/user/$UID_/envoy")
-    # The verified-grader stream's gateway key and the omp session-store DSN are shared writable.
-    # The DSN (scripts/omp-session-dsn, dispatch://INFRA-1192) is the machine's, not the box's: it
-    # names the machine's IAM database user and no password, and the proxy it points at is the
-    # host's, relayed in on the same address (LOOPBACK_SERVICE_PORTS). A named --dir already
-    # supplies the same destination, so avoid a duplicate bind. Directories show atomic refreshes.
+    # The verified-grader stream's gateway key is shared writable. A named --dir already supplies
+    # the same destination, so avoid a duplicate bind. A directory shows an atomic refresh.
+    # Nothing of omp's session database is bound: no connection file, no proxy, no store setting,
+    # so a box resumes a session only from its transcript file (dispatch://INFRA-1720/ask/16322992).
     # /run/user/<uid>/ossv-box was here until 2026-11-04 and is not any more: the gateway providers
     # mint this machine's identity token per call through the metadata relay a box already has
     # (scripts/gateway-token), so there is no gateway credential file for a box to read
     # (dispatch://INFRA-993/comment/be112388).
-    mkdir -p -m 700 "/run/user/$UID_/verified-grader" "/run/user/$UID_/omp-session-sql"
-    local key_dir
-    for key_dir in "/run/user/$UID_/verified-grader" "/run/user/$UID_/omp-session-sql"; do
-        box_dir_named "$key_dir" || a+=(-v "$key_dir:$key_dir")
-    done
+    mkdir -p -m 700 "/run/user/$UID_/verified-grader"
+    box_dir_named "/run/user/$UID_/verified-grader" \
+        || a+=(-v "/run/user/$UID_/verified-grader:/run/user/$UID_/verified-grader")
     # The shared ssh identity bin/ossv-vm uses to reach the gateway VM, where the host has it:
     # without it `ossv-vm` in a box cannot reach that VM at all (agentvm, 2026-11-03). A box is
     # for segregation, not for keeping a session from what its host gives it (Sami,
@@ -4580,7 +4573,7 @@ move_record_file() {
     if [[ -z "$file" && -n "$pid" && "$pid" != "$row_pid" ]]; then
         file="$(move_transcript "$pid" "$sid" 2>/dev/null || true)"
     fi
-    # A path the sweep deleted (move_transcript's last source) has nothing left to read.
+    # A path that cannot be read (a record file of the listing that went since) gives nothing.
     [[ -n "$file" && -r "$file" ]] && printf '%s\n' "$file"
     return 0
 }
@@ -4993,12 +4986,14 @@ move_env_pane() {
 }
 
 # The variables of an omp's environment that decide where its session lives: the profile, the
-# agent and config directories, the session directory, the session storage and its SQL DSN file,
-# and the XDG roots omp puts its data and state under. A moved session's box gets each one the
-# omp had, through `-e`, since the caller's environment never reaches a box: METARQ
-# (01a170d9, 2026-11-02) ran with OMP_PROFILE=pbc and its box's omp started without it.
+# agent and config directories, the session directory, and the XDG roots omp puts its data and
+# state under. A moved session's box gets each one the omp had, through `-e`, since the caller's
+# environment never reaches a box: METARQ (01a170d9, 2026-11-02) ran with OMP_PROFILE=pbc and its
+# box's omp started without it. omp's session-store setting and its database connection file are
+# not among them: agentbox gives a box no session-store setting, so a box resumes a session only
+# from its transcript file (dispatch://INFRA-1720/ask/16322992).
 MOVE_SESSION_ENV=(OMP_PROFILE PI_PROFILE PI_CONFIG_DIR PI_CODING_AGENT_DIR PI_CODING_AGENT_SESSION_DIR
-    OMP_SESSION_STORAGE OMP_SESSION_SQL_DSN_FILE XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME)
+    XDG_DATA_HOME XDG_STATE_HOME XDG_CONFIG_HOME)
 
 # move_session_env PID: `-e` and `NAME=VALUE`, one per line, for each of those the omp has set.
 move_session_env() {
@@ -5038,12 +5033,12 @@ move_agent_dir() {
 # session>/<stamp>_01a170d9-….jsonl`), so the id found nothing, in the box or on the host, and the
 # moved session ended. In order: the file named `_<SID>.jsonl` the omp holds open under a
 # `sessions` directory; its own `--resume` argument when that is such a file; the one file of that
-# name under the agent directory its environment selects; else the path the session sweep
-# (dispatch://OSSV-240, `omp-session-sql-sweep.timer`) recorded when it imported the file into
-# Postgres and deleted it, since it deletes a transcript idle for 6 hours even while its omp
-# still runs, and omp resumes such a session by that full path from the table
-# (dispatch://INFRA-754). Nothing, when none of them answers.
-MOVE_SWEEP_RECORD="${AGENTBOX_SWEEP_RECORD:-$HOME/.local/share/omp-session-sql/deleted.tsv}"
+# name under the agent directory its environment selects. Nothing, when none of them answers, and
+# nothing when the one chosen is not a regular file (a dangling symlink, a directory, a path with
+# no file), because a relaunch of a path that is gone ends the box, and the end of a box deletes
+# everything in it (dispatch://INFRA-1720). There is no route through omp's session database: a
+# transcript the database's import sweep took is a session no move can resume.
+move_transcript_take() { [[ -f "$1" ]] && printf '%s\n' "$1"; }
 # Set by a command that asks about many sessions (move_to_index_transcripts): a directory holding
 # one walk of each agent directory, which move_transcript then reads instead of walking again.
 MOVE_DEEP_INDEX_DIR=""
@@ -5117,11 +5112,11 @@ move_transcript() {
     # Any path, not only one under a `sessions/` directory: an archived transcript is open at its
     # target under /mnt/durable/<user>/omp-sessions-moved (SPEEDCOACH's 01a16c67, 2026-11-03).
     link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*_${sid}.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
-    if [[ -n "$link" ]]; then printf '%s\n' "$link"; return 0; fi
+    if [[ -n "$link" ]]; then move_transcript_take "$link"; return; fi
     # A subagent's transcript it holds open is `<own transcript without .jsonl>/<name>.jsonl`:
     # an idle lead holds only those (01a15237, 2026-11-03).
     link="$(find "$PROC/$pid/fd" -maxdepth 1 -type l -lname "/*_${sid}/*.jsonl" -printf '%l\n' -quit 2>/dev/null || true)"
-    if [[ -n "$link" && -e "${link%/*}.jsonl" ]]; then printf '%s\n' "${link%/*}.jsonl"; return 0; fi
+    if [[ -n "$link" && -e "${link%/*}.jsonl" ]]; then move_transcript_take "${link%/*}.jsonl"; return; fi
     while IFS= read -r -d '' arg; do
         if [[ "$arg" == /*_"$sid".jsonl && -f "$arg" ]]; then printf '%s\n' "$arg"; return 0; fi
     done < <(cat "$PROC/$pid/cmdline" 2>/dev/null || true)
@@ -5139,7 +5134,7 @@ move_transcript() {
         bucket="${bucket//\//-}"
         found=()
         for link in "$dir/$bucket"/*_"$sid".jsonl; do [[ -e "$link" || -L "$link" ]] && found+=("$link"); done
-        if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
+        if (( ${#found[@]} == 1 )); then move_transcript_take "${found[0]}"; return; fi
     fi
     if [[ -n "$MOVE_DEEP_INDEX_DIR" ]]; then
         # One listing of the buckets for every session a run asks about, kept in a file that the
@@ -5160,12 +5155,7 @@ move_transcript() {
     else
         mapfile -t found < <(find "$dir" -mindepth 2 -maxdepth 3 -name "*_${sid}.jsonl" 2>/dev/null)
     fi
-    if (( ${#found[@]} == 1 )); then printf '%s\n' "${found[0]}"; return 0; fi
-    if [[ -r "$MOVE_SWEEP_RECORD" ]]; then
-        # Column 1 of deleted.tsv is the deleted file's path; the last row for the id wins.
-        link="$(awk -F'\t' -v s="_${sid}.jsonl" 'length($1) > length(s) && substr($1, length($1) - length(s) + 1) == s { p = $1 } END { print p }' "$MOVE_SWEEP_RECORD" 2>/dev/null || true)"
-        if [[ -n "$link" && ! -e "$link" ]]; then printf '%s\n' "$link"; return 0; fi
-    fi
+    if (( ${#found[@]} == 1 )); then move_transcript_take "${found[0]}"; return; fi
     return 1
 }
 
@@ -5179,7 +5169,7 @@ move_resume_check() {
     shift 2
     MOVE_RESUME="" MOVE_RESUME_WHY=""
     if ! path="$(move_transcript "$pid" "$sid")"; then
-        MOVE_RESUME_WHY="no transcript of session $sid can be read (no open file, no --resume path, no single *_${sid}.jsonl under $(move_agent_dir "$pid")/sessions), so the box could not resume it"
+        MOVE_RESUME_WHY="no transcript of session $sid can be read (no open file, no --resume path, no single *_${sid}.jsonl under $(move_agent_dir "$pid")/sessions, or the one found is not a regular file), so the box could not resume it"
         return 1
     fi
     real="$(readlink -f "$path" 2>/dev/null || echo "$path")"
@@ -6183,6 +6173,9 @@ move_self_in_box() {
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here, so a new box could not resume it; nothing was hung up"
+    # The fallback is the session's own word for its file, which a /move not yet written down or
+    # a rename leaves pointing at nothing: resuming it would end the new box (dispatch://INFRA-1720).
+    [[ -f "$resume" ]] || die "the transcript of session $sid, $resume, is not a regular file, so a new box could not resume it; nothing was hung up"
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     echo "agentbox: this session is already in box ${AGENTBOX_BOX:-a box}; moving again into a new one with:"
     echo "  agentbox new ${spec[*]} -- $(move_omp_line "$resume" ${flags[@]+"${flags[@]}"})"
@@ -6954,35 +6947,6 @@ move_to_target_worktrees() {
     return 1
 }
 
-# move_to_mcp_logins TARGET: the MCP servers this machine's omp holds an OAuth login for and TARGET's
-# does not, one server URL per line. omp keeps those logins in each machine's own
-# ~/.omp/agent/agent.db, which every box on that machine binds, so a session moved to a machine
-# without one loses the server: it answers HTTP 401 when the session starts and its tools never
-# mount (the chief of staff's Slack tools after its move to sami-devbox, 2026-11-03). Only the
-# credential names are read, never their data. A login stays per machine: two machines refreshing
-# copies of one rotating refresh token would revoke each other's, so the remedy is one sign-in on
-# the target, which every box there then shares.
-MCP_LOGINS_SQL="select distinct provider from auth_credentials where provider like 'mcp_oauth:%' and disabled_cause is null"
-move_to_mcp_logins() {
-    local target="$1" here there
-    here="$(sqlite3 -readonly "$HOME/.omp/agent/agent.db" "$MCP_LOGINS_SQL" 2>/dev/null)" || return 0
-    [[ -n "$here" ]] || return 0
-    # A target whose agent.db cannot be read holds no login a session could use there.
-    there="$(move_remote "$target" "sqlite3 -readonly \"\$HOME/.omp/agent/agent.db\" $(printf '%q' "$MCP_LOGINS_SQL")" </dev/null 2>/dev/null)" || there=""
-    comm -23 <(sort -u <<<"$here") <(sort -u <<<"$there") | sed 's/^mcp_oauth:profile:[^:]*://; s/^mcp_oauth://'
-}
-
-# move_to_warn_mcp_logins TARGET: say on stderr which MCP servers a session moved to TARGET will not
-# reach for want of a login there, and the one step that fixes it. A warning, not a refusal: the
-# session still moves, and once someone signs in on TARGET the session gets the server back when
-# it restarts or runs `/mcp reconnect <server>`.
-move_to_warn_mcp_logins() {
-    local target="$1" missing
-    missing="$(move_to_mcp_logins "$target")"
-    [[ -n "$missing" ]] || return 0
-    echo "agentbox: warning: omp on $target holds no login for the MCP server(s) $(tr '\n' ' ' <<<"$missing")- a session moved there gets none of their tools until someone signs in on $target once: start omp there and run \`/mcp reauth <server>\` (every box on $target shares that login)" >&2
-}
-
 # move_to_dests_writable TARGET: every path the copy writes on the target must be writable by the
 # move's user: the path itself when it exists, else its nearest existing ancestor. An EMPTY
 # directory owned by root there is what docker leaves when a box is started with a --dir that did
@@ -7080,8 +7044,7 @@ move_to_src_trees() {
 # move_to_transcript_paths PATH: "mirror\t<path>" for what a session's transcript is on disk: the
 # file, its own directory (the path without `.jsonl`: its subagents' transcripts, and the
 # marker's place), and what a symlink among them points at, since an archived transcript stays
-# behind a symlink to /mnt/durable. A transcript the session sweep took has no file and is read
-# from Postgres on the target as here.
+# behind a symlink to /mnt/durable.
 move_to_transcript_paths() {
     local t="$1" p real link
     for p in "$t" "${t%.jsonl}"; do
@@ -8995,7 +8958,6 @@ cmd_move_to() {
     move_to_or_would() { if $dry; then would+=("$1"); else die "no move to $target; nothing was hung up: $1"; fi; }
     move_step "asking $target: ready, halts, the same sessions there"
     move_to_preflight "$target" "${MOVE_TO_GROUP[@]}" || move_to_or_would "$MOVE_TO_WHY"
-    move_to_warn_mcp_logins "$target"
     local copy="" cwds=() tpaths="" t
     for s in "${MOVE_TO_GROUP[@]}"; do
         copy+="${MT_COPY[$s]}"$'\n'
@@ -9105,6 +9067,7 @@ move_to_in_box() {
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here; nothing was hung up"
+    [[ -f "$resume" ]] || die "the transcript of session $sid, $resume, is not a regular file, so $target could not resume it; nothing was hung up"
     # Where omp will resume: the transcript header's cwd, not this shell's (move_to_member).
     local hc
     hc="$(move_transcript_cwd "$resume")" && cwd="$hc"
