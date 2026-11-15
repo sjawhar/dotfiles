@@ -1684,9 +1684,8 @@ class BoxWait(EnrollFixture):
 
 
 class CmdNew(EnrollFixture):
-    """cmd_new gives a box a marker and an enrollment only when the host can enroll it, enrolls it
-    again while it runs when its renew is refused as not live, and removes the private copy of
-    scripts/agentbox that `agentbox new` runs from."""
+    """cmd_new gives a box a marker and an enrollment only when the host can enroll it, and enrolls
+    it again while it runs when its renew is refused as not live."""
 
     # The steps that need a real host are no-ops; mount_args makes the key dir and its mount point
     # in run-user/, and close_box, the launcher's last step, records the enrollment id its revoke
@@ -1771,14 +1770,6 @@ class CmdNew(EnrollFixture):
         poll lasts its whole life and enrolls it again."""
         box, keydir, calls = self.renew_refused_while_it_runs("bash -c true")
         self.assert_enrolled_again_while_it_ran(box, keydir, calls, "", box)
-
-    def test_the_private_copy_is_gone_once_cmd_new_has_ended(self) -> None:
-        """`agentbox new` runs from a private copy of scripts/agentbox, named in AGENTBOX_SELF_COPY.
-        Once cmd_new has ended, that file is gone."""
-        copy = self.root / "agentbox-self-copy"
-        copy.write_text("#!/bin/bash\n")
-        self.new_box(AGENTBOX_SELF_COPY=str(copy))
-        self.assertFalse(copy.exists())
 
 
 if __name__ == "__main__":

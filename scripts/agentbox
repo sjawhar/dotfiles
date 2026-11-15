@@ -3189,13 +3189,6 @@ reap_start() {
     return 0
 }
 
-# drop_self_copy: remove the private copy of this file that `agentbox new` runs from
-# (AGENTBOX_SELF_COPY, made at the end of this file), when there is one. cmd_new's EXIT traps run
-# it. It never fails, because those traps run under set -e.
-drop_self_copy() {
-    [[ -z "${AGENTBOX_SELF_COPY:-}" ]] || rm -f -- "$AGENTBOX_SELF_COPY" 2>/dev/null || true
-}
-
 cmd_new() {
     local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE] [--dir PATH]… [--no-host-writes] [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
@@ -3376,12 +3369,9 @@ cmd_new() {
     # Values are expanded now (the trap outlives this function's locals) and
     # the trap runs only in the launcher itself, never in a $(…) subshell,
     # which inherits EXIT traps in bash.
-    # The trap also removes the launcher's private copy of this file (drop_self_copy), and it
-    # does that first: close_box can fail, and set -e then ends the trap. Nothing on this path
-    # runs the file again, and bash reads the running script through a descriptor it holds open.
     local launcher_pid=$BASHPID
     # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $launcher_pid ]] && { drop_self_copy; close_box '$box' '' $(printf '%q ' "${box_repos[@]}"); }" EXIT
+    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '' $(printf '%q ' "${box_repos[@]}")" EXIT
     # A pane kill or TERM lands here; the trap forwards a hangup into the box
     # (--init delivers it to the command), --rm fires, close runs. Before the
     # box exists it is remembered instead and honoured once the clone returns.
@@ -3507,12 +3497,8 @@ cmd_new() {
     # its output goes through a reader that writes to the terminal while it
     # exists and drops the rest - a direct write to a hung-up pty fails with
     # EIO, which set -e would turn into an exit before the rm -rf.
-    trap - TERM INT
+    trap - TERM INT EXIT
     trap '' HUP
-    # After close_box, the launcher's private copy of this file goes as the launcher exits. An
-    # EXIT trap does it, so the copy goes also when close_box fails and set -e ends the launcher.
-    # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $launcher_pid ]] && drop_self_copy" EXIT
     exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
     close_box "$box" "$sid" "${box_repos[@]}"
     exit "$rc"
@@ -10275,10 +10261,10 @@ cmd_doctor_here() {
 # the watcher's log said they were restarted (LANE-C, 2026-11-05).
 #
 # So the protection lives HERE rather than in each caller: no entry, pane or watcher has to know
-# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY both carries
-# the copy's path for the cleanup and stops a second re-exec. A copy that cannot be made is not
-# fatal: the launch goes on from the live file, as before, since refusing to start a session is
-# worse than the hazard.
+# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY names the copy,
+# and the copy removes that file as it starts (below). The variable also stops a second re-exec.
+# A copy that cannot be made is not fatal: the launch goes on from the live file, as before, since
+# refusing to start a session is worse than the hazard.
 if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     _self_copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-self-XXXXXX" 2>/dev/null || true)"
     if [[ -n "$_self_copy" ]] \
@@ -10289,9 +10275,9 @@ if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     [[ -z "$_self_copy" ]] || rm -f "$_self_copy"
     echo "agentbox: could not copy itself to run from; continuing from $(readlink -f "${BASH_SOURCE[0]}"), which a dotfiles publish can kill mid-launch" >&2
 fi
-# Running FROM the copy: this trap removes it when the launch ends before cmd_new sets its own
-# EXIT trap. From there, cmd_new's EXIT traps remove it (drop_self_copy). A SIGKILL leaves it.
-[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || trap 'rm -f "$AGENTBOX_SELF_COPY"' EXIT
+# Running FROM the copy: remove the copy now. Bash reads this script through a descriptor that it
+# holds open, so the launch runs on without the file. No signal after this line can leave the copy.
+[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || rm -f "$AGENTBOX_SELF_COPY"
 
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
