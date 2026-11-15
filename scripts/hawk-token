@@ -32,14 +32,15 @@
 # until 2026-09-25 07:08, and `!hawk-token` came back empty in several sessions. So:
 #   - two slots, $root/agent-c and $root/agent-c.alt; `current` is a symlink to the
 #     live one, and minting always runs from whatever `current` resolves to;
-#   - a stale stamp starts ONE detached background refresh (flock, which the kernel
-#     releases if the holder dies; a mkdir lock where flock is missing) that rebuilds
-#     the IDLE slot, checks it can import the console script's module, and only then
-#     swaps `current` with an atomic rename;
+#   - a stale stamp starts ONE detached background refresh under a flock lock, which
+#     the kernel releases if its holder dies; it rebuilds the IDLE slot, checks it can
+#     import the console script's module, and only then swaps `current` atomically;
+#   - the timer sweeps old partial pack files under that same lock and runs due
+#     refreshes in the foreground, so systemd cannot stop their fetches at unit end;
 #   - the live slot is never rewritten, so a refresh killed at any point leaves the
 #     previous checkout intact and minting unaffected.
 # Each slot's venv records absolute paths, so it is built at that slot's path; slots
-# never move, only the symlink does. Refresh output goes to $root/refresh.log.
+# never move, only the symlink does. Detached refresh output goes to $root/refresh.log.
 set -euo pipefail
 # omp kills a `!command` after 10 s, so the whole run, not only the mint, spends one budget.
 started_ns="$(date +%s%N)"
@@ -52,48 +53,147 @@ root="${AGENTBOX_SRC:-$HOME/src}/.hawk-token"
 current="$root/current"
 stamp="$root/.refreshed"
 cache="$root/last-good-token"
+started="$root/.refresh-started"
+failed="$root/.refresh-failed"
 CACHE_MIN_TTL_SECONDS=300
 REFRESH_SECONDS="${HAWK_TOKEN_REFRESH_SECONDS:-21600}"
-LOCK_STALE_MINUTES=30
 REFRESH_ARG=__hawk_token_background_refresh
+refresh_env=()
 mkdir -p "$root"
 
 log() { echo "hawk-token: $*" >&2; }
 
-# take_lock nonblock|block: hold the refresh lock for the rest of this process.
-take_lock() {
-    if command -v flock >/dev/null 2>&1; then
-        exec 9>"$root/.refresh.lock"
-        if [ "$1" = nonblock ]; then flock -n 9; else flock 9; fi
-        return
+# redact keeps a minted credential out of the journal while preserving the mint's
+# useful error text. Hawk prints JWTs, including five-segment encrypted forms.
+redact() {
+    sed -E 's/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_.-]{16,}/<redacted>/g'
+}
+
+# print_redacted FILE writes FILE's text, tokens redacted, to stderr from this shell.
+# journald finds a line's unit from the pid that wrote it: a line that a short-lived
+# `sed` writes reaches the journal after sed has exited, with no unit and no
+# invocation, so `journalctl -u` never shows it (measured on oryx, 2026-11-15).
+print_redacted() {
+    local text
+    text="$(redact <"$1")"
+    if [ -n "$text" ]; then
+        printf '%s\n' "$text" >&2
     fi
-    local dir="$root/.refresh.lock.d"
-    until mkdir "$dir" 2>/dev/null; do
-        if [ -n "$(find "$dir" -maxdepth 0 -mmin +"$LOCK_STALE_MINUTES" 2>/dev/null)" ]; then
-            rm -rf "$dir"
-        elif [ "$1" = nonblock ]; then
-            return 1
-        else
-            sleep 2
+}
+
+# take_lock nonblock|block: hold the refresh lock for the rest of this process.
+# A flock-only lock cannot be taken from a live fetch by a timer that guesses its age.
+take_lock() {
+    if ! command -v flock >/dev/null 2>&1; then
+        log "flock is required for the refresh lock"
+        return 2
+    fi
+    exec 9>"$root/.refresh.lock"
+    if [ "$1" = nonblock ]; then
+        flock -n 9
+    else
+        flock 9
+    fi
+}
+
+# release_lock: drop the lock before a child starts so it can take fd 9 itself.
+release_lock() {
+    exec 9>&-
+}
+
+# sweep_partial_packs runs only with the refresh lock held. `-mmin +10` rounds up
+# and keeps files from 600 to 660 seconds old, so use find's second-granularity test.
+sweep_partial_packs() {
+    local slot pack
+    local -a removed
+    for slot in agent-c agent-c.alt; do
+        pack="$root/$slot/.git/objects/pack"
+        [ -d "$pack" ] || continue
+        mapfile -t removed < <(
+            find "$pack" -maxdepth 1 -type f \( -name 'tmp_pack_*' -o -name 'tmp_idx_*' -o -name 'tmp_rev_*' \) \
+                ! -newermt '-600 seconds' -print -delete
+        )
+        if [ "${#removed[@]}" -gt 0 ]; then
+            log "removed ${#removed[@]} partial pack files older than 10 minutes from $slot"
         fi
     done
-    trap 'rm -rf "$dir"' EXIT
 }
 
-# release_lock: drop the lock before exec (exec replaces the process without running traps).
-release_lock() {
-    if command -v flock >/dev/null 2>&1; then exec 9>&-; else rm -rf "$root/.refresh.lock.d"; trap - EXIT; fi
+# recent_file PATH says whether PATH is younger than the refresh interval.
+recent_file() {
+    local found
+    [ -f "$1" ] || return 1
+    found="$(find "$1" -newermt "-$REFRESH_SECONDS seconds" -print -quit)"
+    [ -n "$found" ]
 }
 
-# build_slot DIR: make DIR a checkout of agent-c main with a working venv. DIR is never
-# the live slot, and the refresh lock is held, so any git lock file in it is a leftover
-# from a killed run. Every step fails the function explicitly: errexit does not apply
+# refresh_due says whether the next refresh may start. A failed attempt gets its own
+# six-hour wait, measured from when it ended rather than when it began.
+refresh_due() {
+    if recent_file "$failed"; then
+        return 1
+    fi
+    if [ ! -f "$stamp" ] || ! recent_file "$stamp"; then
+        return 0
+    fi
+    return 1
+}
+
+# repair_killed_attempt turns a SIGKILLed attempt into a failure once a later lock
+# holder proves that the earlier process is gone. Missing stamp/failure files are old.
+repair_killed_attempt() {
+    [ -f "$started" ] || return 0
+    if [ -f "$stamp" ] && [ ! "$started" -nt "$stamp" ]; then
+        return 0
+    fi
+    if [ -f "$failed" ] && [ ! "$started" -nt "$failed" ]; then
+        return 0
+    fi
+    touch "$failed"
+}
+
+attempt_finished=1
+
+# begin_attempt and on_exit record the end of every unsuccessful slot build,
+# including TERM/HUP/INT after their foreground child returns to bash.
+begin_attempt() {
+    touch "$started"
+    attempt_finished=0
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap on_exit EXIT
+}
+
+# shellcheck disable=SC2329 # Invoked by begin_attempt's EXIT trap.
+on_exit() {
+    local rc=$?
+    if [ "$attempt_finished" -ne 1 ]; then
+        touch "$failed"
+    fi
+    return "$rc"
+}
+
+# end_attempt_ok is called only after publish and the success stamp both complete.
+end_attempt_ok() {
+    attempt_finished=1
+    trap - EXIT
+    trap - TERM HUP INT
+}
+
+# build_slot DIR: make DIR a checkout of agent-c main with a working venv. DIR is
+# never the live slot, and the refresh lock is held, so any git lock file in it is a
+# leftover from a killed run. Every step fails explicitly: errexit does not apply
 # inside a function called as an `if` condition.
 build_slot() {
-    local slot=$1 scratch
+    local slot=$1 scratch validation_err validation_output
     if [ -d "$slot/.git" ]; then
         find "$slot/.git" -name '*.lock' -type f -delete || return 1
-        ( cd "$slot" && git fetch --quiet --depth 1 origin main && git reset --quiet --hard origin/main ) || return 1
+        (
+            cd "$slot" &&
+                git -c gc.autoDetach=false -c maintenance.autoDetach=false fetch --quiet --depth 1 origin main &&
+                git reset --quiet --hard origin/main
+        ) || return 1
     else
         scratch="$(mktemp -d "$root/.clone.XXXXXX")" || return 1
         git clone --quiet --depth 1 --branch main --filter=blob:none \
@@ -104,7 +204,15 @@ build_slot() {
     # Validate the command minting runs, not `uv run hawk-token`: a slot venv
     # without the console script would make uv fall back to this wrapper on PATH,
     # which mints from the live slot and passes the check vacuously.
-    "$slot/.venv/bin/hawk-token" --api-url "$HAWK_API_URL" >/dev/null 2>&1 || return 1
+    validation_err="$(mktemp "$root/.validation.XXXXXX")" || return 1
+    if "$slot/.venv/bin/hawk-token" --api-url "$HAWK_API_URL" >/dev/null 2>"$validation_err"; then
+        rm -f "$validation_err"
+        return 0
+    fi
+    validation_output="$(tail -n 5 "$validation_err" | redact)"
+    rm -f "$validation_err"
+    log "validation mint failed: $validation_output"
+    return 1
 }
 
 # publish NAME: point `current` at the sibling slot NAME, atomically (rename(2)
@@ -179,66 +287,15 @@ cached_token() {
     cached=$line
 }
 
-if [ "${1:-}" = "$REFRESH_ARG" ]; then
-    take_lock nonblock || exit 0
-    # A sibling may have finished a refresh while this one was starting.
-    if [ -n "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then exit 0; fi
-    live="$(basename "$(readlink "$current")")"
-    if [ "$live" = agent-c ]; then idle=agent-c.alt; else idle=agent-c; fi
-    if build_slot "$root/$idle"; then
-        publish "$idle"
-        touch "$stamp"
-        log "$(date -u +%FT%TZ) refreshed: current -> $idle"
-    else
-        log "$(date -u +%FT%TZ) refresh of $root/$idle failed; still minting from $live"
-    fi
-    exit 0
-fi
-
-if [ ! -L "$current" ]; then
-    if [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]; then
-        # A checkout built by the single-checkout version of this wrapper: adopt it.
-        publish agent-c
-    else
-        # First run: there is nothing to mint from yet, so build in the foreground.
-        take_lock block
-        if [ ! -L "$current" ]; then
-            log "first run: cloning agent-c main into $root/agent-c (about a minute)"
-            build_slot "$root/agent-c" 1>&2 || { log "first-run build failed (see stderr above)"; exit 1; }
-            publish agent-c
-            touch "$stamp"
-        fi
-        release_lock
-        # A foreground build that outlived the budget proves the caller is not omp's
-        # 10 s `!command` (a terminal bootstrapping a fresh machine), so give the mint
-        # a fresh budget; a fast build keeps whatever was left.
-        [ $(( ($(date +%s%N) - started_ns) / 1000000 )) -lt "$MINT_BUDGET_MS" ] || started_ns="$(date +%s%N)"
-    fi
-fi
-
-if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; then
-    # Detached from this call's session, so omp killing the minting call cannot
-    # reach it -- and detached from its ENVIRONMENT too. Whichever session's
-    # staleness check happens to fire this (any live session, Legion panes
-    # included) must not leak its own git-credential routing into a refresh
-    # every other session on the box shares: a Legion pane's `gh` is a
-    # `legion gh` wrapper scoped to its own pane and grant, and inherited into
-    # this detached child that outlives the pane, it failed outright --
-    # devbox-agents-2, 2026-10-05: "LEGION_GH_PATH is not an absolute path" and
-    # a refused askpass, every few minutes for hours, because nothing here
-    # touches $stamp on failure so every later call re-triggers it. Re-derive
-    # the same gh-app routing `scripts/agent-session` sets up for a normal session
-    # (GIT_CONFIG_* -> gh-app-routes.gitconfig) from scratch in a wiped
-    # environment, so the refresh authenticates the same way no matter who
-    # triggered it, and never inherits a credential scoped to somebody else's
-    # session. The validation mint (build_slot's own hawk-token call) reads the
-    # hawk login from the user's keyring over the D-Bus Secret Service, which
-    # needs XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS -- NOT copied from
-    # whichever session's environment triggered this (same risk as the git
-    # routing above), but derived the one way they can be for this user: by
-    # uid, which is identical for every session on this host (agentbox's own
-    # relay depends on the same bus staying reachable this way, per
-    # agentbox/AGENTS.md).
+# build_refresh_env makes the clean environment shared by session-started detached
+# refreshes and timer-started foreground refreshes. It must not inherit a session's
+# credential routing or bus address after that session ends. The validation mint reads
+# the Hawk login from the user's keyring over the D-Bus Secret Service, so derive its
+# XDG runtime directory and bus address by uid rather than copy a triggering session's
+# address. Every session on this host has that uid, and agentbox's relay uses the same
+# bus (agentbox/AGENTS.md).
+build_refresh_env() {
+    local dotfiles_dir xdg_runtime_dir
     dotfiles_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     xdg_runtime_dir="/run/user/$(id -u)"
     refresh_env=(
@@ -259,7 +316,254 @@ if [ -z "$(find "$stamp" -newermt "-$REFRESH_SECONDS seconds" 2>/dev/null)" ]; t
         # user services.
         "MISE_DATA_DIR=$HOME/.mise"
     )
-    [ -n "${AGENTBOX_SRC:-}" ] && refresh_env+=("AGENTBOX_SRC=$AGENTBOX_SRC")
+    if [ -n "${AGENTBOX_SRC:-}" ]; then
+        refresh_env+=("AGENTBOX_SRC=$AGENTBOX_SRC")
+    fi
+    return 0
+}
+
+# next_retry_time prints the UTC time at which an attempt may run again.
+next_retry_time() {
+    date -u -d "+$REFRESH_SECONDS seconds" +%FT%TZ
+}
+
+# log_first_run_wait explains the failure backoff to a caller that has no live slot.
+log_first_run_wait() {
+    local failed_seconds failed_at next_at
+    failed_seconds="$(date -r "$failed" +%s)"
+    failed_at="$(date -u -d "@$failed_seconds" +%FT%TZ)"
+    next_at="$(date -u -d "@$(( failed_seconds + REFRESH_SECONDS ))" +%FT%TZ)"
+    log "first-run build failed at $failed_at; next try after $next_at; remove $failed to try now"
+}
+
+# bootstrap_first_run MODE adopts no existing state: it builds the first live slot
+# under the lock. Return 2 for a timer skip (busy lock or active failure wait).
+bootstrap_first_run() {
+    local mode=$1 lock_mode lock_rc
+    if [ "$mode" = timer ]; then
+        lock_mode=nonblock
+    else
+        lock_mode=block
+    fi
+    if take_lock "$lock_mode"; then
+        :
+    else
+        lock_rc=$?
+        if [ "$lock_rc" -eq 2 ]; then
+            return 1
+        fi
+        if [ "$mode" = timer ]; then
+            log "another refresh holds the lock; no sweep and no refresh this run"
+            return 2
+        fi
+        return 1
+    fi
+    repair_killed_attempt
+    if [ -L "$current" ]; then
+        release_lock
+        return 0
+    fi
+    if ! refresh_due; then
+        log_first_run_wait
+        release_lock
+        if [ "$mode" = timer ]; then
+            return 2
+        fi
+        return 1
+    fi
+    log "first run: cloning agent-c main into $root/agent-c (about a minute)"
+    begin_attempt
+    if build_slot "$root/agent-c" && publish agent-c && touch "$stamp"; then
+        end_attempt_ok
+        release_lock
+        return 0
+    fi
+    log "first-run build failed (see stderr above)"
+    return 1
+}
+
+# background_refresh runs in its own process after it takes the lock. It records a
+# failed attempt but exits successfully so the live slot can still mint a token.
+background_refresh() {
+    local lock_rc live idle
+    if take_lock nonblock; then
+        :
+    else
+        lock_rc=$?
+        if [ "$lock_rc" -eq 2 ]; then
+            exit 1
+        fi
+        exit 0
+    fi
+    sweep_partial_packs
+    repair_killed_attempt
+    refresh_due || exit 0
+    live="$(basename "$(readlink "$current")")"
+    if [ "$live" = agent-c ]; then
+        idle=agent-c.alt
+    else
+        idle=agent-c
+    fi
+    begin_attempt
+    if build_slot "$root/$idle" && publish "$idle" && touch "$stamp"; then
+        end_attempt_ok
+        log "$(date -u +%FT%TZ) refreshed: current -> $idle"
+    else
+        log "refresh of $idle failed; still minting from $live; next try after $(next_retry_time)"
+    fi
+    exit 0
+}
+
+# hawk_host strips scheme, user information, port and path with parameter expansion.
+hawk_host() {
+    local host=$HAWK_API_URL
+    host=${host#*://}
+    host=${host#*@}
+    host=${host%%/*}
+    host=${host%%:*}
+    printf '%s\n' "$host"
+}
+
+# probe_hawk returns false only for the route failures that make a timer run a skip.
+probe_hawk() {
+    local host connect_time='' rc=0
+    host="$(hawk_host)"
+    if ! timeout 5 getent hosts "$host" >/dev/null; then
+        log "skipped: $host does not resolve (no route to Hawk)"
+        return 1
+    fi
+    connect_time="$(curl --silent --output /dev/null --connect-timeout 5 --max-time 15 --write-out '%{time_connect}' "$HAWK_API_URL")" || rc=$?
+    case $rc in
+        0) return 0 ;;
+        6)
+            log "skipped: $host does not resolve (no route to Hawk)"
+            return 1
+            ;;
+        7)
+            log "skipped: no connection to $host opens (no route to Hawk)"
+            return 1
+            ;;
+        28)
+            if [ "$connect_time" = 0.000000 ]; then
+                log "skipped: no connection to $host opens within 5 s (no route to Hawk)"
+                return 1
+            fi
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+# timer_mint is separate from the session mint loop: its 60 seconds start only after
+# any foreground refresh. It prints no token, even after a successful mint.
+timer_mint() {
+    local mint_bin err out='' rc=0
+    mint_bin="$(readlink -f "$current")/.venv/bin/hawk-token"
+    err="$(mktemp)" || {
+        log "could not create a mint stderr file"
+        return 1
+    }
+    out="$(timeout 60 "$mint_bin" --api-url "$HAWK_API_URL" 2>"$err")" || rc=$?
+    if [ -n "$out" ]; then
+        if save_token "$out"; then
+            rm -f "$err"
+            log "minted; $cache rewritten"
+            return 0
+        fi
+        rm -f "$err"
+        log "could not rewrite $cache"
+        return 1
+    fi
+    log "mint failed; its stderr follows, tokens redacted"
+    print_redacted "$err"
+    rm -f "$err"
+    return 1
+}
+
+# run_timer is only selected by the exact top-level --timer argument form.
+run_timer() {
+    local lock_was_free=0 lock_rc bootstrap_rc
+    if take_lock nonblock; then
+        lock_was_free=1
+        sweep_partial_packs
+        release_lock
+    else
+        lock_rc=$?
+        if [ "$lock_rc" -eq 2 ]; then
+            return 1
+        fi
+        log "another refresh holds the lock; no sweep and no refresh this run"
+    fi
+    probe_hawk || return 0
+    if [ "$lock_was_free" -ne 1 ] && [ ! -L "$current" ]; then
+        return 0
+    fi
+    if [ ! -L "$current" ]; then
+        if [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]; then
+            # A checkout built by the single-checkout version of this wrapper: adopt it.
+            publish agent-c
+        elif bootstrap_first_run timer; then
+            :
+        else
+            bootstrap_rc=$?
+            if [ "$bootstrap_rc" -eq 2 ]; then
+                return 0
+            fi
+            return 1
+        fi
+    fi
+    if [ "$lock_was_free" -eq 1 ] && refresh_due; then
+        build_refresh_env
+        if ! env -i "${refresh_env[@]}" "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >&2 2>&1; then
+            return 1
+        fi
+    fi
+    timer_mint
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = --timer ]; then
+    run_timer
+    exit $?
+fi
+
+if [ "$#" -eq 1 ] && [ "$1" = "$REFRESH_ARG" ]; then
+    background_refresh
+fi
+
+if [ ! -L "$current" ]; then
+    if [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]; then
+        # A checkout built by the single-checkout version of this wrapper: adopt it.
+        publish agent-c
+    else
+        if bootstrap_first_run session; then
+            :
+        else
+            exit 1
+        fi
+        # A foreground build that outlived the budget proves the caller is not omp's
+        # 10 s `!command` (a terminal bootstrapping a fresh machine), so give the mint
+        # a fresh budget; a fast build keeps whatever was left.
+        [ $(( ($(date +%s%N) - started_ns) / 1000000 )) -lt "$MINT_BUDGET_MS" ] || started_ns="$(date +%s%N)"
+    fi
+fi
+
+if refresh_due; then
+    # Detached from this call's session, so omp killing the minting call cannot
+    # reach it -- and detached from its ENVIRONMENT too. Whichever session's
+    # staleness check happens to fire this (any live session, Legion panes
+    # included) must not leak its own git-credential routing into a refresh
+    # every other session on the box shares: a Legion pane's `gh` is a
+    # `legion gh` wrapper scoped to its own pane and grant, and inherited into
+    # this detached child that outlives the pane, it failed outright --
+    # devbox-agents-2, 2026-10-05: "LEGION_GH_PATH is not an absolute path" and
+    # a refused askpass, every few minutes for hours, because nothing here
+    # touches $stamp on failure so every later call re-triggers it. Re-derive
+    # the same gh-app routing `scripts/agent-session` sets up for a normal session
+    # (GIT_CONFIG_* -> gh-app-routes.gitconfig) from scratch in a wiped
+    # environment, so the refresh authenticates the same way no matter who
+    # triggered it, and never inherits a credential scoped to somebody else's
+    # session.
+    build_refresh_env
     if command -v setsid >/dev/null 2>&1; then
         setsid env -i "${refresh_env[@]}" "${BASH_SOURCE[0]}" "$REFRESH_ARG" </dev/null >>"$root/refresh.log" 2>&1 &
     else
@@ -286,6 +590,8 @@ fi
 # before publishing it (build_slot).
 mint_bin="$(readlink -f "$current")/.venv/bin/hawk-token"
 err="$(mktemp)"
+# This is the only mint cleanup EXIT trap. Bootstrap and refresh attempts have already
+# ended or exited before it is installed, so it cannot replace their failure recorder.
 trap 'rm -f "$err"' EXIT
 tries=0
 for attempt in 1 2; do
@@ -328,6 +634,6 @@ if [ "$#" -eq 0 ] && cached_token; then
     printf '%s\n' "$cached"
     exit 0
 fi
-log "mint produced no token after $tries attempt(s) in $(( ($(date +%s%N) - started_ns) / 1000000 )) ms of a ${MINT_BUDGET_MS} ms budget; last stderr follows"
-cat "$err" >&2
+log "mint produced no token after $tries attempt(s) in $(( ($(date +%s%N) - started_ns) / 1000000 )) ms of a ${MINT_BUDGET_MS} ms budget; last stderr follows, tokens redacted"
+print_redacted "$err"
 exit 1

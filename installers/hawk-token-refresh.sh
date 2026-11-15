@@ -17,6 +17,8 @@
 # omp/models.local.yml now points at — never has to mint inside an agent turn
 # in the common case; `scripts/hawk-token`'s own live-mint-with-cache-fallback
 # behavior is unchanged and still runs on a cold cache or a refresher outage.
+# A machine with no route to Hawk gets skipped runs (exit 0 with one reason line
+# in the journal), so arming the timer on one often signed out of Trajectory is safe.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
