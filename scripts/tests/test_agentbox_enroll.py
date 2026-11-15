@@ -1172,23 +1172,23 @@ class OpenAttempts(EnrollFixture):
             ],
         )
 
-    def close_after_the_fallback(self, words: str) -> Path:
+    def close_after_the_fallback(self, words: str, **stubs: str) -> Path:
         """Session sid-1's `owner` names box0, an earlier box of the session that is gone. Then
         enroll_box box1 sid-1 with STUB_ENROLL=`words`, whose second word is `conflict`: the first
         call is for the session, the second is refused 409, and the 409 fallback enrolls under
-        box1 with the same key from the third call on. Then the close, with a grace of 0 s.
-        Returns the session's key dir."""
+        box1 with the same key from the third call on. Then the close, with a grace of 0 s, and
+        `stubs`. Returns the session's key dir."""
         skd = self.run_base / "session-keys" / "sid-1"
         skd.mkdir(parents=True)
         (skd / "owner").write_text("box0\n")
-        self.close("enroll_box box1 sid-1 || true", STUB_ENROLL=words, AGENTBOX_UNENROLL_GRACE="0")
+        self.close("enroll_box box1 sid-1 || true", STUB_ENROLL=words, AGENTBOX_UNENROLL_GRACE="0", **stubs)
         return skd
 
     def test_an_open_session_call_and_an_open_call_after_the_fallback_are_each_learned(self) -> None:
         """close_after_the_fallback with the first call and every call under box1 ending with the
         outcome not known: the broker made enr-1 for session-sid-1 and enr-2 for box1, and the
-        launcher holds one open entry of each kind. The close learns box1's at once and the
-        waiter learns the session's: one learn call for each, two unenroll calls, both rows
+        launcher holds one open entry of each kind. The close learns box1's, and the waiter
+        learns the session's: one learn call for each, two unenroll calls, both rows
         ended, and the session's key dir removed."""
         skd = self.close_after_the_fallback("unknown conflict unknown")
         self.assertEqual(
@@ -1205,6 +1205,23 @@ class OpenAttempts(EnrollFixture):
         self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
         self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
         self.assertFalse(skd.exists())
+
+    def test_the_open_call_after_the_fallback_is_learned_while_the_session_lives_in_another_box(self) -> None:
+        """As the row above, but box2's run dir records sid-1 and its container is there
+        (STUB_LIVE_BOXES), so at its wake the waiter finds the session live in box2 and leaves the
+        session's enrollment alone. box1's own open call is not the session's, so the close learns
+        it at once and does not hand it to the waiter: one learn call, for box1, and one unenroll
+        call, of enr-2. box1's row has ended, the session's row is live, and the session's key dir
+        is still there."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        skd = self.close_after_the_fallback("unknown conflict unknown", STUB_LIVE_BOXES="box2")
+        self.assert_one_learn_call("box1")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-2"])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertTrue(skd.exists())
 
     def test_a_success_after_the_fallback_keeps_the_open_session_call(self) -> None:
         """close_after_the_fallback with the first call ending with the outcome not known (the
