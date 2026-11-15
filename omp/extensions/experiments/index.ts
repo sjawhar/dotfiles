@@ -34,9 +34,12 @@
 // keep running. The installer links only this file; its imports resolve from its real path.
 // The three features of text-arms.ts run in both arms of a gate that is `on` or `random`, as the
 // bash gate does, and read the arm per call. They register through a view of the same kind, so the
-// error rule above holds for them too. In either arm they append an `experiments-exposure` entry, so
-// the join of assignment, exposure and outcome finds every assigned session. A gate that is `off`
-// runs none of their handlers.
+// error rule above holds for them too. A root session is a unit of their experiments when its file
+// carries the `experiments` entry and at least one user prompt after it. A session that reaches that
+// prompt gets an `experiments-exposure` entry in either arm. A Legion pane gets an
+// `experiments-excluded` entry instead, and no text (text-arms.ts). A session with no such prompt gets
+// neither. The join lists a session with no such prompt, and an excluded session, apart. A gate that
+// is `off` runs none of their handlers.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import bashGate from "./bash-gate";
 import gateFile from "./gates.json" with { type: "json" };

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import gateFile from "../experiments/gates.json" with { type: "json" };
-import { draw, ENTRY_TYPE, EXPOSURE_ENTRY_TYPE, type ExperimentRecord, type ExposureRecord, envName, FEATURES, type Feature, resolve, resolveGates, rootSessionId } from "../experiments/gates";
+import { draw, ENTRY_TYPE, EXCLUDED_ENTRY_TYPE, EXPOSURE_ENTRY_TYPE, type ExcludedRecord, type ExperimentRecord, type ExposureRecord, envName, FEATURES, type Feature, resolve, resolveGates, rootSessionId } from "../experiments/gates";
 import selfcheckText from "../experiments/infra805-selfcheck.md" with { type: "text" };
 import skillText from "../experiments/infra805-skill.md" with { type: "text" };
+import { LEGION_ENV } from "../experiments/proactive-memory-core";
 import { DEFAULT_RULES, ompModules } from "./omp-interceptor";
 
 // The entry imports the memory agent's and the judge log's bindings, which import @oh-my-pi/pi-ai; that resolves only inside omp.
@@ -87,10 +88,13 @@ describe("the gate file", () => {
 			expect(record.features[feature].on).toBe(false);
 		}
 	});
-	test("the skill text is SKILL.md of cybermonklabs/legion at d806232f, unchanged (git blob cab9f7bf)", () => {
-		const bytes = new TextEncoder().encode(skillText);
+	test.each([
+		["the skill text is SKILL.md of cybermonklabs/legion at d806232f, unchanged", skillText, "cab9f7bf7937ded98538de09226e0aab7289e811"],
+		["the self-check text is the paragraph written for its arm and the three questions of d806232f", selfcheckText, "17e71c4d29ae7c56b9755d56df61e7a516233bcb"],
+	])("%s (git blob %s)", (_label, text, expected) => {
+		const bytes = new TextEncoder().encode(text);
 		const blob = new Bun.CryptoHasher("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
-		expect(blob).toBe("cab9f7bf7937ded98538de09226e0aab7289e811");
+		expect(blob).toBe(expected);
 	});
 });
 
@@ -99,23 +103,30 @@ describe("the extension", () => {
 	const saved = { ...process.env };
 	beforeEach(() => {
 		for (const name of Object.keys(process.env)) if (name.startsWith("OMP_EXPERIMENT_")) delete process.env[name];
+		// The text arms and the memory agent skip a Legion pane: a test runs as a session outside Legion.
+		for (const name of LEGION_ENV) delete process.env[name];
 	});
 	afterEach(() => {
 		for (const name of Object.keys(process.env)) if (name.startsWith("OMP_EXPERIMENT_")) delete process.env[name];
+		for (const name of LEGION_ENV) delete process.env[name];
 		Object.assign(process.env, saved);
 	});
 
 	type Delivered = { message: { customType: string; content: string; display: boolean } };
 	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. Its branch is its entries unless `setBranch` replaces it. */
-	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown }> = [], kind: "main" | "sub" = "main") {
+	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown; [key: string]: unknown }> = [], kind: "main" | "sub" = "main") {
 		Object.assign(process.env, env);
 		const { default: experiments } = await import("../experiments/index");
 		const handlers = new Map<string, Handler[]>();
 		const entries = [...seed];
 		const errors: string[] = [];
+		let appendFails: (customType: string, data: unknown) => boolean = () => false;
 		const pi = {
 			on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-			appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+			appendEntry: (customType: string, data: unknown) => {
+				if (appendFails(customType, data)) throw new Error("the session file cannot be written");
+				entries.push({ type: "custom", customType, data });
+			},
 			logger: { error: (message: string) => errors.push(message), warn: () => {}, debug: () => {} },
 			typebox: { Type: {} },
 			pi: { settings: {} },
@@ -141,19 +152,28 @@ describe("the extension", () => {
 			gh: () => emit("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "gh pr create --fill" } }) as Promise<{ block?: boolean } | undefined>,
 			bash: (command: string) => emit("tool_call", { toolName: "bash", toolCallId: "c2", input: { command } }) as Promise<{ block?: boolean; reason?: string } | undefined>,
 			setBranch: (fn: typeof branch) => (branch = fn),
+			setAppendFailure: (fn: typeof appendFails) => (appendFails = fn),
 			exposures: () => entries.filter(e => e.customType === EXPOSURE_ENTRY_TYPE).map(e => e.data as ExposureRecord),
-			/** Every before_agent_start result of one prompt, in handler order. */
+			excluded: () => entries.filter(e => e.customType === EXCLUDED_ENTRY_TYPE).map(e => e.data as ExcludedRecord),
+			/** Every before_agent_start result of one prompt, in handler order. Each message goes on the branch as omp stores it, a `custom_message` entry. */
 			prompt: async (reason: "prompt" | "revive" = "prompt") => {
 				const results: Delivered[] = [];
 				for (const handler of handlers.get("before_agent_start") ?? []) {
 					const result = await handler({ type: "before_agent_start", reason, prompt: "Design the cache.", systemPrompt: ["You are omp."] }, ctx);
 					if (result !== undefined) results.push(result as Delivered);
 				}
+				for (const { message } of results) entries.push({ type: "custom_message", ...message });
 				return results;
 			},
-			/** The next request, holding the prompt and the custom messages `delivered` put in. */
-			request: (delivered: Delivered[]) =>
-				emit("context", { type: "context", messages: [{ role: "user", content: "Design the cache.", timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))] }),
+			/** The next request, holding the prompt and the custom messages of `delivered`. Each context handler gets the messages the one before it returned, as in omp. Returns the custom types of the custom messages that go out. */
+			request: async (delivered: Delivered[]) => {
+				let messages: Array<{ role: string; customType?: string }> = [{ role: "user", content: "Design the cache.", timestamp: 1 }, ...delivered.map(d => ({ role: "custom", ...d.message, timestamp: 2 }))];
+				for (const handler of handlers.get("context") ?? []) {
+					const result = (await handler({ type: "context", messages }, ctx)) as { messages?: typeof messages } | undefined;
+					if (result?.messages) messages = result.messages;
+				}
+				return messages.filter(m => m.role === "custom").map(m => m.customType);
+			},
 		};
 	}
 	const allOff = { OMP_EXPERIMENT_SELFCOMPACT: "off", OMP_EXPERIMENT_PROACTIVE_MEMORY: "off", OMP_EXPERIMENT_SKILL_GATE: "off", OMP_EXPERIMENT_JUDGE_LOG: "off" };
@@ -229,7 +249,7 @@ describe("the extension", () => {
 				const delivered = await b.prompt();
 				expect(delivered).toEqual(deliveryOf(feature, text));
 				expect(b.exposures()).toEqual([]);
-				expect(await b.request(delivered)).toBeUndefined();
+				expect(await b.request(delivered)).toEqual(text === undefined ? [] : [feature]);
 				expect(b.exposures()).toEqual([{ v: 1, feature, arm: "on", gate, rootSessionId: root, at: expect.any(String) }]);
 				const { at } = b.exposures()[0];
 				expect(new Date(at).toISOString()).toBe(at);
@@ -246,7 +266,7 @@ describe("the extension", () => {
 			expect(b.records()[0].features[feature]).toEqual({ gate: "random", draw: "off", on: false });
 			expect(await b.prompt()).toEqual([]);
 			expect(b.exposures()).toEqual([]);
-			expect(await b.request([])).toBeUndefined();
+			expect(await b.request([])).toEqual([]);
 			expect(b.exposures()).toEqual([{ v: 1, feature, arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
 			expect(await b.prompt()).toEqual([]);
 			await b.request([]);
@@ -335,6 +355,81 @@ describe("the extension", () => {
 			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
 			await resumed.request(again);
 			expect(resumed.exposures()).toHaveLength(2);
+		});
+		test("the text goes in again when the context keeps the exposure entry but not the text, and no second entry is written", async () => {
+			const b = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+			await b.start();
+			await b.request(await b.prompt());
+			const text = b.entries.find(e => e.type === "custom_message" && e.customType === "infra805_skill");
+			const [exposure] = b.entries.filter(e => e.customType === EXPOSURE_ENTRY_TYPE);
+			// A compaction whose first kept entry is the exposure entry: the text before it is out of the context.
+			b.setBranch(() => [{ ...text, id: "t" }, { ...exposure, id: "x" }, { type: "compaction", id: "c", firstKeptEntryId: "x" }]);
+			const again = await b.prompt();
+			expect(again).toEqual(deliveryOf("infra805_skill", skillText));
+			expect(await b.request(again)).toEqual(["infra805_skill"]);
+			expect(b.exposures()).toHaveLength(1);
+		});
+		test("a context that keeps the text but no exposure entry gets no second text, and gets the entry at the next request that holds the text", async () => {
+			const kept = { type: "custom_message", customType: "infra805_skill", content: skillText, display: false };
+			const b = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on" }, ROOT_FILE, [kept]);
+			await b.start();
+			expect(await b.prompt()).toEqual([]);
+			await b.request([]);
+			expect(b.exposures()).toEqual([]);
+			expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual(["infra805_skill"]);
+			expect(b.exposures().map(e => [e.feature, e.arm])).toEqual([["infra805_skill", "on"]]);
+		});
+		test("when the exposure append fails, no request carries that feature's text, the feature stops and is logged, and the other features run on", async () => {
+			const b = await bind({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+			await b.start();
+			b.setAppendFailure((customType, data) => customType === EXPOSURE_ENTRY_TYPE && (data as ExposureRecord).feature === "infra805_skill");
+			const delivered = await b.prompt();
+			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
+			expect(await b.request(delivered)).toEqual(["infra805_selfcheck"]);
+			expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in context")]);
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
+			// Later requests carry both texts from the session's history. The skill's text stays out, also once the append works again.
+			b.setAppendFailure(() => false);
+			expect(await b.request(delivered)).toEqual(["infra805_selfcheck"]);
+			expect(await b.prompt()).toEqual([]);
+			expect(await b.request(delivered)).toEqual(["infra805_selfcheck"]);
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck"]);
+			expect((await b.gh())?.block).toBe(true);
+			// The next resolution finds the skill's text in the context and no entry: the entry goes in with the next request that holds the text.
+			await b.start();
+			expect(await b.prompt()).toEqual([]);
+			expect(await b.request(delivered)).toEqual(["infra805_skill", "infra805_selfcheck"]);
+			expect(b.exposures().map(e => e.feature)).toEqual(["infra805_selfcheck", "infra805_skill"]);
+		});
+		test.each(LEGION_ENV)("a Legion pane (%s set) gets one excluded entry per feature whose gate is on or random, no exposure entry and no text, and an empty value is not a Legion pane", async name => {
+			const all = { OMP_EXPERIMENT_AA_NOOP: "random", OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_INFRA805_SELFCHECK: "on" };
+			const legion = await bind({ ...all, [name]: "x" });
+			await legion.start();
+			expect(legion.records()[0].features.infra805_skill.on).toBe(true);
+			expect(await legion.prompt("revive")).toEqual([]);
+			expect(legion.excluded()).toEqual([]);
+			expect(await legion.prompt()).toEqual([]);
+			expect(await legion.request([])).toEqual([]);
+			expect(legion.exposures()).toEqual([]);
+			expect(legion.excluded()).toEqual(
+				(["aa_noop", "infra805_skill", "infra805_selfcheck"] as const).map(feature => ({ v: 1, feature, reason: "legion_pane", rootSessionId: ROOT, at: expect.any(String) })),
+			);
+			expect(await legion.prompt()).toEqual([]);
+			const resumed = await bind({ ...all, [name]: "x" }, ROOT_FILE, legion.entries);
+			await resumed.start();
+			expect(await resumed.prompt()).toEqual([]);
+			expect(resumed.excluded()).toHaveLength(3);
+			expect(resumed.exposures()).toEqual([]);
+			const skillOff = await bind({ ...all, OMP_EXPERIMENT_INFRA805_SKILL: "off", [name]: "x" });
+			await skillOff.start();
+			await skillOff.prompt();
+			expect(skillOff.excluded().map(e => e.feature)).toEqual(["aa_noop", "infra805_selfcheck"]);
+			const outside = await bind({ ...all, [name]: "" });
+			await outside.start();
+			const delivered = await outside.prompt();
+			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
+			await outside.request(delivered);
+			expect(outside.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill", "infra805_selfcheck"]);
 		});
 	});
 });

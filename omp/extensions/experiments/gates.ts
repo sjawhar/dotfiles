@@ -27,6 +27,10 @@ export const ENTRY_TYPE = "experiments";
 export const EXPOSURE_ENTRY_TYPE = "experiments-exposure";
 /** One exposure: the feature, the arm of the session, its gate (`off` writes no entry), the root session id (rootIdFromPath, else the session's own id) and the time (ISO 8601, UTC). */
 export type ExposureRecord = { v: 1; feature: Feature; arm: "on" | "off"; gate: Exclude<Gate, "off">; rootSessionId: string; at: string };
+/** The custom type of the entry a feature of text-arms.ts appends, in place of any text or exposure entry, in a session that is outside its experiments. */
+export const EXCLUDED_ENTRY_TYPE = "experiments-excluded";
+/** One exclusion: the feature, the reason (`legion_pane`: a Legion pane), the root session id (rootIdFromPath, else the session's own id) and the time (ISO 8601, UTC). */
+export type ExcludedRecord = { v: 1; feature: Feature; reason: "legion_pane"; rootSessionId: string; at: string };
 const ENV_PREFIX = "OMP_EXPERIMENT_";
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** The uuid after `Z_` in a session file path (the root's id for its own file and its subagents' files alike). */
