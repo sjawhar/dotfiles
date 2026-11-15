@@ -1,6 +1,6 @@
 {
   "personal": {
-    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The read, modify and send tiers use the older External client of a personal project (number 1092431965353); the admin tier uses the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT). A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
+    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The modify, send and admin tiers use the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT); the read tier uses the older External client of a personal project (number 1092431965353). A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_PERSONAL_READ_OAUTH", "--"],
@@ -8,7 +8,7 @@
       },
       "modify": {
         "command": ["secret-run", "--reason", "gws personal modify", "--wait", "4m", "GWS_PERSONAL_MODIFY_OAUTH", "--"],
-        "description": "gmail.modify: labels, archive, drafts, +reply, +forward; one approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
+        "description": "gmail.modify, calendar, drive, documents and spreadsheets: Gmail labels, archive, drafts, +reply, +forward, and changes to Calendar events, Drive files, Docs and Sheets. A Calendar change with sendUpdates other than none, or a Drive share, sends mail to other people. One approval per session: a Dispatch grant from the credential broker, or a YubiKey touch where the broker does not serve the session"
       },
       "send": {
         "command": ["secret-run", "--reason", "gws personal send", "--wait", "4m", "GWS_PERSONAL_SEND_OAUTH", "--"],
@@ -63,7 +63,7 @@
     }
   },
   "wren": {
-    "description": "wren@thecybermonk.com, Wren's own Google Workspace account: an ordinary user of thecybermonk.com with no admin role, for Wren and the errand agents to read and send mail as themselves (never as Sami). Every tier is Gmail alone (no Drive, Docs, Sheets or Calendar), uses the older External client \"gws personal\" of the personal project (number 1092431965353), the client of the personal read tier, because the Gmail API is off in thecybermonk-gws, and releases its agent-tier key with no approval step",
+    "description": "wren@thecybermonk.com, Wren's own Google Workspace account: an ordinary user of thecybermonk.com with no admin role, for Wren and the errand agents to read and send mail as themselves (never as Sami). Every tier is Gmail alone (no Drive, Docs, Sheets or Calendar), uses the older External client \"gws personal\" of the personal project (number 1092431965353), the client of the personal read tier, and releases its agent-tier key with no approval step",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_WREN_READ_OAUTH", "--"],
