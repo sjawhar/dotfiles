@@ -121,16 +121,17 @@ status = 0
 paths_at_fetch = {{}}
 try:
     if action == "fetch":
-        active_temporary = active.with_name(f".{{active.name}}.{{os.getpid()}}.tmp")
-        active_temporary.write_text(json.dumps({{"pid": os.getpid(), "pgid": os.getpgid(0), "start": started}}),
-                                    encoding="utf-8")
-        os.replace(active_temporary, active)
         paths_at_fetch = {{path: Path(path).exists() for path in settings.get("record_exists", [])}}
         pack = Path.cwd() / ".git" / "objects" / "pack"
         if settings.get("write_tmp"):
             pack.mkdir(parents=True, exist_ok=True)
             partial = pack / "tmp_pack_from_fetch"
             partial.write_text("partial", encoding="utf-8")
+        active_temporary = active.with_name(f".{{active.name}}.{{os.getpid()}}.tmp")
+        active_temporary.write_text(json.dumps({{"pid": os.getpid(), "pgid": os.getpgid(0), "start": started}}),
+                                    encoding="utf-8")
+        # Publish the record last because a test signals the stub once it sees it.
+        os.replace(active_temporary, active)
         time.sleep(float(settings.get("fetch_sleep", 0)))
         if settings.get("rename_tmp"):
             partial = pack / "tmp_pack_from_fetch"
