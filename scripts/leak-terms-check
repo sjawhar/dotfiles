@@ -1657,19 +1657,18 @@ def scan_outgoing_objects(
     folder_files: list[tuple[str, str]] = []
     findings: list[str] = []
     for folder in folders:
-        # Each entry's path is decided as the commit check decides a changed file's path: the whole path through the
-        # same matcher. A folder's path starts every path below it, so one match shows up again in each of them; after
-        # matching, a match counts once, by its start and the path text up to its end, at the first entry that holds
-        # it (git lists a folder before what it holds). Every shown path masks every term in it.
-        counted: set[tuple[int, str]] = set()
-        for kind, path_object, path in tree_paths(folder):
+        # The places are the ones the commit check names for a commit that adds the same files: each file's whole
+        # path, decided by the same matcher, one finding per match. A folder that holds anything is not read on its
+        # own, since its path starts the path of everything in it and the term is read there. An empty folder, which no
+        # commit diff can show, is read as one place of its own. Every shown path masks every term in it.
+        entries = tree_paths(folder)
+        nonempty = {path.rpartition("/")[0] for _, _, path in entries if "/" in path}
+        for kind, path_object, path in entries:
+            if kind == "tree" and path in nonempty:
+                continue
             spans = matcher.spans(path)
             shown = mask_path(path, spans)
-            for span in spans:
-                occurrence = (span.start, path[: span.end])
-                if occurrence not in counted:
-                    counted.add(occurrence)
-                    findings.append(shown)
+            findings.extend(shown for _ in spans)
             if kind == "blob" and path_object not in destination_objects and path_object not in commit_objects:
                 folder_files.append((path_object, shown))
 

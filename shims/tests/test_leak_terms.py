@@ -3933,19 +3933,21 @@ class OutgoingLeaks(SinkRepositoryCase):
                         else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
                     )
                     self.set_url(destination)
+                    # The places a commit adding the same files would get: each file under the term-named folder, and
+                    # the empty folder's own path, which no commit can hold.
+                    places = (
+                        ("prefix/<listed term>",)
+                        if folder == empty_folder
+                        else ("prefix/<listed term>/first.txt", "prefix/<listed term>/second.txt", "prefix/<listed term>/second.txt:1")
+                    )
                     result = self.assert_object_refused(
                         lambda: self.git_push_ref(folder, f"refs/tags/{self.unique('folder')}", environment),
-                        "prefix/<listed term>",
+                        places[0],
                         destination,
                         *absent,
                     )
-                    self.assertEqual(
-                        result.stderr.count("error: leak terms: prefix/<listed term>: listed leak term"),
-                        1,
-                        result.stderr,
-                    )
-                    if folder == nonempty_folder:
-                        self.assertIn("error: leak terms: prefix/<listed term>/second.txt:1: listed leak term", result.stderr)
+                    shown = [line for line in result.stderr.splitlines() if line.endswith(": listed leak term")]
+                    self.assertEqual(shown, [f"error: leak terms: {place}: listed leak term" for place in places], result.stderr)
 
     def test_push_masks_a_folder_path_in_text_findings(self) -> None:
         def make(arguments: list[str], source: str) -> str:
@@ -3973,9 +3975,9 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.assertIn("error: leak terms: <listed term>.txt: listed leak term", result.stderr)
                 self.assertIn("error: leak terms: <listed term>.txt:1: listed leak term", result.stderr)
 
-    def test_push_refuses_a_term_that_spans_folder_levels_once(self) -> None:
+    def test_push_refuses_a_term_that_spans_folder_levels(self) -> None:
         # A listed term holding `/` matches a folder object's path across levels: `alpha/omega` in `alpha/omega/x.txt`.
-        # It is refused once, at the entry where the match ends, not once per file below it.
+        # Each file below names its place, as a commit adding the same files would.
         term = "alpha/omega"
         term_file = encrypt_yaml(f"terms: |\n  {term}\n")
 
@@ -3999,47 +4001,104 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.set_url(destination)
                 result = self.assert_object_refused(
                     lambda: self.git_push_ref(top, f"refs/tags/{self.unique('slash-term')}", environment | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
-                    "<listed term>",
+                    "<listed term>/x.txt",
                     destination,
                     top,
                     alpha,
                     omega,
                 )
-                self.assertEqual(result.stderr.count(": listed leak term"), 1, result.stderr)
+                shown = [line for line in result.stderr.splitlines() if line.endswith(": listed leak term")]
+                self.assertEqual(
+                    shown,
+                    ["error: leak terms: <listed term>/x.txt: listed leak term", "error: leak terms: <listed term>/y.txt: listed leak term"],
+                    result.stderr,
+                )
                 self.assertNotIn(term, result.stdout + result.stderr)
 
-    def test_push_folder_check_decides_a_path_as_the_commit_check_does(self) -> None:
-        # The same path through both checks: a commit that adds a file at PATH (the commit check reads its diff path),
-        # and that commit's folder object pushed alone (the folder check reads its entries). Both refuse, or both
-        # pass, with the same number of findings. Each push goes to a fresh public destination, so nothing is held.
-        rows = (
-            ("foo/", "foo/bar/x.txt"),
-            ("foo/bar/", "foo/bar/x.txt"),
-            ("/", "foo/x.txt"),
-            ("a/b", "a/b/x.txt"),
-            ("/bar", "foo/bar/x.txt"),
-            (TEST_TERMS[1], f"{TEST_TERMS[1]}/x.txt"),
-            ("clean-term", "foo/bar/x.txt"),
-        )
+    def make_tree(self, files: Sequence[str], empty_folders: Sequence[str] = ()) -> str:
+        """A folder object made by the real git: each of FILES holding `x`, and each of EMPTY_FOLDERS empty."""
+        def run(arguments: list[str], source: str) -> str:
+            result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
 
-        def findings(result: subprocess.CompletedProcess[str]) -> int:
-            return sum(1 for line in result.stderr.splitlines() if line.startswith("error: leak terms: ") and line.endswith(": listed leak term"))
+        blob = run(["hash-object", "-w", "--stdin"], "x\n")
+        empty = run(["mktree"], "")
+        root: dict = {}
+        for path, leaf in [*((path, blob) for path in files), *((path, None) for path in empty_folders)]:
+            *folders, name = path.split("/")
+            node = root
+            for folder in folders:
+                node = node.setdefault(folder, {})
+            node[name] = leaf if leaf is not None else {}
 
-        for term, path in rows:
-            with self.subTest(term=term, path=path):
-                environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml(f"terms: |\n  {term}\n"))}
-                commit = self.commit(path, "clean", "clean", parent=self.base)
-                tree = self.real("rev-parse", f"{commit}^{{tree}}")
-                outcomes = []
-                for kind, source in (("commit", commit), ("folder", tree)):
-                    url = self.fresh_public_url()
-                    self.set_url(url)
-                    ref = f"refs/heads/{self.unique('table')}" if kind == "commit" else f"refs/tags/{self.unique('table')}"
-                    result = self.git_push_ref(source, ref, environment)
-                    self.assertNotIn(term if term != "/" else "\0", result.stdout + result.stderr)
-                    outcomes.append((result.returncode != 0, findings(result)))
-                self.assertEqual(outcomes[0], outcomes[1], f"commit check {outcomes[0]}, folder check {outcomes[1]}")
-                self.assertEqual(outcomes[0][0], term != "clean-term", outcomes)
+        def build(node: dict) -> str:
+            lines = [
+                f"100644 blob {value}\t{name}\n" if isinstance(value, str) else f"040000 tree {build(value) if value else empty}\t{name}\n"
+                for name, value in node.items()
+            ]
+            return run(["mktree"], "".join(lines))
+
+        return build(root)
+
+    def test_push_folder_check_names_the_places_the_commit_check_names(self) -> None:
+        # A generated grid: every term against every tree. For each pair, a commit that adds the tree's files (the
+        # commit check reads its diff paths) and the tree's folder object pushed alone, empty folders included (the
+        # folder check reads its entries). Both refuse or both pass, and the folder push names the same masked
+        # places as the commit push; the one allowed extra is one place per match in an empty folder's path, which no
+        # commit diff can show. Each push goes to a fresh public destination, so nothing is held.
+        terms = ("foo/", "foo/bar/", "/", "a/b", "/bar", "zorble plex", TEST_TERMS[1], "qqq-clean")
+        trees = {
+            "nested": (("foo/bar/x.txt", "foo/bar/y.txt", "foo/z.txt"), ()),
+            "sibling-folders": ((f"{TEST_TERMS[1]}-one/x.txt", f"{TEST_TERMS[1]}-two/y.txt"), ()),
+            "sibling-files": ((f"{TEST_TERMS[1]}-one.txt", f"{TEST_TERMS[1]}-two.txt"), ()),
+            "a-b-siblings": (("a/b-one", "a/b-two"), ()),
+            "bar-under": (("x/bar/y.txt", "x/barn.txt"), ()),
+            "term-files": ((f"{TEST_TERMS[1]}.txt", "zorble plex.txt", "deep/zorble  plex/x.txt"), ()),
+            "empty-folders": (("keep/x.txt",), (f"prefix/{TEST_TERMS[1]}", "foo", "a/b", "q/bar/inner")),
+        }
+        prefix = re.compile(r"^error: leak terms: (?:commit [0-9a-f]{12} )?(.*): listed leak term$")
+
+        def places(result: subprocess.CompletedProcess[str]) -> list[str]:
+            return sorted(match.group(1) for line in result.stderr.splitlines() if (match := prefix.match(line)))
+
+        def pattern(term: str) -> re.Pattern[str]:
+            return re.compile(r"[ \t]+".join(re.escape(piece) for piece in term.casefold().split()))
+
+        for term in terms:
+            environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml(f"terms: |\n  {term}\n"))}
+            for label, (files, empty_folders) in trees.items():
+                with self.subTest(term=term, tree=label):
+                    commit_tree = self.make_tree(files)
+                    made = self.command(["/usr/bin/git", "commit-tree", commit_tree, "-p", self.base, "-m", "grid"], self.person)
+                    self.assertEqual(made.returncode, 0, made.stderr)
+                    commit = made.stdout.strip()
+                    folder = self.make_tree(files, empty_folders)
+                    results = {}
+                    for kind, source in (("commit", commit), ("folder", folder)):
+                        url = self.fresh_public_url()
+                        self.set_url(url)
+                        ref = f"refs/heads/{self.unique('grid')}" if kind == "commit" else f"refs/tags/{self.unique('grid')}"
+                        results[kind] = self.git_push_ref(source, ref, environment)
+                        if term != "/":
+                            self.assertNotIn(term.casefold(), (results[kind].stdout + results[kind].stderr).casefold())
+                    commit_places, folder_places = places(results["commit"]), places(results["folder"])
+                    extra = list(folder_places)
+                    for place in commit_places:
+                        self.assertIn(place, extra, f"the commit check names {place}; the folder check names {folder_places}")
+                        extra.remove(place)
+                    expected_extra = sorted(
+                        folder_path for folder_path in empty_folders for _ in pattern(term).finditer(folder_path.casefold())
+                    )
+                    self.assertEqual(len(extra), len(expected_extra), f"extra folder places {extra}, empty-folder matches {expected_extra}")
+                    for place in extra:
+                        masked = re.compile(".+".join(re.escape(part) for part in place.split("<listed term>")))
+                        self.assertTrue(any(masked.fullmatch(path) for path in empty_folders), f"{place} is no empty folder's path")
+                    refused = (results["commit"].returncode != 0, results["folder"].returncode != 0)
+                    self.assertEqual(refused[1], bool(folder_places), results["folder"].stderr)
+                    self.assertEqual(refused[0], bool(commit_places), results["commit"].stderr)
+                    if not expected_extra:
+                        self.assertEqual(refused[0], refused[1], (results["commit"].stderr, results["folder"].stderr))
 
     def test_push_refuses_a_term_named_empty_folder_in_a_folder_object(self) -> None:
         # A folder object can hold an empty folder; its name is refused. (A commit that only adds an empty folder has
