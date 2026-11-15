@@ -850,6 +850,7 @@ class WaitAfterFailure(HawkTokenFixture):
         first = self.timer_run()
         self.assertNotEqual(first.returncode, 0)
         self.assertEqual(len(self.git_calls("clone")), 1)
+        started = self.root / ".refresh-started"
         failed = self.root / ".refresh-failed"
         self.assertTrue(failed.exists())
         failed_at = failed.stat().st_mtime
@@ -862,16 +863,35 @@ class WaitAfterFailure(HawkTokenFixture):
             "hawk-token: first-run build failed at "
             f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(failed_at))}; "
             f"next try after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(failed_at + 6 * 60 * 60))}; "
-            f"remove {failed} to try now\n"
+            f"remove {started} and {failed} to try now\n"
         )
         self.assertIn(expected, second.stderr)
 
+        self.age(started, 6 * 60 * 60 + 60)
+        self.age(failed, 6 * 60 * 60 + 60)
+        retry_started = time.time()
+        retry_failed = self.timer_run()
+        self.assertNotEqual(retry_failed.returncode, 0)
+        self.assertEqual(len(self.git_calls("clone")), 2)
+        current = self.root / "current"
+        self.assertFalse(current.exists())
+        self.assertGreaterEqual(failed.stat().st_mtime, retry_started)
+
+        held_again = self.timer_run()
+        self.assertEqual(held_again.returncode, 0, held_again.stderr)
+        self.assertEqual(len(self.git_calls("clone")), 2)
+        self.assertIn(f"remove {started} and {failed} to try now", held_again.stderr)
+
+        advice = next(line for line in held_again.stderr.splitlines() if "remove " in line)
+        paths = advice.split("remove ", 1)[1].removesuffix(" to try now").split(" and ")
+        for path in paths:
+            Path(path).unlink()
         self.set_control("git", {})
-        self.age(self.root / ".refresh-started", 6 * 60 * 60 + 60)
-        self.age(self.root / ".refresh-failed", 6 * 60 * 60 + 60)
         retry = self.timer_run()
         self.assertEqual(retry.returncode, 0, retry.stderr)
-        self.assertEqual(len(self.git_calls("clone")), 2)
+        self.assertEqual(len(self.git_calls("clone")), 3)
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(os.readlink(current), "agent-c")
 
     def test_fresh_stamp_without_a_checkout_bootstraps_a_session(self) -> None:
         (self.root / ".refreshed").touch()

@@ -347,7 +347,7 @@ log_first_run_wait() {
     failed_seconds="$(date -r "$failed" +%s)"
     failed_at="$(date -u -d "@$failed_seconds" +%FT%TZ)"
     next_at="$(date -u -d "@$(( failed_seconds + REFRESH_SECONDS ))" +%FT%TZ)"
-    log "first-run build failed at $failed_at; next try after $next_at; remove $failed to try now"
+    log "first-run build failed at $failed_at; next try after $next_at; remove $started and $failed to try now"
 }
 
 # bootstrap_first_run MODE adopts no existing state: it builds the first live slot
