@@ -1480,29 +1480,44 @@ def object_types(object_ids: Sequence[str]) -> dict[str, str]:
     return types
 
 
-def tag_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
-    """The raw content of each tag object, in one Git call, with each record's size checked."""
+def batch_objects(
+    object_ids: Sequence[str], expected_type: str, read_error: str, malformed_error: str
+) -> dict[str, bytes]:
+    """The exact content of each expected object type, with every batch record checked."""
     if not object_ids:
         return {}
-    output = git_output(
-        ["cat-file", "--batch"], ("\n".join(object_ids) + "\n").encode(), "git could not read the outgoing tags"
-    )
+    output = git_output(["cat-file", "--batch"], ("\n".join(object_ids) + "\n").encode(), read_error)
     contents: dict[str, bytes] = {}
     position = 0
     for object_id in object_ids:
         end = output.find(b"\n", position)
         fields = output[position:end].decode("utf-8", errors="surrogateescape").split() if end >= 0 else []
-        if len(fields) != 3 or fields[0].lower() != object_id.lower() or fields[1] != "tag" or not fields[2].isdigit():
-            raise TextError("git gave a malformed tag object")
+        if (
+            len(fields) != 3
+            or fields[0].lower() != object_id.lower()
+            or fields[1] != expected_type
+            or not fields[2].isdigit()
+        ):
+            raise TextError(malformed_error)
         size = int(fields[2])
         content = output[end + 1 : end + 1 + size]
         if len(content) != size or output[end + 1 + size : end + 2 + size] != b"\n":
-            raise TextError("git gave a malformed tag object")
+            raise TextError(malformed_error)
         contents[object_id] = content
         position = end + 2 + size
     if position != len(output):
-        raise TextError("git gave a malformed tag object")
+        raise TextError(malformed_error)
     return contents
+
+
+def tag_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
+    """The raw content of each tag object, in one Git call, with each record's size checked."""
+    return batch_objects(
+        object_ids,
+        "tag",
+        "git could not read the outgoing tags",
+        "git gave a malformed tag object",
+    )
 
 
 def parse_tag(content: bytes) -> tuple[str, str, str, bytes, bytes | None]:
@@ -1582,8 +1597,8 @@ def outgoing_tag_messages(
 
 
 def tree_paths(object_id: str) -> list[tuple[str, str, str]]:
-    """Every leaf kind, object and path in a folder object, with Git's raw path bytes decoded once."""
-    output = git_output(["ls-tree", "-r", "-z", object_id], b"", "git could not read an outgoing folder")
+    """Every kind, object and path in a folder object, with Git's raw path bytes decoded once."""
+    output = git_output(["ls-tree", "-r", "-t", "-z", object_id], b"", "git could not read an outgoing folder")
     records = output.split(b"\0")
     if records.pop() != b"":
         raise TextError("git gave a malformed outgoing folder")
@@ -1595,7 +1610,7 @@ def tree_paths(object_id: str) -> list[tuple[str, str, str]]:
             not separator
             or len(fields) != 3
             or not fields[0].isdigit()
-            or fields[1] not in {b"blob", b"commit"}
+            or fields[1] not in {b"blob", b"commit", b"tree"}
         ):
             raise TextError("git gave a malformed outgoing folder")
         try:
@@ -1612,27 +1627,12 @@ def tree_paths(object_id: str) -> list[tuple[str, str, str]]:
 
 def blob_objects(object_ids: Sequence[str]) -> dict[str, bytes]:
     """The exact content of each file object, verified as one batch."""
-    if not object_ids:
-        return {}
-    output = git_output(
-        ["cat-file", "--batch"], ("\n".join(object_ids) + "\n").encode(), "git could not read the outgoing files"
+    return batch_objects(
+        object_ids,
+        "blob",
+        "git could not read the outgoing files",
+        "git gave a malformed outgoing file",
     )
-    contents: dict[str, bytes] = {}
-    position = 0
-    for object_id in object_ids:
-        end = output.find(b"\n", position)
-        fields = output[position:end].decode("utf-8", errors="surrogateescape").split() if end >= 0 else []
-        if len(fields) != 3 or fields[0].lower() != object_id.lower() or fields[1] != "blob" or not fields[2].isdigit():
-            raise TextError("git gave a malformed outgoing file")
-        size = int(fields[2])
-        content = output[end + 1 : end + 1 + size]
-        if len(content) != size or output[end + 1 + size : end + 2 + size] != b"\n":
-            raise TextError("git gave a malformed outgoing file")
-        contents[object_id] = content
-        position = end + 2 + size
-    if position != len(output):
-        raise TextError("git gave a malformed outgoing file")
-    return contents
 
 
 def scan_outgoing_objects(
@@ -1658,10 +1658,11 @@ def scan_outgoing_objects(
     findings: list[str] = []
     for folder in folders:
         for kind, path_object, path in tree_paths(folder):
-            path_spans = matcher.spans(path)
-            shown = mask_path(path, path_spans)
-            if path_spans:
-                findings.extend(shown for _ in path_spans)
+            # One finding per entry whose own name holds a term, so a folder's name counts once, not once per file
+            # under it; every shown path masks every term in it, its parent folders' names included.
+            component_start = path.rfind("/") + 1
+            shown = mask_path(path, matcher.spans(path))
+            findings.extend(shown for _ in matcher.spans(path[component_start:]))
             if kind == "blob" and path_object not in destination_objects and path_object not in commit_objects:
                 folder_files.append((path_object, shown))
 

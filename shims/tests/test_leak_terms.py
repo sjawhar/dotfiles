@@ -3897,6 +3897,56 @@ class OutgoingLeaks(SinkRepositoryCase):
                         *absent,
                     )
 
+
+    def test_push_refuses_named_empty_and_nonempty_subfolders_without_a_sent_commit(self) -> None:
+        def make(arguments: list[str], source: str) -> str:
+            result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        clean_blob = make(["hash-object", "-w", "--stdin"], "clean\n")
+        first_blob = make(["hash-object", "-w", "--stdin"], "first\n")
+        # A term in this file's text too: its line finding must show the folder's name masked.
+        second_blob = make(["hash-object", "-w", "--stdin"], f"{TEST_TERMS[0]}\n")
+        empty_tree = make(["mktree"], "")
+        empty_named_tree = make(["mktree"], f"040000 tree {empty_tree}\t{TEST_TERMS[1]}\n")
+        two_files_tree = make(
+            ["mktree"], f"100644 blob {first_blob}\tfirst.txt\n100644 blob {second_blob}\tsecond.txt\n"
+        )
+        named_files_tree = make(["mktree"], f"040000 tree {two_files_tree}\t{TEST_TERMS[1]}\n")
+        empty_folder = make(
+            ["mktree"], f"100644 blob {clean_blob}\tclean.txt\n040000 tree {empty_named_tree}\tprefix\n"
+        )
+        nonempty_folder = make(
+            ["mktree"], f"100644 blob {clean_blob}\tclean.txt\n040000 tree {named_files_tree}\tprefix\n"
+        )
+
+        for agent, environment, url in self.combinations():
+            for folder, absent in (
+                (empty_folder, (empty_folder, empty_named_tree, clean_blob)),
+                (nonempty_folder, (nonempty_folder, named_files_tree, two_files_tree, clean_blob, first_blob, second_blob)),
+            ):
+                with self.subTest(agent=agent, url=url, folder=folder):
+                    destination = (
+                        self.fresh_public_url()
+                        if url == self.public_url
+                        else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                    )
+                    self.set_url(destination)
+                    result = self.assert_object_refused(
+                        lambda: self.git_push_ref(folder, f"refs/tags/{self.unique('folder')}", environment),
+                        "prefix/<listed term>",
+                        destination,
+                        *absent,
+                    )
+                    self.assertEqual(
+                        result.stderr.count("error: leak terms: prefix/<listed term>: listed leak term"),
+                        1,
+                        result.stderr,
+                    )
+                    if folder == nonempty_folder:
+                        self.assertIn("error: leak terms: prefix/<listed term>/second.txt:1: listed leak term", result.stderr)
+
     def test_push_masks_a_folder_path_in_text_findings(self) -> None:
         def make(arguments: list[str], source: str) -> str:
             result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
