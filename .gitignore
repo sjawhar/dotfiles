@@ -45,6 +45,8 @@ docs/superpowers/
 
 # Private secrets repo (its own git repo, never part of dotfiles)
 .secrets/
+# Private Trajectory secrets repo (its own git repo; installers/secretsd.sh declares it where it is cloned)
+.secrets-trajectory/
 omp/models.local.yml
 # shims/omp loads omp/config.<profile>.local.yml for a named profile, as it loads config.local.yml for the default one.
 omp/config.*.local.yml

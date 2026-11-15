@@ -52,3 +52,4 @@ An ask for an outside message has, in this order: who the reader is, and one lin
 
 - How the text reads: `skill://plain-words` for empty verb phrases, `skill://speaking-as-sami` for text in Sami's own name.
 - A message to another agent or to Sami: write it plainly and send it; no approval step.
+- Sami's personal admin (sellers, vendors, couriers, taskers, family) in the omp `personal` profile: `skill://contacting` holds its identity and approval rules.

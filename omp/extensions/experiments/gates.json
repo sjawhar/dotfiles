@@ -5,5 +5,8 @@
 	"judge_log": "on",
 	"rules_refresh": "random",
 	"askgate_block": "random",
-	"bash_gate_leading": "random"
+	"bash_gate_leading": "random",
+	"aa_noop": "off",
+	"infra805_skill": "off",
+	"infra805_selfcheck": "off"
 }

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""installers/secretsd.sh configures dojo only for a matching local age identity.
+"""installers/secretsd.sh configures encrypted source roots for local age identities.
 
-The installer must retain its dotfiles and private source roots, add the optional
-HOME/src/dojo root only when its encrypted secrets file names an age identity in
-the local key file, and leave a converged configuration without another restart.
-The fixtures use only throwaway age identities and run the real installer with a
-temporary HOME, stubbed system commands, and no inherited environment.
+The installer retains its dotfiles and private source roots. It adds the optional
+Trajectory and HOME/src/dojo roots only when a local key can decrypt their
+secrets.env files. A Trajectory root with only secrets.human.d needs no age key.
+The installer also leaves a converged configuration without another restart.
+Fixtures use throwaway age identities, a temporary HOME, stubbed system commands,
+and no inherited environment.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -79,8 +81,10 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.mise = self.root / "mise"
         self.stubs = self.root / "stubs"
         self.log = self.root / "installer.log"
+        self.grants = self.root / "grants.txt"
         self.config = self.home / ".config" / "secretsd" / "config.toml"
         self.keys = self.home / ".config" / "sops" / "age" / "keys.txt"
+        self.trajectory = self.dotfiles / ".secrets-trajectory"
         self.dojo = self.home / "src" / "dojo"
 
         for directory in (
@@ -94,7 +98,7 @@ class SecretsdInstallerConfig(unittest.TestCase):
 
         write_executable(
             self.mise / "installs" / "secrets" / "9.9.9" / "bin" / "secrets",
-            'if [ "${1:-}" = grants ]; then\n    echo "no active grants"\nfi\nexit 0',
+            'if [ "${1:-}" = grants ]; then\n    cat "$SECRETSD_INSTALLER_TEST_GRANTS"\nfi\nexit 0',
         )
         (self.mise / "installs" / "secrets" / "9.9.9" / "systemd" / "secretsd.service").write_text(
             "test secretsd service\n", encoding="utf-8"
@@ -103,6 +107,7 @@ class SecretsdInstallerConfig(unittest.TestCase):
             "test secretsd socket\n", encoding="utf-8"
         )
         (self.mise / "installs" / "secrets" / "latest").symlink_to("9.9.9")
+        self.grants.write_text("no active grants\n", encoding="utf-8")
 
         write_executable(
             self.stubs / "systemctl",
@@ -119,6 +124,7 @@ class SecretsdInstallerConfig(unittest.TestCase):
             "DOTFILES_DIR": str(self.dotfiles),
             "MISE_DATA_DIR": str(self.mise),
             "LANG": "C.UTF-8",
+            "SECRETSD_INSTALLER_TEST_GRANTS": str(self.grants),
             "SECRETSD_INSTALLER_TEST_LOG": str(self.log),
             "PATH": f"{self.stubs}:/usr/local/bin:/usr/bin:/bin",
         }
@@ -157,29 +163,68 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.keys.parent.mkdir(parents=True)
         self.keys.write_bytes(b"".join(identity.read_bytes() for identity in identities))
 
-    def write_dojo_secrets(self, *recipients: str) -> None:
-        self.dojo.mkdir(parents=True)
+    def write_sops_secrets(self, root: Path, *recipients: str) -> None:
+        root.mkdir(parents=True)
         metadata = "".join(
             f"sops_age__list_{index}__map_recipient={recipient}\n"
             for index, recipient in enumerate(recipients)
         )
-        (self.dojo / "secrets.env").write_text(ENCRYPTED_VALUE + metadata, encoding="utf-8")
+        (root / "secrets.env").write_text(ENCRYPTED_VALUE + metadata, encoding="utf-8")
+
+    def write_dojo_secrets(self, *recipients: str) -> None:
+        self.write_sops_secrets(self.dojo, *recipients)
+
+    def write_trajectory_secrets(self, *recipients: str) -> None:
+        self.write_sops_secrets(self.trajectory, *recipients)
 
     def todays_text(self) -> bytes:
         return TODAYS_TEXT.format(dotfiles=self.dotfiles).encode("utf-8")
 
+    def trajectory_text(self) -> bytes:
+        return self.todays_text() + (
+            f'\n[source.trajectory]\npath = "{self.trajectory}"\n'.encode("utf-8")
+        )
+
     def dojo_text(self) -> bytes:
         return self.todays_text() + f'\n[source.dojo]\npath = "{self.dojo}"\n'.encode("utf-8")
+
+    def trajectory_dojo_text(self) -> bytes:
+        return self.trajectory_text() + f'\n[source.dojo]\npath = "{self.dojo}"\n'.encode(
+            "utf-8"
+        )
 
     def run_installer(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(INSTALLER)], capture_output=True, text=True, env=self.env, check=False
         )
 
-    def assert_installed(self, result: subprocess.CompletedProcess[str], expected: bytes) -> None:
+    def run_config_function(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", 'source "$1" && secretsd_config_toml', "_", str(INSTALLER)],
+            capture_output=True,
+            text=True,
+            env={**self.env, "SECRETSD_INSTALLER_FUNCTIONS_ONLY": "1"},
+            check=False,
+        )
+
+    def assert_installed(
+        self,
+        result: subprocess.CompletedProcess[str],
+        expected: bytes,
+        *,
+        expect_trajectory_note: bool = True,
+    ) -> None:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.config.read_bytes(), expected, result.stdout + result.stderr)
         self.assertNotIn("AGE-SECRET-KEY-", result.stdout + result.stderr)
+        if expect_trajectory_note:
+            self.assertEqual(
+                result.stderr.count("NOTE: trajectory source root not configured:"),
+                1,
+                result.stderr,
+            )
+        else:
+            self.assertNotIn("NOTE: trajectory source root not configured:", result.stderr)
         self.assertNotIn("sudo", self.log.read_text(encoding="utf-8"))
 
     def test_1_no_key_file(self) -> None:
@@ -239,6 +284,97 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.write_dojo_secrets(recipient)
 
         self.assert_installed(self.run_installer(), self.dojo_text())
+
+    def test_7_trajectory_human_directory_needs_no_age_recipient(self) -> None:
+        (self.trajectory / "secrets.human.d").mkdir(parents=True)
+
+        self.assert_installed(
+            self.run_installer(), self.trajectory_text(), expect_trajectory_note=False
+        )
+
+    def test_8_trajectory_matching_recipient_adds_source(self) -> None:
+        self.install_age_keygen_in_mise()
+        identity, recipient = self.create_identity("trajectory-matching")
+        self.write_key_file(identity)
+        self.write_trajectory_secrets(recipient)
+
+        self.assert_installed(
+            self.run_installer(), self.trajectory_text(), expect_trajectory_note=False
+        )
+
+    def test_9_trajectory_mismatched_secrets_env_is_not_rescued_by_human_directory(self) -> None:
+        self.install_age_keygen_in_mise()
+        matching, _ = self.create_identity("matching")
+        _, unrelated = self.create_identity("unrelated")
+        self.write_key_file(matching)
+        self.write_trajectory_secrets(unrelated)
+
+        self.assert_installed(self.run_installer(), self.todays_text())
+        (self.trajectory / "secrets.human.d").mkdir()
+        self.assert_installed(self.run_installer(), self.todays_text())
+
+    def test_10_trajectory_precedes_dojo_when_both_recipients_match(self) -> None:
+        self.install_age_keygen_in_mise()
+        identity, recipient = self.create_identity("matching")
+        self.write_key_file(identity)
+        self.write_trajectory_secrets(recipient)
+        self.write_dojo_secrets(recipient)
+
+        self.assert_installed(
+            self.run_installer(), self.trajectory_dojo_text(), expect_trajectory_note=False
+        )
+
+    def test_11_config_function_has_no_installer_side_effects(self) -> None:
+        self.install_age_keygen_in_mise()
+        _, recipient = self.create_identity("dojo-recipient")
+        self.write_dojo_secrets(recipient)
+
+        result = self.run_config_function()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.encode("utf-8"), self.todays_text())
+        tomllib.loads(result.stdout)
+        self.assertNotIn("NOTE:", result.stdout)
+        self.assertIn(
+            "NOTE: dojo source root not configured: ~/.config/sops/age/keys.txt is absent.",
+            result.stderr,
+        )
+        self.assertEqual(
+            result.stderr.count("NOTE: trajectory source root not configured:"),
+            1,
+            result.stderr,
+        )
+        self.assertFalse(self.config.exists())
+        if self.log.exists():
+            self.assertEqual(self.log.read_text(encoding="utf-8"), "")
+
+    def test_12_refused_restart_restores_pending_trajectory_config(self) -> None:
+        self.assert_installed(self.run_installer(), self.todays_text())
+        self.log.write_text("", encoding="utf-8")
+        self.assert_installed(self.run_installer(), self.todays_text())
+        self.assertNotIn("try-restart", self.log.read_text(encoding="utf-8"))
+
+        (self.trajectory / "secrets.human.d").mkdir(parents=True)
+        self.grants.write_text("active grant\n", encoding="utf-8")
+        refused = self.run_installer()
+
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertEqual(self.config.read_bytes(), self.todays_text())
+        self.assertNotIn("try-restart", self.log.read_text(encoding="utf-8"))
+        self.assertFalse(self.config.with_suffix(".toml.prev").exists())
+
+        self.grants.write_text("no active grants\n", encoding="utf-8")
+        self.assert_installed(
+            self.run_installer(), self.trajectory_text(), expect_trajectory_note=False
+        )
+        self.assertEqual(self.log.read_text(encoding="utf-8").count("try-restart"), 1)
+        self.assertFalse(self.config.with_suffix(".toml.prev").exists())
+
+        self.log.write_text("", encoding="utf-8")
+        self.assert_installed(
+            self.run_installer(), self.trajectory_text(), expect_trajectory_note=False
+        )
+        self.assertNotIn("try-restart", self.log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
