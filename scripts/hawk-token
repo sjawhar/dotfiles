@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# hawk-token: print one Hawk (Cognito) access token on stdout and nothing else: a
-# freshly minted one, or, when no mint can finish in time, the last good one.
+# hawk-token: a session call prints one Hawk (Cognito) access token on stdout and
+# nothing else: a freshly minted one, or, when no mint can finish in time, the last
+# good one. `hawk-token --timer` (the hawk-token-refresh unit) prints nothing on stdout.
 #
 # A thin wrapper over agent-c's `hawk-token` console script (agent-c #19673, now
 # meta/tl_hawk_token), which performs one OAuth refresh grant per run through hawk's
@@ -66,7 +67,7 @@ mkdir -p "$root"
 log() { echo "hawk-token: $*" >&2; }
 
 # redact keeps a minted credential out of the journal while preserving the mint's
-# useful error text. Hawk prints JWTs, including five-segment encrypted forms.
+# useful error text. Hawk prints JWTs; the pattern also matches five-segment encrypted ones.
 redact() {
     sed -E 's/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_.-]{16,}/<redacted>/g'
 }
