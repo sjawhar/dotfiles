@@ -23,6 +23,15 @@ run writes a mode-0600 report at
 the same path on oryx after the login probe succeeds. The command prints the
 oryx report path. If the upload fails, it prints the local report path.
 
+## SSH to oryx
+
+oryx has one SSH hostname, `oryx.thecybermonk.com`, which Cloudflare Access sends
+to sshd on oryx's port 22. The laptop is the way in: `ssh oryx` signs in with
+the login key in 1Password, and the forward connection, `Host oryx-tunnel`,
+which `forward-tunnel@oryx` runs, signs in with its own key and the tunnel's
+service token. The two never share an SSH connection. The phone setup below is
+a backup for when you are away from the laptop.
+
 ## Oryx tunnel ports
 
 | Port on oryx `127.0.0.1` | Direction | Laptop end | Use |
@@ -44,9 +53,13 @@ It needs no Tailscale; the laptop command above writes oryx's forward config.
 
 The line in `oryx/oryx-tunnel.key-options` is installed on oryx by hand: it goes
 in front of the laptop's tunnel key in `agent`'s `~/.ssh/authorized_keys`. sshd
-on oryx's port 2222 must also set `AllowStreamLocalForwarding no`.
+on oryx must also set `AllowStreamLocalForwarding no`. The tunnel reaches sshd on
+port 22, so this setting applies to every session there.
 
 ## Phone
+
+The phone is a backup way into oryx, through the same hostname, for when you
+are away from the laptop.
 
 Install Termux. Termux includes the bootstrap `curl` command. If `curl` is
 unavailable, run `pkg install -y curl`.
