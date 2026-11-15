@@ -117,10 +117,6 @@ EXTRA_INSTALLERS=(
     # Not here:
     # - omp-root-hang-watch watches the root session holding the Envoy role lead-rocq-speed
     #   (SPEEDCOACH), whose transcript is on sami-rocqperf. Arm it here when that session moves.
-    # - hawk-token-refresh: sami-rocqperf does not arm it (checked 2026-11-02: `systemctl --user
-    #   is-enabled` not-found), and no omp model there uses hawk. It would fail every 3 minutes
-    #   here: it clones a private repository with no GitHub credential and mints with a hawk
-    #   login, a person's, that this machine never holds.
 )
 
 # The agent-azure user-assigned identity of theorem-labs/agent-infra#1146 (box-identity output

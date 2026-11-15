@@ -6,9 +6,8 @@
 # Every check below runs in parallel with its own timeout, never prompts for
 # input, and never prints a secret or token value - only the identity, expiry
 # and status a non-interactive status command exposes. `--json` emits the same
-# rows as a JSON array for scripts. The whole run finishes in ~10s because the
-# slowest single check (hawk-token's own mint budget) is ~9s and every check
-# runs concurrently, not in sequence.
+# rows as a JSON array for scripts. Each command uses the 6 s `TIMEOUT_S`
+# timeout, so the run takes about as long as the slowest check.
 #
 # A check that errors prints that error as its detail; it never falls back to
 # a different, silently-chosen command.
@@ -25,7 +24,6 @@ case "${1:-}" in
 esac
 
 TIMEOUT_S=6
-HAWK_TIMEOUT_S=9
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -100,31 +98,6 @@ check_github_app() {
         "personal gh login is refused by design (shims/gh)"
 }
 
-check_hawk() {
-    local errfile token rc email exp now ttl status models="$HOME/.omp/agent/models.local.yml"
-    if ! grep -qs 'hawk-token' "$models"; then
-        row hawk unused - - "grep hawk-token $models" "no model provider on this machine routes through Hawk"
-        return
-    fi
-    errfile="$tmp/.hawk.err"
-    token="$(timeout "$HAWK_TIMEOUT_S" hawk-token 2>"$errfile")"
-    rc=$?
-    if [[ -z "$token" ]]; then
-        row hawk missing - - "hawk-token" "$(first_line "$(<"$errfile")")"
-        return
-    fi
-    email="$(JWT_FIELD_TOKEN="$token" jwt_field email)"
-    exp="$(JWT_FIELD_TOKEN="$token" jwt_field exp)"
-    if [[ -n "$exp" ]]; then
-        now=$(date +%s)
-        ttl=$((exp - now))
-        if ((ttl > 0)); then status=live; else status=expired; fi
-        row hawk "$status" "${email:-unknown}" "$(iso "$exp")" "hawk-token"
-    else
-        row hawk unknown "${email:-unknown}" - "hawk-token" "minted but exp claim unreadable"
-    fi
-    ((rc == 0)) || true # the mint may have served a cached token past attempt 1; still a real token
-}
 
 check_ant() {
     local out rc email exp status
@@ -325,7 +298,7 @@ for extra in "$dotfiles"/.secrets/dotfiles/agent-access.d/*.sh; do
     source "$extra"
 done
 
-for fn in check_aws check_github_app check_hawk check_ant "${extra_checks[@]}" check_vercel \
+for fn in check_aws check_github_app check_ant "${extra_checks[@]}" check_vercel \
     check_datadog check_gcloud check_gws check_fleetctl check_sentry check_kubectl \
     check_secretsd check_agent_secrets_broker check_modal check_dispatch; do
     "$fn" &
@@ -336,7 +309,7 @@ wait
 # from the files it wrote. An unmatched glob stays literal, and the loops below
 # skip a name with no row file.
 gws_rows=("$tmp"/google_workspace_*)
-order=(aws github_app anthropic_ant hawk "${extra_rows[@]}" google_workspace "${gws_rows[@]##*/}" \
+order=(aws github_app anthropic_ant "${extra_rows[@]}" google_workspace "${gws_rows[@]##*/}" \
     gcloud vercel datadog_pup \
     fleetctl sentry kubectl secretsd_grants agent_secrets_broker modal dispatch)
 

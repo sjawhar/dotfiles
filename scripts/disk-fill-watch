@@ -1131,8 +1131,8 @@ def writers_text(
 # How long the `sudo -n true` probe may take. It was 5 s, and on 2026-10-31T06:04Z a run on a
 # loaded box lost its whole privileged sample to that deadline (`TimeoutExpired`). The probe
 # itself does no work; what it waits for is the box, which sits at load 200+ and where a call
-# that costs ~1.5 s idle has been measured at 10.1 s (scripts/AGENTS.md, hawk-token). 30 s is
-# well past that and still bounded: it is spent only on a run that is already sending.
+# that costs ~1.5 s idle has been measured at 10.1 s. 30 s is well past that and still bounded:
+# it is spent only on a run that is already sending.
 SUDO_PROBE_TIMEOUT = 30.0
 
 # How many of the guard's growth rows an alert carries, and how far back it looks for them.
