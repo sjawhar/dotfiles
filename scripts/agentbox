@@ -1348,7 +1348,9 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 # enroll the box (the reaper, for example) has an empty ENROLL_OPEN, so for it only the
 # recorded id counts.
 #   - The box's own recorded enrollment (no enrollment-session): one revoke, at once. A failure
-#     is only noted. The lease that the box stopped renewing lapses within 15 minutes.
+#     is only noted. The lease that the box stopped renewing lapses within 15 minutes. When
+#     enrollment-session is there but gives no session id, the recorded id can be a session's, so
+#     it is not revoked: one line on stderr, and the lease ends it.
 #   - The box's own open entries (kind `own`): one detached process, with no grace
 #     (unenroll_learn_each). For each entry, it learns the id and revokes it.
 #   - The session's recorded enrollment and the session's open entries (kind `session`): one
@@ -1358,7 +1360,8 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 # back, and nothing may wait there. A detached process runs the text of its functions, which
 # unenroll_box gives to `bash -c`. It reads this file only for the waiter's one short call of
 # `session-live-box`. A publish replaces this file, and bash reads a script by byte offset (see
-# the self-copy at the end of this file).
+# the self-copy at the end of this file). So that call can end with no answer, and the waiter
+# then leaves every enrollment alone (unenroll_session_wait).
 #
 # The learn call (unenroll_learn) gets the id of an open entry from the broker. It is the enroll
 # call of the entry: the same runtime id and thumbprint, and no session id. While an enrollment
@@ -1382,17 +1385,24 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 # reads that as "nobody came back". It then ends the enrollment of the session's ORIGINAL box,
 # which still runs. The enrollment is the SESSION's (runtime id `session-<id>`), not the box's,
 # so any live box of that session uses it. Test 2 asks exactly that (`session-live-box`, below),
-# at wake time and not now, because a box can come up during the grace.
+# at wake time and not now, because a box can come up during the grace. The waiter ends the
+# enrollments only on the explicit answer "no other box is live" (`none`). When it cannot read
+# test 2, it leaves them alone.
 # When the box recorded a session enrollment, test 1 passes while owner names this box. When the
 # box recorded none (its enroll calls for the session came back open), owner names an earlier box
 # of the session, or nothing. So test 1 then passes while owner is what it was at the close. A box
 # that enrolls for the session during the grace writes its own name there.
 unenroll_box() {
     local box="$1" eid="" sid="" skd owner fns e own=() ses=()
-    if [[ -s "$RUN_BASE/$box/enrollment-id" ]]; then
-        eid="$(<"$RUN_BASE/$box/enrollment-id")"
-        if [[ -s "$RUN_BASE/$box/enrollment-session" ]]; then
-            sid="$(<"$RUN_BASE/$box/enrollment-session")"
+    # The read builtin, not `$(<file)`: under `set -e`, `$(<file)` of a file that cannot be opened
+    # ends close_box or reap_box, and another close of the box can remove the file at any time. A
+    # file that is missing or cannot be read reads as empty.
+    read -r eid 2>/dev/null <"$RUN_BASE/$box/enrollment-id" || true
+    if [[ -n "$eid" ]]; then
+        read -r sid 2>/dev/null <"$RUN_BASE/$box/enrollment-session" || true
+        if [[ -z "$sid" && -e "$RUN_BASE/$box/enrollment-session" ]]; then
+            echo "agentbox: cannot read $RUN_BASE/$box/enrollment-session; enrollment $eid of $box can be a session's, so it is left to end with its lease (15 min)" >&2
+            eid=""
         fi
     fi
     if [[ -n "$eid" && -z "$sid" ]]; then
@@ -1509,13 +1519,23 @@ unenroll_learn_each() {
 
 # unenroll_session_wait GRACE RUN_BASE SKD BOX SID OWNER EID SELF ENTRY...: the session waiter
 # (unenroll_box). After GRACE seconds it runs the two tests. Test 1: SKD/owner still reads OWNER.
-# Test 2: `SELF session-live-box SID BOX` names no other live box. SELF is this script. When a
-# test fails, one line names the recorded id EID (or `none`) and each open ENTRY, all left alone.
-# When both pass, it removes SKD, the session's key dir, and writes one line. Then it revokes EID,
-# when there is one (unenroll_revoke), and learns and revokes each ENTRY (unenroll_learn_each).
+# Test 2: `SELF session-live-box SID BOX` exits 1 and prints `none`, which is its answer "no other
+# box of the session is live" (session_live_box). SELF is this script. Each other answer stops the
+# waiter, and one line names the recorded id EID (or `none`) and each open ENTRY, all left alone:
+#   - Test 1 fails, or SELF exits 0 and prints a box name: the session is live.
+#   - Any other answer of SELF: test 2 could not be read. Examples are status 2 (session_live_box
+#     could not look), status 1 with no output (SELF ended before it looked, as under `set -e`)
+#     and status 0 with no output (as when a publish replaces SELF during the read). The line also
+#     names the status and the output of SELF, and says that an enrollment that no box renews ends
+#     with its lease (15 min). SKD stays.
+# The waiter must not guess "none": the session's recorded id is the id of every box of the
+# session, and a learn call with the session's key gets the id of the live enrollment back
+# (unenroll_box). When both tests pass, it removes SKD, the session's key dir, and writes one
+# line. Then it revokes EID, when there is one (unenroll_revoke), and learns and revokes each
+# ENTRY (unenroll_learn_each).
 unenroll_session_wait() {
     local grace="$1" run_base="$2" skd="$3" box="$4" sid="$5" owner="$6" eid="$7" self="$8"
-    local now live open=""
+    local now live rc open=""
     shift 8
     if (( $# )); then
         printf -v open '%s; ' "$@"
@@ -1527,8 +1547,14 @@ unenroll_session_wait() {
         echo "$(date -u +%FT%TZ) $box: session $sid came back in $now; enrollment ${eid:-none} left alone$open"
         return 0
     fi
-    if live="$("$self" session-live-box "$sid" "$box" 2>/dev/null)" && [[ -n "$live" ]]; then
+    rc=0
+    live="$("$self" session-live-box "$sid" "$box" 2>/dev/null)" || rc=$?
+    if (( rc == 0 )) && [[ -n "$live" ]]; then
         echo "$(date -u +%FT%TZ) $box: session $sid is live in box $live; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    if (( rc != 1 )) || [[ "$live" != none ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid: test 2 could not be read (session-live-box exited $rc and printed '${live//$'\n'/ }'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
         return 0
     fi
     rm -rf "${skd:?}"
@@ -1538,22 +1564,47 @@ unenroll_session_wait() {
     return 0
 }
 
-# session_live_box SID EXCEPT: the name of a box other than EXCEPT that enrolled for session SID
-# and whose container still exists, or nothing. The run directory of every box holds the session
-# it enrolled for (`enrollment-session`, written by enroll_box) and is removed with the box, so
-# this is the host's own record of who is using the session's broker identity.
+# session_live_box SID EXCEPT: whether session SID is live in a box other than EXCEPT. A box is
+# live when it enrolled for SID and its container still exists. The run directory of every box
+# holds the session it enrolled for (`enrollment-session`, written by enroll_box) and is removed
+# with the box, so this is the host's own record of who is using the session's broker identity.
+# A `docker ps` that fails does not mean "no container" (close_box_cache and reap_box read it
+# the same way). An `enrollment-session` that is there but cannot be read does not mean "another
+# session" either. It has three answers:
+#   - Status 0 and the name of a live box.
+#   - Status 1 and `none`: no box of SID other than EXCEPT is live.
+#   - Status 2 and no output: no answer. SID is empty, or the walk found no live box but could not
+#     ask docker about a box that enrolled for SID, or could not read a box's `enrollment-session`.
+#     A live box gives status 0 also after such a failure.
+# The answer "none" is the word, not the status alone: this script also exits 1 when a command
+# ends it under `set -e`. The walk uses no `$(<file)` (a file that cannot be opened ends the
+# script) and no fork whose failure it does not test, so a box it cannot read does not hide a
+# live box after it.
 session_live_box() {
-    local sid="$1" except="${2:-}" d box
-    [[ -n "$sid" && -d "$RUN_BASE" ]] || return 1
+    local sid="$1" except="${2:-}" d box s names cannot=0
+    [[ -n "$sid" ]] || return 2
+    # With no box dir, or no RUN_BASE, the pattern stays as it is, and the `-s` test skips it.
     for d in "$RUN_BASE"/*/; do
-        box="$(basename "$d")"
+        box="${d%/}"
+        box="${box##*/}"
         [[ "$box" == "$except" || "$box" == session-keys ]] && continue
         [[ -s "$d/enrollment-session" ]] || continue
-        [[ "$(<"$d/enrollment-session")" == "$sid" ]] || continue
-        [[ -n "$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)" ]] || continue
+        if ! read -r s 2>/dev/null <"$d/enrollment-session"; then
+            # Gone: the box closed during the walk. Still there: it cannot be read.
+            [[ ! -e "$d/enrollment-session" ]] || cannot=1
+            continue
+        fi
+        [[ "$s" == "$sid" ]] || continue
+        if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
+            cannot=1
+            continue
+        fi
+        [[ -n "$names" ]] || continue
         printf '%s\n' "$box"
         return 0
     done
+    (( cannot )) && return 2
+    echo none
     return 1
 }
 

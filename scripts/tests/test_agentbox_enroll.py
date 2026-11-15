@@ -76,7 +76,8 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 # --user ubuntu <box> sh -c` runs here too, as a process whose key dir is the box's. `inspect`
 # answers false until its STUB_RUNNING_AFTER'th call when that is set, as a box does while it is
 # still starting. keygen writes a key of its own each time, and a thumbprint of its own after the
-# first. `ps -a --filter name=^<box>$` names the box while its name is in $STUB_LIVE_BOXES.
+# first. `ps -a --filter name=^<box>$` names the box while its name is in $STUB_LIVE_BOXES. With
+# STUB_PS_FAIL set, `ps` exits 1 with no output, as when docker cannot be asked.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
 keydir() {{ echo "$STUB_RUN_BASE/$1/$STUB_KEYDIR_REL"; }}
@@ -135,6 +136,7 @@ case "$*" in
         echo "sid-probe marker-mtime=$(stat -c %Y "$(keydir "$2")/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
         echo "${{STUB_SID:-}}" ;;
     "ps "*)
+        [[ -z "${{STUB_PS_FAIL:-}}" ]] || exit 1
         name="${{4#name=^}}"
         name="${{name%\$}}"
         [[ " ${{STUB_LIVE_BOXES:-}} " != *" $name "* ]] || echo "$name" ;;
@@ -621,6 +623,29 @@ class AgentboxEnroll(EnrollFixture):
         self.assertIn("--enrollment enr-123", call)
         self.assertFalse(self.hostdir.exists())
 
+    def test_a_record_the_close_cannot_read_does_not_end_the_close(self) -> None:
+        """box1's enrollment-id, or its enrollment-session, is there but cannot be read (mode 000).
+        Under the script's set -e, `$(<file)` of such a file ended close_box, and another close of
+        the box can remove the file between a test and a read. The close goes on and removes
+        box1's run dir. It makes no unenroll call: an id it cannot read is not revoked, and an
+        enrollment-session it cannot read can name a session, whose enrollment is not box1's to end
+        at once (one line on stderr says so)."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file of mode 000")
+        for name in ("enrollment-id", "enrollment-session"):
+            with self.subTest(unreadable=name):
+                self.reset_box()
+                (self.hostdir / "enrollment-id").write_text("enr-123\n")
+                (self.hostdir / "enrollment-session").write_text("sid-1\n")
+                (self.hostdir / name).chmod(0)
+                (self.home / "boxes" / "box1").mkdir(parents=True, exist_ok=True)
+                result = self.bash('close_box box1 ""\necho closed', STUB_GONE="1")
+                self.assertIn("closed", result.stdout, result.stderr)
+                self.assertEqual(self.calls_matching("unenroll "), [])
+                self.assertFalse(self.hostdir.exists())
+                if name == "enrollment-session":
+                    self.assertIn(f"cannot read {self.hostdir}/enrollment-session; enrollment enr-123", result.stderr)
+
     def test_close_box_drops_the_launchers_pane_from_the_attention_queue(self) -> None:
         # The box's own shutdown drop dies with its container; the launcher runs in the same
         # host pane, so it drops that pane once the container is gone.
@@ -1057,21 +1082,25 @@ class OpenAttempts(EnrollFixture):
             ],
         )
 
+    # box1 enrolls for session sid-1 (enr-1, recorded). The broker revokes enr-1, and the launcher's
+    # call to enroll the box again ends with its outcome not known while the broker makes enr-2.
+    # Run with STUB_ENROLL="broker unknown".
+    REENROLLED_OPEN = "\n".join(
+        [
+            "enroll_box box1 sid-1",
+            'agent-secrets unenroll --helper --enrollment "$(<"$RUN_BASE/box1/enrollment-id")"',
+            ': >"$(box_keydir box1)/enrollment.not-live"',
+            "reenroll_if_not_live box1",
+        ]
+    )
+
     def test_a_session_whose_reenrollment_ends_open_has_both_enrollments_ended(self) -> None:
         """box1 enrolled for session sid-1 (enr-1, recorded); the broker revoked enr-1, and the
         launcher's call to enroll the box again ended with its outcome not known while the broker
         made enr-2. After the grace (0 s) the waiter revokes the recorded enr-1, then learns enr-2
         with runtime id session-sid-1 and no --session-id, and revokes it: two unenroll calls after
         the close, both rows ended, and a log line for each step."""
-        steps = "\n".join(
-            [
-                "enroll_box box1 sid-1",
-                'agent-secrets unenroll --helper --enrollment "$(<"$RUN_BASE/box1/enrollment-id")"',
-                ': >"$(box_keydir box1)/enrollment.not-live"',
-                "reenroll_if_not_live box1",
-            ]
-        )
-        self.close(steps, STUB_ENROLL="broker unknown", AGENTBOX_UNENROLL_GRACE="0")
+        self.close(self.REENROLLED_OPEN, STUB_ENROLL="broker unknown", AGENTBOX_UNENROLL_GRACE="0")
         self.assert_one_learn_call("session-sid-1")
         self.assertEqual(
             self.revokes_after_close(),
@@ -1109,6 +1138,60 @@ class OpenAttempts(EnrollFixture):
                 f" and the enrollment of each open attempt: {self.SESSION_OPEN}"
             ],
         )
+
+    def close_while_test_2_cannot_be_read(self, steps: str) -> None:
+        """The steps of REENROLLED_OPEN, so box1 has a recorded enrollment (enr-1) and an open
+        session entry (enr-2). box2's run dir records sid-1. Then `steps`, the close and the grace
+        (0 s)."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        self.close(f"{self.REENROLLED_OPEN}\n{steps}", STUB_ENROLL="broker unknown", AGENTBOX_UNENROLL_GRACE="0")
+
+    def assert_test_2_not_read(self, status: int) -> None:
+        """The waiter made no learn call and no unenroll call after the close, the session's key
+        dir is still there, and unenroll.log holds one line: test 2 could not be read, with the
+        status of session-live-box and its empty output, and enr-1 and the open entry left
+        alone."""
+        self.assertEqual(self.learn_calls(), [])
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((self.run_base / "session-keys" / "sid-1" / "key.pem").exists())
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                f"box1: session sid-1: test 2 could not be read (session-live-box exited {status} and"
+                " printed ''), so an enrollment that no box renews ends with its lease (15 min);"
+                f" enrollment enr-1 left alone, and the enrollment of each open attempt: {self.SESSION_OPEN}"
+            ],
+        )
+
+    def test_a_waiter_that_cannot_ask_docker_leaves_the_enrollments_alone(self) -> None:
+        """`docker ps` fails from the close on, so at the waiter's wake session-live-box cannot
+        tell whether box2 has a container. It exits 2 with no output, and the waiter does not
+        read that as "no other box is live"."""
+        self.close_while_test_2_cannot_be_read("export STUB_PS_FAIL=1")
+        self.assert_test_2_not_read(2)
+
+    def self_that_only(self, body: str) -> str:
+        """The step that makes the waiter's SELF a script that only runs `body`: DOTFILES_DIR names
+        a dir whose scripts/agentbox is that script, and unenroll_box gives that file to the waiter
+        as SELF."""
+        scripts = self.root / "dotfiles-stub" / "scripts"
+        scripts.mkdir(parents=True)
+        write_stub(scripts, "agentbox", body)
+        return f'DOTFILES_DIR="{scripts.parent}"'
+
+    def test_a_session_live_box_with_no_answer_leaves_the_enrollments_alone(self) -> None:
+        """The waiter's session-live-box exits 0 with no output, as this script can when a publish
+        replaces it during the read."""
+        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 0"))
+        self.assert_test_2_not_read(0)
+
+    def test_a_session_live_box_that_ends_before_it_looks_leaves_the_enrollments_alone(self) -> None:
+        """The waiter's session-live-box exits 1 with no output, as this script does when a
+        command ends it under set -e before it looks. Status 1 alone is not the answer `none`."""
+        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 1"))
+        self.assert_test_2_not_read(1)
 
     def test_a_session_that_came_back_keeps_the_open_enrollment(self) -> None:
         """Each enroll call of box1 for session sid-1 ends with its outcome not known, and after
