@@ -324,10 +324,8 @@ while :; do sleep 1; done''',
 
     def write_wrapper(self, *, ssh_path: Path | None) -> None:
         source = (FORWARD / "forward-oryx").read_text(encoding="utf-8")
-        if ssh_path is None:
-            copied = source
-            self.assertEqual(copied, source)
-        else:
+        copied = source
+        if ssh_path is not None:
             original = "ssh=/usr/bin/ssh\n"
             replacement = f"ssh={ssh_path}\n"
             self.assertEqual(source.count(original), 1)
@@ -602,8 +600,6 @@ class ForwardOryxLiveUnit(unittest.TestCase):
         self.ssh_pid_file = self.root / "ssh-pid"
         self.ssh_stub = self.root / "ssh"
         self.link_path = Path.home() / ".config" / "systemd" / "user" / self.name
-        self._prepared = False
-        self._linked = False
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -687,7 +683,6 @@ while :; do sleep 300 & wait "$!"; done''',
 trap 'exit 0' TERM INT
 while :; do sleep 300 & wait "$!"; done''',
         )
-        self._prepared = True
 
     def pid_from(self, path: Path) -> int:
         return int(path.read_text(encoding="utf-8").strip())
@@ -716,7 +711,6 @@ while :; do sleep 300 & wait "$!"; done''',
         self.prepare()
         self.addCleanup(self.cleanup_unit)
         self.assert_command_ok(self.systemctl("link", str(self.unit)))
-        self._linked = True
         self.assert_command_ok(self.systemctl("start", self.name))
         self.wait_for(lambda: self.pids() is not None)
 
