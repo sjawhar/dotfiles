@@ -17,6 +17,12 @@ sat at a shell until a person respawned it.
 These tests drive the hand-off's own launch line, cut from the script, against exactly that:
 rewrite the original mid-flight and require the relauncher to finish anyway. The old line fails
 them, which is the point.
+
+The copy itself must not outlive the relauncher either. It was removed by an EXIT trap of a
+wrapper shell, and a SIGKILL runs no trap, so a killed relauncher left `agentbox-relaunch-*` in
+$TMPDIR (dispatch://INFRA-1720/comment/4fab10d7). It is now removed as soon as it is open, as
+`agentbox new`'s own copy is (#66): the copy runs with AGENTBOX_SELF_COPY naming it, and the
+script's own preamble removes that file as it starts. Each probe here carries that preamble line.
 """
 
 from __future__ import annotations
@@ -31,8 +37,9 @@ import pytest
 
 AGENTBOX = Path(__file__).resolve().parent.parent / "agentbox"
 
-PROBE = """#!/bin/bash
+PROBE = """
 echo "running from: $0"
+echo "session: $(ps -o sid= -p $$ | tr -d ' ')"
 sleep 6
 echo "finished"
 """
@@ -40,16 +47,23 @@ echo "finished"
 REWRITTEN = "#!/bin/bash\necho REWRITTEN BY A PUBLISH\n"
 
 
+def removal_line() -> str:
+    """The line of scripts/agentbox that removes the private copy a process runs from."""
+    match = re.search(r'^\[\[ -z "\$\{AGENTBOX_SELF_COPY:-\}" \]\] \|\| .*$', AGENTBOX.read_text(), re.MULTILINE)
+    assert match, "the self-copy removal line is no longer findable in scripts/agentbox"
+    return match.group(0)
+
+
+def probe() -> str:
+    return "#!/bin/bash\n" + removal_line() + "\n" + PROBE
+
+
 def launch_line() -> str:
     """The hand-off's own `setsid` line, from the script, with the log redirect removed."""
     text = AGENTBOX.read_text()
-    match = re.search(r"^    setsid --fork bash -c .*?\n(?:.*?\n)*?.*?&$", text, re.MULTILINE)
+    match = re.search(r"^    setsid --fork .*(?:\\\n.*)*&$", text, re.MULTILINE)
     assert match, "the hand-off's setsid line is no longer findable in scripts/agentbox"
     line = match.group(0)
-    assert "exec" not in line, (
-        "the relauncher must RUN its private copy, not exec it: exec replaces the shell and "
-        "discards the trap that removes the copy"
-    )
     # `--fork` is the whole reason this relauncher outlives the hang-up it performs. Measured
     # 2026-11-05 over 32 observations on two omp builds: omp's teardown SIGTERMs what is
     # reachable from it BY PARENT LINK, and plain `setsid` changes session and process group
@@ -63,9 +77,11 @@ def launch_line() -> str:
     return line.replace("</dev/null >>\"$log\" 2>&1", "</dev/null >\"$out\" 2>&1")
 
 
-def run_handoff(tmp_path: Path, rewrite: bool) -> dict:
+def run_handoff(tmp_path: Path, rewrite: bool, kill_after: float | None = None) -> dict:
+    """The hand-off line run against a probe copy. With `kill_after`, the relauncher's whole
+    session gets SIGKILL that many seconds after it starts, as an OOM kill or `kill -9` does."""
     original = tmp_path / "relaunch-probe.sh"
-    original.write_text(PROBE)
+    original.write_text(probe())
     original.chmod(0o755)
     out = tmp_path / "out.log"
     marker = tmp_path / "copy-path"
@@ -79,7 +95,7 @@ cat {original!s} >"$run_copy" && chmod +x "$run_copy"
 {launch_line().replace('"$run_copy" move --relaunch "$@"', '"$run_copy"')}
 sleep 2
 {f'printf %s {REWRITTEN!r} > {original!s}' if rewrite else 'true'}
-sleep 9
+{f'kill -9 -- -"$(sed -n "s/^session: //p" "$out")"; sleep 1' if kill_after is not None else 'sleep 9'}
 """
     subprocess.run(["bash", "-c", script], check=True, capture_output=True, text=True, timeout=120)
     copy_path = Path(marker.read_text())
@@ -108,6 +124,16 @@ def test_the_private_copy_is_removed_afterwards(tmp_path):
     assert not result["copy_remains"], "the private copy leaked"
 
 
+def test_the_private_copy_is_gone_once_open_so_a_killed_relauncher_leaves_none(tmp_path):
+    """dispatch://INFRA-1720/comment/4fab10d7, gap 2: the copy was removed only by an EXIT trap,
+    which a SIGKILL of the relauncher never runs. It is now gone while the relauncher runs."""
+    result = run_handoff(tmp_path, rewrite=False, kill_after=2)
+    assert "agentbox-relaunch-" in result["ran_from"], result
+    assert "finished" not in result["out"], "the relauncher was not killed: %r" % result
+    assert not result["copy_remains"], "a SIGKILL of the relauncher left its private copy"
+    assert sorted(p.name for p in tmp_path.glob("agentbox-relaunch-*")) == []
+
+
 def test_the_live_file_running_itself_is_what_fails(tmp_path):
     """The control: without the copy, a mid-flight rewrite loses the process silently.
 
@@ -115,7 +141,7 @@ def test_the_live_file_running_itself_is_what_fails(tmp_path):
     could be dropped. Until then it is the reason the copy exists.
     """
     original = tmp_path / "probe.sh"
-    original.write_text(PROBE)
+    original.write_text(probe())
     original.chmod(0o755)
     out = tmp_path / "control.log"
     subprocess.run(

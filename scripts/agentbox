@@ -5507,7 +5507,7 @@ move_hand_off() {
     # at 08:29:05Z, both logged "hung up; waiting for its teardown", and this file was rewritten
     # at 08:30:17Z by a publish. Both were inside the sleep loop; neither logged another line,
     # and the loop always logs on exit. Two leads sat at a shell with their omp hung up until a
-    # person respawned their panes. The copy is removed when the relauncher ends.
+    # person respawned their panes.
     #
     # By absolute path, not $0: the relauncher outlives a caller that was started by a relative
     # path from a directory the pane is about to leave.
@@ -5517,9 +5517,11 @@ move_hand_off() {
         rm -f "$run_copy"
         return 1
     }
-    # The wrapper RUNS the copy rather than exec-ing it, and removes it on the way out: `exec`
-    # replaces the shell, which discards the trap and leaks the copy (measured).  Its own script
-    # text is an argument to `bash -c`, so the wrapper itself is in memory.
+    # The copy runs with AGENTBOX_SELF_COPY naming it, and removes that file as it starts (the
+    # preamble at the end of this file), as `agentbox new`'s own copy does: bash reads it through a
+    # descriptor it holds open. Before, an EXIT trap of a wrapper shell removed it, and a SIGKILL
+    # of the relauncher runs no trap, so a killed relauncher left the copy in $TMPDIR
+    # (dispatch://INFRA-1720/comment/4fab10d7).
     #
     # `--fork` IS WHAT MAKES THE RELAUNCHER SURVIVE THE HANG-UP IT PERFORMS, and without it this
     # strands the session it is moving. Measured 2026-11-05 over 32 observations on two omp
@@ -5531,8 +5533,7 @@ move_hand_off() {
     # BASELINE were stranded at 08:27:25Z and 08:29:05Z: each relauncher hung its omp up and was
     # dead ~2 s later, three minutes before the publish I first blamed. The sibling `move --to`
     # path already used --fork for a different symptom of the same thing (line ~7785).
-    setsid --fork bash -c 'c="$1"; shift; trap '"'"'rm -f "$c"'"'"' EXIT; "$@"' _ "$run_copy" \
-        "$run_copy" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
+    setsid --fork env AGENTBOX_SELF_COPY="$run_copy" "$run_copy" move --relaunch "$@" </dev/null >>"$log" 2>&1 &
     local child=$!
     # It must be RUNNING before this says so: LANE-C's `move --self` returned 0 twice and nothing
     # ever moved (2026-11-03). The relauncher's first line is its own; waiting for the log to grow
@@ -10293,7 +10294,10 @@ if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
 fi
 # Running FROM the copy: remove the copy now. Bash reads this script through a descriptor that it
 # holds open, so the launch runs on without the file. No signal after this line can leave the copy.
-[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || rm -f "$AGENTBOX_SELF_COPY"
+# The same holds for a move's relauncher and the collector, which run from copies of their own
+# (move_hand_off, collect_start). The name is dropped with the file, so a child that runs
+# `agentbox new` makes a copy of its own rather than take this one's as done.
+[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || { rm -f "$AGENTBOX_SELF_COPY"; unset AGENTBOX_SELF_COPY; }
 
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;
