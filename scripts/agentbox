@@ -1025,11 +1025,11 @@ enroll_open_add() {
 # enroll_open_settle: remove from ENROLL_OPEN every entry with the runtime id and the thumbprint
 # of the enroll call that just recorded an enrollment id.
 enroll_open_settle() {
-    local e kept=()
+    local e unsettled=()
     for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
-        [[ "${e#* }" == "$ENROLLED_RUNTIME $ENROLLED_TP" ]] || kept+=("$e")
+        [[ "${e#* }" == "$ENROLLED_RUNTIME $ENROLLED_TP" ]] || unsettled+=("$e")
     done
-    ENROLL_OPEN=(${kept[@]+"${kept[@]}"})
+    ENROLL_OPEN=(${unsettled[@]+"${unsettled[@]}"})
 }
 
 # enroll_attempts BOX ATTEMPTS [fallback]: the broker call of an enrollment, for the key the box
