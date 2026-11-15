@@ -367,6 +367,7 @@ bootstrap_first_run() {
         return 1
     fi
     repair_killed_attempt
+    sweep_partial_packs
     if [ -L "$current" ]; then
         release_lock
         return 0
@@ -476,7 +477,7 @@ timer_mint() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     out="$(timeout 60 "$mint_bin" --api-url "$HAWK_API_URL" 2>"$err")" || rc=$?
-    if [ -n "$out" ]; then
+    if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
         if save_token "$out"; then
             rm -f "$err"
             log "minted; $cache rewritten"

@@ -70,9 +70,10 @@ def control(name, default=None):
         return {{}} if default is None else default
     return json.loads(path.read_text(encoding="utf-8"))
 
-def record(name, argv, started, ended):
+def record(name, argv, started, ended, **details):
     entry = {{"name": name, "argv": argv, "pid": os.getpid(), "pgid": os.getpgid(0),
              "start": started, "end": ended}}
+    entry.update(details)
     with open(LOG, "a", encoding="utf-8") as file:
         file.write(json.dumps(entry, sort_keys=True) + "\\n")
 '''
@@ -94,9 +95,14 @@ try:
         sys.stderr.write(message)
         status = 1
     elif kind == "mint" and settings.get("mint_fail"):
-        message = "error: " + {token!r} + " rejected\\n" if settings.get("mint_token") else "mint rejected\\n"
+        message = settings.get("mint_error")
+        if message is None:
+            message = "error: " + {token!r} + " rejected\\n" if settings.get("mint_token") else "mint rejected\\n"
         sys.stderr.write(message)
-        status = 1
+        stdout = settings.get("mint_stdout", "")
+        if stdout:
+            sys.stdout.write(stdout)
+        status = int(settings.get("mint_status", 1))
     else:
         sys.stdout.write({token!r} + "\\n")
 finally:
@@ -112,9 +118,14 @@ settings = control("git", {{}})
 action = "fetch" if "fetch" in argv else "clone" if "clone" in argv else "reset" if "reset" in argv else "git"
 active = CONTROLS / "active-git.json"
 status = 0
+paths_at_fetch = {{}}
 try:
     if action == "fetch":
-        active.write_text(json.dumps({{"pid": os.getpid(), "pgid": os.getpgid(0), "start": started}}), encoding="utf-8")
+        active_temporary = active.with_name(f".{{active.name}}.{{os.getpid()}}.tmp")
+        active_temporary.write_text(json.dumps({{"pid": os.getpid(), "pgid": os.getpgid(0), "start": started}}),
+                                    encoding="utf-8")
+        os.replace(active_temporary, active)
+        paths_at_fetch = {{path: Path(path).exists() for path in settings.get("record_exists", [])}}
         pack = Path.cwd() / ".git" / "objects" / "pack"
         if settings.get("write_tmp"):
             pack.mkdir(parents=True, exist_ok=True)
@@ -139,7 +150,7 @@ try:
 finally:
     if active.exists():
         active.unlink()
-    record("git", argv, started, time.time())
+    record("git", argv, started, time.time(), paths_at_fetch=paths_at_fetch)
 sys.exit(status)
 '''
     uv = f'''#!/usr/bin/env python3
@@ -303,7 +314,9 @@ class HawkTokenFixture(unittest.TestCase):
     def calls(self) -> list[dict]:
         if not self.log.exists():
             return []
-        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        # A stub may be appending while a wait_for polls: parse only lines its newline ended.
+        complete = self.log.read_text(encoding="utf-8").split("\n")[:-1]
+        return [json.loads(line) for line in complete]
 
     def named_calls(self, name: str) -> list[dict]:
         return [call for call in self.calls() if call["name"] == name]
@@ -508,6 +521,27 @@ class NoTokenInOutput(HawkTokenFixture):
         self.assertNotIn(self.token, result.stderr)
         self.assertEqual(len(self.named_calls("mint")), 1)
 
+    def test_nonzero_mint_with_stdout_keeps_existing_cache_and_fails(self) -> None:
+        self.make_live(fresh=True)
+        cache = self.root / "last-good-token"
+        before = (self.token + "\n").encode("utf-8")
+        cache.write_bytes(before)
+        cache.chmod(0o600)
+        self.set_mint_control("agent-c", {
+            "mint_fail": True,
+            "mint_stdout": "partial-not-a-token\n",
+            "mint_error": "mint transport error\n",
+            "mint_status": 3,
+        })
+
+        result = self.timer_run()
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("mint transport error", result.stderr)
+        self.assertNotIn("minted", result.stderr)
+        self.assertEqual(cache.read_bytes(), before)
+
     def test_failed_validation_is_redacted_and_the_live_slot_still_mints(self) -> None:
         self.make_live()
         self.set_mint_control("agent-c.alt", {"validation_fail": True, "validation_token": True})
@@ -646,6 +680,36 @@ class SweepAndForeground(HawkTokenFixture):
         self.wait_for(lambda: not old.exists(), "the detached refresh sweep")
         self.wait_for(lambda: os.readlink(self.root / "current") == "agent-c.alt", "the detached refresh publish")
         self.wait_for(lambda: not self.fixture_processes(), "the detached refresh to exit")
+
+    def test_first_run_sweeps_existing_slot_before_a_failed_fetch(self) -> None:
+        pack = self.pack("agent-c")
+        pack.mkdir(parents=True, exist_ok=True)
+        old_pack = pack / "tmp_pack_first-run-old"
+        old_index = pack / "tmp_idx_first-run-old"
+        fresh = pack / "tmp_pack_first-run-fresh"
+        for path in (old_pack, old_index, fresh):
+            path.write_text("partial", encoding="utf-8")
+        self.age(old_pack, 2 * 60 * 60)
+        self.age(old_index, 2 * 60 * 60)
+        self.age(fresh, 60)
+        self.set_control("git", {
+            "fetch_fail": True,
+            "record_exists": [str(old_pack), str(old_index), str(fresh)],
+        })
+
+        result = self.session_call()
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(old_pack.exists())
+        self.assertFalse(old_index.exists())
+        self.assertTrue(fresh.exists())
+        fetch = self.git_calls("fetch")
+        self.assertEqual(len(fetch), 1)
+        self.assertEqual(fetch[0]["paths_at_fetch"], {
+            str(old_pack): False,
+            str(old_index): False,
+            str(fresh): True,
+        })
 
     def test_next_sweep_removes_a_partial_pack_left_by_a_killed_fetch(self) -> None:
         self.make_live()
