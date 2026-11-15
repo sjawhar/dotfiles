@@ -174,9 +174,10 @@ esac
 # only once that file exists (120 s at most). With STUB_HUP_PID set, a box's enroll call first
 # sends that process a hangup, as a pane kill can during the call. unenroll call n takes the nth
 # word of $STUB_UNENROLL (the last word repeats): ok (the default: the broker ends the
-# enrollment), known (the pinned client's UNENROLL_FAILED line) or unknown (its
-# UNENROLL_OUTCOME_UNKNOWN line), each exit 1 with nothing ended. renew exits as the pinned
-# client's does, and ends its loop on the third run.
+# enrollment), known (the pinned client's UNENROLL_FAILED line), unknown (its
+# UNENROLL_OUTCOME_UNKNOWN line) or buried (a line for a helper that gave no answer, with the
+# UNENROLL_FAILED line inside its parentheses), each exit 1 with nothing ended. renew exits as the
+# pinned client's does, and ends its loop on the third run.
 AGENT_SECRETS_STUB = r"""
 # end_enrollment ID: enrollment ID is no longer live at the broker.
 end_enrollment() {
@@ -283,6 +284,7 @@ case "$1" in
             ok) end_enrollment "$id"; rc=$? ;;
             known) echo "agent-secrets unenroll: UNENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not revoke this enrollment" >&2; rc=1 ;;
             unknown) echo "agent-secrets unenroll: UNENROLL_OUTCOME_UNKNOWN: the broker's answer did not come back within 20s" >&2; rc=1 ;;
+            buried) echo "agent-secrets unenroll: the helper gave no answer (read unix @->helper.sock: agent-secrets unenroll: UNENROLL_FAILED: broker 403). So it is not known if the broker revoked the enrollment." >&2; rc=1 ;;
             *) echo "unexpected STUB_UNENROLL word $mode" >&2; rc=99 ;;
         esac
         echo "$call" >>"$STUB_CALLS"
@@ -970,8 +972,9 @@ class OpenAttempts(EnrollFixture):
     one bash process (`close`). The body writes a `close` line into the call log before the close,
     so the calls after that line are the close's, and ends with `wait`: the close's detached
     processes are children of the body's shell, so it returns once they have ended, before
-    tearDown removes the dir they write in. They log to session-keys/unenroll.log. The case that
-    kills the body's process group waits for the detached process's line in that log instead.
+    tearDown removes the dir they write in. They log to session-keys/unenroll.log. The cases that
+    kill the body's process group (close_then_kill_the_body) wait for the detached process's last
+    line in that log instead.
     """
 
     OWN_OPEN = f"own box1 {THUMBPRINT}"
@@ -1319,6 +1322,16 @@ class OpenAttempts(EnrollFixture):
                 self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
                 self.assertEqual(self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "live"]])
 
+    def test_a_revoke_whose_known_code_is_inside_other_text_is_made_once_more(self) -> None:
+        """The first unenroll call of a learned id exits 1, and no line of its stderr starts with
+        UNENROLL_FAILED: that line is inside the text of a line for a helper that gave no answer
+        (buried), so the outcome is not known. The second call succeeds: two unenroll calls of
+        enr-1 after the close, and the broker's row of enr-1 has ended."""
+        steps, runtime, stubs = self.REVOKE_PATHS["a learned id"]
+        self.close(steps, STUB_UNENROLL="buried ok", **stubs)
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"] * 2)
+        self.assertEqual(self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "ended"]])
+
     def test_the_close_does_not_wait_for_the_learn_call(self) -> None:
         """The stub's learn call answers only once a file exists (STUB_LEARN_AFTER), and the body
         writes that file only after unenroll_box has returned. The learn call then answers, and
@@ -1336,32 +1349,30 @@ class OpenAttempts(EnrollFixture):
         self.assert_one_learn_call("box1")
         self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
 
-    def test_a_kill_of_the_launchers_process_group_does_not_stop_the_learn_call(self) -> None:
-        """The body runs in a process group of its own, as a launcher does, and sleeps once
-        close_box has returned. Each enroll call of box1 (no session id) ends with its outcome not
-        known, and the learn call answers only once a file exists (STUB_LEARN_AFTER). Once
-        close_box has returned (within 120 s), the body's process group gets SIGKILL, as a
-        cancelled `agentbox move` sends it 30 s after TERM (move_to_cancel_start), and then the
-        file is written. Within 60 s unenroll.log holds one line, the revoke of enr-1 (runtime id
-        box1), and the broker's row of enr-1 has ended."""
+    def close_then_kill_the_body(self, steps: str, revoked: str, **stubs: str) -> None:
+        """`steps`, the `close` line and close_box, in a bash process that has a process group of
+        its own, as a launcher has, with box1's container gone (STUB_GONE) and a learn call that
+        answers only once a file exists (STUB_LEARN_AFTER). Once close_box has returned and the
+        learn call waits (within 120 s), the body's process group gets SIGKILL, as a cancelled
+        `agentbox move` sends it 30 s after TERM (move_to_cancel_start), and then the file is
+        written. Returns once unenroll.log holds `revoked`, or 60 s after the kill. Asserts that
+        close_box returned."""
         gate = self.root / "learn-gate"
         returned = self.root / "close-box-returned"
-        revoked = "box1: enrollment enr-1 (runtime id box1) revoked"
         # /bin/sleep, not the stub, which returns at once: the body is still in its process group
         # when the kill comes.
-        body = (
-            'enroll_box box1 "" || true\necho close >>"$STUB_CALLS"\nclose_box box1 ""\n'
-            f': >"{returned}"\n/bin/sleep 60'
-        )
+        body = f'{steps}\necho close >>"$STUB_CALLS"\nclose_box box1 ""\n: >"{returned}"\n/bin/sleep 60'
         proc = subprocess.Popen(
             ["bash", "-c", self.bash_script(body)],
-            env=self.bash_env(STUB_GONE="1", STUB_ENROLL="unknown", STUB_LEARN_AFTER=str(gate)),
+            env=self.bash_env(STUB_GONE="1", STUB_LEARN_AFTER=str(gate), **stubs),
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         try:
-            wait_until(returned.exists, 120)
+            # A child of the detached process logs the learn call as it starts to wait, so the kill
+            # cannot come before that process's setsid.
+            wait_until(lambda: returned.exists() and len(self.learn_calls()) > 0, 120)
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -1371,8 +1382,40 @@ class OpenAttempts(EnrollFixture):
         # process from outliving the temp dir.
         wait_until(lambda: revoked in self.unenroll_log(), 60)
         self.assertTrue(returned.exists(), "close_box did not return")
+
+    def test_a_kill_of_the_launchers_process_group_does_not_stop_the_learn_call(self) -> None:
+        """Each enroll call of box1 (no session id) ends with its outcome not known; then
+        close_then_kill_the_body. unenroll.log holds one line, the revoke of enr-1 (runtime id
+        box1); the close made one learn call, for box1; and the broker's row of enr-1 has ended."""
+        revoked = "box1: enrollment enr-1 (runtime id box1) revoked"
+        self.close_then_kill_the_body('enroll_box box1 "" || true', revoked, STUB_ENROLL="unknown")
         self.assertEqual(self.unenroll_log(), [revoked])
+        self.assert_one_learn_call("box1")
         self.assertEqual(self.broker_rows("box1"), [["enr-1", "box1", THUMBPRINT, "ended"]])
+
+    def test_a_kill_of_the_launchers_process_group_does_not_stop_the_session_waiter(self) -> None:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone, and each
+        enroll call of box1 for the session ends with its outcome not known; the grace is 0 s. Then
+        close_then_kill_the_body. unenroll.log holds the waiter's two lines, that the session did
+        not come back and the revoke of enr-1 (runtime id session-sid-1); the close made one learn
+        call, for session-sid-1; and the broker's row of enr-1 has ended."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        revoked = "box1: enrollment enr-1 (runtime id session-sid-1) revoked"
+        self.close_then_kill_the_body(
+            "enroll_box box1 sid-1 || true", revoked, STUB_ENROLL="unknown", AGENTBOX_UNENROLL_GRACE="0"
+        )
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment none,"
+                f" and the enrollment of each open attempt: {self.SESSION_OPEN}",
+                revoked,
+            ],
+        )
+        self.assert_one_learn_call("session-sid-1")
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
 
     def test_a_hangup_stops_the_attempts_and_the_close_learns_the_one_made(self) -> None:
         """A HUP comes during enroll_box's first call (STUB_HUP_PID), and a HUP trap sets
