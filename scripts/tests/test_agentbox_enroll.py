@@ -85,7 +85,9 @@ def wait_until(test: Callable[[], bool], seconds: float) -> None:
 # answers false until its STUB_RUNNING_AFTER'th call when that is set, as a box does while it is
 # still starting. keygen writes a key of its own each time, and a thumbprint of its own after the
 # first. `ps -a --filter name=^<box>$` names the box while its name is in $STUB_LIVE_BOXES. With
-# STUB_PS_FAIL set, `ps` exits 1 with no output, as when docker cannot be asked.
+# STUB_PS_FAIL set, `ps` exits 1 with no output, as when docker cannot be asked. With STUB_SID set,
+# the box's omp reports that session as the box starts: `run` writes the session file
+# (session-env.ts's `agentbox-session`) into the box's runtime dir, where box_session_id reads it.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
 keydir() {{ echo "$STUB_RUN_BASE/$1/$STUB_KEYDIR_REL"; }}
@@ -101,6 +103,8 @@ case "$*" in
         while [[ "$1" != --name ]]; do shift; done
         if [[ -e "$(keydir "$2")/enrollment.pending" ]]; then m=yes; else m=no; fi
         echo "run $2 marker=$m" >>"$STUB_CALLS"
+        [[ -z "${{STUB_SID:-}}" ]] || printf 'version=1\npid=7\nsession=%s\nfile=/x.jsonl\n' "$STUB_SID" \
+            >"$STUB_RUN_BASE/$2/run-user/agentbox-session"
         if [[ -z "${{STUB_RUN_UNTIL:-}}" ]]; then /bin/sleep 1; exit 0; fi
         for _ in $(seq 600); do
             grep -qF "$STUB_RUN_UNTIL" "$(keydir "$2")/renew.log" 2>/dev/null && break
@@ -140,9 +144,6 @@ case "$*" in
             fail) echo "keygen: no /run/user dir" >&2; exit 1 ;;
             empty) ;;
         esac ;;
-    *"pgrep -x omp"*)
-        echo "sid-probe marker-mtime=$(stat -c %Y "$(keydir "$2")/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
-        echo "${{STUB_SID:-}}" ;;
     "ps "*)
         [[ -z "${{STUB_PS_FAIL:-}}" ]] || exit 1
         name="${{4#name=^}}"
@@ -338,6 +339,9 @@ class EnrollFixture(unittest.TestCase):
         # re-enrollment does while the renew loop waits. STUB_REAL_SLEEP makes it a real sleep.
         # With STUB_GRACE_UNTIL set, the unenroll waiter's grace (a sleep of
         # $AGENTBOX_UNENROLL_GRACE, 180 by default) lasts until that file exists (60 s at most).
+        # Each sleep logs the marker's mtime as the pass before it left it (`marker-at-sleep`), and
+        # the STUB_SESSION_AT'th sleep writes box1's session file naming STUB_SESSION_ID, as the
+        # box's omp does a few seconds into its start (session-env.ts).
         write_stub(
             self.stub_dir,
             "sleep",
@@ -345,9 +349,13 @@ class EnrollFixture(unittest.TestCase):
             '[[ -z "${STUB_REAL_SLEEP:-}" ]] || exec /bin/sleep "$@"\n'
             '[[ -z "${STUB_GRACE_UNTIL:-}" || "$*" != "${AGENTBOX_UNENROLL_GRACE:-180}" ]]'
             ' || for _ in $(seq 600); do [[ -e "$STUB_GRACE_UNTIL" ]] && break; /bin/sleep 0.1; done\n'
+            'echo "marker-at-sleep mtime=$(stat -c %Y "$STUB_KEYDIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"\n'
             '[[ -e "$STUB_KEYDIR/enrollment.pending" ]] && touch -h -d "-1000 seconds" "$STUB_KEYDIR/enrollment.pending"\n'
             '[[ -z "${STUB_NEW_ID_AT:-}" ]] || (( $(grep -c "^sleep " "$STUB_CALLS") != STUB_NEW_ID_AT ))'
             ' || echo enr-new >"$STUB_KEYDIR/enrollment"\n'
+            '[[ -z "${STUB_SESSION_AT:-}" ]] || (( $(grep -c "^sleep " "$STUB_CALLS") != STUB_SESSION_AT ))'
+            ' || printf "version=1\\npid=7\\nsession=%s\\nfile=/x.jsonl\\n" "$STUB_SESSION_ID"'
+            ' >"$STUB_RUN_BASE/box1/run-user/agentbox-session"\n'
             "exit 0",
         )
         write_stub(self.stub_dir, "docker", DOCKER_STUB)
@@ -1632,15 +1640,22 @@ class OpenAttempts(EnrollFixture):
 class EnrollWhenUp(EnrollFixture):
     """`agentbox new`'s enrollment of a box that is starting, against a real child process."""
 
+    SID = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+
     def when_up(
-        self, cmd: str, child: str = "/bin/sleep 30 &", **stubs: str
+        self, cmd: str, child: str = "/bin/sleep 30 &", body: str = "", **stubs: str
     ) -> subprocess.CompletedProcess[str]:
         return self.bash(
-            f"{child}\nchild=$!\n"
+            f"{body}{child}\nchild=$!\n"
             f'if enroll_when_up box1 "$child" {cmd}; then echo rc=0; else echo "rc=$?"; fi\n'
             'kill "$child" 2>/dev/null || true',
             **stubs,
         )
+
+    def report_session(self, sid: str) -> None:
+        """box1's omp names its session in its session file (session-env.ts)."""
+        (self.hostdir / "run-user" / "agentbox-session").write_text(
+            f"version=1\npid=7\nsession={sid}\nfile=/x.jsonl\n", encoding="utf-8")
 
     def test_any_other_command_enrolls_at_once_and_renews(self) -> None:
         result = self.when_up("bash")
@@ -1652,10 +1667,36 @@ class EnrollWhenUp(EnrollFixture):
         self.assertEqual(len(self.calls_matching("docker exec -d ")), 1)
 
     def test_omp_enrolls_with_its_session_id(self) -> None:
-        result = self.when_up("omp", STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd")
+        self.report_session(self.SID)
+        result = self.when_up("omp")
         self.assertIn("rc=0", result.stdout, result.stderr)
         (enroll,) = self.calls_matching("enroll ")
-        self.assertIn("--session-id 0192f3a4-5b6c-7d8e-9f01-23456789abcd", enroll)
+        self.assertIn(f"--session-id {self.SID}", enroll)
+
+    def test_enroll_uses_the_reported_session_within_120s(self) -> None:
+        """A fresh `-- omp` box has no transcript until its first reply, so before
+        dispatch://INFRA-1720 its launcher found no id and enrolled it under the box's name (two
+        boxes on 2026-11-14, dispatch://INFRA-3462/comment/7b61823d). Its omp now writes the
+        session file a few seconds into its start, and the launcher waits for that file: the
+        enrollment comes after the file and carries its id, and the host asks the box nothing."""
+        result = self.when_up("omp", STUB_SESSION_AT="3", STUB_SESSION_ID=self.SID)
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        calls = self.calls.read_text().splitlines()
+        sleeps = [i for i, c in enumerate(calls) if c.startswith("sleep ")]
+        (enroll,) = [i for i, c in enumerate(calls) if c.startswith("enroll ")]
+        self.assertGreaterEqual(len(sleeps), 3, calls)
+        self.assertGreater(enroll, sleeps[2], "the launcher enrolled before the session file came")
+        self.assertIn(f"--session-id {self.SID}", calls[enroll])
+        self.assertEqual([c for c in calls if c.startswith("docker exec ") and " -d " not in c], [],
+                         "the session comes from the file, not from the box")
+        # With no session file at all, at the end of the 120 s (each `sleep 2` here moves bash's
+        # clock on 61 s), the box enrolls under its name.
+        self.reset_box()
+        result = self.when_up("omp", body="sleep() { SECONDS=$((SECONDS + 61)); }\n")
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        (enroll_line,) = self.calls_matching("enroll ")
+        self.assertNotIn("--session-id", enroll_line)
+        self.assertIn("--runtime-id box1", enroll_line)
 
     def test_a_box_that_never_runs_ends_without_identity(self) -> None:
         result = self.when_up("omp", child="/bin/true &\nwait", STUB_RUNNING="false")
@@ -1675,23 +1716,24 @@ class EnrollWhenUp(EnrollFixture):
         The launcher stands in for one that lives longer than the wait: 400 passes of the loop
         fork a stub `docker` each, which on a loaded host takes longer than 30 s, and a child
         that ends first makes the launcher give up instead (the test below that one)."""
+        self.report_session(self.SID)
         result = self.when_up(
             "omp",
             child="/bin/sleep 300 &",
             STUB_RUNNING_AFTER="400",
-            STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd",
         )
         self.assertIn("rc=0", result.stdout, result.stderr)
         self.assertEqual(self.files(), {"key.pem", "enrollment"})
         self.assertGreaterEqual(len(self.calls_matching("docker inspect")), 400)
         (enroll,) = self.calls_matching("enroll ")
-        self.assertIn("--session-id 0192f3a4-5b6c-7d8e-9f01-23456789abcd", enroll)
+        self.assertIn(f"--session-id {self.SID}", enroll)
 
     def test_the_marker_stays_fresh_while_it_waits(self) -> None:
-        """Each pass of the wait renews the marker; each sleep ages it past 160 s."""
+        """Each pass of the wait renews the marker; each sleep ages it past 160 s, after it logs
+        the mtime the pass left."""
         started = time.time()
         self.when_up("omp", child="/bin/sleep 1 &")
-        probes = self.calls_matching("sid-probe ")
+        probes = self.calls_matching("marker-at-sleep ")
         self.assertGreater(len(probes), 1)
         for probe in probes:
             self.assertGreaterEqual(int(probe.rsplit("=", 1)[1]), int(started) - 1, probe)
@@ -2113,6 +2155,7 @@ class CmdNew(EnrollFixture):
         'mount_args() { mkdir -p "$(box_keydir "$1")" "$RUN_BASE/$1/run-user/agent-secrets"; }\n'
         "session_env() { :; }; clone_checkout() { :; }\n"
         'close_box() { echo "close_box $1 revokes=$(cat "$RUN_BASE/$1/enrollment-id" 2>/dev/null)" >>"$STUB_CALLS"; }\n'
+        "collect_start() { :; }\n"
     )
     SID = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
 

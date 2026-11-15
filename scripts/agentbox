@@ -1311,14 +1311,18 @@ box_wait() {
     done
 }
 
-# Enroll a box from `new` once it is up, then start its renew: for omp once its session id is
-# known (omp opens its session file 4–10 s after start, before any tool can run), so the
-# enrollment carries the id the broker wakes on a decision; any other command at once; after
-# 120 s of running without a session id (an omp --no-session run) without one. The deadline
-# starts once the box is Running, so a box that was slow to start still enrolls with its id. The
-# enrollment.pending marker is renewed on every pass of both waits, so it stays inside the
-# client's 160 s trust window however long the box takes. A box that never runs, or ends first,
-# ends in enroll_failed too.
+# Enroll a box from `new` once it is up, then start its renew: for omp once its session file names
+# its session (box_session_id; the box's omp writes it at its start, fresh or resumed, before any
+# tool can run), so the enrollment carries the id the broker wakes on a decision and its grants
+# follow the session to its next box (dispatch://INFRA-1167); any other command at once; after
+# 120 s of running with no session file (an omp --no-session run, a box started from a MAIN
+# checkout, a profile with `.no-shared-setup`) under the box's name. Before dispatch://INFRA-1720
+# the id came from a transcript omp held open, which a fresh session has none of until its first
+# reply, so two fresh boxes enrolled under their box names on 2026-11-14
+# (dispatch://INFRA-3462/comment/7b61823d). The deadline starts once the box is Running, so a box
+# that was slow to start still enrolls with its id. The enrollment.pending marker is renewed on
+# every pass of both waits, so it stays inside the client's 160 s trust window however long the
+# box takes. A box that never runs, or ends first, ends in enroll_failed too.
 enroll_when_up() {
     local box="$1" child="$2" cmd="$3" sid="" deadline
     wait_for_running "$box" "$child" || { enroll_failed "$box" "$box never reached Running; not enrolled"; return 1; }
@@ -1586,16 +1590,21 @@ unenroll_session_wait() {
 }
 
 # session_live_box SID EXCEPT: whether session SID is live in a box other than EXCEPT. A box is
-# live when it enrolled for SID and its container still exists. The run directory of every box
-# holds the session it enrolled for (`enrollment-session`, written by enroll_box) and is removed
-# with the box, so this is the host's own record of who is using the session's broker identity.
-# A `docker ps` that fails does not mean "no container" (close_box_cache and reap_box read it
-# the same way). An `enrollment-session` that is there but cannot be read does not mean "another
-# session" either. It has three answers:
+# live when it enrolled for SID, or its omp's session file names SID, and its container still
+# exists. The run directory of every box holds the session it enrolled for (`enrollment-session`,
+# written by enroll_box) and is removed with the box, so this is the host's own record of who is
+# using the session's broker identity. A box that is still enrolling has no `enrollment-session`
+# yet, and with a broker slower than the waiter's grace the waiter ended the session's enrollment
+# while that box enrolled, which then enrolled again for the carry alone
+# (dispatch://INFRA-1720/comment/4fab10d7). Its omp writes the session file before the launcher
+# enrolls it (enroll_when_up waits for that file), so the file counts too (box_session_read).
+# A `docker ps` that fails does not mean "no container" (close_box_cache and the collector read
+# it the same way). An `enrollment-session` that is there but cannot be read does not mean
+# "another session" either. It has three answers:
 #   - Status 0 and the name of a live box.
 #   - Status 1 and `none`: no box of SID other than EXCEPT is live.
 #   - Status 2 and no output: no answer. SID is empty, or the walk found no live box but could not
-#     ask docker about a box that enrolled for SID, or could not read a box's `enrollment-session`.
+#     ask docker about a box of SID, or could not read a box's `enrollment-session`.
 #     A live box gives status 0 also after such a failure.
 # The answer "none" is the word, not the status alone: this script also exits 1 when a command
 # ends it under `set -e`. The walk uses no `$(<file)` (a file that cannot be opened ends the
@@ -1609,12 +1618,13 @@ session_live_box() {
         box="${d%/}"
         box="${box##*/}"
         [[ "$box" == "$except" || "$box" == session-keys ]] && continue
-        [[ -s "$d/enrollment-session" ]] || continue
-        if ! read -r s 2>/dev/null <"$d/enrollment-session"; then
+        s=""
+        if [[ -s "$d/enrollment-session" ]] && ! read -r s 2>/dev/null <"$d/enrollment-session"; then
             # Gone: the box closed during the walk. Still there: it cannot be read.
             [[ ! -e "$d/enrollment-session" ]] || cannot=1
-            continue
+            s=""
         fi
+        if [[ "$s" != "$sid" ]] && box_session_read "$box"; then s="$BOX_SESSION_SID"; fi
         [[ "$s" == "$sid" ]] || continue
         if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
             cannot=1
@@ -2494,63 +2504,62 @@ session_env() {
     printf '%s\n' "${e[@]}"
 }
 
-# The session id of the omp running in a box: the file it holds open,
-# ~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl, read from its fd table (omp
-# exports OMP_SESSION_ID to its children, not itself) - or, when none is open
-# (idle after a resume or a full-file rewrite), the newest session file of the
-# box's own directory under <boxes>, which omp keys by cwd and whose box name is
-# never reused. A box working in a host directory (--dir) has no such fallback,
-# on purpose: omp keys that directory by the path, which the host and every
-# other box naming it share, so its newest file is very often another session's
-# - measured 2026-11-01, where a glob by working directory answered with a live
-# HOST session's id for both test boxes. Acting on that id would notify the
-# wrong session on `agentbox restart` and release ANOTHER session's knives
-# claims at close, so an empty answer is the right one. Empty also until a
-# session has materialized, and for a --no-session run.
+# The files a box's runner and its omp leave for the host, in the box's runtime directory
+# (/run/user/<uid> in the box, $RUN_BASE/<box>/run-user here; mount_args), which the box's end
+# deletes (dispatch://INFRA-1720):
+#   agentbox-session  the session the box's omp runs, written by omp/extensions/session-env.ts in
+#                     the omp whose parent is the runner, at its start, at once after /new,
+#                     /resume, /fork and /branch, and within 10 s of any other change: four lines,
+#                     `version=1`, `pid=<its pid in the box>`, `session=<id>`, `file=<transcript>`,
+#                     replaced whole by a rename;
+#   agentbox-runner   written by scripts/agentbox-run.ts at its start (`version=1`): a box with
+#                     none runs a runner older than this change, which answers no restart;
+#   agentbox-restart  the runner's answer to each SIGUSR1, one line each (cmd_restart).
+# The box can write anything there, so the host takes each only when it is a regular file, and
+# from the session file only a UUID, a pid and an absolute path.
+box_run_user() { echo "$RUN_BASE/$1/run-user"; }
+BOX_SID_RE='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+
+# box_file_lines FILE: the first lines of FILE when it is a regular file and not a link, nothing
+# otherwise. A box can put a FIFO or a link where a file was between the test and the read, so the
+# read is bounded both in time and in size.
+box_file_lines() {
+    [[ -f "$1" && ! -L "$1" ]] || return 0
+    timeout 5 head -c 65536 -- "$1" 2>/dev/null | head -n 16 || true
+}
+
+# box_session_read BOX: BOX_SESSION_SID, BOX_SESSION_PID and BOX_SESSION_FILE from BOX's session
+# file. Status 1, with all three empty, when the box names no session.
+BOX_SESSION_SID="" BOX_SESSION_PID="" BOX_SESSION_FILE=""
+box_session_read() {
+    local line version="" sid="" pid="" file=""
+    BOX_SESSION_SID="" BOX_SESSION_PID="" BOX_SESSION_FILE=""
+    while IFS= read -r line; do
+        case "$line" in
+            version=*) version="${line#version=}" ;;
+            pid=*) pid="${line#pid=}" ;;
+            session=*) sid="${line#session=}" ;;
+            file=*) file="${line#file=}" ;;
+        esac
+    done < <(box_file_lines "$(box_run_user "$1")/agentbox-session")
+    [[ "$version" == 1 && "$sid" =~ $BOX_SID_RE ]] || return 1
+    [[ "$pid" =~ ^[1-9][0-9]{0,9}$ ]] || pid=""
+    [[ "$file" == /* ]] || file=""
+    BOX_SESSION_SID="$sid" BOX_SESSION_PID="$pid" BOX_SESSION_FILE="$file"
+}
+
+# The session id of the omp running in a box, from the box's session file and nothing else: no
+# `docker exec`, no launch line, no directory. Each of those was a guess at what omp does, and each
+# was blind to a session started fresh until its first reply and to every session under omp's
+# database store, which writes no transcript: on 2026-11-08 13 of 70 live boxes carried no
+# `--resume`, and `agentbox restart <id>` answered `no running box matches` for a live box at
+# 02:03:36Z (dispatch://INFRA-1720). Empty for a box started before this change (its omp writes no
+# such file), for a profile that opts out of the shared extensions (`.no-shared-setup`), for a
+# --no-session run, and for a box whose command is not omp. Callers run under set -e, so this
+# succeeds, empty, then.
 box_session_id() {
-    local sid
-    # Only a transcript held for WRITING names this box's session. omp's session writer holds
-    # its own file O_WRONLY|O_APPEND for its life, while an omp opens ANOTHER session's
-    # transcript read-only whenever a tool reads one -- which is why `omp-session-live` reads
-    # the access mode too. Without that filter this answered with a session that merely passed
-    # through: on 2026-11-08 the grading lane's box reported 01a1b8ff, a live session working
-    # in /mnt/nvme/sami/gate-runs, and `agentbox sh <that id>` then ran a command in the
-    # GRADING lane's box. For restart that is a hang-up of the wrong lane, and at close it is
-    # another session's knives claims released.
-    sid="$(docker exec "$1" sh -c '
-        for p in $(pgrep -x omp); do
-            for fd in /proc/$p/fd/*; do
-                case "$(readlink "$fd" 2>/dev/null)" in
-                    *.jsonl) ;;
-                    *) continue ;;
-                esac
-                flags=$(sed -n "s/^flags:[[:space:]]*//p" "/proc/$p/fdinfo/${fd##*/}" 2>/dev/null)
-                [ -n "$flags" ] || continue
-                # O_WRONLY (1) or O_RDWR (2) in the low two bits: a reader has neither.
-                [ $(( 0$flags & 3 )) -ne 0 ] || continue
-                readlink "$fd" 2>/dev/null
-            done
-        done | sed -n "s#.*/\\.omp/agent/sessions/[^/]*/[0-9T:-]*Z_\\([0-9a-f-]\\{36\\}\\)\\.jsonl\$#\\1#p" | head -1' 2>/dev/null || true)"
-    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
-    # The launch line the runner logged for this box. Under the SQL session store omp holds no
-    # transcript open at all, so the scan above now answers empty for EVERY box -- 0 of 12 host
-    # omp processes held one when measured on 2026-11-08 -- and with only the cwd fallback left,
-    # `agentbox restart|sh|grow <session id>` could not find a live, healthy box: the grading
-    # lane's at 02:03Z and the librarian's at 02:35Z, each with its omp alive and its cgroup
-    # naming the box (dispatch://INFRA-1720). This route is safe where the cwd glob is not,
-    # because it is not a guess from a shared directory: a resume names its own session in its
-    # own argv, so the id belongs to the omp this box started. A box launched with a brief and
-    # never resumed carries no id here and still answers empty.
-    local launched
-    launched="$(sed -n 's/.*: omp started ([^)]*): .*--resume \([^ ]*\).*/\1/p' \
-        "$HOME/.cache/omp/agentbox/$1.log" 2>/dev/null | tail -1 || true)"
-    # Either a bare id or a transcript path, whose own file name carries the id.
-    sid="$(sed -n 's#^\([0-9a-f-]\{36\}\)$#\1#p; s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$launched" | tail -1)"
-    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
-    # Callers run under set -e: this must succeed, empty, while no file exists.
-    local files
-    files="$(ls -t "$HOME/.omp/agent/sessions/-boxes-$1-"*/*.jsonl 2>/dev/null || true)"
-    sed -n '1s#.*Z_\([0-9a-f-]\{36\}\)\.jsonl$#\1#p' <<<"$files"
+    box_session_read "$1" || return 0
+    printf '%s\n' "$BOX_SESSION_SID"
 }
 
 # A clone and the close-phase knives run in their own session (`setsid`): the
@@ -3588,10 +3597,17 @@ resolve_box() {
     return 1
 }
 
+# Why TARGET names no running box, for the commands that take one. A session id finds only a box
+# started after dispatch://INFRA-1720, whose omp writes its session file: the bare `no running box
+# matches` it answered before sent nobody to the box that runs the session.
+no_box_reason() {
+    echo "no running box matches $1: no box is named so, and no running box's session file names that session. A box started before this change (dispatch://INFRA-1720) runs a runner older than this change, whose omp writes no session file, so it cannot be found by its session id: find it with \`agentbox ls\`, and in it run \`agentbox move --self\`, which moves the session into a new box"
+}
+
 cmd_grow() {
     (( $# == 2 )) || die "usage: agentbox grow <box|session-id> SIZE"
     local box img loop mounted old
-    box="$(resolve_box "$1")" || die "no running box matches $1"
+    box="$(resolve_box "$1")" || die "$(no_box_reason "$1")"
     [[ "$box" =~ ^agentbox-[a-zA-Z0-9-]+$ ]] || die "invalid box name $box"
     img="$BOX_DISKS/$box.img"
     [[ -f "$img" && ! -L "$img" ]] || die "$box has no disk image at $img"
@@ -3622,7 +3638,7 @@ cmd_sh() {
     [[ -n "$target" ]] || die "box name or session id required"
     shift
     local box wdir
-    box="$(resolve_box "$target")" || die "no running box matches $target"
+    box="$(resolve_box "$target")" || die "$(no_box_reason "$target")"
     wdir="$(docker inspect -f '{{.Config.WorkingDir}}' "$box")"
     local tty=(-i)
     [[ -t 0 && -t 1 ]] && tty=(-it)
@@ -3687,15 +3703,135 @@ box_runner_pid() {
 
 RESTART_NOTICE='agentbox: a restart of your omp is pending (new omp/plugins on the host). Finish the current step and start no new subagents or long jobs. When `read proc://` lists none of your jobs or services still running, run `agentbox restart` from your bash tool: omp quits gracefully and relaunches in this same box with --resume of this session; the box, its workspace and /tmp stay, supervised processes only if started with persist. If you are idle, do it now.'
 
+# How long a restart command waits for the runner's answer to its signal, and how long the host's
+# --now waits for the relaunched omp to report its session. The runner answers in its signal
+# handler, before it stops omp, so 15 s leaves room for a host at load; omp reports its session
+# at its start, which can take a minute on a loaded host.
+RESTART_ANSWER_WAIT="${AGENTBOX_RESTART_ANSWER_WAIT:-15}"
+RESTART_REPORT_WAIT="${AGENTBOX_RESTART_REPORT_WAIT:-120}"
+
+# restart_offset FILE: the size of the runner's answer file before a signal, so only a line the
+# runner writes after it counts as its answer to that signal (0 when there is no file yet).
+restart_offset() {
+    [[ -f "$1" && ! -L "$1" ]] || { echo 0; return 0; }
+    stat -c %s -- "$1" 2>/dev/null || echo 0
+}
+
+# restart_answer FILE OFFSET: the first whole line FILE gained past byte OFFSET within
+# RESTART_ANSWER_WAIT seconds, as `<word> <text>` (the runner's time dropped). Status 1 when none.
+restart_answer() {
+    local file="$1" offset="$2" end=$((SECONDS + RESTART_ANSWER_WAIT)) chunk line
+    while :; do
+        if [[ -f "$file" && ! -L "$file" ]]; then
+            chunk="$(timeout 5 tail -c +"$((offset + 1))" -- "$file" 2>/dev/null | head -c 4096; echo x)"
+            chunk="${chunk%x}"
+            if [[ "$chunk" == *$'\n'* ]]; then
+                line="${chunk%%$'\n'*}"
+                printf '%s\n' "${line#* }"
+                return 0
+            fi
+        fi
+        (( SECONDS < end )) || return 1
+        sleep 0.5
+    done
+}
+
+# The restart of the omp in this box, from its own bash tool. omp's bash tool has a builtin kill
+# that refuses the shell's ancestors - the runner is one - so the signal is sent from here, a real
+# process. Every outcome but a restart that started exits 1 with its reason: on 2026-11-08 the
+# in-box command printed nothing and exited 0 while the runner wrote "this box has no session yet;
+# omp left running, restart not performed" only to its log (agentbox-cc8efa00f4da, twice). On a
+# restart that started the command ends with omp, which the runner hangs up, and the wake notice
+# tells the resumed session that it came back.
+restart_in_box() {
+    local run_user="${XDG_RUNTIME_DIR:-/run/user/$UID_}" answers offset line
+    answers="$run_user/agentbox-restart"
+    # A subagent's bash tool reaches the same omp as its parent's, so a restart there would hang up
+    # the session in the middle of the subagent's own work. The test `agentbox finish` uses: a
+    # subagent's own transcript does not end in `_<session id>.jsonl`.
+    if [[ -n "${PI_SESSION_FILE:-}" && "${PI_SESSION_FILE##*/}" != *_"${OMP_SESSION_ID:-}".jsonl ]]; then
+        die "a subagent cannot restart its session's omp; tell the session to run 'agentbox restart' when the subagent is done. Nothing was restarted."
+    fi
+    [[ -n "$(box_file_lines "$run_user/agentbox-runner")" ]] \
+        || die "this box's runner is older than this change (dispatch://INFRA-1720) and cannot say whether it restarted, so no signal was sent. Run \`agentbox move --self\` from this bash tool: it moves this session into a new box, which restarts in place."
+    offset="$(restart_offset "$answers")"
+    kill -USR1 "$AGENTBOX_RUNNER_PID" || die "could not signal the runner (pid $AGENTBOX_RUNNER_PID); nothing was restarted"
+    line="$(restart_answer "$answers" "$offset")" \
+        || die "the runner gave no answer within ${RESTART_ANSWER_WAIT}s, so the restart may not have happened; its log is ~/.cache/omp/agentbox/${AGENTBOX_BOX:-<box>}.log"
+    [[ "${line%% *}" == started ]] || die "the runner did not restart: ${line#* }"
+    echo "agentbox: ${line#* }"
+    return 0
+}
+
+# restart_box BOX NOW: one box from the host, saying what happened. Status 0 when it restarted (or
+# its session was told to), 1 with the reason on stderr when it did not.
+restart_box() {
+    local box="$1" now="$2" run_user answers offset line old_pid end log last
+    if [[ -z "$(box_runner_pid "$box")" ]]; then
+        echo "agentbox: $box does not run omp under the runner (scripts/agentbox-run.ts), so nothing can restart it in place; quit its session and resume it with \`omp --resume\`" >&2
+        return 1
+    fi
+    run_user="$(box_run_user "$box")"
+    # A runner older than this change writes no version, answers no signal, and resumes a session
+    # it guessed from open files: no signal is sent to it at all.
+    if [[ -z "$(box_file_lines "$run_user/agentbox-runner")" ]]; then
+        echo "agentbox: $box runs a runner older than this change (dispatch://INFRA-1720), which cannot say whether it restarted, so no signal was sent; its session moves to a new box, which restarts in place, with \`agentbox move --self\` run in its own bash tool" >&2
+        return 1
+    fi
+    if [[ "$now" == true ]]; then
+        answers="$run_user/agentbox-restart"
+        offset="$(restart_offset "$answers")"
+        box_session_read "$box" || true
+        old_pid="$BOX_SESSION_PID"
+        # pid 1 (docker-init) forwards the signal to the runner.
+        docker kill -s USR1 "$box" >/dev/null || { echo "agentbox: $box: docker could not send it SIGUSR1; nothing was restarted" >&2; return 1; }
+        if ! line="$(restart_answer "$answers" "$offset")"; then
+            echo "agentbox: $box: the runner gave no answer within ${RESTART_ANSWER_WAIT}s, so the restart may not have happened; its log is ~/.cache/omp/agentbox/$box.log" >&2
+            return 1
+        fi
+        if [[ "${line%% *}" != started ]]; then
+            echo "agentbox: $box: the runner did not restart: ${line#* }" >&2
+            return 1
+        fi
+        echo "agentbox: $box: ${line#* }"
+        end=$((SECONDS + RESTART_REPORT_WAIT))
+        while :; do
+            if box_session_read "$box" && [[ -n "$BOX_SESSION_PID" && "$BOX_SESSION_PID" != "$old_pid" ]]; then
+                echo "agentbox: $box: omp came back (pid $BOX_SESSION_PID in the box) on session $BOX_SESSION_SID"
+                return 0
+            fi
+            (( SECONDS < end )) || break
+            sleep 1
+        done
+        log="$HOME/.cache/omp/agentbox/$box.log"
+        last="$(tail -n 1 "$log" 2>/dev/null || true)"
+        echo "agentbox: $box: the relaunched omp did not report its session within ${RESTART_REPORT_WAIT}s; the box's last log line ($log): ${last:-none}" >&2
+        return 1
+    fi
+    if ! box_session_read "$box"; then
+        echo "agentbox: $box: its session is not known: no session file at $run_user/agentbox-session, so no session can be told to restart. omp writes it at its start; retry, or use --now" >&2
+        return 1
+    fi
+    # The path the box's runner would resume, tested in the box, where a --no-host-writes box's
+    # transcripts live at the same path as nowhere on the host.
+    if [[ -z "$BOX_SESSION_FILE" ]] || ! docker exec --user ubuntu "$box" test -f "$BOX_SESSION_FILE" 2>/dev/null; then
+        echo "agentbox: $box: the transcript of session $BOX_SESSION_SID, ${BOX_SESSION_FILE:-(none recorded)}, is not a regular file in the box, so a restart could not resume it; nothing was sent" >&2
+        return 1
+    fi
+    if ! envoy_send_text "$BOX_SESSION_SID" "$RESTART_NOTICE" >/dev/null; then
+        echo "agentbox: $box: envoy send to $BOX_SESSION_SID failed; the session was not told to restart" >&2
+        return 1
+    fi
+    echo "agentbox: $box (session $BOX_SESSION_SID) notified; it restarts when it reaches a safe point"
+}
+
 cmd_restart() {
-    # Inside a box this is the agent's own trigger. omp's bash tool has a
-    # builtin kill that refuses the shell's ancestors - the runner is one - so
-    # the signal is sent from here, a real process.
     if [[ -n "${AGENTBOX_RUNNER_PID:-}" ]]; then
         (( $# == 0 )) || die "inside a box, agentbox restart takes no arguments: it restarts this session"
-        exec kill -USR1 "$AGENTBOX_RUNNER_PID"
+        restart_in_box
+        return 0
     fi
-    local now=false all=false t targets=() boxes=() box sid
+    local now=false all=false t targets=() boxes=() box rc=0
     for t in "$@"; do
         case "$t" in
             --now) now=true ;;
@@ -3709,26 +3845,13 @@ cmd_restart() {
     else
         (( ${#targets[@]} )) || die "usage: agentbox restart <box|session-id>… | --all [--now]"
         for t in "${targets[@]}"; do
-            box="$(resolve_box "$t")" || die "no running box matches $t"
-            boxes+=("$box")
+            if box="$(resolve_box "$t")"; then boxes+=("$box"); else echo "agentbox: $(no_box_reason "$t")" >&2; rc=1; fi
         done
     fi
-    for box in "${boxes[@]}"; do
-        if [[ -z "$(box_runner_pid "$box")" ]]; then
-            echo "agentbox: $box does not run omp under the runner; quit it and relaunch with --resume instead" >&2
-            continue
-        fi
-        if $now; then
-            # pid 1 (docker-init) forwards the signal to the runner.
-            docker kill -s USR1 "$box" >/dev/null
-            echo "agentbox: $box restarting now"
-            continue
-        fi
-        sid="$(box_session_id "$box")"
-        [[ -n "$sid" ]] || { echo "agentbox: $box: omp holds no session file open right now; retry, or use --now" >&2; continue; }
-        envoy_send_text "$sid" "$RESTART_NOTICE" >/dev/null || die "envoy send to $sid failed"
-        echo "agentbox: $box (session $sid) notified; it restarts when it reaches a safe point"
+    for box in ${boxes[@]+"${boxes[@]}"}; do
+        restart_box "$box" "$now" || rc=1
     done
+    return "$rc"
 }
 
 # ── move: the sessions already running on this host (dispatch://INFRA-702) ───────────────────
