@@ -285,15 +285,22 @@ class HawkTokenFixture(unittest.TestCase):
         then = time.time() - seconds
         os.utime(path, (then, then))
 
-    def timer_command(self) -> tuple[list[str], dict[str, str]]:
-        values: dict[str, str] = {}
-        execution = ""
+    def unit_settings(self) -> list[tuple[str, str]]:
+        """Return this fixture's unit settings with specifiers substituted."""
+        settings: list[tuple[str, str]] = []
         for line in self.unit.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
             value = value.replace("%h/.dotfiles", str(self.dotfiles)).replace("%h", str(self.home))
+            settings.append((key, value))
+        return settings
+
+    def timer_command(self) -> tuple[list[str], dict[str, str]]:
+        values: dict[str, str] = {}
+        execution = ""
+        for key, value in self.unit_settings():
             if key == "ExecStart":
                 execution = value
             elif key == "Environment":
@@ -355,27 +362,18 @@ class HawkTokenFixture(unittest.TestCase):
     def stop_fixture_processes(self) -> None:
         """Stop only exact PIDs whose command line proves this test fixture started them."""
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
-            for entry in Path("/proc").iterdir():
-                if not entry.name.isdigit():
-                    continue
-                command_line = entry / "cmdline"
+            for pid, _ in self.fixture_processes():
                 try:
-                    command = command_line.read_bytes().replace(b"\0", b" ").decode(errors="replace")
-                except FileNotFoundError:
-                    continue
-                if str(self.fixture) not in command:
-                    continue
-                try:
-                    os.kill(int(entry.name), signal_number)
+                    os.kill(pid, signal_number)
                 except ProcessLookupError:
                     pass
             if not self.fixture_processes():
                 return
             time.sleep(0.05)
 
-    def fixture_processes(self) -> list[str]:
+    def fixture_processes(self) -> list[tuple[int, str]]:
         """Return only processes whose command line names this test's private fixture."""
-        leftovers: list[str] = []
+        leftovers: list[tuple[int, str]] = []
         for entry in Path("/proc").iterdir():
             if not entry.name.isdigit():
                 continue
@@ -385,11 +383,12 @@ class HawkTokenFixture(unittest.TestCase):
             except FileNotFoundError:
                 continue
             if str(self.fixture) in command:
-                leftovers.append(f"{entry.name}:{command}")
+                leftovers.append((int(entry.name), command))
         return leftovers
 
     def assert_no_fixture_processes(self) -> None:
-        self.assertEqual(self.fixture_processes(), [], "fixture process left behind")
+        leftovers = [f"{pid}:{command}" for pid, command in self.fixture_processes()]
+        self.assertEqual(leftovers, [], "fixture process left behind")
 
     def pack(self, slot: str) -> Path:
         return self.slot(slot) / ".git" / "objects" / "pack"
@@ -904,12 +903,7 @@ class UnderSystemd(HawkTokenFixture):
         command, environment = self.timer_command()
         service_properties: list[tuple[str, str]] = []
         wanted = {"Type", "StandardOutput", "StandardError", "ExecCondition", "TimeoutStartSec", "KillMode"}
-        for line in self.unit.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            value = value.replace("%h/.dotfiles", str(self.dotfiles)).replace("%h", str(self.home))
+        for key, value in self.unit_settings():
             if key in wanted:
                 service_properties.append((key, value))
             elif key == "Environment":
