@@ -170,6 +170,42 @@ exit "${{DPKG_STATUS:-0}}"''',
         )
         return deb
 
+    def raw_field(self, deb: Path, name: str) -> str:
+        """Read a field as written in the package control file."""
+        control_tar = subprocess.run(
+            ["dpkg-deb", "--ctrl-tarfile", str(deb)],
+            check=True,
+            capture_output=True,
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(control_tar), mode="r:*") as archive:
+            control_member = next(
+                (
+                    member
+                    for member in archive
+                    if member.name.removeprefix("./") == "control"
+                ),
+                None,
+            )
+            if control_member is None:
+                raise AssertionError("package control file is missing")
+            control_file = archive.extractfile(control_member)
+            if control_file is None:
+                raise AssertionError("package control file is missing")
+            control = control_file.read().decode("utf-8")
+
+        prefix = f"{name}: "
+        lines = control.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if not line.startswith(prefix):
+                continue
+            value = line.removeprefix(prefix)
+            for continuation in lines[index + 1 :]:
+                if not continuation.startswith((" ", "\t")):
+                    break
+                value += continuation[1:]
+            return value
+        raise AssertionError(f"package control file has no {name} field")
+
     def field(self, deb: Path, name: str) -> str:
         """Read a package control field with the real dpkg-deb command."""
         return subprocess.run(
@@ -285,9 +321,10 @@ exit "${{DPKG_STATUS:-0}}"''',
 
     def test_folded_depends_is_passed_unchanged(self) -> None:
         deb = self.build_folded_deb()
-        depends_output = self.field(deb, "Depends")
-        self.assertIn("\n", depends_output)
+        depends_output = self.raw_field(deb, "Depends")
         depends = depends_output.rstrip("\n")
+        self.assertIn("\n", depends)
+        expected_depends = self.field(deb, "Depends").rstrip("\n")
 
         result = self.run_helper(deb, sha256_file(deb))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -295,7 +332,7 @@ exit "${{DPKG_STATUS:-0}}"''',
         calls = self.read_calls()
         self.assertEqual(
             calls[0]["argv"],
-            ["satisfy", "-y", "--no-install-recommends", depends],
+            ["satisfy", "-y", "--no-install-recommends", expected_depends],
         )
 
     def test_wrong_sha256_returns_one_without_install(self) -> None:

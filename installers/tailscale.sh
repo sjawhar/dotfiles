@@ -8,9 +8,9 @@
 # Root-level role installer: devbox/gce-host.sh sources it with sudo. TAILSCALE_HOSTNAME defaults
 # to this machine's short host name, the name the tailnet policy's hosts entries give sami-devbox.
 #
-# Idempotent: the package is installed only when the pinned version is not, and `tailscale up`
-# runs only when the node is not already up, untagged, under that name. A node still tagged from
-# an earlier join signs in again (--force-reauth) and drops its tags (--advertise-tags=).
+# Idempotent: installs unless the pinned version is fully installed (status `install ok installed`),
+# and `tailscale up` runs only when the node is not already up, untagged, under that name. A node
+# still tagged from an earlier join signs in again (--force-reauth) and drops its tags (--advertise-tags=).
 set -euo pipefail
 # shellcheck source=installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -23,7 +23,7 @@ TAILSCALE_DEB_SHA256=8768973def76dd530b53a0fe74ca396252fff050f955aeebfabd33c7796
 
 ((EUID == 0)) || { echo "tailscale.sh: run as root (devbox/gce-host.sh)" >&2; exit 1; }
 
-if [[ "$(dpkg-query -W -f='${Version}' tailscale 2>/dev/null || true)" == "$TAILSCALE_VERSION" ]]; then
+if [[ "$(dpkg-query -W -f='${Status} ${Version}' tailscale 2>/dev/null || true)" == "install ok installed $TAILSCALE_VERSION" ]]; then
     echo "tailscale.sh: tailscale $TAILSCALE_VERSION already installed"
 else
     ts_tmp="$(mktemp -d)"
