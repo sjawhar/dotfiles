@@ -350,9 +350,29 @@ exit 1''',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        calls = self.read_calls()
-        self.assertEqual([call["cmd"] for call in calls], ["apt-get", "dpkg"])
-        self.assertEqual(calls[1]["argv"], ["-i", str(deb)])
+        calls = [(call["cmd"], call["argv"]) for call in self.read_calls()]
+        self.assertIn(("dpkg", ["-i", str(deb)]), calls)
+
+    def test_package_held_at_the_same_version_is_held_again_when_dpkg_fails(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        # DPKG_STATUS fails only `dpkg -i`; the hold set after it succeeds.
+        (self.bin_dir / "dpkg").rename(self.bin_dir / "logging-dpkg")
+        write_command(
+            self.bin_dir,
+            "dpkg",
+            '''if [[ "${1:-}" != -i ]]; then DPKG_STATUS=0; fi
+exec "$(dirname -- "$0")/logging-dpkg" "$@"''',
+        )
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "hold half-configured 1.0", "DPKG_STATUS": "2"},
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+
+        calls = [(call["cmd"], call["argv"]) for call in self.read_calls()]
+        self.assertIn(("dpkg", ["-i", str(deb)]), calls)
+        self.assertIn(("dpkg", ["--set-selections"]), calls)
 
     def write_selection_state_fakes(self, state: Path) -> None:
         """Replace the fakes with ones that keep dpkg's selection and status in *state*.
@@ -463,11 +483,12 @@ state=state-sentinel
 installed_version=installed-version-sentinel
 pre_depends=pre-depends-sentinel
 depends=depends-sentinel
+rc=rc-sentinel
 deps=(deps-zero deps-one)
 trap 'echo bye' EXIT
 cd "$CALLER_DIR"
 state() {{
-    declare -p deb expected actual package version installed want state installed_version pre_depends depends deps
+    declare -p deb expected actual package version installed want state installed_version pre_depends depends rc deps
     trap -p EXIT
     printf 'shell-options=%s\\n' "$-"
     shopt -o pipefail

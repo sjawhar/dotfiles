@@ -82,11 +82,13 @@ ensure_json() {
 # apt 2.8 can install a configured source's same-version copy instead of a local file
 # (Debian bug #1058934), so apt gets only dependency fields and dpkg gets the checked file.
 # It keeps the two refusals of apt that `dpkg -i` lacks: it installs nothing over a newer
-# installed version or over a package held at another version.
+# installed version or over a package held at another version. A hold at the pinned version is
+# kept: `dpkg -i` sets the selection back to install, so the hold is set again after it, whether
+# `dpkg -i` succeeds or fails.
 # Every step returns its own failure because `||` and `if` callers disable `set -e` inside it.
 install_checked_deb() {
     local deb="$1" expected="$2"
-    local actual package version installed want state installed_version pre_depends depends
+    local actual package version installed want state installed_version pre_depends depends rc
     local -a deps=()
     actual="$(sha256sum -- "$deb")" || return 1
     actual="${actual%% *}"
@@ -120,7 +122,12 @@ install_checked_deb() {
     if ((${#deps[@]})); then
         DEBIAN_FRONTEND=noninteractive apt-get satisfy -y --no-install-recommends "${deps[@]}" || return 1
     fi
-    DEBIAN_FRONTEND=noninteractive dpkg -i "$deb"
+    rc=0
+    DEBIAN_FRONTEND=noninteractive dpkg -i "$deb" || rc=$?
+    if [[ "$want" == hold ]]; then
+        dpkg --set-selections <<< "$package hold" || return 1
+    fi
+    return "$rc"
 }
 
 # Give a box watch's service the session that owns THIS machine's box health, from
