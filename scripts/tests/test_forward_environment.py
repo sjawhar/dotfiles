@@ -96,7 +96,10 @@ if [[ -n "${CLOUDFLARED_FAIL:-}" ]]; then exit "$CLOUDFLARED_FAIL"; fi''',
             self.stub_dir / "systemctl",
             '''printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
 printf 'systemctl %s\\n' "$*" >> "$CALL_LOG"
-if [[ -n "${SYSTEMCTL_FAIL:-}" && "$*" == "$SYSTEMCTL_FAIL" ]]; then exit 1; fi
+if [[ -n "${SYSTEMCTL_FAIL:-}" && "$*" == "$SYSTEMCTL_FAIL" ]]; then
+    [[ -z "${SYSTEMCTL_FAIL_STDERR:-}" ]] || printf '%s\n' "$SYSTEMCTL_FAIL_STDERR" >&2
+    exit 1
+fi
 case "$*" in
     *is-enabled?forward-oryx)
         cat "$SYSTEMCTL_ENABLED"
@@ -569,6 +572,38 @@ class ForwardInstaller(ForwardInstallerHarness):
             self.assertEqual((ssh_dir / name).read_text(), "keep me\n")
         self.assertFalse(self.config.is_symlink())
 
+    def test_migration_allows_no_legacy_unit_files(self) -> None:
+        legacy_globs = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@*.service forward-tunnel@*.service"
+        )
+
+        install = self.install("daemon", SYSTEMCTL_FAIL=legacy_globs)
+
+        self.assertEqual(install.returncode, 0, install.stderr)
+        self.assertIn(legacy_globs, self.systemctl_log.read_text().splitlines())
+
+    def test_migration_reports_legacy_unit_listing_failure(self) -> None:
+        legacy_globs = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@*.service forward-tunnel@*.service"
+        )
+        systemctl_error = "Failed to connect to bus: No medium found"
+
+        install = self.install(
+            "daemon",
+            SYSTEMCTL_FAIL=legacy_globs,
+            SYSTEMCTL_FAIL_STDERR=systemctl_error,
+        )
+
+        self.assertEqual(install.returncode, 1)
+        self.assertIn(
+            "forward.sh daemon: cannot list legacy unit files; "
+            "check systemctl --user before retrying migration step 2.",
+            install.stderr,
+        )
+        self.assertIn(systemctl_error, install.stderr)
+
     def test_systemd_failure_does_not_report_a_successful_install(self) -> None:
         for command in ("--user enable --now forward-daemon", "--user restart forward-daemon"):
             with self.subTest(command=command):
@@ -738,6 +773,23 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
 
         self.assert_oryx_success(result)
         self.assertFalse("systemctl --user restart forward-oryx" in self.call_lines())
+
+    def test_old_unit_listing_failure_reports_systemctl_error(self) -> None:
+        old_unit_files = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@oryx.service forward-tunnel@oryx.service"
+        )
+        systemctl_error = "Failed to connect to bus: No medium found"
+
+        result = self.install(
+            "daemon",
+            SYSTEMCTL_FAIL=old_unit_files,
+            SYSTEMCTL_FAIL_STDERR=systemctl_error,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("forward.sh daemon: oryx: old units failed:", result.stderr)
+        self.assertIn(systemctl_error, result.stderr)
 
     def test_failed_enrolment_stops_before_cutover_and_retries_the_key(self) -> None:
         failed = self.install("daemon", ENROL_FAIL="1")

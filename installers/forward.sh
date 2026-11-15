@@ -13,6 +13,18 @@ fail() {
     exit 1
 }
 
+# systemd 255's list-unit-files exits 1 and prints nothing, on stdout or stderr,
+# when no unit file matches; a real failure prints its reason on stderr.
+list_unit_files() {
+    local errors status=0
+    { errors="$(systemctl --user list-unit-files --no-legend --no-pager "$@" 2>&1 >&3 3>&-)" || status=$?; } 3>&1
+    if (( status == 1 )) && [[ -z "$errors" ]]; then
+        return 0
+    fi
+    [[ -z "$errors" ]] || printf '%s\n' "$errors" >&2
+    return "$status"
+}
+
 # Oryx is not a Tailscale VM pair. Its dedicated forward-oryx service is
 # installed after the ordinary daemon and browser-relay work below.
 tunnel_pairs=(oryx)
@@ -217,7 +229,7 @@ oryx_old_units() {
     local actions=0
     local -a units=()
 
-    if ! legacy_files="$(systemctl --user list-unit-files --no-legend --no-pager forward-daemon@oryx.service forward-tunnel@oryx.service)"; then
+    if ! legacy_files="$(list_unit_files forward-daemon@oryx.service forward-tunnel@oryx.service)"; then
         ORYX_ERROR="could not list the old unit files"
         return 1
     fi
@@ -603,7 +615,7 @@ systemctl --user daemon-reload || fail "$role" "could not reload user units; run
 if [[ "$role" = daemon ]]; then
     # Include enabled-but-unloaded and active-but-disabled instances, including
     # retired names no longer in hosts.toml. Preserve every unit/config/SSH file.
-    legacy_files="$(systemctl --user list-unit-files --no-legend --no-pager 'forward-daemon@*.service' 'forward-tunnel@*.service')" \
+    legacy_files="$(list_unit_files 'forward-daemon@*.service' 'forward-tunnel@*.service')" \
         || fail "$role" "cannot list legacy unit files; check systemctl --user before retrying migration step 2."
     legacy_active="$(systemctl --user list-units --all --full --plain --no-legend --no-pager 'forward-daemon@*.service' 'forward-tunnel@*.service')" \
         || fail "$role" "cannot list legacy unit instances; check systemctl --user before retrying migration step 2."
