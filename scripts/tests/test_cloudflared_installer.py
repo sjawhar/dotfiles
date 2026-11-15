@@ -784,20 +784,8 @@ printf '%s\n' "2026.10.7" > "$CF_VERSION_FILE"''',
             check=False,
             env=self.real_apt_fake_environment(pin_dir, apt_capture),
         )
-        direct = subprocess.run(
-            [
-                self.real_apt_get,
-                *self.apt_options(self.empty_status, pin_dir),
-                "-d",
-                "--print-uris",
-                "-y",
-                *arguments,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            env=self.apt_environment(),
+        direct = self.run_apt(
+            ["-d", "--print-uris", "-y", *arguments], self.empty_status, pin_dir
         )
         self.assertEqual(direct.returncode, 100, self.output(direct))
         self.assertNotEqual(fake.returncode, 0, self.output(fake))
