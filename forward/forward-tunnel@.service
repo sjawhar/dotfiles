@@ -21,8 +21,9 @@ StartLimitIntervalSec=0
 # sshd reaps the old session's ports, then succeeds. That needs the far side's
 # OpenSSH (ClientAlive): a devbox's Host %i-tunnel names port 443, because on
 # port 22 the tailnet answers with Tailscale's own ssh server, which kept a dead
-# session's ports for over an hour on 2026-10-21 (dispatch://INFRA-103). oryx's
-# reaches its OpenSSH on 127.0.0.1:2222 through Cloudflare.
+# session's ports for over an hour on 2026-10-21 (dispatch://INFRA-103).
+# oryx's Host oryx-tunnel reaches OpenSSH on oryx's port 22 through Cloudflare,
+# at oryx.thecybermonk.com, the hostname that ssh oryx also uses.
 ExecStart=/usr/bin/ssh -o ConnectTimeout=30 -N %i-tunnel
 Restart=always
 RestartSec=10
