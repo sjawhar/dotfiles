@@ -163,23 +163,19 @@ class SecretsdInstallerConfig(unittest.TestCase):
         self.keys.parent.mkdir(parents=True)
         self.keys.write_bytes(b"".join(identity.read_bytes() for identity in identities))
 
-    def write_dojo_secrets(self, *recipients: str) -> None:
-        self.dojo.mkdir(parents=True)
+    def write_sops_secrets(self, root: Path, *recipients: str) -> None:
+        root.mkdir(parents=True)
         metadata = "".join(
             f"sops_age__list_{index}__map_recipient={recipient}\n"
             for index, recipient in enumerate(recipients)
         )
-        (self.dojo / "secrets.env").write_text(ENCRYPTED_VALUE + metadata, encoding="utf-8")
+        (root / "secrets.env").write_text(ENCRYPTED_VALUE + metadata, encoding="utf-8")
+
+    def write_dojo_secrets(self, *recipients: str) -> None:
+        self.write_sops_secrets(self.dojo, *recipients)
 
     def write_trajectory_secrets(self, *recipients: str) -> None:
-        self.trajectory.mkdir(parents=True)
-        metadata = "".join(
-            f"sops_age__list_{index}__map_recipient={recipient}\n"
-            for index, recipient in enumerate(recipients)
-        )
-        (self.trajectory / "secrets.env").write_text(
-            ENCRYPTED_VALUE + metadata, encoding="utf-8"
-        )
+        self.write_sops_secrets(self.trajectory, *recipients)
 
     def todays_text(self) -> bytes:
         return TODAYS_TEXT.format(dotfiles=self.dotfiles).encode("utf-8")
