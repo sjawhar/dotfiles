@@ -1659,6 +1659,29 @@ class BoxWait(EnrollFixture):
                 self.assertEqual(result.stdout.split(), ["trapped", "box-wait-returned"], result.stderr)
                 self.assertLess(time.monotonic() - started, 8)
 
+    def test_a_child_that_ends_during_the_pass_is_not_waited_for(self) -> None:
+        """The child ends while the pass's reenroll_if_not_live runs, as during an enroll call, and
+        bash has reaped it before the pass would wait: box_wait returns in well under the 10 s of
+        that wait, and its stderr holds no `no such job`. With bash 5.2.15 (Debian bookworm), a
+        `wait -n` with the reaped child's pid writes `no such job` and waits for all of the sleep;
+        with bash 5.2.37 it does not."""
+        started = time.monotonic()
+        result = self.bash(
+            "/bin/sleep 30 </dev/null >/dev/null 2>&1 &\nchild=$!\n"
+            # kill -0 fails only once bash has reaped the child: a zombie still takes signal 0.
+            "reenroll_if_not_live() {\n"
+            '    kill "$child"\n'
+            '    while kill -0 "$child" 2>/dev/null; do /bin/sleep 0.1; done\n'
+            "    /bin/sleep 0.5\n"
+            "}\n"
+            'box_wait box1 "$child"\n'
+            "echo box-wait-returned",
+            STUB_REAL_SLEEP="1",
+        )
+        self.assertEqual(result.stdout.split(), ["box-wait-returned"], result.stderr)
+        self.assertNotIn("no such job", result.stderr)
+        self.assertLess(time.monotonic() - started, 5)
+
 
 class CmdNew(EnrollFixture):
     """cmd_new gives a box a marker and an enrollment only when the host can enroll it, enrolls it

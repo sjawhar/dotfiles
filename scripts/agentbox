@@ -1295,10 +1295,14 @@ reenroll_if_not_live() {
 # acts at once, as in the blocking `wait`; the loop goes on while the child lives. `wait -n` with
 # ids needs bash 5.1 (the hosts run 5.2). Returns once the child has exited; `wait "$child"`
 # still returns the child's own status afterwards.
+# After reenroll_if_not_live the pass checks the child again, before it waits. A child that
+# ended during the pass's enroll call is already reaped: `wait -n` with its pid then writes
+# "no such job" (bash 5.2.15) and waits for all of the 10 s.
 box_wait() {
     local box="$1" child="$2" sleep_pid
     while kill -0 "$child" 2>/dev/null; do
         reenroll_if_not_live "$box"
+        kill -0 "$child" 2>/dev/null || break
         sleep 10 &
         sleep_pid=$!
         wait -n "$child" "$sleep_pid" || true
