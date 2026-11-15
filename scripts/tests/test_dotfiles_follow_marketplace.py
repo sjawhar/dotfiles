@@ -17,6 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
+from scripts.tests.marketplace_version_cases import CASES, MISSING
 
 
 FAKE_OMP = r'''#!/usr/bin/env python3
@@ -362,33 +363,10 @@ class MarketplacePlugins(Harness):
         self.assert_clean_lock()
 
     def test_version_at_least_table(self) -> None:
-        cases = (
-            ("0.3.1", "0.3.1", True),
-            ("0.3.2", "0.3.1", True),
-            ("0.3.0", "0.3.1", False),
-            ("0.3.10", "0.3.9", True),
-            ("0.3.9", "0.3.10", False),
-            ("1.2.0", "1.2", True),
-            ("1.2", "1.2.0", True),
-            ("1.2", "1.2.1", False),
-            ("0.3.09", "0.3.9", True),
-            ("0.3.08", "0.3.9", False),
-            ("10", "9", True),
-            ("99999999999999999999.0", "9.0", True),
-            ("partial", "2.0.0", False),
-            ("2.0.0", "partial", False),
-            ("partial", "partial", True),
-            ("0.3.1-beta", "0.3.1", False),
-            ("0.3.1", "0.3.1-beta", False),
-            ("v1.0.0", "1.0.0", False),
-            ("", "1.0.0", False),
-            ("9" * 4301, "9" * 4301, True),
-            ("0" * 4300 + "2", "1", True),
-            ("1", "0" * 4300 + "2", False),
-            ("1" + "0" * 4300, "9" * 4300, True),
-        )
-        for have, want, expected in cases:
+        for have, want, expected in CASES:
             with self.subTest(have=have, want=want):
+                have = None if have is MISSING else have
+                want = None if want is MISSING else want
                 self.assertEqual(FOLLOW.version_at_least(have, want), expected)
 
     def test_failed_catalog_update_does_not_upgrade_but_keeps_going(self) -> None:

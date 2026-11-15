@@ -18,13 +18,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.tests.marketplace_version_cases import CASES, MISSING
+
 
 INSTALLER = Path(__file__).resolve().parents[2] / "installers/omp.sh"
 PLUGIN = "engineering@agent-skills"
 MARKETPLACE = "theorem-labs/verification-skills"
 CATALOG = "agent-skills"
 FUNCTION_NAMES = (
+    "marketplace_version_text",
     "marketplace_plugin_version",
+    "marketplace_lock_version",
     "marketplace_version_at_least",
     "install_marketplace_plugin",
 )
@@ -301,10 +305,94 @@ class OmpMarketplaceInstaller(unittest.TestCase):
                 "plugin upgrade engineering@agent-skills",
             ],
             [
-                "omp: engineering@agent-skills is partial, below 0.3.1, "
+                'omp: engineering@agent-skills is json:"partial", below 0.3.1, '
                 "the lowest version omp-plugins.lock.json records"
             ],
         )
+
+    def test_json_number_and_json_looking_string_are_not_equal(self) -> None:
+        self.prepare(1, "json:1", upgrade_to="json:1")
+
+        result = self.install()
+
+        self.assert_step(
+            result,
+            [
+                "plugin marketplace list",
+                "plugin marketplace update agent-skills",
+                "plugin upgrade engineering@agent-skills",
+            ],
+            [],
+        )
+        installed = json.loads(self.installed_path.read_text(encoding="utf-8"))
+        self.assertEqual(installed["plugins"][PLUGIN][0]["version"], "json:1")
+
+    def test_string_with_trailing_newline_is_not_a_dotted_number(self) -> None:
+        self.prepare("2\n", "1", upgrade_to="2\n")
+
+        result = self.install()
+
+        self.assert_step(
+            result,
+            [
+                "plugin marketplace list",
+                "plugin marketplace update agent-skills",
+                "plugin upgrade engineering@agent-skills",
+            ],
+            [
+                'omp: engineering@agent-skills is json:"2\\n", below 1, '
+                "the lowest version omp-plugins.lock.json records"
+            ],
+        )
+
+    def test_missing_installed_record_reads_as_empty(self) -> None:
+        self.prepare(None, "1")
+        self.installed_path.unlink()
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'set -euo pipefail; source "$1"; value="$(marketplace_plugin_version "$2")"; '
+                'printf "<%s>\\n" "$value"',
+                "_",
+                str(self.functions),
+                PLUGIN,
+            ],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "<>\n")
+
+    def test_unreadable_lock_stops_the_installer(self) -> None:
+        self.prepare("1", "1")
+        self.lock_path.unlink()
+        self.lock_path.mkdir()
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'set -euo pipefail; source "$1"; install_marketplace_plugin "$2" "$3"; '
+                "echo UNREACHABLE",
+                "_",
+                str(self.functions),
+                MARKETPLACE,
+                PLUGIN,
+            ],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.calls(), ["plugin marketplace list"])
 
     def test_non_string_installed_version_is_upgraded(self) -> None:
         self.prepare(2, "1", upgrade_to="2")
@@ -408,49 +496,40 @@ class OmpMarketplaceInstaller(unittest.TestCase):
         )
 
     def test_version_at_least_table(self) -> None:
-        cases = (
-            ("0.3.1", "0.3.1", True),
-            ("0.3.2", "0.3.1", True),
-            ("0.3.0", "0.3.1", False),
-            ("0.3.10", "0.3.9", True),
-            ("0.3.9", "0.3.10", False),
-            ("1.2.0", "1.2", True),
-            ("1.2", "1.2.0", True),
-            ("1.2", "1.2.1", False),
-            ("0.3.09", "0.3.9", True),
-            ("0.3.08", "0.3.9", False),
-            ("10", "9", True),
-            ("99999999999999999999.0", "9.0", True),
-            ("partial", "2.0.0", False),
-            ("2.0.0", "partial", False),
-            ("partial", "partial", True),
-            ("0.3.1-beta", "0.3.1", False),
-            ("0.3.1", "0.3.1-beta", False),
-            ("v1.0.0", "1.0.0", False),
-            ("", "1.0.0", False),
-            ("9" * 4301, "9" * 4301, True),
-            ("0" * 4300 + "2", "1", True),
-            ("1", "0" * 4300 + "2", False),
-            ("1" + "0" * 4300, "9" * 4300, True),
-        )
-        for have, want, expected in cases:
+        environment = self.env
+        if "en_us.utf8" in subprocess.run(
+            ["locale", "-a"], capture_output=True, text=True, check=False
+        ).stdout.lower():
+            environment = {**self.env, "LC_ALL": "en_US.UTF-8"}
+        for have, want, expected in CASES:
             with self.subTest(have=have, want=want):
-                # In a condition, as the installer calls it; a crash under set -u is exit 1 with
-                # no answer line, never read as "no".
+                installed = {
+                    "version": 2,
+                    "plugins": {
+                        PLUGIN: [{}] if have is MISSING else [{"version": have}],
+                    },
+                }
+                self.installed_path.write_text(json.dumps(installed), encoding="utf-8")
+                lock = {
+                    "plugins": {
+                        "engineering": {} if want is MISSING else {"version": want},
+                    },
+                }
+                self.lock_path.write_text(json.dumps(lock), encoding="utf-8")
                 result = subprocess.run(
                     [
                         "bash",
                         "-c",
                         'set -euo pipefail; source "$1"; '
-                        'if marketplace_version_at_least "$2" "$3"; then echo yes; else echo no; fi',
+                        'if marketplace_version_at_least "$(marketplace_plugin_version "$2")" '
+                        '"$(marketplace_lock_version engineering)"; then echo yes; else echo no; fi',
                         "_",
                         str(self.functions),
-                        have,
-                        want,
+                        PLUGIN,
                     ],
                     capture_output=True,
                     text=True,
-                    env=self.env,
+                    env=environment,
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)

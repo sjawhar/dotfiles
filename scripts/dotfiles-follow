@@ -424,16 +424,18 @@ def omp_profile_is_legion() -> bool:
 def version_at_least(have: object, want: object) -> bool:
     """True when an installed marketplace version is at or above the lock's entry.
 
-    Two dotted-number versions compare component by component after leading zeros are removed; the
-    shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals 0.3.9).
-    When either one is anything else (0.3.1-beta, an empty version, or a non-string), the two
-    must be equal.
+    Two strings that fully match the ASCII dotted-number pattern compare component by component
+    after leading zeros are removed; the shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10
+    is above 0.3.9, 0.3.09 equals 0.3.9). Every other pair must have the same JSON type and value.
     """
-    if not isinstance(have, str) or not isinstance(want, str):
-        return have == want
     numeric = r"[0-9]+(?:\.[0-9]+)*"
-    if not (re.fullmatch(numeric, have) and re.fullmatch(numeric, want)):
-        return have == want
+    if not (
+        isinstance(have, str)
+        and isinstance(want, str)
+        and re.fullmatch(numeric, have)
+        and re.fullmatch(numeric, want)
+    ):
+        return json.dumps(have) == json.dumps(want)
     have_parts = [component.lstrip("0") or "0" for component in have.split(".")]
     want_parts = [component.lstrip("0") or "0" for component in want.split(".")]
     length = max(len(have_parts), len(want_parts))
@@ -495,7 +497,7 @@ def install_marketplace_plugins(
                     continue
                 plugin = matches[0]
                 records = installed[plugin]
-                have = records[0].get("version", "") if records else ""
+                have = records[0].get("version") if records else None
                 if version_at_least(have, want):
                     continue
                 # Like installers/omp.sh: refresh the catalog before upgrading, then check the
@@ -517,7 +519,7 @@ def install_marketplace_plugins(
                         break
                 else:
                     current = json.loads(installed_path.read_text()).get("plugins", {}).get(plugin, [])
-                    have = current[0].get("version", "") if current else ""
+                    have = current[0].get("version") if current else None
                     if not version_at_least(have, want):
                         failures.append(
                             f"{plugin} is {have or 'not installed'}, below {want}, the lowest version "

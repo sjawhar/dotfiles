@@ -228,9 +228,12 @@ still below after its upgrade (a failure), 0.3.10 above 0.3.9, versions that are
 numbers, Bun/unchanged/unregistered skips, aggregated failures, decoding, ambiguous sources, alert
 classification and escalation, timeout cleanup and recovery from arbitrary dirty-lock contents
 before a fast-forward or a same-HEAD retry, including an interrupted durable checkpoint. The
-installer module runs `install_marketplace_plugin` and `marketplace_version_at_least`, taken from
-`installers/omp.sh`, under `set -euo pipefail` with a stub `omp` on `PATH`: the same version
+installer module runs `install_marketplace_plugin` and its version reads and comparison, taken
+from `installers/omp.sh`, under `set -euo pipefail` with a stub `omp` on `PATH`: the same version
 cases, and a failed catalog refresh, install or upgrade still reports omp's exit status and leaves
-the lock as committed.
+the lock as committed. Both modules check one table of version pairs,
+`scripts/tests/marketplace_version_cases.py`: JSON strings, numbers, booleans, null and a missing
+key, so the installer (through its reads of the real files) and dotfiles-follow give the same
+answer for each pair.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.
