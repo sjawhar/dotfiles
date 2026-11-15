@@ -3486,12 +3486,12 @@ cmd_new() {
     fi
     # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
     # while it runs and returns once the child has exited. A box with none goes straight to the
-    # wait below. The last attempt comes before close_box below, which revokes the last
-    # enrollment id the host recorded. An attempt whose outcome is not known can still have made
-    # an enrollment at the broker. The host has no id for it, only the attempt's identity
+    # wait below. The last attempt comes before close_box below, which ends the enrollment of the
+    # last id the host recorded. An attempt whose outcome is not known can still have made an
+    # enrollment at the broker. The host has no id for it, only the attempt's identity
     # (ENROLL_OPEN). close_box gives that identity to a detached process, which gets the id from
-    # the broker and revokes it; for a session's attempt, only when the session did not come back
-    # (unenroll_box). An interrupted wait re-waits: the first return after a signal carries
+    # the broker and revokes it. A session's enrollments end only when the session did not come
+    # back (unenroll_box). An interrupted wait re-waits: the first return after a signal carries
     # 128+sig, the child's real status arrives once it is reaped.
     if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
     while :; do

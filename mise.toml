@@ -246,8 +246,9 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # tag series and install dir; both measured side by side on mise 2026.8.10). The helper runs
 # this pin from its user unit (only where installers/agent-secrets.sh set it up: devbox/install.sh,
 # or the root install.sh where env.local names a broker), and installers/agent-secrets.sh restarts it
-# on a bump only when no host session is registered:
-# a restart re-pins every live session and revokes its grants.
+# on a bump only when no host session is registered. A restart keeps the enrollment and the
+# grants of a live session that the running helper recorded with its key (a session registered
+# with --session-id), and revokes those of every other live session (installers/agent-secrets.sh).
 # The release is mutable, so each asset's sha256 is pinned: a replaced asset fails to install.
 # From legion-envoy-v3.17.1 on the release also carries a build attestation (release-envoy-listener.yaml
 # on main), which mise verifies on install; check it by hand with

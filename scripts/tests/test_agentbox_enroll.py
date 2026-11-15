@@ -270,7 +270,7 @@ case "$1" in
         echo "$call" >>"$STUB_CALLS"
         exit "$rc" ;;
     renew)
-        # As the pinned client (legion-envoy-v29.54.0) in a box: renew reads `enrollment` once as
+        # As the pinned client (legion-envoy-v30.21.1) in a box: renew reads `enrollment` once as
         # it starts, exits 76 only when the broker refuses the enrollment as not live, and retries
         # every timeout and every other refusal itself without exiting. Run n takes the nth word
         # of $STUB_RENEW (the last word repeats): notlive, the enrollment lapsed (its row in the
@@ -457,7 +457,7 @@ class EnrollFixture(unittest.TestCase):
     def host_keydir(self, key: bytes | None = None) -> Path:
         """A directory that stands for the host's own /run/user/<uid>/agent-secrets: the helper's
         socket, and with `key` the key.pem a host session's client signs with before it asks the
-        socket (legion-envoy-v29.54.0 cmd/agent-secrets identity.go keyDir, main.go selectSigner)."""
+        socket (legion-envoy-v30.21.1 cmd/agent-secrets identity.go keyDir, main.go selectSigner)."""
         host = self.root / "host-run-user" / "agent-secrets"
         host.mkdir(parents=True)
         with socket.socket(socket.AF_UNIX) as sock:

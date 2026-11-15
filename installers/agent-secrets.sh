@@ -13,9 +13,17 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # release tarball ships bin/agent-secrets and bin/agent-secrets-helper), the user unit is linked
 # and enabled, and a restart happens only when the pinned version, the unit, its wrapper or its
 # broker.env changed — and never while host sessions are registered unless the operator says
-# so, because the helper's session keys live in memory: a restart re-pins every live session
-# with a fresh key and revokes its old enrollment, so every grant those sessions hold is gone
-# (they re-request).
+# so. A restart can cost a live session its enrollment and its grants. At start, the new helper
+# reads the session records that the running helper saved (by default
+# ~/.config/agent-secrets/sessions.json):
+#   - A live session that the running helper recorded with its key (a session registered with
+#     --session-id) is pinned again with that key. It keeps its enrollment and its grants.
+#   - A live session recorded with no key is pinned again with a fresh key. The new helper
+#     revokes its old enrollment, so its grants are gone and it must request them again.
+#   - A record with no boot id reads as a process that is gone, and the new helper does not pin
+#     that session again. It revokes the record's enrollment when the record names no session
+#     id. legion-envoy-v18.1.0 records no session id, no key and no boot id for any session, so a
+#     restart from that version costs every live session its enrollment and its grants.
 HELPER_MISE_DIR="$(mise where agent-secrets 2>/dev/null || true)"
 HELPER_BIN="${HELPER_MISE_DIR:+${HELPER_MISE_DIR}/bin/agent-secrets-helper}"
 UNIT_SRC="${DOTFILES_DIR}/agent-secrets/agent-secrets-helper.service"
@@ -69,11 +77,11 @@ elif [ "$recorded" != "$installed" ]; then
     if sessions="$(timeout 10 "$HELPER_BIN" sessions 2>/dev/null)"; then rc=0; else rc=$?; fi
     if [ "$rc" -ne 0 ]; then
         if [ "$rc" -eq 124 ]; then why="exit status 124: it timed out after 10 s"; else why="exit status ${rc}"; fi
-        echo "WARNING: agent-secrets-helper NOT restarted -- the new version or unit is installed but 'agent-secrets-helper sessions' did not answer (${why}), so whether host sessions are registered is unknown, and a restart would revoke every grant they hold; the next install retries." >&2
+        echo "WARNING: agent-secrets-helper NOT restarted -- the new version or unit is installed, but 'agent-secrets-helper sessions' did not answer (${why}), so it is not known whether host sessions are registered. A restart revokes the enrollment and the grants of each live session that the running helper recorded without its key. The next install retries." >&2
         echo "  To restart anyway: systemctl --user restart agent-secrets-helper.service" >&2
     elif [ -n "$sessions" ] && [ "${AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS:-}" != 1 ]; then
         n="$(printf '%s\n' "$sessions" | wc -l)"
-        echo "WARNING: agent-secrets-helper NOT restarted -- the new version or unit is installed but ${n} host session(s) are registered, and a restart re-pins them with fresh keys: every grant they hold is revoked and they must re-request:" >&2
+        echo "WARNING: agent-secrets-helper NOT restarted -- the new version or unit is installed, but a restart keeps the enrollment and the grants only of a session that the running helper recorded with its key (a session registered with --session-id), and revokes those of every other session. ${n} host session(s) are registered:" >&2
         printf '%s\n' "$sessions" | while IFS= read -r line; do printf '    %s\n' "$line"; done >&2
         echo "  Wait for them to end, or re-run with AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS=1." >&2
     elif systemctl --user try-restart agent-secrets-helper.service 2>/dev/null; then
