@@ -397,8 +397,8 @@ IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
 # session too.
 ENVOY_PORT="${AGENTBOX_ENVOY_PORT:-9020}"
 UID_="$(id -u)"
-# AGENTBOX_RUN_BASE: the tests' own tree. unenroll_box sets it for its detached waiter, whose
-# `session-live-box` runs this script again.
+# AGENTBOX_RUN_BASE: the tests' own tree, and it reaches a detached child that runs this script
+# again (the unenroll waiter's `session-live-box`), which a shell variable would not.
 RUN_BASE="${AGENTBOX_RUN_BASE:-/run/user/$UID_/agentbox}"
 # The relayed session bus, in its own dir so a box sees the socket socat
 # recreates after a unit restart.
@@ -1055,7 +1055,7 @@ enroll_open_settle() {
 # (ENROLL_OUTCOME_UNKNOWN), no answer from the helper, a reply that the client could not read, an
 # id that it could not write, and a signal.
 enroll_attempts() {
-    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid rc attempt=1 args
+    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid err attempt=1 args
     keydir="$(box_keydir "$box")"
     errfile="$RUN_BASE/$box/enroll.attempt-error"
     while :; do
@@ -1065,10 +1065,8 @@ enroll_attempts() {
         # enroll prints the enrollment id alone, and writes it into the key dir for the box. The
         # client's rename leaves a plain file there; a link at that name is the box's, so it is a
         # failed attempt, tested with -L and never followed.
-        rc=0
-        eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
-            agent-secrets "${args[@]}" 2>"$errfile")" || rc=$?
-        if (( rc == 0 )); then
+        if eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
+            agent-secrets "${args[@]}" 2>"$errfile")"; then
             if [[ -z "$eid" || -L "$keydir/enrollment" || ! -s "$keydir/enrollment" ]]; then
                 ENROLL_ERROR="agent-secrets enroll gave no enrollment id, or left no plain, non-empty enrollment file in $keydir (it printed '$eid')"
                 enroll_open_add
@@ -1094,10 +1092,12 @@ enroll_attempts() {
             ENROLLED_BOX="$box" ENROLLED_ID="$eid"
             return 0
         fi
-        # A known failure: the helper answered ENROLL_FAILED or DRAINING and made no enrollment.
-        # Any other failure can have made one.
-        grep -qaE '^agent-secrets enroll: (ENROLL_FAILED|DRAINING): ' "$errfile" 2>/dev/null \
-            || enroll_open_add
+        # A missing file (its redirect failed) reads as empty. Under set -e, `$(<file)` of a
+        # missing file ends the launcher, even on the left of `||`.
+        err=""
+        [[ ! -f "$errfile" ]] || err="$(<"$errfile")"
+        [[ $'\n'"$err" == *$'\n''agent-secrets enroll: ENROLL_FAILED: '* \
+            || $'\n'"$err" == *$'\n''agent-secrets enroll: DRAINING: '* ]] || enroll_open_add
         # A live enrollment of this session under a key the host no longer holds — its key dir
         # went with a reboot while the old lease still ran — refuses every attempt with the same
         # 409 until that lease lapses, up to 15 minutes. Rather than leave the box with no
@@ -1105,7 +1105,7 @@ enroll_attempts() {
         # accepted; the session gets its continuity back at its next box. The fallback call is
         # part of the same attempt, made at once: the 409 is the broker's answer, not an outage to
         # wait out, and a re-enrollment pass has one attempt only.
-        if [[ -n "$fallback" && -n "$ENROLLED_SKD" && "$(<"$errfile")" == *ALREADY_ENROLLED* ]]; then
+        if [[ -n "$fallback" && -n "$ENROLLED_SKD" && "$err" == *ALREADY_ENROLLED* ]]; then
             echo "agentbox: the broker still holds a live enrollment for session $ENROLLED_SID under a key this host does not have; $box enrolls under its own name and its pending broker cards will not follow the session" >&2
             ENROLLED_SKD="" ENROLLED_RUNTIME="$box"
             continue
@@ -1121,11 +1121,11 @@ enroll_attempts() {
     done
     if (( attempt < attempts )); then
         # The loop stopped early: the launcher was interrupted.
-        ENROLL_ERROR="agent-secrets enroll failed $attempt of $attempts attempts, and the launcher was interrupted, so it made no more; last: $(<"$errfile")"
+        ENROLL_ERROR="agent-secrets enroll failed $attempt of $attempts attempts, and the launcher was interrupted, so it made no more; last: $err"
     elif (( attempts > 1 )); then
-        ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $(<"$errfile")"
+        ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $err"
     else
-        ENROLL_ERROR="agent-secrets enroll failed: $(<"$errfile")"
+        ENROLL_ERROR="agent-secrets enroll failed: $err"
     fi
     return 1
 }
@@ -1346,7 +1346,7 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 #   - The box's own recorded enrollment (no enrollment-session): one revoke, at once. A failure
 #     is only noted. The lease that the box stopped renewing lapses within 15 minutes.
 #   - The box's own open entries (kind `own`): one detached process, with no grace
-#     (unenroll_open_own). For each entry, it learns the id and revokes it.
+#     (unenroll_learn_each). For each entry, it learns the id and revokes it.
 #   - The session's recorded enrollment and the session's open entries (kind `session`): one
 #     detached waiter (unenroll_session_wait), below.
 # A detached process holds none of the caller's pipes. Its stdin is /dev/null, and its output
@@ -1402,10 +1402,10 @@ unenroll_box() {
     done
     [[ -n "$sid" ]] || (( ${#own[@]} + ${#ses[@]} )) || return 0
     mkdir -p -m 700 "$RUN_BASE/session-keys" || true
-    fns="$(declare -f unenroll_revoke unenroll_learn unenroll_open_own unenroll_session_wait)"
+    fns="$(declare -f unenroll_revoke unenroll_learn unenroll_learn_each unenroll_session_wait)"
     if (( ${#own[@]} )); then
         setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
-            bash -c "$fns"$'\n''unenroll_open_own "$@"' agentbox-unenroll "$RUN_BASE" "$box" "${own[@]}" \
+            bash -c "$fns"$'\n''unenroll_learn_each "$@"' agentbox-unenroll "$RUN_BASE" "$box" "${own[@]}" \
             </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
     fi
     if [[ -n "$sid" ]]; then
@@ -1420,7 +1420,7 @@ unenroll_box() {
     else
         return 0
     fi
-    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENTBOX_RUN_BASE="$RUN_BASE" \
+    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
         bash -c "$fns"$'\n''unenroll_session_wait "$@"' agentbox-unenroll \
         "$AGENTBOX_UNENROLL_GRACE" "$RUN_BASE" "$skd" "$box" "$sid" "$owner" "$eid" \
         "$DOTFILES_DIR/scripts/agentbox" ${ses[@]+"${ses[@]}"} \
@@ -1489,9 +1489,10 @@ unenroll_learn() {
     return 1
 }
 
-# unenroll_open_own RUN_BASE BOX ENTRY...: the detached process for the box's own open entries.
-# It learns and revokes each entry at once (unenroll_learn).
-unenroll_open_own() {
+# unenroll_learn_each RUN_BASE BOX ENTRY...: for each open ENTRY of BOX, of either kind, learn
+# its id and revoke it (unenroll_learn). The detached process for the box's own entries runs it,
+# and so does the session waiter for the session's entries. Status 0.
+unenroll_learn_each() {
     local run_base="$1" box="$2" e
     shift 2
     for e in "$@"; do
@@ -1502,14 +1503,13 @@ unenroll_open_own() {
 
 # unenroll_session_wait GRACE RUN_BASE SKD BOX SID OWNER EID SELF ENTRY...: the session waiter
 # (unenroll_box). After GRACE seconds it runs the two tests. Test 1: SKD/owner still reads OWNER.
-# Test 2: `SELF session-live-box SID BOX` names no other live box. SELF is this script, and the
-# caller sets AGENTBOX_RUN_BASE for it. When a test fails, one line names the recorded id EID (or
-# `none`) and each open ENTRY, all left alone. When both pass, it removes SKD, the session's key
-# dir, and writes one line. Then it revokes EID, when there is one (unenroll_revoke), and learns
-# and revokes each ENTRY (unenroll_learn).
+# Test 2: `SELF session-live-box SID BOX` names no other live box. SELF is this script. When a
+# test fails, one line names the recorded id EID (or `none`) and each open ENTRY, all left alone.
+# When both pass, it removes SKD, the session's key dir, and writes one line. Then it revokes EID,
+# when there is one (unenroll_revoke), and learns and revokes each ENTRY (unenroll_learn_each).
 unenroll_session_wait() {
     local grace="$1" run_base="$2" skd="$3" box="$4" sid="$5" owner="$6" eid="$7" self="$8"
-    local now live e open=""
+    local now live open=""
     shift 8
     if (( $# )); then
         printf -v open '%s; ' "$@"
@@ -1528,9 +1528,7 @@ unenroll_session_wait() {
     rm -rf "${skd:?}"
     echo "$(date -u +%FT%TZ) $box: session $sid did not come back; ending enrollment ${eid:-none}$open"
     [[ -z "$eid" ]] || unenroll_revoke "$box" recorded "$eid" || true
-    for e in "$@"; do
-        unenroll_learn "$run_base" "$box" "$e" || true
-    done
+    unenroll_learn_each "$run_base" "$box" "$@"
     return 0
 }
 
@@ -3486,13 +3484,9 @@ cmd_new() {
     fi
     # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
     # while it runs and returns once the child has exited. A box with none goes straight to the
-    # wait below. The last attempt comes before close_box below, which ends the enrollment of the
-    # last id the host recorded. An attempt whose outcome is not known can still have made an
-    # enrollment at the broker. The host has no id for it, only the attempt's identity
-    # (ENROLL_OPEN). close_box gives that identity to a detached process, which gets the id from
-    # the broker and revokes it. A session's enrollments end only when the session did not come
-    # back (unenroll_box). An interrupted wait re-waits: the first return after a signal carries
-    # 128+sig, the child's real status arrives once it is reaped.
+    # wait below. The last attempt comes before close_box below, which ends every enrollment the
+    # box can hold (unenroll_box). An interrupted wait re-waits: the first return after a signal
+    # carries 128+sig, the child's real status arrives once it is reaped.
     if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
     while :; do
         if wait "$child"; then rc=0; else rc=$?; fi

@@ -149,7 +149,7 @@ A later call that records an id for the same runtime id and thumbprint removes t
 - The enrollment of an open call whose learn call gets no id, for example because the broker did not answer in time. The log line says so.
 - An enrollment whose revoke fails. The box's own recorded enrollment gets one revoke. Any other enrollment gets a second revoke only when the outcome of the first is not known. A line on stderr or in the log says so.
 - The enrollments of a box whose launcher a SIGKILL ended. That launcher runs no close.
-- An enrollment that a helper older than legion-envoy-v30.21.1 made for a failed call. The call failed after the broker wrote, for example with a 502 from a front door. Such a helper can answer `ENROLL_FAILED` for that failure, and the close reads it as a known failure. The helper runs the version it last started with, and `installers/agent-secrets.sh` does not restart it while host sessions are registered.
+- An enrollment that a helper older than legion-envoy-v30.21.1 made for a failed call. The call failed after the broker wrote, for example with a 502 from a front door. Such a helper can answer `ENROLL_FAILED` for that failure. The launcher reads that answer at the call as a known failure, so the close has no open call for it. The helper runs the version it last started with, and `installers/agent-secrets.sh` does not restart it while host sessions are registered.
 
 When a new box of the same session enrolls the same key before such a lease ends, that box gets the session's enrollment back.
 
