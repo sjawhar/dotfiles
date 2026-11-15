@@ -230,8 +230,8 @@ class OryxTunnelKey(unittest.TestCase):
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             previous = signal.getsignal(signum)
             if previous is not None and previous is not signal.SIG_IGN:
-                signal.signal(signum, self._stop_by_signal)
                 self._handlers[signum] = previous
+                signal.signal(signum, self._stop_by_signal)
 
     def _stop_by_signal(self, signum: int, frame: object) -> None:
         if self._recorded_signal is None:
