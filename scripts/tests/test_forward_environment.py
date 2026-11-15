@@ -114,9 +114,14 @@ case "$*" in
         ;;
     *show*ExecMainStartTimestamp*)
         if [[ " $* " == *" --timestamp=us+utc "* ]]; then
-            cat "$SYSTEMCTL_TIMESTAMP"
+            timestamp_file="$SYSTEMCTL_TIMESTAMP"
         else
-            cat "$SYSTEMCTL_TIMESTAMP_DEFAULT"
+            timestamp_file="$SYSTEMCTL_TIMESTAMP_DEFAULT"
+        fi
+        if [[ " $* " == *" --value "* ]]; then
+            cat "$timestamp_file"
+        else
+            printf 'ExecMainStartTimestamp=%s\\n' "$(<"$timestamp_file")"
         fi
         ;;
     *show*MainPID*)
