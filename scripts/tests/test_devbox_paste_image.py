@@ -121,7 +121,7 @@ class PasteTarget(unittest.TestCase):
             ("[mosh] sami@sami-rocqperf: ~/src", "sami-rocqperf"),
             ("mosh agent@oryx", "oryx"),
             ("devbox sami-rocqperf -- tm", "sami-rocqperf"),
-            ("ssh -p 2222 agent@oryx", "oryx"),
+            ("ssh -p 22 agent@oryx", "oryx"),
         ):
             with self.subTest(title=title):
                 self.tearDown()
