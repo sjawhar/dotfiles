@@ -510,6 +510,74 @@ class OryxTunnelKeyCleanup(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     pass
 
+    def test_signal_while_setup_installs_its_handler_reaches_the_previous_handler(self) -> None:
+        """A SIGTERM that lands in the instant after setUp installs its handler for SIGTERM,
+        before setUp has recorded the handler it replaced, must still reach the previous
+        handler once, and the previous handler must be installed again after the run.
+
+        The previous handler here records the signal instead of ending the process, so the
+        run can be checked in this process. The trigger wraps signal.signal and sends the
+        SIGTERM as soon as the real call has installed the test's handler; CPython runs the
+        handler when that call returns, which is the point an outside SIGTERM can also reach.
+        """
+        loader = importlib.machinery.SourceFileLoader(
+            "oryx_tunnel_key_install_gap", str(self.test_file)
+        )
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+
+        received: list[int] = []
+
+        def previous_handler(signum: int, frame: object) -> None:
+            received.append(signum)
+
+        real_signal = signal.signal
+        fired: list[int] = []
+
+        def install_then_signal(signum: int, handler: Any) -> Any:
+            replaced = real_signal(signum, handler)
+            if (
+                signum == signal.SIGTERM
+                and not fired
+                and isinstance(getattr(handler, "__self__", None), module.OryxTunnelKey)
+            ):
+                fired.append(signum)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return replaced
+
+        saved = {signum: signal.getsignal(signum) for signum in _SIGNALS}
+        previous_subreaper = _child_subreaper()
+        initial_children = _own_children()
+        real_signal(signal.SIGTERM, previous_handler)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                with mock.patch.object(signal, "signal", install_then_signal):
+                    module.OryxTunnelKey(_AGENT_TEST).run(unittest.TestResult())
+            handler_after = signal.getsignal(signal.SIGTERM)
+        finally:
+            for signum, handler in saved.items():
+                real_signal(signum, handler)
+
+        self.assertEqual(
+            fired, [signal.SIGTERM], "setUp never installed a SIGTERM handler of the test"
+        )
+        self.assertIs(
+            handler_after,
+            previous_handler,
+            f"the SIGTERM handler after the run is {handler_after!r}, not the one before it",
+        )
+        self.assertEqual(
+            received,
+            [signal.SIGTERM],
+            "the SIGTERM did not reach the handler that was installed before the test",
+        )
+        self.assertEqual(_child_subreaper(), previous_subreaper)
+        new_children = [child for child in _own_children() if child not in initial_children]
+        self.assertEqual(new_children, [], "the run left a child process")
+
 
 if __name__ == "__main__":
     unittest.main()
