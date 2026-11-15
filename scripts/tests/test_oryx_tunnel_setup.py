@@ -457,6 +457,9 @@ class TunnelSetup(unittest.TestCase):
         self.fakebin = self.root / f"fakebin-{name}"
         self.fakebin.mkdir()
         self.log = self.root / f"{name}.log"
+        # Another run's fixtures share this machine, so expose only this test's processes.
+        self.proc_root = self.root / f"proc-{name}"
+        self.proc_root.mkdir()
         self.probe_dir = self.root / f"probes-{name}"
         self.probe_dir.mkdir()
         self.remote = self.root / f"remote-{name}"
@@ -473,6 +476,7 @@ class TunnelSetup(unittest.TestCase):
             "PATH": f"{self.fakebin}:/usr/bin:/bin",
             "ORYX_SETUP_FAKEBIN": str(self.fakebin),
             "FAKE_LOG": str(self.log),
+            "PROC_ROOT": str(self.proc_root),
             "FAKE_PROBE_DIR": str(self.probe_dir),
             "REMOTE_ROOT": str(self.remote),
             "CURRENT_NONCE": str(self.current_nonce),
@@ -655,6 +659,9 @@ class TunnelSetup(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         return waiter, reaper
 
+    def show_process(self, pid: int) -> None:
+        (self.proc_root / str(pid)).symlink_to(f"/proc/{pid}")
+
     def spawn_fixtures(self) -> dict[str, int]:
         waiter, reaper = self.build_reaper()
         devbox = self.root / "devbox"
@@ -673,6 +680,7 @@ class TunnelSetup(unittest.TestCase):
             while cmdline.read_bytes() != expected:
                 self.assertLess(time.monotonic(), deadline, f"pid {pid} never ran {args}")
                 time.sleep(0.01)
+            self.show_process(pid)
             return pid
 
         return {
@@ -1471,6 +1479,7 @@ class TunnelSetup(unittest.TestCase):
         self.checkout("git", "preflight-systemctl-down")
         self.advance_to_current()
         holder = subprocess.Popen(["/bin/sleep", "60"])
+        self.show_process(holder.pid)
         try:
             self.fake_ss(f'LISTEN 0      128    127.0.0.1:12802 0.0.0.0:* users:(("ssh",pid={holder.pid},fd=5))')
             result = self.invoke(after_sync=True, SYSTEMCTL_SHOW_FAILS="1")
