@@ -33,7 +33,9 @@
 // resolution (index.ts): its handlers do not run, so it adds no text and writes no entry. For these
 // features, and only these, index.ts reads gates.json again whenever the file changes on disk, at
 // each before_agent_start and each context event, and draws their arm again from the same root id.
-// So the resolution a handler reads is the one in force at that event.
+// So the resolution a handler reads is the one in force at that event. index.ts also counts each
+// change of the state in force for these features (`generation`): each new resolution waiting to be
+// recorded, and each recorded resolution, a gate going `off` and back included.
 // A Legion pane (LEGION_TREE, LEGION_ROLE or LEGION_CONTROLLER set, as proactive-memory-core.ts reads
 // them) is outside the experiments. The INFRA-805 experiment of the spec of INFRA-3189 leaves Legion
 // designs out until a Legion route exists. So in a Legion pane the handler adds no text and writes no
@@ -81,8 +83,10 @@
 // feature, the arm, the gate, the root session id and the time) at the first request after a trigger
 // that started at a user prompt. In the on arm of a feature with a text, the handler waits for the
 // first request whose messages hold the text, so the entry says that the text reached the model.
-// When the arm or the gate in force changed after the trigger (gates.json changed on disk), the
-// handler writes no entry for that trigger. The next user prompt triggers again in the arm now in force.
+// When the state in force changed after the trigger (the count of index.ts moved, for example when a
+// gate went `off` and back on), the trigger is stale. It writes no entry, a text it added is withheld,
+// and the next user prompt triggers again under the state now in force. An owed entry that went stale
+// before it was written is dropped the same way.
 //
 // The invariant: a text reaches the model only while the current arm of the session for its feature
 // is on, and only with its entry. index.ts registers, for each feature of this file, the scrub of
@@ -93,7 +97,10 @@
 //   - The feature did not stop after a throw, and the process is not a Legion pane.
 //   - The text is not withheld (above).
 //   - The context holds an exposure entry of the feature in the on arm, or the feature owes an entry
-//     whose arm and gate match the current resolution.
+//     made under the state now in force, or this request's own exposure append succeeded. The last
+//     needs no read of the branch.
+// A throw of the permit (a branch that cannot be read) goes through the feature's logged failure path
+// (index.ts): the feature stops until the next resolution, and the scrub removes the text.
 // A text that an earlier resolution put in the session file stays there, but it reaches the model
 // again only under these rules. So:
 //   - When a gate goes from `random` to `off` (D13), a running session sends no text from its next
@@ -136,21 +143,25 @@ export function startsWithUserPrompt(messages: readonly Message[]): boolean {
 
 /** Whether the text of a feature of this file may go out in the session of `ctx`, apart from the checks of index.ts. */
 export type Permit = (ctx: Ctx) => boolean;
-/** A feature of this file: index.ts registers it with a view of `pi` and a reader of the resolution of the feature in the current session, and gives its scrub the permit it returns. */
-export type TextArm = (pi: ExtensionAPI, resolution: () => Resolution) => Permit;
+/**
+ * A feature of this file: index.ts registers it with a view of `pi`, a reader of the resolution of the feature in the
+ * current session, and a reader of the count of changes of that state (index.ts `generation`), and gives its scrub the
+ * permit it returns.
+ */
+export type TextArm = (pi: ExtensionAPI, resolution: () => Resolution, generation: () => number) => Permit;
 
 /** Whether this process is a Legion pane, read as proactive-memory-core.ts reads it. */
 const legionPane = () => LEGION_ENV.some(name => process.env[name] !== undefined && process.env[name] !== "");
 
-/** The scrub of `feature`: a `context` handler that removes each custom message of `feature` from the request unless `permits(ctx)` holds. A throw of `permits` removes them too. */
-export function scrubText(feature: Feature, permits: Permit): (event: ContextEvent, ctx: Ctx) => { messages: Message[] } | undefined {
+/** The scrub of `feature`: a `context` handler that removes each custom message of `feature` from the request unless `permits(ctx)` holds. A throw of `permits` goes to `failed`, and the text is removed. */
+export function scrubText(feature: Feature, permits: Permit, failed: (error: unknown) => void): (event: ContextEvent, ctx: Ctx) => { messages: Message[] } | undefined {
 	const isText = (m: Message) => m.role === "custom" && m.customType === feature;
 	return (event, ctx) => {
 		if (!event.messages.some(isText)) return undefined;
 		try {
 			if (permits(ctx)) return undefined;
-		} catch {
-			// Fail closed: a text whose permit cannot be read does not go out.
+		} catch (error) {
+			failed(error);
 		}
 		return { messages: event.messages.filter(m => !isText(m)) };
 	};
@@ -158,7 +169,7 @@ export function scrubText(feature: Feature, permits: Permit): (event: ContextEve
 
 /** The feature that, in the on arm, puts `text` into the context of a top-level session, and in both arms records the exposure. With no text it puts nothing there in either arm. */
 export function textArm(feature: Feature, text: string | undefined): TextArm {
-	return (pi, resolution) => {
+	return (pi, resolution, generation) => {
 		const rootOf = (ctx: Ctx) => rootSessionId(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId());
 		if (legionPane()) {
 			// Set by a trigger, until the first request after it.
@@ -185,16 +196,19 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 			});
 			return () => false;
 		}
-		// The latest trigger, until the first request after it: its arm, whether it owes an entry, and whether it added the text.
-		let trigger: (Arm & { owes: boolean; added: boolean }) | undefined;
-		// The entry owed by a trigger that started at a user prompt, until it is written.
-		let pending: Arm | undefined;
-		// Set when a trigger added the text for a run that did not start at a user prompt, until a run that does.
+		// The latest trigger, until the first request after it: its arm, the count it was made under, whether it owes an entry, and whether it added the text.
+		let trigger: (Arm & { generation: number; owes: boolean; added: boolean }) | undefined;
+		// The entry owed by a trigger that started at a user prompt, with the count it was made under, until it is written.
+		let pending: (Arm & { generation: number }) | undefined;
+		// Set when a trigger added the text for a run that did not start at a user prompt, or for a stale trigger, until a run that starts at a user prompt.
 		let withheld = false;
+		// Request-local: set when this request's exposure append succeeded, so this request's scrub needs no branch read.
+		let recorded = false;
 		const reset = () => {
 			trigger = undefined;
 			pending = undefined;
 			withheld = false;
+			recorded = false;
 		};
 		pi.on("session_start", reset);
 		pi.on("session_switch", reset);
@@ -211,35 +225,36 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 				return e.type === "custom" && e.customType === EXPOSURE_ENTRY_TYPE && data?.feature === feature && data.arm === arm;
 			});
 			const add = arm === "on" && text !== undefined && !kept.some(e => e.type === "custom_message" && e.customType === feature);
-			trigger = { arm, gate, owes: !exposed, added: add };
+			trigger = { arm, gate, generation: generation(), owes: !exposed, added: add };
 			return add ? { message: { customType: feature, content: text, display: false } } : undefined;
 		});
 		pi.on("context", (event: ContextEvent, ctx: Ctx) => {
+			recorded = false;
 			if (trigger) {
-				const { owes, added, ...arm } = trigger;
+				const t = trigger;
 				trigger = undefined;
-				if (startsWithUserPrompt(event.messages)) {
+				if (t.generation === generation() && startsWithUserPrompt(event.messages)) {
 					withheld = false;
-					if (owes) pending = arm;
-				} else if (added) withheld = true;
+					if (t.owes) pending = { arm: t.arm, gate: t.gate, generation: t.generation };
+				} else if (t.added) withheld = true;
 			}
 			if (!pending) return undefined;
-			const { gate, on } = resolution();
-			if (gate !== pending.gate || (on ? "on" : "off") !== pending.arm) {
+			if (pending.generation !== generation()) {
 				pending = undefined;
 				return undefined;
 			}
 			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature)) return undefined;
-			const record: ExposureRecord = { v: 1, feature, ...pending, rootSessionId: rootOf(ctx), at: new Date().toISOString() };
+			const record: ExposureRecord = { v: 1, feature, arm: pending.arm, gate: pending.gate, rootSessionId: rootOf(ctx), at: new Date().toISOString() };
 			// A throw here stops the feature (index.ts), and the scrub then removes its text from this request.
 			pi.appendEntry(EXPOSURE_ENTRY_TYPE, record);
 			pending = undefined;
+			recorded = true;
 			return undefined;
 		});
 		return ctx => {
 			if (withheld) return false;
-			const { gate } = resolution();
-			if (pending?.arm === "on" && pending.gate === gate) return true;
+			if (recorded) return true;
+			if (pending?.arm === "on" && pending.generation === generation()) return true;
 			const branch = ctx.sessionManager.getBranch();
 			for (let i = branch.length - 1, low = contextLowerBound(branch); i >= low; i--) {
 				const e = branch[i];

@@ -609,6 +609,63 @@ describe("the extension", () => {
 				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill", "infra805_selfcheck"]);
 				expect(b.errors).toHaveLength(1);
 			});
+			test("a prompt under on, the gate off before its request and on again before an assistant message: no exposure and no text until a new user prompt", async () => {
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, ROOT_FILE, [], "main", path);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
+				writeGates({ infra805_skill: "off" }, 2_000);
+				expect(await b.request(delivered)).toEqual([]);
+				writeGates({ infra805_skill: "on" }, 3_000);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "on", gate: "on", rootSessionId: ROOT, at: expect.any(String) }]);
+			});
+		});
+
+		describe("an `experiments` entry that cannot be appended at a resolution", () => {
+			test("keeps the text arms closed and is tried again at every later event, logged once; the other features run under the new resolution at once", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_SKILL_GATE: "on" });
+				b.setAppendFailure(customType => customType === ENTRY_TYPE);
+				await b.start();
+				expect(b.records()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(deliveryOf("infra805_skill", skillText))).toEqual([]);
+				expect(await b.request([])).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(b.errors).toEqual([expect.stringContaining("cannot record their new resolution")]);
+				expect((await b.gh())?.block).toBe(true);
+				b.setAppendFailure(() => false);
+				expect(await b.request([])).toEqual([]);
+				expect(b.records()).toEqual([resolve(resolveGates(gateFile, { ...TEXT_OFF, OMP_EXPERIMENT_INFRA805_SKILL: "on", OMP_EXPERIMENT_SKILL_GATE: "on" }), ROOT)]);
+				const delivered = await b.prompt();
+				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
+				expect(b.errors).toHaveLength(1);
+			});
+		});
+
+		describe("a branch read that throws after a successful exposure append", () => {
+			test("lets that request carry the text and the entry; at the next request the permit's throw is logged, the feature stops, and the text stays out", async () => {
+				const b = await bindArms({ OMP_EXPERIMENT_INFRA805_SKILL: "on" });
+				await b.start();
+				const delivered = await b.prompt();
+				b.setBranch(() => {
+					throw new Error("branch unavailable");
+				});
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures().map(e => e.feature)).toEqual(["infra805_skill"]);
+				expect(b.errors).toEqual([]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.errors).toEqual([expect.stringContaining("infra805_skill failed in the context scrub")]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.errors).toHaveLength(1);
+			});
 		});
 
 		describe("only a user prompt (architect ruling 48e7077f, item 2) triggers the text and the exposure", () => {

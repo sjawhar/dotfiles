@@ -29,9 +29,11 @@
 // for the current session; the gates resolve at session_start, and again at session_switch and
 // session_branch, which move this binding to another session file. Each resolution appends one
 // `experiments` custom entry naming every feature's gate, draw and outcome, unless the session's
-// latest such entry already says the same (a resumed session). A handler that throws or rejects
-// is logged through omp's logger and its feature stays off until the next resolution; the others
-// keep running. The installer links only this file; its imports resolve from its real path.
+// latest such entry already says the same (a resumed session). Every feature but the text arms reads
+// a new resolution at once. The text arms read it only once its entry is recorded (below), and a
+// failed append there throws nothing. A handler that throws or rejects is logged through omp's
+// logger and its feature stays off until the next resolution; the others keep running. The installer
+// links only this file; its imports resolve from its real path.
 // The three features of text-arms.ts run in both arms of a gate that is `on` or `random`, as the
 // bash gate does, and read the arm per call. They register through a view of the same kind, so the
 // error rule above holds for them too. A root session is a unit of their experiments when its file
@@ -45,18 +47,22 @@
 // guard. It removes the text of the feature from each request unless the session has a recorded
 // resolution whose arm for the feature is on, the feature did not stop after a throw, and the
 // feature's own permit holds (text-arms.ts: not a Legion pane, the text not withheld, and an exposure
-// entry in the context or owed under the arm in force).
+// entry in the context, owed under the state now in force, or appended by this same request). A throw
+// of a permit goes through the feature's logged failure path, and the scrub removes the text.
 // The text arms, and only they, also follow gates.json as it is on disk while omp runs. At each
 // before_agent_start and each context event, the extension looks at the mtime and the size of the
 // gates.json beside this file's real path. When either changed since the last look, it reads and
 // parses the file with the rules of resolveGates and the process environment, and draws the text
 // arms again from the same root id. When their resolution changes, it appends an `experiments`
-// entry, as at a resolution, so the join sees the arm in force. The new resolution takes effect only
-// once that entry is recorded. A failed append keeps it proposed, is logged once, and is tried again
-// at the next event. Until it is recorded the text arms do not run, and the scrubs remove their text.
-// A file that cannot be read or parsed is logged once, and the text arms keep their last good gates.
-// So an `off` push stops the text at the next request of every running session, and a gate that
-// goes `random` assigns at the next user prompt. Every other feature keeps the gates it read at load.
+// entry, as at a resolution, so the join sees the arm in force. At a resolution and at such a change,
+// the new resolution takes effect for the text arms only once that entry is recorded. A failed append
+// keeps it proposed, is logged once, and is tried again at every later before_agent_start and context
+// event. Until it is recorded the text arms do not run, and the scrubs remove their text. Each new
+// proposal and each recorded resolution moves a count (`generation`), and a trigger or an owed entry
+// made under an older count is stale (text-arms.ts). A file that cannot be read or parsed is logged
+// once, and the text arms keep their last good gates. So an `off` push stops the text at the next
+// request of every running session, and a gate that goes `random` assigns at the next user prompt.
+// Every other feature keeps the gates it read at load.
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -139,34 +145,16 @@ export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 		return { ...record, features };
 	};
 
-	// A live resolution of the text arms whose `experiments` entry is not recorded yet, and whether its failed append was logged.
+	// The latest `experiments` record of this session's file, as this binding knows it.
+	let lastRecorded: unknown;
+	// A resolution of the text arms whose `experiments` entry is not recorded yet, and whether its failed append was logged.
 	let proposed: ExperimentRecord | undefined;
 	let proposalLogged = false;
-	const resolveSession = (_event: unknown, ctx: Ctx) => {
-		const sm = ctx.sessionManager;
-		readLiveGates();
-		current = withLiveTextArms(resolve(gates, rootSessionId(sm.getSessionFile(), sm.getSessionId())));
-		proposed = undefined;
-		proposalLogged = false;
-		stopped.clear();
-		const entries = sm.getEntries();
-		const last = entries.findLast(e => e.type === "custom" && e.customType === ENTRY_TYPE);
-		if (!Bun.deepEquals(last?.data, current)) pi.appendEntry(ENTRY_TYPE, current);
-	};
-	pi.on("session_start", resolveSession);
-	pi.on("session_switch", resolveSession);
-	pi.on("session_branch", resolveSession);
-	/**
-	 * Registered before the text arms, so each of their handlers reads the arm in force. A changed resolution takes
-	 * effect only once its `experiments` entry is recorded. A failed append keeps it proposed, is logged once, and is
-	 * tried again at the next event. Until then the text arms do not run and their scrubs remove their text.
-	 */
-	const followGates = () => {
-		if (current === undefined) return;
-		if (readLiveGates()) {
-			const next = withLiveTextArms(current);
-			proposed = Bun.deepEquals(next, current) ? undefined : next;
-		}
+	// Counts each change of the text arms' state in force: each new proposal and each recorded resolution, through `off`
+	// included. A trigger or an owed exposure entry made under an older count is stale (text-arms.ts).
+	let generation = 0;
+	/** Appends `proposed`. On success the text arms run under it. On a throw it stays proposed, is logged once, and is tried again at the next event. Never throws. */
+	const recordProposed = () => {
 		if (proposed === undefined) return;
 		try {
 			pi.appendEntry(ENTRY_TYPE, proposed);
@@ -179,9 +167,45 @@ export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 			}
 			return;
 		}
-		current = proposed;
+		lastRecorded = proposed;
 		proposed = undefined;
 		proposalLogged = false;
+		generation++;
+	};
+	/**
+	 * Every other feature reads the new resolution at once, as before. The text arms run under it only once its
+	 * `experiments` entry is recorded, or the session's latest entry already says the same.
+	 */
+	const resolveSession = (_event: unknown, ctx: Ctx) => {
+		const sm = ctx.sessionManager;
+		readLiveGates();
+		current = withLiveTextArms(resolve(gates, rootSessionId(sm.getSessionFile(), sm.getSessionId())));
+		stopped.clear();
+		proposalLogged = false;
+		lastRecorded = sm.getEntries().findLast(e => e.type === "custom" && e.customType === ENTRY_TYPE)?.data;
+		proposed = Bun.deepEquals(lastRecorded, current) ? undefined : current;
+		generation++;
+		recordProposed();
+	};
+	pi.on("session_start", resolveSession);
+	pi.on("session_switch", resolveSession);
+	pi.on("session_branch", resolveSession);
+	/**
+	 * Registered before the text arms, so each of their handlers reads the arm in force. A changed resolution takes
+	 * effect for the text arms only once its `experiments` entry is recorded. Until then they do not run, and their
+	 * scrubs remove their text.
+	 */
+	const followGates = () => {
+		if (current === undefined) return;
+		if (readLiveGates()) {
+			const next = withLiveTextArms(current);
+			if (!Bun.deepEquals(next, current)) {
+				current = next;
+				proposed = Bun.deepEquals(next, lastRecorded) ? undefined : next;
+				generation++;
+			}
+		}
+		recordProposed();
 	};
 	pi.on("before_agent_start", followGates);
 	pi.on("context", followGates);
@@ -215,12 +239,20 @@ export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 			},
 		});
 	for (const [feature, register] of REGISTRATIONS) register(view(feature, () => current?.features[feature].on === true));
-	// A text arm runs only after a resolution, and while no new resolution waits to be recorded, so its reader always finds the recorded one.
+	// A text arm runs only after a resolution, and while no resolution waits to be recorded, so its reader always finds the recorded one.
 	const textRuns = (feature: Feature) => current !== undefined && proposed === undefined && current.features[feature].gate !== "off";
-	const permits: Array<[Feature, Permit]> = TEXT_ARMS.map(([feature, register]) => [feature, register(view(feature, () => textRuns(feature)), () => (current as ExperimentRecord).features[feature])]);
+	const permits: Array<[Feature, Permit]> = TEXT_ARMS.map(([feature, register]) => [
+		feature,
+		register(
+			view(feature, () => textRuns(feature)),
+			() => (current as ExperimentRecord).features[feature],
+			() => generation,
+		),
+	]);
 	// Registered last, outside the gate and the guard, so each runs after every text arm's own handlers, in every request.
+	// A throw of a permit goes through the feature's logged failure path, and the scrub removes the text.
 	for (const [feature, permit] of permits) {
 		const on = (ctx: Parameters<Permit>[0]) => current !== undefined && proposed === undefined && current.features[feature].on && !stopped.has(feature) && permit(ctx);
-		pi.on("context", scrubText(feature, on) as never);
+		pi.on("context", scrubText(feature, on, error => fail(feature, "the context scrub", error)) as never);
 	}
 }
