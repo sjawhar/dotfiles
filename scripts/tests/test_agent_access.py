@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """scripts/agent-access: reports what logins/credentials THIS session holds.
 
-Stubs every external CLI on PATH, then checks: the script never hangs past its
-budget, every row has the required fields, `--json` is valid JSON, and no
-secret-shaped string (a JWT, an AWS key, a GitHub token) ever reaches stdout -
-the whole point of the script is to report status without exposing values.
+Stubs every external CLI on PATH. Successful `ant auth status` output contains
+an access token and a run-time JWT; failing `fleetctl` output starts with a
+GitHub token. The script must filter all of them, while it reports status,
+valid `--json`, required fields, and finishes within its budget.
 """
 
 from __future__ import annotations
@@ -27,8 +27,6 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path = directory / name
     path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
-
-
 
 
 # Secret-shaped substrings this script must never print, however a stub or a
@@ -175,8 +173,14 @@ class AgentAccess(unittest.TestCase):
             self.stub_dir,
             "ant",
             r"""
+jwt_header="eyJhbGciOiJIUzI1NiJ9"
+jwt_payload="eyJzdWIiOiJzYWZlLXRlc3QifQ"
+jwt_signature="signature"
+jwt="$(printf '%s.%s.%s' "$jwt_header" "$jwt_payload" "$jwt_signature")"
 echo "  Logged in to Example Org as sami@trajectorylabs.net"
 echo "               expires:        2099-01-01T00:00:00Z"
+echo "access-token: sk-ant-should-never-print"
+echo "session-token: $jwt"
 """,
         )
         write_stub(self.stub_dir, "vercel", 'echo "noise"; echo "sami-2219"')
@@ -207,7 +211,15 @@ fi
         (gws_dir / "accounts.json").write_text(
             json.dumps({name: {} for name in ("personal", "theorem", "trajectory")}), encoding="utf-8"
         )
-        write_stub(self.stub_dir, "fleetctl", 'echo "{}"')
+        write_stub(
+            self.stub_dir,
+            "fleetctl",
+            r"""
+echo "ghs_should_never_print"
+echo "not authenticated"
+exit 1
+""",
+        )
         write_stub(
             self.stub_dir,
             "sentry-cli",
@@ -262,6 +274,8 @@ fi
         self.assertEqual(rows["sentry"]["status"], "live")
         self.assertEqual(rows["kubectl"]["status"], "live")
         self.assertEqual(rows["secretsd_grants"]["identity"], "TEST_KEY")
+        self.assertEqual(rows["fleetctl"]["status"], "missing")
+        self.assertEqual(rows["fleetctl"]["detail"], "not authenticated")
         self.assertEqual(rows["agent_secrets_broker"]["status"], "live")
 
         self.assert_no_secrets(result.stdout)
@@ -269,7 +283,7 @@ fi
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/
         # agent-access.d/*.sh (a private repository); the script finds that directory from its
-        # own path, runs each check it adds and prints the rows it names after the public checks.
+        # own path, runs each check it adds and prints the rows it names after `anthropic_ant`.
         dotfiles = self.root / "dotfiles"
         (dotfiles / "scripts").mkdir(parents=True)
         script = dotfiles / "scripts" / "agent-access"

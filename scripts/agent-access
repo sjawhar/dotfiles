@@ -98,7 +98,6 @@ check_github_app() {
         "personal gh login is refused by design (shims/gh)"
 }
 
-
 check_ant() {
     local out rc email exp status
     out="$(timeout "$TIMEOUT_S" ant auth status 2>&1)"
