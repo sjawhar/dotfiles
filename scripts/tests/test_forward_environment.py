@@ -718,6 +718,27 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
         self.assertFalse("systemctl --user restart forward-oryx" in lines)
         self.assertEqual(list(self.token_file().parent.glob(".tunnel-oryx-*")), [])
 
+    def test_run_after_the_old_units_are_gone_succeeds(self) -> None:
+        # systemd 255 prints nothing and exits 1 when list-unit-files matches no
+        # unit file, by exact name or by glob. forward-daemon@oryx and
+        # forward-tunnel@oryx have no unit file once the first run disabled them,
+        # and a new laptop never had one.
+        no_old_unit_files = (
+            "--user list-unit-files --no-legend --no-pager "
+            "forward-daemon@oryx.service forward-tunnel@oryx.service"
+        )
+        self.legacy_units.write_text(
+            "forward-tunnel@oryx.service enabled enabled\n", encoding="utf-8"
+        )
+        self.assert_oryx_success(self.install("daemon"))
+        self.legacy_units.write_text("", encoding="utf-8")
+        self.clear_call_log()
+
+        result = self.install("daemon", SYSTEMCTL_FAIL=no_old_unit_files)
+
+        self.assert_oryx_success(result)
+        self.assertFalse("systemctl --user restart forward-oryx" in self.call_lines())
+
     def test_failed_enrolment_stops_before_cutover_and_retries_the_key(self) -> None:
         failed = self.install("daemon", ENROL_FAIL="1")
 
