@@ -25,6 +25,31 @@ list_unit_files() {
     return "$status"
 }
 
+# Print each unit name from the unit-file and unit-instance listings once, in
+# their discovery order. A caller keeps responsibility for filtering the names.
+find_units() {
+    local unit_files
+    local unit_instances
+    local unit
+    local rest
+    local -A found=()
+
+    if ! unit_files="$(list_unit_files "$@")"; then
+        return 1
+    fi
+    if ! unit_instances="$(systemctl --user list-units --all --full --plain --no-legend --no-pager "$@")"; then
+        return 2
+    fi
+    while read -r unit rest; do
+        [[ -n "$unit" ]] || continue
+        [[ -z "${found[$unit]+present}" ]] || continue
+        found["$unit"]=1
+        printf '%s\n' "$unit"
+    done <<<"${unit_files}
+${unit_instances}"
+    return 0
+}
+
 # Oryx is not a Tailscale VM pair. Its dedicated forward-oryx service is
 # installed after the ordinary daemon and browser-relay work below.
 tunnel_pairs=(oryx)
@@ -215,10 +240,8 @@ oryx_process_is_running() {
 }
 
 oryx_old_units() {
-    local legacy_files
-    local legacy_active
+    local found_units
     local unit
-    local rest
     local socket
     local pids
     local pid
@@ -229,22 +252,22 @@ oryx_old_units() {
     local actions=0
     local -a units=()
 
-    if ! legacy_files="$(list_unit_files forward-daemon@oryx.service forward-tunnel@oryx.service)"; then
-        ORYX_ERROR="could not list the old unit files"
+    if found_units="$(find_units forward-daemon@oryx.service forward-tunnel@oryx.service)"; then
+        :
+    else
+        case $? in
+            1) ORYX_ERROR="could not list the old unit files" ;;
+            2) ORYX_ERROR="could not list the old unit instances" ;;
+        esac
         return 1
     fi
-    if ! legacy_active="$(systemctl --user list-units --all --full --plain --no-legend --no-pager forward-daemon@oryx.service forward-tunnel@oryx.service)"; then
-        ORYX_ERROR="could not list the old unit instances"
-        return 1
-    fi
-    while read -r unit rest; do
+    while read -r unit; do
         case "$unit" in
             forward-daemon@oryx.service|forward-tunnel@oryx.service)
-                [[ " ${units[*]} " == *" $unit "* ]] || units+=("$unit")
+                units+=("$unit")
                 ;;
         esac
-    done <<<"${legacy_files}
-${legacy_active}"
+    done <<< "$found_units"
     for unit in "${units[@]}"; do
         if ! systemctl --user disable --now "$unit"; then
             ORYX_ERROR="could not disable $unit; run the installer again"
@@ -332,36 +355,62 @@ oryx_foreign_listener() {
 }
 
 oryx_is_stale() {
-    local path
-    local value
-    local newest=0
     local started
+    local outcome
+    local status
 
-    for path in \
+    if ! started="$(systemctl --user show forward-oryx -p ExecMainStartTimestamp --timestamp=us+utc --value)"; then
+        ORYX_ERROR="could not read forward-oryx's start time"
+        return 2
+    fi
+    if outcome="$(python3 - "$started" \
         "$config_home/forward/tunnel-oryx.env" \
         "$DOTFILES_DIR/forward/forward-oryx.service" \
         "$DOTFILES_DIR/forward/forward-oryx" \
         "$DOTFILES_DIR/forward/forward-oryx.ssh-config" \
         "$DOTFILES_DIR/forward/forward-oryx.known_hosts" \
         "$DOTFILES_DIR/forward/config-daemon-oryx.toml" \
-        "$DOTFILES_DIR/forward/forward-daemon"; do
-        if ! value="$(stat -L -c %Y "$path")" || ! [[ "$value" =~ ^[0-9]+$ ]]; then
-            ORYX_ERROR="could not read the mtime of $path"
-            return 2
-        fi
-        (( value > newest )) && newest=$value
-    done
-    if ! started="$(systemctl --user show forward-oryx -p ExecMainStartTimestamp --timestamp=unix --value)"; then
-        ORYX_ERROR="could not read forward-oryx's start time"
-        return 2
+        "$DOTFILES_DIR/forward/forward-daemon" <<'PY'
+import calendar
+from datetime import datetime, timezone
+import os
+import sys
+
+try:
+    started = datetime.strptime(
+        sys.argv[1], "%a %Y-%m-%d %H:%M:%S.%f UTC"
+    ).replace(tzinfo=timezone.utc)
+except ValueError as error:
+    print(f"could not parse forward-oryx's start time: {error}", file=sys.stderr)
+    print("start")
+    raise SystemExit(2)
+
+newest = 0
+for path in sys.argv[2:]:
+    try:
+        mtime_ns = os.stat(path).st_mtime_ns
+    except OSError as error:
+        print(f"could not read the mtime of {path}: {error}", file=sys.stderr)
+        print(f"mtime:{path}")
+        raise SystemExit(2)
+    newest = max(newest, mtime_ns)
+
+started_us = calendar.timegm(started.utctimetuple()) * 1_000_000 + started.microsecond
+raise SystemExit(0 if started_us * 1_000 <= newest else 1)
+PY
+)"; then
+        return 0
+    else
+        status=$?
     fi
-    started="${started#@}"
-    started="${started%%.*}"
-    if ! [[ "$started" =~ ^[0-9]+$ ]]; then
-        ORYX_ERROR="forward-oryx has no usable start time"
-        return 2
+    if (( status == 1 )); then
+        return 1
     fi
-    (( started <= newest ))
+    case "$outcome" in
+        mtime:*) ORYX_ERROR="could not read the mtime of ${outcome#mtime:}" ;;
+        *) ORYX_ERROR="forward-oryx has no usable start time" ;;
+    esac
+    return 2
 }
 
 oryx_start() {
@@ -615,19 +664,22 @@ systemctl --user daemon-reload || fail "$role" "could not reload user units; run
 if [[ "$role" = daemon ]]; then
     # Include enabled-but-unloaded and active-but-disabled instances, including
     # retired names no longer in hosts.toml. Preserve every unit/config/SSH file.
-    legacy_files="$(list_unit_files 'forward-daemon@*.service' 'forward-tunnel@*.service')" \
-        || fail "$role" "cannot list legacy unit files; check systemctl --user before retrying migration step 2."
-    legacy_active="$(systemctl --user list-units --all --full --plain --no-legend --no-pager 'forward-daemon@*.service' 'forward-tunnel@*.service')" \
-        || fail "$role" "cannot list legacy unit instances; check systemctl --user before retrying migration step 2."
+    if legacy_unit_names="$(find_units 'forward-daemon@*.service' 'forward-tunnel@*.service')"; then
+        :
+    else
+        case $? in
+            1) fail "$role" "cannot list legacy unit files; check systemctl --user before retrying migration step 2." ;;
+            2) fail "$role" "cannot list legacy unit instances; check systemctl --user before retrying migration step 2." ;;
+        esac
+    fi
     legacy_units=()
-    while read -r unit rest; do
+    while read -r unit; do
         case "$unit" in
             forward-daemon@?*.service|forward-tunnel@?*.service)
-                [[ " ${legacy_units[*]} " == *" $unit "* ]] || legacy_units+=("$unit")
+                legacy_units+=("$unit")
                 ;;
         esac
-    done <<<"${legacy_files}
-${legacy_active}"
+    done <<< "$legacy_unit_names"
     for unit in "${legacy_units[@]}"; do
         pair="${unit#*@}"
         pair="${pair%.service}"

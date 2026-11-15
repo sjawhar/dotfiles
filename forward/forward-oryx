@@ -14,13 +14,25 @@ home="$runtime/home"
 bin="$runtime/bin"
 browser_refused="$runtime/browser-refused"
 
-rm -rf -- "$home"
-mkdir -p -- "$home" "$bin"
-rm -f -- "$browser_refused"
-xdg_open_tmp="$(mktemp "$bin/.xdg-open.XXXXXX")"
-printf '#!/bin/bash\ntouch -- %q\nexit 1\n' "$browser_refused" > "$xdg_open_tmp"
-chmod 700 -- "$xdg_open_tmp"
-mv -f -- "$xdg_open_tmp" "$bin/xdg-open"
+setup_fail() {
+    local step="$1"
+    local path="$2"
+
+    printf 'forward-oryx: could not %s: %s\n' "$step" "$path" >&2
+    exit 1
+}
+
+rm -rf -- "$home" || setup_fail "remove runtime home" "$home"
+mkdir -p -- "$home" "$bin" || setup_fail "create runtime directories" "$runtime"
+rm -f -- "$browser_refused" || setup_fail "remove browser refusal marker" "$browser_refused"
+xdg_open_tmp="$(mktemp "$bin/.xdg-open.XXXXXX")" \
+    || setup_fail "create the xdg-open refusal script" "$bin"
+printf '#!/bin/bash\ntouch -- %q\nexit 1\n' "$browser_refused" > "$xdg_open_tmp" \
+    || setup_fail "write the xdg-open refusal script" "$xdg_open_tmp"
+chmod 700 -- "$xdg_open_tmp" \
+    || setup_fail "make the xdg-open refusal script executable" "$xdg_open_tmp"
+mv -f -- "$xdg_open_tmp" "$bin/xdg-open" \
+    || setup_fail "install the xdg-open refusal script" "$bin/xdg-open"
 
 daemon=""
 connection=""

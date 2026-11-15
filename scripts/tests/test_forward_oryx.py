@@ -258,6 +258,7 @@ class ForwardOryxWrapper(unittest.TestCase):
         self.write_stubs()
 
     def tearDown(self) -> None:
+        self.doCleanups()
         self.temp_dir.cleanup()
 
     def assert_no_tokens(self, *streams: tuple[str, str]) -> None:
@@ -402,6 +403,26 @@ while :; do sleep 1; done''',
                 self.assertEqual(result.stderr, NO_TOKEN_MESSAGE + "\n")
                 self.assertFalse(self.daemon_record.exists(), "daemon started without a token")
                 self.assertFalse(self.ssh_record.exists(), "ssh started without a token")
+
+    def test_unwritable_runtime_stops_before_children(self) -> None:
+        self.write_wrapper(ssh_path=self.ssh)
+        original_mode = stat.S_IMODE(self.runtime.stat().st_mode)
+        self.addCleanup(self.runtime.chmod, original_mode)
+        self.runtime.chmod(0o500)
+
+        result = self.run_wrapper(
+            TUNNEL_SERVICE_TOKEN_ID=TOKEN_ID,
+            TUNNEL_SERVICE_TOKEN_SECRET=TOKEN_SECRET,
+            DAEMON_EXIT_STATUS="0",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.daemon_record.exists(), "daemon started after setup failed")
+        self.assertFalse(self.ssh_record.exists(), "ssh started after setup failed")
+        self.assertIn(
+            "forward-oryx: could not create runtime directories:",
+            result.stderr,
+        )
 
     def test_children_receive_only_their_required_environment(self) -> None:
         self.write_wrapper(ssh_path=self.ssh)

@@ -12,6 +12,7 @@ import tempfile
 import time
 import tomllib
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -66,7 +67,7 @@ class ForwardInstallerHarness(unittest.TestCase):
         self.systemctl_enabled.write_text("disabled\n", encoding="utf-8")
         self.systemctl_active.write_text("inactive\n", encoding="utf-8")
         self.systemctl_main_pid.write_text("4242\n", encoding="utf-8")
-        self.systemctl_timestamp.write_text("0\n", encoding="utf-8")
+        self.systemctl_timestamp.write_text("", encoding="utf-8")
         for name, address in {
             "self": "100.80.0.1",
             "self-vm": "100.80.0.3",
@@ -110,7 +111,7 @@ case "$*" in
         [[ "$(<"$SYSTEMCTL_ACTIVE")" == active ]]
         ;;
     *show*ExecMainStartTimestamp*)
-        printf '@%s\\n' "$(<"$SYSTEMCTL_TIMESTAMP")"
+        cat "$SYSTEMCTL_TIMESTAMP"
         ;;
     *show*MainPID*)
         cat "$SYSTEMCTL_MAIN_PID"
@@ -124,7 +125,11 @@ case "$*" in
     *start?forward-oryx|*restart?forward-oryx)
         printf 'active\\n' > "$SYSTEMCTL_ACTIVE"
         printf '4242\\n' > "$SYSTEMCTL_MAIN_PID"
-        printf '%s\\n' "$(( $(date +%s) + 1 ))" > "$SYSTEMCTL_TIMESTAMP"
+        python3 - <<'PY' > "$SYSTEMCTL_TIMESTAMP"
+from datetime import datetime, timezone
+
+print(datetime.now(timezone.utc).strftime("%a %Y-%m-%d %H:%M:%S.%f UTC"))
+PY
         ;;
     *list-unit-files*--type=service) printf '%s\\n' "${PCSC_UNIT_FILES:-}" ;;
     *list-units*pcscd-bridge.service) printf '%s\\n' "${PCSC_ACTIVE_UNITS:-}" ;;
@@ -649,7 +654,20 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
         self.systemctl_enabled.write_text("disabled\n", encoding="utf-8")
         self.systemctl_active.write_text("inactive\n", encoding="utf-8")
         self.systemctl_main_pid.write_text("4242\n", encoding="utf-8")
-        self.systemctl_timestamp.write_text("0\n", encoding="utf-8")
+        self.systemctl_timestamp.write_text("", encoding="utf-8")
+
+    @staticmethod
+    def systemd_timestamp(timestamp_ns: int) -> str:
+        seconds, nanoseconds = divmod(timestamp_ns, 1_000_000_000)
+        moment = datetime.fromtimestamp(seconds, timezone.utc)
+        return (
+            f"{moment.strftime('%a %Y-%m-%d %H:%M:%S')}.{nanoseconds // 1_000:06d} UTC\n"
+        )
+
+    def set_oryx_start(self, timestamp_ns: int) -> None:
+        self.systemctl_timestamp.write_text(
+            self.systemd_timestamp(timestamp_ns), encoding="utf-8"
+        )
 
     def token_file(self) -> Path:
         return self.config_home / "forward" / "tunnel-oryx.env"
@@ -814,7 +832,7 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
     def test_token_rotation_restarts_even_at_the_same_second(self) -> None:
         self.assert_oryx_success(self.install("daemon"))
         token = self.token_file()
-        self.systemctl_timestamp.write_text(str(int(token.stat().st_mtime)) + "\n", encoding="utf-8")
+        self.set_oryx_start(token.stat().st_mtime_ns)
         rotated = (
             "TUNNEL_SERVICE_TOKEN_ID=fake-id-rotated.access\n"
             "TUNNEL_SERVICE_TOKEN_SECRET=fakesecret-rotated\n"
@@ -841,10 +859,7 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
         self.assertEqual(failed.returncode, 1)
         self.assertIn("forward.sh daemon: oryx: start failed:", failed.stderr)
         self.assertEqual(self.token_file().read_text(encoding="utf-8"), rotated)
-        self.systemctl_timestamp.write_text(
-            str(int(self.token_file().stat().st_mtime)) + "\n",
-            encoding="utf-8",
-        )
+        self.set_oryx_start(self.token_file().stat().st_mtime_ns - 1_000_000)
         self.clear_call_log()
 
         result = self.install("daemon")
@@ -928,11 +943,40 @@ class ForwardOryxInstaller(ForwardInstallerHarness):
         self.assertEqual(no_listener.returncode, 1)
         self.assertIn("forward.sh daemon: oryx: connected failed:", no_listener.stderr)
 
+    def test_staleness_does_not_restart_when_start_is_later_in_same_second(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        timestamp = 1_900_000_000
+        token_mtime = timestamp * 1_000_000_000 + 100_000_000
+        os.utime(self.token_file(), ns=(token_mtime, token_mtime))
+        self.set_oryx_start(timestamp * 1_000_000_000 + 500_000_000)
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        lines = self.call_lines()
+        self.assertFalse("systemctl --user start forward-oryx" in lines)
+        self.assertFalse("systemctl --user restart forward-oryx" in lines)
+        self.assertIn("forward.sh daemon: oryx: connected: forward-oryx is running", result.stdout)
+
+    def test_staleness_restarts_when_file_is_later_in_same_second(self) -> None:
+        self.assert_oryx_success(self.install("daemon"))
+        timestamp = 1_900_000_000
+        token_mtime = timestamp * 1_000_000_000 + 500_000_000
+        os.utime(self.token_file(), ns=(token_mtime, token_mtime))
+        self.set_oryx_start(timestamp * 1_000_000_000 + 100_000_000)
+        self.clear_call_log()
+
+        result = self.install("daemon")
+
+        self.assert_oryx_success(result)
+        self.assertEqual(self.call_lines().count("systemctl --user restart forward-oryx"), 1)
+
     def test_already_running_and_fresh_stays_running(self) -> None:
         self.assert_oryx_success(self.install("daemon"))
         self.systemctl_enabled.write_text("enabled\n", encoding="utf-8")
         self.systemctl_active.write_text("active\n", encoding="utf-8")
-        self.systemctl_timestamp.write_text(str(int(time.time()) + 60) + "\n", encoding="utf-8")
+        self.set_oryx_start(time.time_ns() + 60_000_000_000)
         self.clear_call_log()
 
         result = self.install("daemon")
