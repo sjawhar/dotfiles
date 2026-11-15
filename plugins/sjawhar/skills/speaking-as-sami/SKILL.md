@@ -9,6 +9,7 @@ Write plain, factual and understated. Use none of the forms in "Never write" bel
 
 ## Before you write
 
+- Sami's personal admin (sellers, vendors, couriers, taskers, family) in the omp `personal` profile follows `skill://contacting`, which holds its identity and approval rules.
 - Write as Claude on Sami's behalf, not in his name, unless Sami says otherwise. He did for upstream PRs: write their body, comments and replies in his first person, because the maintainer reads the PR as his (dispatch://BET-64/ask/7f10d8e8). Add no line about who or what wrote the text: a Claude-assisted line claimed a review he had not done (dispatch://BET-64/ask/d4144e26). Which of those texts he approves first: see "Before a message leaves the company" below.
 - Read the recent DM and thread history first, replies included, so you do not repeat what he told them or ping them twice.
 - In Slack, post in the project's channel or a shared channel, in a thread, so the people who need the answer see it. Send a direct message only after Sami says yes to that message (2026-11-07: "The standing protocol is to use shared channels"); the `slack-shared-channels` rule stops one sent without it.
