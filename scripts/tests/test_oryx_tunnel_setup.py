@@ -79,6 +79,11 @@ case "$name" in
         for ((index = 1; index <= $#; index += 1)); do
             [[ "${!index}" == -F ]] || continue
             next=$((index + 1))
+            probe_file="${!next}"
+            probe_copy="$FAKE_PROBE_DIR/${probe_file##*/}"
+            probe_temp="$FAKE_PROBE_DIR/.${probe_file##*/}.$$"
+            /bin/cp "$probe_file" "$probe_temp"
+            /bin/mv "$probe_temp" "$probe_copy"
             {
                 printf 'ssh probe file: %s\n' "${!next}"
                 /bin/cat "${!next}"
@@ -184,7 +189,7 @@ case "$name" in
             port="${BASH_REMATCH[1]}"
             if [[ "${LOCAL_SOCKET_LOGIN_FAILS:-}" == 1 ]]; then
                 # The key did not log in, so the -L never listens.
-                printf 'agent@oryx-pcsc.thecybermonk.com: Permission denied (publickey).\n' >&2
+                printf 'agent@oryx.thecybermonk.com: Permission denied (publickey).\n' >&2
                 exit 255
             fi
             # LOCAL_SOCKET_FORWARDED_SILENT: sshd forwarded the socket, and the server on it, like
@@ -452,6 +457,8 @@ class TunnelSetup(unittest.TestCase):
         self.fakebin = self.root / f"fakebin-{name}"
         self.fakebin.mkdir()
         self.log = self.root / f"{name}.log"
+        self.probe_dir = self.root / f"probes-{name}"
+        self.probe_dir.mkdir()
         self.remote = self.root / f"remote-{name}"
         self.current_nonce = self.root / f"nonce-{name}"
         self.forward_port = self.root / f"forward-port-{name}"
@@ -466,6 +473,7 @@ class TunnelSetup(unittest.TestCase):
             "PATH": f"{self.fakebin}:/usr/bin:/bin",
             "ORYX_SETUP_FAKEBIN": str(self.fakebin),
             "FAKE_LOG": str(self.log),
+            "FAKE_PROBE_DIR": str(self.probe_dir),
             "REMOTE_ROOT": str(self.remote),
             "CURRENT_NONCE": str(self.current_nonce),
             "FORWARD_PORT": str(self.forward_port),
@@ -564,6 +572,36 @@ class TunnelSetup(unittest.TestCase):
             values.setdefault(key, []).append(value)
         return values
 
+    def assert_probe_ssh_configuration(self) -> None:
+        lines = (DOTFILES / "laptop" / "ssh-config").read_text(encoding="utf-8").splitlines(keepends=True)
+        host_start = next(index for index, line in enumerate(lines) if line.rstrip("\n") == "Host *")
+        host_defaults = "".join(lines[host_start:])
+        for filename, host in (
+            ("tunnel-probe.conf", "oryx-probe"),
+            ("login-probe.conf", "oryx-login-probe"),
+        ):
+            with self.subTest(probe=host):
+                probe_file = self.probe_dir / filename
+                self.assertTrue(probe_file.is_file(), probe_file)
+                config = self.root / f"{filename}.with-defaults"
+                config.write_text(probe_file.read_text(encoding="utf-8") + host_defaults, encoding="utf-8")
+                result = run(["/usr/bin/ssh", "-F", str(config), "-G", host], cwd=self.home, env=self.env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values: dict[str, list[str]] = {}
+                for line in result.stdout.splitlines():
+                    key, value = line.split(maxsplit=1)
+                    values.setdefault(key, []).append(value)
+                self.assertEqual(values["hostname"], ["oryx.thecybermonk.com"])
+                self.assertEqual(values["controlmaster"], ["false"])
+                self.assertNotIn("controlpath", values)
+                if host == "oryx-probe":
+                    self.assertEqual(values["identitiesonly"], ["yes"])
+                    self.assertEqual(values["identityagent"], ["none"])
+                    self.assertEqual(len(values["identityfile"]), 1)
+                    self.assertTrue(values["identityfile"][0].endswith("/.ssh/oryx-tunnel"))
+                else:
+                    self.assertTrue(values["identityagent"][0].endswith("/.1password/agent.sock"))
+
     def assert_no_tokens(self, *texts: str) -> None:
         for token in (self.token_id, self.token_secret):
             for text in texts:
@@ -627,6 +665,14 @@ class TunnelSetup(unittest.TestCase):
             self.assertIsNotNone(process.stdout)
             pid = int(process.stdout.readline().strip())
             self.reapers.append((process, pid))
+            # The reaper prints the pid right after fork, before execv: wait until the child
+            # carries its own argv, or the command's process scan can run first and miss it.
+            cmdline = Path(f"/proc/{pid}/cmdline")
+            expected = "".join(f"{arg}\0" for arg in args).encode()
+            deadline = time.monotonic() + 10
+            while cmdline.read_bytes() != expected:
+                self.assertLess(time.monotonic(), deadline, f"pid {pid} never ran {args}")
+                time.sleep(0.01)
             return pid
 
         return {
@@ -655,6 +701,7 @@ class TunnelSetup(unittest.TestCase):
                 first = self.invoke(readme=True)
                 self.assertLess(time.monotonic() - started, 20)
                 self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                self.assert_probe_ssh_configuration()
                 self.assertTrue((self.checkout_dir / "laptop/oryx-tunnel-setup").exists())
                 self.assertLess(SETUP.stat().st_size, 100 * 1024)
                 report = self.report()
@@ -738,7 +785,7 @@ class TunnelSetup(unittest.TestCase):
         )
         self.assertEqual(proxy.returncode, 0, proxy.stderr)
         calls = "\n".join(self.lines())
-        self.assertIn("cloudflared: access ssh --hostname oryx-pcsc.thecybermonk.com env TUNNEL_SERVICE_TOKEN_ID=set TUNNEL_SERVICE_TOKEN_SECRET=set", calls)
+        self.assertIn("cloudflared: access ssh --hostname oryx.thecybermonk.com env TUNNEL_SERVICE_TOKEN_ID=set TUNNEL_SERVICE_TOKEN_SECRET=set", calls)
         self.assert_no_tokens(calls, proxy.stdout, proxy.stderr, self.report())
 
     def test_cutover_and_token_failures_are_negative_controls(self) -> None:
@@ -828,7 +875,9 @@ class TunnelSetup(unittest.TestCase):
         text = config.read_text(encoding="utf-8")
         config.write_text(text.replace("cloudflared access ssh --hostname %h", f"cloudflared access ssh --hostname %h --service-token-secret {self.token_secret}"), encoding="utf-8")
         values = run(["/usr/bin/ssh", "-F", str(self.home / ".ssh/config"), "-G", "oryx-tunnel"], cwd=self.home, env=self.env)
-        command = dict(line.split(maxsplit=1) for line in values.stdout.splitlines())["proxycommand"].replace("%h", "oryx-pcsc.thecybermonk.com")
+        self.assertEqual(values.returncode, 0, values.stderr)
+        parsed = dict(line.split(maxsplit=1) for line in values.stdout.splitlines())
+        command = parsed["proxycommand"].replace("%h", parsed["hostname"])
         subprocess.run(["bash", "-c", command], cwd=self.home, env=self.env, capture_output=True, text=True, check=False)
         recorded = "\n".join(self.lines())
         self.assertIn(self.token_secret, recorded)
@@ -975,7 +1024,7 @@ class TunnelSetup(unittest.TestCase):
         report = self.report()
         self.assertIn(
             "self-check: tunnel key rejects local socket forwarding: client never connected; ssh exited"
-            " (exit 255), ssh said: agent@oryx-pcsc.thecybermonk.com: Permission denied"
+            " (exit 255), ssh said: agent@oryx.thecybermonk.com: Permission denied"
             " (publickey).: failed\n",
             report,
         )

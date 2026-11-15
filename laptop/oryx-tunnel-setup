@@ -336,7 +336,7 @@ validate_ssh_configuration() {
     ssh_config_expect oryx "$oryx" localforward '' || true
     ssh_config_expect oryx "$oryx" remoteforward '' || true
 
-    ssh_config_expect oryx-tunnel "$tunnel" hostname oryx-pcsc.thecybermonk.com || true
+    ssh_config_expect oryx-tunnel "$tunnel" hostname oryx.thecybermonk.com || true
     ssh_config_expect oryx-tunnel "$tunnel" user agent || true
     ssh_config_expect oryx-tunnel "$tunnel" proxycommand 'cloudflared access ssh --hostname %h' || true
     # This tailnet name is only the label under which known_hosts holds oryx's key.
@@ -862,9 +862,11 @@ human_tier_read() {
 write_probe_configs() {
     tunnel_probe="$work_dir/tunnel-probe.conf"
     login_probe="$work_dir/login-probe.conf"
+    # Both probes go to the hostname that ssh oryx uses, so each keeps ControlMaster no and
+    # ControlPath none: ControlMaster no alone still joins a master another connection opened.
     cat > "$tunnel_probe" <<EOF
 Host oryx-probe
-  HostName oryx-pcsc.thecybermonk.com
+  HostName oryx.thecybermonk.com
   User agent
   # This tailnet name is only the label under which known_hosts holds oryx's key.
   HostKeyAlias oryx.tail12ec1c.ts.net
