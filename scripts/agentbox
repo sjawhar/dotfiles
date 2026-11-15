@@ -953,8 +953,15 @@ wait_for_running() {
 # it is the box's own (no session id, no host key for the session, or the 409 fallback, which
 # still passes --session-id); ENROLLED_ID is the id the last enrollment got back. ENROLL_ERROR is
 # why the last key step or enroll call failed, and after enroll_failed the reason it recorded.
+# ENROLL_OPEN holds the identity of each enroll call whose outcome is not known: the broker can
+# have made an enrollment for it, with an id the host does not have. An entry is one string of
+# three words, `<kind> <runtime id> <thumbprint>`, as they were at that call. The kind is
+# `session` when ENROLLED_SKD was set and `own` when it was empty. enroll_attempts adds an
+# identity once, and removes its entries when a later call for the same runtime id and
+# thumbprint records an enrollment id.
 ENROLLED_BOX="" ENROLLED_SID="" ENROLLED_RUNTIME="" ENROLLED_TP="" ENROLLED_SKD="" ENROLLED_ID=""
 ENROLL_ERROR=""
+ENROLL_OPEN=()
 
 # enroll_key BOX SID: give the box the key it enrolls with, and set ENROLLED_SID,
 # ENROLLED_RUNTIME, ENROLLED_TP and ENROLLED_SKD for it. A box whose omp session id is known
@@ -998,18 +1005,52 @@ enroll_key() {
     ENROLLED_SID="$sid" ENROLLED_RUNTIME="$runtime" ENROLLED_TP="$tp" ENROLLED_SKD="$skd"
 }
 
+# enroll_open_add: add the identity of the enroll call just made to ENROLL_OPEN, unless it is
+# there already. It reads the ENROLLED_* globals, so it runs before anything changes them.
+enroll_open_add() {
+    local kind=own entry e
+    [[ -z "$ENROLLED_SKD" ]] || kind=session
+    entry="$kind $ENROLLED_RUNTIME $ENROLLED_TP"
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        [[ "$e" != "$entry" ]] || return 0
+    done
+    ENROLL_OPEN+=("$entry")
+}
+
+# enroll_open_settle: remove from ENROLL_OPEN every entry with the runtime id and the thumbprint
+# of the enroll call that just recorded an enrollment id.
+enroll_open_settle() {
+    local e kept=()
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        [[ "${e#* }" == "$ENROLLED_RUNTIME $ENROLLED_TP" ]] || kept+=("$e")
+    done
+    ENROLL_OPEN=(${kept[@]+"${kept[@]}"})
+}
+
 # enroll_attempts BOX ATTEMPTS [fallback]: the broker call of an enrollment, for the key the box
 # holds, as ENROLLED_RUNTIME, ENROLLED_TP and ENROLLED_SID name it. The enrollment is made from the
 # host with the launcher credential, which no box can read, and the client writes the enrollment
 # id beside the key. Up to ATTEMPTS attempts 3 s apart, each one call (two with the 409 fallback
 # below), with the enrollment.pending marker renewed before each call: from the legion #1589
 # release a client in the box waits on a marker younger than 160 s, so it stays fresh for exactly
-# as long as the launcher is still working, however slow the broker. Success records the
-# enrollment on the host, sets ENROLLED_BOX and ENROLLED_ID, and removes the marker and every
-# error file. A failure leaves the marker for its caller to end, with the reason in ENROLL_ERROR.
-# `fallback` allows the 409 fallback below.
+# as long as the launcher is still working, however slow the broker. No retry starts once
+# cmd_new's HUP, TERM or INT trap has set `interrupted`. The 409 fallback call is not a retry: it
+# is part of its attempt. Success records the enrollment on the host, sets ENROLLED_BOX and
+# ENROLLED_ID, and removes the marker and every error file. A failure leaves the marker for its
+# caller to end, with the reason in ENROLL_ERROR. `fallback` allows the 409 fallback below.
+# Each call also keeps ENROLL_OPEN up to date. A call that records an enrollment id removes the
+# entries of its runtime id and thumbprint: under one runtime id the broker gives a key the id of
+# its live enrollment, so the id that the host recorded is that of any live enrollment an earlier
+# call made. A call that exits non-zero, with a line that starts with one of these two prefixes,
+# made no enrollment and adds nothing:
+#   `agent-secrets enroll: ENROLL_FAILED: `
+#   `agent-secrets enroll: DRAINING: `
+# Only the code in that place counts. The same word in other text of the error does not count.
+# Every other call adds its identity: exit 0 with no id recorded, any other code
+# (ENROLL_OUTCOME_UNKNOWN), no answer from the helper, a reply that the client could not read, an
+# id that it could not write, and a signal.
 enroll_attempts() {
-    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid attempt=1 args
+    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid rc attempt=1 args
     keydir="$(box_keydir "$box")"
     errfile="$RUN_BASE/$box/enroll.attempt-error"
     while :; do
@@ -1019,10 +1060,13 @@ enroll_attempts() {
         # enroll prints the enrollment id alone, and writes it into the key dir for the box. The
         # client's rename leaves a plain file there; a link at that name is the box's, so it is a
         # failed attempt, tested with -L and never followed.
-        if eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
-            agent-secrets "${args[@]}" 2>"$errfile")"; then
+        rc=0
+        eid="$(AGENT_SECRETS_URL="$AGENT_SECRETS_URL" AGENT_SECRETS_KEY_DIR="$keydir" \
+            agent-secrets "${args[@]}" 2>"$errfile")" || rc=$?
+        if (( rc == 0 )); then
             if [[ -z "$eid" || -L "$keydir/enrollment" || ! -s "$keydir/enrollment" ]]; then
                 ENROLL_ERROR="agent-secrets enroll gave no enrollment id, or left no plain, non-empty enrollment file in $keydir (it printed '$eid')"
+                enroll_open_add
                 return 1
             fi
             printf '%s\n' "$eid" >"$RUN_BASE/$box/enrollment-id"
@@ -1041,9 +1085,14 @@ enroll_attempts() {
                 rm -f "$RUN_BASE/$box/enrollment-session"
             fi
             rm -f "$keydir/enrollment.pending" "$keydir/enrollment.error" "$errfile"
+            enroll_open_settle
             ENROLLED_BOX="$box" ENROLLED_ID="$eid"
             return 0
         fi
+        # A known failure: the helper answered ENROLL_FAILED or DRAINING and made no enrollment.
+        # Any other failure can have made one.
+        grep -qaE '^agent-secrets enroll: (ENROLL_FAILED|DRAINING): ' "$errfile" 2>/dev/null \
+            || enroll_open_add
         # A live enrollment of this session under a key the host no longer holds — its key dir
         # went with a reboot while the old lease still ran — refuses every attempt with the same
         # 409 until that lease lapses, up to 15 minutes. Rather than leave the box with no
@@ -1056,11 +1105,19 @@ enroll_attempts() {
             ENROLLED_SKD="" ENROLLED_RUNTIME="$box"
             continue
         fi
+        # No retry once cmd_new's HUP, TERM or INT trap has set `interrupted` (unset for any other
+        # caller): the box is ending. The test comes before the 3 s wait and again after it,
+        # because a signal that comes during the sleep runs its trap only when the sleep ends.
         (( attempt < attempts )) || break
-        (( attempt += 1 ))
+        [[ "${interrupted:-0}" == 0 ]] || break
         sleep 3
+        [[ "${interrupted:-0}" == 0 ]] || break
+        (( attempt += 1 ))
     done
-    if (( attempts > 1 )); then
+    if (( attempt < attempts )); then
+        # The loop stopped early: the launcher was interrupted.
+        ENROLL_ERROR="agent-secrets enroll failed $attempt of $attempts attempts, and the launcher was interrupted, so it made no more; last: $(<"$errfile")"
+    elif (( attempts > 1 )); then
         ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $(<"$errfile")"
     else
         ENROLL_ERROR="agent-secrets enroll failed: $(<"$errfile")"
@@ -1191,8 +1248,11 @@ REENROLL_BACKOFF=30 REENROLL_AT=0
 reenroll_if_not_live() {
     local box="$1" keydir old delay ok=0
     # No new attempt once cmd_new's HUP, TERM or INT trap has set `interrupted`: the box is
-    # ending, and an attempt would cost a helper call, up to about 60 s of its close, and for a
-    # box with no session id an enrollment that close_box then revokes at once.
+    # ending. With the pinned helper one attempt can take about 23 s of the close (the helper's
+    # 20 s bound and the client's own wait), and a cancelled `agentbox move` sends SIGKILL 30 s
+    # after TERM (move_to_cancel_start). For a box with no session id the attempt can also make
+    # an enrollment that close_box then revokes at once. enroll_attempts makes no retry then
+    # either: the ten attempts of enroll_box can take about four minutes.
     [[ "${interrupted:-0}" == 0 ]] || return 0
     [[ "$ENROLLED_BOX" == "$box" ]] || return 0
     keydir="$(box_keydir "$box")"
@@ -2977,6 +3037,13 @@ reap_start() {
     return 0
 }
 
+# drop_self_copy: remove the private copy of this file that `agentbox new` runs from
+# (AGENTBOX_SELF_COPY, made at the end of this file), when there is one. cmd_new's EXIT traps run
+# it. It never fails, because those traps run under set -e.
+drop_self_copy() {
+    [[ -z "${AGENTBOX_SELF_COPY:-}" ]] || rm -f -- "$AGENTBOX_SELF_COPY" 2>/dev/null || true
+}
+
 cmd_new() {
     local usage="usage: agentbox new [-e NAME[=VALUE]]… [--memory SIZE] [--cpus N] [--pids N] [--disk SIZE] [--dir PATH]… [--no-host-writes] [--drop-gone-dirs] [<repo>…] -- <cmd> [args…]"
     local user_env=() box_repos=() repo a drop_gone=false dirs_seen=0
@@ -3157,9 +3224,12 @@ cmd_new() {
     # Values are expanded now (the trap outlives this function's locals) and
     # the trap runs only in the launcher itself, never in a $(…) subshell,
     # which inherits EXIT traps in bash.
+    # The trap also removes the launcher's private copy of this file (drop_self_copy), and it
+    # does that first: close_box can fail, and set -e then ends the trap. Nothing on this path
+    # runs the file again, and bash reads the running script through a descriptor it holds open.
     local launcher_pid=$BASHPID
     # shellcheck disable=SC2064
-    trap "[[ \$BASHPID == $launcher_pid ]] && close_box '$box' '' $(printf '%q ' "${box_repos[@]}")" EXIT
+    trap "[[ \$BASHPID == $launcher_pid ]] && { drop_self_copy; close_box '$box' '' $(printf '%q ' "${box_repos[@]}"); }" EXIT
     # A pane kill or TERM lands here; the trap forwards a hangup into the box
     # (--init delivers it to the command), --rm fires, close runs. Before the
     # box exists it is remembered instead and honoured once the clone returns.
@@ -3268,11 +3338,12 @@ cmd_new() {
     fi
     # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
     # while it runs and returns once the child has exited. Its last attempt comes before
-    # close_box below, which revokes the last enrollment id the host recorded. An attempt that the
-    # helper reports as failed can still make an enrollment at the broker, which the host has no
-    # record of; that one lapses at the end of its lease (agentbox/AGENTS.md). A box with none
-    # goes straight to the wait below. An interrupted wait re-waits: the first return after a
-    # signal carries 128+sig, the child's real status arrives once it is reaped.
+    # close_box below, which revokes the last enrollment id the host recorded. An attempt whose
+    # outcome is not known can still have made an enrollment at the broker. The host has no id
+    # for it, only the attempt's identity (ENROLL_OPEN), so close_box does not revoke it: it
+    # lapses at the end of its lease (agentbox/AGENTS.md). A box with none goes straight to the
+    # wait below. An interrupted wait re-waits: the first return after a signal carries 128+sig,
+    # the child's real status arrives once it is reaped.
     if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
     while :; do
         if wait "$child"; then rc=0; else rc=$?; fi
@@ -3287,8 +3358,12 @@ cmd_new() {
     # its output goes through a reader that writes to the terminal while it
     # exists and drops the rest - a direct write to a hung-up pty fails with
     # EIO, which set -e would turn into an exit before the rm -rf.
-    trap - TERM INT EXIT
+    trap - TERM INT
     trap '' HUP
+    # After close_box, the launcher's private copy of this file goes as the launcher exits. An
+    # EXIT trap does it, so the copy goes also when close_box fails and set -e ends the launcher.
+    # shellcheck disable=SC2064
+    trap "[[ \$BASHPID == $launcher_pid ]] && drop_self_copy" EXIT
     exec > >(while IFS= read -r line; do printf '%s\n' "$line" 2>/dev/null || :; done) 2>&1
     close_box "$box" "$sid" "${box_repos[@]}"
     exit "$rc"
@@ -10065,7 +10140,8 @@ if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     [[ -z "$_self_copy" ]] || rm -f "$_self_copy"
     echo "agentbox: could not copy itself to run from; continuing from $(readlink -f "${BASH_SOURCE[0]}"), which a dotfiles publish can kill mid-launch" >&2
 fi
-# Running FROM the copy: take it away when this launch ends, whichever way it ends.
+# Running FROM the copy: this trap removes it when the launch ends before cmd_new sets its own
+# EXIT trap. From there, cmd_new's EXIT traps remove it (drop_self_copy). A SIGKILL leaves it.
 [[ -z "${AGENTBOX_SELF_COPY:-}" ]] || trap 'rm -f "$AGENTBOX_SELF_COPY"' EXIT
 
 case "${1:-}" in
