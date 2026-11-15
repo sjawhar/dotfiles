@@ -30,7 +30,10 @@
 // both arms, and gives each handler the resolution of its feature (gates.ts). A gate that is `off`,
 // in gates.json or by its variable, runs no handler: the feature is in no experiment, and the session
 // gets no new text and no entry. A handler that throws stops its own feature until the next
-// resolution (index.ts): its handlers do not run, so it adds no text and writes no entry.
+// resolution (index.ts): its handlers do not run, so it adds no text and writes no entry. For these
+// features, and only these, index.ts reads gates.json again whenever the file changes on disk, at
+// each before_agent_start and each context event, and draws their arm again from the same root id.
+// So the resolution a handler reads is the one in force at that event.
 // A Legion pane (LEGION_TREE, LEGION_ROLE or LEGION_CONTROLLER set, as proactive-memory-core.ts reads
 // them) is outside the experiments. The INFRA-805 experiment of the spec of INFRA-3189 leaves Legion
 // designs out until a Legion route exists. So in a Legion pane the handler adds no text and writes no
@@ -50,6 +53,8 @@
 // A resumed session does not get either again while both stay in its context. A subagent never
 // triggers. The unit of the experiments is the root session, and the skill tells its reader to
 // start fresh subagents, so a subagent that reads it can start more.
+// A known limit: the text goes in only at a user prompt. A compaction inside a turn removes it for
+// the rest of that turn, and it comes back at the next user prompt.
 //
 // The text goes in as one hidden custom message (display false). Its custom type is the name of the
 // feature, and omp sends it with the prompt. The model reads it, but the person at the session does
@@ -59,6 +64,8 @@
 // feature, the arm, the gate, the root session id and the time) at the next request after the
 // trigger (the `context` event). In the on arm of a feature with a text, the handler waits for the
 // first request whose messages hold the text, so the entry says that the text reached the model.
+// When the arm or the gate in force changed after the trigger (gates.json changed on disk), the
+// handler writes no entry for that trigger. The next prompt triggers again in the arm now in force.
 //
 // The invariant: a text reaches the model only while the current arm of the session for its feature
 // is on. index.ts registers, for each feature of this file, the scrub of scrubText, after the
@@ -68,8 +75,9 @@
 // feature stopped after a throw, before the first resolution, and in a Legion pane. A text that an
 // earlier resolution put in the session file stays there, but it reaches the model again only in a
 // later resolution whose arm is on. So:
-//   - When a gate goes from `random` to `off` (D13), a resumed session sends no text from its next
-//     request on.
+//   - When a gate goes from `random` to `off` (D13), a running session sends no text from its next
+//     request on, because index.ts reads the changed gates.json at that request. A session resumed
+//     later sends none either.
 //   - No text goes out without its entry. When the exposure append (or any other handler of the
 //     feature) throws, the feature stops, and the scrub removes the text from that request and from
 //     every later one. A later resolution in the on arm that finds the text in the context and no
@@ -143,6 +151,11 @@ export function textArm(feature: Feature, text: string | undefined): TextArm {
 		});
 		pi.on("context", (event: ContextEvent, ctx: Ctx) => {
 			if (!pending) return undefined;
+			const { gate, on } = resolution();
+			if (gate !== pending.gate || (on ? "on" : "off") !== pending.arm) {
+				pending = undefined;
+				return undefined;
+			}
 			if (pending.arm === "on" && text !== undefined && !event.messages.some(m => m.role === "custom" && m.customType === feature)) return undefined;
 			const sm = ctx.sessionManager;
 			const record: ExposureRecord = { v: 1, feature, ...pending, rootSessionId: rootSessionId(sm.getSessionFile(), sm.getSessionId()), at: new Date().toISOString() };

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import gateFile from "../experiments/gates.json" with { type: "json" };
 import { draw, ENTRY_TYPE, EXCLUDED_ENTRY_TYPE, EXPOSURE_ENTRY_TYPE, type ExcludedRecord, type ExperimentRecord, type ExposureRecord, envName, FEATURES, type Feature, resolve, resolveGates, rootSessionId } from "../experiments/gates";
 import selfcheckText from "../experiments/infra805-selfcheck.md" with { type: "text" };
@@ -110,10 +113,10 @@ describe("the extension", () => {
 	});
 
 	type Delivered = { message: { customType: string; content: string; display: boolean } };
-	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. Its branch is its entries unless `setBranch` replaces it. */
-	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown; [key: string]: unknown }> = [], kind: "main" | "sub" = "main") {
+	/** The real entry bound to a fake `pi`, with every gate set from `env`, for a session whose file is `sessionFile`. Its branch is its entries unless `setBranch` replaces it. The text arms follow `gatesPath` when one is given, else the committed gates.json, which no test writes. */
+	async function bind(env: Record<string, string>, sessionFile = ROOT_FILE, seed: Array<{ type: string; customType?: string; data?: unknown; [key: string]: unknown }> = [], kind: "main" | "sub" = "main", gatesPath?: string) {
 		Object.assign(process.env, env);
-		const { default: experiments } = await import("../experiments/index");
+		const { default: experiments, bindExperiments } = await import("../experiments/index");
 		const handlers = new Map<string, Handler[]>();
 		const entries = [...seed];
 		const errors: string[] = [];
@@ -129,7 +132,8 @@ describe("the extension", () => {
 			pi: { settings: {} },
 			getActiveTools: () => ["bash", "read", "grep", "glob", "edit", "write"],
 		};
-		experiments(pi as never);
+		if (gatesPath === undefined) experiments(pi as never);
+		else bindExperiments(pi as never, gatesPath);
 		let branch: () => unknown[] = () => entries;
 		const ctx = {
 			agent: { kind },
@@ -474,6 +478,90 @@ describe("the extension", () => {
 			expect(delivered).toEqual([...deliveryOf("infra805_skill", skillText), ...deliveryOf("infra805_selfcheck", selfcheckText)]);
 			await outside.request(delivered);
 			expect(outside.exposures().map(e => e.feature)).toEqual(["aa_noop", "infra805_skill", "infra805_selfcheck"]);
+		});
+
+		describe("gates.json changed on disk while omp runs", () => {
+			let dir: string;
+			let path: string;
+			/** Writes the temp copy: the committed gates with the three text gates off and `changes` on top, or `contents` as it is. Its mtime moves to `second`. */
+			const writeGates = (contents: Record<string, string> | string, second: number) => {
+				writeFileSync(path, typeof contents === "string" ? contents : JSON.stringify({ ...gateFile, aa_noop: "off", infra805_skill: "off", infra805_selfcheck: "off", ...contents }));
+				utimesSync(path, second, second);
+			};
+			beforeEach(() => {
+				dir = mkdtempSync(join(tmpdir(), "experiments-gates-"));
+				path = join(dir, "gates.json");
+			});
+			afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+			test("an off gate written while a session runs stops the text at the next request, with an `experiments` entry and no new exposure, and the other features keep their load-time gates", async () => {
+				writeGates({ infra805_skill: "on", bash_gate_leading: "off" }, 1_000);
+				const b = await bind({}, ROOT_FILE, [], "main", path);
+				await b.start();
+				const [first] = b.records();
+				expect(first.features.infra805_skill).toMatchObject({ gate: "on", on: true });
+				expect(first.features.bash_gate_leading.gate).toBe(gateFile.bash_gate_leading);
+				const delivered = await b.prompt();
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.exposures()).toHaveLength(1);
+				writeGates({ infra805_skill: "off", bash_gate_leading: "off" }, 2_000);
+				expect(await b.request(delivered)).toEqual([]);
+				const records = b.records();
+				expect(records).toHaveLength(2);
+				expect(records[1].features.infra805_skill).toMatchObject({ gate: "off", on: false });
+				expect(records[1].features.bash_gate_leading).toEqual(first.features.bash_gate_leading);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.exposures()).toHaveLength(1);
+				expect(b.records()).toHaveLength(2);
+			});
+			test("a gates.json that cannot be parsed keeps the last good gates and is logged once", async () => {
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, ROOT_FILE, [], "main", path);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				writeGates("{ not json", 2_000);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual(["infra805_skill"]);
+				expect(b.errors).toEqual([expect.stringContaining(`the text arms cannot read the gates in ${path}`)]);
+				expect(b.records()).toHaveLength(1);
+				writeGates({ infra805_skill: "off" }, 3_000);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.records()).toHaveLength(2);
+				expect(b.errors).toHaveLength(1);
+			});
+			test.each([true, false])("aa_noop going random mid-process (draw on: %p) makes the next prompt write an `experiments` entry and an exposure entry with the drawn arm", async drawnOn => {
+				const id = ids.find(i => draw(i, "aa_noop") === drawnOn) as string;
+				const arm = drawnOn ? "on" : "off";
+				writeGates({}, 1_000);
+				const b = await bind({}, rootFile(id), [], "main", path);
+				await b.start();
+				await b.request(await b.prompt());
+				expect(b.exposures()).toEqual([]);
+				writeGates({ aa_noop: "random" }, 2_000);
+				expect(await b.prompt()).toEqual([]);
+				const records = b.records();
+				expect(records).toHaveLength(2);
+				expect(records[1].features.aa_noop).toEqual({ gate: "random", draw: arm, on: drawnOn });
+				expect(await b.request([])).toEqual([]);
+				expect(b.exposures()).toEqual([{ v: 1, feature: "aa_noop", arm, gate: "random", rootSessionId: id, at: expect.any(String) }]);
+			});
+			test("a gate change between a prompt and its request voids that trigger: no entry for the old arm, and the next prompt records the arm in force", async () => {
+				const drawnOff = ids.find(id => !draw(id, "infra805_skill")) as string;
+				writeGates({ infra805_skill: "on" }, 1_000);
+				const b = await bind({}, rootFile(drawnOff), [], "main", path);
+				await b.start();
+				const delivered = await b.prompt();
+				expect(delivered).toEqual(deliveryOf("infra805_skill", skillText));
+				writeGates({ infra805_skill: "random" }, 2_000);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.exposures()).toEqual([]);
+				expect(await b.prompt()).toEqual([]);
+				expect(await b.request(delivered)).toEqual([]);
+				expect(b.exposures()).toEqual([{ v: 1, feature: "infra805_skill", arm: "off", gate: "random", rootSessionId: drawnOff, at: expect.any(String) }]);
+			});
 		});
 	});
 });

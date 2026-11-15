@@ -44,10 +44,21 @@
 // them (scrubText of text-arms.ts) runs outside the gate and the guard. It removes the text of the
 // feature from each request when the current arm is not on, when the feature stopped after a throw,
 // and in a Legion pane.
+// The text arms, and only they, also follow gates.json as it is on disk while omp runs. At each
+// before_agent_start and each context event, the extension looks at the mtime and the size of the
+// gates.json beside this file's real path. When either changed since the last look, it reads and
+// parses the file with the rules of resolveGates and the process environment, and draws the text
+// arms again from the same root id. When their resolution changes, it appends an `experiments`
+// entry, as at a resolution, so the join sees the arm in force. A file that cannot be read or
+// parsed is logged once, and the text arms keep their last good gates. So an `off` push stops the
+// text at the next request of every running session, and a gate that goes `random` assigns at the
+// next prompt. Every other feature keeps the gates it read at load.
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import bashGate from "./bash-gate";
 import gateFile from "./gates.json" with { type: "json" };
-import { ENTRY_TYPE, type ExperimentRecord, type Feature, resolve, resolveGates, rootSessionId } from "./gates";
+import { ENTRY_TYPE, type ExperimentRecord, type Feature, type Gates, resolve, resolveGates, rootSessionId } from "./gates";
 import judgeLog from "./judge-log";
 import proactiveMemory from "./proactive-memory";
 import rulesRefresh from "./rules-refresh";
@@ -79,14 +90,55 @@ type Ctx = {
 	};
 };
 
+/** gates.json beside this file's real path: the file the static import above reads at load. */
+const GATES_PATH = join(import.meta.dir, "gates.json");
+
 export default function experiments(pi: ExtensionAPI): void {
+	bindExperiments(pi, GATES_PATH);
+}
+
+/** The extension, with the text arms following the gates in `gatesPath` while omp runs. The tests give it a temp copy. */
+export function bindExperiments(pi: ExtensionAPI, gatesPath: string): void {
 	const gates = resolveGates(gateFile, process.env);
 	let current: ExperimentRecord | undefined;
 	const stopped = new Set<Feature>();
 
+	// The gates of the text arms, as gatesPath last read well, and the mtime and size of the version last looked at.
+	let liveGates: Gates = gates;
+	let liveVersion: string | undefined;
+	/** Reads gatesPath again when its mtime or size changed since the last look. True when that gave new good gates. */
+	const readLiveGates = (): boolean => {
+		let version: string;
+		try {
+			const stat = statSync(gatesPath);
+			version = `${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			version = "unreadable";
+		}
+		if (version === liveVersion) return false;
+		liveVersion = version;
+		try {
+			liveGates = resolveGates(JSON.parse(readFileSync(gatesPath, "utf8")), process.env);
+			return true;
+		} catch (error) {
+			pi.logger.error(`experiments: the text arms cannot read the gates in ${gatesPath}, so they keep their last good gates`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return false;
+		}
+	};
+	/** `record` with the text arms drawn again, from the same root id, under the live gates. */
+	const withLiveTextArms = (record: ExperimentRecord): ExperimentRecord => {
+		const live = resolve(liveGates, record.rootSessionId).features;
+		const features = { ...record.features };
+		for (const [feature] of TEXT_ARMS) features[feature] = live[feature];
+		return { ...record, features };
+	};
+
 	const resolveSession = (_event: unknown, ctx: Ctx) => {
 		const sm = ctx.sessionManager;
-		current = resolve(gates, rootSessionId(sm.getSessionFile(), sm.getSessionId()));
+		readLiveGates();
+		current = withLiveTextArms(resolve(gates, rootSessionId(sm.getSessionFile(), sm.getSessionId())));
 		stopped.clear();
 		const entries = sm.getEntries();
 		const last = entries.findLast(e => e.type === "custom" && e.customType === ENTRY_TYPE);
@@ -95,6 +147,16 @@ export default function experiments(pi: ExtensionAPI): void {
 	pi.on("session_start", resolveSession);
 	pi.on("session_switch", resolveSession);
 	pi.on("session_branch", resolveSession);
+	/** Registered before the text arms, so each of their handlers reads the arm in force. */
+	const followGates = () => {
+		if (current === undefined || !readLiveGates()) return;
+		const next = withLiveTextArms(current);
+		if (Bun.deepEquals(next, current)) return;
+		current = next;
+		pi.appendEntry(ENTRY_TYPE, current);
+	};
+	pi.on("before_agent_start", followGates);
+	pi.on("context", followGates);
 	// Before the first resolution a call gets the off arm, which is omp's own behavior.
 	bashGate(pi, () => current?.features.bash_gate_leading.on === true);
 
