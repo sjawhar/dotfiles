@@ -767,6 +767,39 @@ class TunnelSetup(unittest.TestCase):
                 ]
                 self.assertEqual(len(tunnel_restarts), 2)
 
+    def test_a_run_ends_no_process_this_test_did_not_spawn(self) -> None:
+        # Every agent on a machine shares its process table. On 2026-11-15 two runs of this file
+        # on oryx ended each other's old-tunnel fixtures, so one run's report lacked
+        # "old-tunnel: ended". A decoy started outside this test's fixtures, with the argv of an
+        # old tunnel and of a supervisor, stands for another run's fixture: it must survive.
+        self.checkout("git")
+        waiter, reaper = self.build_reaper()
+        decoys: dict[str, tuple[subprocess.Popen[str], int]] = {}
+        try:
+            for name, args in (
+                ("old tunnel", ["ssh", "-N", "-f", "oryx-tunnel"]),
+                ("supervisor", ["/bin/bash", str(self.root / "other-run" / "devbox"), "--tunnel-supervisor", "oryx"]),
+            ):
+                # The reaper reaps the decoy, so a decoy the run ends is gone and not a zombie.
+                process = subprocess.Popen([str(reaper), str(waiter), *args], stdout=subprocess.PIPE, text=True)
+                self.assertIsNotNone(process.stdout)
+                pid = int(process.stdout.readline().strip())
+                decoys[name] = (process, pid)
+                expected = "".join(f"{arg}\0" for arg in args).encode()
+                deadline = time.monotonic() + 10
+                while Path(f"/proc/{pid}/cmdline").read_bytes() != expected:
+                    self.assertLess(time.monotonic(), deadline, f"pid {pid} never ran {args}")
+                    time.sleep(0.01)
+            result = self.invoke(readme=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name, (_process, pid) in decoys.items():
+                self.assertTrue(self.process_is_alive(pid), f"the run ended the {name} decoy (pid {pid}), which this test did not spawn")
+        finally:
+            for process, pid in decoys.values():
+                if self.process_is_alive(pid):
+                    os.kill(pid, 9)
+                process.wait(timeout=5)
+
     def test_proxycommand_uses_token_environment_without_arguments(self) -> None:
         self.checkout("git")
         result = self.invoke(readme=True)
