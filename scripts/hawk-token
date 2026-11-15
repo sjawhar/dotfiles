@@ -231,6 +231,12 @@ publish() {
     python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$current.tmp.$$" "$current"
 }
 
+# legacy_checkout: whether $root holds the checkout that the single-checkout version
+# of this wrapper built; a caller adopts it by publishing it as the live slot.
+legacy_checkout() {
+    [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]
+}
+
 # save_token TOKEN: rewrite the last-good-token cache after a successful mint. Every
 # host session and every box shares $root and mints without a lock, so the token goes
 # to a temp file private to this process (the host name tells the boxes' pid
@@ -512,8 +518,7 @@ run_timer() {
         return 0
     fi
     if [ ! -L "$current" ]; then
-        if [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]; then
-            # A checkout built by the single-checkout version of this wrapper: adopt it.
+        if legacy_checkout; then
             publish agent-c
         elif bootstrap_first_run timer; then
             :
@@ -544,8 +549,7 @@ if [ "$#" -eq 1 ] && [ "$1" = "$REFRESH_ARG" ]; then
 fi
 
 if [ ! -L "$current" ]; then
-    if [ -f "$stamp" ] && [ -d "$root/agent-c/.git" ]; then
-        # A checkout built by the single-checkout version of this wrapper: adopt it.
+    if legacy_checkout; then
         publish agent-c
     else
         if bootstrap_first_run session; then
