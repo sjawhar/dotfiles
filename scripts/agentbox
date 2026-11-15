@@ -1044,10 +1044,10 @@ enroll_open_settle() {
 # ENROLLED_ID, and removes the marker and every error file. A failure leaves the marker for its
 # caller to end, with the reason in ENROLL_ERROR. `fallback` allows the 409 fallback below.
 # Each call also keeps ENROLL_OPEN up to date. A call that records an enrollment id removes the
-# entries of its runtime id and thumbprint: under one runtime id the broker gives a key the id of
-# its live enrollment, so the id that the host recorded is that of any live enrollment an earlier
-# call made. A call that exits non-zero, with a line that starts with one of these two prefixes,
-# made no enrollment and adds nothing:
+# entries of its runtime id and thumbprint: under one launcher credential and one runtime id the
+# broker gives a key the id of its live enrollment, so the id that the host recorded is that of
+# any live enrollment an earlier call made under that credential. A call that exits non-zero,
+# with a line that starts with one of these two prefixes, made no enrollment and adds nothing:
 #   `agent-secrets enroll: ENROLL_FAILED: `
 #   `agent-secrets enroll: DRAINING: `
 # Only the code in that place counts. The same word in other text of the error does not count.
@@ -1362,11 +1362,13 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 #
 # The learn call (unenroll_learn) gets the id of an open entry from the broker. It is the enroll
 # call of the entry: the same runtime id and thumbprint, and no session id. While an enrollment
-# of that runtime id and key is live, the broker gives back its id, whatever the session id
-# (broker enroll.go recoverConflict). When none is live, the broker makes a new enrollment. That
-# enrollment names no session, and the broker moves a session's grants only to an enrollment
-# that names the session (adopt). So a learn call cannot take the grants of a live box. The
-# close writes no record of a learned id. It only revokes the id (unenroll_revoke).
+# of that runtime id and key is live under the launcher credential that the helper signs with,
+# the broker gives back its id, whatever the session id (broker enroll.go recoverConflict; the
+# helper signs with a person's sign-in when it has one, and with the machine login otherwise).
+# When none is live, the broker makes a new enrollment. That enrollment names no session, and the
+# broker moves a session's grants only to an enrollment that names the session (adopt). So a learn
+# call cannot take the grants of a live box. The close writes no record of a learned id. It only
+# revokes the id (unenroll_revoke).
 #
 # A SESSION's enrollment is not this box's to end: revoking it ends the id every box of the
 # session signs with. The broker keeps the session's pending requests and grants dormant for its
