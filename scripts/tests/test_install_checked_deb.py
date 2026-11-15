@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-import gzip
 import hashlib
-import io
 import json
 import os
 import shutil
 import stat
 import subprocess
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,8 +83,21 @@ exit "${{APT_STATUS:-0}}"''',
         write_command(
             self.bin_dir,
             "dpkg",
-            f'''FAKE_COMMAND=dpkg {logger}
+            f'''if [[ "${{1:-}}" == --compare-versions ]]; then
+    exec /usr/bin/dpkg "$@"
+fi
+FAKE_COMMAND=dpkg {logger}
 exit "${{DPKG_STATUS:-0}}"''',
+        )
+        write_command(
+            self.bin_dir,
+            "dpkg-query",
+            '''if [[ -v DPKG_QUERY_OUTPUT ]]; then
+    printf '%s' "$DPKG_QUERY_OUTPUT"
+    exit 0
+fi
+echo "dpkg-query: no packages found matching ${!#}" >&2
+exit 1''',
         )
 
     def build_deb(
@@ -125,59 +135,6 @@ exit "${{DPKG_STATUS:-0}}"''',
             text=True,
         )
         return deb
-
-    @staticmethod
-    def _tar_gzip(files: dict[str, bytes]) -> bytes:
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w", format=tarfile.GNU_FORMAT) as archive:
-            for name, contents in files.items():
-                entry = tarfile.TarInfo(name)
-                entry.mode = 0o644
-                entry.size = len(contents)
-                entry.mtime = 0
-                archive.addfile(entry, io.BytesIO(contents))
-        return gzip.compress(buffer.getvalue(), mtime=0)
-
-    @staticmethod
-    def _ar_member(name: str, contents: bytes) -> bytes:
-        header = (
-            f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{0o100644:<8o}{len(contents):<10}`\n".encode(
-                "ascii"
-            )
-        )
-        assert len(header) == 60
-        return header + contents + (b"\n" if len(contents) % 2 else b"")
-
-    def build_folded_deb(self) -> Path:
-        """Build an ar package whose Depends field retains a folded line."""
-        control = (
-            "Package: checked-deb-folded\n"
-            "Version: 1.0\n"
-            "Architecture: all\n"
-            "Maintainer: Test <test@example.invalid>\n"
-            "Depends: debconf (>= 0.5),\n"
-            " rsync\n"
-            "Description: package with a folded dependency\n"
-        ).encode("utf-8")
-        control_tar = self._tar_gzip({"control": control})
-        data_tar = self._tar_gzip({})
-        deb = self.root / "folded.deb"
-        deb.write_bytes(
-            b"!<arch>\n"
-            + self._ar_member("debian-binary", b"2.0\n")
-            + self._ar_member("control.tar.gz", control_tar)
-            + self._ar_member("data.tar.gz", data_tar)
-        )
-        return deb
-
-    def field(self, deb: Path, name: str) -> str:
-        """Read a package control field with the real dpkg-deb command."""
-        return subprocess.run(
-            ["dpkg-deb", "--field", str(deb), name],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
 
     def read_calls(self) -> list[dict[str, object]]:
         """Read the fake command records in call order."""
@@ -284,7 +241,7 @@ exit "${{DPKG_STATUS:-0}}"''',
         )
 
     def test_folded_depends_is_passed_unchanged(self) -> None:
-        deb = self.build_folded_deb()
+        deb = self.build_deb(depends="debconf (>= 0.5),\n rsync")
         control = subprocess.run(
             ["dpkg-deb", "--info", str(deb), "control"],
             check=True,
@@ -292,8 +249,6 @@ exit "${{DPKG_STATUS:-0}}"''',
             text=True,
         ).stdout
         self.assertIn("Depends: debconf (>= 0.5),\n rsync\n", control)
-        expected_depends = self.field(deb, "Depends").rstrip("\n")
-        self.assertEqual(expected_depends, "debconf (>= 0.5), rsync")
 
         result = self.run_helper(deb, sha256_file(deb))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -301,7 +256,7 @@ exit "${{DPKG_STATUS:-0}}"''',
         calls = self.read_calls()
         self.assertEqual(
             calls[0]["argv"],
-            ["satisfy", "-y", "--no-install-recommends", expected_depends],
+            ["satisfy", "-y", "--no-install-recommends", "debconf (>= 0.5), rsync"],
         )
 
     def test_wrong_sha256_returns_one_without_install(self) -> None:
@@ -349,6 +304,69 @@ exit "${{DPKG_STATUS:-0}}"''',
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual([call["cmd"] for call in self.read_calls()], ["dpkg"])
 
+    def test_newer_installed_version_is_refused(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "install installed 2.0"},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("checked-deb-control 2.0 is installed, newer than 1.0", result.stderr)
+        self.assertIn("installed nothing", result.stderr)
+        self.assertEqual(self.read_calls(), [])
+
+    def test_package_held_at_another_version_is_refused(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "hold installed 0.5"},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("checked-deb-control is on hold at 0.5", result.stderr)
+        self.assertIn("installed nothing", result.stderr)
+        self.assertEqual(self.read_calls(), [])
+
+    def test_older_installed_version_is_upgraded(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        result = self.run_helper(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "install installed 0.5"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        calls = self.read_calls()
+        self.assertEqual([call["cmd"] for call in calls], ["apt-get", "dpkg"])
+        self.assertEqual(calls[1]["argv"], ["-i", str(deb)])
+
+    def test_package_held_at_the_same_version_is_installed(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        result = self.run_helper(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "hold half-configured 1.0"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        calls = self.read_calls()
+        self.assertEqual([call["cmd"] for call in calls], ["apt-get", "dpkg"])
+        self.assertEqual(calls[1]["argv"], ["-i", str(deb)])
+
+    def test_newer_configuration_files_only_are_not_installed(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        result = self.run_helper(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "deinstall config-files 2.0"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        calls = self.read_calls()
+        self.assertEqual([call["cmd"] for call in calls], ["apt-get", "dpkg"])
+        self.assertEqual(calls[1]["argv"], ["-i", str(deb)])
+
     def assert_caller_state(self, deb: Path, expected: str, handled_failure: bool) -> None:
         """Compare caller state before and after a successful or handled call."""
         caller_dir = self.root / ("caller-failure" if handled_failure else "caller-success")
@@ -365,13 +383,19 @@ exit "${{DPKG_STATUS:-0}}"''',
             f'''deb=deb-sentinel
 expected=expected-sentinel
 actual=actual-sentinel
+package=package-sentinel
+version=version-sentinel
+installed=installed-sentinel
+want=want-sentinel
+state=state-sentinel
+installed_version=installed-version-sentinel
 pre_depends=pre-depends-sentinel
 depends=depends-sentinel
 deps=(deps-zero deps-one)
 trap 'echo bye' EXIT
 cd "$CALLER_DIR"
 state() {{
-    declare -p deb expected actual pre_depends depends deps
+    declare -p deb expected actual package version installed want state installed_version pre_depends depends deps
     trap -p EXIT
     printf 'shell-options=%s\\n' "$-"
     shopt -o pipefail

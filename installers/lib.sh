@@ -81,15 +81,36 @@ ensure_json() {
 
 # apt 2.8 can install a configured source's same-version copy instead of a local file
 # (Debian bug #1058934), so apt gets only dependency fields and dpkg gets the checked file.
+# It keeps the two refusals of apt that `dpkg -i` lacks: it installs nothing over a newer
+# installed version or over a package held at another version.
 # Every step returns its own failure because `||` and `if` callers disable `set -e` inside it.
 install_checked_deb() {
     local deb="$1" expected="$2"
-    local actual pre_depends depends
+    local actual package version installed want state installed_version pre_depends depends
     local -a deps=()
     actual="$(sha256sum -- "$deb")" || return 1
     actual="${actual%% *}"
     if [[ "$actual" != "$expected" ]]; then
         echo "install_checked_deb: SHA-256 of $deb is $actual, expected $expected; installed nothing" >&2
+        return 1
+    fi
+    package="$(dpkg-deb --field "$deb" Package)" || return 1
+    version="$(dpkg-deb --field "$deb" Version)" || return 1
+    # dpkg-query exits 1 for a package dpkg does not know (nothing is installed); any other
+    # failure is an error.
+    installed="$(dpkg-query -W -f='${db:Status-Want} ${db:Status-Status} ${Version}' "$package" 2>/dev/null)" || {
+        (($? == 1)) || return 1
+        installed=""
+    }
+    read -r want state installed_version <<< "$installed"
+    if [[ "$want" == hold && "$installed_version" != "$version" ]]; then
+        echo "install_checked_deb: $package is on hold at $installed_version; installed nothing (apt-mark unhold $package to install $version)" >&2
+        return 1
+    fi
+    # apt counts neither `config-files` (only configuration files left) nor `not-installed` as installed.
+    if [[ "$state" != config-files && "$state" != not-installed ]] \
+        && dpkg --compare-versions "$installed_version" gt "$version"; then
+        echo "install_checked_deb: $package $installed_version is installed, newer than $version; installed nothing" >&2
         return 1
     fi
     pre_depends="$(dpkg-deb --field "$deb" Pre-Depends)" || return 1
