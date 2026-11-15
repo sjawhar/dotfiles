@@ -1371,6 +1371,106 @@ class OpenAttempts(EnrollFixture):
             ],
         )
 
+    def close_then_enroll_another_box(self, steps: str, **stubs: str) -> Path:
+        """`steps`, then the close. During the grace (STUB_GRACE_UNTIL, 180 s), box C of the same
+        session starts its enrollment: its enroll_key touches the session's key dir before its
+        first call, and C has no `owner` and no `enrollment-session` yet, so tests 1 and 2 cannot
+        see it. The body waits 0.1 s first, so the touch is not within the kernel's timestamp
+        granularity of the close. Returns the session's key dir."""
+        grace_over = self.run_base / "grace-over"
+        self.close(
+            steps,
+            after=f'/bin/sleep 0.1\ntouch "$RUN_BASE/session-keys/sid-1"\n: >"{grace_over}"',
+            AGENTBOX_UNENROLL_GRACE="180",
+            STUB_GRACE_UNTIL=str(grace_over),
+            **stubs,
+        )
+        return self.run_base / "session-keys" / "sid-1"
+
+    def test_a_box_that_starts_to_enroll_for_the_session_keeps_the_open_enrollment(self) -> None:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone, and
+        each enroll call of box1 for the session ends with its outcome not known. Then
+        close_then_enroll_another_box. The waiter's test 3 sees that the session's key dir changed
+        after the close: no learn call, no unenroll call, the key dir kept, and one line that says
+        so."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        self.close_then_enroll_another_box("enroll_box box1 sid-1 || true", STUB_ENROLL="unknown")
+        self.assertEqual(self.learn_calls(), [])
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((skd / "key.pem").exists())
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1: its key dir changed after the close, as when a box starts to enroll"
+                " for the session; enrollment none left alone, and the enrollment of each open attempt:"
+                f" {self.SESSION_OPEN}"
+            ],
+        )
+
+    def test_a_box_that_starts_to_enroll_for_the_session_keeps_the_recorded_enrollment(self) -> None:
+        """box1 enrolls for session sid-1 and records enr-1 (owner box1). Then
+        close_then_enroll_another_box. The waiter's test 3 sees that the session's key dir changed
+        after the close: no unenroll call, enr-1 still live, the key dir kept, and one line that
+        says so."""
+        skd = self.close_then_enroll_another_box("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((skd / "key.pem").exists())
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1: its key dir changed after the close, as when a box starts to enroll"
+                " for the session; enrollment enr-1 left alone"
+            ],
+        )
+
+    def waiter(self, skd: Path, owner: str, closed: str) -> list[str]:
+        """unenroll_session_wait called directly, with a grace of 0 s, for box1 of session sid-1:
+        SKD `skd`, OWNER `owner`, EID enr-1, SELF this script (which answers `none`: no other box
+        is in the run dir) and CLOSED `closed`. Returns its lines without their UTC time."""
+        result = self.bash(
+            f'unenroll_session_wait 0 "$RUN_BASE" "{skd}" box1 sid-1 "{owner}" enr-1'
+            f' "$DOTFILES_DIR/scripts/agentbox" "{closed}"'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [m.group(1) if (m := self.TIMED.fullmatch(line)) else line for line in result.stdout.splitlines()]
+
+    def test_a_waiter_that_cannot_read_the_close_time_leaves_the_enrollments_alone(self) -> None:
+        """The waiter's CLOSED is not a number. Tests 1 and 2 pass, and test 3 cannot be read: no
+        unenroll call, the session's key dir kept, and one line that says test 3 could not be
+        read."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        lines = self.waiter(skd, "box0", "not-a-time")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(
+            lines[0].startswith("box1: session sid-1: test 3 could not be read (the close's time 'not-a-time',"),
+            lines,
+        )
+        self.assertTrue(lines[0].endswith("; enrollment enr-1 left alone"), lines)
+        self.assertEqual(self.calls_matching("unenroll "), [])
+        self.assertTrue(skd.exists())
+
+    def test_a_waiter_whose_session_key_dir_is_gone_ends_the_enrollment(self) -> None:
+        """The session's key dir is gone at the wake (no box has made it again), and `owner` read
+        nothing at the close. All three tests pass: one unenroll call, of enr-1, and the lines
+        that say the session did not come back and that enr-1 is revoked."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        lines = self.waiter(skd, "", str(time.time_ns()))
+        self.assertEqual(
+            lines,
+            [
+                "box1: session sid-1 did not come back; ending enrollment enr-1",
+                "box1: enrollment enr-1 (recorded) revoked",
+            ],
+        )
+        # The stub logs a call as `unenroll <its arguments>`, which start with `unenroll` too.
+        self.assertEqual(self.calls_matching("unenroll "), ["unenroll unenroll --helper --enrollment enr-1"])
+
     def test_a_learn_call_that_fails_leaves_the_enrollment_to_its_lease(self) -> None:
         """The learn call is refused ENROLL_FAILED, or ends with its outcome not known. unenroll.log
         holds one line, which names the open attempt and the client's answer and says that the

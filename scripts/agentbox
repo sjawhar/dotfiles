@@ -1379,8 +1379,8 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 # endEnrollment, adopt), but a move must keep the id itself. So the waiter gives the session its
 # grace to come back in another box, and ends the enrollments only if none did.
 #
-# The waiter has TWO tests, because the first one alone is blind to the box that enrolled
-# BEFORE this one. Test 1 reads `owner`, the name of the last box that enrolled for the session.
+# The waiter has THREE tests. The first one alone is blind to the box that enrolled BEFORE this
+# one. Test 1 reads `owner`, the name of the last box that enrolled for the session.
 # When a DUPLICATE box of a live session ends, owner still names the duplicate, and test 1 alone
 # reads that as "nobody came back". It then ends the enrollment of the session's ORIGINAL box,
 # which still runs. The enrollment is the SESSION's (runtime id `session-<id>`), not the box's,
@@ -1392,8 +1392,15 @@ AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 # box recorded none (its enroll calls for the session came back open), owner names an earlier box
 # of the session, or nothing. So test 1 then passes while owner is what it was at the close. A box
 # that enrolls for the session during the grace writes its own name there.
+# Tests 1 and 2 see a box only once its enroll call has succeeded. A box that is still enrolling,
+# as under a slow broker, writes neither owner nor enrollment-session yet, but its enroll_key has
+# touched the session's key dir before its first call. Test 3 passes while the key dir's mtime is
+# not later than the close, whose time unenroll_box gives the waiter.
 unenroll_box() {
-    local box="$1" eid="" sid="" skd owner fns e own=() ses=()
+    local box="$1" eid="" sid="" skd owner fns e own=() ses=() closed
+    # The close's time for the waiter's test 3, in nanoseconds. A value that is not a number
+    # makes the waiter leave everything alone.
+    closed="$(date +%s%N 2>/dev/null)" || closed=""
     # The read builtin, not `$(<file)`: under `set -e`, `$(<file)` of a file that cannot be opened
     # ends close_box or reap_box, and another close of the box can remove the file at any time. A
     # file that is missing or cannot be read reads as empty.
@@ -1439,7 +1446,7 @@ unenroll_box() {
     setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
         bash -c "$fns"$'\n''unenroll_session_wait "$@"' agentbox-unenroll \
         "$AGENTBOX_UNENROLL_GRACE" "$RUN_BASE" "$skd" "$box" "$sid" "$owner" "$eid" \
-        "$DOTFILES_DIR/scripts/agentbox" ${ses[@]+"${ses[@]}"} \
+        "$DOTFILES_DIR/scripts/agentbox" "$closed" ${ses[@]+"${ses[@]}"} \
         </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
     return 0
 }
@@ -1517,26 +1524,31 @@ unenroll_learn_each() {
     return 0
 }
 
-# unenroll_session_wait GRACE RUN_BASE SKD BOX SID OWNER EID SELF ENTRY...: the session waiter
-# (unenroll_box). After GRACE seconds it runs the two tests. Test 1: SKD/owner still reads OWNER.
-# Test 2: `SELF session-live-box SID BOX` exits 1 and prints `none`, which is its answer "no other
-# box of the session is live" (session_live_box). SELF is this script. Each other answer stops the
-# waiter, and one line names the recorded id EID (or `none`) and each open ENTRY, all left alone:
+# unenroll_session_wait GRACE RUN_BASE SKD BOX SID OWNER EID SELF CLOSED ENTRY...: the session
+# waiter (unenroll_box). After GRACE seconds it runs the three tests. Test 1: SKD/owner still reads
+# OWNER. Test 2: `SELF session-live-box SID BOX` exits 1 and prints `none`, which is its answer "no
+# other box of the session is live" (session_live_box). SELF is this script. Test 3: SKD's mtime is
+# not later than CLOSED, the close's time in nanoseconds; a missing SKD passes, since a box that
+# enrolls for the session makes it again. Each other answer stops the waiter, and one line names
+# the recorded id EID (or `none`) and each open ENTRY, all left alone:
 #   - Test 1 fails, or SELF exits 0 and prints a box name: the session is live.
 #   - Any other answer of SELF: test 2 could not be read. Examples are status 2 (session_live_box
 #     could not look), status 1 with no output (SELF ended before it looked, as under `set -e`)
 #     and status 0 with no output (as when a publish replaces SELF during the read). The line also
 #     names the status and the output of SELF, and says that an enrollment that no box renews ends
 #     with its lease (15 min). SKD stays.
+#   - Test 3 fails: a box started to enroll for the session after the close. SKD stays.
+#   - CLOSED is not a number, or SKD is there and its mtime cannot be read: test 3 could not be
+#     read. The line says so, and that the enrollments end with their lease. SKD stays.
 # The waiter must not guess "none": the session's recorded id is the id of every box of the
 # session, and a learn call with the session's key gets the id of the live enrollment back
-# (unenroll_box). When both tests pass, it removes SKD, the session's key dir, and writes one
+# (unenroll_box). When all three tests pass, it removes SKD, the session's key dir, and writes one
 # line. Then it revokes EID, when there is one (unenroll_revoke), and learns and revokes each
 # ENTRY (unenroll_learn_each).
 unenroll_session_wait() {
     local grace="$1" run_base="$2" skd="$3" box="$4" sid="$5" owner="$6" eid="$7" self="$8"
-    local now live rc open=""
-    shift 8
+    local closed="$9" now live rc mtime="" open=""
+    shift 9
     if (( $# )); then
         printf -v open '%s; ' "$@"
         open=", and the enrollment of each open attempt: ${open%; }"
@@ -1555,6 +1567,15 @@ unenroll_session_wait() {
     fi
     if (( rc != 1 )) || [[ "$live" != none ]]; then
         echo "$(date -u +%FT%TZ) $box: session $sid: test 2 could not be read (session-live-box exited $rc and printed '${live//$'\n'/ }'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    [[ ! -e "$skd" ]] || mtime="$(stat -c %.9Y -- "$skd" 2>/dev/null || true)"
+    if [[ ! "$closed" =~ ^[0-9]+$ ]] || [[ -e "$skd" && ! "$mtime" =~ ^[0-9]+\.[0-9]{9}$ ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid: test 3 could not be read (the close's time '$closed', the key dir's mtime '$mtime'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    if [[ -n "$mtime" ]] && (( 10#${mtime/./} > 10#$closed )); then
+        echo "$(date -u +%FT%TZ) $box: session $sid: its key dir changed after the close, as when a box starts to enroll for the session; enrollment ${eid:-none} left alone$open"
         return 0
     fi
     rm -rf "${skd:?}"
