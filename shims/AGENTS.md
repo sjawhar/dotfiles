@@ -346,8 +346,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   systemd user scope with a hard memory cap and swap off: `OMP_MEMORY_MAX=<size>`, by default the
   larger of 24G and MemTotal/20 in whole GiB (dispatch://INFRA-898: the largest of 44 sessions
   measured on 2026-10-31 held 17.8 GiB; dispatch://INFRA-993: 24G on sami-rocqperf, 109G on
-  sami-devbox), a caller's value clamped at four times the default. The shim waits for the session instead of exec'ing, and says on
-  the pane when the cap was what killed it. A session inside such a scope exports
+  sami-devbox), a caller's value clamped at four times the default. The shim waits for the
+  session instead of exec'ing, and says on the pane when the cap was what killed it. After that
+  wait it runs `scripts/go-build-session-sweep` once, so the session's Go build cache is gone when
+  the prompt comes back; a large cache makes the prompt wait. A session inside such a scope exports
   `OMP_MEMORY_SCOPE`, so an omp it starts takes no default and shares the parent's scope. One
   session reached 138.0 GiB on 2026-10-26 and the box-wide OOM
   killer took two unrelated pods with it; inside a scope only that session dies. `MemoryHigh` is

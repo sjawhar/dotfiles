@@ -446,6 +446,35 @@ elif [[ -n "${OMP_MEMORY_MAX:-}" ]] && command -v systemd-run >/dev/null 2>&1; t
             echo "omp: this session was killed at its $mem_max memory ceiling (OMP_MEMORY_MAX)." >&2
             echo "omp: resume it with 'omp --resume <session-id>'; raise the ceiling if it was real work." >&2
         fi
+        # Remove this session's Go build cache now that the session has ended, and every other
+        # dead one, before the prompt comes back (scripts/go-build-session-sweep). The cache home
+        # is read through the machine-local env file, because scripts/agent-session reads it there.
+        # A large cache makes the prompt wait. A failed or interrupted sweep keeps the session's
+        # exit status, and the next launch removes what is left. The paths without this wait
+        # leave the removal to the next launch through scripts/agent-session.
+        #
+        # The session is gone, so the traps above have nothing to forward to: their `kill` of the
+        # reaped pid would fail, and under `set -e` a Ctrl-C during the sweep would end the
+        # wrapper with that failure instead of the session's status. A handler that does nothing
+        # keeps the status; the sweep, in the terminal's process group, still ends on a Ctrl-C.
+        for sig in INT TERM HUP QUIT; do
+            trap : "$sig"
+        done
+        go_session_sweep="$DOTFILES_DIR/scripts/go-build-session-sweep"
+        if [[ -x "$go_session_sweep" ]]; then
+            go_cache_home=""
+            session_env="${XDG_CONFIG_HOME:-$HOME/.config}/agent-session/env"
+            if [[ -f "$session_env" && -O "$session_env" ]] \
+                && [[ -z "$(find "$session_env" -perm /022 -print -quit 2>/dev/null)" ]]; then
+                go_cache_home="$(
+                    # shellcheck source=/dev/null
+                    source "$session_env" >/dev/null 2>&1 && printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}"
+                )" || go_cache_home=""
+            fi
+            go_cache_home="${go_cache_home:-${XDG_CACHE_HOME:-$HOME/.cache}}"
+            "$go_session_sweep" "$go_cache_home/go-build-session" || true
+        fi
+
         exit "$omp_status"
     fi
     echo "omp: systemd-run refused a $mem_max scope; starting without a memory ceiling" >&2

@@ -16,7 +16,9 @@
 #     the user, unless the caller names a credential file of its own; on a Google VM it sets
 #     none, and the libraries take the VM's account from the metadata server;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
-#     caches there, on a machine that has one (below); on one that has not, nothing changes;
+#     caches there, on a machine that has one (below); on one that has not, it gives each agent
+#     session a Go build cache of its own in ${XDG_CACHE_HOME:-~/.cache}/go-build-session/ and
+#     keeps the other home defaults;
 #   - points omp's session-store fallback ledger at the durable disk, which the host and every
 #     agent box share, so one file holds the whole machine's fallbacks (below);
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
@@ -185,6 +187,11 @@ if [[ -f "$session_env" && -O "$session_env" ]]; then
     fi
 fi
 
+# Where each agent session's own Go build cache goes on a machine without the big disk (below),
+# and the root the sweep before the exec reads. After the machine-local file, which may set
+# XDG_CACHE_HOME; shims/omp reads the same file for the same reason.
+go_session_root="${XDG_CACHE_HOME:-$HOME/.cache}/go-build-session"
+
 # Scratch and language caches on the big disk, where this machine has one (dispatch://INFRA-613).
 # Root holds every session's transcript, so a root that fills wedges the whole box, and on
 # 2026-10-27 it filled in 5h41m - not from one writer, but from thousands of tool runs writing
@@ -194,7 +201,9 @@ fi
 #
 # A caller's value always wins, and a machine without the directory keeps the home defaults: a
 # laptop, and an agent box, which mounts an allow-list of $HOME and no /mnt at all
-# (agentbox/AGENTS.md), so no box session is given a path it would lose with the box.
+# (agentbox/AGENTS.md), so no box session is given a path it would lose with the box. The one
+# exception is the Go build cache: on such a machine each agent session gets one of its own in
+# ${XDG_CACHE_HOME:-~/.cache}/go-build-session/ (below).
 #
 # TMPDIR is per session and removed when the session ends: the directory is named for this
 # shell's pid, which is the agent's own pid (every hop from here is an exec), and
@@ -248,8 +257,8 @@ if [[ -d "$nvme_home" ]]; then
     # `go test` in the box-wide directory, and that build failed on "vet.cfg: no such file or
     # directory". The box-wide value that .bashrc and the systemd manager (devbox/nvme-tmp.conf,
     # scratch-tmp.conf) give every shell counts as unset; any other value a caller set wins, so a
-    # nested launch keeps its parent session's. GOCACHE stays shared: that is
-    # where builds reuse each other's work.
+    # nested launch keeps its parent session's. On this machine GOCACHE stays shared; a machine
+    # without the big disk gives each session a cache of its own (below).
     if [[ -z "${GOTMPDIR:-}" || "$GOTMPDIR" == "$shared_gotmp" || "$GOTMPDIR" == "$nvme_home/gotmp" ]]; then
         if [[ -n "${AGENT_SESSION_SCRATCH:-}" && -d "$AGENT_SESSION_SCRATCH" ]] && mkdir -p "$AGENT_SESSION_SCRATCH/gotmp" 2>/dev/null \
             && [[ -w "$AGENT_SESSION_SCRATCH/gotmp" ]]; then
@@ -259,6 +268,36 @@ if [[ -d "$nvme_home" ]]; then
         fi
     fi
     unset shared_gotmp
+elif [[ -r /proc/$$/stat && -r /proc/sys/kernel/random/boot_id ]]; then
+    # A machine without the big disk gives each agent process one cache, named
+    # <pid>-<start>-<boot> (dispatch://HOME-234). The detached sweep removes dead caches at a
+    # later launch, and shims/omp removes them when its wrapper returns. A nested launch gets its
+    # own cache; a caller's value outside go-build-session/ wins.
+    go_session_cache="${GOCACHE:-}"
+    while [[ "$go_session_cache" != / && "$go_session_cache" == */ ]]; do
+        go_session_cache="${go_session_cache%/}"
+    done
+    if [[ -z "$go_session_cache" || "$go_session_cache" == */go-build-session/* ]]; then
+        stat=""
+        start=""
+        boot=""
+        if read -r stat < /proc/$$/stat && read -r boot < /proc/sys/kernel/random/boot_id; then
+            stat="${stat##*) }"
+            read -ra stat_fields <<< "$stat"
+            start="${stat_fields[19]:-}"
+        fi
+        dir="$go_session_root/$$-$start-$boot"
+        if [[ "$start" =~ ^[0-9]+$ && "$boot" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+            && mkdir -p -- "$go_session_root" 2>/dev/null \
+            && { mkdir -m 700 -- "$dir" 2>/dev/null || [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]]; } \
+            && chmod 700 -- "$dir" 2>/dev/null; then
+            export GOCACHE="$dir"
+        else
+            unset GOCACHE
+            printf 'agent-session: cannot make %s; GOCACHE is unset, so Go uses its default cache\n' "$dir" >&2
+        fi
+    fi
+    unset go_session_cache stat stat_fields start boot dir
 fi
 
 # The fallback ledger of omp's Postgres session store (dispatch://INFRA-1192). Under
@@ -415,5 +454,19 @@ fi
 # shellcheck source=SCRIPTDIR/agent-spend-env.sh
 . "$DOTFILES_DIR/scripts/agent-spend-env.sh"
 agent_spend_env "$prog" "$@"
+
+# Remove the Go build caches of sessions that ended (scripts/go-build-session-sweep,
+# dispatch://HOME-234). It runs detached, so the launch does not wait for the removal; it is
+# started from a subshell that exits at once, so the agent gets neither a child nor a zombie; and
+# it holds none of the caller's pipes, so a caller that reads the agent's output to its end does
+# not wait for it either.
+sweep="$DOTFILES_DIR/scripts/go-build-session-sweep"
+if [[ -x "$sweep" ]]; then
+    if command -v setsid >/dev/null 2>&1; then
+        ( setsid "$sweep" "$go_session_root" </dev/null >/dev/null 2>&1 & )
+    else
+        ( "$sweep" "$go_session_root" </dev/null >/dev/null 2>&1 & )
+    fi
+fi
 
 exec "$DOTFILES_DIR/scripts/agent-secrets-session" "$prog" "$@"

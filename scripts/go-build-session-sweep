@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# go-build-session-sweep: remove the Go build caches of agent sessions that have ended.
+#
+#   go-build-session-sweep <root>
+#
+# On a machine without the big disk, scripts/agent-session gives each agent process a Go build
+# cache of its own, <root>/<pid>-<start>-<boot>, so a Go test loop in one session no longer fills
+# the one cache every session and shell shares (dispatch://HOME-234). This removes the caches whose
+# process is gone. Two callers run it, and nothing else does: scripts/agent-session, detached, at
+# each launch, and shims/omp once after its wait for the session. It makes one pass over <root>
+# and exits; it adds no timer and waits for no session.
+#
+# A directory is dead, and removed, when its name has exactly that shape (no leading zero, a
+# lower-case boot ID) and its <boot> is not the current boot, or no process has its <pid>, or the
+# process with that <pid> started at another time (field 22 of /proc/<pid>/stat, compared as a
+# string). Everything else stays: a symlink, a regular file, any other name. When it cannot tell,
+# it keeps: it removes nothing when the current boot ID or /proc/self/stat cannot be read, and it
+# keeps a directory whose process exists but whose stat cannot be read or is too short.
+# GO_BUILD_SESSION_SWEEP_PROC replaces /proc, for the tests.
+set -uo pipefail
+
+if (( $# != 1 )); then
+    echo "usage: go-build-session-sweep <root>" >&2
+    exit 2
+fi
+
+root="$1"
+while [[ "$root" != / && "$root" == */ ]]; do
+    root="${root%/}"
+done
+[[ -d "$root" ]] || exit 0
+
+proc="${GO_BUILD_SESSION_SWEEP_PROC:-/proc}"
+current_boot=""
+if ! read -r current_boot < "$proc/sys/kernel/random/boot_id"; then
+    exit 0
+fi
+if ! [[ "$current_boot" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    exit 0
+fi
+if ! read -r _ < "$proc/self/stat"; then
+    exit 0
+fi
+
+shopt -s nullglob
+for entry in "$root"/*; do
+    [[ -d "$entry" && ! -L "$entry" ]] || continue
+
+    name="${entry##*/}"
+    [[ "$name" =~ ^([1-9][0-9]*)-(0|[1-9][0-9]*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$ ]] || continue
+    pid="${BASH_REMATCH[1]}"
+    start="${BASH_REMATCH[2]}"
+    entry_boot="${BASH_REMATCH[3]}"
+
+    dead=0
+    if [[ "$entry_boot" != "$current_boot" ]]; then
+        dead=1
+    elif [[ ! -e "$proc/$pid" ]]; then
+        dead=1
+    else
+        stat=""
+        if ! read -r stat < "$proc/$pid/stat"; then
+            continue
+        fi
+        stat="${stat##*) }"
+        stat_fields=()
+        read -ra stat_fields <<< "$stat"
+        (( ${#stat_fields[@]} > 19 )) || continue
+        process_start="${stat_fields[19]}"
+        [[ "$process_start" == "$start" ]] || dead=1
+    fi
+
+    (( dead )) || continue
+    if ! rm -rf -- "$entry"; then
+        printf 'go-build-session-sweep: could not remove %s\n' "$entry" >&2
+    fi
+done
+
+exit 0

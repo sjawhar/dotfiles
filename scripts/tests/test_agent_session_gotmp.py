@@ -5,7 +5,7 @@ On 2026-11-03 at 16:20:04Z one session's cleanup, `rm -rf /mnt/nvme/sami/gotmp/g
 the live build tree of another session's `go test` in the box-wide GOTMPDIR. Each session now builds
 in <its AGENT_SESSION_SCRATCH>/gotmp, which session-scratch-reap removes with the scratch directory.
 The box-wide value every shell inherits counts as unset; any other value a caller set wins; GOCACHE
-stays shared.
+stays shared on such a machine.
 
 Technique: AGENT_SESSION_NVME_HOME points the script at a scratch tree, USER is a name with no
 /mnt/scratch/<user>, agent-secrets-session is a stub that execs its argv, and the agent prints its
