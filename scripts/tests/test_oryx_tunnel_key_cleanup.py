@@ -560,6 +560,10 @@ class OryxTunnelKeyCleanup(unittest.TestCase):
         finally:
             for signum, handler in saved.items():
                 real_signal(signum, handler)
+            # Record, then stop, what the run left, so a failing run (main's file) leaves nothing.
+            new_children = [child for child in _own_children() if child not in initial_children]
+            for pid, _ in new_children:
+                _stop_and_reap(pid)
 
         self.assertEqual(
             fired, [signal.SIGTERM], "setUp never installed a SIGTERM handler of the test"
@@ -575,7 +579,6 @@ class OryxTunnelKeyCleanup(unittest.TestCase):
             "the SIGTERM did not reach the handler that was installed before the test",
         )
         self.assertEqual(_child_subreaper(), previous_subreaper)
-        new_children = [child for child in _own_children() if child not in initial_children]
         self.assertEqual(new_children, [], "the run left a child process")
 
 
