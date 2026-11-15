@@ -18,6 +18,7 @@ unit that started it.
 from __future__ import annotations
 
 import base64
+import calendar
 import json
 import os
 import re
@@ -741,9 +742,22 @@ class WaitAfterFailure(HawkTokenFixture):
         self.make_live()
         self.set_control("git", {"fetch_fail": True})
 
+        first_started = time.time()
         first = self.timer_run()
+        first_ended = time.time()
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(len(self.git_calls("fetch")), 1)
+        match = re.search(
+            r"^hawk-token: refresh of (?P<slot>[^ ]+) failed; still minting from "
+            r"(?P<live>[^;]+); next try after (?P<next>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$",
+            first.stderr, re.MULTILINE)
+        self.assertIsNotNone(match, first.stderr)
+        assert match is not None
+        self.assertEqual(match.group("slot"), "agent-c.alt")
+        self.assertEqual(match.group("live"), "agent-c")
+        retry_at = calendar.timegm(time.strptime(match.group("next"), "%Y-%m-%dT%H:%M:%SZ"))
+        self.assertGreaterEqual(retry_at, first_started + 6 * 60 * 60 - 5)
+        self.assertLessEqual(retry_at, first_ended + 6 * 60 * 60 + 5)
         self.assertTrue((self.root / ".refresh-failed").exists())
         for caller in (self.timer_run, self.session_call, self.timer_run):
             result = caller()
@@ -836,11 +850,21 @@ class WaitAfterFailure(HawkTokenFixture):
         first = self.timer_run()
         self.assertNotEqual(first.returncode, 0)
         self.assertEqual(len(self.git_calls("clone")), 1)
+        failed = self.root / ".refresh-failed"
+        self.assertTrue(failed.exists())
+        failed_at = failed.stat().st_mtime
         second = self.timer_run()
         third = self.timer_run()
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(third.returncode, 0, third.stderr)
         self.assertEqual(len(self.git_calls("clone")), 1)
+        expected = (
+            "hawk-token: first-run build failed at "
+            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(failed_at))}; "
+            f"next try after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(failed_at + 6 * 60 * 60))}; "
+            f"remove {failed} to try now\n"
+        )
+        self.assertIn(expected, second.stderr)
 
         self.set_control("git", {})
         self.age(self.root / ".refresh-started", 6 * 60 * 60 + 60)
