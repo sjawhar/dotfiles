@@ -5,8 +5,9 @@ The matrix covers a normal run, an assertion failure after the ssh-agent starts,
 and every signal or cleanup gap exercised by ``oryx_tunnel_key_rig``.  The rig's
 reaper is a child subreaper so that descendants which outlive their direct
 parent are reparented to it, recorded as leftovers, and reaped before the next
-case.  The final in-process test proves that the test class restores the
-caller's signal handlers and child-subreaper state while leaving an unrelated
+case.  A class-level helper with a non-UTF-8 process name stays alive for every
+host-wide scan.  The final in-process test proves that the test class restores
+the caller's signal handlers and child-subreaper state while leaving an unrelated
 child alone.
 """
 
@@ -113,14 +114,16 @@ def _own_children() -> dict[tuple[int, int], tuple[str, str, str]]:
         if not entry.name.isdecimal():
             continue
         try:
-            _, fields = (entry / "stat").read_text(encoding="utf-8").rsplit(")", 1)
+            _, fields = (entry / "stat").read_bytes().rsplit(b")", 1)
             values = fields.split()
             pid = int(entry.name)
-            state, parent_pid, start_tick = values[0], int(values[1]), int(values[19])
+            state = values[0].decode("ascii")
+            parent_pid = int(values[1])
+            start_tick = int(values[19])
             saw_self = saw_self or pid == os.getpid()
             if parent_pid != os.getpid():
                 continue
-            comm = (entry / "comm").read_text(encoding="utf-8").rstrip("\n")
+            comm = (entry / "comm").read_bytes().decode(errors="replace").rstrip("\n")
             cmdline = (
                 (entry / "cmdline")
                 .read_bytes()
@@ -148,6 +151,19 @@ def _stop_and_reap(pid: int) -> None:
 
 
 class OryxTunnelKeyCleanup(unittest.TestCase):
+    @staticmethod
+    def _stop_non_utf8_name_helper(process: subprocess.Popen[bytes]) -> None:
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        for output in (process.stdout, process.stderr):
+            if output is not None:
+                output.close()
+
     @classmethod
     def setUpClass(cls) -> None:
         try:
@@ -179,6 +195,37 @@ class OryxTunnelKeyCleanup(unittest.TestCase):
         cls.test_file = Path(__file__).with_name("test_oryx_tunnel_key.py")
         cls.rig = Path(__file__).with_name("oryx_tunnel_key_rig.py")
         cls.tests_dir = cls.test_file.parent
+        helper = subprocess.Popen(
+            [
+                cls.python3,
+                "-c",
+                (
+                    "import ctypes, sys\n"
+                    "PR_SET_NAME = 15\n"
+                    "prctl = ctypes.CDLL(None, use_errno=True).prctl\n"
+                    "if prctl(PR_SET_NAME, b'\\xffbadname', 0, 0, 0):\n"
+                    "    raise OSError(ctypes.get_errno(), 'prctl(PR_SET_NAME)')\n"
+                    "sys.stdout.buffer.write(b'ready\\n')\n"
+                    "sys.stdout.buffer.flush()\n"
+                    "sys.stdin.buffer.read()\n"
+                ),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        cls.addClassCleanup(cls._stop_non_utf8_name_helper, helper)
+        if helper.stdout is None:
+            raise AssertionError("non-UTF-8 name helper has no stdout")
+        ready = helper.stdout.readline()
+        if ready != b"ready\n":
+            raise AssertionError(f"non-UTF-8 name helper did not become ready: {ready!r}")
+        try:
+            comm = (Path("/proc") / str(helper.pid) / "comm").read_bytes()
+        except FileNotFoundError as error:
+            raise AssertionError("non-UTF-8 name helper vanished") from error
+        if not comm.startswith(b"\xffbadname"):
+            raise AssertionError(f"non-UTF-8 name helper has unexpected comm: {comm!r}")
 
     @classmethod
     def _run_reaper(cls, case: str, runner: str) -> ReaperRun:

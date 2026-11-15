@@ -119,13 +119,13 @@ def _agent_pid() -> int:
 def _process_state(pid: int) -> str | None:
     try:
         contents = Path("/proc") / str(pid) / "stat"
-        _, fields = contents.read_text(encoding="utf-8").rsplit(")", 1)
+        _, fields = contents.read_bytes().rsplit(b")", 1)
     except (FileNotFoundError, ProcessLookupError):
         return None
     values = fields.split()
     if not values:
         raise RuntimeError(f"could not read process state for {pid}")
-    return values[0]
+    return values[0].decode("ascii")
 
 
 def _write_event(
@@ -315,13 +315,15 @@ def _process_table() -> dict[int, tuple[str, int]]:
         if not entry.name.isdecimal():
             continue
         try:
-            _, fields = (entry / "stat").read_text(encoding="utf-8").rsplit(")", 1)
+            _, fields = (entry / "stat").read_bytes().rsplit(b")", 1)
         except (FileNotFoundError, ProcessLookupError):
             continue
         values = fields.split()
         if len(values) < 2:
             raise RuntimeError(f"could not parse {entry / 'stat'}")
-        processes[int(entry.name)] = (values[0], int(values[1]))
+        state = values[0].decode("ascii")
+        parent_pid = int(values[1])
+        processes[int(entry.name)] = (state, parent_pid)
     if os.getpid() not in processes:
         raise RuntimeError("full /proc scan did not find the reaper")
     return processes
@@ -345,7 +347,7 @@ def _descendants(processes: dict[int, tuple[str, int]]) -> set[int]:
 def _describe_process(pid: int, state: str) -> dict[str, Any] | None:
     directory = Path("/proc") / str(pid)
     try:
-        comm = (directory / "comm").read_text(encoding="utf-8").rstrip("\n")
+        comm = (directory / "comm").read_bytes().decode(errors="replace").rstrip("\n")
         cmdline = (
             (directory / "cmdline")
             .read_bytes()

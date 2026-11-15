@@ -43,11 +43,14 @@ def process_table() -> dict[int, tuple[str, int, int]]:
         if not directory.name.isdecimal():
             continue
         try:
-            _, fields = (directory / "stat").read_text(encoding="utf-8").rsplit(")", 1)
+            _, fields = (directory / "stat").read_bytes().rsplit(b")", 1)
         except (FileNotFoundError, ProcessLookupError):
             continue
         values = fields.split()
-        processes[int(directory.name)] = (values[0], int(values[1]), int(values[19]))
+        state = values[0].decode("ascii")
+        parent_pid = int(values[1])
+        start_tick = int(values[19])
+        processes[int(directory.name)] = (state, parent_pid, start_tick)
     if os.getpid() not in processes:
         raise AssertionError("full /proc scan did not find this process")
     return processes
