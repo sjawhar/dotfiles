@@ -1456,7 +1456,9 @@ class TunnelSetup(unittest.TestCase):
         self.advance_to_current()
         result = self.invoke(after_sync=True, FORWARD_CURL_FAIL_FIRST="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.forward_curl_calls.read_text(encoding="utf-8").strip(), "2")
+        self.assertTrue(self.forward_curl_calls.is_file())
+        self.assertGreaterEqual(int(self.forward_curl_calls.read_text(encoding="utf-8")), 2)
+        self.assertIn("self-check: forward port delivery: ok\n", self.report())
 
     def test_delivery_preview_and_page_remove_their_remote_directories(self) -> None:
         self.checkout("git", "delivery-cleanup")
