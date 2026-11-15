@@ -29,6 +29,15 @@ the secrets-broker secret holding the App's key; a fallback secret is optional:
       broker-secret   = GITHUB_APP_<PERSON>  ; a github-app secret of the secrets broker
       fallback-secret = NAME_OF_SECRET       ; a personal access token, from `secrets get`
       key-secret      = NAME_OF_SECRET       ; this machine only: mint from secretsd (below)
+      refuse-owner    = LOGIN                ; this machine only, one value per owner (below)
+
+A machine refuses an owner for a profile by naming it in refuse-owner, in its own
+`~/.config/git/config`. For a refused owner the helper reads and seeds no cache, mints no
+App token and falls back to no personal token: it prints one line on stderr, logs
+`refused` in decisions.log and exits 1. refuse-owner is multi-valued and matches without
+regard to case. Add each owner with
+  git config --file ~/.config/git/config --add gh-app.<profile>.refuse-owner <login>
+oryx refuses trajectory-labs-pbc for the agent profile (HOME-216).
 
 A machine with no agent-secrets helper has no broker identity, so the broker refuses every
 session there (only devboxes run the helper: agent-secrets/AGENTS.md). Such a machine opts in
@@ -191,6 +200,10 @@ class UninstalledOwnerError(AppTokenError):
     """The broker released no token for the requested GitHub owner."""
 
 
+class RefusedOwnerError(AppTokenError):
+    """This machine must not issue a token for the requested owner."""
+
+
 class BrokerInstallation(TypedDict):
     installation_id: int
     token: str
@@ -208,6 +221,24 @@ def git_config_optional(key: str) -> str | None:
     if result.returncode != 0 or not value:
         return None
     return value
+
+
+def git_config_all(key: str) -> list[str]:
+    """Return every value for a git config key; a missing key is an empty list."""
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get-all", key],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, UnicodeDecodeError) as error:
+        raise AppTokenError(f"failed to read git config: {key}") from error
+    if result.returncode == 0:
+        return result.stdout.splitlines()
+    if result.returncode == 1 and not result.stdout:
+        return []
+    raise AppTokenError(f"failed to read git config: {key}")
 
 
 def git_config(key: str) -> str:
@@ -872,10 +903,17 @@ def main(argv: list[str] | None = None) -> int:
         print("gh-app-token: target owner required: pass --owner or set GH_APP_OWNER", file=sys.stderr)
         return 1
 
-    if CACHE_DIR == DEFAULT_CACHE_DIR:
-        seed_cache_dir(CACHE_DIR, OLD_CACHE_DIR)
-    scope = scope_of(args.repo, args.read_only)
     try:
+        refused = git_config_all(f"gh-app.{args.profile}.refuse-owner")
+        if any(owner.casefold() == value.casefold() for value in refused):
+            raise RefusedOwnerError(
+                f"owner {owner} is refused for profile {args.profile} on this machine "
+                f"(gh-app.{args.profile}.refuse-owner): no token"
+            )
+
+        if CACHE_DIR == DEFAULT_CACHE_DIR:
+            seed_cache_dir(CACHE_DIR, OLD_CACHE_DIR)
+        scope = scope_of(args.repo, args.read_only)
         try:
             token = get_token(args.profile, owner, required_lifetime(), scope)
             decision = "app"
@@ -912,13 +950,20 @@ def main(argv: list[str] | None = None) -> int:
                 ) from None
             decision = "fallback-personal-token"
     except AppTokenError as error:
-        print(f"gh-app-token: {error}", file=sys.stderr)
+        message = f"gh-app-token: {error}"
+        print(message, file=sys.stderr)
         if credential_mode:
             # Stop git's helper chain: a broker failure, or an uncovered owner
             # with no usable fallback, must fail loudly, never silently fall
             # back to the user's own credentials.
             print("quit=1")
-        log_decision_after_answer(args.profile, owner, request, "refused", str(error))
+        log_decision_after_answer(
+            args.profile,
+            owner,
+            request,
+            "refused",
+            message if isinstance(error, RefusedOwnerError) else str(error),
+        )
         return 1
 
     if args.source:
