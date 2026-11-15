@@ -378,7 +378,7 @@ bootstrap_first_run() {
         release_lock
         return 0
     fi
-    if ! refresh_due; then
+    if recent_file "$failed"; then
         log_first_run_wait
         release_lock
         if [ "$mode" = timer ]; then

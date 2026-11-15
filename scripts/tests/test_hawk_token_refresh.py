@@ -106,7 +106,7 @@ try:
     else:
         sys.stdout.write({token!r} + "\\n")
 finally:
-    record(kind, sys.argv[1:], started, time.time())
+    record(kind, sys.argv[1:], started, time.time(), slot=str(slot))
 sys.exit(status)
 '''
     git = f'''#!/usr/bin/env python3
@@ -849,6 +849,31 @@ class WaitAfterFailure(HawkTokenFixture):
         self.assertEqual(retry.returncode, 0, retry.stderr)
         self.assertEqual(len(self.git_calls("clone")), 2)
 
+    def test_fresh_stamp_without_a_checkout_bootstraps_a_session(self) -> None:
+        (self.root / ".refreshed").touch()
+
+        result = self.session_call()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, self.token + "\n")
+        self.assertEqual(len(self.git_calls("clone")), 1)
+        current = self.root / "current"
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(os.readlink(current), "agent-c")
+        self.assertNotIn("first-run build failed", result.stderr)
+
+    def test_fresh_stamp_without_a_checkout_bootstraps_the_timer(self) -> None:
+        (self.root / ".refreshed").touch()
+
+        result = self.timer_run()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(len(self.git_calls("clone")), 1)
+        current = self.root / "current"
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(os.readlink(current), "agent-c")
+
 
 class SessionCalls(HawkTokenFixture):
     """Existing session calls keep their stdout and argument/cache contract."""
@@ -878,6 +903,37 @@ class SessionCalls(HawkTokenFixture):
         self.assertEqual(len(mints), 1)
         self.assertEqual(mints[0]["argv"][-2:], ["--audience", "other"])
         self.assertEqual([call["name"] for call in self.calls()], ["timeout", "mint"])
+
+    def test_fresh_single_checkout_session_adopts_without_git(self) -> None:
+        (self.root / ".refreshed").touch()
+        slot = self.make_slot("agent-c")
+
+        result = self.session_call()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, self.token + "\n")
+        self.assertEqual(os.readlink(self.root / "current"), "agent-c")
+        mints = self.named_calls("mint")
+        self.assertEqual(len(mints), 1)
+        self.assertEqual(mints[0]["slot"], str(slot))
+        self.assertEqual(self.named_calls("git"), [])
+
+    def test_fresh_single_checkout_timer_adopts_without_git(self) -> None:
+        (self.root / ".refreshed").touch()
+        slot = self.make_slot("agent-c")
+
+        result = self.timer_run()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        current = self.root / "current"
+        self.assertTrue(current.is_symlink())
+        self.assertEqual(os.readlink(current), "agent-c")
+        mints = self.named_calls("mint")
+        self.assertEqual(len(mints), 1)
+        self.assertEqual(mints[0]["slot"], str(slot))
+        self.assertEqual(self.named_calls("git"), [])
+        self.assertEqual((self.root / "last-good-token").read_text(encoding="utf-8").strip(), self.token)
 
 
 class UnderSystemd(HawkTokenFixture):
