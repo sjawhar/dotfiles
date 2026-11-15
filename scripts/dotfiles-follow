@@ -27,10 +27,14 @@ What one run does:
      --ff-only` keeps a modified file that the merge does not touch, and refuses one it does.)
   5. `git merge --ff-only origin/main`.
   6. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
-     `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace update/upgrade
-     for registered marketplace plugins not at their committed lock versions (a best-effort lock
-     restore afterward), then `devbox/sami-devbox-check --pins` (knives and mise-pin lines).
-     Lock entries without an installed marketplace record are skipped; install.sh bootstraps them.
+     `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
+     upgrade for registered marketplace plugins below the lowest version their committed lock entries
+     require (a best-effort lock restore afterward). A plugin at or above its entry gets no upgrade or
+     version failure; one below is a version failure only if it is still below after its refresh and
+     upgrade, and a failed omp command is a failure whatever the version. Dotted-number strings
+     compare numerically; any other pair must be equal JSON values of the same type, and object key
+     order does not matter. An empty or missing entry is handled as before. Lock entries without an
+     installed marketplace record are skipped; install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
      --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
      on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
@@ -418,6 +422,35 @@ def omp_profile_is_legion() -> bool:
         return False
 
 
+def version_at_least(have: object, want: object) -> bool:
+    """True when an installed marketplace version is at or above the lock's entry.
+
+    Two ASCII dotted-number strings compare component by component after leading zeros are removed;
+    the shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals
+    0.3.9). Any other pair must be equal JSON values of the same type; object key order does not
+    matter. An empty or missing entry is handled as before.
+    """
+    numeric = r"[0-9]+(?:\.[0-9]+)*"
+    if not (
+        isinstance(have, str)
+        and isinstance(want, str)
+        and re.fullmatch(numeric, have)
+        and re.fullmatch(numeric, want)
+    ):
+        return json.dumps(have, sort_keys=True) == json.dumps(want, sort_keys=True)
+    have_parts = [component.lstrip("0") or "0" for component in have.split(".")]
+    want_parts = [component.lstrip("0") or "0" for component in want.split(".")]
+    length = max(len(have_parts), len(want_parts))
+    for index in range(length):
+        have_component = have_parts[index] if index < len(have_parts) else "0"
+        want_component = want_parts[index] if index < len(want_parts) else "0"
+        if len(have_component) != len(want_component):
+            return len(have_component) > len(want_component)
+        if have_component != want_component:
+            return have_component > want_component
+    return True
+
+
 def install_marketplace_plugins(
     repo: Path, timeout: float, *, environment: dict[str, str] | None = None
 ) -> str:
@@ -466,11 +499,12 @@ def install_marketplace_plugins(
                     continue
                 plugin = matches[0]
                 records = installed[plugin]
-                have = records[0].get("version", "") if records else ""
-                if have == want:
+                have = records[0].get("version") if records else None
+                if version_at_least(have, want):
                     continue
                 # Like installers/omp.sh: refresh the catalog before upgrading, then check the
-                # installed record. Upgrade selects latest, which need not be the committed pin.
+                # installed record. Upgrade installs the catalog's version, which passes when it
+                # is at or above the entry.
                 source = plugin.rpartition("@")[2]
                 for args in (["plugin", "marketplace", "update", source], ["plugin", "upgrade", plugin]):
                     remaining = deadline - time.monotonic()
@@ -487,9 +521,23 @@ def install_marketplace_plugins(
                         break
                 else:
                     current = json.loads(installed_path.read_text()).get("plugins", {}).get(plugin, [])
-                    have = current[0].get("version", "") if current else ""
-                    if have != want:
-                        failures.append(f"{plugin} is {have or 'not installed'}, but {display_path(lock)} records {want}.")
+                    have = current[0].get("version") if current else None
+                    if not version_at_least(have, want):
+                        if have is not None and not isinstance(have, str):
+                            failures.append(
+                                f"{plugin}'s installed record holds {json.dumps(have)}, "
+                                "which is not a version string."
+                            )
+                        elif not isinstance(want, str):
+                            failures.append(
+                                f"{display_path(lock)} records {json.dumps(want)} for {plugin}, "
+                                "which is not a version string."
+                            )
+                        else:
+                            failures.append(
+                                f"{plugin} is {have or 'not installed'}, below {want}, the lowest version "
+                                f"{display_path(lock)} records."
+                            )
             except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
                 failures.append(f"{name}: cannot install marketplace pin: {error}")
     finally:
