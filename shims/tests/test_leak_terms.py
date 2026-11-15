@@ -4008,6 +4008,54 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.assertEqual(result.stderr.count(": listed leak term"), 1, result.stderr)
                 self.assertNotIn(term, result.stdout + result.stderr)
 
+    def test_push_folder_check_decides_a_path_as_the_commit_check_does(self) -> None:
+        # The same path through both checks: a commit that adds a file at PATH (the commit check reads its diff path),
+        # and that commit's folder object pushed alone (the folder check reads its entries). Both refuse, or both
+        # pass, with the same number of findings. Each push goes to a fresh public destination, so nothing is held.
+        rows = (
+            ("foo/", "foo/bar/x.txt"),
+            ("foo/bar/", "foo/bar/x.txt"),
+            ("/", "foo/x.txt"),
+            ("a/b", "a/b/x.txt"),
+            ("/bar", "foo/bar/x.txt"),
+            (TEST_TERMS[1], f"{TEST_TERMS[1]}/x.txt"),
+            ("clean-term", "foo/bar/x.txt"),
+        )
+
+        def findings(result: subprocess.CompletedProcess[str]) -> int:
+            return sum(1 for line in result.stderr.splitlines() if line.startswith("error: leak terms: ") and line.endswith(": listed leak term"))
+
+        for term, path in rows:
+            with self.subTest(term=term, path=path):
+                environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml(f"terms: |\n  {term}\n"))}
+                commit = self.commit(path, "clean", "clean", parent=self.base)
+                tree = self.real("rev-parse", f"{commit}^{{tree}}")
+                outcomes = []
+                for kind, source in (("commit", commit), ("folder", tree)):
+                    url = self.fresh_public_url()
+                    self.set_url(url)
+                    ref = f"refs/heads/{self.unique('table')}" if kind == "commit" else f"refs/tags/{self.unique('table')}"
+                    result = self.git_push_ref(source, ref, environment)
+                    self.assertNotIn(term if term != "/" else "\0", result.stdout + result.stderr)
+                    outcomes.append((result.returncode != 0, findings(result)))
+                self.assertEqual(outcomes[0], outcomes[1], f"commit check {outcomes[0]}, folder check {outcomes[1]}")
+                self.assertEqual(outcomes[0][0], term != "clean-term", outcomes)
+
+    def test_push_refuses_a_term_named_empty_folder_in_a_folder_object(self) -> None:
+        # A folder object can hold an empty folder; its name is refused. (A commit that only adds an empty folder has
+        # no diff path, so the commit check cannot see it: a named limit.)
+        environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml(f"terms: |\n  {TEST_TERMS[1]}\n"))}
+        empty = self.launch(["/usr/bin/git", "mktree"], cwd=self.repo, env=self.person, input="").stdout.strip()
+        tree = self.launch(
+            ["/usr/bin/git", "mktree"], cwd=self.repo, env=self.person, input=f"040000 tree {empty}\t{TEST_TERMS[1]}\n"
+        ).stdout.strip()
+        url = self.fresh_public_url()
+        self.set_url(url)
+        result = self.assert_object_refused(
+            lambda: self.git_push_ref(tree, f"refs/tags/{self.unique('empty-folder')}", environment), "<listed term>", url, tree
+        )
+        self.assertEqual(result.stderr.count(": listed leak term"), 1, result.stderr)
+
     def test_push_allows_a_file_object_a_held_commit_already_has(self) -> None:
         path = f"{self.unique('held-file')}.txt"
         commit = self.commit(path, self.term, "clean", parent=self.base)
