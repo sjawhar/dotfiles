@@ -241,7 +241,7 @@ done
 # shellcheck source=laptop/cosmic-settings.sh
 source "${LAPTOP_DIR}/cosmic-settings.sh"
 
-# One tailnet daemon serves every VM in forward/hosts.toml; this runs migration step 2.
+# The forward daemon serves each Tailscale VM and forward-oryx serves oryx.
 bash "${DOTFILES_DIR}/installers/forward.sh" daemon
 
 # =============================================================================
