@@ -257,49 +257,33 @@ class OryxTunnelKey(unittest.TestCase):
         if not self._sweep_ready:
             return
         deadline = time.monotonic() + 10
-        seen: set[tuple[int, int]] = set()
-        reaped: set[tuple[int, int]] = set()
         terminated: dict[tuple[int, int], float] = {}
         killed: set[tuple[int, int]] = set()
         empty_since: float | None = None
         while True:
             processes = process_table()
             owned = self._owned_children(processes)
-            owned_keys = {(pid, process[2]) for pid, process in owned.items()}
-            reaped.update(seen - owned_keys)
             now = time.monotonic()
             for pid, (state, _, start_time) in owned.items():
                 child = (pid, start_time)
-                seen.add(child)
-                if state == "Z":
-                    try:
-                        waited_pid, _ = os.waitpid(pid, os.WNOHANG)
-                    except ChildProcessError:
-                        reaped.add(child)
-                    else:
-                        if waited_pid == pid:
-                            reaped.add(child)
-                    continue
-                if child not in terminated:
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    terminated[child] = now
-                elif now - terminated[child] >= 3 and child not in killed:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    killed.add(child)
+                if state != "Z":
+                    if child not in terminated:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                        terminated[child] = now
+                    elif now - terminated[child] >= 3 and child not in killed:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        killed.add(child)
                 try:
-                    waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+                    os.waitpid(pid, os.WNOHANG)
                 except ChildProcessError:
-                    reaped.add(child)
-                else:
-                    if waited_pid == pid:
-                        reaped.add(child)
-            if not owned and seen <= reaped:
+                    pass
+            if not owned:
                 if empty_since is not None and now - empty_since >= 0.05:
                     return
                 empty_since = now
