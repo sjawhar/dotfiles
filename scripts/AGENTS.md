@@ -47,8 +47,9 @@ Executables covering several areas:
     `staged` produces `git diff --cached` with the same attribute policy as outgoing push diffs,
     and `push` decides which commits, annotated-tag messages, direct file and folder objects, and
     created or updated ref names are outgoing before it reads the list. It scans a direct object
-    only when the destination does not have it and no outgoing commit includes it. A deletion-only
-    push does not read the list. An outgoing tag uses its `encoding` header, then strict UTF-8,
+    only when the destination does not have it and no outgoing commit includes it. A push that
+    creates or updates no ref (one that only deletes, or changes nothing) does not read the list.
+    An outgoing tag uses its `encoding` header, then strict UTF-8,
     then the pushing repository's `i18n.commitEncoding`; outgoing commit text uses strict UTF-8
     after Git's conversion, then that same configured encoding. An unknown encoding or bytes that
     do not decode makes `push` exit 4. `message` decodes its input with `--encoding` (UTF-8 by
