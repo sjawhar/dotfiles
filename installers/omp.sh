@@ -94,44 +94,46 @@ rm -rf "${DOTFILES_DIR}/omp/plugins/node_modules/legion"
 # Marketplace plugins install at user scope. Each marketplace entry of the committed
 # omp-plugins.lock.json is the lowest version a machine must have: omp installs a catalog plugin
 # only at the version its catalog resolves now, so no machine can go back to an older entry. A
-# plugin at or above its entry gets no upgrade and no version warning. A plugin below it (another
-# machine upgraded and committed the lock) refreshes the marketplace catalog, which omp otherwise
-# keeps from the day it was added, and upgrades; it gets a version warning only when it is still
-# below afterwards, and a failed omp command is reported whatever the version. Dotted-number
-# strings compare as numbers; any other string must equal the entry, and a version that is not a
-# string never satisfies it.
+# plugin at or above its entry gets no upgrade and no version warning. A plugin below it refreshes
+# the marketplace catalog and upgrades; it gets a version warning only when it is still below
+# afterward, and a failed omp command is reported whatever the version. Dotted-number strings
+# compare as numbers. Any other pair satisfies the entry only when the two are equal JSON values of
+# the same type; object key order does not matter. An empty or missing version is handled as it
+# was before this rule.
 # The install record (installed_plugins.json) is machine-local; the lock entry is not, and omp
 # refuses to install a plugin whose name the lock already holds ("Runtime package name ...
 # conflicts") while exiting 0. So on a machine without the install, the stale lock entry is
 # dropped first, and after the omp calls the committed bytes are put back, whatever omp wrote, so
 # the checkout stays clean. The lock changes only by a commit.
-# Null and missing values print nothing. A dotted-number string prints raw. Another string has a
-# str: prefix and its JSON text; a non-string has a json: prefix and its JSON text. The prefix keeps
-# the value's kind clear, and JSON text keeps command substitution from cutting a trailing newline.
+# Null, missing, and empty-string values print nothing. A dotted-number string prints raw. Another
+# string has a str: prefix and its JSON text; a non-string has a json: prefix and its JSON text.
+# The prefix keeps the value's kind clear, and JSON text keeps command substitution from cutting a
+# trailing newline.
 marketplace_version_text() {
-    jq -r 'if . == null then empty
+    jq -r 'if . == null or . == "" then empty
         elif type == "string" and test("\\A[0-9]+(\\.[0-9]+)*\\z") then .
         elif type == "string" then "str:" + tojson
         else "json:" + tojson end'
 }
 marketplace_plugin_version() {
-    jq -c --arg p "$1" '.plugins[$p][0].version' \
+    jq -S -c --arg p "$1" '.plugins[$p][0].version' \
         "${DOTFILES_DIR}/omp/plugins/installed_plugins.json" 2>/dev/null | marketplace_version_text || true
 }
 marketplace_lock_version() {
-    jq -c --arg n "$1" '.plugins[$n].version' \
+    jq -S -c --arg n "$1" '.plugins[$n].version' \
         "${DOTFILES_DIR}/omp/plugins/omp-plugins.lock.json" | marketplace_version_text
 }
-# Succeeds when installed version $1 satisfies lock entry $2. It returns 1 for empty values or
-# non-string JSON values. Dotted numbers compare component by component as integers (0.3.10 is above
-# 0.3.9; 1.2 equals 1.2.0; 0.3.09 equals 0.3.9), as digit strings without leading zeros, so no
-# component is read as octal or overflows $(( )).
+# Succeeds when installed version $1 satisfies lock entry $2. It returns 1 for empty values, as
+# before. Dotted numbers compare component by component as integers (0.3.10 is above 0.3.9; 1.2
+# equals 1.2.0; 0.3.09 equals 0.3.9), as digit strings without leading zeros, so no component is
+# read as octal or overflows $(( )).
 # Digits are ASCII 0-9 alone, listed one by one, since in a UTF-8 locale bash's [0-9] also matches
-# other digits (U+0661, U+FF11), which dotfiles-follow does not. Other string values must be exactly
-# equal. Call it only in a condition.
+# other digits (U+0661, U+FF11), which dotfiles-follow does not. Any other pair must be equal JSON
+# values of the same type, represented by sorted compact JSON text; object key order does not
+# matter. Call it only in a condition.
 marketplace_version_at_least() {
     local numeric='^[0123456789]+(\.[0123456789]+)*$' h w i n
-    if [ -z "$1" ] || [ -z "$2" ] || [[ $1 == json:* || $2 == json:* ]]; then
+    if [ -z "$1" ] || [ -z "$2" ]; then
         return 1
     fi
     if ! [[ $1 =~ $numeric && $2 =~ $numeric ]]; then

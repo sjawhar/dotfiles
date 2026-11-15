@@ -32,9 +32,9 @@ What one run does:
      require (a best-effort lock restore afterward). A plugin at or above its entry gets no upgrade or
      version failure; one below is a version failure only if it is still below after its refresh and
      upgrade, and a failed omp command is a failure whatever the version. Dotted-number strings
-     compare numerically; other strings must equal the entry, and a version that is not a string
-     never satisfies it. Lock entries without an installed marketplace record are skipped;
-     install.sh bootstraps them.
+     compare numerically; any other pair must be equal JSON values of the same type, and object key
+     order does not matter. An empty or missing entry is handled as before. Lock entries without an
+     installed marketplace record are skipped; install.sh bootstraps them.
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
      --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
      on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
@@ -427,13 +427,17 @@ def version_at_least(have: object, want: object) -> bool:
 
     Two ASCII dotted-number strings compare component by component after leading zeros are removed;
     the shorter is padded with zeros (1.2 equals 1.2.0, 0.3.10 is above 0.3.9, 0.3.09 equals
-    0.3.9). Other strings must be equal. A version that is not a string never satisfies an entry.
+    0.3.9). Any other pair must be equal JSON values of the same type; object key order does not
+    matter. An empty or missing entry is handled as before.
     """
-    if not isinstance(have, str) or not isinstance(want, str):
-        return False
     numeric = r"[0-9]+(?:\.[0-9]+)*"
-    if not (re.fullmatch(numeric, have) and re.fullmatch(numeric, want)):
-        return have == want
+    if not (
+        isinstance(have, str)
+        and isinstance(want, str)
+        and re.fullmatch(numeric, have)
+        and re.fullmatch(numeric, want)
+    ):
+        return json.dumps(have, sort_keys=True) == json.dumps(want, sort_keys=True)
     have_parts = [component.lstrip("0") or "0" for component in have.split(".")]
     want_parts = [component.lstrip("0") or "0" for component in want.split(".")]
     length = max(len(have_parts), len(want_parts))

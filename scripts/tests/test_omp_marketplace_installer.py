@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.tests.marketplace_version_cases import CASES, MISSING, RAW_CASES
+from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
 INSTALLER = Path(__file__).resolve().parents[2] / "installers/omp.sh"
@@ -421,29 +421,41 @@ class OmpMarketplaceInstaller(unittest.TestCase):
         installed = json.loads(self.installed_path.read_text(encoding="utf-8"))
         self.assertEqual(installed["plugins"][PLUGIN][0]["version"], "2")
 
-    def test_non_string_installed_objects_are_reported_after_upgrade(self) -> None:
+    def test_reordered_objects_are_equal_without_an_upgrade(self) -> None:
         cases = (
             ({"b": 2, "a": 1}, {"a": 1, "b": 2}),
             ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
         )
         for have, want in cases:
             with self.subTest(have=have, want=want):
-                self.prepare(have, want, upgrade_to_json=have)
+                self.prepare(have, want)
 
                 result = self.install()
 
                 self.assert_step(
                     result,
-                    [
-                        "plugin marketplace list",
-                        "plugin marketplace update agent-skills",
-                        "plugin upgrade engineering@agent-skills",
-                    ],
-                    [
-                        "omp: engineering@agent-skills is recorded as "
-                        f"{json.dumps(have, separators=(',', ':'))}, which is not a version string"
-                    ],
+                    ["plugin marketplace list", "plugin marketplace update agent-skills"],
+                    [],
                 )
+
+    def test_different_installed_object_is_reported_after_upgrade(self) -> None:
+        have = {"a": 1}
+        self.prepare(have, {"a": 2}, upgrade_to_json=have)
+
+        result = self.install()
+
+        self.assert_step(
+            result,
+            [
+                "plugin marketplace list",
+                "plugin marketplace update agent-skills",
+                "plugin upgrade engineering@agent-skills",
+            ],
+            [
+                "omp: engineering@agent-skills is recorded as "
+                '{"a":1}, which is not a version string'
+            ],
+        )
 
     def test_non_string_lock_version_is_reported(self) -> None:
         self.prepare("1", 1, upgrade_to="1")
@@ -535,7 +547,11 @@ class OmpMarketplaceInstaller(unittest.TestCase):
             ["locale", "-a"], capture_output=True, text=True, check=False
         ).stdout.lower():
             environment = {**self.env, "LC_ALL": "en_US.UTF-8"}
-        for have, want, expected in CASES:
+        cases = CASES + tuple(
+            (have, want, installer_expected)
+            for have, want, _follow_expected, installer_expected in EMPTY_CASES
+        )
+        for have, want, expected in cases:
             with self.subTest(have=have, want=want):
                 installed = {
                     "version": 2,

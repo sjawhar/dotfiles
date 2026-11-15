@@ -89,8 +89,9 @@ Follow restores the managed marketplace lock before it calls the sync.
    back to an older entry. A plugin at or above its entry gets no upgrade or version failure. A
    plugin below its entry refreshes its catalog and upgrades, and is a version failure only if it is
    still below afterward; a failed omp command is a failure whatever the version. Dotted-number
-   strings compare numerically; any other string must equal the entry, and a version that is not a
-   string never satisfies it. Every omp command removes `OMP_PROFILE`, `PI_PROFILE`, and
+   strings compare numerically; any other pair must be equal JSON values of the same type, and
+   object key order does not matter. An empty or missing entry is handled as before. Every omp
+   command removes `OMP_PROFILE`, `PI_PROFILE`, and
    `PI_CODING_AGENT_DIR` from its environment. If
    `${XDG_CONFIG_HOME:-~/.config}/omp/profile` contains `legion`, follow does not run omp and
    reports the plugin step as failed. Finally, `devbox/sami-devbox-check --pins` checks knives and
@@ -232,10 +233,12 @@ before a fast-forward or a same-HEAD retry, including an interrupted durable che
 installer module runs `install_marketplace_plugin` and its version reads and comparison, taken
 from `installers/omp.sh`, under `set -euo pipefail` with a stub `omp` on `PATH`: the same version
 cases, and a failed catalog refresh, install or upgrade still reports omp's exit status and leaves
-the lock as committed. Both modules check one table of version pairs,
-`scripts/tests/marketplace_version_cases.py`: JSON strings and non-strings, including numbers,
-booleans, null, missing keys, lists and objects. Both treat a version that is not a string as
-never satisfying an entry. Its raw rows are written into the two files as JSON text (1.10 against
-1.1, an object against the same keys in either order), so the installer reads them as stored.
+the lock as committed. Both modules check the shared version table,
+`scripts/tests/marketplace_version_cases.py`, for dotted-number strings and other equal JSON values
+of the same type, including reordered objects. Its per-tool empty rows record follow's comparison
+result and the installer's existing empty-argument result after it reads null, missing, or empty
+strings. Number spelling, such as 1.10 against 1.1, can differ between jq and Python and is out of
+scope, so no shared row requires agreement on it. Its raw rows are written into the two files as
+JSON text, so the installer reads them as stored.
 The jj cases use a real colocated jj checkout whose `@` holds two local files, and check that the
 files keep their bytes and nothing is pushed.

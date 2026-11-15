@@ -17,7 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 from scripts.tests.test_dotfiles_follow import FOLLOW, Harness
-from scripts.tests.marketplace_version_cases import CASES, MISSING, RAW_CASES
+from scripts.tests.marketplace_version_cases import CASES, EMPTY_CASES, MISSING, RAW_CASES
 
 
 FAKE_OMP = r'''#!/usr/bin/env python3
@@ -362,13 +362,34 @@ class MarketplacePlugins(Harness):
         self.assertEqual(self.version("dev-infra"), "2.0.0")
         self.assert_clean_lock()
 
-    def test_non_string_installed_version_is_reported_after_upgrade(self) -> None:
-        self.take_upstream()
+    def test_reordered_non_string_value_needs_no_omp_command(self) -> None:
+        wanted = json.loads(self.want_lock)
+        wanted["plugins"]["dev-infra"]["version"] = {"a": 1, "b": 2}
+        self.commit_wanted_lock(wanted)
         installed = json.loads(self.installed_path.read_text())
         installed["plugins"]["dev-infra@verification-skills"][0]["version"] = {"b": 2, "a": 1}
         self.installed_path.write_text(json.dumps(installed))
+
+        self.assertEqual(FOLLOW.install_tools(self.repo, self.options()), "")
+
+        self.assertFalse(
+            any(
+                "dev-infra" in argument
+                for args in self.calls()
+                for argument in args
+            )
+        )
+        self.assert_clean_lock()
+
+    def test_unequal_non_string_value_is_reported_after_upgrade(self) -> None:
+        wanted = json.loads(self.want_lock)
+        wanted["plugins"]["dev-infra"]["version"] = {"a": 2}
+        self.commit_wanted_lock(wanted)
+        installed = json.loads(self.installed_path.read_text())
+        installed["plugins"]["dev-infra@verification-skills"][0]["version"] = {"a": 1}
+        self.installed_path.write_text(json.dumps(installed))
         os.environ["FAKE_OMP_VERSIONS"] = json.dumps({
-            "dev-infra": {"b": 2, "a": 1},
+            "dev-infra": {"a": 1},
             "verification-skills": "2.0.0",
             "core-ops": "2.0.0",
         })
@@ -378,7 +399,7 @@ class MarketplacePlugins(Harness):
         self.assertIn(["plugin", "marketplace", "update", "verification-skills"], self.calls())
         self.assertIn(["plugin", "upgrade", "dev-infra@verification-skills"], self.calls())
         self.assertIn(
-            'dev-infra@verification-skills\'s installed record holds {"b": 2, "a": 1}, '
+            'dev-infra@verification-skills\'s installed record holds {"a": 1}, '
             "which is not a version string.",
             why,
         )
@@ -386,7 +407,11 @@ class MarketplacePlugins(Harness):
         self.assert_clean_lock()
 
     def test_version_at_least_table(self) -> None:
-        for have, want, expected in CASES:
+        cases = CASES + tuple(
+            (have, want, follow_expected)
+            for have, want, follow_expected, _installer_expected in EMPTY_CASES
+        )
+        for have, want, expected in cases:
             with self.subTest(have=have, want=want):
                 have = None if have is MISSING else have
                 want = None if want is MISSING else want
