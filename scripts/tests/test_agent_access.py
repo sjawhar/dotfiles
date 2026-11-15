@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """scripts/agent-access: reports what logins/credentials THIS session holds.
 
-Stubs every external CLI on PATH, then checks: the script never hangs past its
-budget, every row has the required fields, `--json` is valid JSON, and no
-secret-shaped string (a JWT, an AWS key, a GitHub token) ever reaches stdout -
-the whole point of the script is to report status without exposing values.
+Stubs every external CLI on PATH. Successful `ant auth status` output contains
+an access token and a run-time JWT; failing `fleetctl` output starts with a
+GitHub token. The script must filter all of them, while it reports status,
+valid `--json`, required fields, and finishes within its budget.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import shutil
@@ -30,19 +29,9 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def make_jwt(payload: dict) -> str:
-    def b64(data: bytes) -> str:
-        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-    header = b64(json.dumps({"alg": "none", "typ": "JWT"}).encode())
-    body = b64(json.dumps(payload).encode())
-    return f"{header}.{body}.sig"
-
-
 # Secret-shaped substrings this script must never print, however a stub or a
-# real CLI answers: full JWTs (hawk) and token-prefixed credentials.
+# real CLI answers: token-prefixed credentials.
 SECRET_MARKERS = [
-    "eyJhbGciOiAibm9uZSIsICJ0eXAiOiAiSldUIn0",  # this suite's JWT header b64
     "ghs_should_never_print",
     "sk-ant-should-never-print",
 ]
@@ -111,7 +100,7 @@ class AgentAccess(unittest.TestCase):
         self.assertIsInstance(rows, list)
         self.assertGreater(len(rows), 10)
         names = {row["name"] for row in rows}
-        for required in ("aws", "github_app", "hawk", "dispatch", "modal"):
+        for required in ("aws", "github_app", "dispatch", "modal"):
             self.assertIn(required, names)
         for row in rows:
             for field in ("name", "status", "identity", "expiry", "command", "detail"):
@@ -128,7 +117,9 @@ class AgentAccess(unittest.TestCase):
         write_stub(
             self.stub_dir,
             "gws",
-            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "$GWS_ACCOUNT"',
+            # The probe is the Gmail profile, which every account's read tier can read.
+            '[ "$1 $2 $3" = "gmail users getProfile" ] || { echo "unexpected gws call: $*" >&2; exit 1; }\n'
+            'printf \'{"emailAddress":"%s@example.com"}\' "$GWS_ACCOUNT"',
         )
         result = self.run_access("--json")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -152,7 +143,7 @@ class AgentAccess(unittest.TestCase):
         write_stub(
             self.stub_dir,
             "gws",
-            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "$GWS_ACCOUNT"',
+            'printf \'{"emailAddress":"%s@example.com"}\' "$GWS_ACCOUNT"',
         )
         gws_dir = self.home / ".config" / "gws"
         gws_dir.mkdir(parents=True)
@@ -175,13 +166,6 @@ class AgentAccess(unittest.TestCase):
                 self.assertIn(detail, rows["google_workspace"]["detail"])
 
     def test_stubbed_clis_report_live_identity_without_leaking_token(self) -> None:
-        hawk_jwt = make_jwt(
-            {"email": "sami@trajectorylabs.net", "exp": int(time.time()) + 3600}
-        )
-        write_stub(self.stub_dir, "hawk-token", f'echo "{hawk_jwt}"')
-        models = self.home / ".omp" / "agent"
-        models.mkdir(parents=True)
-        (models / "models.local.yml").write_text('apiKey: "!hawk-token-fast"\n')
         write_stub(
             self.stub_dir,
             "aws",
@@ -191,8 +175,14 @@ class AgentAccess(unittest.TestCase):
             self.stub_dir,
             "ant",
             r"""
+jwt_header="eyJhbGciOiJIUzI1NiJ9"
+jwt_payload="eyJzdWIiOiJzYWZlLXRlc3QifQ"
+jwt_signature="signature"
+jwt="$(printf '%s.%s.%s' "$jwt_header" "$jwt_payload" "$jwt_signature")"
 echo "  Logged in to Example Org as sami@trajectorylabs.net"
 echo "               expires:        2099-01-01T00:00:00Z"
+echo "access-token: sk-ant-should-never-print"
+echo "session-token: $jwt"
 """,
         )
         write_stub(self.stub_dir, "vercel", 'echo "noise"; echo "sami-2219"')
@@ -216,14 +206,22 @@ fi
             "gws",
             # Real gws prints advisories on stderr next to the JSON on stdout.
             'echo "Using keyring backend: keyring" >&2\n'
-            'printf \'{"user":{"emailAddress":"%s@example.com"}}\' "${GWS_ACCOUNT:-unknown}"',
+            'printf \'{"emailAddress":"%s@example.com"}\' "${GWS_ACCOUNT:-unknown}"',
         )
         gws_dir = self.home / ".config" / "gws"
         gws_dir.mkdir(parents=True)
         (gws_dir / "accounts.json").write_text(
             json.dumps({name: {} for name in ("personal", "theorem", "trajectory")}), encoding="utf-8"
         )
-        write_stub(self.stub_dir, "fleetctl", 'echo "{}"')
+        write_stub(
+            self.stub_dir,
+            "fleetctl",
+            r"""
+echo "ghs_should_never_print"
+echo "not authenticated"
+exit 1
+""",
+        )
         write_stub(
             self.stub_dir,
             "sentry-cli",
@@ -261,8 +259,6 @@ fi
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = {row["name"]: row for row in json.loads(result.stdout)}
 
-        self.assertEqual(rows["hawk"]["status"], "live")
-        self.assertEqual(rows["hawk"]["identity"], "sami@trajectorylabs.net")
         self.assertEqual(rows["aws"]["status"], "live")
         self.assertIn("assumed-role/test", rows["aws"]["identity"])
         self.assertEqual(rows["anthropic_ant"]["status"], "live")
@@ -280,15 +276,16 @@ fi
         self.assertEqual(rows["sentry"]["status"], "live")
         self.assertEqual(rows["kubectl"]["status"], "live")
         self.assertEqual(rows["secretsd_grants"]["identity"], "TEST_KEY")
+        self.assertEqual(rows["fleetctl"]["status"], "missing")
+        self.assertEqual(rows["fleetctl"]["detail"], "not authenticated")
         self.assertEqual(rows["agent_secrets_broker"]["status"], "live")
 
         self.assert_no_secrets(result.stdout)
-        self.assertNotIn(hawk_jwt, result.stdout)
 
     def test_private_checks_beside_the_dotfiles_are_sourced_and_ordered(self) -> None:
         # A check whose name would name a customer lives in <dotfiles>/.secrets/dotfiles/
         # agent-access.d/*.sh (a private repository); the script finds that directory from its
-        # own path, runs each check it adds and prints the rows it names after hawk.
+        # own path, runs each check it adds and prints the rows it names after `anthropic_ant`.
         dotfiles = self.root / "dotfiles"
         (dotfiles / "scripts").mkdir(parents=True)
         script = dotfiles / "scripts" / "agent-access"
@@ -305,7 +302,7 @@ fi
         self.assertEqual(result.returncode, 0, result.stderr)
         names = [row["name"] for row in json.loads(result.stdout)]
         self.assertIn("demo_platform", names)
-        self.assertLess(names.index("hawk"), names.index("demo_platform"))
+        self.assertLess(names.index("anthropic_ant"), names.index("demo_platform"))
         demo = next(row for row in json.loads(result.stdout) if row["name"] == "demo_platform")
         self.assertEqual((demo["status"], demo["identity"]), ("live", "demo-identity"))
 
@@ -313,7 +310,7 @@ fi
         result = self.run_access("--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         names = [row["name"] for row in json.loads(result.stdout)]
-        self.assertIn("hawk", names)
+        self.assertIn("anthropic_ant", names)
         self.assertFalse([n for n in names if n.startswith("demo")], names)
 
 

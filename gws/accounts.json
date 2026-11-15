@@ -61,5 +61,22 @@
         "description": "Admin SDK Directory (users, groups), consented by admin-sami@. gws cannot call it: use the google-workspace skill's recipe for APIs gws lacks, and ~/.dotfiles/docs/trajectory-workspace-admin.md. One YubiKey touch per session"
       }
     }
+  },
+  "wren": {
+    "description": "wren@thecybermonk.com, Wren's own Google Workspace account: an ordinary user of thecybermonk.com with no admin role, for Wren and the errand agents to read and send mail as themselves (never as Sami). Every tier is Gmail alone (no Drive, Docs, Sheets or Calendar), uses the older External client \"gws personal\" of the personal project (number 1092431965353), the client of the personal read tier, because the Gmail API is off in thecybermonk-gws, and releases its agent-tier key with no approval step",
+    "tiers": {
+      "read": {
+        "command": ["secrets", "GWS_WREN_READ_OAUTH", "--"],
+        "description": "gmail.readonly only: read and search mail; no approval"
+      },
+      "modify": {
+        "command": ["secrets", "GWS_WREN_MODIFY_OAUTH", "--"],
+        "description": "gmail.modify: labels, archive, trash, drafts, +reply, +forward; no approval"
+      },
+      "send": {
+        "command": ["secrets", "GWS_WREN_SEND_OAUTH", "--"],
+        "description": "gmail.send only (+send; cannot read mail); no approval"
+      }
+    }
   }
 }

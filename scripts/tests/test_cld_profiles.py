@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 import subprocess
@@ -22,7 +21,6 @@ TRACKED = tuple(
 )
 SHARED = (*TRACKED, "plugins/")
 PER_ACCOUNT = (".claude.json", ".credentials.json", "policy-limits.json", "remote-settings.json", "projects/")
-GATEWAY = "https://middleman.hawk.internal.trajectorylabs.com/anthropic"
 # The stub claude reports the --settings value it got and the variables that override an
 # envoy.json field.
 STUB = """#!/bin/bash
@@ -93,7 +91,7 @@ class CldProfiles(unittest.TestCase):
                 self.assertTrue(fields["ARGS"].endswith("-p hi"), fields["ARGS"])
 
     def test_a_profiles_cld_settings_is_its_model_route(self) -> None:
-        """The trajectory profile's own file wins over its Hawk gateway too."""
+        """A profile's own settings file supplies its model route."""
         for name, args in (("default", ()), ("theorem", ("--profile", "theorem")), ("trajectory", ("--profile", "trajectory"))):
             directory = self.canonical if name == "default" else self.dotfiles / ".claude-profiles" / name
             directory.mkdir(parents=True, exist_ok=True)
@@ -101,16 +99,13 @@ class CldProfiles(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(self.fields(self.cld(*args))["SETTINGS"], str(directory / "cld-settings.json"))
 
-    def test_trajectory_profile_reaches_claude_through_the_hawk_gateway(self) -> None:
+    def test_trajectory_profile_keeps_its_own_login_without_cld_settings(self) -> None:
         trajectory = str(self.dotfiles / ".claude-profiles" / "trajectory")
         for name, args, extra in (("flag", ("--profile", "trajectory"), {}), ("inherited", (), {"CLAUDE_CONFIG_DIR": trajectory})):
             with self.subTest(name):
                 fields = self.fields(self.cld(*args, "-p", "hi", **extra))
                 self.assertEqual(fields["CONFIG"], trajectory)
-                self.assertEqual(
-                    json.loads(fields["SETTINGS"]),
-                    {"apiKeyHelper": str(self.dotfiles / "scripts" / "hawk-token"), "env": {"ANTHROPIC_BASE_URL": GATEWAY}},
-                )
+                self.assertEqual(fields["SETTINGS"], "unset")
                 self.assertTrue(fields["ARGS"].endswith("-p hi"), fields["ARGS"])
 
     def test_named_profile_keeps_its_own_login(self) -> None:
