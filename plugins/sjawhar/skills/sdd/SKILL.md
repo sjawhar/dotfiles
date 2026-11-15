@@ -1,11 +1,9 @@
 ---
 name: sdd
-description: "Use whenever you are building a large project autonomously with subagents — several slices or more than a day of work, especially after a spec or design is approved: plan, implement, test, review, merge in one session. Also when the user asks for SDD or /sdd by name, at any size, and when resuming such a project after a compaction. Not for a small fix nobody asked to run this way, and never in a session the Legion daemon started (LEGION_ROLE is set)."
+description: "Use whenever you are building a large project autonomously with subagents — several slices or more than a day of work, especially after a spec or design is approved: plan, implement, test, review, merge in one session. Also when the user asks for SDD or /sdd by name, at any size, and when resuming such a project after a compaction. Not for a small fix nobody asked to run this way."
 ---
 
 # Subagent-driven development
-
-**Stop if the Legion daemon started this session.** Run `printenv LEGION_ROLE`. If it prints a role, you are a per-process Legion phase worker (or an architect) booted from the daemon's `LEGION_*` environment: follow `skill://legion-worker` (or `skill://legion-architect`) and your role prompt, and stop reading here. The daemon runs one phase of the issue at a time under Legion's own skills, so this skill's planning, dispatch, merge and close steps would do work that belongs to other roles. If your assignment asked for this skill, tell the issue's architect with `envoy_publish` to its role topic (`notifications.role.<token>`; your system prompt's `Legion addressing` line names it), as `skill://legion-worker` says for any cross-phase decision.
 
 Where this skill and a stock workflow skill (`subagent-driven-development`, `writing-plans`, `executing-plans`, or another) disagree, follow this skill. Load `subagent-driven-development` and `using-subagents`.
 
