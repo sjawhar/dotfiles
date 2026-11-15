@@ -3973,6 +3973,41 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.assertIn("error: leak terms: <listed term>.txt: listed leak term", result.stderr)
                 self.assertIn("error: leak terms: <listed term>.txt:1: listed leak term", result.stderr)
 
+    def test_push_refuses_a_term_that_spans_folder_levels_once(self) -> None:
+        # A listed term holding `/` matches a folder object's path across levels: `alpha/omega` in `alpha/omega/x.txt`.
+        # It is refused once, at the entry where the match ends, not once per file below it.
+        term = "alpha/omega"
+        term_file = encrypt_yaml(f"terms: |\n  {term}\n")
+
+        def make(arguments: list[str], source: str) -> str:
+            result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+
+        first = make(["hash-object", "-w", "--stdin"], "first\n")
+        second = make(["hash-object", "-w", "--stdin"], "second\n")
+        omega = make(["mktree"], f"100644 blob {first}\tx.txt\n100644 blob {second}\ty.txt\n")
+        alpha = make(["mktree"], f"040000 tree {omega}\tomega\n")
+        top = make(["mktree"], f"040000 tree {alpha}\talpha\n")
+        for agent, environment, url in self.combinations():
+            with self.subTest(agent=agent, url=url):
+                destination = (
+                    self.fresh_public_url()
+                    if url == self.public_url
+                    else f"https://github.com/theorem-labs/{self.unique('fresh-unreadable')}.git"
+                )
+                self.set_url(destination)
+                result = self.assert_object_refused(
+                    lambda: self.git_push_ref(top, f"refs/tags/{self.unique('slash-term')}", environment | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
+                    "<listed term>",
+                    destination,
+                    top,
+                    alpha,
+                    omega,
+                )
+                self.assertEqual(result.stderr.count(": listed leak term"), 1, result.stderr)
+                self.assertNotIn(term, result.stdout + result.stderr)
+
     def test_push_allows_a_file_object_a_held_commit_already_has(self) -> None:
         path = f"{self.unique('held-file')}.txt"
         commit = self.commit(path, self.term, "clean", parent=self.base)

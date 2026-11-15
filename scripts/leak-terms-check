@@ -1658,11 +1658,13 @@ def scan_outgoing_objects(
     findings: list[str] = []
     for folder in folders:
         for kind, path_object, path in tree_paths(folder):
-            # One finding per entry whose own name holds a term, so a folder's name counts once, not once per file
-            # under it; every shown path masks every term in it, its parent folders' names included.
+            # Each match of the full path counts once, at the entry where it ends: a folder's name counts at that
+            # folder, not again for each file under it, and a term holding `/` (`a/b` in `a/b/x.txt`) counts at `a/b`.
+            # Every shown path masks every term in it, its parent folders' names included.
             component_start = path.rfind("/") + 1
-            shown = mask_path(path, matcher.spans(path))
-            findings.extend(shown for _ in matcher.spans(path[component_start:]))
+            spans = matcher.spans(path)
+            shown = mask_path(path, spans)
+            findings.extend(shown for span in spans if span.end > component_start)
             if kind == "blob" and path_object not in destination_objects and path_object not in commit_objects:
                 folder_files.append((path_object, shown))
 
