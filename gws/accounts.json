@@ -1,10 +1,10 @@
 {
   "personal": {
-    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The modify, send and admin tiers use the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT); the read tier uses the older External client of a personal project (number 1092431965353). A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
+    "description": "sami@thecybermonk.com (formerly sami.n.jawhar@gmail.com), Sami's personal Google account, upgraded to Google Workspace on thecybermonk.com. The read, modify, send and admin tiers use the Internal Desktop client \"gws CLI\" in project thecybermonk-gws (its JSON is the agent-tier key GWS_PERSONAL_OAUTH_CLIENT). A secret-run tier's approval card shows SECRET_RUN_REASON: set it on the call to say why (SECRET_RUN_REASON='archive the triaged threads' gws ...)",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_PERSONAL_READ_OAUTH", "--"],
-        "description": "Drive, Docs, Sheets, Slides and Calendar read-write; Gmail read-only"
+        "description": "Read-only: Gmail, Calendar, Drive, Docs and Sheets (gmail.readonly, calendar.readonly, drive.readonly, documents.readonly, spreadsheets.readonly); reads, downloads and exports, and no change; a change goes on the modify tier"
       },
       "modify": {
         "command": ["secret-run", "--reason", "gws personal modify", "--wait", "4m", "GWS_PERSONAL_MODIFY_OAUTH", "--"],
@@ -63,7 +63,7 @@
     }
   },
   "wren": {
-    "description": "wren@thecybermonk.com, Wren's own Google Workspace account: an ordinary user of thecybermonk.com with no admin role, for Wren and the errand agents to read and send mail as themselves (never as Sami). Every tier is Gmail alone (no Drive, Docs, Sheets or Calendar), uses the older External client \"gws personal\" of the personal project (number 1092431965353), the client of the personal read tier, and releases its agent-tier key with no approval step",
+    "description": "wren@thecybermonk.com, Wren's own Google Workspace account: an ordinary user of thecybermonk.com with no admin role, for Wren and the errand agents to read and send mail as themselves (never as Sami). Every tier is Gmail alone (no Drive, Docs, Sheets or Calendar), uses the older External client \"gws personal\" of the personal project (number 1092431965353), which no personal tier uses, and releases its agent-tier key with no approval step",
     "tiers": {
       "read": {
         "command": ["secrets", "GWS_WREN_READ_OAUTH", "--"],
