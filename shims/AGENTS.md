@@ -28,8 +28,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   2026-11-02. `gh auth` verbs other than `status` are refused, and a call GitHub refuses for
   the App (a review of the App's own pull request, a permission its installation lacks) ends
   with a `gh shim: REFUSED` block naming the call, the identity, why, and the route: where a
-  repository requires an approval your own identity cannot give, ask the INFRA Legion
-  controller for a review issue; elsewhere a verdict goes out as an App
+  repository requires an approval your own identity cannot give, ask INFRA's Legion controller
+  which running Legion reviewer reads it and send that reviewer the pull request and its head,
+  asking for no review issue (dispatch://INFRA-1481, R1 and R3); elsewhere a verdict goes out as an App
   comment beginning `VERDICT: <verdict> at <head sha>`. A post
   (`issue create`, `issue
   comment`, `pr comment`) Sami instructed in a Dispatch ask he answered runs again with
