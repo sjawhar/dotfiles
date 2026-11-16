@@ -15,6 +15,7 @@ the arguments of the `docker run` it makes.
 
 from __future__ import annotations
 
+import socket
 import stat
 import subprocess
 import tempfile
@@ -69,10 +70,19 @@ class NoSqlInAgentbox(unittest.TestCase):
         write_stub(self.stubs, "sqlite3", f'echo "$*" >>"{self.sqlite}"; exit 0')
         dot = self.root / "dotfiles"
         write_stub(dot / "scripts", "envoy-nats-seed", "exit 1")
-        write_stub(dot / "scripts", "agentbox-docker-snapshot", "exit 0")
+        # The real snapshot, which writes the box's private Docker config and its (empty) bind
+        # list into the fixture's box tree: mount_args reads that list, and a stub that writes
+        # nothing made this test depend on the host's own ~/.docker.
+        (dot / "scripts" / "agentbox-docker-snapshot").symlink_to(DOTFILES / "scripts" / "agentbox-docker-snapshot")
         write_stub(dot / "scripts", "on-google-vm", "exit 1")
         (dot / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
         (dot / "agentbox").symlink_to(DOTFILES / "agentbox")
+        # mount_args refuses a box with no secretsd socket to bind. The fixture's own socket, so the
+        # test does not depend on the host running secretsd (a Legion pod does not).
+        self.secretsd = self.root / "secretsd.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(self.secretsd))
+        self.addCleanup(listener.close)
         self.env = {
             "AGENTBOX_IDENTITY_FILE": str(self.root / "not-a-box"),
             "AGENTBOX_BOX": "",
@@ -94,7 +104,7 @@ class NoSqlInAgentbox(unittest.TestCase):
                               check=False, timeout=120, env={**self.env, **(env or {})})
 
     def test_no_sql_in_agentbox(self) -> None:
-        got = self.run_bash(f"{NO_HOST}cmd_new repo1 -- omp")
+        got = self.run_bash(f"SECRETSD_SOCK={self.secretsd}\n{NO_HOST}cmd_new repo1 -- omp")
         self.assertEqual(got.returncode, 0, got.stderr[-3000:])
         args = self.run_args.read_text(encoding="utf-8").splitlines()
         self.assertFalse([a for a in args if "omp-session-sql" in a], "no mount of the database connection file")

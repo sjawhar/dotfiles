@@ -32,6 +32,7 @@ from __future__ import annotations
 import fcntl
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -363,16 +364,25 @@ exit 0''')
         write_stub(self.stubs, "df", "printf 'Avail\\n%s\\n' 1099511627776")
         dot = self.root / "dotfiles"
         write_stub(dot / "scripts", "envoy-nats-seed", "exit 1")
-        write_stub(dot / "scripts", "agentbox-docker-snapshot", "exit 0")
+        # The real snapshot, which writes the box's private Docker config and its (empty) bind
+        # list into the fixture's box tree, and a fixture secretsd socket for mount_args, which
+        # refuses a box with none: this test reads mount_args' real work, and neither the host's
+        # ~/.docker nor its secretsd may decide it (a Legion pod has neither).
+        (dot / "scripts" / "agentbox-docker-snapshot").symlink_to(DOTFILES / "scripts" / "agentbox-docker-snapshot")
         write_stub(dot / "scripts", "on-google-vm", "exit 1")
         write_stub(dot / "scripts", "omp-session-live", "exit 1")
         (dot / "agent-secrets").symlink_to(DOTFILES / "agent-secrets")
         (dot / "agentbox").symlink_to(DOTFILES / "agentbox")
+        secretsd = self.root / "secretsd.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(secretsd))
+        self.addCleanup(listener.close)
         no_host = (
             "image_tag() { echo agentbox:test; }; build_image() { :; }; ensure_forwarders() { :; }\n"
             f"ensure_network() {{ NETWORK_GATEWAY={GATEWAY} NETWORK_SUBNET=172.31.0.0/16; }}\n"
             "clone_checkout() { :; }; close_box() { :; }; box_cache_mounts() { :; }\n"
             "forward_channels() { FORWARD_CHANNELS=(); }; collect_start() { :; }\n"
+            f"SECRETSD_SOCK={secretsd}\n"
         )
         result = self.run_bash(f"{no_host}cmd_new repo1 -- omp --resume {SID}", {
             "DOTFILES_DIR": str(dot), "AGENTBOX_SRC": str(self.root / "src"), "STUB_RUN_ARGS": str(run_args),
