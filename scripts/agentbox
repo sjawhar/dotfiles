@@ -98,12 +98,14 @@
 # within 15 min when nothing renews it. When the broker refuses renew as not live, the launcher
 # enrolls the key the box holds again (reenroll_if_not_live). A failed attempt keeps the key, and
 # the launcher tries again later.
-# close_box revokes a box's own enrollment at once (unenroll_box). It gives a session's
-# enrollment to a detached waiter, which ends it after a grace unless another box of the session
-# uses it. A box started while the host's helper holds no live launcher credential gets no
-# identity at all (no key, no enrollment.pending). Its agents use secretsd, and `new` says so
-# (broker_ready). The same holds for a box whose first enrollment fails: enroll_failed removes
-# its key.
+# close_box ends the box's enrollments (unenroll_box). It revokes the box's own recorded
+# enrollment at once. An enroll call whose outcome is not known can have made an enrollment with
+# an id that the host does not have. A detached process gets that id from the broker and revokes
+# it. A session's enrollments go to a detached waiter, which ends them after a grace unless
+# another box of the session uses them. A box started while the host's helper holds no live
+# launcher credential gets no identity at all (no key, no enrollment.pending). Its agents use
+# secretsd, and `new` says so (broker_ready). The same holds for a box whose first enrollment
+# fails: enroll_failed removes its key.
 set -euo pipefail
 
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -844,7 +846,8 @@ box_keydir() { echo "$RUN_BASE/$1/agent-secrets"; }
 # The box's key dir is the box's to write too (keygen writes key.pem there as the box's user), so
 # the host keeps its own files beside it, in $RUN_BASE/<box>, which no box's own mounts reach (the
 # one exception is under box_keydir): each enroll attempt's error (enroll.attempt-error) and the
-# enrollment id close_box revokes (enrollment-id).
+# enrollment id that close_box revokes (enrollment-id). An enroll call whose outcome is not known
+# leaves no file there: the launcher keeps its identity in memory (ENROLL_OPEN).
 # What agentbox itself puts in the key dir is written to a temp file in $RUN_BASE/<box> and
 # renamed into place. The rename replaces whatever the box left at the last name (a symlink
 # included) instead of following it, but it follows every directory above that name: a link at
@@ -953,8 +956,17 @@ wait_for_running() {
 # it is the box's own (no session id, no host key for the session, or the 409 fallback, which
 # still passes --session-id); ENROLLED_ID is the id the last enrollment got back. ENROLL_ERROR is
 # why the last key step or enroll call failed, and after enroll_failed the reason it recorded.
+# ENROLL_OPEN holds the identity of each enroll call whose outcome is not known: the broker can
+# have made an enrollment for it, with an id the host does not have. An entry is one string of
+# three words, `<kind> <runtime id> <thumbprint>`, as they were at that call. The kind is
+# `session` when ENROLLED_SKD was set and `own` when it was empty. enroll_attempts adds an
+# identity once, and removes its entries when a later call for the same runtime id and
+# thumbprint records an enrollment id. At the close, unenroll_box ends the enrollment of each
+# entry: a detached process gets its id from the broker and revokes it (for a session's entry,
+# only when the session did not come back).
 ENROLLED_BOX="" ENROLLED_SID="" ENROLLED_RUNTIME="" ENROLLED_TP="" ENROLLED_SKD="" ENROLLED_ID=""
 ENROLL_ERROR=""
+ENROLL_OPEN=()
 
 # enroll_key BOX SID: give the box the key it enrolls with, and set ENROLLED_SID,
 # ENROLLED_RUNTIME, ENROLLED_TP and ENROLLED_SKD for it. A box whose omp session id is known
@@ -998,18 +1010,52 @@ enroll_key() {
     ENROLLED_SID="$sid" ENROLLED_RUNTIME="$runtime" ENROLLED_TP="$tp" ENROLLED_SKD="$skd"
 }
 
+# enroll_open_add: add the identity of the enroll call just made to ENROLL_OPEN, unless it is
+# there already. It reads the ENROLLED_* globals, so it runs before anything changes them.
+enroll_open_add() {
+    local kind=own entry e
+    [[ -z "$ENROLLED_SKD" ]] || kind=session
+    entry="$kind $ENROLLED_RUNTIME $ENROLLED_TP"
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        [[ "$e" != "$entry" ]] || return 0
+    done
+    ENROLL_OPEN+=("$entry")
+}
+
+# enroll_open_settle: remove from ENROLL_OPEN every entry with the runtime id and the thumbprint
+# of the enroll call that just recorded an enrollment id.
+enroll_open_settle() {
+    local e unsettled=()
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        [[ "${e#* }" == "$ENROLLED_RUNTIME $ENROLLED_TP" ]] || unsettled+=("$e")
+    done
+    ENROLL_OPEN=(${unsettled[@]+"${unsettled[@]}"})
+}
+
 # enroll_attempts BOX ATTEMPTS [fallback]: the broker call of an enrollment, for the key the box
 # holds, as ENROLLED_RUNTIME, ENROLLED_TP and ENROLLED_SID name it. The enrollment is made from the
 # host with the launcher credential, which no box can read, and the client writes the enrollment
 # id beside the key. Up to ATTEMPTS attempts 3 s apart, each one call (two with the 409 fallback
 # below), with the enrollment.pending marker renewed before each call: from the legion #1589
 # release a client in the box waits on a marker younger than 160 s, so it stays fresh for exactly
-# as long as the launcher is still working, however slow the broker. Success records the
-# enrollment on the host, sets ENROLLED_BOX and ENROLLED_ID, and removes the marker and every
-# error file. A failure leaves the marker for its caller to end, with the reason in ENROLL_ERROR.
-# `fallback` allows the 409 fallback below.
+# as long as the launcher is still working, however slow the broker. No retry starts once
+# cmd_new's HUP, TERM or INT trap has set `interrupted`. The 409 fallback call is not a retry: it
+# is part of its attempt. Success records the enrollment on the host, sets ENROLLED_BOX and
+# ENROLLED_ID, and removes the marker and every error file. A failure leaves the marker for its
+# caller to end, with the reason in ENROLL_ERROR. `fallback` allows the 409 fallback below.
+# Each call also keeps ENROLL_OPEN up to date. A call that records an enrollment id removes the
+# entries of its runtime id and thumbprint: under one launcher credential and one runtime id the
+# broker gives a key the id of its live enrollment, so the id that the host recorded is that of
+# any live enrollment an earlier call made under that credential. A call that exits non-zero,
+# with a line that starts with one of these two prefixes, made no enrollment and adds nothing:
+#   `agent-secrets enroll: ENROLL_FAILED: `
+#   `agent-secrets enroll: DRAINING: `
+# Only the code in that place counts. The same word in other text of the error does not count.
+# Every other call adds its identity: exit 0 with no id recorded, any other code
+# (ENROLL_OUTCOME_UNKNOWN), no answer from the helper, a reply that the client could not read, an
+# id that it could not write, and a signal.
 enroll_attempts() {
-    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid attempt=1 args
+    local box="$1" attempts="$2" fallback="${3:-}" keydir errfile eid err attempt=1 args
     keydir="$(box_keydir "$box")"
     errfile="$RUN_BASE/$box/enroll.attempt-error"
     while :; do
@@ -1023,6 +1069,7 @@ enroll_attempts() {
             agent-secrets "${args[@]}" 2>"$errfile")"; then
             if [[ -z "$eid" || -L "$keydir/enrollment" || ! -s "$keydir/enrollment" ]]; then
                 ENROLL_ERROR="agent-secrets enroll gave no enrollment id, or left no plain, non-empty enrollment file in $keydir (it printed '$eid')"
+                enroll_open_add
                 return 1
             fi
             printf '%s\n' "$eid" >"$RUN_BASE/$box/enrollment-id"
@@ -1041,9 +1088,16 @@ enroll_attempts() {
                 rm -f "$RUN_BASE/$box/enrollment-session"
             fi
             rm -f "$keydir/enrollment.pending" "$keydir/enrollment.error" "$errfile"
+            enroll_open_settle
             ENROLLED_BOX="$box" ENROLLED_ID="$eid"
             return 0
         fi
+        # A missing file (its redirect failed) reads as empty. Under set -e, `$(<file)` of a
+        # missing file ends the launcher, even on the left of `||`.
+        err=""
+        [[ ! -f "$errfile" ]] || err="$(<"$errfile")"
+        [[ $'\n'"$err" == *$'\n''agent-secrets enroll: ENROLL_FAILED: '* \
+            || $'\n'"$err" == *$'\n''agent-secrets enroll: DRAINING: '* ]] || enroll_open_add
         # A live enrollment of this session under a key the host no longer holds — its key dir
         # went with a reboot while the old lease still ran — refuses every attempt with the same
         # 409 until that lease lapses, up to 15 minutes. Rather than leave the box with no
@@ -1051,19 +1105,27 @@ enroll_attempts() {
         # accepted; the session gets its continuity back at its next box. The fallback call is
         # part of the same attempt, made at once: the 409 is the broker's answer, not an outage to
         # wait out, and a re-enrollment pass has one attempt only.
-        if [[ -n "$fallback" && -n "$ENROLLED_SKD" && "$(<"$errfile")" == *ALREADY_ENROLLED* ]]; then
+        if [[ -n "$fallback" && -n "$ENROLLED_SKD" && "$err" == *ALREADY_ENROLLED* ]]; then
             echo "agentbox: the broker still holds a live enrollment for session $ENROLLED_SID under a key this host does not have; $box enrolls under its own name and its pending broker cards will not follow the session" >&2
             ENROLLED_SKD="" ENROLLED_RUNTIME="$box"
             continue
         fi
+        # No retry once cmd_new's HUP, TERM or INT trap has set `interrupted` (unset for any other
+        # caller): the box is ending. The test comes before the 3 s wait and again after it,
+        # because a signal that comes during the sleep runs its trap only when the sleep ends.
         (( attempt < attempts )) || break
-        (( attempt += 1 ))
+        [[ "${interrupted:-0}" == 0 ]] || break
         sleep 3
+        [[ "${interrupted:-0}" == 0 ]] || break
+        (( attempt += 1 ))
     done
-    if (( attempts > 1 )); then
-        ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $(<"$errfile")"
+    if (( attempt < attempts )); then
+        # The loop stopped early: the launcher was interrupted.
+        ENROLL_ERROR="agent-secrets enroll failed $attempt of $attempts attempts, and the launcher was interrupted, so it made no more; last: $err"
+    elif (( attempts > 1 )); then
+        ENROLL_ERROR="agent-secrets enroll failed $attempts times; last: $err"
     else
-        ENROLL_ERROR="agent-secrets enroll failed: $(<"$errfile")"
+        ENROLL_ERROR="agent-secrets enroll failed: $err"
     fi
     return 1
 }
@@ -1191,8 +1253,11 @@ REENROLL_BACKOFF=30 REENROLL_AT=0
 reenroll_if_not_live() {
     local box="$1" keydir old delay ok=0
     # No new attempt once cmd_new's HUP, TERM or INT trap has set `interrupted`: the box is
-    # ending, and an attempt would cost a helper call, up to about 60 s of its close, and for a
-    # box with no session id an enrollment that close_box then revokes at once.
+    # ending. With the pinned helper one attempt can take about 23 s of the close (the helper's
+    # 20 s bound and the client's own wait), and a cancelled `agentbox move` sends SIGKILL 30 s
+    # after TERM (move_to_cancel_start). For a box with no session id the attempt can also make
+    # an enrollment that close_box then revokes at once. enroll_attempts makes no retry then
+    # either: the ten attempts of enroll_box can take about four minutes.
     [[ "${interrupted:-0}" == 0 ]] || return 0
     [[ "$ENROLLED_BOX" == "$box" ]] || return 0
     keydir="$(box_keydir "$box")"
@@ -1230,10 +1295,14 @@ reenroll_if_not_live() {
 # acts at once, as in the blocking `wait`; the loop goes on while the child lives. `wait -n` with
 # ids needs bash 5.1 (the hosts run 5.2). Returns once the child has exited; `wait "$child"`
 # still returns the child's own status afterwards.
+# After reenroll_if_not_live the pass checks the child again, before it waits. A child that
+# ended during the pass's enroll call is already reaped: `wait -n` with its pid then writes
+# "no such job" (bash 5.2.15) and waits for all of the 10 s.
 box_wait() {
     local box="$1" child="$2" sleep_pid
     while kill -0 "$child" 2>/dev/null; do
         reenroll_if_not_live "$box"
+        kill -0 "$child" 2>/dev/null || break
         sleep 10 &
         sleep_pid=$!
         wait -n "$child" "$sleep_pid" || true
@@ -1272,76 +1341,291 @@ enroll_when_up() {
 # anyway, so this only decides how much of that window a session that has really ended keeps.
 AGENTBOX_UNENROLL_GRACE="${AGENTBOX_UNENROLL_GRACE:-180}"
 
-# Revoke a box's enrollment and every grant under it: the id the host recorded at enrollment,
-# never the box-writable copy. Idempotent on the broker; a failure is noted, and the lease the
-# box stopped renewing lapses within 15 minutes.
-# A SESSION's enrollment (enroll_box, when the box had an omp session id) is not this box's to
-# end: revoking it ends the id every box of the session signs with. The broker keeps the
-# session's pending requests and grants dormant for its carry (12 h by default) and hands them to
-# the session's next enrollment (broker enroll.go endEnrollment, adopt), but a move must keep the
-# id itself. So it goes to a detached waiter that gives the session its grace to come back in
-# another box and ends the enrollment only if none did. Detached because close_box runs in the
-# pane the respawn is taking back, and nothing may wait here.
+# unenroll_box BOX: at the close of the box, end each enrollment the box can hold at the broker,
+# and every grant under it. It has two sources. One is the id that the host recorded at
+# enrollment ($RUN_BASE/<box>/enrollment-id), never the box-writable copy. The other is the
+# launcher's ENROLL_OPEN: the enroll calls whose outcome is not known. A process that did not
+# enroll the box (the reaper, for example) has an empty ENROLL_OPEN, so for it only the
+# recorded id counts.
+#   - The box's own recorded enrollment (no enrollment-session): one revoke, at once. A failure
+#     is only noted. The lease that the box stopped renewing lapses within 15 minutes. When
+#     enrollment-session is there but gives no session id, the recorded id can be a session's, so
+#     it is not revoked: one line on stderr, and the lease ends it.
+#   - The box's own open entries (kind `own`): one detached process, with no grace
+#     (unenroll_learn_each). For each entry, it learns the id and revokes it.
+#   - The session's recorded enrollment and the session's open entries (kind `session`): one
+#     detached waiter (unenroll_session_wait), below.
+# A detached process holds none of the caller's pipes. Its stdin is /dev/null, and its output
+# goes to $RUN_BASE/session-keys/unenroll.log. close_box runs in the pane that the respawn takes
+# back, and nothing may wait there. A detached process runs the text of its functions, which
+# unenroll_box gives to `bash -c`. It reads this file only for the waiter's one short call of
+# `session-live-box`. A publish replaces this file, and bash reads a script by byte offset (see
+# the self-copy at the end of this file). So that call can end with no answer, and the waiter
+# then leaves every enrollment alone (unenroll_session_wait).
 #
-# The waiter has TWO tests, because the first one alone is blind to the box that enrolled
-# BEFORE this one. `owner` holds the name of the last box that enrolled for the session, so
-# when a DUPLICATE box of a live session ends, owner still names the duplicate and the waiter
-# reads that as "nobody came back" - at 20:17Z on 2026-11-04 it ended the enrollment of a
-# session that was running the whole time in its ORIGINAL box, which lost its broker identity
-# three minutes after the duplicate closed and noticed 25 minutes later, when its last cached
-# GitHub token expired. The enrollment is the SESSION's (runtime id `session-<id>`), not the
-# box's, so any live box of that session is using it. The second test asks exactly that
-# (`session-live-box`, below), at wake time rather than now, since a box can come up during the
-# grace.
+# The learn call (unenroll_learn) gets the id of an open entry from the broker. It is the enroll
+# call of the entry: the same runtime id and thumbprint, and no session id. While an enrollment
+# of that runtime id and key is live under the launcher credential that the helper signs with,
+# the broker gives back its id, whatever the session id (broker enroll.go recoverConflict; the
+# helper signs with a person's sign-in when it has one, and with the machine login otherwise).
+# When none is live, the broker makes a new enrollment. That enrollment names no session, and the
+# broker moves a session's grants only to an enrollment that names the session (adopt). So a learn
+# call cannot take the grants of a live box. The close writes no record of a learned id. It only
+# revokes the id (unenroll_revoke).
+#
+# A SESSION's enrollment is not this box's to end: revoking it ends the id every box of the
+# session signs with. The broker keeps the session's pending requests and grants dormant for its
+# carry (12 h by default) and hands them to the session's next enrollment (broker enroll.go
+# endEnrollment, adopt), but a move must keep the id itself. So the waiter gives the session its
+# grace to come back in another box, and ends the enrollments only if none did.
+#
+# The waiter has THREE tests. The first one alone is blind to the box that enrolled BEFORE this
+# one. Test 1 reads `owner`, the name of the last box that enrolled for the session.
+# When a DUPLICATE box of a live session ends, owner still names the duplicate, and test 1 alone
+# reads that as "nobody came back". It then ends the enrollment of the session's ORIGINAL box,
+# which still runs. The enrollment is the SESSION's (runtime id `session-<id>`), not the box's,
+# so any live box of that session uses it. Test 2 asks exactly that (`session-live-box`, below),
+# at wake time and not now, because a box can come up during the grace. The waiter ends the
+# enrollments only on the explicit answer "no other box is live" (`none`). When it cannot read
+# test 2, it leaves them alone.
+# When the box recorded a session enrollment, test 1 passes while owner names this box. When the
+# box recorded none (its enroll calls for the session came back open), owner names an earlier box
+# of the session, or nothing. So test 1 then passes while owner is what it was at the close. A box
+# that enrolls for the session during the grace writes its own name there.
+# Tests 1 and 2 see a box only once its enroll call has succeeded. A box that is still enrolling,
+# as under a slow broker, writes neither owner nor enrollment-session yet, but its enroll_key has
+# touched the session's key dir before its first call. Test 3 passes while the key dir's mtime is
+# not later than the close, whose time unenroll_box gives the waiter.
 unenroll_box() {
-    local box="$1" eid sid="" skd
-    [[ -s "$RUN_BASE/$box/enrollment-id" ]] || return 0
-    eid="$(<"$RUN_BASE/$box/enrollment-id")"
-    if [[ -s "$RUN_BASE/$box/enrollment-session" ]]; then
-        sid="$(<"$RUN_BASE/$box/enrollment-session")"
+    local box="$1" eid="" sid="" skd owner fns e own=() ses=() closed
+    # The close's time for the waiter's test 3, in nanoseconds. A value that is not a number
+    # makes the waiter leave everything alone.
+    closed="$(date +%s%N 2>/dev/null)" || closed=""
+    # The read builtin, not `$(<file)`: under `set -e`, `$(<file)` of a file that cannot be opened
+    # ends close_box or reap_box, and another close of the box can remove the file at any time. A
+    # file that is missing or cannot be read reads as empty.
+    read -r eid 2>/dev/null <"$RUN_BASE/$box/enrollment-id" || true
+    if [[ -n "$eid" ]]; then
+        read -r sid 2>/dev/null <"$RUN_BASE/$box/enrollment-session" || true
+        if [[ -z "$sid" && -e "$RUN_BASE/$box/enrollment-session" ]]; then
+            echo "agentbox: cannot read $RUN_BASE/$box/enrollment-session; enrollment $eid of $box can be a session's, so it is left to end with its lease (15 min)" >&2
+            eid=""
+        fi
     fi
-    if [[ -z "$sid" ]]; then
+    if [[ -n "$eid" && -z "$sid" ]]; then
         AGENT_SECRETS_URL="$AGENT_SECRETS_URL" agent-secrets unenroll --helper --enrollment "$eid" \
             || echo "agentbox: unenroll $box ($eid) failed; the broker drops it when its lease lapses (15 min)" >&2
+        eid=""
+    fi
+    for e in ${ENROLL_OPEN[@]+"${ENROLL_OPEN[@]}"}; do
+        case "$e" in
+            "own "*) own+=("$e") ;;
+            "session "*) ses+=("$e") ;;
+        esac
+    done
+    [[ -n "$sid" ]] || (( ${#own[@]} + ${#ses[@]} )) || return 0
+    mkdir -p -m 700 "$RUN_BASE/session-keys" || true
+    fns="$(declare -f unenroll_revoke unenroll_learn unenroll_learn_each unenroll_session_wait)"
+    if (( ${#own[@]} )); then
+        setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
+            bash -c "$fns"$'\n''unenroll_learn_each "$@"' agentbox-unenroll "$RUN_BASE" "$box" "${own[@]}" \
+            </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
+    fi
+    if [[ -n "$sid" ]]; then
+        skd="$(session_keydir "$sid")"
+        owner="$box"
+    elif (( ${#ses[@]} )); then
+        # The entry is `session session-<sid> <thumbprint>`.
+        sid="${ses[0]#session session-}"
+        sid="${sid%% *}"
+        skd="$(session_keydir "$sid")"
+        owner="$(cat "$skd/owner" 2>/dev/null || true)"
+    else
         return 0
     fi
-    skd="$(session_keydir "$sid")"
-    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" bash -c '
-        sleep "$1"
-        [[ "$(cat "$2/owner" 2>/dev/null)" == "$3" ]] || {
-            echo "$(date -u +%FT%TZ) $3: session $4 came back in $(cat "$2/owner" 2>/dev/null); enrollment $5 left alone"
-            exit 0
-        }
-        if live="$("$6" session-live-box "$4" "$3" 2>/dev/null)" && [[ -n "$live" ]]; then
-            echo "$(date -u +%FT%TZ) $3: session $4 is live in box $live; enrollment $5 left alone"
-            exit 0
-        fi
-        rm -rf "${2:?}"
-        echo "$(date -u +%FT%TZ) $3: session $4 did not come back; ending enrollment $5"
-        agent-secrets unenroll --helper --enrollment "$5" \
-            || echo "$(date -u +%FT%TZ) $3: unenroll $5 failed; the broker drops it when its lease lapses (15 min)"
-    ' agentbox-unenroll "$AGENTBOX_UNENROLL_GRACE" "$skd" "$box" "$sid" "$eid" \
-        "$DOTFILES_DIR/scripts/agentbox" \
+    setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
+        bash -c "$fns"$'\n''unenroll_session_wait "$@"' agentbox-unenroll \
+        "$AGENTBOX_UNENROLL_GRACE" "$RUN_BASE" "$skd" "$box" "$sid" "$owner" "$eid" \
+        "$DOTFILES_DIR/scripts/agentbox" "$closed" ${ses[@]+"${ses[@]}"} \
         </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
     return 0
 }
 
-# session_live_box SID EXCEPT: the name of a box other than EXCEPT that enrolled for session SID
-# and whose container still exists, or nothing. The run directory of every box holds the session
-# it enrolled for (`enrollment-session`, written by enroll_box) and is removed with the box, so
-# this is the host's own record of who is using the session's broker identity.
+# unenroll_revoke BOX WHAT ID: revoke enrollment ID of BOX. WHAT names where the id comes from:
+# `recorded`, or `runtime id <id>` for an id that a learn call got. A failure with a stderr line
+# that starts with `agent-secrets unenroll: UNENROLL_FAILED: ` is a known outcome: nothing was
+# revoked. After any other failure the outcome is not known, so the revoke runs once more at
+# once, and only once. The helper takes the broker's 404 as done, so a revoke of an ended
+# enrollment succeeds. Each client call writes one line to stdout, after the UTC time: the box,
+# the id, WHAT and the result. Status 0 when the broker revoked the enrollment, else 1.
+# unenroll_box runs this in a detached process (no `set -e`, no globals), and a direct call works
+# too.
+unenroll_revoke() {
+    local box="$1" what="$2" eid="$3" err rc try
+    for try in 1 2; do
+        rc=0
+        err="$(agent-secrets unenroll --helper --enrollment "$eid" 2>&1 >/dev/null)" || rc=$?
+        if (( rc == 0 )); then
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what) revoked"
+            return 0
+        fi
+        if [[ $'\n'"$err" == *$'\n''agent-secrets unenroll: UNENROLL_FAILED: '* ]]; then
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what) not revoked: agent-secrets unenroll exited $rc: ${err//$'\n'/ }; it lapses at the end of its lease (15 min)"
+            return 1
+        fi
+        if (( try == 1 )); then
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what): the outcome of the revoke is not known: agent-secrets unenroll exited $rc: ${err//$'\n'/ }; revoking once more"
+        else
+            echo "$(date -u +%FT%TZ) $box: enrollment $eid ($what): the outcome of the revoke is not known: agent-secrets unenroll exited $rc: ${err//$'\n'/ }; if it is live, it lapses at the end of its lease (15 min)"
+        fi
+    done
+    return 1
+}
+
+# unenroll_learn RUN_BASE BOX ENTRY: get the enrollment id of one open entry of BOX from the
+# broker, and revoke that id (unenroll_revoke). ENTRY is `<kind> <runtime id> <thumbprint>`
+# (ENROLL_OPEN). The learn call is `agent-secrets enroll --helper` with the entry's runtime id and
+# thumbprint, and with no --session-id (unenroll_box tells why). Its key dir is a new
+# RUN_BASE/learn.XXXXXX, not the box's key dir: the box can make that one unwritable, and the
+# close removes it. The client writes `enrollment` there, and this removes the dir after the call.
+# No walker of RUN_BASE takes the dir for a box: session_live_box reads only a dir that holds
+# enrollment-session. When the client exits 0 and prints an id, that id is revoked. Any other end
+# writes one line to stdout: the box, the entry and the client's stderr. An enrollment, if the
+# attempt made one, then ends with its lease. Status 0 when the id was revoked, else 1.
+unenroll_learn() {
+    local run_base="$1" box="$2" entry="$3" runtime tp dir eid err rc=0
+    read -r _ runtime tp <<<"$entry"
+    if ! dir="$(mktemp -d "$run_base/learn.XXXXXX" 2>&1)"; then
+        echo "$(date -u +%FT%TZ) $box: open attempt '$entry' not learned: no key dir for the learn call ($dir); an enrollment, if the attempt made one, ends with its lease (15 min)"
+        return 1
+    fi
+    eid="$(AGENT_SECRETS_KEY_DIR="$dir" agent-secrets enroll --helper --runtime-id "$runtime" \
+        --thumbprint "$tp" 2>"$dir/error")" || rc=$?
+    err="$(cat "$dir/error" 2>/dev/null || true)"
+    rm -rf -- "$dir"
+    eid="${eid//[[:space:]]/}"
+    if (( rc == 0 )) && [[ -n "$eid" ]]; then
+        unenroll_revoke "$box" "runtime id $runtime" "$eid" || return 1
+        return 0
+    fi
+    echo "$(date -u +%FT%TZ) $box: open attempt '$entry' not learned: agent-secrets enroll exited $rc and printed '$eid': ${err//$'\n'/ }; an enrollment, if the attempt made one, ends with its lease (15 min)"
+    return 1
+}
+
+# unenroll_learn_each RUN_BASE BOX ENTRY...: for each open ENTRY of BOX, of either kind, learn
+# its id and revoke it (unenroll_learn). The detached process for the box's own entries runs it,
+# and so does the session waiter for the session's entries. Status 0.
+unenroll_learn_each() {
+    local run_base="$1" box="$2" e
+    shift 2
+    for e in "$@"; do
+        unenroll_learn "$run_base" "$box" "$e" || true
+    done
+    return 0
+}
+
+# unenroll_session_wait GRACE RUN_BASE SKD BOX SID OWNER EID SELF CLOSED ENTRY...: the session
+# waiter (unenroll_box). After GRACE seconds it runs the three tests. Test 1: SKD/owner still reads
+# OWNER. Test 2: `SELF session-live-box SID BOX` exits 1 and prints `none`, which is its answer "no
+# other box of the session is live" (session_live_box). SELF is this script. Test 3: SKD's mtime is
+# not later than CLOSED, the close's time in nanoseconds; a missing SKD passes, since a box that
+# enrolls for the session makes it again. Each other answer stops the waiter, and one line names
+# the recorded id EID (or `none`) and each open ENTRY, all left alone:
+#   - Test 1 fails, or SELF exits 0 and prints a box name: the session is live.
+#   - Any other answer of SELF: test 2 could not be read. Examples are status 2 (session_live_box
+#     could not look), status 1 with no output (SELF ended before it looked, as under `set -e`)
+#     and status 0 with no output (as when a publish replaces SELF during the read). The line also
+#     names the status and the output of SELF, and says that an enrollment that no box renews ends
+#     with its lease (15 min). SKD stays.
+#   - Test 3 fails: a box started to enroll for the session after the close. SKD stays.
+#   - CLOSED is not a number, or SKD is there and its mtime cannot be read: test 3 could not be
+#     read. The line says so, and that the enrollments end with their lease. SKD stays.
+# The waiter must not guess "none": the session's recorded id is the id of every box of the
+# session, and a learn call with the session's key gets the id of the live enrollment back
+# (unenroll_box). When all three tests pass, it removes SKD, the session's key dir, and writes one
+# line. Then it revokes EID, when there is one (unenroll_revoke), and learns and revokes each
+# ENTRY (unenroll_learn_each).
+unenroll_session_wait() {
+    local grace="$1" run_base="$2" skd="$3" box="$4" sid="$5" owner="$6" eid="$7" self="$8"
+    local closed="$9" now live rc mtime="" open=""
+    shift 9
+    if (( $# )); then
+        printf -v open '%s; ' "$@"
+        open=", and the enrollment of each open attempt: ${open%; }"
+    fi
+    sleep "$grace"
+    now="$(cat "$skd/owner" 2>/dev/null || true)"
+    if [[ "$now" != "$owner" ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid came back in $now; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    rc=0
+    live="$("$self" session-live-box "$sid" "$box" 2>/dev/null)" || rc=$?
+    if (( rc == 0 )) && [[ -n "$live" ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid is live in box $live; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    if (( rc != 1 )) || [[ "$live" != none ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid: test 2 could not be read (session-live-box exited $rc and printed '${live//$'\n'/ }'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    [[ ! -e "$skd" ]] || mtime="$(stat -c %.9Y -- "$skd" 2>/dev/null || true)"
+    if [[ ! "$closed" =~ ^[0-9]+$ ]] || [[ -e "$skd" && ! "$mtime" =~ ^[0-9]+\.[0-9]{9}$ ]]; then
+        echo "$(date -u +%FT%TZ) $box: session $sid: test 3 could not be read (the close's time '$closed', the key dir's mtime '$mtime'), so an enrollment that no box renews ends with its lease (15 min); enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    if [[ -n "$mtime" ]] && (( 10#${mtime/./} > 10#$closed )); then
+        echo "$(date -u +%FT%TZ) $box: session $sid: its key dir changed after the close, as when a box starts to enroll for the session; enrollment ${eid:-none} left alone$open"
+        return 0
+    fi
+    rm -rf "${skd:?}"
+    echo "$(date -u +%FT%TZ) $box: session $sid did not come back; ending enrollment ${eid:-none}$open"
+    [[ -z "$eid" ]] || unenroll_revoke "$box" recorded "$eid" || true
+    unenroll_learn_each "$run_base" "$box" "$@"
+    return 0
+}
+
+# session_live_box SID EXCEPT: whether session SID is live in a box other than EXCEPT. A box is
+# live when it enrolled for SID and its container still exists. The run directory of every box
+# holds the session it enrolled for (`enrollment-session`, written by enroll_box) and is removed
+# with the box, so this is the host's own record of who is using the session's broker identity.
+# A `docker ps` that fails does not mean "no container" (close_box_cache and reap_box read it
+# the same way). An `enrollment-session` that is there but cannot be read does not mean "another
+# session" either. It has three answers:
+#   - Status 0 and the name of a live box.
+#   - Status 1 and `none`: no box of SID other than EXCEPT is live.
+#   - Status 2 and no output: no answer. SID is empty, or the walk found no live box but could not
+#     ask docker about a box that enrolled for SID, or could not read a box's `enrollment-session`.
+#     A live box gives status 0 also after such a failure.
+# The answer "none" is the word, not the status alone: this script also exits 1 when a command
+# ends it under `set -e`. The walk uses no `$(<file)` (a file that cannot be opened ends the
+# script) and no fork whose failure it does not test, so a box it cannot read does not hide a
+# live box after it.
 session_live_box() {
-    local sid="$1" except="${2:-}" d box
-    [[ -n "$sid" && -d "$RUN_BASE" ]] || return 1
+    local sid="$1" except="${2:-}" d box s names cannot=0
+    [[ -n "$sid" ]] || return 2
+    # With no box dir, or no RUN_BASE, the pattern stays as it is, and the `-s` test skips it.
     for d in "$RUN_BASE"/*/; do
-        box="$(basename "$d")"
+        box="${d%/}"
+        box="${box##*/}"
         [[ "$box" == "$except" || "$box" == session-keys ]] && continue
         [[ -s "$d/enrollment-session" ]] || continue
-        [[ "$(<"$d/enrollment-session")" == "$sid" ]] || continue
-        [[ -n "$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)" ]] || continue
+        if ! read -r s 2>/dev/null <"$d/enrollment-session"; then
+            # Gone: the box closed during the walk. Still there: it cannot be read.
+            [[ ! -e "$d/enrollment-session" ]] || cannot=1
+            continue
+        fi
+        [[ "$s" == "$sid" ]] || continue
+        if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
+            cannot=1
+            continue
+        fi
+        [[ -n "$names" ]] || continue
         printf '%s\n' "$box"
         return 0
     done
+    (( cannot )) && return 2
+    echo none
     return 1
 }
 
@@ -3267,12 +3551,10 @@ cmd_new() {
         reap_start "$box" "$sid" "$box_started_ms"
     fi
     # A box with a broker identity is waited for by box_wait, which goes on enrolling it again
-    # while it runs and returns once the child has exited. Its last attempt comes before
-    # close_box below, which revokes the last enrollment id the host recorded. An attempt that the
-    # helper reports as failed can still make an enrollment at the broker, which the host has no
-    # record of; that one lapses at the end of its lease (agentbox/AGENTS.md). A box with none
-    # goes straight to the wait below. An interrupted wait re-waits: the first return after a
-    # signal carries 128+sig, the child's real status arrives once it is reaped.
+    # while it runs and returns once the child has exited. A box with none goes straight to the
+    # wait below. The last attempt comes before close_box below, which ends every enrollment the
+    # box can hold (unenroll_box). An interrupted wait re-waits: the first return after a signal
+    # carries 128+sig, the child's real status arrives once it is reaped.
     if [[ "$ENROLLED_BOX" == "$box" ]]; then box_wait "$box" "$child"; fi
     while :; do
         if wait "$child"; then rc=0; else rc=$?; fi
@@ -10051,10 +10333,10 @@ cmd_doctor_here() {
 # the watcher's log said they were restarted (LANE-C, 2026-11-05).
 #
 # So the protection lives HERE rather than in each caller: no entry, pane or watcher has to know
-# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY both carries
-# the copy's path for the cleanup and stops a second re-exec. A copy that cannot be made is not
-# fatal: the launch goes on from the live file, as before, since refusing to start a session is
-# worse than the hazard.
+# about it, and there is no second mechanism to keep in step. AGENTBOX_SELF_COPY names the copy,
+# and the copy removes that file as it starts (below). The variable also stops a second re-exec.
+# A copy that cannot be made is not fatal: the launch goes on from the live file, as before, since
+# refusing to start a session is worse than the hazard.
 if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     _self_copy="$(mktemp "${TMPDIR:-/tmp}/agentbox-self-XXXXXX" 2>/dev/null || true)"
     if [[ -n "$_self_copy" ]] \
@@ -10065,8 +10347,9 @@ if [[ "${1:-}" == new && -z "${AGENTBOX_SELF_COPY:-}" ]]; then
     [[ -z "$_self_copy" ]] || rm -f "$_self_copy"
     echo "agentbox: could not copy itself to run from; continuing from $(readlink -f "${BASH_SOURCE[0]}"), which a dotfiles publish can kill mid-launch" >&2
 fi
-# Running FROM the copy: take it away when this launch ends, whichever way it ends.
-[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || trap 'rm -f "$AGENTBOX_SELF_COPY"' EXIT
+# Running FROM the copy: remove the copy now. Bash reads this script through a descriptor that it
+# holds open, so the launch runs on without the file. No signal after this line can leave the copy.
+[[ -z "${AGENTBOX_SELF_COPY:-}" ]] || rm -f "$AGENTBOX_SELF_COPY"
 
 case "${1:-}" in
     new)     shift; cmd_new "$@" ;;

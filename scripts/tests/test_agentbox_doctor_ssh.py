@@ -17,6 +17,8 @@ def ssh_block() -> str:
     script = subprocess.run(
         ["bash", "-c", f'source "{AGENTBOX}" && printf "%s" "$DOCTOR_BOX_SCRIPT"'],
         check=True, capture_output=True, text=True,
+        # The script sources $DOTFILES_DIR/agent-secrets/broker-url.sh: this tree's, not $HOME/.dotfiles's.
+        env=dict(os.environ, DOTFILES_DIR=str(DOTFILES)),
     ).stdout
     lines = script.splitlines()
     helpers = [line for line in lines if line.startswith(("ok() ", "fail() "))]
