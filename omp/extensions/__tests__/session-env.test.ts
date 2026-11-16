@@ -174,10 +174,23 @@ describe("the identity a session exports", () => {
 	): Promise<Exported> {
 		const env: Record<string, string | undefined> = { ...process.env, HOME: home, PATH: `${fakeJj}:${process.env.PATH ?? ""}` };
 		// The child's identity is only what `inherited` gives it, and its gh and gcloud
-		// directories resolve under the scratch home.
-		for (const key of ["OMP_SESSION_ID", "PI_COMMIT_TRAILERS", "JJ_CONFIG", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS"]) {
+		// directories resolve under the scratch home. It finds no secrets helper socket, so it
+		// never names a session to this machine's real helper (session-env-register.test.ts
+		// covers that call).
+		for (const key of [
+			"OMP_SESSION_ID",
+			"PI_COMMIT_TRAILERS",
+			"JJ_CONFIG",
+			"GH_CONFIG_DIR",
+			"XDG_CONFIG_HOME",
+			"CLOUDSDK_CONFIG",
+			"GOOGLE_APPLICATION_CREDENTIALS",
+			"AGENT_SECRETS_HELPER_SOCK",
+			"AGENTBOX_BOX",
+		]) {
 			delete env[key];
 		}
+		env.XDG_RUNTIME_DIR = home;
 		if (inherited) {
 			env.OMP_SESSION_ID = inherited.id;
 			env.PI_COMMIT_TRAILERS = `Omp-Session: ${inherited.id}`;
