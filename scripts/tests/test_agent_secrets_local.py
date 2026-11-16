@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +29,8 @@ SYSTEMCTL_STUB = r'''
 echo "systemctl $*" >>"$STUB_LOG"
 case "$*" in
     "--user enable --now agent-secrets-helper.service")
+        # Starting a stopped helper leaves it booting: it does not answer on its socket yet.
+        [[ -f "$STUB_STATE/active" ]] || touch "$STUB_STATE/booting"
         touch "$STUB_STATE/enabled" "$STUB_STATE/active"
         exit "${STUB_ENABLE_EXIT:-0}"
         ;;
@@ -40,7 +43,7 @@ case "$*" in
         exit
         ;;
     "--user try-restart agent-secrets-helper.service")
-        touch "$STUB_STATE/active"
+        touch "$STUB_STATE/active" "$STUB_STATE/booting"
         exit 0
         ;;
     "--user daemon-reload")
@@ -67,6 +70,43 @@ if [[ -n "${STUB_TIMEOUT_EXIT:-}" ]]; then
     exit "$STUB_TIMEOUT_EXIT"
 fi
 exec /usr/bin/timeout "$@"
+'''
+
+# A helper that a start or a restart left booting (the systemctl stub's `booting` file) refuses
+# `sessions` STUB_REFUSALS times (default 3; `never` keeps refusing), as the real helper refuses
+# with exit 2 before its socket listens, and then answers. Each answer adds a `helper answered`
+# line to the log after the call's own line.
+BOOTING_HELPER_STUB = r'''
+echo "helper $*" >>"$STUB_LOG"
+if [[ "$1" == sessions && -f "$STUB_STATE/booting" ]]; then
+    refused=$(( $(cat "$STUB_STATE/refused" 2>/dev/null || echo 0) + 1 ))
+    echo "$refused" >"$STUB_STATE/refused"
+    limit="${STUB_REFUSALS:-3}"
+    if [[ "$limit" == never || "$refused" -le "$limit" ]]; then
+        echo "agent-secrets-helper: not answering at helper.sock" >&2
+        exit 2
+    fi
+    rm -f "$STUB_STATE/booting" "$STUB_STATE/refused"
+fi
+echo "helper answered $*" >>"$STUB_LOG"
+printf "%s" "${STUB_SESSIONS:-}"
+'''
+
+# `agent-secrets machine login-status` as cmdMachineLoginStatus answers: the state word on stdout,
+# why on stderr, exit 0 only for `issued`. The client dials the helper once, so while the helper
+# is still booting (or with STUB_UNREACHABLE set) it fails with the dial error and prints no state.
+LOGIN_STATUS_STUB = r'''
+echo "agent-secrets $*" >>"$STUB_LOG"
+[[ "$*" == "machine login-status" ]] || exit 1
+if [[ -f "$STUB_STATE/booting" || -n "${STUB_UNREACHABLE:-}" ]]; then
+    echo "agent-secrets machine login-status: dial unix helper.sock: connect: no such file or directory" >&2
+    exit 1
+fi
+printf '%s\n' "${STUB_LOGIN_STATE:-issued}"
+if [[ -n "${STUB_LOGIN_REASON:-}" ]]; then
+    printf '%s\n' "$STUB_LOGIN_REASON" >&2
+fi
+exit "${STUB_LOGIN_EXIT:-0}"
 '''
 
 
@@ -316,11 +356,12 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assertIn(
             f"systemctl --user enable --now {UNIT_NAME}", self.calls()
         )
-        # The first run started the helper itself, so it records the installed files without a
-        # `sessions` call or a restart.
+        # The first run started the helper itself, so it records the installed files without the
+        # `sessions` call that decides a restart (`timeout 10 ... sessions`), and with no restart.
         for verb in ("restart", "try-restart"):
             self.assertEqual(self.systemctl_verb(self.calls(), verb), [], self.calls())
-        self.assertNotIn("helper sessions", self.calls())
+        helper = self.mise_v1 / "bin" / "agent-secrets-helper"
+        self.assertNotIn(f"timeout 10 {helper} sessions", self.calls())
         self.assertTrue(self.marker.is_file())
         self.assertIn("legion-envoy-v1.0.0", self.marker.read_text(encoding="utf-8"))
         self.assertNotIn(url, result.stdout)
@@ -529,6 +570,157 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_no_lifecycle_calls(self.calls()[before:])
         self.assert_positive_log()
+
+    def use_booting_helper(self, install: Path) -> None:
+        write_stub(install / "bin", "agent-secrets-helper", BOOTING_HELPER_STUB)
+        write_stub(self.stub_dir, "agent-secrets", LOGIN_STATUS_STUB)
+
+    @staticmethod
+    def helper_and_client_calls(lines: list[str]) -> list[str]:
+        return [line for line in lines if line.startswith(("helper ", "agent-secrets "))]
+
+    def assert_login_status_after_the_helper_answered(
+        self, result: subprocess.CompletedProcess[str], new_calls: list[str], lifecycle: str
+    ) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = result.stdout + result.stderr
+        self.assertNotIn("no live launcher credential", output)
+        self.assertNotIn("machine login-status exited", output)
+        after = new_calls[new_calls.index(f"systemctl --user {lifecycle} {UNIT_NAME}") + 1 :]
+        # Three refusals, the first answer, and then the one login-status call.
+        self.assertEqual(
+            self.helper_and_client_calls(after),
+            ["helper sessions"] * 4
+            + ["helper answered sessions", "agent-secrets machine login-status"],
+            new_calls,
+        )
+
+    def test_l_waits_for_the_restarted_helper_before_login_status(self) -> None:
+        # INFRA-3887: `enable --now` and `try-restart` return before the new helper listens, so
+        # login-status asked at once fails for that reason alone. The installer waits for the
+        # helper it (re)started to answer `sessions`, then reads login-status once.
+        self.use_booting_helper(self.mise_v1)
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+
+        started = self.run_local()
+
+        self.assert_login_status_after_the_helper_answered(
+            started, self.calls(), "enable --now"
+        )
+        before = len(self.calls())
+        self.change_pin()
+        self.use_booting_helper(Path(self.env["STUB_MISE_WHERE"]))
+
+        restarted = self.run_local()
+
+        self.assert_login_status_after_the_helper_answered(
+            restarted, self.calls()[before:], "try-restart"
+        )
+        self.assertIn("legion-envoy-v2.0.0", self.marker.read_text(encoding="utf-8"))
+        # Neither run set AGENT_SECRETS_HELPER_SOCKET_WAIT, so each wait is the 10 s default.
+        waits = [
+            line for line in self.calls() if line.startswith("timeout ") and " bash -c " in line
+        ]
+        self.assertEqual([line.split(" ")[1] for line in waits], ["10", "10"], waits)
+
+    def test_l2_a_failed_login_status_prints_its_own_error(self) -> None:
+        url = "AGENT_SECRETS_URL=https://broker.example.invalid\n"
+        self.use_booting_helper(self.mise_v1)
+        self.write_env_local(url)
+        self.assertEqual(self.run_local(STUB_REFUSALS="0").returncode, 0)
+        # The reasons are legion-envoy-v30.21.1's (helper.NoCredentialReason).
+        none = (
+            "agent-secrets machine login-status: no machine login since the helper started, "
+            "and none kept on this machine; run: agent-secrets machine login"
+        )
+        expired = (
+            "agent-secrets machine login-status: the most recent machine login expired "
+            "before anyone approved it; run: agent-secrets machine login"
+        )
+        dial = (
+            "agent-secrets machine login-status: dial unix helper.sock: connect: "
+            "no such file or directory"
+        )
+        identity = (
+            "  the helper proves this machine's identity (AGENT_SECRETS_MACHINE_IDENTITY in "
+            "~/.config/agent-secrets/env.local) and holds no launcher credential from it yet: "
+            "journalctl --user -u agent-secrets-helper"
+        )
+        cases = {
+            # `none` on a helper that proves no machine identity: no machine login has run, and
+            # agent-secrets-login names the operator for the first one.
+            "none": (url, {"STUB_LOGIN_STATE": "none", "STUB_LOGIN_REASON": none},
+                     f"none\n{none}\n  run: agent-secrets-login <email>"),
+            "expired": (url, {"STUB_LOGIN_STATE": "expired", "STUB_LOGIN_REASON": expired},
+                        f"expired\n{expired}"),
+            # A helper that proves the machine's identity (broker.Start's startIdentity) answers
+            # `none` until its first trade: no person's login is missing.
+            "none with a machine identity": (
+                url + "AGENT_SECRETS_MACHINE_IDENTITY=metadata\n",
+                {"STUB_LOGIN_STATE": "none", "STUB_LOGIN_REASON": none},
+                f"none\n{none}\n{identity}",
+            ),
+            # No state on stdout: the client could not ask the helper.
+            "no state": (url, {"STUB_UNREACHABLE": "1"}, dial),
+        }
+        for name, (env_local, stub, expected) in cases.items():
+            with self.subTest(case=name):
+                self.write_env_local(env_local)
+
+                result = self.run_local(STUB_LOGIN_EXIT="1", **stub)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout, f"agent-secrets: machine login-status exited 1: {expected}\n"
+                )
+                self.assertNotIn("no live launcher credential", result.stdout + result.stderr)
+
+    def test_l3_a_helper_that_never_answers_is_named(self) -> None:
+        self.use_booting_helper(self.mise_v1)
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        wait = {"STUB_REFUSALS": "never", "AGENT_SECRETS_HELPER_SOCKET_WAIT": "1"}
+        for lifecycle, how in (("enable --now", "start"), ("try-restart", "restart")):
+            with self.subTest(how=how):
+                if how == "restart":
+                    # The helper the first run started came up after that run gave up on it.
+                    (self.state / "booting").unlink()
+                    self.change_pin()
+                    self.use_booting_helper(Path(self.env["STUB_MISE_WHERE"]))
+                before = len(self.calls())
+                began = time.monotonic()
+
+                result = self.run_local(**wait)
+
+                elapsed = time.monotonic() - began
+                new_calls = self.calls()[before:]
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"systemctl --user {lifecycle} {UNIT_NAME}", new_calls)
+                self.assertIn(
+                    "agent-secrets: the helper did not answer on its socket within 1 s after "
+                    f"its {how} (systemctl --user status agent-secrets-helper); its login "
+                    "state was not read\n",
+                    result.stdout,
+                )
+                self.assertIn("helper sessions", new_calls)
+                self.assertNotIn("agent-secrets machine login-status", new_calls)
+                self.assertNotIn("no live launcher credential", result.stdout + result.stderr)
+                # The 1 s wait, not the 10 s default, bounds the run.
+                self.assertLess(elapsed, 8)
+
+    def test_l4_no_restart_reads_login_status_at_once(self) -> None:
+        self.use_booting_helper(self.mise_v1)
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        self.assertEqual(self.run_local(STUB_REFUSALS="0").returncode, 0)
+        before = len(self.calls())
+
+        result = self.run_local()
+
+        new_calls = self.calls()[before:]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_lifecycle_calls(new_calls)
+        self.assertEqual(
+            self.helper_and_client_calls(new_calls), ["agent-secrets machine login-status"]
+        )
 
     def test_r1_root_installer_continues_when_helper_binary_is_absent(self) -> None:
         root_installer = self.prepare_root_installer()

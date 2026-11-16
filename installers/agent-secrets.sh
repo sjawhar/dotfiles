@@ -52,6 +52,7 @@ if systemctl --user is-active --quiet agent-secrets-helper.service 2>/dev/null; 
     helper_active=1
 fi
 helper_started=0
+helper_restarted=0
 if [ "$helper_active" -eq 0 ] \
     || ! systemctl --user is-enabled --quiet agent-secrets-helper.service 2>/dev/null; then
     if ! systemctl --user enable --now agent-secrets-helper.service 2>/dev/null; then
@@ -86,10 +87,42 @@ elif [ "$recorded" != "$installed" ]; then
         echo "  Wait for them to end, or re-run with AGENT_SECRETS_HELPER_RESTART_WITH_SESSIONS=1." >&2
     elif systemctl --user try-restart agent-secrets-helper.service 2>/dev/null; then
         echo "$installed" > "$MARKER"
+        helper_restarted=1
     else
         echo "WARNING: agent-secrets-helper did not restart (systemctl --user status agent-secrets-helper); the next install retries." >&2
     fi
 fi
-if ! agent-secrets machine login-status >/dev/null 2>&1; then
-    echo "agent-secrets: no live launcher credential on this host yet — run: agent-secrets-login <email>"
+# login-status asks the helper. `enable --now` and `try-restart` return before the new helper's
+# socket listens, and login-status asked before then fails for that reason alone; so after this
+# run started or restarted the helper, wait for it to answer `sessions` first, up to
+# AGENT_SECRETS_HELPER_SOCKET_WAIT seconds (default 10).
+if [ "$helper_started" -eq 1 ] || [ "$helper_restarted" -eq 1 ]; then
+    if [ "$helper_started" -eq 1 ]; then how=start; else how=restart; fi
+    wait_s="${AGENT_SECRETS_HELPER_SOCKET_WAIT:-10}"
+    # shellcheck disable=SC2016 # The child shell expands this command string.
+    if ! timeout "$wait_s" bash -c 'until timeout 2 "$0" sessions >/dev/null 2>&1; do sleep 0.2; done' "$HELPER_BIN"; then
+        echo "agent-secrets: the helper did not answer on its socket within ${wait_s} s after its ${how} (systemctl --user status agent-secrets-helper); its login state was not read"
+        exit 0
+    fi
+fi
+# login-status prints its state word (none, pending, denied, expired, issued) on stdout and why on
+# stderr, and exits 0 only for issued; a client that cannot ask the helper prints only an error on
+# stderr. The state is read from stdout alone: stderr can also carry mise's auto-install progress
+# (scripts/agent-secrets-session). A failed read is printed as it came, state first. `none` gets
+# one more line. On a helper whose env.local (its second EnvironmentFile) names a machine identity,
+# `none` means its first trade of that identity has not succeeded: the helper listens after 5 s
+# without a credential when the broker is slow. Elsewhere `none` means no machine login has run,
+# and agent-secrets-login names the operator for the first one.
+errfile="$(mktemp)" || errfile=""
+if state="$(agent-secrets machine login-status 2>"${errfile:-/dev/null}")"; then rc=0; else rc=$?; fi
+why=""
+if [ -n "$errfile" ]; then why="$(<"$errfile")"; rm -f "$errfile"; fi
+if [ "$rc" -ne 0 ]; then
+    if [ -n "$state" ] && [ -n "$why" ]; then out="$(printf '%s\n%s' "$state" "$why")"; else out="${state}${why}"; fi
+    echo "agent-secrets: machine login-status exited ${rc}: ${out}"
+    if [ "$state" = none ] && grep -qs '^AGENT_SECRETS_MACHINE_IDENTITY=.' "${CONF_DIR}/env.local"; then
+        echo "  the helper proves this machine's identity (AGENT_SECRETS_MACHINE_IDENTITY in ~/.config/agent-secrets/env.local) and holds no launcher credential from it yet: journalctl --user -u agent-secrets-helper"
+    elif [ "$state" = none ]; then
+        echo "  run: agent-secrets-login <email>"
+    fi
 fi
