@@ -208,6 +208,39 @@ class CitedPost(unittest.TestCase):
             self.assertIn(f"neither the ask nor its draft ({DOC}@v2) names {repo}", result.stderr)
         self.assertEqual(self.routed(), [])
 
+    # A value that must match whole is refused with a trailing newline: Python's `$` matched before
+    # one, so these passed until the patterns ended in `\Z`. The head and base rows are in the pull
+    # request tests below.
+
+    def test_a_repository_with_a_trailing_newline_is_refused(self):
+        # The draft names `o/upstream` at the end of a line, so with `$` this one was allowed.
+        for argv in (
+            ["issue", "create", "-R", "o/upstream\n", "--title", TITLE, "--body-file", str(self.body_file)],
+            ["pr", "create", "--repo=o/upstream\n", "--title", TITLE, "--body-file", str(self.body_file),
+             "--head", "sjawhar:fix"],
+        ):
+            with self.subTest(argv=argv):
+                (self.cache / "log" / "approved-posts.jsonl").unlink(missing_ok=True)
+                self.assert_refused(self.run_gh(argv), "name the repository: -R <owner>/<repo>.",
+                                    call=" ".join(argv[:2]) + " ")
+
+    def test_a_citation_with_a_trailing_newline_is_refused(self):
+        result = self.run_gh(self.issue(), cite=False, GH_SHIM_APPROVAL=ASK + "\n")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("is not a Dispatch ask reference (dispatch://KEY/ask/<id>)", result.stderr)
+        self.assertEqual(self.routed(), [], "a refused citation must not reach GitHub")
+        [record] = self.log()
+        self.assertEqual((record["verdict"], record["ask"]), ("refused", ASK + "\n"))
+
+    def test_control_the_same_values_without_the_newline_are_allowed(self):
+        # The rows above fail for the newline alone: the same repository and citation pass.
+        for argv in (self.issue(), self.pull()):
+            with self.subTest(argv=argv):
+                (self.cache / "log" / "approved-posts.jsonl").unlink(missing_ok=True)
+                result = self.run_gh(argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.log()[0]["verdict"], "allowed")
+
     def test_two_asks_with_the_same_question_are_refused(self):
         answered = doc_text(block=ANSWERED)
         self.fixture(v2=answered + answered[answered.index(":::ask"):])

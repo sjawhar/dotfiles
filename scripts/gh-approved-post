@@ -44,7 +44,9 @@ APPROVING = re.compile(r"^(post|send|publish|file|open|submit|approve|yes|go)\b"
 NEGATION = re.compile(r"^(do not|don't|dont|no|not|never|hold|wait|skip|cancel)\b|\bnot\b", re.I)
 VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment"), ("pr", "create")}
 CREATES = {"issue create", "pr create"}
-REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# A pattern that must match a whole value ends in `\Z`, never `$`: Python's `$` also matches before
+# a final newline, so `o/upstream\n` passed as a repository.
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+")
 BRANCH = r"[^\s:~^?*\[\\]+"
 HEAD_RE = re.compile(rf"^([A-Za-z0-9-]+):({BRANCH})\Z")
@@ -227,7 +229,7 @@ def norm(text: str) -> str:
 
 
 def check(ref: str, call: dict) -> dict:
-    if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}$", ref):
+    if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}\Z", ref):
         raise Refused(f"GH_SHIM_APPROVAL={ref!r} is not a Dispatch ask reference (dispatch://KEY/ask/<id>).")
     ask = parse_ask(dispatch("read", "--ref", ref))
     record = {"answered_by": ask["by"], "selected": ask["selected"], "answer_text": ask["text"]}
