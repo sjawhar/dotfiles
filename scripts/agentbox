@@ -3518,11 +3518,12 @@ cmd_rebuild() {
 # root-owned lost+found, before open_box_disk gave that one to the user).
 dir_size() { du -sh --one-file-system "$1" 2>/dev/null | cut -f1 || true; }
 
-# Running boxes, then anything a box left on disk and nothing is using: a tree kept at close for
-# unpushed work, or one whose launcher was killed before it could close (the trap cannot run on a
-# SIGKILL, and a reboot drops the loop mount while the image keeps its contents). Nothing is
-# removed here - the tree may hold an agent's only copy of its work - so each one is named with
-# the command that frees it.
+# Running boxes, then any box tree with no container: one whose launcher was killed before it
+# could close (the trap cannot run on a SIGKILL, and a reboot drops the loop mount while the image
+# keeps its contents), or one a close could not remove. `agentbox collect`, which every
+# `agentbox new` starts, deletes such a tree once it is an hour old and nothing uses it
+# (dispatch://INFRA-1720); nothing is removed here, and each one is named with the command that
+# frees it now.
 cmd_ls() {
     docker ps --filter name='^agentbox-' --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
     local running box dir img left=()

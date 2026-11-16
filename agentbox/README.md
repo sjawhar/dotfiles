@@ -13,8 +13,11 @@ agentbox runs each agent session in its own disposable [Sysbox](https://github.c
   bind-mounted.
 - Root in the box is an unprivileged user on the host, so `sudo apt-get install`, an inner Docker daemon and
   nested containers work without host privileges.
-- Each box has its own cpu, memory, pids and disk limit. When the session ends, the box and its directory go.
-  A clone with uncommitted changes, or commits that no remote has, keeps its directory, and the pane names it.
+- Each box has its own cpu, memory, pids and disk limit. When the session ends, everything in the box is deleted:
+  its clones (uncommitted changes and commits no remote has too), its home, `/tmp` and its inner Docker store.
+  Push what you want kept before the session ends. A box whose launcher died is deleted later by the collector
+  that every `agentbox new` starts.
+- The box gets no route to omp's session database, so a box resumes a session only from its transcript file.
 
 This is part of Sami's dotfiles, not a stand-alone tool. It expects a host set up by this repository's
 `install.sh`. (`devbox/gce-host.sh` is for Sami's own Google Cloud devbox only: it needs its disks and must run
@@ -129,7 +132,7 @@ or prints credential values.
 # Change limits, set variables (a bare NAME passes your value):
 ~/.dotfiles/scripts/agentbox new -e MY_VAR=1 --memory 32g --cpus 4 --disk 64g my-repo -- omp
 
-~/.dotfiles/scripts/agentbox ls                       # running boxes, then box trees kept for unpushed work
+~/.dotfiles/scripts/agentbox ls                       # running boxes, then box trees with no box running
 ~/.dotfiles/scripts/agentbox sh <box|session-id>      # a shell in a running box
 ~/.dotfiles/scripts/agentbox grow <box|session-id> 256g # grow the home filesystem online, without restarting
 ~/.dotfiles/scripts/agentbox restart <box|session-id> # ask the session to relaunch omp in place at a safe point;
