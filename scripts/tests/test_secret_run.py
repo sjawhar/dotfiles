@@ -756,16 +756,20 @@ class SecretRun(unittest.TestCase):
             ],
         )
         reason = self.reason_of(result)
-        self.assertRegex(
-            reason,
-            "^"
-            + re.escape(
+        match = re.fullmatch(
+            re.escape(
                 f'gws theorem modify; retitle the environment tabs | session: omp {self.SESSION} "TASKCOACH: RL task '
                 'difficulty coach" subagent CarryCensus | runs: gws docs documents batchUpdate '
-                f"documentId=1PTCUrEOLmYbHUx9Zf-ruQ5P5GhDAnpsEptQWOvRcKZk +4 args | host: {socket.gethostname()} pid "
+                "documentId=1PTCUrEOLmYbHUx9Zf-ruQ5P5GhDAnpsEptQWOvRcKZk +4 args | host: "
             )
-            + r"\d+$",
+            + r"(?P<host>\S+) pid \d+",
+            reason,
         )
+        self.assertIsNotNone(match, reason)
+        # It names this machine: whole, or cut with "…" where the name is longer than the host
+        # part's cap (test_secret_run_reason.py pins the cap; sami-devbox's name is 53 characters).
+        host, name = match["host"], socket.gethostname()
+        self.assertTrue(host == name or (host.endswith("…") and name.startswith(host[:-1])), (host, name))
         self.assertNotIn("ya29", reason)
         self.assertNotIn("private", reason)
         self.assertIn(f"SESSION_ID {self.SESSION}", result.stderr.splitlines())
