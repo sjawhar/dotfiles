@@ -3,7 +3,7 @@ import type { Subprocess } from "bun";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dispatchEnv, movedRefusal, OOM_BIAS_ADJ, oomBiasPass, relaunchArgv } from "./agentbox-run.ts";
+import { dispatchEnv, movedRefusal, OOM_BIAS_ADJ, oomBiasPass, pendingRequests, relaunchArgv } from "./agentbox-run.ts";
 
 // A restart resumes the session's transcript by its path (dispatch://INFRA-1720).
 const resumed = "/home/u/.omp/agent/sessions/-x/2026-11-15T00-00-00-000Z_01a1e000-0000-7000-8000-000000000001.jsonl";
@@ -87,6 +87,21 @@ describe("oomBiasPass", () => {
 		oomBiasPass(runner, omp, OOM_BIAS_ADJ, root);
 		expect(adjOf(root, 40)).toBe(800);
 		expect(oomBiasPass(runner, omp, OOM_BIAS_ADJ, root)).toBe(0);
+	});
+});
+
+describe("pendingRequests", () => {
+	test("oldest first, answered ones and names that are no id left out, and a stale one deleted unanswered", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentbox-requests-"));
+		const now = Date.now();
+		for (const [name, age] of [["b-2", 1_000], ["a-1", 2_000], ["c-3", 0], ["stale-0", 120_000], ["no id", 0]] as const) {
+			fs.writeFileSync(path.join(dir, name), "");
+			fs.utimesSync(path.join(dir, name), (now - age) / 1000, (now - age) / 1000);
+		}
+		expect(pendingRequests(dir, new Set(["c-3"]), now)).toEqual(["a-1", "b-2"]);
+		expect(fs.existsSync(path.join(dir, "stale-0"))).toBe(false);
+		expect(pendingRequests(path.join(dir, "absent"))).toEqual([]);
+		fs.rmSync(dir, { recursive: true });
 	});
 });
 
@@ -441,6 +456,33 @@ describe("restartAnswersInTheSignalHandler", () => {
 		await until("the waker", () => fs.existsSync(path.join(box.rec, "agentbox-argv")));
 		expect(ompPids(box)).toHaveLength(2);
 		expect(answers(box)).toHaveLength(2);
+	}, 20_000);
+
+	test("each request is answered under its own id: of two at once the second is busy, and so is one during the restart", async () => {
+		// Two callers that each left a request before one signal reached the runner (two signals can
+		// arrive as one), then a third that signals while the restart runs. The runner hangs omp up a
+		// second after it is asked, so the third lands in the middle of the restart.
+		const box = await startBox(["omp"], () => ({ FAKE_OMP_HUP_DELAY: "1" }));
+		const [omp] = ompPids(box);
+		const file = transcript(box.home);
+		report(box, omp, file);
+		const requests = path.join(box.runtime, "agentbox-restart.d");
+		fs.mkdirSync(requests);
+		for (const id of ["20261116T100000000000000-1-1", "20261116T100000000000001-2-2"]) fs.writeFileSync(path.join(requests, id), "");
+		box.runner.kill("SIGUSR1");
+		await until("both answers", () => answers(box).length === 2);
+		fs.writeFileSync(path.join(requests, "20261116T100000000000002-3-3"), "");
+		box.runner.kill("SIGUSR1");
+		await until("the third answer", () => answers(box).length === 3);
+		expect(answers(box)).toEqual([
+			`started session ${SID}: hanging up omp (pid ${omp}) to resume ${file} [request 20261116T100000000000000-1-1]`,
+			"busy another restart request came first; this one is ignored [request 20261116T100000000000001-2-2]",
+			"busy a restart is already in progress; this signal is ignored [request 20261116T100000000000002-3-3]",
+		]);
+		expect(fs.readdirSync(requests)).toEqual([]);
+		await until("the second omp", () => ompPids(box).length === 2);
+		await until("the waker", () => fs.existsSync(path.join(box.rec, "agentbox-argv")));
+		expect(ompPids(box)).toHaveLength(2);
 	}, 20_000);
 
 	// The routes the runner took before the session reported itself, each set up so that it alone

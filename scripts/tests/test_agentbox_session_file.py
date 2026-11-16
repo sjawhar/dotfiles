@@ -20,6 +20,7 @@ with `docker` and the other host tools stubbed first on PATH, and a scratch $RUN
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -253,8 +254,22 @@ class SessionWaiterTest2(SessionFileFixture):
         self.assertEqual((got.returncode, got.stdout), (1, "none\n"), got.stderr)
 
 
-# The runner's answer line, as agentbox-run.ts appends it.
+# The runner's answer to every restart request waiting in RUN_USER/agentbox-restart.d, as
+# agentbox-run.ts appends it: the line ends ` [request <id>]` and the request file goes. A shell
+# snippet for a stand-in runner; `other` first appends an answer under another caller's id, as when
+# two callers' requests reach the runner together.
+def reply(run_user: str, word: str, text: str, other: str = "") -> str:
+    first = (f'printf "2026-11-15T22:00:00.000Z {other} [request another-caller]\\n" >>"{run_user}/agentbox-restart"\n'
+             if other else "")
+    return first + (
+        f'for f in "{run_user}"/agentbox-restart.d/*; do [ -e "$f" ] || continue; '
+        f'printf "2026-11-15T22:00:00.000Z {word} {text} [request %s]\\n" "${{f##*/}}" >>"{run_user}/agentbox-restart"; '
+        'rm -f "$f"; done\n'
+    )
+
+
 def answer(word: str, text: str) -> str:
+    """An answer line under no request: one the caller must never take for its own."""
     return f"2026-11-15T22:00:00.000Z {word} {text}\n"
 
 
@@ -273,6 +288,24 @@ class RestartReasons(SessionFileFixture):
 
     def usr1_sent(self) -> bool:
         return any(line.startswith("docker kill") for line in self.docker_calls())
+
+    def test_the_host_writes_no_request_through_a_link_the_box_put(self) -> None:
+        """The box owns its runtime directory, so it can put a link at `agentbox-restart.d`, or at a
+        request's name, pointing at a host directory or file. The host's request goes through
+        neither: it refuses, sends no signal, and writes nothing where the link points."""
+        waits = {"AGENTBOX_RESTART_ANSWER_WAIT": "2", "AGENTBOX_RESTART_REPORT_WAIT": "2"}
+        self.set_lines("running", BOX)
+        self.set_lines("runner-boxes", BOX)
+        self.runner_file()
+        target = self.root / "host-dir"
+        target.mkdir()
+        requests = self.run_user() / "agentbox-restart.d"
+        requests.symlink_to(target)
+        got = self.run_bash(f"cmd_restart {BOX} --now", waits)
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        self.assertIn("could not write a restart request", got.stderr)
+        self.assertFalse(self.usr1_sent(), "no signal without a request")
+        self.assertEqual(list(target.iterdir()), [], "nothing written through the box's link")
 
     def test_restart_says_why_for_each_reason(self) -> None:
         waits = {"AGENTBOX_RESTART_ANSWER_WAIT": "2", "AGENTBOX_RESTART_REPORT_WAIT": "2"}
@@ -301,12 +334,21 @@ class RestartReasons(SessionFileFixture):
                            ("busy", "a restart is already in progress; this signal is ignored")):
             with self.subTest("the runner says no", word=word):
                 self.answers().unlink(missing_ok=True)
-                self.on_usr1(f'printf "%s" "{answer(word, text)}" >>"{self.answers()}"\n')
+                self.on_usr1(reply(str(self.run_user()), word, text))
                 got = self.run_bash(f"cmd_restart {BOX} --now", waits)
                 self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
                 self.assertIn(text, got.stdout + got.stderr)
                 self.assertTrue(self.usr1_sent())
 
+        with self.subTest("a second caller gets its own busy, not the first caller's started"):
+            self.answers().unlink(missing_ok=True)
+            self.on_usr1(reply(str(self.run_user()), "busy", "another restart request came first; this one is ignored",
+                               other=f"started session {SID}: hanging up omp (pid 77) to resume x"))
+            got = self.run_bash(f"cmd_restart {BOX} --now", waits)
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertIn("came first", got.stderr)
+            self.assertNotIn("hanging up omp", got.stdout + got.stderr, "the first caller's answer is not this one")
+            self.assertEqual(list((self.run_user() / "agentbox-restart.d").iterdir()), [])
         with self.subTest("no answer, with an earlier answer already in the file"):
             self.answers().write_text(answer("started", f"session {SID}: hanging up omp (pid 77) to resume x"),
                                       encoding="utf-8")
@@ -320,7 +362,7 @@ class RestartReasons(SessionFileFixture):
         log.write_text("agentbox-run 2026-11-15T22:00:01Z x: omp exited after 1s; the box ends\n", encoding="utf-8")
         with self.subTest("a relaunch that does not report its session"):
             self.answers().unlink()
-            self.on_usr1(f'printf "%s" "{answer("started", f"session {SID}: hanging up omp (pid 77) to resume x")}" >>"{self.answers()}"\n')
+            self.on_usr1(reply(str(self.run_user()), "started", f"session {SID}: hanging up omp (pid 77) to resume x"))
             got = self.run_bash(f"cmd_restart {BOX} --now", waits)
             self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
             self.assertIn("did not report its session", got.stderr)
@@ -331,8 +373,8 @@ class RestartReasons(SessionFileFixture):
             new_file = self.session_file(pid=78).read_text(encoding="utf-8")
             self.session_file(pid=77)
             self.on_usr1(
-                f'printf "%s" "{answer("started", f"session {SID}: hanging up omp (pid 77) to resume x")}" >>"{self.answers()}"\n'
-                f"( sleep 0.5; printf '%s' '{new_file}' >'{self.run_user()}/agentbox-session' ) &\n")
+                reply(str(self.run_user()), "started", f"session {SID}: hanging up omp (pid 77) to resume x")
+                + f"( sleep 0.5; printf '%s' '{new_file}' >'{self.run_user()}/agentbox-session' ) &\n")
             got = self.run_bash(f"cmd_restart {SID} --now", waits)
             self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
             self.assertIn("hanging up omp (pid 77)", got.stdout)
@@ -379,6 +421,7 @@ class RestartReasons(SessionFileFixture):
         runtime.mkdir(exist_ok=True)
         for name in ("agentbox-runner", "agentbox-restart", "signals"):
             (runtime / name).unlink(missing_ok=True)
+        shutil.rmtree(runtime / "agentbox-restart.d", ignore_errors=True)
         if version:
             (runtime / "agentbox-runner").write_text("version=1\npid=1\n", encoding="utf-8")
         runner = subprocess.Popen(
@@ -402,35 +445,41 @@ class RestartReasons(SessionFileFixture):
         return got, runtime
 
     def test_the_in_box_restart_says_why_for_each_reason(self) -> None:
-        refusal = answer("refused", "the session did not report its id: no session file")
-        started = answer("started", f"session {SID}: hanging up omp (pid 77) to resume x")
-        busy = answer("busy", "a restart is already in progress; this signal is ignored")
+        def runner(word: str, text: str, other: str = "") -> str:
+            # The trap's script, where $R is the box's runtime dir.
+            return reply("$R", word, text, other).replace("\n", "; ")
 
+        started = runner("started", f"session {SID}: hanging up omp (pid 77) to resume x")
         with self.subTest("a subagent"):
-            got, runtime = self.in_box(f'printf "%s" "{started}" >>"$R/agentbox-restart"',
-                                       {"PI_SESSION_FILE": str(self.root / "x" / "Explore.jsonl")})
+            got, runtime = self.in_box(started, {"PI_SESSION_FILE": str(self.root / "x" / "Explore.jsonl")})
             self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
             self.assertIn("subagent", got.stderr)
             self.assertFalse((runtime / "signals").exists())
 
         with self.subTest("a runner older than this change"):
-            got, runtime = self.in_box(f'printf "%s" "{started}" >>"$R/agentbox-restart"', version=False)
+            got, runtime = self.in_box(started, version=False)
             self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
             self.assertIn("older than this change", got.stderr)
             self.assertIn("agentbox move --self", got.stderr)
             self.assertFalse((runtime / "signals").exists())
 
         for name, script, rc, text in (
-            ("a refusal", f'printf "%s" "{refusal}" >>"$R/agentbox-restart"', 1, "did not report its id"),
-            ("busy", f'printf "%s" "{busy}" >>"$R/agentbox-restart"', 1, "already in progress"),
+            ("a refusal", runner("refused", "the session did not report its id: no session file"), 1, "did not report its id"),
+            ("busy", runner("busy", "a restart is already in progress; this signal is ignored"), 1, "already in progress"),
             ("no answer", ":", 1, "no answer"),
-            ("started", f'printf "%s" "{started}" >>"$R/agentbox-restart"', 0, "hanging up omp"),
+            ("an answer under no request", f'printf "%s" "{answer("started", "x: hanging up omp")}" >>"$R/agentbox-restart"', 1, "no answer"),
+            ("a second caller", runner("busy", "another restart request came first; this one is ignored",
+                                       other=f"started session {SID}: hanging up omp (pid 77) to resume x"), 1, "came first"),
+            ("started", started, 0, "hanging up omp"),
         ):
             with self.subTest(name):
                 got, runtime = self.in_box(script)
                 self.assertEqual(got.returncode, rc, got.stdout + got.stderr)
                 self.assertIn(text, got.stdout + got.stderr)
+                if rc:
+                    self.assertNotIn("hanging up omp", got.stdout, "another caller's answer is not this one")
                 self.assertTrue((runtime / "signals").exists(), "the runner got its signal")
+                self.assertEqual(list((runtime / "agentbox-restart.d").glob("*")), [], "the request is gone")
 
 
 if __name__ == "__main__":

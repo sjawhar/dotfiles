@@ -43,8 +43,11 @@
 //   agentbox-runner   written by this runner at start: version=1 and its pid. A
 //                     runner from before INFRA-1720 writes none, which is how the
 //                     host tells a box that answers in the next file.
-//   agentbox-restart  one line per SIGUSR1, appended in the signal handler before
-//                     omp is signalled: `<UTC time> started|refused|busy <text>`.
+//   agentbox-restart  one line per restart request, appended in the signal handler
+//                     before omp is signalled: `<UTC time> started|refused|busy <text>
+//                     [request <id>]`. A caller leaves an empty file named by a fresh
+//                     id in agentbox-restart.d before it signals, and reads only the
+//                     line under its own id; every request waiting gets one.
 //
 // omp's own /restart cannot do this: it re-execs process.execPath, the
 // versioned mise install path, so it never sees a new pin.
@@ -72,6 +75,7 @@ const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.(
 const sessionReportPath = `${runtimeDir}/agentbox-session`;
 const versionPath = `${runtimeDir}/agentbox-runner`;
 const answerPath = `${runtimeDir}/agentbox-restart`;
+const requestDir = `${runtimeDir}/agentbox-restart.d`;
 
 function note(message: string, toStderr = false): void {
 	const line = `agentbox-run ${new Date().toISOString()} ${box}: ${message}\n`;
@@ -336,14 +340,49 @@ function reportedSession(ompPid: number): { sid: string; file: string } | { refu
 
 // One line per restart request, for `agentbox restart` on the host or in the box to read back.
 // Appended in the signal handler, before omp is signalled, so the line is there by the time
-// anything can see the restart happen.
-function answer(word: "started" | "refused" | "busy", text: string): void {
-	note(`restart request: ${word}: ${text}`);
+// anything can see the restart happen. A request a caller left in requestDir (below) is answered
+// under its id, ` [request <id>]` at the end of the line, and its file removed: that id, not the
+// line's place in the file, is how a caller finds its own answer.
+function answer(word: "started" | "refused" | "busy", text: string, request?: string): void {
+	const tag = request ? ` [request ${request}]` : "";
+	note(`restart request: ${word}: ${text}${tag}`);
 	try {
-		fs.appendFileSync(answerPath, `${new Date().toISOString()} ${word} ${text.replace(/\n/g, " ")}\n`);
+		fs.appendFileSync(answerPath, `${new Date().toISOString()} ${word} ${text.replace(/\n/g, " ")}${tag}\n`);
 	} catch (error) {
 		note(`could not append to ${answerPath}: ${error}`);
 	}
+	if (!request) return;
+	answeredRequests.add(request);
+	try {
+		fs.unlinkSync(`${requestDir}/${request}`);
+	} catch {}
+}
+
+// The restart requests waiting for an answer, oldest first. `agentbox restart` writes an empty file
+// named by a fresh id into requestDir, then signals; a signal carries no sender, and two sent
+// together can arrive as one, so on 2026-11-16 two callers could both read the first one's
+// `started` from its place in the file. Each is answered under its own id instead. A request older
+// than STALE_REQUEST_MS is one whose caller is gone (it waits 15 s, and withdraws its request when
+// it gives up, unless it was killed): it is deleted unanswered, so it never takes a live caller's turn.
+const answeredRequests = new Set<string>();
+export const STALE_REQUEST_MS = 60_000;
+export function pendingRequests(dir: string, answered: Set<string> = new Set(), now = Date.now()): string[] {
+	let names: string[] = [];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	return names
+		.filter((name) => {
+			if (!/^[A-Za-z0-9._-]{1,80}$/.test(name) || answered.has(name)) return false;
+			try {
+				if (now - fs.statSync(`${dir}/${name}`).mtimeMs <= STALE_REQUEST_MS) return true;
+				fs.unlinkSync(`${dir}/${name}`);
+			} catch {}
+			return false;
+		})
+		.sort();
 }
 
 // The Dispatch and Envoy environment of a host session, for the omp of a box: the pi-envoy
@@ -533,21 +572,31 @@ if (import.meta.main) {
 	let restarting = false;
 	let shuttingDown = false;
 
-	// Every request gets its line in the answer file before this handler returns.
+	// Every request gets its line in the answer file before this handler returns: the oldest
+	// waiting request is this signal's, and every other one waiting is answered too, busy when this
+	// one starts a restart and with the same refusal when it does not.
 	process.on("SIGUSR1", () => {
-		if (shuttingDown) return answer("refused", "the box is shutting down");
-		if (restarting) return answer("busy", "a restart is already in progress; this signal is ignored");
+		const [request, ...others] = pendingRequests(requestDir, answeredRequests);
+		const reply = (word: "started" | "refused" | "busy", text: string): void => {
+			answer(word, text, request);
+			for (const other of others) {
+				if (word === "started") answer("busy", "another restart request came first; this one is ignored", other);
+				else answer(word, text, other);
+			}
+		};
+		if (shuttingDown) return reply("refused", "the box is shutting down");
+		if (restarting) return reply("busy", "a restart is already in progress; this signal is ignored");
 		const session = reportedSession(child.pid);
-		if ("refusal" in session) return answer("refused", `${session.refusal}; omp left running`);
+		if ("refusal" in session) return reply("refused", `${session.refusal}; omp left running`);
 		const argv = relaunchArgv(launchArgv, session.file);
 		const moved = movedRefusal(argv, home, machine);
-		if (moved) return answer("refused", moved);
+		if (moved) return reply("refused", moved);
 		restarting = true;
 		relaunch = { argv, sid: session.sid };
 		// Before the hang-up, never after it: the gap this marker covers starts here.
 		markedSid = session.sid;
 		markRestarting(session.sid);
-		answer("started", `session ${session.sid}: hanging up omp (pid ${child.pid}) to resume ${session.file}`);
+		reply("started", `session ${session.sid}: hanging up omp (pid ${child.pid}) to resume ${session.file}`);
 		child.kill("SIGHUP");
 	});
 	for (const sig of ["SIGHUP", "SIGTERM"] as const) {

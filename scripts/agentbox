@@ -2503,7 +2503,9 @@ session_env() {
 #                     replaced whole by a rename;
 #   agentbox-runner   written by scripts/agentbox-run.ts at its start (`version=1`): a box with
 #                     none runs a runner older than this change, which answers no restart;
-#   agentbox-restart  the runner's answer to each SIGUSR1, one line each (cmd_restart).
+#   agentbox-restart  the runner's answer to each restart request, one line each, ending
+#                     ` [request <id>]` for the request a caller left in agentbox-restart.d
+#                     (restart_request, restart_answer).
 # The box can write anything there, so the host takes each only when it is a regular file, and
 # from the session file only a UUID, a pid and an absolute path.
 box_run_user() { echo "$RUN_BASE/$1/run-user"; }
@@ -3584,28 +3586,40 @@ RESTART_NOTICE='agentbox: a restart of your omp is pending (new omp/plugins on t
 RESTART_ANSWER_WAIT="${AGENTBOX_RESTART_ANSWER_WAIT:-15}"
 RESTART_REPORT_WAIT="${AGENTBOX_RESTART_REPORT_WAIT:-120}"
 
-# restart_offset FILE: the size of the runner's answer file before a signal, so only a line the
-# runner writes after it counts as its answer to that signal (0 when there is no file yet).
-restart_offset() {
-    [[ -f "$1" && ! -L "$1" ]] || { echo 0; return 0; }
-    stat -c %s -- "$1" 2>/dev/null || echo 0
+# restart_request DIR: an empty request file in DIR/agentbox-restart.d, named by a fresh id, for the
+# runner to answer under (agentbox-run.ts); prints the id. A signal carries no sender and two can
+# arrive as one, so a caller that took the first line after its own offset could read another
+# caller's `started` as its own; the runner ends each answer with ` [request <id>]` instead.
+# On the host DIR is the box's own runtime directory, where the box can put a link at any name, so
+# the request goes only into a real directory, and only as a new file (noclobber: not through a
+# link at the request's name either).
+restart_request() {
+    local dir="$1/agentbox-restart.d" id
+    id="$(date -u +%Y%m%dT%H%M%S%N)-$$-$RANDOM"
+    [[ -L "$dir" ]] && return 1
+    { mkdir -p "$dir" && [[ -d "$dir" && ! -L "$dir" ]] && (set -C; : >"$dir/$id"); } 2>/dev/null || return 1
+    printf '%s\n' "$id"
 }
 
-# restart_answer FILE OFFSET: the first whole line FILE gained past byte OFFSET within
-# RESTART_ANSWER_WAIT seconds, as `<word> <text>` (the runner's time dropped). Status 1 when none.
+# restart_answer FILE ID: the runner's answer to request ID, the line of FILE that ends
+# ` [request ID]`, within RESTART_ANSWER_WAIT seconds, as `<word> <text>` (the runner's time and
+# the request dropped). Status 1 when none, and the request is then withdrawn, so a runner that
+# answers late cannot take it for a later caller's.
 restart_answer() {
-    local file="$1" offset="$2" end=$((SECONDS + RESTART_ANSWER_WAIT)) chunk line
+    local file="$1" id="$2" end=$((SECONDS + RESTART_ANSWER_WAIT)) tag=" [request $2]" line
     while :; do
         if [[ -f "$file" && ! -L "$file" ]]; then
-            chunk="$(timeout 5 tail -c +"$((offset + 1))" -- "$file" 2>/dev/null | head -c 4096; echo x)"
-            chunk="${chunk%x}"
-            if [[ "$chunk" == *$'\n'* ]]; then
-                line="${chunk%%$'\n'*}"
+            line="$(timeout 5 tail -c 1048576 -- "$file" 2>/dev/null | grep -aF -- "$tag" | tail -n 1)"
+            if [[ "$line" == *"$tag" ]]; then
+                line="${line%"$tag"}"
                 printf '%s\n' "${line#* }"
                 return 0
             fi
         fi
-        (( SECONDS < end )) || return 1
+        if (( SECONDS >= end )); then
+            rm -f -- "${file%/*}/agentbox-restart.d/$id"
+            return 1
+        fi
         sleep 0.5
     done
 }
@@ -3618,7 +3632,7 @@ restart_answer() {
 # restart that started the command ends with omp, which the runner hangs up, and the wake notice
 # tells the resumed session that it came back.
 restart_in_box() {
-    local run_user="${XDG_RUNTIME_DIR:-/run/user/$UID_}" answers offset line
+    local run_user="${XDG_RUNTIME_DIR:-/run/user/$UID_}" answers request line
     answers="$run_user/agentbox-restart"
     # A subagent's bash tool reaches the same omp as its parent's, so a restart there would hang up
     # the session in the middle of the subagent's own work. The test `agentbox finish` uses: a
@@ -3628,9 +3642,10 @@ restart_in_box() {
     fi
     [[ -n "$(box_file_lines "$run_user/agentbox-runner")" ]] \
         || die "this box's runner is older than this change (dispatch://INFRA-1720) and cannot say whether it restarted, so no signal was sent. Run \`agentbox move --self\` from this bash tool: it moves this session into a new box, which restarts in place."
-    offset="$(restart_offset "$answers")"
-    kill -USR1 "$AGENTBOX_RUNNER_PID" || die "could not signal the runner (pid $AGENTBOX_RUNNER_PID); nothing was restarted"
-    line="$(restart_answer "$answers" "$offset")" \
+    request="$(restart_request "$run_user")" \
+        || die "could not write a restart request in $run_user/agentbox-restart.d; nothing was restarted"
+    kill -USR1 "$AGENTBOX_RUNNER_PID" || { rm -f -- "$run_user/agentbox-restart.d/$request"; die "could not signal the runner (pid $AGENTBOX_RUNNER_PID); nothing was restarted"; }
+    line="$(restart_answer "$answers" "$request")" \
         || die "the runner gave no answer within ${RESTART_ANSWER_WAIT}s, so the restart may not have happened; its log is ~/.cache/omp/agentbox/${AGENTBOX_BOX:-<box>}.log"
     [[ "${line%% *}" == started ]] || die "the runner did not restart: ${line#* }"
     echo "agentbox: ${line#* }"
@@ -3640,7 +3655,7 @@ restart_in_box() {
 # restart_box BOX NOW: one box from the host, saying what happened. Status 0 when it restarted (or
 # its session was told to), 1 with the reason on stderr when it did not.
 restart_box() {
-    local box="$1" now="$2" run_user answers offset line old_pid end log last
+    local box="$1" now="$2" run_user answers request line old_pid end log last
     if [[ -z "$(box_runner_pid "$box")" ]]; then
         echo "agentbox: $box does not run omp under the runner (scripts/agentbox-run.ts), so nothing can restart it in place; quit its session and resume it with \`omp --resume\`" >&2
         return 1
@@ -3654,12 +3669,15 @@ restart_box() {
     fi
     if [[ "$now" == true ]]; then
         answers="$run_user/agentbox-restart"
-        offset="$(restart_offset "$answers")"
+        if ! request="$(restart_request "$run_user")"; then
+            echo "agentbox: $box: could not write a restart request in $run_user/agentbox-restart.d; nothing was restarted" >&2
+            return 1
+        fi
         box_session_read "$box" || true
         old_pid="$BOX_SESSION_PID"
         # pid 1 (docker-init) forwards the signal to the runner.
-        docker kill -s USR1 "$box" >/dev/null || { echo "agentbox: $box: docker could not send it SIGUSR1; nothing was restarted" >&2; return 1; }
-        if ! line="$(restart_answer "$answers" "$offset")"; then
+        docker kill -s USR1 "$box" >/dev/null || { rm -f -- "$run_user/agentbox-restart.d/$request"; echo "agentbox: $box: docker could not send it SIGUSR1; nothing was restarted" >&2; return 1; }
+        if ! line="$(restart_answer "$answers" "$request")"; then
             echo "agentbox: $box: the runner gave no answer within ${RESTART_ANSWER_WAIT}s, so the restart may not have happened; its log is ~/.cache/omp/agentbox/$box.log" >&2
             return 1
         fi
