@@ -5,11 +5,14 @@ description: |
   (dispatch://BET-545) is Sol over Astra unless Astra is asked for. Use it when a task benefits from a non-Anthropic model: independent verification, cross-model
   second opinions, adversarial review of Claude-authored work, or bounded implementation and
   debugging. It serves GPT-6.1 Sol through
-  Theorem's model gateway (`model-gateway-openai`, team `box`) and falls back only to
+  Theorem's model gateway (`model-gateway-openai`, team `box`) -- on its Flex tier, which
+  promotes itself to the standard tier on a 429, a server-fault 5xx or a timeout -- and falls back only to
   GPT-6.1 Sol on the Codex subscription; it never answers from Anthropic, so a refusal means
   no GPT-6.1 Sol route was reachable. Full tool access; finishes the task it is handed and
   reports with evidence.
 model:
+  - "model-gateway-openai/openai/gpt-6.1-sol-flex:xhigh"
+  - "model-gateway/openai/gpt-6.1-sol-flex:xhigh"
   - "model-gateway-openai/openai/gpt-6.1-sol:xhigh"
   - "model-gateway/openai/gpt-6.1-sol:xhigh"
 color: green
