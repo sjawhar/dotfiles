@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -416,17 +417,25 @@ class RestartReasons(SessionFileFixture):
     def in_box(self, runner_script: str, env: dict[str, str] | None = None,
                version: bool = True) -> tuple[subprocess.CompletedProcess[str], Path]:
         """`agentbox restart` in a box: a stand-in runner (a process that traps SIGUSR1) whose
-        pid is AGENTBOX_RUNNER_PID, and the box's runtime dir as XDG_RUNTIME_DIR."""
+        pid is AGENTBOX_RUNNER_PID, and the box's runtime dir as XDG_RUNTIME_DIR.
+
+        The runner waits in `wait`, which a trap interrupts at once (a `sleep` in the foreground
+        held each trap until it ended), and before it is killed it gets a SIGUSR2 fence: a SIGUSR1
+        the command sent before it ended is pending by then, and bash runs the lower signal's trap
+        first, so `signals` holds every signal the command sent once `fence` exists. Without the
+        fence a runner killed the moment the command returned recorded nothing, and a command that
+        signalled a runner it must not signal passed."""
         runtime = self.root / "box-run-user"
         runtime.mkdir(exist_ok=True)
-        for name in ("agentbox-runner", "agentbox-restart", "signals"):
+        for name in ("agentbox-runner", "agentbox-restart", "signals", "fence"):
             (runtime / name).unlink(missing_ok=True)
         shutil.rmtree(runtime / "agentbox-restart.d", ignore_errors=True)
         if version:
             (runtime / "agentbox-runner").write_text("version=1\npid=1\n", encoding="utf-8")
         runner = subprocess.Popen(
             ["bash", "-c", f'trap \'echo usr1 >>"$R/signals"; {runner_script}\' USR1\n'
-                           'echo ready >"$R/ready"\nwhile :; do sleep 0.1; done'],
+                           'trap \'echo fence >"$R/fence"\' USR2\n'
+                           'echo ready >"$R/ready"\nwhile :; do sleep 0.1 & wait $!; done'],
             env={**os.environ, "R": str(runtime)},
         )
         self.addCleanup(runner.kill)
@@ -440,6 +449,12 @@ class RestartReasons(SessionFileFixture):
             "OMP_SESSION_ID": SID, "PI_SESSION_FILE": str(transcript),
             "AGENTBOX_RESTART_ANSWER_WAIT": "2", **(env or {}),
         })
+        runner.send_signal(signal.SIGUSR2)
+        for _ in range(200):
+            if (runtime / "fence").exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue((runtime / "fence").exists(), "the stand-in runner never took its fence")
         runner.kill()
         runner.wait()
         return got, runtime
