@@ -33,8 +33,13 @@ assert SPEC is not None
 AW = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(AW)
 SHIMS = Path(__file__).resolve().parents[2] / "shims"
-# shims/git tells an agent session by these, and by a gh-app-routes include in GIT_CONFIG_*.
-AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION")
+# shims/git tells an agent session by these (agent_context), by a gh-app-routes include in
+# GIT_CONFIG_*, and by a command over SSH with no terminal. The test's "outside" carries none of
+# them: with the four session markers alone it kept the runner's own CLAUDECODE and SSH_CONNECTION,
+# so under an omp session that has them the shim locked the "outside" add and 8 subtests failed.
+AGENT_MARKERS = ("OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
+                 "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
+                 "LEGION_CONTROLLER", "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY")
 # What shims/git writes on every `git worktree add` an agent session runs.
 ADD_LOCK = "agent session: locked on add (AGENTC-431)"
 # What shims/jj writes on the git worktree of a `jj workspace add` shims/git did not lock.
