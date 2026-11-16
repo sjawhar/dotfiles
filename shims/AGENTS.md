@@ -738,6 +738,14 @@ is set and the configured age key does not exist, the scanner gives sops the pas
 term as matching one or more spaces or tabs in one line, and ignores blank list lines and lines
 that start with `#`.
 
+The scanner runs the first `sops` on `PATH`, except mise's shim: in its place it runs the version
+this checkout's `mise.toml` pins, from `installs/sops/<version>/` in the mise data directory that
+holds that shims directory. mise's shim takes its version from the caller's `HOME` or from a
+`mise.toml` in the caller's directory, so with a test's `HOME` outside this checkout it had none,
+exited 1, and every commit a Legion test made through the shims was refused (2026-11-16). With
+no exact pin or no install of it, the shim runs as found. A sops that exits with any status but
+0 or 128 is named in the refusal with its status.
+
 The `diff`, `message` and `push` modes print one stderr line per match with a place and
 `listed leak term`, never the matching text, then name how to remove it. They exit 0 when clean,
 3 on a match, 2 when the list cannot be read and 4 when the text to scan cannot be read;

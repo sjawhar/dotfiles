@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
-from leak_terms_fixture import TEST_TERMS, encrypt_yaml, fixture_environment, unrelated_key_file
+from leak_terms_fixture import TEST_TERMS, encrypt_yaml, fixture_environment, real_sops, unrelated_key_file
 from test_jj_push_leak_gate import SERVER_SIDE, SINK_HELPER
 
 
@@ -809,6 +809,64 @@ index 0000000,0000000,0000000..1111111
         with mock.patch.object(module, "passwd_home", return_value=passwd_home):
             matcher = module.load_terms(environment)
         self.assertTrue(matcher.spans("Quillfeather Lane 9"))
+
+    def test_scanner_runs_the_pinned_sops_past_a_mise_shim_with_no_version(self) -> None:
+        # mise's shim takes its sops version from the caller's HOME or from a mise.toml in the caller's directory, so
+        # under a moved HOME outside this checkout it has none and exits 1: every commit a Legion test made through
+        # the shims was refused on 2026-11-16. The fake mise here keeps mise's layout and fails as mise did.
+        import tomllib
+
+        module = scanner_module()
+        pin = tomllib.loads((ROOT / "mise.toml").read_text(encoding="utf-8"))["tools"]["sops"]
+        self.assertRegex(pin, r"^[0-9][0-9A-Za-z.+-]*$", "mise.toml pins no exact sops version")
+        mise = self.root / "mise"
+        shim = write_executable(
+            mise / "shims" / "sops", "#!/bin/sh\necho 'mise ERROR No version is set for shim: sops' >&2\nexit 1\n"
+        )
+        install = mise / "installs" / "sops" / pin
+        install.mkdir(parents=True)
+        (install / "sops").symlink_to(real_sops())
+        python_bin = self.root / "python-bin"
+        python_bin.mkdir()
+        (python_bin / "python3").symlink_to(sys.executable)
+        moved_home = self.root / "moved-home"
+        moved_home.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        environment = {
+            **self.env,
+            "HOME": str(moved_home),
+            "XDG_CONFIG_HOME": str(moved_home / ".config"),
+            "PATH": os.pathsep.join([str(shim.parent), str(python_bin)]),
+        }
+
+        def scan(text: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            return self.launch([str(CHECK), "message"], input=text, env=env, cwd=outside)
+
+        clean = scan("clean\n", environment)
+        self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "", ""))
+        self.assert_found(scan("Quillfeather Lane 9\n", environment), "commit message line 1")
+
+        # The machine's key is found as before, and a machine with no key that can decrypt the list still refuses.
+        passwd_home = self.root / "passwd-home"
+        key_dir = passwd_home / ".config" / "sops" / "age"
+        key_dir.mkdir(parents=True)
+        keyless = {name: value for name, value in environment.items() if name not in (
+            "SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD", "DOTFILES_LEAK_TERMS_SOPS_HOME"
+        )}
+        with mock.patch.object(module, "passwd_home", return_value=passwd_home):
+            with self.assertRaisesRegex(module.ListError, "no age key can decrypt the term list"):
+                module.load_terms(keyless)
+            shutil.copyfile(self.env["SOPS_AGE_KEY_FILE"], key_dir / "keys.txt")
+            self.assertTrue(module.load_terms(keyless).spans("Quillfeather Lane 9"))
+
+        # Control: with no install of the pin beside the shims, the shim runs as found, and its exit is named.
+        (install / "sops").unlink()
+        refused = scan("clean\n", environment)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn(f"({shim} exited 1)", refused.stderr)
+        self.assert_hidden(refused)
+        self.assert_no_key_material(refused)
 
     def test_scanner_selects_gits_auto_comment_character(self) -> None:
         selected = self.check(
