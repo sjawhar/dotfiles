@@ -99,6 +99,10 @@ fi
 if [ "$helper_started" -eq 1 ] || [ "$helper_restarted" -eq 1 ]; then
     if [ "$helper_started" -eq 1 ]; then how=start; else how=restart; fi
     wait_s="${AGENT_SECRETS_HELPER_SOCKET_WAIT:-10}"
+    if [[ ! "$wait_s" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || [[ ! "$wait_s" =~ [1-9] ]]; then
+        echo "agent-secrets: AGENT_SECRETS_HELPER_SOCKET_WAIT must be a positive number of seconds; using 10 s" >&2
+        wait_s=10
+    fi
     # shellcheck disable=SC2016 # The child shell expands this command string.
     if ! timeout "$wait_s" bash -c 'until timeout 2 "$0" sessions >/dev/null 2>&1; do sleep 0.2; done' "$HELPER_BIN"; then
         echo "agent-secrets: the helper did not answer on its socket within ${wait_s} s after its ${how} (systemctl --user status agent-secrets-helper); its login state was not read"
@@ -120,9 +124,14 @@ if [ -n "$errfile" ]; then why="$(<"$errfile")"; rm -f "$errfile"; fi
 if [ "$rc" -ne 0 ]; then
     if [ -n "$state" ] && [ -n "$why" ]; then out="$(printf '%s\n%s' "$state" "$why")"; else out="${state}${why}"; fi
     echo "agent-secrets: machine login-status exited ${rc}: ${out}"
-    if [ "$state" = none ] && grep -qs '^AGENT_SECRETS_MACHINE_IDENTITY=.' "${CONF_DIR}/env.local"; then
-        echo "  the helper proves this machine's identity (AGENT_SECRETS_MACHINE_IDENTITY in ~/.config/agent-secrets/env.local) and holds no launcher credential from it yet: journalctl --user -u agent-secrets-helper"
-    elif [ "$state" = none ]; then
-        echo "  run: agent-secrets-login <email>"
+    if [ "$state" = none ]; then
+        # Like agent-secrets-local.sh, source env.local in a child shell, without an inherited
+        # identity. Only its final value selects the hint; no other settings reach this shell.
+        # shellcheck disable=SC2016 # The child shell expands this command string.
+        if env -u AGENT_SECRETS_MACHINE_IDENTITY bash -c '. "$1" >/dev/null 2>&1; [ -n "${AGENT_SECRETS_MACHINE_IDENTITY-}" ]' agent-secrets-identity "${CONF_DIR}/env.local"; then
+            echo "  the helper proves this machine's identity (AGENT_SECRETS_MACHINE_IDENTITY in ~/.config/agent-secrets/env.local) and holds no launcher credential from it yet: journalctl --user -u agent-secrets-helper"
+        else
+            echo "  run: agent-secrets-login <email>"
+        fi
     fi
 fi

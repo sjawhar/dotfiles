@@ -69,7 +69,8 @@ echo "timeout $*" >>"$STUB_LOG"
 if [[ -n "${STUB_TIMEOUT_EXIT:-}" ]]; then
     exit "$STUB_TIMEOUT_EXIT"
 fi
-exec /usr/bin/timeout "$@"
+# Stay in the test's process group so its outer watchdog also stops a polling shell.
+exec /usr/bin/timeout --foreground "$@"
 '''
 
 # A helper that a start or a restart left booting (the systemctl stub's `booting` file) refuses
@@ -721,6 +722,94 @@ class AgentSecretsLocal(unittest.TestCase):
         self.assertEqual(
             self.helper_and_client_calls(new_calls), ["agent-secrets machine login-status"]
         )
+
+    def test_l5_none_uses_the_effective_machine_identity(self) -> None:
+        self.use_booting_helper(self.mise_v1)
+        url = "AGENT_SECRETS_URL=https://broker.example.invalid\n"
+        self.write_env_local(url)
+        self.assertEqual(self.run_local(STUB_REFUSALS="0").returncode, 0)
+        cases = {
+            "plain identity": ("AGENT_SECRETS_MACHINE_IDENTITY=metadata\n", True),
+            "leading spaces": ("  AGENT_SECRETS_MACHINE_IDENTITY=metadata\n", True),
+            "empty quotes": ('AGENT_SECRETS_MACHINE_IDENTITY=""\n', False),
+            "last assignment empty": (
+                "AGENT_SECRETS_MACHINE_IDENTITY=metadata\nAGENT_SECRETS_MACHINE_IDENTITY=\n",
+                False,
+            ),
+            "inherited identity only": ("", False),
+        }
+        for name, (assignments, has_identity) in cases.items():
+            with self.subTest(case=name):
+                self.write_env_local(url + assignments)
+
+                result = self.run_local(
+                    AGENT_SECRETS_MACHINE_IDENTITY="inherited",
+                    STUB_LOGIN_STATE="none",
+                    STUB_LOGIN_EXIT="1",
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("machine login-status exited 1: none", result.stdout)
+                if has_identity:
+                    self.assertIn("the helper proves this machine's identity", result.stdout)
+                    self.assertNotIn("run: agent-secrets-login <email>", result.stdout)
+                else:
+                    self.assertIn("run: agent-secrets-login <email>", result.stdout)
+                    self.assertNotIn("the helper proves this machine's identity", result.stdout)
+
+    def test_l6_invalid_socket_wait_uses_the_finite_default(self) -> None:
+        self.use_booting_helper(self.mise_v1)
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        for wait_s in ("0", "0.0", "-1", "not-a-number"):
+            with self.subTest(wait_s=wait_s):
+                (self.state / "active").unlink(missing_ok=True)
+                before = len(self.calls())
+                began = time.monotonic()
+
+                # The outer deadline also stops the whole poll loop on a broken installer.
+                result = subprocess.run(
+                    ["/usr/bin/timeout", "18", "bash", str(LOCAL_INSTALLER)],
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **self.env,
+                        "STUB_REFUSALS": "never",
+                        "AGENT_SECRETS_HELPER_SOCKET_WAIT": wait_s,
+                    },
+                    check=False,
+                    timeout=25,
+                )
+
+                elapsed = time.monotonic() - began
+                new_calls = self.calls()[before:]
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(
+                    result.stderr,
+                    "agent-secrets: AGENT_SECRETS_HELPER_SOCKET_WAIT must be a positive "
+                    "number of seconds; using 10 s\n",
+                )
+                self.assertIn("within 10 s after its start", result.stdout)
+                self.assertIn("helper sessions", new_calls)
+                self.assertNotIn("agent-secrets machine login-status", new_calls)
+                self.assertGreaterEqual(elapsed, 9)
+                self.assertLess(elapsed, 18)
+
+    def test_l7_positive_fractional_socket_wait_stays_finite(self) -> None:
+        self.use_booting_helper(self.mise_v1)
+        self.write_env_local("AGENT_SECRETS_URL=https://broker.example.invalid\n")
+        began = time.monotonic()
+
+        result = self.run_local(
+            STUB_REFUSALS="never", AGENT_SECRETS_HELPER_SOCKET_WAIT="0.2"
+        )
+
+        elapsed = time.monotonic() - began
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("within 0.2 s after its start", result.stdout)
+        self.assertIn("helper sessions", self.calls())
+        self.assertNotIn("agent-secrets machine login-status", self.calls())
+        self.assertLess(elapsed, 8)
 
     def test_r1_root_installer_continues_when_helper_binary_is_absent(self) -> None:
         root_installer = self.prepare_root_installer()
