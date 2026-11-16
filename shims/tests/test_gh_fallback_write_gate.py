@@ -16,6 +16,7 @@ asserted is whether the call ever reaches knives at all.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -129,6 +130,72 @@ class FallbackWriteGate(unittest.TestCase):
                                 env=env, capture_output=True, text=True, cwd=self.tmp,
                                 timeout=60, check=False)
         self.assertNotIn("personal access token", result.stderr, result.stderr)
+
+    # --- the passed approval, carried to the later passes (dispatch://INFRA-3904) ----
+    # The approval is checked on the outermost pass only; the later passes of the same call (the
+    # stderr-keeping re-run, the read cache's re-entry, knives' own queries) read
+    # GH_SHIM_APPROVED_CALL, which that pass exports after the check: the SHA-256 of the citation
+    # and the call's argv, each NUL-ended.
+    # test_gh_approved_post.py's CitedPostOnTheUpstreamToken runs the approved call end to end.
+
+    COMMENT = ["issue", "comment", "371", "-R", "FreeMixer/plugin-hostd", "--body", "a comment"]
+    # What marks a pass as a later one of the same call, one variable each.
+    LATER_PASSES = ("GH_SHIM_INNER", "GH_READ_CACHE_BYPASS", "KNIVES_GH_SHIM_DEPTH")
+
+    @staticmethod
+    def marker(argv: list[str], approval: str = "") -> str:
+        return hashlib.sha256(b"".join(a.encode() + b"\0" for a in [approval, *argv])).hexdigest()
+
+    def test_a_marker_the_caller_sets_on_an_outermost_call_is_refused(self):
+        """The outermost pass reads no marker: its own approval is the check it runs itself."""
+        self.source("fallback-personal-token")
+        result = self.run_gh(self.COMMENT, GH_SHIM_APPROVED_CALL=self.marker(self.COMMENT))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.reached_knives(), "a marker the caller set let the write through")
+        self.assertIn("personal access token", result.stderr)
+
+    def test_a_marker_the_caller_sets_never_reaches_a_later_pass(self):
+        """And the outermost pass drops the caller's value, so no later pass of the call can read it
+        (one would, were the gate's answer to change between passes)."""
+        self.source("app")
+        stub(self.bin, "knives", f'printf "%s\\n" "${{GH_SHIM_APPROVED_CALL-unset}}" >> {self.reached}')
+        result = self.run_gh(self.COMMENT, GH_SHIM_APPROVED_CALL=self.marker(self.COMMENT))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reached.read_text().split(), ["unset"])
+
+    def test_control_the_same_marker_on_a_later_pass_counts(self):
+        """The control of the two tests above: this digest is the one a later pass accepts, so they
+        hold because the outermost pass ignores and drops the caller's marker, not because the digest
+        never matched. It also shows the bar: a process that marks itself a later pass and computes
+        the digest gets past the gate, as one that sets GH_TOKEN does. The shim guards against
+        accidents (a marker copied into the next command, inherited by another call), not against a
+        caller that forges the shim's own markers (shims/AGENTS.md)."""
+        self.source("fallback-personal-token")
+        for later in self.LATER_PASSES:
+            with self.subTest(later=later):
+                self.reached.unlink(missing_ok=True)
+                self.run_gh(self.COMMENT, **{later: "1"}, GH_SHIM_APPROVED_CALL=self.marker(self.COMMENT))
+                self.assertTrue(self.reached_knives(), "the marker of this exact call did not count on a later pass")
+
+    def test_a_marker_of_another_call_does_not_count_on_a_later_pass(self):
+        self.source("fallback-personal-token")
+        other_body = self.COMMENT[:-1] + ["another comment"]
+        for later in self.LATER_PASSES:
+            for marker, approval in (
+                (self.marker(other_body), ""),
+                (self.marker(self.COMMENT, "dispatch://INFRA-1/ask/aaaaaaaa"), ""),
+                (self.marker(self.COMMENT), "dispatch://INFRA-1/ask/aaaaaaaa"),
+                ("", ""),
+            ):
+                with self.subTest(later=later, marker=marker, approval=approval):
+                    self.reached.unlink(missing_ok=True)
+                    env = {later: "1", "GH_SHIM_APPROVED_CALL": marker}
+                    if approval:
+                        env["GH_SHIM_APPROVAL"] = approval
+                    result = self.run_gh(self.COMMENT, **env)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("personal access token", result.stderr)
+                    self.assertFalse(self.reached_knives(), "a marker of another call let this write through")
 
     # --- the classifier ---------------------------------------------------
 

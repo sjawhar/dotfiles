@@ -31,10 +31,28 @@ behavior before handing the call to the real one. One file is data: `person-name
   repository requires an approval your own identity cannot give, ask INFRA's Legion controller
   which running Legion reviewer reads it and send that reviewer the pull request and its head,
   asking for no review issue (dispatch://INFRA-1481, R1 and R3); elsewhere a verdict goes out as an App
-  comment beginning `VERDICT: <verdict> at <head sha>`. A post
-  (`issue create`, `issue
-  comment`, `pr comment`) Sami instructed in a Dispatch ask he answered runs again with
-  `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>`, which `scripts/gh-approved-post` checks. Every
+  comment beginning `VERDICT: <verdict> at <head sha>`. A post (`issue create`, `issue comment`,
+  `pr comment`, `pr create`) Sami instructed in a Dispatch ask he answered runs again with
+  `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>`, which `scripts/gh-approved-post` checks: his
+  approving answer, the repository named in the draft, the title as the draft's `Title:` line, the
+  body as the text between two `---` lines of it (compared with `\r\n` read as `\n`, without each
+  line's trailing whitespace or the leading and trailing blank lines), and no flag but `-R`/`--repo`,
+  `-t`/`--title` and one of `-b`/`--body` or `-F`/`--body-file` (gh posts the file over `--body`
+  whatever their order, so both are refused) and, for a pull request, `--head` and `-B`/`--base`,
+  with the head `sjawhar:<branch>`, a branch of his own fork (push it first: owner sjawhar routes
+  to the App). A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
+  (`has_head_flag`, `src/commands/gh.rs`), and in a jj checkout it adds `--head <bookmark>`,
+  which gh takes over `-H`. In an agent session a write
+  to an owner without the App, which would go out on his upstream token, is refused without such a
+  citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation
+  is checked on the outermost pass only; the later passes of the same call (the stderr-keeping
+  re-run, the read cache's re-entry, knives' own queries) get its pass as `GH_SHIM_APPROVED_CALL`,
+  the SHA-256 of the citation and the exact argv, which counts only where both match and which an
+  outermost call drops unread. Until 2026-11-16 nothing carried it, so that gate refused every
+  approved post to such an owner after its `allowed` verdict (dispatch://INFRA-3904,
+  `shims/tests/test_gh_approved_post.py`). As with the agent markers below, this is a guardrail
+  against an accident, not a sandbox: a caller that sets `GH_SHIM_INNER` and computes the digest
+  gets past the gate, as one that sets `GH_TOKEN` does. Every
   call GitHub refuses for the App except a review also gets the admin route: a GitHub admin
   action that work Sami already asked for needs (an App permission, an admin merge, a
   repository or branch setting) is done by the agent itself with Sami's admin token from the

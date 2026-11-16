@@ -203,6 +203,13 @@ gh_shim_target_owner() {
     fi
     [[ -n "$_owner" ]] || _owner=theorem-labs
 }
+# gh_shim_call_digest ARGV…: sets _digest to the SHA-256 of GH_SHIM_APPROVAL and ARGV, each ended
+# by a NUL (no argument can hold one), so one digest names one citation and one exact call; empty
+# when it cannot be computed.
+gh_shim_call_digest() {
+    _digest="$(printf '%s\0' "${GH_SHIM_APPROVAL:-}" "$@" | sha256sum 2> /dev/null)" || _digest=""
+    _digest="${_digest%% *}"
+}
 # gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
 # it names a method other than GET, which is how gh itself decides; every other verb is listed,
 # because a verb this misses is a write that goes out ungated. Read verbs are never listed, so a
@@ -314,7 +321,7 @@ gh_shim_refused_by_github() {
     fi
     if [[ -n "$pr" ]]; then
         instead="where a repository requires an approval your own identity cannot give, ask INFRA's Legion controller (Envoy topic notifications.role.legion-infra-controller) which running Legion reviewer reads it, and send that reviewer the pull request and its head. Ask for no review issue. Where a code owner owns the files changed, ask that person through Dispatch; never approve with a person's token or as the Legion review App (dispatch://INFRA-1481, R1 and R3), and ask no other session to review it. Where a comment is enough, post the verdict as a pull-request comment: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
-    elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" ]]; then
+    elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" || "${1:-} ${2:-}" == "pr create" ]]; then
         instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; an owner with no App installation gets his own upstream token, so the post goes out as him (shims/AGENTS.md).${admin:+ $admin} Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     elif [[ -n "$admin" ]]; then
         instead="$admin For any other owner, or a call that is not such an admin action, stop and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
@@ -474,13 +481,37 @@ if agent_context; then
     # hold refuses the call; a call without one is unchanged. On 2026-11-02 he
     # answered "Post it" on dispatch://OSSV-232/ask/a7d1ac41-45c4-4504-a985-7c92998d2158
     # and the issue still did not go out.
+    # The check runs on the outermost pass only, and the same call then runs this shim again: the
+    # stderr-keeping re-run below (GH_SHIM_INNER), the read cache's re-entry (GH_READ_CACHE_BYPASS),
+    # and knives' own queries (KNIVES_GH_SHIM_DEPTH). A passed check reaches those passes as
+    # GH_SHIM_APPROVED_CALL, the digest of the citation and the exact argv it passed for, and a
+    # later pass counts as approved only when its own citation and argv give the same digest, so a
+    # marker inherited by any other gh call does not count for it. Until 2026-11-16 nothing carried
+    # it: the re-run saw no approval, and the fallback-write gate below refused every approved post
+    # to an owner without the App (approved-posts.jsonl held an `allowed` verdict, then rc 1, and no
+    # rc 0 since that gate landed; dispatch://INFRA-3904). Every later pass counts, not only one
+    # marked GH_SHIM_INNER: when the outermost pass cannot make its stderr file it skips the re-run,
+    # and the cache's re-entry is then the pass that runs the gate. On an outermost call the
+    # caller's own value is dropped unread. Like every check in this shim, this guards against
+    # accidents, not against a caller that forges the shim's own markers: one that sets
+    # GH_SHIM_INNER and computes the digest gets past the gate, as one that sets GH_TOKEN does.
     _approved_log=""
-    if [[ -n "${GH_SHIM_APPROVAL:-}" && -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${KNIVES_GH_SHIM_DEPTH:-}" ]]; then
-        _gh_cache_root
-        _approved_root="$_gh_root"
-        mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
-        _approved_log="$_approved_root/log/approved-posts.jsonl"
-        "$_dotfiles/scripts/gh-approved-post" --log "$_approved_log" -- "$@" || exit 1
+    _approved=0
+    if [[ -z "${GH_SHIM_INNER:-}${GH_READ_CACHE_BYPASS:-}${KNIVES_GH_SHIM_DEPTH:-}" ]]; then
+        unset GH_SHIM_APPROVED_CALL
+        if [[ -n "${GH_SHIM_APPROVAL:-}" ]]; then
+            _gh_cache_root
+            _approved_root="$_gh_root"
+            mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
+            _approved_log="$_approved_root/log/approved-posts.jsonl"
+            "$_dotfiles/scripts/gh-approved-post" --log "$_approved_log" -- "$@" || exit 1
+            _approved=1
+            gh_shim_call_digest "$@"
+            [[ -n "$_digest" ]] && export GH_SHIM_APPROVED_CALL="$_digest"
+        fi
+    elif [[ -n "${GH_SHIM_APPROVED_CALL:-}" ]]; then
+        gh_shim_call_digest "$@"
+        [[ "$_digest" == "$GH_SHIM_APPROVED_CALL" ]] && _approved=1
     fi
     # A write that would go out on the user's own personal access token, with nobody having
     # approved it. gh-app-token answers an owner the App does not cover with the profile's fallback
@@ -490,9 +521,9 @@ if agent_context; then
     # that way (dispatch://INFRA-2006): FreeMixer has no installation, and the approval check above
     # runs only when a call opts in with GH_SHIM_APPROVAL.
     # So: in an agent session, a write whose owner resolves to the fallback is refused unless that
-    # approval already passed, which $_approved_log records. Reads are untouched, and so is every
-    # write to an owner the App covers; a push to the user's own fork still works, because this gates
-    # gh, not git.
+    # approval already passed for this call, which $_approved records. Reads are untouched, and so
+    # is every write to an owner the App covers; a push to the user's own fork still works, because
+    # this gates gh, not git.
     # A call that carries GH_TOKEN itself is out of scope: the defect this gate was written for is a
     # write going out on the SILENT personal fallback (gh's own hosts.yml and keyring), which nobody
     # chose and nothing records. A caller that sets GH_TOKEN has chosen an identity deliberately, and
@@ -504,7 +535,7 @@ if agent_context; then
     # activity is by agents. Stop manufacturing a permission boundary here."
     # This condition can only refuse LESS: a call with no GH_TOKEN is unaffected, and a call that
     # passes today still passes.
-    if agent_context && gh_shim_is_write "$@" && [[ -z "${_approved_log:-}" ]] && [[ -z "${GH_TOKEN:-}" ]]; then
+    if agent_context && gh_shim_is_write "$@" && ((!_approved)) && [[ -z "${GH_TOKEN:-}" ]]; then
         gh_shim_target_owner "$@"
         _gate_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" || _gate_profile=""
         [[ -n "$_gate_profile" ]] || _gate_profile=agent
