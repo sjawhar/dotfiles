@@ -3057,16 +3057,30 @@ collect_launcher() {
 # The working directory of every process the collector can see, "<pid>\t<cwd>", read once with one
 # `find` (a readlink per process is thousands of forks on a loaded host). A process of another user
 # whose cwd this user cannot read (root's, or a box's under its own uid range) is not one that can
-# stand in a box's host directory as this user. What it cannot read of its own user's processes is
-# no answer: COLLECT_CWDS_UNREAD then says what, and the collector removes no box that pass. A walk
-# that found no process at all saw nothing (the collector's own process is always one), and says so
-# the same way.
+# stand in a box's host directory as this user.
+#
+# A process of this user whose cwd cannot be read is one of two things. The kernel refuses that read
+# (ptrace access mode READ) to every reader without CAP_SYS_PTRACE when the process is not dumpable
+# (its /proc entries then belong to root, so it never counts as this user's here), when its ids are
+# not all the reader's, when it holds a capability the reader lacks, or when it is in a pid namespace
+# below the reader's. Such a process is hidden on every pass, whatever it does: on sami-devbox the
+# user's systemd manager (CAP_WAKE_ALARM) and a kind cluster's metrics-server (gid 0, a nested pid
+# namespace) are, and counting them made the collector remove nothing at all (59 leftovers kept on
+# 2026-11-16). They are not counted, and each pass says which they were (COLLECT_CWDS_HIDDEN).
+# The limit is real: such a process could stand in a box's directory and the collector cannot see
+# it. A process in another pid namespace is a container's, whose cwd is in its own mount namespace,
+# where a box's host directory exists only in that box's own container, and that box is kept while
+# its container runs. Any other refusal has no reason the collector can name: COLLECT_CWDS_UNREAD
+# then says so, and the collector removes no box that pass. A walk that found no process at all saw
+# nothing (the collector's own process is always one), and says so the same way.
 COLLECT_CWDS=()
 COLLECT_CWDS_UNREAD=""
+COLLECT_CWDS_HIDDEN=()
 collect_read_cwds() {
-    local p owner cwd me n=0
-    COLLECT_CWDS=() COLLECT_CWDS_UNREAD=""
+    local p owner cwd me n=0 self why
+    COLLECT_CWDS=() COLLECT_CWDS_UNREAD="" COLLECT_CWDS_HIDDEN=()
     me="$(id -u)"
+    self="$(collect_status /proc/self/status)"
     while IFS=$'\t' read -r p owner cwd; do
         n=$((n + 1))
         p="${p%/cwd}"
@@ -3074,13 +3088,47 @@ collect_read_cwds() {
         if [[ -z "$cwd" ]]; then
             # Gone since the walk listed it: it stands nowhere.
             if [[ "$owner" == "$me" && -e "$PROC/$p" ]]; then
-                COLLECT_CWDS_UNREAD="process $p's working directory could not be read"
+                why="$(collect_hidden_why "$(collect_status "$PROC/$p/status")" "$self")"
+                if [[ -n "$why" ]]; then
+                    COLLECT_CWDS_HIDDEN+=("process $p ($why)")
+                else
+                    COLLECT_CWDS_UNREAD="process $p's working directory could not be read"
+                fi
             fi
             continue
         fi
         COLLECT_CWDS+=("$p"$'\t'"$cwd")
     done < <(find "$PROC"/[0-9]*/cwd -maxdepth 0 -printf '%p\t%U\t%l\n' 2>/dev/null || true)
     (( n )) || COLLECT_CWDS_UNREAD="the walk of $PROC found no process"
+}
+
+# collect_status FILE: a /proc/<pid>/status (world-readable) as `<uid×4>|<gid×4>|<CapPrm>|<pid
+# namespaces>`: the four uids and gids (real, effective, saved, filesystem), the permitted
+# capabilities in hex, and how many pid namespaces deep the process is (NSpid's count). Nothing
+# when the file cannot be read.
+collect_status() {
+    awk '/^Uid:/ { u = $2 " " $3 " " $4 " " $5 } /^Gid:/ { g = $2 " " $3 " " $4 " " $5 }
+         /^CapPrm:/ { c = $2 } /^NSpid:/ { n = NF - 1 }
+         END { if (u != "" && g != "" && c != "" && n != "") print u "|" g "|" c "|" n }' "$1" 2>/dev/null || true
+}
+
+# collect_hidden_why TARGET SELF: the reason the kernel refuses the reader SELF the cwd of the process
+# TARGET (both collect_status lines), or nothing when none of its rules applies (__ptrace_may_access
+# and cap_ptrace_access_check, mode READ): the target's real, effective and saved uid must each be the
+# reader's filesystem uid, and the same for gids; its permitted capabilities must be a subset of the
+# reader's; and a target in a pid namespace below the reader's is a container's.
+collect_hidden_why() {
+    local tu tg tc tn su sg sc sn a b c _
+    [[ -n "$1" && -n "$2" ]] || return 0
+    IFS='|' read -r tu tg tc tn <<<"$1"
+    IFS='|' read -r su sg sc sn <<<"$2"
+    read -r a b c _ <<<"$tu"
+    [[ "$a" == "${su##* }" && "$b" == "${su##* }" && "$c" == "${su##* }" ]] || { echo "its ids are not all this user's"; return 0; }
+    read -r a b c _ <<<"$tg"
+    [[ "$a" == "${sg##* }" && "$b" == "${sg##* }" && "$c" == "${sg##* }" ]] || { echo "its ids are not all this user's"; return 0; }
+    [[ "$tc" =~ ^[0-9a-f]{1,16}$ && "$sc" =~ ^[0-9a-f]{1,16}$ ]] || return 0
+    if (( (16#$tc & ~16#$sc) != 0 )); then echo "it holds a capability this user lacks"; return 0; fi
+    if (( tn > sn )); then echo "it is in another pid namespace"; fi
 }
 
 # collect_holder BOX: the pid of a process that stands in BOX's directory or run dir, other than
@@ -3214,6 +3262,11 @@ cmd_collect() {
         return 0
     fi
     collect_read_cwds
+    if (( ${#COLLECT_CWDS_HIDDEN[@]} )); then
+        local IFS=';'
+        collect_say "not counted, since the kernel shows where they stand to no reader without CAP_SYS_PTRACE: ${COLLECT_CWDS_HIDDEN[*]}" | sed 's/;/; /g'
+        unset IFS
+    fi
     local boxes=()
     mapfile -t boxes < <(collect_candidates)
     for box in ${boxes[@]+"${boxes[@]}"}; do

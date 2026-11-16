@@ -152,6 +152,12 @@ exec /bin/rm "$@"''')
         echo "find: '$a': Permission denied" >&2; exit 1
     fi
 done
+# A /proc entry the kernel gives root's uid, as it does a process that is not dumpable: the owner
+# field of a `-printf '%p\\t%U\\t%l'` line under $STUB_FIND_ROOT_OWNED reads 0.
+if [[ -n "${STUB_FIND_ROOT_OWNED:-}" ]]; then
+    /usr/bin/find "$@" | awk -F'\\t' -v p="$STUB_FIND_ROOT_OWNED" 'BEGIN { OFS = "\\t" } index($1, p) == 1 && NF == 3 { $2 = 0 } { print }'
+    exit "${PIPESTATUS[0]}"
+fi
 exec /usr/bin/find "$@"''')
         # No test may mount or unmount anything for real: sudo only logs.
         write_stub(self.stubs, "sudo", 'printf "%s\\n" "$*" >>"$STUB_SUDO"; exit "${STUB_SUDO_RC:-1}"')
@@ -785,13 +791,52 @@ exec /usr/bin/find "$@"''')
             self.assertEqual(self.gone(OLD), [], result.stdout + result.stderr)
             self.assertIn(f"{OLD} removed", result.stdout)
 
-    def unreadable_cwd(self) -> None:
+    def unreadable_cwd(self, change=None) -> None:
         """A process of this user whose working directory the walk cannot read: `cwd` is not a
-        link the walk can read (as a process's is when it may not be inspected)."""
+        link the walk can read. Its `status` is this test's own (the same ids, capabilities and pid
+        namespace as the collector), so no reason the kernel gives for hiding a cwd applies;
+        CHANGE(lines) edits it into one that does."""
         d = self.proc / "6161"
         d.mkdir()
         (d / "cwd").write_text("", encoding="utf-8")
         (d / "cgroup").write_text("0::/user.slice/app.slice/bash.scope\n", encoding="utf-8")
+        lines = Path("/proc/self/status").read_text(encoding="utf-8").splitlines()
+        (d / "status").write_text("\n".join(change(lines) if change else lines) + "\n", encoding="utf-8")
+
+    def test_a_process_the_kernel_hides_from_every_reader_keeps_no_box(self) -> None:
+        """The kernel refuses a process's cwd to a reader without CAP_SYS_PTRACE when the process
+        holds a capability the reader lacks, when its ids are not all the reader's, when it is not
+        dumpable, or when it is in another pid namespace. Those readings fail on every pass, on
+        every host: on sami-devbox the user's systemd manager (CAP_WAKE_ALARM) and a kind cluster's
+        metrics-server (gid 0, a nested pid namespace) made the collector keep all 59 leftovers on
+        2026-11-16. Such a process does not keep a box, and each pass says which it could not see;
+        a process hidden for no such reason still does (test_a_walk_that_cannot_read_keeps_the_box_
+        and_says_why)."""
+        def field(name, edit):
+            return lambda lines: [edit(line) if line.startswith(name + ":") else line for line in lines]
+        cases = {
+            "a capability the reader lacks": (field("CapPrm", lambda _: "CapPrm:\t0000000800000000"), {},
+                                              "it holds a capability this user lacks"),
+            "ids not all the reader's": (field("Gid", lambda _: "Gid:\t0\t0\t0\t0"), {},
+                                         "its ids are not all this user's"),
+            "a nested pid namespace": (field("NSpid", lambda line: line + "\t1"), {},
+                                       "it is in another pid namespace"),
+            "not dumpable": (None, {"STUB_FIND_ROOT_OWNED": str(self.proc / "6161")}, None),
+        }
+        for name, (change, env, why) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                shutil.rmtree(self.proc / "6161", ignore_errors=True)
+                self.idle_process()
+                self.leftover(OLD)
+                self.unreadable_cwd(change)
+                result = self.collect(env)
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, said)
+                self.assertEqual(self.gone(OLD), [], said)
+                self.assertIn(f"{OLD} removed", result.stdout)
+                if why:
+                    self.assertIn(f"process 6161 ({why})", said)
 
     def forget(self, box: str) -> None:
         """Remove whatever an earlier subtest left of BOX, read-only directories included."""
