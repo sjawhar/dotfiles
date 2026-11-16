@@ -86,8 +86,8 @@ fi
 # scrubbed; gh sees the agent config directory of scripts/gh-agent-config,
 # whose placeholder login stands where the user's would be, so a call with no
 # target owner to route fails on GitHub's 401 and never reaches the user's own
-# login in hosts.yml or the keyring (an owner the App does not cover gets the
-# upstream token from the secrets store); and a call GitHub refuses for the
+# login in hosts.yml or the keyring (an owner the App does not cover is read with
+# the read-owner's read-only App token and written through the broker); and a call GitHub refuses for the
 # App ends with a refusal that names the call and the route to take instead.
 # On 2026-09-14 an agent's `gh api -X POST …/reviews` from omp's eval kernel in
 # /tmp ran on the user's keyring and approved a pull request as him. On
@@ -180,35 +180,42 @@ gh_shim_origin_slug() {
     [[ "$_slug" =~ ^[^/]+/[^/]+$ ]] || _slug=""
 }
 # gh_shim_target_owner ARGV…: sets _owner to the GitHub owner the call targets: -R/--repo, then
-# GH_REPO, then a `repos/OWNER/…` path of `gh api`, then the origin remote, else theorem-labs.
+# GH_REPO, then a `repos/OWNER/…` path of `gh api`, then the origin remote, else theorem-labs; and
+# _target_slug to OWNER/REPO where that source names the repository too, else to _owner alone.
 gh_shim_target_owner() {
-    local a prev="" repo="" path=""
+    local a prev="" repo="" path="" path_slug=""
     for a in "$@"; do
         case "$prev" in -R | --repo) repo="$a" ;; esac
         case "$a" in
             --repo=*) repo="${a#--repo=}" ;;
             -R?*) repo="${a#-R}" ;;
         esac
-        [[ "${1:-}" == api && -z "$path" && "$a" =~ ^/?repos/([^/?]+)/ ]] && path="${BASH_REMATCH[1]}"
+        if [[ "${1:-}" == api && -z "$path" && "$a" =~ ^/?repos/([^/?]+)/([^/?]*) ]]; then
+            path="${BASH_REMATCH[1]}"
+            path_slug="$path${BASH_REMATCH[2]:+/${BASH_REMATCH[2]}}"
+        fi
         prev="$a"
     done
     [[ -n "$repo" ]] || repo="${GH_REPO:-}"
     repo="${repo#https://}"
     repo="${repo#github.com/}"
     _owner="${repo%%/*}"
-    [[ -n "$_owner" ]] || _owner="$path"
+    _target_slug=""
+    if [[ "$repo" == */?* ]]; then
+        _target_slug="${repo#*/}"
+        _target_slug="$_owner/${_target_slug%%/*}"
+    fi
+    if [[ -z "$_owner" ]]; then
+        _owner="$path"
+        _target_slug="$path_slug"
+    fi
     if [[ -z "$_owner" ]]; then
         gh_shim_origin_slug
         _owner="${_slug%%/*}"
+        _target_slug="$_slug"
     fi
     [[ -n "$_owner" ]] || _owner=theorem-labs
-}
-# gh_shim_call_digest ARGV…: sets _digest to the SHA-256 of GH_SHIM_APPROVAL and ARGV, each ended
-# by a NUL (no argument can hold one), so one digest names one citation and one exact call; empty
-# when it cannot be computed.
-gh_shim_call_digest() {
-    _digest="$(printf '%s\0' "${GH_SHIM_APPROVAL:-}" "$@" | sha256sum 2> /dev/null)" || _digest=""
-    _digest="${_digest%% *}"
+    [[ -n "$_target_slug" ]] || _target_slug="$_owner"
 }
 # gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
 # it names a method other than GET, which is how gh itself decides; every other verb is listed,
@@ -277,7 +284,7 @@ GH_SHIM_REFUSED_BY_GITHUB='Can not (approve|request changes on) your own pull re
 # as the App and that the user's login is never used by an agent, while the
 # token was the user's own and the routed call would have run as him too.
 gh_shim_refused_by_github() {
-    local rc="$1" err="$2" pr="" repo="" verdict="APPROVE" a prev="" instead who token admin=""
+    local rc="$1" err="$2" pr="" repo="" verdict="APPROVE" a prev="" instead who admin=""
     shift 2
     if [[ "${1:-}" == pr && "${2:-}" == review ]]; then
         for a in "${@:3}"; do
@@ -303,15 +310,14 @@ gh_shim_refused_by_github() {
             [[ "$a" == *REQUEST_CHANGES* ]] && verdict="REQUEST_CHANGES"
         done
     fi
-    token="$(sed -nE 's/.*using the personal token ([^ ]+) .*/\1/p' "$err" | head -n 1)"
-    if [[ -n "${GH_TOKEN:-}" ]]; then
+    if [[ -n "${GH_TOKEN:-}" && "$GH_TOKEN" == "${GITHUB_PUBLIC_REPO_PAT:-}" ]]; then
+        who="the broker's GITHUB_PUBLIC_REPO_PAT through its airlock, so as that token's GitHub user, sjawhar: the repository's owner has no App installation, and this shim routed the write there (dispatch://INFRA-2031)"
+    elif [[ -n "${GH_TOKEN:-}" ]]; then
         who="the token in GH_TOKEN, inherited from the environment (${GH_TOKEN:0:4}…), so as that token's own GitHub user; nothing routed the call, and a broker token reaches only the repositories it was made for (GITHUB_ADMIN_PAT: theorem-labs)"
-    elif [[ -n "$token" ]]; then
-        who="the personal token $token, so as its GitHub user, not as an App: the repository's owner has no App installation"
     else
         who="the GitHub App this repository's owner routes agent calls to"
     fi
-    if [[ -z "${GH_TOKEN:-}" && -z "$token" ]]; then
+    if [[ -z "${GH_TOKEN:-}" ]]; then
         # The App was refused. Sami said five times (2026-10-25 to 2026-11-03) that an agent does a
         # GitHub admin action itself with his admin token and never asks him to; this block used to
         # send every such refusal to the lead, who asked him. A post (the App lacking the issues
@@ -322,7 +328,7 @@ gh_shim_refused_by_github() {
     if [[ -n "$pr" ]]; then
         instead="where a repository requires an approval your own identity cannot give, ask INFRA's Legion controller (Envoy topic notifications.role.legion-infra-controller) which running Legion reviewer reads it, and send that reviewer the pull request and its head. Ask for no review issue. Where a code owner owns the files changed, ask that person through Dispatch; never approve with a person's token or as the Legion review App (dispatch://INFRA-1481, R1 and R3), and ask no other session to review it. Where a comment is enough, post the verdict as a pull-request comment: \`gh pr comment $pr${repo:+ -R $repo} --body-file <file>\`, the file's first line \`VERDICT: $verdict at <full 40-character head sha>\`. pr-gate reads issue comments as verdicts (dispatch://BET-9/ask/6b7de765)."
     elif [[ "${1:-} ${2:-}" == "issue create" || "${1:-} ${2:-}" == "issue comment" || "${1:-} ${2:-}" == "pr comment" || "${1:-} ${2:-}" == "pr create" ]]; then
-        instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; an owner with no App installation gets his own upstream token, so the post goes out as him (shims/AGENTS.md).${admin:+ $admin} Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
+        instead="if Sami instructed this post in a Dispatch ask he answered, run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN. The shim then checks that he answered it with its approving option and that the title and body are the draft he was shown, and logs the post; a write to an owner with no App installation runs through the broker's GITHUB_PUBLIC_REPO_PAT, so the post goes out as him (shims/AGENTS.md).${admin:+ $admin} Otherwise stop, and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     elif [[ -n "$admin" ]]; then
         instead="$admin For any other owner, or a call that is not such an admin action, stop and tell your lead which call GitHub refused and its error above. Do not look for another credential, token or gh binary."
     else
@@ -349,13 +355,12 @@ GH_SHIM_RATE_LIMITED='API rate limit (already )?exceeded|secondary rate limit|HT
 # call. On 2026-11-02 the shared public-repo token's REST budget ran out and the
 # refusal text told agents the App could not make the call and to stop.
 gh_shim_rate_limited() {
-    local rc="$1" err="$2" who token="" owner="" repo="" prev="" a want=core line name left limit reset when
+    local rc="$1" err="$2" who owner="" repo="" prev="" a want=core line name left limit reset when
     local -a limits=()
     shift 2
-    token="$(sed -nE 's/.*using the personal token ([^ ]+) .*/\1/p' "$err" | head -n 1)"
     owner="$(sed -nE 's/.*\(owner=([^)]+)\).*/\1/p; s/.*no App installation for owner ([^ ;]+).*/\1/p' "$err" | head -n 1)"
-    if [[ -n "$token" ]]; then
-        who="the shared public-repo token $token${owner:+ (owner $owner has no App installation)}. It is a personal token, so every session on every machine that reads such an owner, and every other token of the same GitHub user, spends this one budget"
+    if [[ -n "${GH_TOKEN:-}" && "$GH_TOKEN" == "${GITHUB_PUBLIC_REPO_PAT:-}" ]]; then
+        who="the broker's GITHUB_PUBLIC_REPO_PAT${owner:+ (owner $owner has no App installation)}. It is Sami's personal token, so every session that writes to such an owner, and every other token of his GitHub user, spends this one budget"
     else
         who="the GitHub App installation${owner:+ for owner $owner}, which every agent session shares"
     fi
@@ -406,6 +411,40 @@ gh_shim_rate_limited() {
     } >&2
     exit "$rc"
 }
+# gh_shim_public_route PROFILE ARGV…: a write to an owner the GitHub App is not installed on
+# (gh-app-token PROFILE answers `--source uncovered`) runs under the broker's GITHUB_PUBLIC_REPO_PAT,
+# behind the airlock, for every caller, so no process here ever holds a personal token: gh-app-token
+# hands out none (dispatch://INFRA-2031), and Sami, dispatch://INFRA-1475/ask/c23d0d6c, 2026-11-09:
+# "Stop manufacturing a permission boundary here." The call re-execs as `secret-run --register …
+# GITHUB_PUBLIC_REPO_PAT -- sh -c 'GH_TOKEN="$GITHUB_PUBLIC_REPO_PAT" exec <this shim> …'`: the inner
+# call carries GH_TOKEN, the airlock placeholder, so it is not routed again and knives mints nothing
+# for it, and it still runs the leak check and the GitHub-refusal wrapper; the broker's proxy swaps
+# the placeholder for the token on the wire. The approval is the broker's: one card a session (--ttl
+# 12h, and the broker reuses the live grant), or with GH_SHIM_APPROVAL naming the answered ask that
+# gh-approved-post has checked, --ttl 15m, which the judge can decide; the inner call keeps
+# GH_SHIM_APPROVAL, so it logs the post's result, and does not check the text again.
+# AGENT_SECRETS_WAIT replaces the 30-minute wait. A read, a write to an owner the App covers and a
+# call that carries its own GH_TOKEN or GITHUB_TOKEN are not routed.
+gh_shim_public_route() {
+    local profile="$1" src verb reason ttl=12h
+    shift
+    [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]] && gh_shim_is_write "$@" || return 0
+    gh_shim_target_owner "$@"
+    src="$(gh-app-token "$profile" --owner "$_owner" --source 2> /dev/null)" || src=""
+    [[ "$src" == uncovered ]] || return 0
+    verb="${1:-} ${2:-}"
+    [[ "${1:-}" != api ]] || verb="api write"
+    reason="gh $verb on $_target_slug as sjawhar"
+    # The ask goes first: secret-run-reason keeps the first 100 runes of a reason, and the judge
+    # needs the whole reference.
+    if [[ -n "${GH_SHIM_APPROVAL:-}" ]]; then
+        reason="approved at $GH_SHIM_APPROVAL: $reason"
+        ttl=15m
+    fi
+    exec "${DOTFILES_DIR:-$HOME/.dotfiles}/scripts/secret-run" --register --reason "$reason" --ttl "$ttl" \
+        --wait "${AGENT_SECRETS_WAIT:-30m}" GITHUB_PUBLIC_REPO_PAT -- \
+        sh -c 'GH_TOKEN="$GITHUB_PUBLIC_REPO_PAT" exec "$0" "$@"' "$0" "$@"
+}
 if agent_context; then
     _dotfiles="${DOTFILES_DIR:-$HOME/.dotfiles}"
     _routed=0
@@ -431,7 +470,7 @@ if agent_context; then
     # for what an agent call uses instead: it names the routing and, inside a
     # GitHub repository, makes one routed read of it and exits on that.
     if [[ "${1:-}" == auth && "${2:-}" == status ]]; then
-        echo "gh shim: agent session. gh calls are routed to the GitHub App for the target repo's owner (an owner without one gets the upstream token), minted per call; the user's own login is not used, so it is not reported."
+        echo "gh shim: agent session. gh calls are routed to the GitHub App for the target repo's owner, minted per call (an owner without one is read with the read-owner's read-only App token, and written through the broker's GITHUB_PUBLIC_REPO_PAT); the user's own login is not used, so it is not reported."
         gh_shim_origin_slug
         if [[ -z "$_slug" ]]; then
             echo "No GitHub repository in this directory to check. To check one, run a read against it, for example: gh api repos/<owner>/<repo> --jq .full_name"
@@ -451,21 +490,17 @@ if agent_context; then
     # git-credential is what ~/.gitconfig names as the user's helper for
     # github.com, so a git process whose environment lost the routing include
     # (omp's eval kernel) lands here: answer with the App helper on the same
-    # request. It mints for an owner the App covers, answers the profile's
-    # fallback secret (the user's upstream token) for one it does not, and
-    # stops git with its own quit=1 when it can do neither.
+    # request. It mints for an owner the App covers, answers a read-only token of the
+    # profile's read-owner for one it does not (a push to one quits: shims/git sends it
+    # through the broker), and stops git with its own quit=1 when it can do neither.
     if [[ "${1:-}" == auth && "${2:-}" != status ]]; then
         if [[ "${2:-}" == git-credential ]]; then
             # --for-write: this is git asking to authenticate, and git asks for a credential on
-            # a push, not on a fetch or clone of a public repository. gh-app-token then refuses
-            # the personal fallback rather than letting this push act as the account owner.
-            # Nothing else passes the flag: knives mints for every routed gh call through the
-            # same `get` interface, so flagging that would refuse ordinary reads.
-            # THIS CLOSES ONE ROUTE, NOT THE CLASS. An agent whose environment carries the
-            # gh-app-routes include reaches gh-app-token directly (`helper = !gh-app-token
-            # agent`) and never passes here, so its push is not refused; and a raw mint hands
-            # over a usable token in any case. The durable fix is a fallback secret that cannot
-            # write, which dispatch://INFRA-2031 asks for.
+            # a push, not on a fetch or clone of a public repository. For an owner the App does
+            # not cover, gh-app-token then quits rather than hand git a read-only token: such a
+            # push goes through the broker's GITHUB_PUBLIC_REPO_PAT, which shims/git routes it to
+            # (dispatch://INFRA-2031). Nothing else passes the flag: knives mints for every routed
+            # gh call through the same `get` interface, so flagging that would refuse reads.
             [[ "${3:-}" == get ]] && exec gh-app-token agent get --for-write
             exit 0
         fi
@@ -477,77 +512,35 @@ if agent_context; then
     # names the Dispatch ask he answered, and scripts/gh-approved-post checks the
     # answer and that the title and body are the draft he was shown, and logs the
     # post beside the call log, before the call goes on its usual route (for an
-    # owner without the App, his own upstream token). A citation that does not
+    # owner without the App, the broker route below). A citation that does not
     # hold refuses the call; a call without one is unchanged. On 2026-11-02 he
     # answered "Post it" on dispatch://OSSV-232/ask/a7d1ac41-45c4-4504-a985-7c92998d2158
     # and the issue still did not go out.
-    # The check runs on the outermost pass only, and the same call then runs this shim again: the
-    # stderr-keeping re-run below (GH_SHIM_INNER), the read cache's re-entry (GH_READ_CACHE_BYPASS),
-    # and knives' own queries (KNIVES_GH_SHIM_DEPTH). A passed check reaches those passes as
-    # GH_SHIM_APPROVED_CALL, the digest of the citation and the exact argv it passed for, and a
-    # later pass counts as approved only when its own citation and argv give the same digest, so a
-    # marker inherited by any other gh call does not count for it. Until 2026-11-16 nothing carried
-    # it: the re-run saw no approval, and the fallback-write gate below refused every approved post
-    # to an owner without the App (approved-posts.jsonl held an `allowed` verdict, then rc 1, and no
-    # rc 0 since that gate landed; dispatch://INFRA-3904). Every later pass counts, not only one
-    # marked GH_SHIM_INNER: when the outermost pass cannot make its stderr file it skips the re-run,
-    # and the cache's re-entry is then the pass that runs the gate. On an outermost call the
-    # caller's own value is dropped unread. Like every check in this shim, this guards against
-    # accidents, not against a caller that forges the shim's own markers: one that sets
-    # GH_SHIM_INNER and computes the digest gets past the gate, as one that sets GH_TOKEN does.
+    # The check runs on the outermost pass only. The later passes of the same call (the
+    # stderr-keeping re-run below, the read cache's re-entry, knives' own queries) gate nothing, so
+    # they need no record that it passed. Until dispatch://INFRA-2031 a fallback-write gate did, and
+    # GH_SHIM_APPROVED_CALL carried the pass to it (dispatch://INFRA-3904); that gate is gone. The
+    # broker route's re-run (gh_shim_public_route) is an outermost pass again, with GH_TOKEN the
+    # placeholder of GITHUB_PUBLIC_REPO_PAT: it logs the post's result, and checks nothing twice.
     _approved_log=""
-    _approved=0
-    if [[ -z "${GH_SHIM_INNER:-}${GH_READ_CACHE_BYPASS:-}${KNIVES_GH_SHIM_DEPTH:-}" ]]; then
-        unset GH_SHIM_APPROVED_CALL
-        if [[ -n "${GH_SHIM_APPROVAL:-}" ]]; then
-            _gh_cache_root
-            _approved_root="$_gh_root"
-            mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
-            _approved_log="$_approved_root/log/approved-posts.jsonl"
+    if [[ -n "${GH_SHIM_APPROVAL:-}" && -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" && -z "${KNIVES_GH_SHIM_DEPTH:-}" ]]; then
+        _gh_cache_root
+        _approved_root="$_gh_root"
+        mkdir -p "$_approved_root/log" && chmod 700 "$_approved_root" "$_approved_root/log" || exit 1
+        _approved_log="$_approved_root/log/approved-posts.jsonl"
+        # The broker route's own call (gh_shim_public_route) was checked before it was routed.
+        if [[ -z "${GITHUB_PUBLIC_REPO_PAT:-}" || "${GH_TOKEN:-}" != "$GITHUB_PUBLIC_REPO_PAT" ]]; then
             "$_dotfiles/scripts/gh-approved-post" --log "$_approved_log" -- "$@" || exit 1
-            _approved=1
-            gh_shim_call_digest "$@"
-            [[ -n "$_digest" ]] && export GH_SHIM_APPROVED_CALL="$_digest"
         fi
-    elif [[ -n "${GH_SHIM_APPROVED_CALL:-}" ]]; then
-        gh_shim_call_digest "$@"
-        [[ "$_digest" == "$GH_SHIM_APPROVED_CALL" ]] && _approved=1
     fi
-    # A write that would go out on the user's own personal access token, with nobody having
-    # approved it. gh-app-token answers an owner the App does not cover with the profile's fallback
-    # secret, the user's PAT, so in an agent session a `gh issue comment` on such an owner posts
-    # under the user's name and looks to the outside like the user wrote it. On 2026-11-08T17:50:32Z
-    # an agent posted https://github.com/FreeMixer/plugin-hostd/issues/371#issuecomment-6724942068
-    # that way (dispatch://INFRA-2006): FreeMixer has no installation, and the approval check above
-    # runs only when a call opts in with GH_SHIM_APPROVAL.
-    # So: in an agent session, a write whose owner resolves to the fallback is refused unless that
-    # approval already passed for this call, which $_approved records. Reads are untouched, and so
-    # is every write to an owner the App covers; a push to the user's own fork still works, because
-    # this gates gh, not git.
-    # A call that carries GH_TOKEN itself is out of scope: the defect this gate was written for is a
-    # write going out on the SILENT personal fallback (gh's own hosts.yml and keyring), which nobody
-    # chose and nothing records. A caller that sets GH_TOKEN has chosen an identity deliberately, and
-    # the only sanctioned way to get one is the credential broker, whose approval card is already the
-    # audit trail this gate exists to create — the refusal below names that route itself. The shim's
-    # own GH_TOKEN-aware handling sits 60 lines further down and was unreachable while this refused
-    # first. Sami, dispatch://INFRA-1475/ask/c23d0d6c, 2026-11-09 21:39-21:40Z: "Activity on repos we
-    # don't own are supposed to be as me, there is no other option" and "I don't author anything. All
-    # activity is by agents. Stop manufacturing a permission boundary here."
-    # This condition can only refuse LESS: a call with no GH_TOKEN is unaffected, and a call that
-    # passes today still passes.
-    if agent_context && gh_shim_is_write "$@" && ((!_approved)) && [[ -z "${GH_TOKEN:-}" ]]; then
-        gh_shim_target_owner "$@"
-        _gate_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" || _gate_profile=""
-        [[ -n "$_gate_profile" ]] || _gate_profile=agent
-        _gate_source="$(gh-app-token "$_gate_profile" --owner "$_owner" --source 2> /dev/null)" || _gate_source=""
-        if [[ "$_gate_source" == fallback-personal-token ]]; then
-            gh_shim_refuse \
-                "this writes to $_owner, which the GitHub App is not installed on, so it would go out on the user's own personal access token and read as the user writing it." \
-                "a write as the user needs his approval: ask on the relevant Dispatch issue, and run the same call again with GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> naming the ask he answered. Reads of $_owner are unaffected. Do not look for another token." \
-                "$@"
-        fi
-        unset _gate_profile _gate_source
-    fi
+    # A write to an owner the GitHub App is not installed on goes through the broker
+    # (gh_shim_public_route): with GH_SHIM_APPROVAL set, gh-approved-post above has already checked
+    # the text. On 2026-11-08T17:50:32Z such a write went out on the user's own token, which nobody
+    # chose and nothing recorded: an agent posted
+    # https://github.com/FreeMixer/plugin-hostd/issues/371#issuecomment-6724942068 (dispatch://INFRA-2006).
+    _gate_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" || _gate_profile=""
+    gh_shim_public_route "${_gate_profile:-agent}" "$@"
+    unset _gate_profile
     # The outermost call runs the rest of this shim as a child and keeps a copy
     # of its stderr: when GitHub refuses the call, gh's own error ("Can not
     # approve your own pull request", "Resource not accessible by integration")
@@ -599,6 +592,7 @@ if agent_context; then
         case "$GH_TOKEN" in
             ghs_*) _kind="an App installation token" ;;
             ghp_*|gho_*|github_pat_*) _kind="a PERSONAL token: this call acts as its user, not as an App" ;;
+            agent-secrets-placeholder-*) _kind="a secrets-broker placeholder: the broker's proxy puts the token it stands for on the wire" ;;
             *) _kind="a token of unknown kind" ;;
         esac
         echo "gh shim: GH_TOKEN inherited from the environment (${GH_TOKEN:0:4}…, $_kind); not routing" >&2
@@ -704,13 +698,15 @@ fi
 # profile for its target owner, minted through the broker's machine login, as the git helper above
 # does. The owner comes from -R/--repo, GH_REPO, a `repos/OWNER/…` path of `gh api`, or this
 # directory's origin remote, else theorem-labs. Only an App installation token (ghs_) is used: for an
-# owner the App does not cover, gh-app-token answers the profile's personal fallback token, which is
-# refused here, and the call goes on with no token. `gh auth` verbs are left to the real gh.
+# owner the App does not cover, gh-app-token answers a read-only token of the profile's read-owner,
+# and a write to such an owner goes through the broker first (gh_shim_public_route), as an agent's
+# does. `gh auth` verbs are left to the real gh.
 # GH_APP_TOKEN_MIN_LIFETIME: gh reads its token once per call; a cached token with under 30 minutes
 # left is replaced by a fresh one (`gh run watch` failed 401 on a 12-minute token, 2026-10-22).
 if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && "${1:-}" != auth ]] && ! agent_context &&
     _host_profile="$(git config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" &&
     [[ -n "$_host_profile" ]]; then
+    gh_shim_public_route "$_host_profile" "$@"
     gh_shim_target_owner "$@"
     if _host_token="$(GH_APP_TOKEN_MIN_LIFETIME="${GH_APP_TOKEN_MIN_LIFETIME:-1800}" gh-app-token "$_host_profile" --owner "$_owner" 2> /dev/null)" &&
         [[ "$_host_token" == ghs_* ]]; then

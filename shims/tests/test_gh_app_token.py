@@ -24,7 +24,7 @@ SPEC.loader.exec_module(gh_app_token)
 GIT_CONFIG = {
     "gh-app.agent.app-id": "3202636",
     "gh-app.agent.broker-secret": "GITHUB_APP_SJAWHAR",
-    "gh-app.agent.fallback-secret": "GH_PUBLIC_REPO_PAT",
+    "gh-app.agent.read-owner": "sjawhar",
 }
 
 
@@ -137,24 +137,9 @@ class GhAppTokenTests(unittest.TestCase):
     def set_broker_response(self, response):
         os.environ["SECRET_RUN_STUB_RESPONSE"] = response
 
-    # Every agent marker shims/gh and gh-app-token test for. A case that means "a person at
-    # their own shell" must clear all of them, because the test process is itself an agent's.
-    AGENT_MARKERS = (
-        "OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION",
-        "CLAUDECODE", "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE",
-        "LEGION_CONTROLLER", "LEGION_DAEMON_URL", "SSH_CONNECTION", "GIT_CONFIG_COUNT",
-    )
-
-    def as_person(self):
-        """Make this call look like a person at their own terminal.
-
-        An empty value is falsy to the same test the shim makes, and AGENT_SHIM_PERSON=1 is
-        the documented escape for a deliberate non-interactive command of their own.
-        """
-        return patch.dict(
-            os.environ,
-            {name: "" for name in self.AGENT_MARKERS} | {"AGENT_SHIM_PERSON": "1"},
-        )
+    # gh-app-token no longer tells a person from an agent: an owner the App does not cover is
+    # read through the read-owner token for every caller, and a write routes through the broker
+    # (dispatch://INFRA-2031). as_agent stays only to mark a covered-owner write as a session's.
 
     def as_agent(self):
         return patch.dict(os.environ, {"OMP_SESSION_ID": "01a18385-f8c8-74a9-b6ff-694fb5fe87a7"})
@@ -250,86 +235,85 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual((rc, stdout, stderr), (0, "broker-token-sjawhar\n", ""))
         self.assertEqual(self.secret_run_calls(), self.broker_command("sjawhar"))
 
-    def test_owner_never_covered_uses_only_the_fallback_pat_for_a_person(self):
-        # This catches treating a missing installation as an App failure or
-        # consulting secretsd for the broker-only App key.
-        # As a person: the fallback is what their own push to an uncovered owner runs on, and
-        # dispatch://INFRA-2031 refuses it only for an agent session.
-        with self.as_person():
-            rc, stdout, stderr = self.run_main(
-                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
-            )
+    READ_OWNER_NARROWING = ("--github-owner", "sjawhar", "--github-read-only")
+
+    def test_uncovered_owner_read_uses_the_read_owner_read_only_token(self):
+        # dispatch://INFRA-2031: an owner the App does not cover is read through a read-only
+        # token of the profile's read-owner (sjawhar), which reads any public repository. No
+        # personal token, and secretsd is never asked for one.
+        rc, stdout, stderr = self.run_main(
+            ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
+        )
 
         self.assertEqual(rc, 0)
         self.assertIn("username=x-access-token", stdout)
-        self.assertIn("password=ghp_stub_upstream_token", stdout)
+        self.assertIn("password=broker-token-sjawhar", stdout)
         self.assertNotIn("quit=1", stdout)
-        # An uncovered owner gets the personal token, but never silently: the caller must
-        # see that the identity about to act is the human's and not the App's.
-        self.assertIn("METR", stderr)
-        self.assertIn("GH_PUBLIC_REPO_PAT", stderr)
-        self.assertIn("personal", stderr)
-        self.assertEqual(self.secrets_calls(), ["get GH_PUBLIC_REPO_PAT --value"])
-        self.assertEqual(self.secret_run_calls(), self.broker_command("metr"))
+        self.assertNotIn("personal", stderr)
+        self.assertEqual(self.secrets_calls(), [])
+        # Two broker calls: the discovery request for the uncovered owner, then a read-only
+        # token of the read-owner. Neither reads secretsd.
         self.assertEqual(
-            gh_app_token.get_cached_token("agent", "trajectory-labs-pbc"),
-            "broker-token-trajectory",
+            self.secret_run_calls(),
+            self.broker_command("metr") + self.broker_command("sjawhar", self.READ_OWNER_NARROWING),
         )
-        self.assertEqual(
-            gh_app_token.covered_owners("3202636"),
-            {"sjawhar": 111, "trajectory-labs-pbc": 222},
-        )
-        # The fallback is static: no token-cache entry is written for it.
+        # The fallback personal token is gone: no cache entry for the uncovered owner itself.
         self.assertFalse(gh_app_token.token_cache_file("agent", "metr").exists())
 
-    def test_an_agents_push_to_an_uncovered_owner_is_refused(self):
-        """The hole dispatch://INFRA-2006 left: `gh` writes were gated, `git push` was not.
-
-        git reaches the same personal token through the credential helper, which execs this
-        program before that gate, so an agent could push to a third-party repository under the
-        account owner's name. A fetch or clone of a public repository asks for no credential,
-        so refusing here does not touch reads.
-        """
-        with self.as_agent():
-            rc, stdout, stderr = self.run_main(
-                ["agent", "get", "--for-write"],
-                stdin="host=github.com\npath=METR/hawk.git\n\n",
-            )
-
-        self.assertEqual(rc, 1)
-        self.assertIn("quit=1", stdout)
-        self.assertNotIn("password=", stdout)
-        self.assertIn("METR", stderr)
-        self.assertIn("personal token", stderr)
-        self.assertIn("have a person do it", stderr)
-
-    def test_an_agents_routed_read_through_the_credential_interface_still_works(self):
-        """knives mints for every routed `gh` call, read and write alike, through this same
-        `get` interface (knives 3.2.3, src/commands/gh.rs). An earlier version of this gate
-        refused on credential mode and would have failed ordinary `gh api` reads of uncovered
-        owners outright. The write signal is --for-write, which only shims/gh's
-        `gh auth git-credential` branch passes.
-        """
-        with self.as_agent():
-            rc, stdout, _ = self.run_main(
-                ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
-            )
+    def test_uncovered_owner_never_prints_a_personal_token(self):
+        # The output is the read-owner's App token, never a PAT, and secretsd saw no `get`.
+        rc, stdout, _ = self.run_main(["agent", "--owner", "METR"])
 
         self.assertEqual(rc, 0)
-        self.assertIn("password=ghp_stub_upstream_token", stdout)
-        self.assertNotIn("quit=1", stdout)
+        self.assertFalse(stdout.startswith("ghp_"))
+        self.assertFalse(stdout.startswith("github_pat_"))
+        self.assertEqual(stdout, "broker-token-sjawhar\n")
+        self.assertEqual(self.secrets_calls(), [])
+
+    def test_uncovered_owner_credential_request_quits(self):
+        # A `git push` to an uncovered owner authenticates with --for-write. The token goes
+        # nowhere near this process: it quits git's helper chain, and the git shim routes the
+        # push through the broker's GITHUB_PUBLIC_REPO_PAT.
+        rc, stdout, stderr = self.run_main(
+            ["agent", "get", "--for-write"],
+            stdin="host=github.com\npath=METR/hawk.git\n\n",
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "quit=1\n")
+        self.assertNotIn("password=", stdout)
+        self.assertIn("METR", stderr)
+        self.assertIn("GITHUB_PUBLIC_REPO_PAT", stderr)
+        self.assertEqual(self.secrets_calls(), [])
 
     def test_an_agents_read_of_an_uncovered_owner_still_works(self):
         """Reads are untouched: refusing them would drop public-upstream reads from 5,000 an
-        hour to the unauthenticated 60, shared across every box on the machine."""
-        with self.as_agent():
-            rc, stdout, _ = self.run_main(["agent", "--owner", "METR"])
+        hour to the unauthenticated 60, shared across every box on the machine. The read now
+        runs on the read-owner's read-only App token, not a personal token."""
+        rc, stdout, _ = self.run_main(["agent", "--owner", "METR"])
 
         self.assertEqual(rc, 0)
-        self.assertIn("ghp_stub_upstream_token", stdout)
+        self.assertIn("broker-token-sjawhar", stdout)
+        self.assertEqual(
+            self.secret_run_calls(),
+            self.broker_command("metr") + self.broker_command("sjawhar", self.READ_OWNER_NARROWING),
+        )
+
+    def test_uncovered_owner_source_reports_uncovered_without_minting_the_read_owner(self):
+        # --source discovers coverage with one broker call for the owner, then reports; it never
+        # mints the read-owner token, and never reads secretsd.
+        rc, stdout, _ = self.run_main(["agent", "--owner", "METR", "--source"])
+        self.assertEqual((rc, stdout), (0, "uncovered\n"))
+        self.assertEqual(self.secrets_calls(), [])
+        self.assertEqual(self.secret_run_calls(), self.broker_command("metr"))
+        self.assertNotIn("--github-owner", self.secret_run_calls())
+
+    def test_a_covered_owner_source_reports_app(self):
+        rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar", "--source"])
+        self.assertEqual((rc, stdout), (0, "app\n"))
 
     def test_an_agents_write_to_a_covered_owner_is_untouched(self):
-        """Only the personal fallback is refused; an App installation token is not the person."""
+        """Only an uncovered owner's push credential quits; an App installation token is not the person."""
         with self.as_agent():
             rc, stdout, _ = self.run_main(["agent", "--owner", "sjawhar", "--for-write"])
 
@@ -523,8 +507,8 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertIn(cause, stderr)
         self.assertEqual(self.secrets_calls(), [])
 
-    def test_uninstalled_owner_without_fallback_secret_quits(self):
-        del self.git_config["gh-app.agent.fallback-secret"]
+    def test_uncovered_owner_without_read_owner_quits(self):
+        del self.git_config["gh-app.agent.read-owner"]
 
         rc, stdout, stderr = self.run_main(
             ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
@@ -533,27 +517,17 @@ class GhAppTokenTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(stdout, "quit=1\n")
         self.assertIn(
-            "no App installation for owner METR and no fallback-secret on profile agent", stderr
+            "no App installation for owner METR and no read-owner on profile agent", stderr
         )
         self.assertEqual(self.secrets_calls(), [])
 
-    def test_uninstalled_owner_with_unreadable_fallback_secret_quits(self):
-        self.git_config["gh-app.agent.fallback-secret"] = "GH_MISSING_TOKEN"
-
-        rc, stdout, stderr = self.run_main(
-            ["agent", "get"], stdin="host=github.com\npath=METR/hawk.git\n\n"
-        )
-
-        self.assertEqual(rc, 1)
-        self.assertEqual(stdout, "quit=1\n")
-        self.assertIn("failed to fetch secret GH_MISSING_TOKEN", stderr)
-        self.assertIn("secret 'GH_MISSING_TOKEN' not found", stderr)
-
-    def test_uninstalled_owner_prints_fallback_secret_in_cli_mode(self):
+    def test_uncovered_owner_read_token_in_cli_mode(self):
         rc, stdout, _ = self.run_main(["agent", "--owner", "METR"])
-        self.assertEqual((rc, stdout), (0, "ghp_stub_upstream_token\n"))
+        self.assertEqual((rc, stdout), (0, "broker-token-sjawhar\n"))
 
-        del self.git_config["gh-app.agent.fallback-secret"]
+        del self.git_config["gh-app.agent.read-owner"]
+        # A read-owner mint caches under its scope, so clear it before the no-read-owner case.
+        gh_app_token.token_cache_file("agent", "sjawhar", gh_app_token.scope_key(gh_app_token.scope_of(None, True))).unlink()
         rc, stdout, stderr = self.run_main(["agent", "--owner", "METR"])
         self.assertEqual((rc, stdout), (1, ""))
         self.assertIn("no App installation for owner METR", stderr)

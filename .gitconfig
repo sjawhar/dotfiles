@@ -65,7 +65,7 @@
 [gh-app "agent"]
 	app-id = 4943528
 	broker-secret = GITHUB_APP_SJAWHAR
-	fallback-secret = GH_PUBLIC_REPO_PAT
+	read-owner = sjawhar
 
 # Commit signing, mirroring the jj setup in .jjconfig.toml: same key path, same
 # allowed-signers file, so a commit verifies the same whether jj or plain git

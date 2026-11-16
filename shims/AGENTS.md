@@ -8,8 +8,10 @@ behavior before handing the call to the real one. One file is data: `person-name
 
 - **`gh`** sources the auth token. In an agent session (omp, agentbox, or anything launched
   with the gh-app routing include) it routes every call to the repo owner's GitHub App; an
-  owner with no App installation (METR, can1357, every upstream we fork) gets the upstream
-  token from the secrets store (`gh-app.agent.fallback-secret`, `GH_PUBLIC_REPO_PAT`). No
+  owner with no App installation (METR, can1357, every upstream we fork) is read with a
+  read-only token of `gh-app.agent.read-owner` (`sjawhar`), whose App installation reads any
+  public repository; a write to such an owner runs through the broker's `GITHUB_PUBLIC_REPO_PAT`
+  behind the airlock, so no agent process ever holds a personal token (dispatch://INFRA-2031). No
   agent process reaches the user's own login, through this shim or past it: gh runs with
   `GH_CONFIG_DIR` at `scripts/gh-agent-config`'s directory, whose placeholder login stands
   where the user's would be, so gh never reads his token from `hosts.yml` or the keyring.
@@ -42,17 +44,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   with the head `sjawhar:<branch>`, a branch of his own fork (push it first: owner sjawhar routes
   to the App). A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
   (`has_head_flag`, `src/commands/gh.rs`), and in a jj checkout it adds `--head <bookmark>`,
-  which gh takes over `-H`. In an agent session a write
-  to an owner without the App, which would go out on his upstream token, is refused without such a
-  citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation
-  is checked on the outermost pass only; the later passes of the same call (the stderr-keeping
-  re-run, the read cache's re-entry, knives' own queries) get its pass as `GH_SHIM_APPROVED_CALL`,
-  the SHA-256 of the citation and the exact argv, which counts only where both match and which an
-  outermost call drops unread. Until 2026-11-16 nothing carried it, so that gate refused every
-  approved post to such an owner after its `allowed` verdict (dispatch://INFRA-3904,
-  `shims/tests/test_gh_approved_post.py`). As with the agent markers below, this is a guardrail
-  against an accident, not a sandbox: a caller that sets `GH_SHIM_INNER` and computes the digest
-  gets past the gate, as one that sets `GH_TOKEN` does. Every
+  which gh takes over `-H`. The citation is checked on the outermost pass only; the later passes
+  of the same call (the stderr-keeping re-run, the read cache's re-entry, knives' own queries)
+  gate nothing. Until dispatch://INFRA-2031 a write to an owner without the App was refused
+  without a citation, and `GH_SHIM_APPROVED_CALL` carried the citation's pass to the later passes
+  (dispatch://INFRA-2006, dispatch://INFRA-3904); that gate and its marker are gone, since such a
+  write now runs under the broker (below). Every
   call GitHub refuses for the App except a review also gets the admin route: a GitHub admin
   action that work Sami already asked for needs (an App permission, an admin merge, a
   repository or branch setting) is done by the agent itself with Sami's admin token from the
@@ -60,6 +57,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   on dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a). An approval of a pull
   request is not an admin action: no approval uses a person's token, and a code owner's
   approval stays that person's (dispatch://INFRA-1481, R3).
+  A write (not a read) to an owner the App does not cover, from any caller that gives no
+  `GH_TOKEN` or `GITHUB_TOKEN` (an agent session, and a host shell on a `gh-app.host-profile`
+  machine), re-execs as `secret-run --register --ttl 12h … GITHUB_PUBLIC_REPO_PAT -- sh -c
+  'GH_TOKEN="$GITHUB_PUBLIC_REPO_PAT" exec gh …'` (`gh_shim_public_route`), so it goes out behind
+  the airlock on the broker's token and the process holds only a placeholder; one card a session
+  approves it. `GH_SHIM_APPROVAL` adds the ask to the reason and lowers the grant's lifetime to a
+  judge's 15 minutes, and `gh-approved-post` still checks the text first (dispatch://INFRA-2031,
+  `shims/tests/test_gh_public_write_route.py`).
   The block prints the refused call ready to run:
   `secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>`
   for theorem-labs, `GITHUB_PERSONAL_ADMIN_PAT` for sjawhar's own repositories; the `sh -c`
@@ -70,7 +75,7 @@ behavior before handing the call to the real one. One file is data: `person-name
   ran), where `agent-secrets` answers `NOT_A_SESSION` and plain `secret-run` reads secretsd and
   gets "not found". It registers that one command as a broker session of its own, with no
   restart, and changes nothing where the session has an identity. Anything else,
-  and any refusal of an inherited `GH_TOKEN` or an upstream token, stops and goes to the lead
+  and any refusal of an inherited `GH_TOKEN`, stops and goes to the lead
   (`shims/tests/test_gh_user_login.py`). A call GitHub stops
   for a spent budget (`API rate limit exceeded`, a secondary limit, HTTP 429) ends instead with
   a `gh shim: RATE LIMITED` block: the identity, the budget the call spends (core, graphql,
@@ -89,8 +94,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   `GITHUB_TOKEN` gets an installation token of the same profile for its target owner
   (`gh-app-token <profile> --owner OWNER`, through the broker's machine login): the owner from
   `-R`/`--repo`, `GH_REPO`, a `repos/OWNER/…` path of `gh api`, or the directory's origin remote,
-  else theorem-labs. Only a `ghs_` App token is used; for an owner the App does not cover the call
-  runs with no token, never the profile's personal fallback. Before this a host shell's gh had no
+  else theorem-labs. Only a `ghs_` App token is used; an owner the App does not cover is served a
+  read-only token of the read-owner (also `ghs_`), never a personal token, and a write to it takes
+  the broker route above. Before this a host shell's gh had no
   token there: `installers/agent-spend.sh` and the pre-push leak check failed (2026-11-04,
   `shims/tests/test_gh_host_token.py`).
   `gh pr create` for an
@@ -369,6 +375,19 @@ behavior before handing the call to the real one. One file is data: `person-name
   tree's branches to the target machine runs the git past this shim (`move_real_git`): it goes to
   a box over ssh, never to GitHub, so neither this check nor the leak-term gate sees it.
   `tests/test_person_branch_guard.py` is the contract.
+  A `git push` to an https github.com URL whose owner the GitHub App does not cover
+  (`gh-app-token <profile> --owner <owner> --source` answers `uncovered`), from any caller, the
+  push jj runs included, runs under the broker's `GITHUB_PUBLIC_REPO_PAT` behind the airlock, so no
+  personal token is ever in the process (`public_push_gate`, dispatch://INFRA-2031). The shim reads
+  the destination as the leak gate does and its URL as git pushes to it (`git remote get-url
+  --push`, else `git ls-remote --get-url`); an ssh URL authenticates with a key and is not routed.
+  It re-execs through itself under `secret-run --register --ttl 12h … GITHUB_PUBLIC_REPO_PAT --
+  git -c <one-shot credential helper> push …`, so the branch-name and leak gates run on the push
+  itself, and the helper answers git's credential request with the airlock placeholder, which the
+  broker's proxy swaps for the token on the wire (INFRA-1355 k7a). `GH_SHIM_APPROVAL` adds the ask
+  to the reason and lowers the grant to 15 minutes, as for gh; `AGENT_SECRETS_WAIT` replaces the
+  30-minute wait. `GIT_SHIM_PUBLIC_ROUTED` tells the inner push it is routed already, and that jj
+  ran it when jj did (`shims/tests/test_git_public_push_route.py`).
   Every `git push` through this shim, for every caller, gets the encrypted-term pre-push gate
   except a push from a checkout that is not guarded to one of its configured remotes. The
   destination is the one Git uses: the first non-option argument, else the last `--repo`, else

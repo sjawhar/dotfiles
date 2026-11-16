@@ -93,7 +93,7 @@ check_github_app() {
         return
     fi
     owners="$(jq -r 'keys | join(", ")' "$f" 2>/dev/null)"
-    row github_app live "App covers: ${owners:-unknown}; other owners -> GH_PUBLIC_REPO_PAT fallback" \
+    row github_app live "App covers: ${owners:-unknown}; other owners -> read-owner read-only token (read), broker GITHUB_PUBLIC_REPO_PAT (write)" \
         "n/a (installation tokens auto-mint, ~1h)" "cat $dir/covered-*.json" \
         "personal gh login is refused by design (shims/gh)"
 }

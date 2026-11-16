@@ -37,7 +37,7 @@ class HostToken(unittest.TestCase):
         stubs, real = self.tmp / "stubs", self.tmp / "real"
         stubs.mkdir()
         real.mkdir()
-        # Prints an App token, or the personal fallback token for owner `upstream`.
+        # Prints an App token, or a personal token for owner `upstream`, which the shim must not use.
         executable(stubs / "gh-app-token",
                    f'echo "gh-app-token $* life=$GH_APP_TOKEN_MIN_LIFETIME" >> "{self.calls}"\n'
                    'if [[ "$3" == upstream ]]; then echo ghp_PERSONAL; else echo "ghs_APP_$3"; fi')

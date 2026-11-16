@@ -1,0 +1,134 @@
+#!/bin/bash
+# scripts/gh-public-route-check [--owner OWNER] [--wait DURATION] [--probe a|b|c]…: prove, live, that
+# an owner the GitHub App does not cover is read without a personal token and written only through
+# the broker's GITHUB_PUBLIC_REPO_PAT behind the airlock (dispatch://INFRA-2031). It prints one PASS
+# or FAIL line a probe, then `VERDICT: pass` or `VERDICT: fail (N probe(s))`, and exits 0 only when
+# every probe it ran passed. It never prints a token: a probe reads a token's first four characters
+# or an HTTP status, nothing else.
+#
+#   (a) `gh-app-token agent --owner OWNER` prints a token that is not a personal one (ghp_,
+#       github_pat_).
+#   (b) `git push --dry-run` of a fresh commit to OWNER, under AGENT_SECRETS_WAIT=0s, exits 75 and
+#       names the broker request it waits on: nothing ran, so nothing was pushed.
+#   (c) Inside one grant of GITHUB_PUBLIC_REPO_PAT, `curl https://api.github.com/user` with the
+#       token's placeholder answers 200 through the broker's proxy and 401 with the proxy taken out
+#       of its environment (`env -u HTTPS_PROXY -u https_proxy`): the token reaches GitHub only
+#       through the airlock. It asks with the routes' own --ttl 12h, so it joins the request (b) left
+#       and the approver sees one card; --wait (default 30m) is how long it waits for the approval.
+#
+# Run it from an agent session and from Sami's own shell. Run against the shims before this change
+# (sjawhar/dotfiles e5c69e85, with PATH and GIT_CONFIG_GLOBAL at a copy of that tree), (a) and (b)
+# fail. A process with no broker identity runs the whole check as one registered session
+# (scripts/agent-secrets-session), so (b) and (c) share one request; a request still waiting when
+# the check ends is cancelled, since nothing waits for it any more. OWNER defaults to reearth, whose
+# public repositories alone are read.
+set -uo pipefail
+
+here="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+argv=("$@")
+owner=reearth
+wait=30m
+probes=()
+usage() { echo "usage: gh-public-route-check [--owner OWNER] [--wait DURATION] [--probe a|b|c]..." >&2; exit 2; }
+while (($#)); do
+    case "$1" in
+        --owner) (($# >= 2)) || usage; owner="$2"; shift 2 ;;
+        --wait) (($# >= 2)) || usage; wait="$2"; shift 2 ;;
+        --probe) (($# >= 2)) && [[ "$2" == [abc] ]] || usage; probes+=("$2"); shift 2 ;;
+        -h | --help) echo "usage: gh-public-route-check [--owner OWNER] [--wait DURATION] [--probe a|b|c]..."; exit 0 ;;
+        *) usage ;;
+    esac
+done
+((${#probes[@]})) || probes=(a b c)
+wants() {
+    local p
+    for p in "${probes[@]}"; do [[ "$p" == "$1" ]] && return 0; done
+    return 1
+}
+
+if { wants b || wants c; } && [[ -z "${GH_PUBLIC_ROUTE_CHECK_SESSION:-}" ]] &&
+    command -v agent-secrets > /dev/null 2>&1 && ! agent-secrets identity > /dev/null 2>&1; then
+    export GH_PUBLIC_ROUTE_CHECK_SESSION=1
+    exec "$here/agent-secrets-session" "$here/gh-public-route-check" "${argv[@]}"
+fi
+
+fails=0
+pass() { printf 'PASS %s: %s\n' "$1" "$2"; }
+fail() {
+    printf 'FAIL %s: %s\n' "$1" "$2"
+    fails=$((fails + 1))
+}
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+waiting_re='request ([^ ]+) to .* is still waiting for approval'
+# last_line FILE: the last non-empty line of FILE, cut to 200 characters, for a FAIL line.
+last_line() { awk 'NF { line = $0 } END { print substr(line, 1, 200) }' "$1"; }
+pending=""
+
+if wants a; then
+    a_token="$(gh-app-token agent --owner "$owner" 2> /dev/null)" || a_token=""
+    case "$a_token" in
+        ghp_* | github_pat_*) fail a "gh-app-token printed a personal token (${a_token:0:4}…) for $owner" ;;
+        "") fail a "gh-app-token printed nothing for $owner (a read-only token of the read-owner was expected)" ;;
+        *) pass a "gh-app-token's token for $owner is not a personal token (${a_token:0:4}…)" ;;
+    esac
+    unset a_token
+fi
+
+if wants b; then
+    repo="$tmp/b"
+    git init -q "$repo" > /dev/null 2>&1
+    tree="$(git -C "$repo" hash-object -t tree -w --stdin < /dev/null)"
+    commit="$(GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@example.invalid GIT_COMMITTER_NAME=probe \
+        GIT_COMMITTER_EMAIL=probe@example.invalid git -C "$repo" commit-tree -m probe "$tree")"
+    AGENT_SECRETS_WAIT=0s git -C "$repo" push --dry-run "https://github.com/$owner/agent-secrets-route-probe.git" \
+        "$commit:refs/heads/agent-secrets-route-probe" > /dev/null 2> "$tmp/b.err" < /dev/null
+    b_rc=$?
+    request=""
+    if [[ "$(cat "$tmp/b.err")" =~ $waiting_re ]]; then request="${BASH_REMATCH[1]}"; fi
+    if [[ "$b_rc" == 75 && -n "$request" ]]; then
+        pending="$request"
+        pass b "a push to $owner waits at the broker on request $request (exit 75): nothing ran, nothing was pushed"
+    else
+        fail b "a push to $owner exited $b_rc, not 75 naming a broker request, so it did not go through the broker: $(last_line "$tmp/b.err")"
+    fi
+fi
+
+if wants c; then
+    # The placeholder is expanded by the sh the grant starts, never by this shell.
+    probe='curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_PUBLIC_REPO_PAT" https://api.github.com/user'
+    reason="gh-public-route-check (c): does GITHUB_PUBLIC_REPO_PAT reach GitHub only through the airlock (dispatch://INFRA-2031)"
+    c_in="$("$here/secret-run" --register --reason "$reason" --ttl 12h --wait "$wait" GITHUB_PUBLIC_REPO_PAT -- \
+        sh -c "$probe" 2> "$tmp/c.err" < /dev/null)"
+    c_rc=$?
+    if ((c_rc == 0)); then
+        pending=""
+        c_out="$("$here/secret-run" --register --reason "$reason" --ttl 12h --wait "$wait" GITHUB_PUBLIC_REPO_PAT -- \
+            sh -c "env -u HTTPS_PROXY -u https_proxy $probe" 2> "$tmp/c.err" < /dev/null)" || c_out=""
+        if [[ "$c_in" == 200 && "$c_out" == 401 ]]; then
+            pass c "the token reaches GitHub only through the airlock (200 through the proxy, 401 without it)"
+        else
+            fail c "through the proxy ${c_in:-no answer} (200 wanted), without it ${c_out:-no answer} (401 wanted)"
+        fi
+    elif ((c_rc == 75)); then
+        if [[ "$(cat "$tmp/c.err")" =~ $waiting_re ]]; then pending="${BASH_REMATCH[1]}"; fi
+        fail c "request ${pending:-(unnamed)} still waited for approval after --wait $wait (exit 75), so nothing ran"
+    else
+        fail c "the grant did not run its command (exit $c_rc): $(last_line "$tmp/c.err")"
+    fi
+fi
+
+if [[ -n "$pending" ]]; then
+    if agent-secrets cancel "$pending" > /dev/null 2>&1; then
+        echo "NOTE: cancelled broker request $pending, which still waited when the check ended"
+    else
+        echo "NOTE: broker request $pending still waits; cancel it with: agent-secrets cancel $pending"
+    fi
+fi
+
+if ((fails == 0)); then
+    echo "VERDICT: pass"
+    exit 0
+fi
+echo "VERDICT: fail ($fails probe(s))"
+exit 1

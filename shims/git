@@ -8,7 +8,9 @@
 # remote a branch whose name starts with a person token (scripts/person-branch-guard), run
 # the shared public leak check under its existing conditions, run the encrypted leak-term
 # check on every `git push` but one from an unguarded checkout to a configured remote (its
-# hook scans a public or unknown GitHub URL),
+# hook scans a public or unknown GitHub URL), route every `git push` to an https github.com
+# owner the GitHub App does not cover through the broker's GITHUB_PUBLIC_REPO_PAT behind the
+# airlock (public_push_gate, dispatch://INFRA-2031),
 # and keep a pruning `git fetch` from deleting the destination of a short-named refspec.
 # From inside an agent box every other box's worktree path looks missing, so a
 # prune there deletes live sessions' registrations in the shared store
@@ -1068,16 +1070,71 @@ person_branch_gate() {
         *) printf 'error: git shim: the branch-name check failed (exit %s); the push goes on.\n' "$rc" >&2 ;;
     esac
 }
+# public_push_target: sets PUBLIC_PUSH_OWNER and PUBLIC_PUSH_REPO to the owner and repository of the
+# https github.com URL this push goes to, and returns 1 for any other destination. The destination is
+# the one push_effective_repository names. A configured remote is read as git pushes to it (`remote
+# get-url --push`: its first push URL, after pushInsteadOf and insteadOf), any other destination after
+# insteadOf (`ls-remote --get-url`). An ssh URL is not one: git authenticates it with a key, and never
+# asks a credential helper.
+public_push_target() {
+    local destination url
+    destination="$(push_effective_repository)"
+    if push_is_named_remote "$destination"; then
+        url="$("$_real" "${args[@]:0:i}" remote get-url --push -- "$destination" 2> /dev/null)" || return 1
+    else
+        url="$("$_real" "${args[@]:0:i}" ls-remote --get-url -- "$destination" 2> /dev/null)" || url="$destination"
+    fi
+    [[ "$url" =~ ^https://([^/@]*@)?github\.com/([^/]+)/([^/]+) ]] || return 1
+    PUBLIC_PUSH_OWNER="${BASH_REMATCH[2]}"
+    PUBLIC_PUSH_REPO="${BASH_REMATCH[3]%.git}"
+}
+# public_push_gate IS_JJ: a push to an owner the GitHub App does not cover (gh-app-token answers
+# `--source uncovered`) runs under the broker's GITHUB_PUBLIC_REPO_PAT, behind the airlock, for every
+# caller, so no personal token is ever in this process (dispatch://INFRA-2031). The push re-execs
+# through this shim, so the branch-name and leak gates run on it, under `secret-run --register …
+# GITHUB_PUBLIC_REPO_PAT -- git -c <one-shot credential helper> push …`, as shims/gh routes a write:
+# the helper answers git's credential request with the airlock placeholder, which the broker's proxy
+# swaps for the token on the wire (INFRA-1355 k7a). The approval is the broker's: one card a session
+# (--ttl 12h, and the broker reuses the live grant), or with GH_SHIM_APPROVAL naming the answered ask,
+# --ttl 15m, which the judge can decide. AGENT_SECRETS_WAIT replaces the 30-minute wait.
+# GIT_SHIM_PUBLIC_ROUTED tells the inner push it is routed already, and whether jj ran it.
+public_push_gate() {
+    local is_jj=$1 profile src reason ttl=12h
+    public_push_target || return 0
+    profile="$("$_real" "${args[@]:0:i}" config --file "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" --get gh-app.host-profile 2> /dev/null)" || profile=""
+    [[ -n "$profile" ]] || profile=agent
+    src="$(gh-app-token "$profile" --owner "$PUBLIC_PUSH_OWNER" --source 2> /dev/null)" || src=""
+    [[ "$src" == uncovered ]] || return 0
+    reason="git push to $PUBLIC_PUSH_OWNER/$PUBLIC_PUSH_REPO as sjawhar"
+    # The ask goes first: secret-run-reason keeps the first 100 runes of a reason, and the judge
+    # needs the whole reference.
+    if [[ -n "${GH_SHIM_APPROVAL:-}" ]]; then
+        reason="approved at $GH_SHIM_APPROVAL: $reason"
+        ttl=15m
+    fi
+    if ((is_jj)); then export GIT_SHIM_PUBLIC_ROUTED=jj; else export GIT_SHIM_PUBLIC_ROUTED=git; fi
+    exec "${BASH_SOURCE[0]%/*}/../scripts/secret-run" --register --reason "$reason" --ttl "$ttl" \
+        --wait "${AGENT_SECRETS_WAIT:-30m}" GITHUB_PUBLIC_REPO_PAT -- \
+        "${BASH_SOURCE[0]}" "${args[@]:0:i}" \
+        -c 'credential.https://github.com.helper=' \
+        -c 'credential.https://github.com.helper=!f(){ test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITHUB_PUBLIC_REPO_PAT"; }; f' \
+        push "${args[@]:i+1}"
+}
 if [[ "${args[i]}" == push ]]; then
     unset GIT_SHIM_PUBLIC_CHECK GIT_SHIM_OWN_HOOKS GIT_SHIM_JJ_PUSH
+    # The push public_push_gate re-execs under the broker: it does not route again, and it is
+    # jj's when the push it re-runs was. Unset here, so a push this one starts routes on its own.
+    public_routed="${GIT_SHIM_PUBLIC_ROUTED:-}"
+    unset GIT_SHIM_PUBLIC_ROUTED
     is_jj=0
-    from_jj && is_jj=1
+    if from_jj || [[ "$public_routed" == jj ]]; then is_jj=1; fi
     # The branch-name refusal is an agent session's alone and runs first, so no route below, the
     # unguarded checkout's own included, pushes a name it refuses.
     if ((is_agent)); then
         if ((is_jj)); then person_branch_gate jj; else person_branch_gate git; fi
     fi
     push_parse
+    [[ -n "$public_routed" ]] || public_push_gate "$is_jj"
     listing=""
     listed=0
     if listing="$("$_real" "${args[@]:0:i}" remote -v 2> /dev/null)"; then listed=1; fi

@@ -67,7 +67,7 @@ class CitedPost(unittest.TestCase):
         self.fixtures.mkdir()
         self.calls = self.tmp / "knives-calls"
         self.cache = self.tmp / "cache"
-        # The route of the owner's token, which the fallback-write gate asks gh-app-token for.
+        # Whether the App covers the owner, which the broker route asks gh-app-token (`--source`).
         self.source = self.tmp / "token-source"
         self.source.write_text("app\n")
         # gh resolves a real gh before it hands the call to knives; this one is never run.
@@ -388,75 +388,97 @@ class CitedPost(unittest.TestCase):
                                     f"`{flag[0]}` is not checked against the approved draft")
 
 
-class CitedPostOnTheUpstreamToken(CitedPost):
+PLACEHOLDER = "agent-secrets-placeholder-" + "x" * 32
+
+
+class CitedPostOnTheBrokerRoute(CitedPost):
     """Every case above again, for an owner with no GitHub App installation, through the whole shim.
 
-    Such an owner's write goes out on Sami's upstream token, and the fallback-write gate
-    (dispatch://INFRA-2006) refuses it unless the citation passed. The citation is checked on the
-    outermost pass; the same call then runs the shim again (the pass that keeps stderr, and the read
-    cache's re-entry), and until 2026-11-16 none of those passes knew the check had passed, so the
-    gate refused every such post after an `allowed` verdict (dispatch://INFRA-3904: no `result` line
-    with rc 0 in the log since the gate landed). Here gh-app-token names the fallback, knives hands
-    the call to gh with the upstream token, as it does for such an owner, and gh is a stub that
-    records what reached it.
+    Such an owner's write runs under the broker's GITHUB_PUBLIC_REPO_PAT (dispatch://INFRA-2031):
+    shims/gh checks the citation on the outermost pass, then runs the call again as
+    `secret-run … GITHUB_PUBLIC_REPO_PAT -- sh -c 'GH_TOKEN="$GITHUB_PUBLIC_REPO_PAT" exec gh …'`,
+    with the ask first in the reason and a 15-minute grant, which the judge can decide. The re-run
+    is an outermost pass again; it checks nothing twice and logs the post's result. The fallback-write
+    gate this replaced refused every approved post to such an owner after its `allowed` verdict
+    (dispatch://INFRA-3904). Here gh-app-token answers `uncovered`, agent-secrets runs the command
+    with a placeholder as a grant does, knives hands the call to gh with that GH_TOKEN, and gh is a
+    stub that records what reached it.
     """
 
     def setUp(self):
         super().setUp()
-        self.source.write_text("fallback-personal-token\n")
+        self.source.write_text("uncovered\n")
+        self.broker = self.tmp / "agent-secrets-calls"
+        executable(self.front / "agent-secrets",
+                   '[ "$1" = identity ] && exit 0\n'
+                   f'printf "%s\\0" "$@" >> {self.broker}; printf "\\n" >> {self.broker}\n'
+                   'while [ "$1" != -- ]; do shift; done; shift\n'
+                   f'GITHUB_PUBLIC_REPO_PAT={PLACEHOLDER} exec "$@"')
         # One file per call, each argument NUL-ended, so argument boundaries survive the record.
         self.sent = self.tmp / "gh-calls"
         self.sent.mkdir()
         executable(self.bin / "gh", f'printf "%s\\0" "$GH_TOKEN" "$@" > "$(mktemp -p {self.sent})"\n'
                    'echo https://github.com/o/upstream/issues/12')
-        # knives hands gh the route's token in GH_TOKEN, as it does for such an owner; the value
-        # is a placeholder, set without a literal assignment the public leak check reads as a key.
+        # A call with GH_TOKEN set is not minted for; knives hands it to gh as it came.
         executable(self.bin / "knives",
                    '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n'
                    f'printf "%s\\n" "$*" >> {self.calls}\n'
-                   'printf -v GH_TOKEN %s upstream-route; export GH_TOKEN\n'
                    'exec "$KNIVES_REAL_GH" "$@"')
 
     def sent_calls(self):
         return [path.read_bytes().decode().split("\0")[:-1] for path in self.sent.iterdir()]
 
+    def broker_calls(self):
+        if not self.broker.exists():
+            return []
+        return [line.split("\0")[:-1] for line in self.broker.read_text().splitlines()]
+
     def assert_sent(self, result, argv, logged_result=True):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "https://github.com/o/upstream/issues/12")
-        self.assertEqual(self.sent_calls(), [["upstream-route", *argv]])
+        self.assertEqual(self.sent_calls(), [[PLACEHOLDER, *argv]])
+        [broker] = self.broker_calls()
+        self.assertIn("GITHUB_PUBLIC_REPO_PAT", broker)
+        self.assertEqual(broker[broker.index("--ttl") + 1], "15m")
+        # The whole ask reference survives secret-run-reason's 100-rune cut of the caller's reason.
+        self.assertTrue(broker[broker.index("--reason") + 1].startswith(f"approved at {ASK}: gh {argv[0]} {argv[1]} on o/"))
+        # Checked once, before the route; the routed call logs the post's result.
         records = self.log()
-        self.assertEqual(records[0]["verdict"], "allowed")
+        self.assertEqual([r.get("verdict") for r in records if "verdict" in r], ["allowed"])
         if logged_result:
             self.assertEqual((records[1]["ev"], records[1]["rc"]), ("result", 0))
 
     def test_without_a_citation_nothing_changes(self):
-        # Overrides the App case: on the upstream token an uncited write is the gate's to refuse.
+        # Overrides the App case: an uncited write to such an owner runs under the broker too, on the
+        # session's 12-hour card, and nothing is checked or logged.
         result = self.run_gh(self.issue(), cite=False)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("which the GitHub App is not installed on", result.stderr)
-        self.assertIn("GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>", result.stderr)
-        self.assertEqual((self.routed(), self.sent_calls(), self.log()), ([], [], []))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sent_calls(), [[PLACEHOLDER, *self.issue()]])
+        [broker] = self.broker_calls()
+        self.assertEqual(broker[broker.index("--ttl") + 1], "12h")
+        self.assertTrue(broker[broker.index("--reason") + 1].startswith("gh issue create on o/upstream as sjawhar"))
+        self.assertEqual(self.log(), [])
 
-    def test_an_approved_issue_reaches_gh_on_the_upstream_token(self):
+    def test_an_approved_issue_reaches_gh_through_the_broker(self):
         self.assert_sent(self.run_gh(self.issue()), self.issue())
 
-    def test_an_approved_pull_request_reaches_gh_on_the_upstream_token(self):
+    def test_an_approved_pull_request_reaches_gh_through_the_broker(self):
         self.assert_sent(self.run_gh(self.pull()), self.pull())
 
     def test_with_the_read_cache_on_it_reaches_gh_through_the_cache(self):
         # The cache is on in every session; its re-entry is one more pass of the same call.
         self.assert_sent(self.run_gh(self.pull(), GH_READ_CACHE=None), self.pull())
 
-    def test_when_the_first_pass_cannot_keep_stderr_the_cache_pass_still_counts(self):
+    def test_when_the_first_pass_cannot_keep_stderr_the_call_still_goes_out(self):
         # No temporary directory: the outermost pass runs on without its stderr-keeping re-run, so
-        # the only later pass is the cache's re-entry, which is not marked GH_SHIM_INNER.
+        # no result line is logged, and the call still reaches gh.
         self.assert_sent(self.run_gh(self.pull(), GH_READ_CACHE=None, TMPDIR=str(self.tmp / "absent")),
                          self.pull(), logged_result=False)
 
-    def test_a_refused_citation_sends_nothing_on_the_upstream_token(self):
+    def test_a_refused_citation_sends_nothing_through_the_broker(self):
         result = self.run_gh(self.pull(head="someone:fix"))
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertEqual((self.routed(), self.sent_calls()), ([], []))
+        self.assertEqual((self.routed(), self.sent_calls(), self.broker_calls()), ([], [], []))
 
 
 if __name__ == "__main__":

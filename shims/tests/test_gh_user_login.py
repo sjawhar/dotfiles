@@ -298,15 +298,6 @@ class UserLogin(unittest.TestCase):
                              capture_output=True, text=True, check=True)
         self.assertEqual(ran.stdout, "ghp_ADMIN\napi -X PUT repos/o/r/branches/main/protection\n")
 
-    def test_a_refusal_of_the_upstream_token_offers_no_admin_token(self):
-        executable(self.bin / "knives",
-                   'echo "gh-app-token: no App installation for owner o; using the personal token GH_PUBLIC_REPO_PAT'
-                   ' - this call will act as its user, not as the App" >&2\n'
-                   'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
-        result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path, **self.agent)
-        self.assertIn("Instead: stop, and tell your lead which call GitHub refused", result.stderr)
-        self.assertNotIn("GITHUB_ADMIN_PAT --", result.stderr)
-
     def test_a_refusal_of_an_inherited_token_names_that_token_not_the_app(self):
         # 2026-11-02: GH_TOKEN held a broker token made for theorem-labs; knives does not route a
         # call that carries one, and GitHub refused it on google/oss-fuzz. The refusal said "it ran
@@ -320,6 +311,21 @@ class UserLogin(unittest.TestCase):
         self.assertNotIn("ran as the GitHub App", result.stderr)
         self.assertIn("GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id> in front of it and no GH_TOKEN", result.stderr)
         self.assertNotIn("GITHUB_ADMIN_PAT --", result.stderr)
+
+    def test_a_refusal_of_the_routed_broker_token_names_it(self):
+        # dispatch://INFRA-2031: a write to an owner the App does not cover runs again under the
+        # broker's GITHUB_PUBLIC_REPO_PAT, with GH_TOKEN its placeholder. A refusal then names that
+        # token and its user, not an inherited token "nothing routed".
+        placeholder = "agent-secrets-placeholder-0123456789abcdefghijklmnopqrstuv"
+        executable(self.bin / "knives", 'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
+        broker = dict.fromkeys(("GH_TOKEN", "GITHUB_PUBLIC_REPO_PAT"), placeholder)
+        result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path, **broker, **self.agent)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Identity: it ran as the broker's GITHUB_PUBLIC_REPO_PAT through its airlock, so as that "
+                      "token's GitHub user, sjawhar", result.stderr)
+        self.assertNotIn("nothing routed the call", result.stderr)
+        self.assertIn("a secrets-broker placeholder", result.stderr)
+        self.assertNotIn(placeholder, result.stderr)
 
     def test_an_admin_call_refused_on_an_inherited_token_offers_no_admin_token(self):
         # The call already ran on a token from the environment (perhaps the admin token itself).
@@ -339,16 +345,6 @@ class UserLogin(unittest.TestCase):
         self.assertIn("GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>", err)
         self.assertIn("GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' gh issue comment 3 -R o/r --body b`", err)
         self.assertIn("Otherwise stop, and tell your lead", err)
-
-    def test_a_refusal_on_the_upstream_token_names_that_token(self):
-        executable(self.bin / "knives",
-                   'echo "gh-app-token: no App installation for owner o; using the personal token GH_PUBLIC_REPO_PAT'
-                   ' - this call will act as its user, not as the App" >&2\n'
-                   'echo "HTTP 403: Must have admin rights to Repository." >&2; exit 1')
-        result, _ = self.run_gh(["pr", "merge", "5", "-R", "o/r", "--admin"], self.shim_path, **self.agent)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Identity: it ran as the personal token GH_PUBLIC_REPO_PAT, so as its GitHub user", result.stderr)
-        self.assertNotIn("ran as the GitHub App", result.stderr)
 
     def rate_limited(self, knives_body):
         executable(self.bin / "knives", '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n' + knives_body +
@@ -375,14 +371,6 @@ class UserLogin(unittest.TestCase):
         self.assertTrue(1 <= minutes <= 11, minutes)
         self.assertNotIn("graphql 4990", result.stderr)  # a budget with requests left is not the cause
         return result.stderr
-
-    def test_a_spent_public_repo_token_says_rate_limit_and_reset_not_refusal(self):
-        err = self.rate_limited(
-            'echo "gh-app-token: minting token for profile agent (owner=o) through the broker..." >&2\n'
-            'echo "gh-app-token: no App installation for owner o; using the personal token GH_PUBLIC_REPO_PAT'
-            ' - this call will act as its user, not as the App" >&2\n'
-            f'export GH_TOKEN={PAT_TOKEN}')
-        self.assertIn("the shared public-repo token GH_PUBLIC_REPO_PAT (owner o has no App installation)", err)
 
     def test_a_spent_app_installation_says_rate_limit_too(self):
         err = self.rate_limited(

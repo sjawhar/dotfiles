@@ -3,9 +3,10 @@
 
 shims/gh runs this in an agent session when a call carries GH_SHIM_APPROVAL, a Dispatch ask
 reference (dispatch://KEY/ask/<id>), before the call goes on. Exit 0 lets the call run on its
-usual route, which for an owner without the GitHub App is Sami's own upstream token
-(GH_PUBLIC_REPO_PAT, login sjawhar), and with a GH_TOKEN from the broker is that token. Exit 1
-refuses it, and stderr says why.
+usual route: for an owner with the GitHub App, its installation token; for an owner without it,
+the broker's GITHUB_PUBLIC_REPO_PAT behind the airlock, on a 15-minute grant whose reason cites the
+ask (shims/gh re-execs the write under `secret-run`); and with a GH_TOKEN from the broker, that
+token. Exit 1 refuses it, and stderr says why.
 
 His rule (CLAUDE.md): anything that commits him outside the company is drafted, shown to him,
 then sent; his answer to the draft is the permission to send it. On 2026-11-02 he answered
