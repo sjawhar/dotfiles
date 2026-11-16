@@ -42,6 +42,17 @@ APPROVER = "sami@theorem.dev"
 APPROVER_LOGIN = "sjawhar"
 APPROVING = re.compile(r"^(post|send|publish|file|open|submit|approve|yes|go)\b", re.I)
 NEGATION = re.compile(r"^(do not|don't|dont|no|not|never|hold|wait|skip|cancel)\b|\bnot\b", re.I)
+# An option approves a post when one of its clauses opens with an approving verb ("Push the commit
+# and post both comments") and nothing in it negates one.
+CLAUSES = re.compile(r"\s*(?:,|;|\band\b|\bthen\b)\s*", re.I)
+
+
+def approves(option: str) -> bool:
+    if NEGATION.search(option):
+        return False
+    return any(APPROVING.match(clause) for clause in CLAUSES.split(option) if clause)
+
+
 VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment"), ("pr", "create")}
 CREATES = {"issue create", "pr create"}
 # A pattern that must match a whole value ends in `\Z`, never `$`: Python's `$` also matches before
@@ -179,7 +190,9 @@ def parse_ask(text: str) -> dict:
     options = []
     for line in options_text.splitlines():
         if line.startswith("- "):
-            options.append(line[2:].split(" — ", 1)[0].strip())
+            # Dispatch prints each option's own block reference after it: `(dispatch://…#b-<id>)`.
+            label = re.sub(r" \(dispatch://\S+#b-[^()\s]+\)$", "", line[2:])
+            options.append(label.split(" — ", 1)[0].strip())
     ask = {"question": question, "options": options, "state": state, "by": "", "selected": "", "text": ""}
     after = re.split(r"\n(?:Replies:\n|Node: ask )", text[m.end() - 1:], maxsplit=1)[0]
     answer = re.match(r"\nAsk id: [^\n]*\nAnswer:\n- By: ([^\n]*)\n- Selected: ([^\n]*)(?:\n- Text: (.*))?", after, re.S)
@@ -239,7 +252,7 @@ def check(ref: str, call: dict) -> dict:
         raise Refused(f"the ask was answered by {ask['by'] or 'nobody'}, not {APPROVER}.")
     if ask["selected"] not in ask["options"]:
         raise Refused(f"the answer selects {ask['selected']!r}, which is not exactly one of the ask's options.")
-    if not APPROVING.match(ask["selected"]) or NEGATION.search(ask["selected"]):
+    if not approves(ask["selected"]):
         raise Refused(f"the selected option {ask['selected']!r} does not approve a post.")
     source, where = ask["question"], ref
     if ask["document"]:

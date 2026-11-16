@@ -34,12 +34,16 @@ def executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def ask_text(state="answered", by="sami@theorem.dev", selected="Post it", text=None):
+OPTIONS = ("Post it — post the title and body above, unchanged.", "Do not post — nothing goes out.")
+
+
+def ask_text(state="answered", by="sami@theorem.dev", selected="Post it", text=None, options=OPTIONS):
     answer = "" if state != "answered" else (
         f"Answer:\n- By: {by}\n- Selected: {selected}\n" + (f"- Text: {text}\n" if text else ""))
+    listed = "".join(f"- {option}\n" for option in options)
     return (
-        f"Question: {QUESTION}\nOptions:\n- Post it — post the title and body above, unchanged.\n"
-        f"- Do not post — nothing goes out.\nState: {state}\nAsk id: a7d1ac41-45c4-4504-a985-7c92998d2158\n"
+        f"Question: {QUESTION}\nOptions:\n{listed}"
+        f"State: {state}\nAsk id: a7d1ac41-45c4-4504-a985-7c92998d2158\n"
         f"{answer}Replies:\n8999b6a1 · user sami@theorem.dev\nBody: State: answered\n"
         f"Node: ask {ASK} · made by session s at 2026-11-02T17:11:51Z · part of {DOC} (version 1)\n"
         f"Links:\n- anchored_to artifact {DOC} (issue.md · 2026-11-02T17:11:51Z)\n"
@@ -172,6 +176,36 @@ class CitedPost(unittest.TestCase):
         self.fixture(ask=ask_text(selected="Do not post"),
                      v2=doc_text(block=ANSWERED.replace("Post it", "Do not post")))
         self.assert_refused(self.run_gh(self.issue()), "the selected option 'Do not post' does not approve a post")
+
+    def test_options_printed_with_their_block_reference_still_match(self):
+        # Dispatch prints each option's own reference after it (INFRA-3904, 2026-11-16).
+        options = (f"Post it ({ASK}#b-b2)", f"Do not post ({ASK}#b-b3)")
+        self.fixture(ask=ask_text(options=options))
+        result = self.run_gh(self.issue())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def answered_with(self, selected, options):
+        quoted = selected.replace('"', "&#x22;")
+        self.fixture(ask=ask_text(selected=selected, options=options),
+                     v2=doc_text(block=ANSWERED.replace("Post it", quoted)))
+
+    TWO_STEPS = ("Push the commit and post both comments", "Push the commit only — no comments",
+                 "Push the commit and do not post", "Do nothing")
+
+    def test_a_clause_that_posts_approves_the_post(self):
+        self.answered_with("Push the commit and post both comments", self.TWO_STEPS)
+        result = self.run_gh(self.issue())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_option_whose_clauses_post_nothing_is_refused(self):
+        self.answered_with("Push the commit only", self.TWO_STEPS)
+        self.assert_refused(self.run_gh(self.issue()),
+                            "the selected option 'Push the commit only' does not approve a post")
+
+    def test_an_option_that_posts_but_says_not_is_refused(self):
+        self.answered_with("Post the comments, not the commit", ("Post the comments, not the commit", "Do nothing"))
+        self.assert_refused(self.run_gh(self.issue()),
+                            "the selected option 'Post the comments, not the commit' does not approve a post")
 
     def test_the_document_must_show_his_answer_too(self):
         self.fixture(v2=doc_text(block=ANSWERED.replace("sami@theorem.dev", "agent@theorem.dev")))
