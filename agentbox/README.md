@@ -56,8 +56,9 @@ On any other machine, the same steps by hand (version and sha256 from the
 ```bash
 curl -fsSLO https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb &&
 echo "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5  sysbox-ce_0.7.1.linux_amd64.deb" | sha256sum -c - &&
-if sysbox_state="$(dpkg-query -W -f='${db:Status-Status}' sysbox-ce 2>/dev/null)" && [ "$sysbox_state" != not-installed ]; then
-  echo "dpkg already knows sysbox-ce: $(dpkg-query -W -f='${Status} ${Version}' sysbox-ce). These steps are for a machine without it; run 'sudo bash ~/.dotfiles/installers/sysbox.sh' from a dotfiles checkout instead." >&2
+if sysbox_state="$(dpkg-query -W -f='${db:Status-Want} ${db:Status-Status}' sysbox-ce 2>/dev/null)" &&
+   { [ "${sysbox_state##* }" != not-installed ] || [ "${sysbox_state%% *}" = hold ]; }; then
+  echo "dpkg already knows sysbox-ce: $(dpkg-query -W -f='${Status} ${Version}' sysbox-ce). These steps are for a machine where dpkg does not know sysbox-ce and nothing holds it; run 'sudo bash ~/.dotfiles/installers/sysbox.sh' from a dotfiles checkout instead." >&2
   false
 fi &&
 sudo apt-get satisfy -y --no-install-recommends "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Pre-Depends)" "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Depends)" &&
@@ -68,9 +69,11 @@ Both ways install the package's dependencies with apt and the checked file itsel
 apt given the `.deb` file can install a configured source's copy of the same version instead
 ([Debian bug #1058934](https://bugs.debian.org/1058934)). The 0.7.1 file has both a `Pre-Depends`
 and a `Depends` field; for a file that lacks one, leave that argument out, because `apt-get satisfy`
-refuses an empty one. These steps are for a machine where dpkg does not know sysbox-ce. When dpkg
-knows it in any state (installed, held, unpacked, half-configured, or configuration files only),
-the block after the `sha256sum` check prints that state and stops, so it installs nothing; run
+refuses an empty one. These steps are for a machine where dpkg does not know sysbox-ce and nothing
+holds it. The block after the `sha256sum` check reads dpkg's want and status in one `dpkg-query`
+call, and prints them and stops, installing nothing, in two cases: dpkg knows sysbox-ce in a state
+other than `not-installed` (installed, unpacked, half-configured, or configuration files only), or
+the package is on hold, which includes a hold with nothing installed (`hold ok not-installed`). Run
 `installers/sysbox.sh` there, which handles those states.
 
 You do not edit Docker's configuration by hand, and `sysbox-runc` need not be the default runtime:
