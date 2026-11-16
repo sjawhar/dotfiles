@@ -4,7 +4,8 @@
 The choice is made by `agent-secrets identity` (exit 0: this process has a broker identity),
 never by failure: once the broker path is taken, its exit is secret-run's exit and secretsd is
 never tried. A client that answers "no identity" (identity exits 1) and no agent-secrets at all
-run `secrets` exactly as before, without touching the broker. A client on PATH that cannot run
+run `secrets` exactly as before, without touching the broker, and each read of secretsd says on
+stderr which keys it reads there and why. A client on PATH that cannot run
 (mise's shim unresolvable, a resolved path that is not an executable file, any identity exit
 other than 0 or 1, 2 included: every installable client has `identity`, so 2 is a usage error or
 a Go panic) is an error, and neither store is touched.
@@ -46,8 +47,17 @@ BROKER_URL = next(
     if line.startswith("AGENT_SECRETS_URL=")
 )
 STALE_URL = "https://stale.example"
-# The one stderr line a process with a client but no broker identity gets (secret-run's header).
+# The notice a process with a client but no broker identity gets (secret-run's header).
 NO_IDENTITY_NOTICE = "secret-run: this process has no secrets-broker identity, so a key only the broker holds"
+# The stderr line every read of secretsd prints, in the exec and request forms, after that notice
+# where there is one; why is "no agent-secrets client" or "no broker identity".
+SECRETSD_READ = "secret-run: reading "
+
+
+def secretsd_read(keys: str, why: str) -> str:
+    return f"{SECRETSD_READ}{keys} from secretsd ({why})"
+
+
 CHOSEN_URL = "http://127.0.0.1:8443"
 LOCAL_URL = "https://local.example"
 # case -> (the caller's environment, env.local's URL or None, the URL and record the broker call
@@ -218,6 +228,7 @@ class SecretRun(unittest.TestCase):
         )
         self.assertNotIn("identity-stdout", result.stdout)
         self.assertNotIn(NO_IDENTITY_NOTICE, result.stderr)
+        self.assertNotIn(SECRETSD_READ, result.stderr)
         self.assertRegex(result.stderr, r"(?m)^REASON skill: smoke \| session: no omp session; pid \d+, cwd ")
 
     def test_equals_forms_and_a_duration_wait_reach_the_broker(self) -> None:
@@ -269,34 +280,81 @@ class SecretRun(unittest.TestCase):
             ['SECRETSD AIRTABLE_TOKEN DD_API_KEY -- sh -c echo "via=$VIA"', "via=secretsd"],
         )
         self.assertNotIn("BROKER", result.stdout)
-        self.assertIn("identity: no key dir", result.stderr)
-        self.assertEqual(result.stderr.count(NO_IDENTITY_NOTICE), 1, result.stderr)
-        self.assertNotIn("cannot run", result.stderr)
+        # identity's own words, then the notice, then the read line.
+        lines = result.stderr.splitlines()
+        self.assertEqual(lines[0], "identity: no key dir", result.stderr)
+        self.assertTrue(lines[1].startswith(NO_IDENTITY_NOTICE), result.stderr)
+        self.assertEqual(lines[2:], [secretsd_read("AIRTABLE_TOKEN DD_API_KEY", "no broker identity")], result.stderr)
 
     def test_a_silent_no_identity_still_says_so_once(self) -> None:
         """A detached tmux, 2026-11-02: identity exits 1 and prints nothing, so before the notice
-        the switch to secretsd was silent and broker-only keys were "not found" with no hint."""
+        the switch to secretsd was silent and broker-only keys were "not found" with no hint. The
+        notice comes once; a read of secretsd adds its own line after it, and a dry run reads none."""
         self.with_client()
         cases = {
-            "exec": (*self.EXEC_ARGS, *self.CMD),
-            "request": ("request", "AIRTABLE_TOKEN"),
-            "dry run": ("--dry-run", "AIRTABLE_TOKEN", *self.CMD),
+            "exec": (
+                (*self.EXEC_ARGS, *self.CMD),
+                [secretsd_read("AIRTABLE_TOKEN DD_API_KEY", "no broker identity")],
+            ),
+            "request": (("request", "AIRTABLE_TOKEN"), [secretsd_read("AIRTABLE_TOKEN", "no broker identity")]),
+            "dry run": (("--dry-run", "AIRTABLE_TOKEN", *self.CMD), []),
         }
-        for case, args in cases.items():
+        for case, (args, reads) in cases.items():
             with self.subTest(case=case):
                 result = self.run_secret_run(*args, STUB_IDENTITY="1", STUB_IDENTITY_SILENT="1")
                 self.assertEqual(result.returncode, 0, result.stderr)
+                lines = result.stderr.splitlines()
                 self.assertEqual(result.stderr.count(NO_IDENTITY_NOTICE), 1, result.stderr)
-                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                self.assertTrue(lines[0].startswith(NO_IDENTITY_NOTICE), result.stderr)
+                self.assertEqual(lines[1:], reads, result.stderr)
 
     def test_no_client_runs_secretsd(self) -> None:
+        """No agent-secrets on PATH (a machine whose mise has none): secretsd serves, and this path
+        printed nothing, so a caller's log could not show which store it asked."""
         result = self.run_secret_run(*self.EXEC_ARGS, *self.CMD)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(),
             ['SECRETSD AIRTABLE_TOKEN DD_API_KEY -- sh -c echo "via=$VIA"', "via=secretsd"],
         )
-        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stderr.splitlines(), [secretsd_read("AIRTABLE_TOKEN DD_API_KEY", "no agent-secrets client")]
+        )
+
+    def test_secretsd_request_is_announced_without_a_client(self) -> None:
+        result = self.run_secret_run("request", "DEEL_API_KEY", "GH_PUBLIC_REPO_PAT")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(), ["SECRETSD get DEEL_API_KEY", "SECRETSD get GH_PUBLIC_REPO_PAT"]
+        )
+        self.assertEqual(
+            result.stderr.splitlines(),
+            [secretsd_read("DEEL_API_KEY GH_PUBLIC_REPO_PAT", "no agent-secrets client")],
+        )
+
+    def test_a_closed_stderr_never_stops_a_secretsd_read(self) -> None:
+        """A caller with stderr closed (2>&-): each line on the secretsd path is for a reader, so a
+        write that fails must not stop the read under set -e, with no client first and then with a
+        client that answers no identity in words of its own."""
+        forms = {
+            "exec": (("AIRTABLE_TOKEN", *self.CMD), "via=secretsd"),
+            "request": (("request", "AIRTABLE_TOKEN"), "SECRETSD get AIRTABLE_TOKEN"),
+        }
+        for why in ("no agent-secrets client", "no broker identity"):
+            if why == "no broker identity":
+                self.with_client()
+            for form, (args, last) in forms.items():
+                with self.subTest(why=why, form=form):
+                    result = subprocess.run(
+                        ["sh", "-c", 'exec "$@" 2>&-', "sh", str(SECRET_RUN), *args],
+                        capture_output=True,
+                        text=True,
+                        env={**self.env, "STUB_IDENTITY": "1", "STUB_IDENTITY_MSG": "no key dir"},
+                        check=False,
+                        timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(result.stdout.splitlines()[-1:], [last], result.stdout)
 
     def test_mise_shim_in_a_bare_environment_reaches_the_broker(self) -> None:
         """The 2026-10-28 outage: no MISE_DATA_DIR, so the shim itself fails; secret-run asks mise
@@ -417,6 +475,7 @@ class SecretRun(unittest.TestCase):
             r"(?m)^REASON task: start \| session: no omp session; pid \d+, cwd .+ \| runs: request only, no command "
             r"\| host: \S+$",
         )
+        self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_ttl_reaches_the_broker_for_exec_and_request(self) -> None:
         self.with_client()
@@ -491,6 +550,7 @@ class SecretRun(unittest.TestCase):
                 self.assertNotIn("SECRETSD", result.stdout)
                 self.assertNotIn("via=", result.stdout)
                 self.assertIn("secrets-broker identity", result.stderr)
+                self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def with_stale_install(self, *, pinned: bool = True) -> Path:
         """An old mise install of the client first on PATH directly, not through a shim, the way a
@@ -578,6 +638,7 @@ class SecretRun(unittest.TestCase):
         )
         self.assertEqual(lines[2], "via=broker")
         self.assertNotIn("SECRETSD", result.stdout)
+        self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_register_runs_the_resolved_client_in_a_bare_environment(self) -> None:
         """In an `env -i` scope mise's shim cannot resolve; registration runs the client secret-run
@@ -612,12 +673,17 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.register_lines(result), [])
         self.assertEqual(result.stdout.splitlines()[-1], "via=broker")
+        self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_register_without_a_client_is_secretsd_as_before(self) -> None:
         result = self.run_secret_run("--register", "AIRTABLE_TOKEN", *self.CMD)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines(), ['SECRETSD AIRTABLE_TOKEN -- sh -c echo "via=$VIA"', "via=secretsd"]
+        )
+        self.assertEqual(
+            [line for line in result.stderr.splitlines() if line.startswith(SECRETSD_READ)],
+            [secretsd_read("AIRTABLE_TOKEN", "no agent-secrets client")],
         )
 
     def test_register_that_gives_no_identity_ends_where_it_would_have_once(self) -> None:
@@ -631,11 +697,16 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.register_lines(result), [f'REGISTER --exec -- {SECRET_RUN} AIRTABLE_TOKEN -- sh -c echo "via=$VIA"'])
         self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
+        self.assertEqual(
+            [line for line in result.stderr.splitlines() if line.startswith(SECRETSD_READ)],
+            [secretsd_read("AIRTABLE_TOKEN", "no broker identity")],
+        )
         result = self.run_secret_run("--register", "--github-owner=sjawhar", "GITHUB_APP_SJAWHAR", *self.CMD, **extra)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertEqual(len(self.register_lines(result)), 1)
         self.assertFalse([line for line in result.stdout.splitlines() if line.startswith("via=")], result.stdout)
         self.assertIn("secrets-broker identity", result.stderr)
+        self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_register_on_a_machine_without_the_helper_runs_unregistered(self) -> None:
         self.with_client()
@@ -643,6 +714,10 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.register_lines(result), [])
         self.assertEqual(result.stdout.splitlines()[-1], "via=secretsd")
+        self.assertEqual(
+            [line for line in result.stderr.splitlines() if line.startswith(SECRETSD_READ)],
+            [secretsd_read("AIRTABLE_TOKEN", "no broker identity")],
+        )
 
     def test_request_on_secretsd_asks_for_each_key(self) -> None:
         self.with_client()
@@ -842,6 +917,7 @@ class SecretRun(unittest.TestCase):
         self.assertEqual(len(lines), 6, result.stdout)
         self.assertNotIn("REASON", result.stderr)
         self.assertNotIn(NO_IDENTITY_NOTICE, result.stderr)
+        self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_dry_run_on_secretsd_runs_nothing(self) -> None:
         self.with_client()
@@ -852,6 +928,22 @@ class SecretRun(unittest.TestCase):
         self.assertIn("session_id: none", result.stdout)
         for absent in ("BROKER", "SECRETSD", "via="):
             self.assertNotIn(absent, result.stdout)
+        self.assertNotIn(SECRETSD_READ, result.stderr)
+
+    def test_a_dry_run_reads_nothing_in_either_form(self) -> None:
+        """A dry run asks no store, so neither form prints the secretsd read line: with no client
+        first, then with a client that answers no identity."""
+        forms = {"exec": ("--dry-run", "AIRTABLE_TOKEN", *self.CMD), "request": ("request", "--dry-run", "AIRTABLE_TOKEN")}
+        for why in ("no agent-secrets client", "no broker identity"):
+            if why == "no broker identity":
+                self.with_client()
+            for form, args in forms.items():
+                with self.subTest(why=why, form=form):
+                    result = self.run_secret_run(*args, STUB_IDENTITY="1", STUB_IDENTITY_SILENT="1")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"store: secretsd ({why})", result.stdout)
+                    self.assertNotIn("SECRETSD", result.stdout)
+                    self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_dry_run_never_registers_or_runs_the_command(self) -> None:
         self.with_client()
@@ -862,6 +954,7 @@ class SecretRun(unittest.TestCase):
         self.assertIn("session_id: none", result.stdout)
         for absent in ("REGISTER", "BROKER", "SECRETSD", "via="):
             self.assertNotIn(absent, result.stdout)
+        self.assertNotIn(SECRETSD_READ, result.stderr)
 
     def test_a_failed_reason_builder_still_says_who_asks(self) -> None:
         """The broker path never stops on the reason: a builder that fails (here python3 itself)
