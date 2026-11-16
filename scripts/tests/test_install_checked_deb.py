@@ -92,7 +92,11 @@ exit "${{DPKG_STATUS:-0}}"''',
         write_command(
             self.bin_dir,
             "dpkg-query",
-            '''if [[ -v DPKG_QUERY_OUTPUT ]]; then
+            '''if [[ -v DPKG_QUERY_STATUS ]]; then
+    echo "dpkg-query: fake failure for ${!#}" >&2
+    exit "$DPKG_QUERY_STATUS"
+fi
+if [[ -v DPKG_QUERY_OUTPUT ]]; then
     printf '%s' "$DPKG_QUERY_OUTPUT"
     exit 0
 fi
@@ -304,6 +308,21 @@ exit 1''',
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual([call["cmd"] for call in self.read_calls()], ["dpkg"])
 
+    def test_dpkg_query_failure_other_than_unknown_package_stops(self) -> None:
+        # dpkg-query exits 1 for a package dpkg does not know; any other exit is a broken
+        # database or a broken dpkg, and reading it as "nothing installed" would install over
+        # a newer version or a hold.
+        deb = self.build_deb(depends="rsync")
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_STATUS": "2"},
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("dpkg-query failed for checked-deb-control (exit 2)", result.stderr)
+        self.assertIn("installed nothing", result.stderr)
+        self.assertEqual(self.read_calls(), [])
+
     def test_newer_installed_version_is_refused(self) -> None:
         deb = self.build_deb(depends="rsync")
         result = self.run_handled_failure(
@@ -325,6 +344,21 @@ exit 1''',
         )
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("checked-deb-control is on hold at 0.5", result.stderr)
+        self.assertIn("installed nothing", result.stderr)
+        self.assertEqual(self.read_calls(), [])
+
+    def test_package_held_but_not_installed_is_refused(self) -> None:
+        # dpkg prints an empty version for a package on hold that it has not installed
+        # (measured for tailscale: `hold not-installed `), so the message names the state.
+        deb = self.build_deb(depends="rsync")
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "hold not-installed "},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("checked-deb-control is on hold (not installed)", result.stderr)
+        self.assertNotIn(" at ;", result.stderr)
         self.assertIn("installed nothing", result.stderr)
         self.assertEqual(self.read_calls(), [])
 
@@ -374,11 +408,52 @@ exec "$(dirname -- "$0")/logging-dpkg" "$@"''',
         self.assertIn(("dpkg", ["-i", str(deb)]), calls)
         self.assertIn(("dpkg", ["--set-selections"]), calls)
 
+    def write_dpkg_status_wrapper(self, install_status: str, set_selections_status: str) -> None:
+        """Give `dpkg -i` and `dpkg --set-selections` each their own exit status."""
+        (self.bin_dir / "dpkg").rename(self.bin_dir / "logging-dpkg")
+        write_command(
+            self.bin_dir,
+            "dpkg",
+            f'''if [[ "${{1:-}}" == --set-selections ]]; then
+    export DPKG_STATUS={set_selections_status}
+else
+    export DPKG_STATUS={install_status}
+fi
+exec "$(dirname -- "$0")/logging-dpkg" "$@"''',
+        )
+
+    def test_hold_not_restored_after_dpkg_succeeds_fails(self) -> None:
+        # `dpkg -i` left the package on install, so apt may move it at the next run.
+        deb = self.build_deb(depends="rsync")
+        self.write_dpkg_status_wrapper(install_status="0", set_selections_status="1")
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "hold half-configured 1.0"},
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("checked-deb-control is no longer on hold", result.stderr)
+
+        calls = [(call["cmd"], call["argv"]) for call in self.read_calls()]
+        self.assertIn(("dpkg", ["-i", str(deb)]), calls)
+        self.assertIn(("dpkg", ["--set-selections"]), calls)
+
+    def test_hold_not_restored_after_dpkg_fails_returns_the_dpkg_status(self) -> None:
+        deb = self.build_deb(depends="rsync")
+        self.write_dpkg_status_wrapper(install_status="2", set_selections_status="1")
+        result = self.run_handled_failure(
+            deb,
+            sha256_file(deb),
+            {"DPKG_QUERY_OUTPUT": "hold half-configured 1.0"},
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("checked-deb-control is no longer on hold", result.stderr)
+
     def write_selection_state_fakes(self, state: Path) -> None:
         """Replace the fakes with ones that keep dpkg's selection and status in *state*.
 
         *state* holds "<want> <status> <version>". Like the real dpkg 1.22, `dpkg -i`
-        sets the want back to install; `dpkg --set-selections` and `apt-mark` set it.
+        sets the want back to install; `dpkg --set-selections` sets it.
         """
         write_command(
             self.bin_dir,
@@ -392,13 +467,13 @@ fmt = next(arg.removeprefix("-f=") for arg in sys.argv[1:] if arg.startswith("-f
 for key, value in {
     "${db:Status-Want}": want,
     "${db:Status-Status}": status,
-    "${db:Status-Abbrev}": want[0] + status[0] + " ",
-    "${Status}": f"{want} ok {status}",
     "${Version}": version,
-    "${Package}": "checked-deb-control",
 }.items():
     fmt = fmt.replace(key, value)
-sys.stdout.write(fmt.replace("\\\\n", "\\n"))
+if "${" in fmt:
+    sys.stderr.write("dpkg-query fake: no value for a field in " + fmt + "\\n")
+    sys.exit(2)
+sys.stdout.write(fmt)
 PY''',
         )
         write_command(
@@ -417,23 +492,15 @@ case "${1:-}" in
 esac
 printf 'dpkg %s\n' "$*" >> "$CALL_LOG.selection"''',
         )
-        write_command(
-            self.bin_dir,
-            "apt-mark",
-            r'''read -r want status version < "$SELECTION_STATE"
-case "${1:-}" in
-    hold) echo "hold $status $version" > "$SELECTION_STATE" ;;
-    unhold) echo "install $status $version" > "$SELECTION_STATE" ;;
-    showhold) if [[ "$want" == hold ]]; then echo checked-deb-control; fi ;;
-esac
-printf 'apt-mark %s\n' "$*" >> "$CALL_LOG.selection"''',
-        )
 
     def test_package_held_at_the_same_version_stays_held(self) -> None:
-        # A package held at the pinned version but not fully installed (sysbox-ce after its
-        # debconf script refused) is installed again from the checked file. apt-get install of
-        # the same file keeps the hold (measured: `hold ok unpacked 1.104.4` became
-        # `hold ok installed`); `dpkg -i` alone sets the want to install and drops it.
+        # sysbox-ce held at the pinned version and half-configured after its debconf script
+        # refused. While that refusal lasts, `apt-get satisfy` configures the pending package
+        # first and fails, so the helper stops there and `dpkg -i` never runs. This path runs
+        # once the configure succeeds: `apt-get satisfy` configures the package and keeps the
+        # hold (measured: `hold ok unpacked 1.104.4` became `hold ok installed`), then
+        # `dpkg -i` sets the want back to install (`install ok installed`), which is why the
+        # helper sets the hold again.
         deb = self.build_deb(depends="rsync")
         state = self.root / "selection-state"
         state.write_text("hold half-configured 1.0\n", encoding="utf-8")

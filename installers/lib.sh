@@ -84,11 +84,12 @@ ensure_json() {
 # It keeps the two refusals of apt that `dpkg -i` lacks: it installs nothing over a newer
 # installed version or over a package held at another version. A hold at the pinned version is
 # kept: `dpkg -i` sets the selection back to install, so the hold is set again after it, whether
-# `dpkg -i` succeeds or fails.
+# `dpkg -i` succeeds or fails; a failed re-hold says so and returns non-zero, because the package
+# is then on install and the next apt run can move it.
 # Every step returns its own failure because `||` and `if` callers disable `set -e` inside it.
 install_checked_deb() {
     local deb="$1" expected="$2"
-    local actual package version installed want state installed_version pre_depends depends rc
+    local actual package version installed want state installed_version held pre_depends depends rc
     local -a deps=()
     actual="$(sha256sum -- "$deb")" || return 1
     actual="${actual%% *}"
@@ -101,17 +102,24 @@ install_checked_deb() {
     # dpkg-query exits 1 for a package dpkg does not know (nothing is installed); any other
     # failure is an error.
     installed="$(dpkg-query -W -f='${db:Status-Want} ${db:Status-Status} ${Version}' "$package" 2>/dev/null)" || {
-        (($? == 1)) || return 1
+        rc=$?
+        if ((rc != 1)); then
+            echo "install_checked_deb: dpkg-query failed for $package (exit $rc); installed nothing" >&2
+            return 1
+        fi
         installed=""
     }
     read -r want state installed_version <<< "$installed"
     if [[ "$want" == hold && "$installed_version" != "$version" ]]; then
-        echo "install_checked_deb: $package is on hold at $installed_version; installed nothing (apt-mark unhold $package to install $version)" >&2
+        # dpkg prints no version for a held package it has not installed, so name the state.
+        if [[ -n "$installed_version" ]]; then held="at $installed_version"; else held="(${state//-/ })"; fi
+        echo "install_checked_deb: $package is on hold $held; installed nothing (apt-mark unhold $package to install $version)" >&2
         return 1
     fi
-    # apt counts neither `config-files` (only configuration files left) nor `not-installed` as installed.
-    if [[ "$state" != config-files && "$state" != not-installed ]] \
-        && dpkg --compare-versions "$installed_version" gt "$version"; then
+    # apt counts neither `config-files` (only configuration files left) nor `not-installed` as
+    # installed, so the version either state reports refuses nothing.
+    if [[ "$state" == config-files || "$state" == not-installed ]]; then installed_version=""; fi
+    if dpkg --compare-versions "$installed_version" gt "$version"; then
         echo "install_checked_deb: $package $installed_version is installed, newer than $version; installed nothing" >&2
         return 1
     fi
@@ -124,8 +132,9 @@ install_checked_deb() {
     fi
     rc=0
     DEBIAN_FRONTEND=noninteractive dpkg -i "$deb" || rc=$?
-    if [[ "$want" == hold ]]; then
-        dpkg --set-selections <<< "$package hold" || return 1
+    if [[ "$want" == hold ]] && ! dpkg --set-selections <<< "$package hold"; then
+        echo "install_checked_deb: $package is no longer on hold; run apt-mark hold $package" >&2
+        return "$((rc == 0 ? 1 : rc))"
     fi
     return "$rc"
 }
