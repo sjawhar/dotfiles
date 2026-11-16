@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly: clean the box's Go build cache when it passes 80 GB (gocache-cap.service)
+Description=Hourly: trim the box's Go build cache past 25 GB (gocache-cap.service)
 
 [Timer]
 OnCalendar=hourly

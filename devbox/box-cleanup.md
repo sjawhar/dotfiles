@@ -17,7 +17,7 @@ recorded, and that something speaks when the cleaning stops working.
 | `tmp-stale-reap` | 86400 s (daily) | walks the root-resident `/tmp`, with its own `TMP_REAP_RUN_SECONDS=1680` budget |
 | `session-scratch-reap` | 86400 s (daily) | session-directory census and liveness checks; only scratch directories whose session is gone |
 | `session-tmp-reap` | 86400 s (daily) | costly TMPDIR census (409-828 s measured); still report only |
-| `gocache-cap` | 0 s (every pass) | cheap size check; Go build cache trimmed past 25 GB, wiped past 50 GB |
+| `gocache-cap` | 0 s (every pass) | cheap size check; Go build cache entries unused for 3 h deleted past 25 GB, unused for 2 h past 50 GB, never one the oldest running `go` command may hold |
 | `nvme-cache-cap` | 0 s (every pass) | cheap usage checks; uv, cargo and Go module caches under their own caps |
 | `docker-cap` | 0 s (every pass) | cheap filesystem check; acts only above `DOCKER_CAP_HIGH_PCT` (default 80%), keeping its own caps, ages and pull-in-flight refusal |
 

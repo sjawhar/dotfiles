@@ -1,7 +1,7 @@
 [Unit]
 Description=Hold the shared uv, cargo and Go module caches on /mnt/nvme/<user> under their size caps
 # Caps and their evidence: devbox/nvme-cache-cap.md. The Go BUILD cache has its own unit,
-# devbox/gocache-cap.service (80 GB).
+# devbox/gocache-cap.service.
 ConditionPathIsDirectory=/mnt/nvme/%u
 
 [Service]

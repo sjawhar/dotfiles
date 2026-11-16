@@ -8,8 +8,8 @@ Documentation=file:%h/.dotfiles/devbox/box-cleanup.md
 Type=oneshot
 Nice=19
 IOSchedulingClass=idle
-# The union of what the seven units set. gocache-cap and nvme-cache-cap need mise's shims for
-# `go`; the rest ran with the plain system PATH, which this contains.
+# The union of what the seven units set. nvme-cache-cap needs mise's shims for `go`; the rest
+# run with the plain system PATH, which this contains.
 Environment=PATH=%h/.dotfiles/shims:%h/.dotfiles/bin:%h/.mise/shims:/usr/local/bin:/usr/bin:/bin
 Environment=MISE_DATA_DIR=%h/.mise
 # Seven steps, each killed at 30 minutes by the script (BOX_CLEANUP_STEP_TIMEOUT), so a run

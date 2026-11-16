@@ -5,7 +5,7 @@
 # /mnt/nvme/<user> (dispatch://INFRA-613), where they are shared by every session and reused
 # across them. Shared and reused is the point; unbounded is not, so each one has a cap here and
 # devbox/nvme-cache-cap.service checks them hourly. The Go BUILD cache has its own, older unit
-# (devbox/gocache-cap, 80 GB). devbox/nvme-cache-cap.md says what each cap costs and how to
+# (devbox/gocache-cap). devbox/nvme-cache-cap.md says what each cap costs and how to
 # turn it off.
 #
 # Every cap is enforced with the tool's own cleaner, and over the cap the cache is emptied rather
