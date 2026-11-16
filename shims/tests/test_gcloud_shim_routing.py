@@ -1410,7 +1410,16 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
 
     def test_off_a_google_vm_nothing_changes(self) -> None:
         before = (self.config / "credentials.db").read_bytes()
-        # A closed port: on-google-vm says no. Unset: an Azure box, where the DMI name is not Google's.
+        # The default metadata name as a machine off Google answers it: it does not resolve (curl's
+        # exit 6). The test gives that answer itself, so on a Google VM the run does not ask the
+        # machine's own metadata server, which says yes there.
+        unresolved = Path(self.tmp.name) / "curl-stub"
+        unresolved.mkdir()
+        write_stub(unresolved, "curl",
+                   'case "$*" in *//metadata.google.internal/*) exit 6 ;; esac\nexec /usr/bin/curl "$@"')
+        self.env["PATH"] = f"{unresolved}:{self.env['PATH']}"
+        # A closed port: on-google-vm says no. Unset: the default name, which does not resolve; on an
+        # Azure box the DMI name, which is not Google's, stops the check before that.
         for host in ("127.0.0.1:9", None):
             with self.subTest(host=host):
                 result = self.run_shim({"GCE_METADATA_HOST": host})
@@ -1430,19 +1439,21 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
         self.assertEqual(result.stdout, "REAL-GCLOUD-RAN\n")
         self.assertIn("gcloud shim: gcloud-drop-azure-credential: cannot change", result.stderr)
 
-    def record_greps(self) -> Path:
-        """A grep that notes its arguments and is then the real grep, ahead of the shim on PATH."""
-        log = Path(self.tmp.name) / "grep.log"
-        stub_dir = Path(self.tmp.name) / "grep-stub"
+    def record_reads(self) -> Path:
+        """A python3 that notes its arguments and is then the real python3, ahead of the shim on
+        PATH. The store's one reader is scripts/gcloud-drop-azure-credential (`#!/usr/bin/env
+        python3`), since 73bc4345 took the shim's own grep of the store away."""
+        log = Path(self.tmp.name) / "python3.log"
+        stub_dir = Path(self.tmp.name) / "python3-stub"
         stub_dir.mkdir()
-        write_stub(stub_dir, "grep", f'printf "%s\\n" "$*" >>"{log}"\nexec /usr/bin/grep "$@"')
+        write_stub(stub_dir, "python3", f'printf "%s\\n" "$*" >>"{log}"\nexec /usr/bin/python3 "$@"')
         self.env["PATH"] = f"{stub_dir}:{self.env['PATH']}"
         return log
 
     def store_reads(self, log: Path) -> list[str]:
         if not log.exists():
             return []
-        return [line for line in log.read_text().splitlines() if "credentials.db" in line]
+        return [line for line in log.read_text().splitlines() if "gcloud-drop-azure-credential" in line]
 
     def set_azure_entry(self, present: bool) -> None:
         db = sqlite3.connect(self.config / "credentials.db", isolation_level=None)
@@ -1456,31 +1467,52 @@ class GcloudAzureCredentialOnGoogleVm(unittest.TestCase):
             db.close()
 
     def test_an_unchanged_store_is_never_read_again(self) -> None:
-        """The grep opened the credential store before every gcloud call, which the CWS rule
-        theorem_gcloud_credential_read reported 109 times in a week (2026-10-30..11-06). A store
-        whose mtime, size and inode are the ones the last check saw is not opened at all."""
-        log = self.record_greps()
-        first = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
-        self.assertEqual((first.returncode, first.stdout), (0, "REAL-GCLOUD-RAN\n"), first.stderr)
-        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
-        for run in range(3):
-            with self.subTest(run=run):
-                again = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
-                self.assertEqual((again.returncode, again.stdout), (0, "REAL-GCLOUD-RAN\n"), again.stderr)
-        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
-
-    def test_a_changed_store_is_read_again_and_its_azure_entry_still_goes(self) -> None:
-        """What the marker remembers is one store's bytes. A store that changed after a check that
-        found no Azure entry is checked again, and the entry it gained is removed as before."""
+        """The check opened the credential store before every gcloud call, which the CWS rule
+        theorem_gcloud_credential_read reported 109 times in a week (2026-10-30..11-06). Off a Google
+        VM the store is never opened; on one, a store checked once is not opened again while it is
+        unchanged."""
+        log = self.record_reads()
+        for run in range(2):
+            with self.subTest(google_vm=False, run=run):
+                off = self.run_shim({"GCE_METADATA_HOST": "127.0.0.1:9"})
+                self.assertEqual((off.returncode, off.stdout, off.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(self.store_reads(log), [])
         server = MetadataStub.start()
         self.addCleanup(server.stop)
         self.set_azure_entry(False)
-        log = self.record_greps()
+        first = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual((first.returncode, first.stdout, first.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+        for run in range(3):
+            with self.subTest(google_vm=True, run=run):
+                again = self.run_shim({"GCE_METADATA_HOST": server.host})
+                self.assertEqual((again.returncode, again.stdout, again.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+
+    def test_a_changed_store_is_read_again_on_the_next_boot_and_its_azure_entry_goes(self) -> None:
+        """What the marker remembers is one store's stat AND the boot (73bc4345): on a Google VM
+        nothing writes an Azure entry into a store, so a store checked absent is not read again
+        that boot, however often gcloud rewrites it. A store that changed under a marker of an
+        earlier boot is read again, and the Azure entry it gained is removed as before."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        self.set_azure_entry(False)
+        log = self.record_reads()
         clean = self.run_shim({"GCE_METADATA_HOST": server.host})
         self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
         self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
 
         self.set_azure_entry(True)
+        same_boot = self.run_shim({"GCE_METADATA_HOST": server.host})
+        self.assertEqual((same_boot.returncode, same_boot.stdout, same_boot.stderr), (0, "REAL-GCLOUD-RAN\n", ""))
+        self.assertEqual(len(self.store_reads(log)), 1, self.store_reads(log))
+        self.assertIn(self.ACCOUNT, self.rows("credentials.db", "credentials"))
+
+        # The marker as an earlier boot left it: the same verdict and stat, another boot id.
+        markers = list((Path(self.env["HOME"]) / ".cache" / "gcloud-shim").glob("azure-check.*"))
+        self.assertEqual(len(markers), 1, markers)
+        verdict = markers[0].read_text(encoding="utf-8").rstrip("\n")
+        markers[0].write_text(verdict.rsplit("|", 1)[0] + "|an-earlier-boot\n", encoding="utf-8")
         changed = self.run_shim({"GCE_METADATA_HOST": server.host})
         self.assertEqual(changed.returncode, 0, changed.stderr)
         self.assertEqual(changed.stdout, "REAL-GCLOUD-RAN\n")
