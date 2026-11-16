@@ -280,47 +280,57 @@ class ForwardOryxWrapper(unittest.TestCase):
         self.assertEqual(changed, expected)
 
     def write_stubs(self) -> None:
+        # Each stub writes its pid file LAST, once its traps and its record are in place, so a pid
+        # file means that child is fully up. A stub told to exit waits (15 s at most) for its peer's
+        # pid file first: the wrapper stops the peer as soon as one child exits, and a peer stopped
+        # before it started wrote no pid file, so under load "daemon-pid was not created" failed
+        # test_either_child_exit_stops_the_other on sami-devbox at cb78d6a9 and at this change's
+        # head, while each test passed alone. "Either child's exit stops the other" needs the other
+        # running when the first one exits; that is what this waits for.
+        peer_wait = '''for ((i = 0; i < 300; i++)); do [[ -s "$%s" ]] && break; sleep 0.05; done'''
         write_executable(
             self.daemon,
-            '''printf '%s\\n' "$$" > "$DAEMON_PID"
-{
-    printf 'TUNNEL_SERVICE_TOKEN_ID=%s\\n' "${TUNNEL_SERVICE_TOKEN_ID:+set}"
-    printf 'TUNNEL_SERVICE_TOKEN_SECRET=%s\\n' "${TUNNEL_SERVICE_TOKEN_SECRET:+set}"
-} > "$DAEMON_RECORD"
-if [[ -v DAEMON_EXIT_STATUS ]]; then
-    exit "$DAEMON_EXIT_STATUS"
-fi
-if [[ "${DAEMON_IGNORE_TERM:-}" == 1 ]]; then
+            '''if [[ "${DAEMON_IGNORE_TERM:-}" == 1 ]]; then
     trap '' TERM INT
 else
     trap 'exit 0' TERM INT
 fi
-while :; do sleep 1; done''',
+{
+    printf 'TUNNEL_SERVICE_TOKEN_ID=%%s\\n' "${TUNNEL_SERVICE_TOKEN_ID:+set}"
+    printf 'TUNNEL_SERVICE_TOKEN_SECRET=%%s\\n' "${TUNNEL_SERVICE_TOKEN_SECRET:+set}"
+} > "$DAEMON_RECORD"
+printf '%%s\\n' "$$" > "$DAEMON_PID"
+if [[ -v DAEMON_EXIT_STATUS ]]; then
+    %s
+    exit "$DAEMON_EXIT_STATUS"
+fi
+while :; do sleep 1; done''' % (peer_wait % "SSH_PID"),
         )
         write_executable(
             self.ssh,
-            '''printf '%s\\n' "$$" > "$SSH_PID"
+            '''if [[ "${SSH_IGNORE_TERM:-}" == 1 ]]; then
+    trap '' TERM INT
+else
+    trap 'exit 0' TERM INT
+fi
 {
-    printf 'TUNNEL_SERVICE_TOKEN_ID=%s\\n' "${TUNNEL_SERVICE_TOKEN_ID:+set}"
-    printf 'TUNNEL_SERVICE_TOKEN_SECRET=%s\\n' "${TUNNEL_SERVICE_TOKEN_SECRET:+set}"
-    printf 'DISPLAY=%s\\n' "${DISPLAY+x}"
-    printf 'WAYLAND_DISPLAY=%s\\n' "${WAYLAND_DISPLAY+x}"
-    printf 'BROWSER=%s\\n' "${BROWSER+x}"
-    printf 'HOME=%s\\n' "$HOME"
-    printf 'PATH=%s\\n' "$PATH"
+    printf 'TUNNEL_SERVICE_TOKEN_ID=%%s\\n' "${TUNNEL_SERVICE_TOKEN_ID:+set}"
+    printf 'TUNNEL_SERVICE_TOKEN_SECRET=%%s\\n' "${TUNNEL_SERVICE_TOKEN_SECRET:+set}"
+    printf 'DISPLAY=%%s\\n' "${DISPLAY+x}"
+    printf 'WAYLAND_DISPLAY=%%s\\n' "${WAYLAND_DISPLAY+x}"
+    printf 'BROWSER=%%s\\n' "${BROWSER+x}"
+    printf 'HOME=%%s\\n' "$HOME"
+    printf 'PATH=%%s\\n' "$PATH"
 } > "$SSH_RECORD"
 if [[ "${SSH_RUN_XDG_OPEN:-}" == 1 ]]; then
     xdg-open https://login.example.invalid || true
 fi
+printf '%%s\\n' "$$" > "$SSH_PID"
 if [[ -v SSH_EXIT_STATUS ]]; then
+    %s
     exit "$SSH_EXIT_STATUS"
 fi
-if [[ "${SSH_IGNORE_TERM:-}" == 1 ]]; then
-    trap '' TERM INT
-else
-    trap 'exit 0' TERM INT
-fi
-while :; do sleep 1; done''',
+while :; do sleep 1; done''' % (peer_wait % "DAEMON_PID"),
         )
 
     def write_wrapper(self, *, ssh_path: Path | None) -> None:
