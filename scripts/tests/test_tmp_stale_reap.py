@@ -230,7 +230,7 @@ class BoundedPassTest(unittest.TestCase):
         """The keeps of devbox/tmp-stale-reap.md's proof, with /proc a scratch directory. The
         window is 10.8 s here, so that the entry made just before each pass stays young."""
         window = {"TMP_REAP_AGE_HOURS": "0.003"}
-        self.entries("held", "mapped", "envdir", "sockdir", "stale", "readonly", settle=0)
+        self.entries("held", "mapped", "envdir", "argdir", "sockdir", "stale", "readonly", settle=0)
         (self.root / "readonly" / "sub").mkdir()
         (self.root / "readonly" / "sub" / "file").write_text("x")
         (self.root / "readonly" / "sub").chmod(0o555)
@@ -242,6 +242,8 @@ class BoundedPassTest(unittest.TestCase):
         (self.proc / "77" / "maps").write_text(f"7f0000-7f1000 r-xp 00000000 00:00 0 {self.root}/mapped/data\n")
         (self.proc / "88").mkdir()
         (self.proc / "88" / "environ").write_bytes(f"PATH=/usr/bin\0TMPDIR={self.root}/envdir\0".encode())
+        (self.proc / "99").mkdir()
+        (self.proc / "99" / "cmdline").write_bytes(f"python3\0{self.root}/argdir/run.py\0".encode())
         time.sleep(12)
         (self.root / "young").mkdir()
 
@@ -254,6 +256,7 @@ class BoundedPassTest(unittest.TestCase):
             f"keep {self.root}/held (live: pid 4242 via an open file)",
             f"keep {self.root}/mapped (live: pid 77 via a mapped file)",
             f"keep {self.root}/envdir (live: pid 88 via TMPDIR)",
+            f"keep {self.root}/argdir (live: pid 99 via an argument)",
             f"keep {self.root}/sockdir (it holds a unix socket: {self.root}/sockdir/s.sock)",
             f"would remove {self.root}/readonly",
             f"would remove {self.root}/stale",
@@ -267,8 +270,27 @@ class BoundedPassTest(unittest.TestCase):
         self.assertEqual(self.removed(out), [f"{self.root}/readonly", f"{self.root}/stale"])
         self.assertEqual(
             sorted(os.listdir(self.root)),
-            [".X11-unix", "alink", "envdir", "held", "mapped", "sockdir", "young"],
+            [".X11-unix", "alink", "argdir", "envdir", "held", "mapped", "sockdir", "young"],
         )
+
+    def test_a_proc_too_big_for_one_argument_list_still_keeps_what_a_process_holds(self):
+        """At 22,765 processes on sami-devbox on 2026-11-16 the one find over every
+        /proc/<pid>/{fd,cwd,exe,root} was over the argument limit, exited 126, and the pass took
+        that for a finished scan that found no holder. A long scratch /proc makes 8,000 enough."""
+        self.entries("held", "stale")
+        proc = self.work / ("p" * 120) / "proc"
+        pids = range(10000, 18000)
+        for pid in pids:
+            (proc / str(pid) / "fd").mkdir(parents=True)
+            for link in ("cwd", "exe", "root"):
+                (proc / str(pid) / link).symlink_to("/dev/null")  # a file, which cleanup's chmod walk skips
+        (proc / "17999" / "fd" / "3").symlink_to(self.root / "held" / "data")
+        one_list = sum(len(f"{proc}/{pid}/{kind}") + 1 + 8 for pid in pids for kind in ("fd", "cwd", "exe", "root"))
+        self.assertGreater(one_list, os.sysconf("SC_ARG_MAX"))
+        status, out, _ = self.reap(TMP_REAP_PROC=str(proc), TMP_REAP_RUN_SECONDS="120")
+        self.assertEqual(status, 0, out)
+        self.assertIn(f"tmp-stale-reap: keep {self.root}/held (live: pid 17999 via an open file)", out)
+        self.assertEqual(self.removed(out), [f"{self.root}/stale"])
 
 
 if __name__ == "__main__":

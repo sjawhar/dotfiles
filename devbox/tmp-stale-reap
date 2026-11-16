@@ -18,9 +18,10 @@
 #     directories, systemd's private directories, snap's private tmp, the tmux server sockets,
 #     the ssh-agent and gpg-agent directories, and whatever TMP_REAP_KEEP adds);
 #   - no process this script can see holds it: not as cwd, exe or root, not an open fd, not a
-#     mapped file, and not named in TMPDIR or AGENT_SESSION_SCRATCH. One pass over /proc answers
-#     that for every candidate at once - never an lsof per candidate, which walks the whole tree
-#     (skill://disk-hygiene);
+#     mapped file, not a command-line argument, and not named in TMPDIR or AGENT_SESSION_SCRATCH
+#     (devbox/proc-holds.sh, the rule devbox/nvme-cache-cap uses too). One pass over /proc
+#     answers that for every candidate at once - never an lsof per candidate, which walks the
+#     whole tree (skill://disk-hygiene);
 #   - nothing in it, at any depth, is a unix socket, because a daemon may still be serving it;
 #   - nothing in it, at any depth, belongs to another user. A container that runs as root writes
 #     root-owned files into a directory this user made (/tmp/r22651/.coq-native on 2026-10-30),
@@ -51,6 +52,9 @@
 set -euo pipefail
 # Byte order for the name order the cursor walks: `sort` and bash's own `<` agree only in C.
 export LC_ALL=C
+# stream, next_record and proc_holds come from devbox/proc-holds.sh.
+# shellcheck source=devbox/proc-holds.sh
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/proc-holds.sh"
 
 root="${TMP_REAP_ROOT:-/tmp}"
 age_hours="${TMP_REAP_AGE_HOURS:-48}"
@@ -162,40 +166,6 @@ bounded() {
     # `timeout -s KILL` reports its own kill as 128+9.
     ((status != 137)) || return 124
     return "$status"
-}
-
-# stream LIMIT DELIM CMD...: what CMD writes, under a hard limit of LIMIT seconds, then one last
-# record `\1end<TAB>STATUS` ended by DELIM, so that next_record can tell a finished listing from
-# one cut short. It runs as the process substitution a loop reads.
-stream() {
-    local limit=$1 delim=$2 rc=0
-    shift 2
-    exec 2>/dev/null
-    if ((limit > 0)); then
-        timeout -s KILL "$limit" "$@" || rc=$?
-    else
-        rc=137
-    fi
-    printf '\1end\t%d%b' "$rc" "$delim"
-}
-
-# next_record DELIM: the next record of the stream on stdin, in $record, read within the deadline.
-# It fails at the stream's last record, with that stream's status in $stream_end, and at the
-# deadline, with "deadline" there.
-next_record() {
-    local wait=$((deadline - EPOCHSECONDS)) rc=0
-    stream_end=deadline
-    ((wait > 0)) || return 1
-    IFS= read -r -d "$1" -t "$wait" record || rc=$?
-    if ((rc != 0)); then
-        # Past 128 the read timed out; below it the stream ended without its last record.
-        ((rc > 128)) || stream_end=lost
-        return 1
-    fi
-    if [[ "$record" == $'\1end\t'* ]]; then
-        stream_end="${record#*$'\t'}"
-        return 1
-    fi
 }
 
 # save_cursor PATH: where the next pass starts; empty for the first entry. Only an --apply run
@@ -331,13 +301,10 @@ if ((${#candidate[@]} == 0)); then
     exit $((failed > 0))
 fi
 
-# Pass 2: the processes. Three reads of /proc for the whole candidate set, never one per
-# candidate: every symlink under /proc/<pid>/ (fd, cwd, exe, root) in one find, then the mapped
-# files, then TMPDIR and AGENT_SESSION_SCRATCH. Only this user's /proc entries are readable from
-# here, so another user's process holding one of these is invisible; the owner gate in pass 1 and
-# the age window are what cover that (devbox/tmp-stale-reap.md). A read of a process's maps or
-# environ waits on that process's memory lock, which a process stuck in a page fault on a stalled
-# disk holds, so each read is a stream under the deadline too.
+# Pass 2: the processes, read by devbox/proc-holds.sh: one read of /proc per kind for the whole
+# candidate set, never one per candidate. Only this user's fd, maps and environ are readable from
+# here, so another user's process holding one of these that way is invisible; the owner gate in
+# pass 1 and the age window are what cover that (devbox/tmp-stale-reap.md).
 declare -A held=()
 mark() { # mark PID HOW PATH
     local path="$3" top
@@ -348,42 +315,11 @@ mark() { # mark PID HOW PATH
     held["$top"]="pid $1 via $2"
 }
 # A scan that did not finish leaves liveness unknown, and nothing is removed on an unknown.
-proc_scan_done() {
-    ((EPOCHSECONDS < deadline)) || stop "$cursor" "the scan of $proc"
-    if [[ ! "$stream_end" =~ ^[0-9]+$ || "$stream_end" == 137 ]]; then
-        echo "tmp-stale-reap: $root: the scan of $proc ended early ($stream_end); nothing removed in this pass" >&2
-        exit 1
-    fi
-}
-
-while next_record $'\n'; do
-    link="${record%%$'\t'*}"
-    target="${record#*$'\t'}"
-    pid="${link#"$proc"/}"
-    pid="${pid%%/*}"
-    kind="${link##*/}"
-    [[ "$kind" =~ ^[0-9]+$ ]] && kind="an open file"
-    mark "$pid" "$kind" "$target"
-done < <(stream "$((deadline - EPOCHSECONDS))" '\n' \
-    find "$proc"/[0-9]*/fd "$proc"/[0-9]*/cwd "$proc"/[0-9]*/exe "$proc"/[0-9]*/root \
-    -maxdepth 1 -ignore_readdir_race -type l -printf '%p\t%l\n')
-proc_scan_done
-
-while next_record $'\n'; do
-    pid="${record#"$proc"/}"
-    pid="${pid%%/*}"
-    mark "$pid" "a mapped file" "${record#*:}"
-done < <(stream "$((deadline - EPOCHSECONDS))" '\n' grep -Ho -- "${root}/[^[:space:]]*" "$proc"/[0-9]*/maps)
-proc_scan_done
-
-while next_record ''; do
-    pid="${record#"$proc"/}"
-    pid="${pid%%/*}"
-    value="${record#*:}"
-    mark "$pid" "${value%%=*}" "${value#*=}"
-done < <(stream "$((deadline - EPOCHSECONDS))" '\0' \
-    grep -zaoH -E "(TMPDIR|AGENT_SESSION_SCRATCH)=${root}/[^[:space:]]*" "$proc"/[0-9]*/environ)
-proc_scan_done
+if ! proc_holds "$proc" "$root" mark TMPDIR AGENT_SESSION_SCRATCH; then
+    [[ "$stream_end" != deadline ]] || stop "$cursor" "the scan of $proc"
+    echo "tmp-stale-reap: $root: the scan of $proc ended early ($stream_end); nothing removed in this pass" >&2
+    exit 1
+fi
 
 # Pass 3: the tree. One walk per candidate that stops at the first thing vetoing it, so a live
 # tree costs almost nothing and only a tree that is really going is walked in full. A walk that
