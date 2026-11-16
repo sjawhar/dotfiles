@@ -1569,6 +1569,12 @@ class AgentboxMove(unittest.TestCase):
         subprocess.run([tmux, "-S", sock, "-f", "/dev/null", "new-session", "-d", "-s", "move", "sleep 600"],
                        env=env, check=True, capture_output=True, timeout=30)
         self.addCleanup(subprocess.run, [tmux, "-S", sock, "kill-server"], env=env, capture_output=True, timeout=30)
+        # tearDown removes the fixture tree, the socket with it, before any cleanup runs, so the
+        # kill-server above reaches nothing: every run left this server and its respawned pane's
+        # `bash -i` (30 of them on sami-devbox on 2026-11-16, the oldest 9 days old). By pid it goes.
+        server = int(subprocess.check_output([tmux, "-S", sock, "display-message", "-p", "#{pid}"],
+                                             env=env, text=True, timeout=30).strip())
+        self.addCleanup(lambda: os.path.exists(f"/proc/{server}") and os.kill(server, signal.SIGTERM))
         pane = subprocess.check_output([tmux, "-S", sock, "display-message", "-p", "#{pane_id}"],
                                        env=env, text=True, timeout=30).strip()
         run = self.run_bash('move_own_omp() { return 1; }\ncmd_move_self --only-dirs --dir "$HOME"', {
