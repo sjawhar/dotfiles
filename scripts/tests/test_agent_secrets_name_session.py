@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """scripts/agent-secrets-name-session: a Claude Code session names itself to the secrets helper.
 
-Claude Code's SessionStart hook (.claude/settings.json) runs it with the hook's JSON on stdin. It
-runs `agent-secrets register --session-id <session_id>` only after `agent-secrets identity` exits
-0, which on a host means the caller is inside a session the helper registered
-(dispatch://INFRA-3848). It does nothing in an agent box, with no helper socket, or with no
-session id, and a refusal writes one line on stderr and exits 0: a hook never stops the start.
+Claude Code's async SessionStart hook (.claude/settings.json) runs it with the hook's JSON on
+stdin. It runs `agent-secrets register --session-id <session_id>` only after `agent-secrets
+identity` exits 0 (dispatch://INFRA-3848). It does nothing in an agent box, with no helper socket,
+or with no session id. A refusal writes one line on stderr and exits 0. Claude owns the background
+process and collects its output without delaying session start; the script keeps its parent link.
 The hook is registered for the sources startup, resume and clear and not compact, so it fires
 once for each session id in a process; SessionStart does not fire for a subagent.
 
-Technique: a stub `agent-secrets` first on PATH appends each argv to a file and exits as the test
-says, and a listening Unix socket stands in for the helper's.
+Technique: assert the native async setting, then keep the real script as a child while the fake
+helper delays each call. The fake helper logs argv, returns controlled status, and a listening
+Unix socket stands in for the helper's. Hung calls must still end at the script's own deadlines.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -31,8 +33,13 @@ SESSION = "6f1c2b7e-1d1a-4c55-9a8e-0b2d3f4a5c6d"
 STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
 case "$1" in
-identity) exit "${FAKE_IDENTITY_EXIT:-0}" ;;
-register) [ -n "$FAKE_REGISTER_ERR" ] && printf '%s\\n' "$FAKE_REGISTER_ERR" >&2; exit "${FAKE_REGISTER_EXIT:-0}" ;;
+identity) sleep "${FAKE_IDENTITY_DELAY:-0}"; exit "${FAKE_IDENTITY_EXIT:-0}" ;;
+register)
+    sleep "${FAKE_REGISTER_DELAY:-0}"
+    [ -n "$FAKE_REGISTER_ERR" ] && printf '%s\\n' "$FAKE_REGISTER_ERR" >&2
+    [ -n "${NAMED:-}" ] && touch "$NAMED"
+    exit "${FAKE_REGISTER_EXIT:-0}"
+    ;;
 esac
 """
 
@@ -53,7 +60,7 @@ class NameSessionTest(unittest.TestCase):
         self.listener.listen()
         self.addCleanup(self.listener.close)
 
-    def run_hook(self, payload: dict, **env: str) -> subprocess.CompletedProcess[str]:
+    def hook_env(self, **env: str) -> dict[str, str]:
         base = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.tmp),
@@ -62,8 +69,12 @@ class NameSessionTest(unittest.TestCase):
             "XDG_RUNTIME_DIR": str(self.tmp / "run"),
         }
         base.update(env)
+        return base
+
+    def run_hook(self, payload: dict, timeout: float = 30, **env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(SCRIPT)], input=json.dumps(payload), env=base, capture_output=True, text=True, timeout=30
+            [str(SCRIPT)], input=json.dumps(payload), env=self.hook_env(**env),
+            capture_output=True, text=True, timeout=timeout,
         )
 
     def logged(self) -> list[str]:
@@ -73,6 +84,51 @@ class NameSessionTest(unittest.TestCase):
         done = self.run_hook({"session_id": SESSION, "hook_event_name": "SessionStart", "source": "startup"})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
+
+    def test_async_session_start_names_after_the_slow_helper_answers(self) -> None:
+        hooks = json.loads(SETTINGS.read_text())["hooks"]["SessionStart"]
+        hook = next(hook for entry in hooks for hook in entry["hooks"]
+                    if hook.get("command") == "agent-secrets-name-session")
+        self.assertIs(hook.get("async"), True, "session start waits for the helper")
+        for delayed_call in ("IDENTITY", "REGISTER"):
+            with self.subTest(delayed_call=delayed_call):
+                self.calls.unlink(missing_ok=True)
+                named = self.tmp / f"named-{delayed_call}"
+                with subprocess.Popen(
+                    [str(SCRIPT)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True,
+                    env=self.hook_env(NAMED=str(named), **{f"FAKE_{delayed_call}_DELAY": "2"}),
+                ) as process:
+                    # Claude owns the async process; keep that parent link here too.
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        process.communicate(json.dumps({"session_id": SESSION, "source": "startup"}), timeout=0.5)
+                    self.assertFalse(named.exists(), "the delayed helper has already finished naming")
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 0, stderr)
+                self.assertEqual((stdout, stderr), ("", ""))
+                self.assertTrue(named.exists(), "the background hook never named the session")
+                self.assertEqual(self.logged(), ["identity", f"register --session-id {SESSION}"])
+
+    def test_each_helper_call_keeps_its_own_deadline(self) -> None:
+        for delayed_call in ("IDENTITY", "REGISTER"):
+            with self.subTest(delayed_call=delayed_call):
+                self.calls.unlink(missing_ok=True)
+                started = time.monotonic()
+                done = self.run_hook(
+                    {"session_id": SESSION, "source": "startup"}, timeout=13,
+                    **{f"FAKE_{delayed_call}_DELAY": "30"},
+                )
+                self.assertLess(time.monotonic() - started, 13)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(done.stdout, "")
+                expected = ["identity"]
+                if delayed_call == "REGISTER":
+                    expected.append(f"register --session-id {SESSION}")
+                    self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+                    self.assertIn(f"register --session-id {SESSION} failed", done.stderr)
+                else:
+                    self.assertEqual(done.stderr, "")
+                self.assertEqual(self.logged(), expected)
 
     def test_finds_the_helpers_default_socket(self) -> None:
         run = self.tmp / "run" / "agent-secrets"
