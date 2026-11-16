@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import os
 import pwd
+import random
 import re
 import signal
 import socket
@@ -103,9 +104,20 @@ def option_values(tokens: list[str], name: str) -> set[str]:
 
 
 def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+    """A port free now and below the kernel's ephemeral range (32768-60999 by default), so no
+    other process's bind(0) or outgoing connect is handed it before ssh binds it. A port from
+    bind(0) is ephemeral: on sami-devbox, where many sessions run tests, another process took one
+    between this pick and ssh's bind, and read_forward read b"" from that stranger before ssh had
+    even authenticated, so the next assertion failed on an ssh that forwarded nothing."""
+    low = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[0])
+    for port in random.sample(range(20000, min(low, 32768)), 200):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            try:
+                listener.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("no free port below the ephemeral range")
 
 
 def stop_process(process: subprocess.Popen[str]) -> None:
