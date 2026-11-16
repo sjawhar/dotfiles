@@ -42,6 +42,10 @@ case "$*" in
     */v1/sessions*) cat "$CURL_SESSIONS" ;;
     *) echo '{"ok":true}' ;;
 esac
+# The status, where the caller asks for it as scripts/envoy's send does (-w '\n%{http_code}').
+for a in "$@"; do
+    if [ "$a" = '\n%{http_code}' ]; then printf '\n200'; fi
+done
 """
 
 

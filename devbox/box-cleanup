@@ -380,6 +380,17 @@ json.dump({
 open(path, "a").write("\n")
 PY
 
+# posted PATH BODY: exit 0 only when the listener answers PATH with 200. A role publish that no
+# live session holds is answered 202, a 2xx that `curl -f` passes: the listener keeps the copy
+# for the role's next holder for one hour (cybermonklabs/legion#4079), so nobody has the alert
+# now, and the SRE's session must still be told, as on a 404.
+posted() {
+    local code
+    code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' -d "$2" "$envoy_url$1" 2>/dev/null) || true
+    [[ "$code" == 200 ]]
+}
+
 # tell MESSAGE: the role topic, and the SRE's session when nothing holds the role. Failing to
 # send is said in the journal and never swallowed: an alert nobody got is the thing this job
 # exists to prevent.
@@ -387,13 +398,11 @@ tell() {
     local message="$1" body sent=no
     message="${message:0:$MESSAGE_LIMIT}"
     body="{\"topic\": \"$BOX_HEALTH_TOPIC\", \"message\": \"$(json_string "$message")\", \"source\": \"envoy\"}"
-    if curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
-        -d "$body" "$envoy_url/v1/messages/publish" >/dev/null 2>&1; then
+    if posted /v1/messages/publish "$body"; then
         sent=yes
     else
         body="{\"target_session\": \"$BOX_HEALTH_FALLBACK_SESSION\", \"message\": \"$(json_string "$message")\", \"source\": \"envoy\"}"
-        if curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
-            -d "$body" "$envoy_url/v1/messages/send" >/dev/null 2>&1; then
+        if posted /v1/messages/send "$body"; then
             sent=yes
         fi
     fi
