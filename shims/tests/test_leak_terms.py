@@ -37,10 +37,15 @@ AGENT_MARKERS = (
     "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
     "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
 )
-# A launch may start this many tasks beyond the ones this uid has when it starts. A shim or editor that
-# recurses (an earlier draft of this file fork-bombed its machine) then fails to fork instead of exhausting the
-# shared uid's tasks. The cap is read at each launch, not once per test: other sessions of the uid start and end
-# threads all the time, and a cap read at the test's start refused git's own forks after they grew by the margin.
+# A launch may start this many tasks of its own. A shim or editor that recurses (an earlier draft of this file
+# fork-bombed its machine) then fails to fork instead of exhausting the shared uid's tasks. Where a user manager
+# answers, the launch runs in a transient scope of its own whose TasksMax is the margin (task_scope), so the bound
+# is the launch's own tasks and nothing else. RLIMIT_NPROC counts every task of the uid, on the whole machine:
+# capped at this uid's live tasks plus the margin, a launch failed whenever other sessions of the uid grew by the
+# margin while it ran. On sami-devbox the uid holds about 60,000 tasks and moves by 2,000 in 30 s, and 160 of this
+# file's cases failed with "fork: retry: Resource temporarily unavailable" on 2026-11-16 (6 of 30 plain `bash`
+# launches under that cap, the same hour). Where no user manager answers (a pod, CI), the RLIMIT_NPROC cap is kept,
+# read at each launch.
 TASK_MARGIN = 1000
 LAUNCH_TIMEOUT = 120
 AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
@@ -73,6 +78,34 @@ def live_tasks() -> int:
         # This process is one of them, so a count of 0 means /proc showed nothing of this uid.
         raise AssertionError("no task of this uid is readable in /proc (UNKNOWN)")
     return count
+
+
+# Runs ARGV with the environment and the deletion of a JSON file named by sys.argv[1], and with the descriptor
+# STDIN on 0 when the spec names one: the in-scope half of a launch, so systemd-run gets the caller's environment
+# (its bus) and the command exactly the test's.
+EXEC_FROM_FILE = (
+    "import json, os, sys\n"
+    "path = sys.argv[1]\n"
+    "with open(path, encoding='utf-8') as source:\n"
+    "    spec = json.load(source)\n"
+    "os.unlink(path)\n"
+    "if spec['stdin'] is not None:\n"
+    "    os.dup2(spec['stdin'], 0)\n"
+    "    os.close(spec['stdin'])\n"
+    "os.execvpe(spec['argv'][0], spec['argv'], spec['env'])\n"
+)
+
+
+@lru_cache(maxsize=1)
+def task_scope() -> tuple[str, ...]:
+    """The argv that runs a command in a transient user scope of its own, before `-p TasksMax=N -- command`, or
+    () where the user manager cannot make one (no systemd user instance, a pod, CI)."""
+    command = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+    try:
+        probe = subprocess.run([*command, "-p", "TasksMax=8", "--", "true"], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    return command if probe.returncode == 0 else ()
 
 
 # Each test term as the scanner matches it: case folded, each run of whitespace in the term any run of spaces and
@@ -158,36 +191,61 @@ class LeakTestCase(unittest.TestCase):
         pass_fds: tuple[int, ...] = (),
         stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
-        """ARGV in a session and process group of its own, its tasks capped at this uid's live tasks plus
-        self.task_margin (RLIMIT_NPROC), stdin the descriptor STDIN, else /dev/null unless INPUT is given. A command
-        that outlives TIMEOUT fails the test after its whole process group is killed, descendants holding its pipes
-        included."""
-        _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        task_limit = live_tasks() + self.task_margin
-        limit = task_limit if hard == resource.RLIM_INFINITY else min(task_limit, hard)
+        """ARGV in a session and process group of its own, its own tasks capped at self.task_margin (a user scope's
+        TasksMax where task_scope can make one, else RLIMIT_NPROC at this uid's live tasks plus the margin), stdin
+        the descriptor STDIN, else /dev/null unless INPUT is given. A command that outlives TIMEOUT fails the test
+        after its whole process group is killed, descendants holding its pipes included."""
+        scope = task_scope()
+        spec_path = None
+        if scope:
+            # systemd-run runs with this process's environment, which reaches the user manager, and execs in place,
+            # so the pid, session, cwd and descriptors are the command's; the command gets ENV from the spec file.
+            descriptor, spec_path = tempfile.mkstemp(prefix="leak-launch-", suffix=".json")
+            with os.fdopen(descriptor, "w", encoding="utf-8") as spec:
+                json.dump({"argv": [os.fspath(part) for part in argv],
+                           "env": dict(os.environ) if env is None else env, "stdin": stdin}, spec)
+            command = [*scope, "-p", f"TasksMax={self.task_margin}", "--", sys.executable, "-c", EXEC_FROM_FILE,
+                       spec_path]
+            command_env = None
+            preexec = None
+        else:
+            _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+            task_limit = live_tasks() + self.task_margin
+            limit = task_limit if hard == resource.RLIM_INFINITY else min(task_limit, hard)
 
-        def cap_tasks() -> None:
-            resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
+            def preexec() -> None:
+                resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
 
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=stdin if stdin is not None else subprocess.DEVNULL if input is None else subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=text,
-            start_new_session=True,
-            preexec_fn=cap_tasks,
-            pass_fds=pass_fds,
-        )
+            command, command_env = argv, env
+        child_stdin = stdin if stdin is not None else subprocess.DEVNULL if input is None else subprocess.PIPE
+        child_fds = pass_fds
+        if scope and stdin is not None:
+            # The Python step starts on /dev/null and puts STDIN on 0 itself: a test's stdin can be one Python
+            # cannot start on (a directory: "init_sys_streams: <stdin> is a directory").
+            child_stdin, child_fds = subprocess.DEVNULL, (*pass_fds, stdin)
         try:
-            stdout, stderr = process.communicate(input, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # The leader is not reaped yet, so its pid still names this group.
-            os.killpg(process.pid, signal.SIGKILL)
-            _, stderr = process.communicate(timeout=30)
-            self.fail(f"{argv[0]} ran past {timeout} s; its process group was killed: {stderr!r}")
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=command_env,
+                stdin=child_stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=text,
+                start_new_session=True,
+                preexec_fn=preexec,
+                pass_fds=child_fds,
+            )
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # The leader is not reaped yet, so its pid still names this group.
+                os.killpg(process.pid, signal.SIGKILL)
+                _, stderr = process.communicate(timeout=30)
+                self.fail(f"{argv[0]} ran past {timeout} s; its process group was killed: {stderr!r}")
+        finally:
+            if spec_path is not None:
+                Path(spec_path).unlink(missing_ok=True)  # left only when the scope never ran the command
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     def assert_hidden(self, *outputs: object) -> None:
