@@ -135,6 +135,21 @@ exit 0''')
         write_stub(self.stubs, "envoy", 'exit 0')
         write_stub(self.stubs, "agent-secrets", 'printf "%s\\n" "$*" >>"$STUB_SECRETS"; exit 0')
         write_stub(self.stubs, "mountpoint", 'exit 1')
+        # `rm` and `find` are the real ones, except on a path under $STUB_RM_FAIL, which rm leaves
+        # in place and fails on (as on a file it may not remove), and under $STUB_FIND_FAIL, which
+        # find says it cannot read and fails on. Both work as root, where file modes do not.
+        write_stub(self.stubs, "rm", '''for a in "$@"; do
+    if [[ -n "${STUB_RM_FAIL:-}" && "$a" == "$STUB_RM_FAIL"* ]]; then
+        echo "rm: cannot remove '$a': Operation not permitted" >&2; exit 1
+    fi
+done
+exec /bin/rm "$@"''')
+        write_stub(self.stubs, "find", '''for a in "$@"; do
+    if [[ -n "${STUB_FIND_FAIL:-}" && "$a" == "$STUB_FIND_FAIL"* ]]; then
+        echo "find: '$a': Permission denied" >&2; exit 1
+    fi
+done
+exec /usr/bin/find "$@"''')
         # No test may mount or unmount anything for real: sudo only logs.
         write_stub(self.stubs, "sudo", 'printf "%s\\n" "$*" >>"$STUB_SUDO"; exit "${STUB_SUDO_RC:-1}"')
         for name in ("STUB_CONTAINERS", "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE",
@@ -167,11 +182,13 @@ exit 0''')
                 "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM", "STUB_SYSTEMCTL")},
             "STUB_CONTAINER_FINISHED": str(self.root / "STUB_CONTAINER_FINISHED"),
         }
+        self.idle_process()
 
     # ── fixtures ────────────────────────────────────────────────────────────────────────────
-    def run_bash(self, script: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def run_bash(self, script: str, extra_env: dict[str, str] | None = None, *,
+                 unprivileged: bool = False) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "-c", f'source "{AGENTBOX}"\n{script}'],
+            [*(self.unprivileged() if unprivileged else []), "bash", "-c", f'source "{AGENTBOX}"\n{script}'],
             capture_output=True, text=True, check=False, timeout=self.TIMEOUT,
             env={**self.env, **(extra_env or {})}, start_new_session=True,
         )
@@ -191,6 +208,34 @@ exit 0''')
     def exits_tally(self) -> str:
         path = self.root / "agentbox-exits.tsv"
         return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def idle_process(self) -> None:
+        """A process of this user standing in /, as the collector's own always is in the real
+        /proc: a walk that finds no process at all cannot tell who stands where."""
+        d = self.proc / "1"
+        d.mkdir(parents=True, exist_ok=True)
+        if not os.path.lexists(d / "cwd"):
+            os.symlink("/", d / "cwd")
+        (d / "cgroup").write_text("0::/init.scope\n", encoding="utf-8")
+
+    SCRATCH_UID = 65534
+
+    def unprivileged(self) -> list[str]:
+        """Root reads a file of mode 000, so as root the command runs as a scratch uid that owns
+        the whole fixture tree (setpriv, util-linux); as any other user it runs as that user."""
+        if os.geteuid() != 0:
+            return []
+        setpriv = shutil.which("setpriv")
+        self.assertIsNotNone(setpriv, "as root this test drops to a scratch uid with setpriv (util-linux)")
+        for root, dirs, files in os.walk(self.root):
+            for name in dirs + files:
+                os.chown(Path(root) / name, self.SCRATCH_UID, self.SCRATCH_UID, follow_symlinks=False)
+        os.chown(self.root, self.SCRATCH_UID, self.SCRATCH_UID)
+        argv = [setpriv, f"--reuid={self.SCRATCH_UID}", f"--regid={self.SCRATCH_UID}", "--clear-groups", "--"]
+        reach = subprocess.run([*argv, "test", "-r", str(AGENTBOX), "-a", "-w", str(self.root)],
+                               capture_output=True, text=True, check=False)
+        self.assertEqual(reach.returncode, 0, f"uid {self.SCRATCH_UID} cannot reach {self.root} or {AGENTBOX}")
+        return argv
 
     def git(self, *args: str, cwd: Path) -> None:
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
@@ -346,15 +391,13 @@ exit 0''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"rm -fv {box}", self.stub_log("STUB_DOCKER_RM"))
 
-    def test_a_new_box_gets_nothing_of_an_earlier_box(self) -> None:
-        """The seed of a new box's home from what a close carried out goes too: a launch with
-        `--resume` of a session that has such a copy starts with an empty home."""
-        copy = self.root / "state" / "agentbox" / "box-homes" / SID / "agentbox-000000000000-20261115T000000Z"
-        copy.mkdir(parents=True)
-        (copy / "notes.md").write_text("from the last box\n", encoding="utf-8")
-        (self.home / ".config").mkdir()
-        (self.home / ".omp" / "agent" / "sessions").mkdir(parents=True)
-        (self.root / "src" / "repo1").mkdir(parents=True)
+    def launch(self, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        """`agentbox new repo1 -- omp --resume SID`, every host step stubbed. `$DOTFILES_DIR/
+        scripts/agentbox` is a stub that logs each call and its TMUX_PANE to $COLLECT_CALLS: the
+        collector a launch starts runs from a copy of that file (collect_start)."""
+        (self.home / ".config").mkdir(exist_ok=True)
+        (self.home / ".omp" / "agent" / "sessions").mkdir(parents=True, exist_ok=True)
+        (self.root / "src" / "repo1").mkdir(parents=True, exist_ok=True)
         run_args = self.root / "run-args"
         write_stub(self.stubs, "docker", r'[[ "$1" == run ]] && { shift; printf "%s\n" "$@" >"$STUB_RUN_ARGS"; }; exit 0')
         for name in ("git", "sleep"):
@@ -364,6 +407,8 @@ exit 0''')
         write_stub(self.stubs, "df", "printf 'Avail\\n%s\\n' 1099511627776")
         dot = self.root / "dotfiles"
         write_stub(dot / "scripts", "envoy-nats-seed", "exit 1")
+        write_stub(dot / "scripts", "agentbox",
+                   'printf "%s pane=[%s]\\n" "$*" "${TMUX_PANE:-}" >>"$COLLECT_CALLS"; exit 0')
         # The real snapshot, which writes the box's private Docker config and its (empty) bind
         # list into the fixture's box tree, and a fixture secretsd socket for mount_args, which
         # refuses a box with none: this test reads mount_args' real work, and neither the host's
@@ -381,12 +426,21 @@ exit 0''')
             "image_tag() { echo agentbox:test; }; build_image() { :; }; ensure_forwarders() { :; }\n"
             f"ensure_network() {{ NETWORK_GATEWAY={GATEWAY} NETWORK_SUBNET=172.31.0.0/16; }}\n"
             "clone_checkout() { :; }; close_box() { :; }; box_cache_mounts() { :; }\n"
-            "forward_channels() { FORWARD_CHANNELS=(); }; collect_start() { :; }\n"
+            "forward_channels() { FORWARD_CHANNELS=(); }\n"
             f"SECRETSD_SOCK={secretsd}\n"
         )
-        result = self.run_bash(f"{no_host}cmd_new repo1 -- omp --resume {SID}", {
+        return self.run_bash(f"{no_host}cmd_new repo1 -- omp --resume {SID}", {
             "DOTFILES_DIR": str(dot), "AGENTBOX_SRC": str(self.root / "src"), "STUB_RUN_ARGS": str(run_args),
-            "AGENT_SECRETS_URL": "https://broker.example", "AGENTBOX_DURABLE": str(self.root / "durable")})
+            "AGENT_SECRETS_URL": "https://broker.example", "AGENTBOX_DURABLE": str(self.root / "durable"),
+            "COLLECT_CALLS": str(self.root / "COLLECT_CALLS"), **(extra_env or {})})
+
+    def test_a_new_box_gets_nothing_of_an_earlier_box(self) -> None:
+        """The seed of a new box's home from what a close carried out goes too: a launch with
+        `--resume` of a session that has such a copy starts with an empty home."""
+        copy = self.root / "state" / "agentbox" / "box-homes" / SID / "agentbox-000000000000-20261115T000000Z"
+        copy.mkdir(parents=True)
+        (copy / "notes.md").write_text("from the last box\n", encoding="utf-8")
+        result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr[-3000:])
         (box,) = [p for p in self.boxes.iterdir()]
         self.assertEqual(sorted(p.name for p in (box / "home").iterdir()), [], "the new box's home starts empty")
@@ -441,14 +495,13 @@ exit 0''')
         """`enrollment-session` is there but cannot be read: the recorded id can be a session's,
         so nothing is revoked and the lease ends it, as #66's unenroll_box does; the run dir still
         goes."""
-        if os.geteuid() == 0:
-            self.skipTest("root reads a file of mode 000")
         self.leftover(OLD)
         (self.run_base / OLD / "enrollment-id").write_text("enr-own\n", encoding="utf-8")
         (self.run_base / OLD / "enrollment-session").write_text(f"{SID}\n", encoding="utf-8")
         (self.run_base / OLD / "enrollment-session").chmod(0)
         age(self.run_base / OLD, 2)
-        result = self.collect()
+        # Root reads a file of mode 000: as root, this runs as a scratch uid that owns the fixture.
+        result = self.run_bash("cmd_collect", unprivileged=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("unenroll", self.stub_log("STUB_SECRETS"))
         self.assertIn("left to end with its lease", result.stdout + result.stderr)
@@ -498,15 +551,10 @@ exit 0''')
         }
         for name, make in cases.items():
             with self.subTest(name):
-                for p in (self.boxes / OLD, self.cache / OLD, self.run_base / OLD, self.proc):
-                    if p.exists():
-                        for root, dirs, _ in os.walk(p):
-                            for d in dirs:
-                                os.chmod(Path(root) / d, 0o755)
-                        shutil.rmtree(p)
-                for p in self.disks.iterdir():
-                    p.unlink()
+                self.forget(OLD)
+                shutil.rmtree(self.proc)
                 self.proc.mkdir()
+                self.idle_process()
                 self.set_containers()
                 self.set_container_state("exited")
                 (self.root / "STUB_PS_FAIL").write_text("", encoding="utf-8")
@@ -517,7 +565,10 @@ exit 0''')
                 self.assertTrue((self.boxes / OLD).exists(), result.stdout)
                 self.assertTrue((self.run_base / OLD).exists(), result.stdout)
                 self.assertTrue((self.disks / f"{OLD}.info").exists(), result.stdout)
-                self.assertIn(f"{OLD} kept", result.stdout)
+                self.assertIn(f"{OLD} not removed:", result.stdout)
+                self.assertIn("remove it with:", result.stdout)
+                self.assertIn(str(self.boxes / OLD), result.stdout.split("remove it with:", 1)[1])
+                self.assertNotIn("kept", result.stdout + result.stderr)
                 self.assertEqual(self.stub_log("STUB_DOCKER_RM"), "")
         with self.subTest("it is younger than one hour"):
             self.leftover(YOUNG, hours=0.5)
@@ -577,7 +628,8 @@ exit 0''')
             result = self.collect()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(self.stub_log("STUB_DOCKER_RM"), "")
-            self.assertIn(f"{box} kept: its container ended", result.stdout)
+            self.assertIn(f"{box} not removed: its container ended", result.stdout)
+            self.assertIn(f"remove it with: docker rm -fv {box}", result.stdout)
         with self.subTest("it ended two hours ago"):
             self.finished.write_text(
                 time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime(time.time() - 7200)) + "\n",
@@ -595,7 +647,96 @@ exit 0''')
             self.finished.write_text("0001-01-01T00:00:00Z-not-a-time\n", encoding="utf-8")
             result = self.collect()
             self.assertEqual(self.stub_log("STUB_DOCKER_RM"), "")
-            self.assertIn(f"{box} kept", result.stdout)
+            self.assertIn(f"{box} not removed", result.stdout)
+
+    def test_a_removal_that_fails_is_said_with_its_command_never_as_removed(self) -> None:
+        """A place of the box that cannot be removed is a failure line naming the command that
+        removes what is left; the collector then does not say the box was removed, and the end of a
+        box says it too. rm fails here on the path the test names (STUB_RM_FAIL), as root too."""
+        places = {
+            "its cache": lambda box: self.cache / box,
+            "its run dir": lambda box: self.run_base / box,
+            "its image": lambda box: self.disks / f"{box}.img",
+        }
+        for name, place in places.items():
+            with self.subTest("the collector", place=name):
+                self.forget(OLD)
+                self.leftover(OLD, image=True)
+                result = self.collect({"STUB_RM_FAIL": str(place(OLD))})
+                said = result.stdout + result.stderr
+                self.assertTrue(os.path.lexists(place(OLD)), said)
+                self.assertNotIn(f"{OLD} removed", said)
+                self.assertIn(f"removing {OLD} failed", said)
+                self.assertRegex(said, rf"failed[^\n]*{place(OLD)}[^\n]*with: [^\n]*rm -[rf]+ [^\n]*{place(OLD)}")
+                self.assertNotIn("kept", said)
+                self.assertNotIn("left in place", said)
+            with self.subTest("the end of a box", place=name):
+                box = "agentbox-0123456789ab"
+                self.forget(box)
+                self.leftover(box, image=True, hours=0)
+                result = self.run_bash(f"close_box {box} {SID} repo", {"STUB_RM_FAIL": str(place(box))})
+                said = result.stdout + result.stderr
+                self.assertTrue(os.path.lexists(place(box)), said)
+                self.assertRegex(said, rf"removing [^\n]*{place(box)}[^\n]*failed[^\n]*with: [^\n]*rm -[rf]+ [^\n]*{place(box)}")
+                self.assertNotIn("left in place", said)
+
+    def test_a_walk_that_cannot_read_keeps_the_box_and_says_why(self) -> None:
+        """What the collector could not read is no answer: a process of this user whose working
+        directory it cannot read could stand in the box, a walk of the processes that found none
+        saw nothing, and an age walk that failed did not show the files are old. Each keeps the box,
+        with a line that says what could not be read and the command that removes it."""
+        cases = {
+            "a process's working directory": (lambda: self.unreadable_cwd(), {},
+                                              "cannot tell whether a process stands in it: process 6161"),
+            "a walk that found no process": (lambda: shutil.rmtree(self.proc / "1"), {},
+                                             "cannot tell whether a process stands in it: the walk of"),
+            "the age of its files": (lambda: None, {"STUB_FIND_FAIL": str(self.boxes / OLD)},
+                                     "cannot tell how old its files are: find: "),
+        }
+        for name, (make, env, why) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                shutil.rmtree(self.proc / "6161", ignore_errors=True)
+                self.idle_process()
+                self.leftover(OLD)
+                make()
+                result = self.collect(env)
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, said)
+                self.assertTrue((self.boxes / OLD).exists(), said)
+                self.assertTrue((self.run_base / OLD).exists(), said)
+                self.assertIn(f"{OLD} not removed: {why}", said)
+                self.assertIn("remove it with:", said)
+                self.assertNotIn(f"{OLD} removed", said)
+        with self.subTest("the control: with every walk readable the box goes"):
+            self.forget(OLD)
+            shutil.rmtree(self.proc / "6161", ignore_errors=True)
+            self.idle_process()
+            self.leftover(OLD)
+            result = self.collect()
+            self.assertEqual(self.gone(OLD), [], result.stdout + result.stderr)
+            self.assertIn(f"{OLD} removed", result.stdout)
+
+    def unreadable_cwd(self) -> None:
+        """A process of this user whose working directory the walk cannot read: `cwd` is not a
+        link the walk can read (as a process's is when it may not be inspected)."""
+        d = self.proc / "6161"
+        d.mkdir()
+        (d / "cwd").write_text("", encoding="utf-8")
+        (d / "cgroup").write_text("0::/user.slice/app.slice/bash.scope\n", encoding="utf-8")
+
+    def forget(self, box: str) -> None:
+        """Remove whatever an earlier subtest left of BOX, read-only directories included."""
+        for p in (self.boxes / box, self.cache / box, self.run_base / box):
+            if not p.exists():
+                continue
+            for root, dirs, _ in os.walk(p):
+                for d in dirs:
+                    if not (Path(root) / d).is_symlink():
+                        os.chmod(Path(root) / d, 0o755)
+            shutil.rmtree(p)
+        for p in self.disks.glob(f"{box}.*"):
+            p.unlink()
 
     def test_collectors_run_one_at_a_time(self) -> None:
         self.leftover(OLD)
@@ -611,22 +752,18 @@ exit 0''')
         self.assertEqual(self.gone(OLD), [], result.stdout)
 
     def test_agentbox_new_starts_the_collector_detached(self) -> None:
-        """collect_start detaches the collector from the launcher's pane and drops TMUX_PANE
-        (close_box's attention step must never run for the live pane from there); every box starts
-        one, a session's first box too."""
+        """`agentbox new` starts the collector, every box, a session's first box too, detached from
+        the launcher's pane and without TMUX_PANE (close_box's attention step must never run for the
+        live pane from there). Driven through cmd_new, so a launch that no longer calls
+        collect_start fails it."""
         calls = self.root / "COLLECT_CALLS"
-        fake = self.root / "fake-dotfiles"
-        write_stub(fake / "scripts", "agentbox",
-                   'printf "%s pane=[%s]\\n" "$*" "${TMUX_PANE:-}" >>"$COLLECT_CALLS"; exit 0')
-        # After the source, not in the environment: the script reads real files of DOTFILES_DIR
-        # while it loads (agent-secrets/broker-url.sh).
-        result = self.run_bash(f'DOTFILES_DIR="{fake}"\ncollect_start\nwait',
-                               {"COLLECT_CALLS": str(calls), "TMUX_PANE": "%42"})
-        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.launch({"TMUX_PANE": "%42"})
+        self.assertEqual(result.returncode, 0, result.stderr[-3000:])
         for _ in range(100):
             if calls.exists() and calls.read_text(encoding="utf-8"):
                 break
             time.sleep(0.1)
+        self.assertTrue(calls.exists(), "the launch started no collector")
         self.assertEqual(calls.read_text(encoding="utf-8").strip(), "collect pane=[]")
 
     # ── the session's broker enrollment ─────────────────────────────────────────────────────
@@ -730,8 +867,6 @@ exit 0''')
         output, before it looked at the boxes after it. session_live_box reads past both: with no
         live box after them it answers 2 (they can be boxes of the session), and with one it names
         that box."""
-        if os.geteuid() == 0:
-            self.skipTest("root reads a file of mode 000")
         folder, locked = "agentbox-adir00000001", "agentbox-alock0000002"
         live, mine = "agentbox-live00000003", "agentbox-mine00000004"
         for box in (folder, locked, mine):
@@ -742,11 +877,12 @@ exit 0''')
         (record / "entry").write_text("", encoding="utf-8")  # a directory with an entry has a size
         (self.run_base / locked / "enrollment-session").chmod(0)
         self.set_containers(folder, locked, mine)
-        found = self.run_bash(f"session_live_box {SID} {mine}")
+        # Root reads a file of mode 000: as root, this runs as a scratch uid that owns the fixture.
+        found = self.run_bash(f"session_live_box {SID} {mine}", unprivileged=True)
         self.assertEqual((found.returncode, found.stdout), (2, ""), found.stderr)
         self.enrolled(live, SID)
         self.set_containers(folder, locked, live, mine)
-        found = self.run_bash(f"session_live_box {SID} {mine}")
+        found = self.run_bash(f"session_live_box {SID} {mine}", unprivileged=True)
         self.assertEqual((found.returncode, found.stdout), (0, f"{live}\n"), found.stderr)
 
 

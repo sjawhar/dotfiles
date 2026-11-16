@@ -577,21 +577,29 @@ box_cache_mounts() {
         -v "$cache/cargo-git:$HOME/.cargo/git"
 }
 
+# remove_paths_command PATH…: the command line that removes each PATH, a read-only tree included,
+# for a line that says a removal failed.
+remove_paths_command() {
+    local q=() p
+    for p in "$@"; do q+=("$(printf '%q' "$p")"); done
+    echo "chmod -R u+w ${q[*]}; rm -rf ${q[*]}"
+}
+
 # Sami 2026-11-04: agent clutter must be cleaned up. A box's cache goes with its container,
 # and only once docker confirms that container is gone: a live box keeps writing into it. A cache
 # that cannot go is a failed removal, said as one with the command that completes it, never as a
-# cache kept (dispatch://INFRA-1720).
+# cache kept, and status 1 (dispatch://INFRA-1720).
 close_box_cache() {
     local box="$1" cache="$BOX_CACHE_ROOT/$1" names remove
-    [[ -d "$cache" ]] || return 0
-    remove="chmod -R u+w '$cache' && rm -rf '$cache'"
+    [[ -e "$cache" || -L "$cache" ]] || return 0
+    remove="$(remove_paths_command "$cache")"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
         echo "agentbox: removing $box's cache $cache failed: docker could not say whether its container is gone; once it is, remove the cache with: $remove" >&2
-        return 0
+        return 1
     fi
     if [[ -n "$names" ]]; then
-        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box && $remove" >&2
-        return 0
+        echo "agentbox: removing $box's cache $cache failed: its container still exists; remove both with: docker rm -fv $box; $remove" >&2
+        return 1
     fi
     # A Go module cache is mode 0444 by design, and `rm -rf` cannot delete a read-only file in
     # a read-only directory: it fails per entry and the tree stays. Measured 2026-11-06: twelve
@@ -599,12 +607,13 @@ close_box_cache() {
     # ends in a run of `rm: cannot remove '.../go-mod/...': Permission denied`. Make the tree
     # writable first, then remove, then CHECK -- `rm -rf` reports failure per file but the
     # caller never sees which, and a teardown that half-worked must not read as success
-    # (ORCH and TAIL, dispatch://INFRA-586).
+    # (ORCH and TAIL, dispatch://INFRA-586). Its status is not this function's: under set -e a
+    # failed rm ended the whole close, and every step after it did not run.
     chmod -R u+w "${cache:?}" 2> /dev/null || true
-    rm -rf "${cache:?}"
-    if [[ -d "$cache" ]]; then
+    rm -rf "${cache:?}" || true
+    if [[ -e "$cache" || -L "$cache" ]]; then
         echo "agentbox: removing $box's cache $cache failed; remove what is left with: $remove" >&2
-        return 0
+        return 1
     fi
 }
 
@@ -804,14 +813,21 @@ add_box_dir() {
 # started with --disk 0 has neither and this is a no-op, as it is for a box whose launcher never
 # got as far as the mount.
 close_box_disk() {
-    local box="$1" img="$BOX_DISKS/$1.img"
+    local box="$1" img="$BOX_DISKS/$1.img" rec p left=()
+    rec="$(box_record "$box")"
     if mountpoint -q "$BOXES/$box" 2>/dev/null; then
-        sudo -n umount "$BOXES/$box" \
-            || { echo "agentbox: could not unmount $BOXES/$box; its disk image $img is left in place (sudo umount '$BOXES/$box' && rm -f '$img')" >&2; return 1; }
+        sudo -n umount "$BOXES/$box" || {
+            echo "agentbox: removing $box's disk image $img failed: $BOXES/$box would not unmount; remove it with: sudo umount $(printf '%q' "$BOXES/$box") && $(remove_paths_command "$img" "$rec" "$rec.exit")" >&2
+            return 1
+        }
     fi
     # The record and its `.exit` marker (record_box_exit) go with the image they describe: a
     # record left on disk means an image left on disk, which is what the collector reads.
-    rm -f "$img" "$(box_record "$box")" "$(box_record "$box").exit"
+    rm -f "$img" "$rec" "$rec.exit" || true
+    for p in "$img" "$rec" "$rec.exit"; do [[ -e "$p" || -L "$p" ]] && left+=("$p"); done
+    (( ${#left[@]} )) || return 0
+    echo "agentbox: removing $box's disk image and record (${left[*]}) failed; remove what is left with: $(remove_paths_command "${left[@]}")" >&2
+    return 1
 }
 
 # Whether a new box can get a broker identity: the client installed and the helper holding a live
@@ -2920,13 +2936,25 @@ close_box() {
     # The container is gone: nothing inside can use the key any more, and the broker must not
     # accept it either. Before the rm -rf below, which takes the key dir with it.
     unenroll_box "$box"
-    close_box_cache "$box"
+    # A removal that fails says so with its command (status 1) and the close goes on: every step
+    # after it still runs.
+    close_box_cache "$box" || true
     finish_knives_claims "$sid"
     stop_tmux_forwarder "$box"
-    rm -rf "${RUN_BASE:?}/$box"
+    close_box_run_dir "$box" || true
     # The box's own filesystem takes everything in it (close_box_disk), leaving the mountpoint
     # for the rm below; a box with no disk limit has no image and the rm does all of it.
     close_box_dir "$box"
+}
+
+# close_box_run_dir BOX: $RUN_BASE/<box>, the box's runtime directory and enrollment files. One
+# that will not go is said with the command that removes it. Status 1 then.
+close_box_run_dir() {
+    local dir="${RUN_BASE:?}/$1"
+    rm -rf "$dir" || true
+    [[ -e "$dir" || -L "$dir" ]] || return 0
+    echo "agentbox: removing $1's runtime directory $dir failed; remove what is left with: $(remove_paths_command "$dir")" >&2
+    return 1
 }
 
 # close_box_dir BOX: the box's filesystem and image (close_box_disk), then its directory. A
@@ -2964,6 +2992,11 @@ close_box_dir() {
 #     ago (`.State.FinishedAt`); an end time docker does not give keeps it;
 #   - no process has its working directory under the box's directory or its $RUN_BASE/<box>,
 #     except the box's own tmux relay unit, which outlives a launcher that died.
+# What it cannot read is no answer: an age walk find could not finish, a process of this user whose
+# working directory it cannot read, or a walk of the processes that found none stops it removing
+# the box that pass. Each box it does not remove gets one line naming why and the command that
+# removes it (collect_not_removed), and a removal that fails one line naming what is still there
+# and that command; no line says a box was kept (dispatch://INFRA-1720, R8).
 # Before it deletes $RUN_BASE/<box>, which holds the box's enrollment files, it runs unenroll_box
 # for that box as close_box does: the box's own recorded enrollment is revoked at once, and a
 # session's goes to #66's session waiter. With an `enrollment-session` that cannot be read the
@@ -3017,18 +3050,32 @@ collect_launcher() {
 }
 
 # The working directory of every process the collector can see, "<pid>\t<cwd>", read once with one
-# `find` (a readlink per process is thousands of forks on a loaded host). A process whose cwd this
-# user cannot read (another user's, or a box's under its own uid range) is not one that can stand in
-# a box's host directory as this user.
+# `find` (a readlink per process is thousands of forks on a loaded host). A process of another user
+# whose cwd this user cannot read (root's, or a box's under its own uid range) is not one that can
+# stand in a box's host directory as this user. What it cannot read of its own user's processes is
+# no answer: COLLECT_CWDS_UNREAD then says what, and the collector removes no box that pass. A walk
+# that found no process at all saw nothing (the collector's own process is always one), and says so
+# the same way.
 COLLECT_CWDS=()
+COLLECT_CWDS_UNREAD=""
 collect_read_cwds() {
-    local e p
-    COLLECT_CWDS=()
-    while IFS= read -r e; do
-        p="${e%%$'\t'*}"
+    local p owner cwd me n=0
+    COLLECT_CWDS=() COLLECT_CWDS_UNREAD=""
+    me="$(id -u)"
+    while IFS=$'\t' read -r p owner cwd; do
+        n=$((n + 1))
         p="${p%/cwd}"
-        COLLECT_CWDS+=("${p##*/}"$'\t'"${e#*$'\t'}")
-    done < <(find "$PROC"/[0-9]*/cwd -maxdepth 0 -printf '%p\t%l\n' 2>/dev/null || true)
+        p="${p##*/}"
+        if [[ -z "$cwd" ]]; then
+            # Gone since the walk listed it: it stands nowhere.
+            if [[ "$owner" == "$me" && -e "$PROC/$p" ]]; then
+                COLLECT_CWDS_UNREAD="process $p's working directory could not be read"
+            fi
+            continue
+        fi
+        COLLECT_CWDS+=("$p"$'\t'"$cwd")
+    done < <(find "$PROC"/[0-9]*/cwd -maxdepth 0 -printf '%p\t%U\t%l\n' 2>/dev/null || true)
+    (( n )) || COLLECT_CWDS_UNREAD="the walk of $PROC found no process"
 }
 
 # collect_holder BOX: the pid of a process that stands in BOX's directory or run dir, other than
@@ -3046,30 +3093,59 @@ collect_holder() {
     return 1
 }
 
-# collect_box BOX: delete BOX in every place it left, or keep it and say which test kept it.
-# Status 1 when it stays.
+# box_remove_command BOX [CONTAINER]: the command line that removes what is left of BOX: its
+# container with its volumes when CONTAINER is not empty, its tmux relay unit, its filesystem when
+# mounted, and each place under the collector's roots. A line that says BOX was not removed names it,
+# never a line that says BOX was kept (dispatch://INFRA-1720).
+box_remove_command() {
+    local box="$1" cmd=() paths=() line="" c
+    [[ -n "${2:-}" ]] && cmd+=("docker rm -fv $box")
+    cmd+=("systemctl --user stop agentbox-tmux-$box")
+    if mountpoint -q "$BOXES/$box" 2>/dev/null; then cmd+=("sudo umount $(printf '%q' "$BOXES/$box")"); fi
+    mapfile -t paths < <(collect_paths "$box")
+    (( ${#paths[@]} )) && cmd+=("$(remove_paths_command "${paths[@]}")")
+    for c in "${cmd[@]}"; do line+="${line:+; }$c"; done
+    echo "$line"
+}
+
+# collect_not_removed BOX CONTAINER REASON: the collector's one line for a box it does not remove
+# this pass, with why and the command that removes it.
+collect_not_removed() {
+    collect_say "$1 not removed: $3; remove it with: $(box_remove_command "$1" "$2")"
+}
+
+# collect_box BOX: delete BOX in every place it left, or say why it was not removed and the command
+# that removes it. Status 1 when it stays.
 collect_box() {
-    local box="$1" names state pid young paths=()
+    local box="$1" names state pid out rc young paths=() failed=0 left=()
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
-        collect_say "$box kept: docker could not be asked whether it has a container"
+        collect_not_removed "$box" "unknown" "docker could not be asked whether it has a container"
         return 1
     fi
     if [[ -n "$names" ]]; then
         state="$(docker inspect -f '{{.State.Status}}' "$box" 2>/dev/null)" || state=""
         if [[ "$state" != exited ]]; then
-            collect_say "$box kept: its container is ${state:-in a state docker did not give}"
+            collect_not_removed "$box" "$names" "its container is ${state:-in a state docker did not give}"
             return 1
         fi
     fi
     if pid="$(collect_launcher "$box")"; then
-        collect_say "$box kept: its launcher, pid $pid, runs"
+        collect_not_removed "$box" "$names" "its launcher, pid $pid, runs"
         return 1
     fi
     mapfile -t paths < <(collect_paths "$box")
     if (( ${#paths[@]} )); then
-        young="$(find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -print -quit 2>/dev/null || true)"
+        # Every file of it, and one find cannot read is no proof the box is old. Errors share the
+        # output with the paths, and an error line starts `find:` where every path starts `/`.
+        rc=0
+        out="$(find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -print -quit 2>&1)" || rc=$?
+        young="$(grep -v '^find: ' <<<"$out" | head -n 1 || true)"
         if [[ -n "$young" ]]; then
-            collect_say "$box kept: $young is younger than $COLLECT_AGE_MIN minutes"
+            collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"
+            return 1
+        fi
+        if (( rc )); then
+            collect_not_removed "$box" "$names" "cannot tell how old its files are: $(grep -m 1 '^find: ' <<<"$out" || echo "find exited $rc")"
             return 1
         fi
     elif [[ -n "$names" ]]; then
@@ -3077,33 +3153,39 @@ collect_box() {
         local finished ended
         finished="$(docker inspect -f '{{.State.FinishedAt}}' "$box" 2>/dev/null)" || finished=""
         if ! ended="$(date -u -d "$finished" +%s 2>/dev/null)" || [[ -z "$finished" ]]; then
-            collect_say "$box kept: docker gave no end time for its container ('$finished')"
+            collect_not_removed "$box" "$names" "docker gave no end time for its container ('$finished')"
             return 1
         fi
         if (( $(date -u +%s) - ended < COLLECT_AGE_MIN * 60 )); then
-            collect_say "$box kept: its container ended at $finished, less than $COLLECT_AGE_MIN minutes ago"
+            collect_not_removed "$box" "$names" "its container ended at $finished, less than $COLLECT_AGE_MIN minutes ago"
             return 1
         fi
     else
         return 0
     fi
+    if [[ -n "$COLLECT_CWDS_UNREAD" ]]; then
+        collect_not_removed "$box" "$names" "cannot tell whether a process stands in it: $COLLECT_CWDS_UNREAD"
+        return 1
+    fi
     if pid="$(collect_holder "$box")"; then
-        collect_say "$box kept: process $pid has its working directory in it"
+        collect_not_removed "$box" "$names" "process $pid has its working directory in it"
         return 1
     fi
     if [[ -n "$names" ]]; then
         record_box_exit "$box" "$(box_record_get "$box" session)" ""
         if ! docker rm -v "$box" >/dev/null 2>&1; then
-            collect_say "removing $box failed: its exited container could not be removed; remove it with: docker rm -v $box"
+            collect_say "removing $box failed: its exited container could not be removed; remove it with: $(box_remove_command "$box" "$names")"
             return 1
         fi
     fi
     stop_tmux_forwarder "$box"
     unenroll_box "$box"
-    close_box_cache "$box"
-    rm -rf "${RUN_BASE:?}/$box"
-    if ! close_box_dir "$box"; then
-        collect_say "removing $box failed (above)"
+    close_box_cache "$box" || failed=1
+    close_box_run_dir "$box" || failed=1
+    close_box_dir "$box" || failed=1
+    if (( failed )); then
+        mapfile -t left < <(collect_paths "$box")
+        collect_say "removing $box failed: ${left[*]:-a place above} is still there; remove it with: $(box_remove_command "$box")"
         return 1
     fi
     collect_say "$box removed"
