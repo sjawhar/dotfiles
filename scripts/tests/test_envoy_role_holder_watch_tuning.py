@@ -313,9 +313,12 @@ class MessageTest(Box):
 
     def test_a_suppression_clear_is_short(self) -> None:
         role = "node-envprobe-d10302249-2"
-        rule = WATCH.SUPPRESSIONS[0]
-        if time.time() >= WATCH.epoch_of(rule["until"]):
-            self.skipTest("the suppression has expired")
+        # The suppression in force at this test's clock: the live one ended 2026-11-06T00:00:00Z,
+        # and from then on this test only skipped.
+        until = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now + 86400))
+        original = WATCH.SUPPRESSIONS
+        WATCH.SUPPRESSIONS = (dict(original[0], until=until),)
+        self.addCleanup(setattr, WATCH, "SUPPRESSIONS", original)
         self.write_state(
             {role: self.role()},
             {f"{role}|{HOLDER}": {"opened_at": self.now - 700, "alerted_at": self.now - 100, "told": [OTHER]}},

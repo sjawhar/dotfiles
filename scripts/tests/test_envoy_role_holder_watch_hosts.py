@@ -4,6 +4,7 @@
 import contextlib
 import io
 import subprocess
+import time
 import unittest
 from unittest.mock import patch
 
@@ -71,6 +72,10 @@ class HostWatchTest(Box):
         self.assertEqual(self.data()["incidents"], {})
 
     def test_a_suppressed_role_does_not_pay_for_registry_or_ssh_reads(self):
+        # The suppression in force at this test's clock. The live one ended at its `until`,
+        # 2026-11-06T00:00:00Z, and from then on this test met an expired rule and failed.
+        until = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now + 86400))
+        self.enterContext(patch.object(WATCH, "SUPPRESSIONS", (dict(WATCH.SUPPRESSIONS[0], until=until),)))
         self.write_state({"node-envprobe-a1-1": self.role(host="sami-rocqperf")})
         with patch.object(RunEnvoy, "registry", side_effect=AssertionError("unneeded registry read")):
             self.period()
