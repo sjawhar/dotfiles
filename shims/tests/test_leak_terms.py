@@ -3934,7 +3934,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                     )
                     self.set_url(destination)
                     # The places a commit adding the same files would get: each file under the term-named folder, and
-                    # the empty folder's own path, which no commit can hold.
+                    # the empty folder's own path, which no commit diff can show.
                     places = (
                         ("prefix/<listed term>",)
                         if folder == empty_folder
@@ -4063,7 +4063,9 @@ class OutgoingLeaks(SinkRepositoryCase):
             return sorted(match.group(1) for line in result.stderr.splitlines() if (match := prefix.match(line)))
 
         def pattern(term: str) -> re.Pattern[str]:
-            return re.compile(r"[ \t]+".join(re.escape(piece) for piece in term.casefold().split()))
+            # The match rule: a space in a term matches a run of spaces or tabs; case does not matter (the grid's
+            # paths are ASCII, so ignoring case is casefolding).
+            return re.compile(r"[ \t]+".join(re.escape(piece) for piece in term.split()), re.IGNORECASE)
 
         for term in terms:
             environment = self.person | {"DOTFILES_LEAK_TERMS_FILE": str(encrypt_yaml(f"terms: |\n  {term}\n"))}
@@ -4087,13 +4089,13 @@ class OutgoingLeaks(SinkRepositoryCase):
                     for place in commit_places:
                         self.assertIn(place, extra, f"the commit check names {place}; the folder check names {folder_places}")
                         extra.remove(place)
+                    # An empty folder's path, masked, once per match: the one place a commit diff cannot show.
                     expected_extra = sorted(
-                        folder_path for folder_path in empty_folders for _ in pattern(term).finditer(folder_path.casefold())
+                        pattern(term).sub("<listed term>", folder_path)
+                        for folder_path in empty_folders
+                        for _ in pattern(term).finditer(folder_path)
                     )
-                    self.assertEqual(len(extra), len(expected_extra), f"extra folder places {extra}, empty-folder matches {expected_extra}")
-                    for place in extra:
-                        masked = re.compile(".+".join(re.escape(part) for part in place.split("<listed term>")))
-                        self.assertTrue(any(masked.fullmatch(path) for path in empty_folders), f"{place} is no empty folder's path")
+                    self.assertEqual(sorted(extra), expected_extra, f"folder places {folder_places}, commit places {commit_places}")
                     refused = (results["commit"].returncode != 0, results["folder"].returncode != 0)
                     self.assertEqual(refused[1], bool(folder_places), results["folder"].stderr)
                     self.assertEqual(refused[0], bool(commit_places), results["commit"].stderr)
