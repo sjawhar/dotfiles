@@ -58,7 +58,7 @@ curl -fsSLO https://github.com/nestybox/sysbox/releases/download/v0.7.1/sysbox-c
 echo "9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5  sysbox-ce_0.7.1.linux_amd64.deb" | sha256sum -c - &&
 if sysbox_state="$(dpkg-query -W -f='${db:Status-Want} ${db:Status-Status}' sysbox-ce 2>/dev/null)" &&
    { [ "${sysbox_state##* }" != not-installed ] || [ "${sysbox_state%% *}" = hold ]; }; then
-  echo "dpkg already knows sysbox-ce: $(dpkg-query -W -f='${Status} ${Version}' sysbox-ce). These steps are for a machine where dpkg does not know sysbox-ce and nothing holds it; run 'sudo bash ~/.dotfiles/installers/sysbox.sh' from a dotfiles checkout instead." >&2
+  echo "dpkg already knows sysbox-ce: $(dpkg-query -W -f='${Status} ${Version}' sysbox-ce | sed 's/ $//'). These steps are for a machine where dpkg does not know sysbox-ce and nothing holds it; run 'sudo bash ~/.dotfiles/installers/sysbox.sh' from a dotfiles checkout instead." >&2
   false
 fi &&
 sudo apt-get satisfy -y --no-install-recommends "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Pre-Depends)" "$(dpkg-deb --field sysbox-ce_0.7.1.linux_amd64.deb Depends)" &&
