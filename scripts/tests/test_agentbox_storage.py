@@ -80,6 +80,7 @@ class BoxStorage(unittest.TestCase):
             self.assertTrue(cache.is_dir())
             self.assertIn(f"removing agentbox-one's cache {cache} failed", result.stderr)
             self.assertIn(f"rm -rf {cache}", result.stderr)
+            self.assertNotIn("kept", result.stderr)
 
     def test_failed_cache_creation_never_emits_a_bind_for_docker_to_create(self):
         (self.root / "box-cache").write_text("not a directory")

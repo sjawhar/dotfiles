@@ -1337,11 +1337,13 @@ box_wait() {
 # (dispatch://INFRA-3462/comment/7b61823d). The deadline starts once the box is Running, so a box
 # that was slow to start still enrolls with its id. The enrollment.pending marker is renewed on
 # every pass of both waits, so it stays inside the client's 160 s trust window however long the
-# box takes. A box that never runs, or ends first, ends in enroll_failed too.
+# box takes. A box that never runs, or ends first, ends in enroll_failed too. ENROLL_SESSION_WAIT
+# is those 120 s (the spec's figure; scripts/tests/test_agentbox_enroll.py pins it).
+ENROLL_SESSION_WAIT=120
 enroll_when_up() {
     local box="$1" child="$2" cmd="$3" sid="" deadline
     wait_for_running "$box" "$child" || { enroll_failed "$box" "$box never reached Running; not enrolled"; return 1; }
-    deadline=$(( SECONDS + 120 ))
+    deadline=$(( SECONDS + ENROLL_SESSION_WAIT ))
     while kill -0 "$child" 2>/dev/null; do
         put_keyfile "$box" enrollment.pending ""
         [[ "$cmd" == omp ]] && sid="$(box_session_id "$box")"
@@ -3010,8 +3012,9 @@ COLLECT_LOG_DIR="${AGENTBOX_COLLECT_LOG_DIR:-$HOME/.cache/omp/agentbox}"
 COLLECT_AGE_MIN=60
 collect_say() { echo "$(date -u +%FT%TZ) agentbox collect: $*"; }
 
-# collect_candidates: each box name with an entry under the collector's roots, or an exited
-# container of that name, once.
+# collect_candidates: each box name with an entry under the collector's roots, an exited container
+# of that name, or a tmux relay unit of that name (agentbox-tmux-<box>), once. A unit can be all
+# that a box left: on sami-devbox 15 ran from 5-12 Nov to 2026-11-16, for boxes with nothing else.
 collect_candidates() {
     local p n
     {
@@ -3025,6 +3028,8 @@ collect_candidates() {
             printf '%s\n' "$n"
         done
         docker ps -a --filter name='^agentbox-' --filter status=exited --format '{{.Names}}' 2>/dev/null || true
+        systemctl --user list-units --all --plain --no-legend 'agentbox-tmux-agentbox-*' 2>/dev/null \
+            | sed -n 's/^agentbox-tmux-\(agentbox-[0-9a-f]\{12\}\)\.service .*/\1/p' || true
     } | grep -E '^agentbox-[0-9a-f]{12}$' | sort -u || true
 }
 
@@ -3161,6 +3166,13 @@ collect_box() {
             return 1
         fi
     else
+        # Nothing of it under the roots and no container: all that can be left is its tmux relay
+        # unit, which outlives a launcher that died. ensure_tmux_forwarder makes $RUN_BASE/<box>
+        # before it starts the unit, so a box being made has files and never reaches here.
+        if [[ -n "$(systemctl --user list-units --all --plain --no-legend "agentbox-tmux-$box.service" 2>/dev/null)" ]]; then
+            stop_tmux_forwarder "$box"
+            collect_say "$box removed (its tmux relay unit was all that was left of it)"
+        fi
         return 0
     fi
     if [[ -n "$COLLECT_CWDS_UNREAD" ]]; then
@@ -10238,10 +10250,11 @@ remove_doctor_box() {
     local box="$1"
     docker rm -fv "$box" >/dev/null 2>&1 || true
     unenroll_box "$box"
-    close_box_cache "$box"
+    # Each removal that fails says so with its command (status 1), and the rest still runs.
+    close_box_cache "$box" || true
     stop_tmux_forwarder "$box"
-    rm -rf "${RUN_BASE:?}/$box"
-    if close_box_disk "$box"; then rm -rf "${BOXES:?}/$box"; fi
+    close_box_run_dir "$box" || true
+    close_box_dir "$box" || true
 }
 
 # The box's host-dependent answers against this host's own (PROBE_FUNCS, @probe lines). Only a

@@ -1689,14 +1689,30 @@ class EnrollWhenUp(EnrollFixture):
         self.assertIn(f"--session-id {self.SID}", calls[enroll])
         self.assertEqual([c for c in calls if c.startswith("docker exec ") and " -d " not in c], [],
                          "the session comes from the file, not from the box")
-        # With no session file at all, at the end of the 120 s (each `sleep 2` here moves bash's
-        # clock on 61 s), the box enrolls under its name.
-        self.reset_box()
-        result = self.when_up("omp", body="sleep() { SECONDS=$((SECONDS + 61)); }\n")
-        self.assertIn("rc=0", result.stdout, result.stderr)
-        (enroll_line,) = self.calls_matching("enroll ")
-        self.assertNotIn("--session-id", enroll_line)
-        self.assertIn("--runtime-id box1", enroll_line)
+        # The 120 s, by bash's own clock: each `sleep` here moves it on 59 s and logs it. A
+        # session file that comes at 118 s is still waited for; with none, the box enrolls under its
+        # name at the first pass past 120 s and at no earlier one. A deadline of 10 s or 600 s fails.
+        session = self.hostdir / "run-user" / "agentbox-session"
+        clock = self.root / "CLOCK"
+        for name, arrives in (("a file at 118 s", True), ("no file", False)):
+            with self.subTest(name):
+                self.reset_box()
+                clock.unlink(missing_ok=True)
+                write = (f'(( SECONDS >= 118 )) && printf "version=1\\npid=7\\nsession={self.SID}\\nfile=/x.jsonl\\n"'
+                         f' >"{session}"; ') if arrives else ""
+                tick = f'sleep() {{ SECONDS=$((SECONDS + 59)); echo "$SECONDS" >>"{clock}"; {write}return 0; }}\n'
+                result = self.when_up("omp", body=tick)
+                self.assertIn("rc=0", result.stdout, result.stderr)
+                (enroll_line,) = self.calls_matching("enroll ")
+                ticks = [int(t) for t in clock.read_text().split()]
+                if arrives:
+                    self.assertIn(f"--session-id {self.SID}", enroll_line)
+                else:
+                    self.assertNotIn("--session-id", enroll_line)
+                    self.assertIn("--runtime-id box1", enroll_line)
+                    self.assertGreaterEqual(len(ticks), 2, ticks)
+                    self.assertLess(ticks[-2], 120, ticks)
+                    self.assertGreaterEqual(ticks[-1], 120, ticks)
 
     def test_a_box_that_never_runs_ends_without_identity(self) -> None:
         result = self.when_up("omp", child="/bin/true &\nwait", STUB_RUNNING="false")

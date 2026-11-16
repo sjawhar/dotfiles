@@ -3542,11 +3542,16 @@ class AgentboxMove(unittest.TestCase):
         self.addCleanup(launcher.kill)
         (starting / self.TO).write_text(f"pid={launcher.pid}\nbox=agentbox-stuck\nwindow=%7\n", encoding="utf-8")
         docker = self.root / "DOCKER"
-        write_stub(self.stubs, "docker", f'echo "$*" >>"{docker}"; case "$1" in ps) echo agentbox-stuck ;; inspect) echo "[\"omp\",\"--resume\",\"{self.TO}\"]" ;; esac; exit 0')
+        # The box whose command names the session and the box the launcher recorded are two
+        # names, so each of the two removals is seen on its own (one name for both let either one
+        # lose its `-v` unseen).
+        write_stub(self.stubs, "docker", f'echo "$*" >>"{docker}"; case "$1" in ps) echo agentbox-made ;; inspect) echo "[\\"omp\\",\\"--resume\\",\\"{self.TO}\\"]" ;; esac; exit 0')
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertEqual(launcher.poll(), -15, "the launcher was not ended")
-        self.assertIn("rm -fv agentbox-stuck", docker.read_text(encoding="utf-8"))
+        removals = [line for line in docker.read_text(encoding="utf-8").splitlines() if line.startswith("rm ")]
+        self.assertEqual({line.split()[-1] for line in removals}, {"agentbox-made", "agentbox-stuck"}, removals)
+        self.assertEqual([line for line in removals if not line.startswith("rm -fv ")], [], "each removal takes the volume")
         self.assertFalse((starting / self.TO).exists())
         self.assertIn("rolled back:", run.stdout)
 
@@ -4557,6 +4562,28 @@ class AgentboxMove(unittest.TestCase):
                 self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
                 self.assertNotIn("HANDED-OFF", refused.stdout)
                 self.assertIn("not a regular file", refused.stderr)
+            with self.subTest("move <id> --now, on the host", kind=kind):
+                outside = self.run_bash('move_image_bytes() { echo 280000000; }\n'
+                                        f'move_hand_off() {{ echo HANDED-OFF; }}\ncmd_move_notify {self.METARQ} --now')
+                self.assertNotIn("HANDED-OFF", outside.stdout)
+                self.assertIn("cannot be moved", outside.stderr)
+                self.assertIn("not a regular file", outside.stderr)
+            with self.subTest("move --to, on the host", kind=kind):
+                member = self.run_bash(
+                    'move_image_bytes() { echo 280000000; }\nmove_to_scan_processes\n'
+                    f'MT_ROW[{self.METARQ}]="${{MT_ROW_OF[{self.METARQ}]}}"\n'
+                    f'MT_DIRS[{self.METARQ}]="{self.root / "lane"}"\n'
+                    f'move_to_member {self.METARQ} devbox')
+                self.assertEqual(member.returncode, 1, member.stdout + member.stderr)
+                self.assertEqual(member.stdout, "")
+                self.assertIn("not a regular file", member.stderr)
+            with self.subTest("the --resume argument of an omp that holds no transcript", kind=kind):
+                named = bad_path(kind, self.home / ".omp/agent/sessions/-lane")
+                shutil.rmtree(self.proc, ignore_errors=True)
+                self.proc.mkdir()
+                self.nested_session(None, cmdline=f"omp --resume {named}")
+                found = self.run_bash(f"move_transcript 1101 {self.METARQ}")
+                self.assertEqual((found.returncode, found.stdout), (1, ""), found.stderr)
 
         self.target()
         in_box = self.home / ".omp/agent/sessions/-work"

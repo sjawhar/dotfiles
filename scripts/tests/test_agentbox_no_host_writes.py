@@ -103,6 +103,9 @@ class AgentboxNoHostWrites(unittest.TestCase):
             "AGENTBOX_BOXES": str(self.root / "boxes"),
             "AGENTBOX_DISKS": str(self.root / "disks"),
             "AGENTBOX_DISK": "0",
+            # Each launch makes $RUN_BASE/<box> (its tmux, key and runtime dirs): the fixture's,
+            # never the host's own /run/user/<uid>/agentbox, where each run of this file left 8.
+            "AGENTBOX_RUN_BASE": str(self.root / "run"),
         }
 
     def tearDown(self) -> None:

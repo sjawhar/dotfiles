@@ -326,6 +326,18 @@ class OmpSessionLive(unittest.TestCase):
         running.unlink()
         result = self.live(SID, stubs)
         self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+        # An exited box, whose container docker still knows: no running process's cgroup names its
+        # id. Another box's omp (pid 900, in the cgroup of container BOX) has the same pid in its
+        # box, 42, and is not the omp this file names.
+        running.touch()
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo false ;; *.Id*) echo {"e" * 64} ;; esac')
+        result = self.live(SID, stubs)
+        self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect && -e "{running}" ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo true ;; *.Id*) echo {BOX} ;; esac')
         # A command line that names the session is still its own route, as today.
         running.touch()
         self.omp(901, ["omp", "--resume", SID])

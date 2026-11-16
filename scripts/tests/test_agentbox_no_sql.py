@@ -15,6 +15,7 @@ the arguments of the `docker run` it makes.
 
 from __future__ import annotations
 
+import re
 import socket
 import stat
 import subprocess
@@ -133,10 +134,13 @@ class NoSqlInAgentbox(unittest.TestCase):
     def test_no_line_of_agentbox_runs_an_sql_client(self) -> None:
         """omp's own agent.db was read with sqlite3 to warn of MCP logins a target machine lacks
         (move_to_mcp_logins). No line runs sqlite3 or psql now; the one mention left is the box
-        doctor's list of tools a box has."""
+        doctor's list of tools a box has. Any code line that names either counts, however it calls
+        it: a call through a variable (`"${SQLITE:-sqlite3}" …`) passed the older match, which
+        looked for the name followed by a space, a `)` or after a quote."""
         text = AGENTBOX.read_text(encoding="utf-8").splitlines()
         runs = [line for line in text
-                if any(f"{tool} " in line or f"{tool})" in line or f'"{tool}' in line for tool in ("sqlite3", "psql"))
+                if re.search(r"sqlite|\bpsql\b", line, re.IGNORECASE)
+                and not line.lstrip().startswith("#")
                 and not line.lstrip().startswith("for t in ")]
         self.assertEqual(runs, [], "scripts/agentbox runs no SQL client")
         self.assertEqual(self.run_bash("declare -F move_to_mcp_logins move_to_warn_mcp_logins").stdout, "")

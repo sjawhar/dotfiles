@@ -290,6 +290,14 @@ class RestartReasons(SessionFileFixture):
     def usr1_sent(self) -> bool:
         return any(line.startswith("docker kill") for line in self.docker_calls())
 
+    def test_the_waits_are_the_spec_s_figures(self) -> None:
+        """With no environment that says otherwise, `--now` waits 120 s for the relaunched omp to
+        report its session and an in-box restart 15 s for the runner's answer (spec R3): every
+        other test here shortens both, so a changed default passed them all."""
+        got = self.run_bash('echo "$RESTART_REPORT_WAIT $RESTART_ANSWER_WAIT"',
+                            {"AGENTBOX_RESTART_REPORT_WAIT": "", "AGENTBOX_RESTART_ANSWER_WAIT": ""})
+        self.assertEqual(got.stdout.split(), ["120", "15"], got.stderr)
+
     def test_the_host_writes_no_request_through_a_link_the_box_put(self) -> None:
         """The box owns its runtime directory, so it can put a link at `agentbox-restart.d`, or at a
         request's name, pointing at a host directory or file. The host's request goes through

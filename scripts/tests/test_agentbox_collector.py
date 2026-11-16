@@ -130,7 +130,10 @@ if [[ -n "$want" ]]; then
 fi
 cat "$STUB_CONTAINERS"
 exit 0''')
-        write_stub(self.stubs, "systemctl", 'printf "%s\\n" "$*" >>"$STUB_SYSTEMCTL"; exit 0')
+        # `systemctl --user list-units` answers the units in $STUB_UNITS, one per line as
+        # `--plain --no-legend` prints them; every call is logged.
+        write_stub(self.stubs, "systemctl",
+                   'printf "%s\\n" "$*" >>"$STUB_SYSTEMCTL"; [[ " $* " == *" list-units "* ]] && cat "$STUB_UNITS" 2>/dev/null; exit 0')
         write_stub(self.stubs, "tmux", 'exit 0')
         write_stub(self.stubs, "envoy", 'exit 0')
         write_stub(self.stubs, "agent-secrets", 'printf "%s\\n" "$*" >>"$STUB_SECRETS"; exit 0')
@@ -181,6 +184,7 @@ exec /usr/bin/find "$@"''')
                 "STUB_CONTAINERS", "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE", "STUB_CONTAINER_RC",
                 "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM", "STUB_SYSTEMCTL")},
             "STUB_CONTAINER_FINISHED": str(self.root / "STUB_CONTAINER_FINISHED"),
+            "STUB_UNITS": str(self.root / "STUB_UNITS"),
         }
         self.idle_process()
 
@@ -340,6 +344,40 @@ exec /usr/bin/find "$@"''')
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in (f"{box}.img", f"{box}.info", f"{box}.info.exit"):
             self.assertFalse((self.disks / name).exists(), name)
+
+    def test_a_filesystem_that_will_not_unmount_is_a_failed_removal_with_its_command(self) -> None:
+        """close_box_disk said "its disk image … is left in place" when the unmount failed: a line
+        that says something was kept. It is a failed removal, with the command that completes it,
+        and status 1; the image and record stay for that command."""
+        box = "agentbox-0123456789ab"
+        self.leftover(box, image=True, hours=0)
+        write_stub(self.stubs, "mountpoint", "exit 0")
+        result = self.run_bash(f"close_box_disk {box}")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        image = self.disks / f"{box}.img"
+        self.assertTrue(image.exists())
+        self.assertIn(f"removing {box}'s disk image {image} failed", result.stderr)
+        self.assertIn(f"remove it with: sudo umount {self.boxes / box} && ", result.stderr)
+        self.assertIn(f"rm -rf {image}", result.stderr)
+        for word in ("left in place", "kept"):
+            self.assertNotIn(word, result.stdout + result.stderr)
+
+    def test_the_doctor_box_goes_with_its_volume_and_everything_it_made(self) -> None:
+        """`agentbox doctor` starts a box of its own and removes it after: its container with its
+        anonymous volume (`docker rm -fv`), its cache, its run dir and its directory."""
+        box = "agentbox-d0c70000000a"
+        self.leftover(box, hours=0)
+        self.set_containers(box)
+        result = self.run_bash(f"remove_doctor_box {box}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"rm -fv {box}", self.stub_log("STUB_DOCKER_RM"))
+        self.assertEqual(self.gone(box), [], result.stdout + result.stderr)
+        # A cache that will not go is said with its command, and the rest of the box still goes.
+        self.leftover(box, hours=0)
+        self.set_containers(box)
+        result = self.run_bash(f"remove_doctor_box {box}", {"STUB_RM_FAIL": str(self.cache / box)})
+        self.assertIn(f"removing {box}'s cache {self.cache / box} failed", result.stderr)
+        self.assertEqual(self.gone(box), [str(self.cache / box)], result.stdout + result.stderr)
 
     def test_a_box_with_no_image_gets_no_record(self) -> None:
         """`--disk 0`: `open_box_disk` deliberately leaves the images directory absent, and such
@@ -556,6 +594,7 @@ exec /usr/bin/find "$@"''')
                 self.proc.mkdir()
                 self.idle_process()
                 self.set_containers()
+                (self.root / "STUB_DOCKER_RM").write_text("", encoding="utf-8")
                 self.set_container_state("exited")
                 (self.root / "STUB_PS_FAIL").write_text("", encoding="utf-8")
                 self.leftover(OLD, launcher=f"launcher=4242\nlauncher_start={start}\n")
@@ -581,6 +620,27 @@ exec /usr/bin/find "$@"''')
             result = self.collect()
             self.assertTrue((self.boxes / "agentbox-0000000000e5").exists(), result.stdout)
 
+    def test_a_tmux_relay_unit_whose_box_left_nothing_else_is_stopped(self) -> None:
+        """A box's relay unit outlives a launcher that died. When that box left nothing else, no
+        container, no file under any root, the collector never named it: on sami-devbox 15 such
+        units ran from 5-12 Nov to 2026-11-16, while 8 collector runs looked at every box. It
+        finds a box by its unit too, and stops a unit that is all that is left of its box. A unit
+        of a box whose container runs, or that has files under the roots, is left to that box."""
+        orphan, live, young = "agentbox-0000000000b9", "agentbox-0000000000ba", "agentbox-0000000000bb"
+        (self.root / "STUB_UNITS").write_text(
+            "".join(f"agentbox-tmux-{box}.service loaded active running agentbox tmux relay for {box}\n"
+                    for box in (orphan, live, young)), encoding="utf-8")
+        self.set_containers(live)
+        self.set_container_state("running")
+        self.leftover(young, hours=0)
+        result = self.collect()
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, said)
+        stops = [line for line in self.stub_log("STUB_SYSTEMCTL").splitlines() if " stop " in f" {line} "]
+        self.assertEqual(stops, [f"--user stop agentbox-tmux-{orphan}"], said)
+        self.assertIn(f"{orphan} removed", result.stdout)
+        self.assertTrue((self.run_base / young).exists())
+
     def test_the_box_s_own_tmux_relay_does_not_keep_it(self) -> None:
         """The relay unit agentbox-tmux-<box> outlives a launcher that died, and its process stands
         in the box's run dir; it is the box's own, and goes with it."""
@@ -596,19 +656,27 @@ exec /usr/bin/find "$@"''')
         self.assertIn(f"--user stop agentbox-tmux-{OLD}", self.stub_log("STUB_SYSTEMCTL"))
 
     def test_the_collector_touches_nothing_that_is_not_a_box(self) -> None:
-        """Names of another form under its roots are not boxes, and a container that runs is not
-        a leftover, wherever its files are."""
+        """Names of another form under its roots are not boxes, a container that runs is not a
+        leftover, wherever its files are, and a box-shaped tree outside its roots (here under
+        $HOME/boxes, where a machine without /mnt/nvme puts boxes, while this one's roots are
+        elsewhere) is not one of its boxes, however old."""
         self.set_containers("agentbox-0000000000f6")
         self.set_container_state("running")
         for odd in ("agentbox-notabox", "agentbox-0000000000a1x"):
             (self.run_base / odd).mkdir()
             age(self.run_base / odd, 2)
+        outside = self.home / "boxes" / "agentbox-0000000000a7"
+        (outside / "home").mkdir(parents=True)
+        (outside / "home" / "notes.md").write_text("a note\n", encoding="utf-8")
+        age(outside, 2)
         result = self.collect()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.stub_log("STUB_DOCKER_RM"), "")
-        self.assertEqual(self.stub_log("STUB_SYSTEMCTL"), "")
+        self.assertNotIn(" stop ", self.stub_log("STUB_SYSTEMCTL"))
         for odd in ("agentbox-notabox", "agentbox-0000000000a1x"):
             self.assertTrue((self.run_base / odd).exists())
+        self.assertTrue((outside / "home" / "notes.md").exists(), result.stdout)
+        self.assertNotIn("agentbox-0000000000a7", result.stdout + result.stderr)
 
     def test_the_collector_removes_an_exited_container_whose_files_are_gone(self) -> None:
         """An exited box container with nothing of it left under the collector's roots is what a

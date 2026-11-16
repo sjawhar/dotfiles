@@ -471,6 +471,9 @@ describe("the session file of a box", () => {
 					{ set: "main", id: B, file: moved },
 					trigger,
 					trigger,
+					// An id that changes while the path stays, which the report must follow too.
+					{ set: "main", id: C, file: moved },
+					trigger,
 				],
 			},
 			{ intervalMs },
@@ -483,6 +486,8 @@ describe("the session file of a box", () => {
 			reportOf(pid, B, transcript(B)),
 			reportOf(pid, B, moved),
 			reportOf(pid, B, moved),
+			reportOf(pid, B, moved),
+			reportOf(pid, C, moved),
 		]);
 		// Unchanged, nothing is written or saved.
 		expect(snapshots[1]?.ino).toBe(snapshots[0]?.ino);
@@ -491,6 +496,7 @@ describe("the session file of a box", () => {
 			{ manager: "main", id: A, held: null },
 			{ manager: "main", id: B, held: reportOf(pid, A, transcript(A)) },
 			{ manager: "main", id: B, held: reportOf(pid, B, transcript(B)) },
+			{ manager: "main", id: C, held: reportOf(pid, B, moved) },
 		]);
 	}, 15_000);
 
