@@ -32,6 +32,7 @@ from __future__ import annotations
 import fcntl
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -153,12 +154,22 @@ exec /bin/rm "$@"''')
     fi
 done
 # A /proc entry the kernel gives root's uid, as it does a process that is not dumpable: the owner
-# field of a `-printf '%p\\t%U\\t%l'` line under $STUB_FIND_ROOT_OWNED reads 0.
+# field of a `-printf '%p\\t%U\\t%l'` line under $STUB_FIND_ROOT_OWNED reads 0. A walk that
+# descends to $STUB_FIND_DENY says it may not read it, as find does at a directory this user may not
+# open (runc's state directory in a box's run-user, root's and mode 1700), and fails.
+deny=0
+if [[ -n "${STUB_FIND_DENY:-}" ]]; then
+    for a in "$@"; do [[ "$STUB_FIND_DENY" == "$a"/* ]] && deny=1; done
+fi
 if [[ -n "${STUB_FIND_ROOT_OWNED:-}" ]]; then
     /usr/bin/find "$@" | awk -F'\\t' -v p="$STUB_FIND_ROOT_OWNED" 'BEGIN { OFS = "\\t" } index($1, p) == 1 && NF == 3 { $2 = 0 } { print }'
-    exit "${PIPESTATUS[0]}"
+    rc="${PIPESTATUS[0]}"
+else
+    /usr/bin/find "$@"
+    rc=$?
 fi
-exec /usr/bin/find "$@"''')
+if (( deny )); then echo "find: '$STUB_FIND_DENY': Permission denied" >&2; exit 1; fi
+exit "$rc"''')
         # No test may mount or unmount anything for real: sudo only logs.
         write_stub(self.stubs, "sudo", 'printf "%s\\n" "$*" >>"$STUB_SUDO"; exit "${STUB_SUDO_RC:-1}"')
         for name in ("STUB_CONTAINERS", "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE",
@@ -803,6 +814,37 @@ exec /usr/bin/find "$@"''')
         lines = Path("/proc/self/status").read_text(encoding="utf-8").splitlines()
         (d / "status").write_text("\n".join(change(lines) if change else lines) + "\n", encoding="utf-8")
 
+    def test_a_directory_another_user_owns_and_this_user_may_not_read_is_left_out_of_the_age(self) -> None:
+        """Every box that ran holds `run-user/runc`, the state directory runc makes at container
+        start, root's and mode 1700 (all 21 running boxes on sami-devbox, 2026-11-16), so the age
+        walk's find could not open it in any dead box, and c2237788 kept every one as "cannot tell
+        how old its files are". The age check is for files this user is still making; nothing under
+        a directory another user owns and this user may not open is that. Such a directory is left
+        out of the age, and the pass names it. A directory this user owns and still may not read
+        (or any other find error) keeps the box as before."""
+        runc = self.run_base / OLD / "run-user" / "runc"
+        cases = {
+            "runc's directory, root's": ({"STUB_FIND_DENY": str(runc), "STUB_FIND_ROOT_OWNED": str(runc)}, True),
+            "a directory of this user's that it may not read": ({"STUB_FIND_DENY": str(runc)}, False),
+        }
+        for name, (env, goes) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                self.leftover(OLD)
+                runc.mkdir()
+                age(self.run_base / OLD, 2)  # the new directory made its parent young
+                result = self.collect(env)
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, said)
+                if goes:
+                    self.assertEqual(self.gone(OLD), [], said)
+                    self.assertIn(f"{OLD} removed", result.stdout)
+                    self.assertIn(f"not counted in its age, since another user owns it and this user may not read it: {runc} (uid 0)", said)
+                else:
+                    self.assertTrue((self.boxes / OLD).exists(), said)
+                    self.assertIn(f"{OLD} not removed: cannot tell how old its files are: find: '{runc}': Permission denied", said)
+                    self.assertNotIn(f"{OLD} removed", said)
+
     def test_a_process_the_kernel_hides_from_every_reader_keeps_no_box(self) -> None:
         """The kernel refuses a process's cwd to a reader without CAP_SYS_PTRACE when the process
         holds a capability the reader lacks, when its ids are not all the reader's, when it is not
@@ -863,6 +905,47 @@ exec /usr/bin/find "$@"''')
         self.assertTrue((self.boxes / OLD).exists())
         result = self.collect()
         self.assertEqual(self.gone(OLD), [], result.stdout)
+
+    def test_a_collector_s_detached_waiter_does_not_hold_the_collector_lock(self) -> None:
+        """The collector holds its lock on fd 8, and the unenroll waiter it starts for a box's
+        session (detached, up to AGENTBOX_UNENROLL_GRACE, 180 s) inherited that fd, so every
+        collector started while it waited ended "another collector runs" (Proof1720 at c2237788,
+        18:39:21Z and 18:39:49Z, waiter pid 2107221). A second collector during a live waiter runs."""
+        self.leftover(OLD)
+        self.enrolled(OLD, SID)
+        age(self.run_base / OLD, 2)
+        first = self.collect({"AGENTBOX_UNENROLL_GRACE": "60"})
+        self.addCleanup(self.end_waiters)
+        self.assertEqual(self.gone(OLD), [], first.stdout + first.stderr)
+        waiters = self.waiters()
+        self.assertTrue(waiters, "the first collector started no unenroll waiter")
+        second_box = "agentbox-0000000000c2"
+        self.leftover(second_box)
+        second = self.collect()
+        self.assertTrue(self.waiters(), "the waiter must still be waiting for the test to mean anything")
+        self.assertNotIn("another collector runs", second.stdout, second.stdout)
+        self.assertEqual(self.gone(second_box), [], second.stdout + second.stderr)
+
+    def waiters(self) -> list[int]:
+        """The pids of this test's unenroll waiters: `agentbox-unenroll` processes naming its run base."""
+        found = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = (entry / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if b"agentbox-unenroll" in argv and str(self.run_base).encode() in argv:
+                found.append(int(entry.name))
+        return found
+
+    def end_waiters(self) -> None:
+        for pid in self.waiters():
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     def test_agentbox_new_starts_the_collector_detached(self) -> None:
         """`agentbox new` starts the collector, every box, a session's first box too, detached from

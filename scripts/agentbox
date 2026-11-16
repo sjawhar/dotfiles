@@ -1447,10 +1447,13 @@ unenroll_box() {
     [[ -n "$sid" ]] || (( ${#own[@]} + ${#ses[@]} )) || return 0
     mkdir -p -m 700 "$RUN_BASE/session-keys" || true
     fns="$(declare -f unenroll_revoke unenroll_learn unenroll_learn_each unenroll_session_wait)"
+    # `8>&-`: each child is detached and outlives the caller, and fd 8 is the collector's lock
+    # (cmd_collect). A waiter that inherited it held the lock through its whole grace, and every
+    # collector started meanwhile ended "another collector runs" (Proof1720, 2026-11-16 18:39Z).
     if (( ${#own[@]} )); then
         setsid env AGENT_SECRETS_URL="$AGENT_SECRETS_URL" \
             bash -c "$fns"$'\n''unenroll_learn_each "$@"' agentbox-unenroll "$RUN_BASE" "$box" "${own[@]}" \
-            </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
+            </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 8>&- &
     fi
     if [[ -n "$sid" ]]; then
         skd="$(session_keydir "$sid")"
@@ -1468,7 +1471,7 @@ unenroll_box() {
         bash -c "$fns"$'\n''unenroll_session_wait "$@"' agentbox-unenroll \
         "$AGENTBOX_UNENROLL_GRACE" "$RUN_BASE" "$skd" "$box" "$sid" "$owner" "$eid" \
         "$DOTFILES_DIR/scripts/agentbox" "$closed" ${ses[@]+"${ses[@]}"} \
-        </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 &
+        </dev/null >>"$RUN_BASE/session-keys/unenroll.log" 2>&1 8>&- &
     return 0
 }
 
@@ -3102,6 +3105,15 @@ collect_read_cwds() {
     (( n )) || COLLECT_CWDS_UNREAD="the walk of $PROC found no process"
 }
 
+# collect_unreadable_owner PATH: the uid that owns PATH when that is not this user, for a path find
+# said this user may not read; status 1 when this user owns it or it cannot be looked at.
+collect_unreadable_owner() {
+    local owner
+    owner="$(find "$1" -maxdepth 0 -printf '%p\t%U\t%m\n' 2>/dev/null | cut -f2)"
+    [[ "$owner" =~ ^[0-9]+$ && "$owner" != "$(id -u)" ]] || return 1
+    printf '%s\n' "$owner"
+}
+
 # collect_status FILE: a /proc/<pid>/status (world-readable) as `<uid×4>|<gid×4>|<CapPrm>|<pid
 # namespaces>`: the four uids and gids (real, effective, saved, filesystem), the permitted
 # capabilities in hex, and how many pid namespaces deep the process is (NSpid's count). Nothing
@@ -3188,18 +3200,36 @@ collect_box() {
     fi
     mapfile -t paths < <(collect_paths "$box")
     if (( ${#paths[@]} )); then
-        # Every file of it, and one find cannot read is no proof the box is old. Errors share the
-        # output with the paths, and an error line starts `find:` where every path starts `/`.
+        # Every file of it, and one find cannot read is no proof the box is old, with one named
+        # exception. Every box that ran holds run-user/runc, the state directory runc makes at
+        # container start, root's and mode 1700, which find may not open. The age is for files this
+        # user is still making, and nothing under a directory another user owns and this user may
+        # not open is that: such a directory is left out (collect_unreadable_owner), and the pass
+        # names it. Any other error, a directory of this user's that it may not read included, keeps
+        # the box. Each young path comes tagged, so an error line is never taken for one.
         rc=0
-        out="$(find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -print -quit 2>&1)" || rc=$?
-        young="$(grep -v '^find: ' <<<"$out" | head -n 1 || true)"
+        out="$(LC_ALL=C find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
+        young="$(sed -n 's/^young\t//p' <<<"$out" | head -n 1)"
         if [[ -n "$young" ]]; then
             collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"
             return 1
         fi
         if (( rc )); then
-            collect_not_removed "$box" "$names" "cannot tell how old its files are: $(grep -m 1 '^find: ' <<<"$out" || echo "find exited $rc")"
-            return 1
+            local line owner unread="" hidden=() denied="find: '(.+)': Permission denied$"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] || continue
+                if [[ "$line" =~ $denied ]] && owner="$(collect_unreadable_owner "${BASH_REMATCH[1]}")"; then
+                    hidden+=("${BASH_REMATCH[1]} (uid $owner)")
+                else
+                    unread="$line"
+                    break
+                fi
+            done <<<"$out"
+            if [[ -n "$unread" || ${#hidden[@]} -eq 0 ]]; then
+                collect_not_removed "$box" "$names" "cannot tell how old its files are: ${unread:-find exited $rc}"
+                return 1
+            fi
+            collect_say "$box: not counted in its age, since another user owns it and this user may not read it: ${hidden[*]}"
         fi
     elif [[ -n "$names" ]]; then
         # Nothing of it under the roots: the hour is the container's own, from its end.
