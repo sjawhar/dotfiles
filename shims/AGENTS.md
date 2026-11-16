@@ -956,8 +956,15 @@ A shim that finds its real binary by a marker in its first 512 bytes must keep t
 header: `git-worktree-shim` for `shims/git` and `jj-lock-shim` for `shims/jj`. On 2026-11-12 a
 draft of the leak-term check (dispatch://HOME-131) rewrote the header of `shims/jj` without
 `jj-lock-shim`; the shim found itself as the real jj, and its editor wrapper started copies of
-itself until the machine ran out of memory. A test that runs a shim, jj or an editor runs under a
-process cap (`ulimit -u`) and a timeout.
+itself until the machine ran out of memory. A test that runs a shim, jj or an editor runs it in a
+cgroup of its own whose task limit counts only that command's processes and threads
+(`systemd-run --user --scope -p TasksMax=…`; in an agent box, the cgroup `shims/systemd-run`
+makes), and under a timeout that kills that cgroup and the command's process group. A command
+that forks without end stops at the limit and dies at the timeout, and every other process of the
+user forks as before (`shims/tests/test_leak_terms.py`, `test_harness_*`). The cap was the
+user-wide `ulimit -u` at the user's live tasks plus 1000 until 2026-11-16; other sessions on a
+288-CPU box grew by more than that within seconds, and the tests' own jj and git forks failed with
+`Resource temporarily unavailable` in about two of three runs.
 
 ## How `shims/omp` resolves omp
 

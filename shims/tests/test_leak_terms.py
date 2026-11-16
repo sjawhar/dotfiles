@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 import re
-import resource
 import shlex
 import shutil
 import signal
@@ -37,11 +36,14 @@ AGENT_MARKERS = (
     "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
     "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
 )
-# A launch may start this many tasks beyond the ones this uid has when it starts. A shim or editor that
-# recurses (an earlier draft of this file fork-bombed its machine) then fails to fork instead of exhausting the
-# shared uid's tasks. The cap is read at each launch, not once per test: other sessions of the uid start and end
-# threads all the time, and a cap read at the test's start refused git's own forks after they grew by the margin.
-TASK_MARGIN = 1000
+# Every command a test starts runs in a cgroup of its own, whose task limit (pids.max) counts that command's own
+# processes and threads and nothing else. A shim or editor that finds itself and forks without end (an earlier draft
+# of this file fork-bombed its machine) fails to fork at the limit and is killed at its timeout, while every other
+# process of this uid forks as before. The limit leaves room for a jj, whose thread pool holds a thread per CPU, with
+# a Go sops under it (measured 2026-11-16 on 288 CPUs: 294 and 80 tasks at their peaks). Until 2026-11-16 the cap was
+# RLIMIT_NPROC at this uid's live tasks plus 1000, which counts every session of the uid: other sessions grew by up to
+# 9,543 tasks in 10 s, and jj's thread pool and git's forks failed with EAGAIN in about two of three runs of a test.
+TASK_LIMIT = 1024 + 4 * (os.cpu_count() or 1)
 LAUNCH_TIMEOUT = 120
 AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
 
@@ -55,24 +57,37 @@ def base_environment(*dropped: str) -> dict[str, str]:
     }
 
 
-def live_tasks() -> int:
-    """This uid's live tasks, threads included, read from /proc: what RLIMIT_NPROC counts."""
-    uid = os.getuid()
-    count = 0
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
+@lru_cache(maxsize=1)
+def scope_runner() -> str:
+    """The systemd-run that puts a command in a transient cgroup of its own: the first one past shims/ on PATH, except
+    in an agent box, where the host's user manager cannot adopt a box's process and shims/systemd-run makes the cgroup
+    under the box's delegated root instead. The shim's own lookup costs about 0.3 s a call on the host, the real one
+    0.015 s."""
+    if os.environ.get("AGENTBOX_BOX") or Path("/etc/agentbox-identity").exists():
+        return str(ROOT / "shims" / "systemd-run")
+    shims = (ROOT / "shims").resolve()
+    entries = [entry for entry in os.environ.get("PATH", os.defpath).split(os.pathsep) if entry]
+    found = shutil.which("systemd-run", path=os.pathsep.join(entry for entry in entries if Path(entry).resolve() != shims))
+    if found is None:
+        raise RuntimeError("no systemd-run past shims/ on PATH, so no command can run under a task limit of its own")
+    return found
+
+
+def command_cgroup(pid: int) -> Path | None:
+    """The cgroup v2 directory PID is in, unless it is this process's own cgroup or one that holds it: the one cgroup
+    launch may kill whole."""
+    def cgroup_of(name: str) -> Path | None:
         try:
-            with open(f"/proc/{entry.name}/status", encoding="ascii", errors="replace") as status:
-                fields = dict(line.split(":", 1) for line in status if ":" in line)
+            lines = Path(f"/proc/{name}/cgroup").read_text(encoding="utf-8").splitlines()
         except OSError:
-            continue  # the process exited while /proc was read
-        if int(fields["Uid"].split()[0]) == uid:
-            count += int(fields["Threads"])
-    if count == 0:
-        # This process is one of them, so a count of 0 means /proc showed nothing of this uid.
-        raise AssertionError("no task of this uid is readable in /proc (UNKNOWN)")
-    return count
+            return None
+        unified = [line.removeprefix("0::") for line in lines if line.startswith("0::")]
+        return Path("/sys/fs/cgroup" + unified[0]) if unified else None
+
+    target, own = cgroup_of(str(pid)), cgroup_of("self")
+    if target is None or own is None or target == own or target in own.parents:
+        return None
+    return target
 
 
 # Each test term as the scanner matches it: case folded, each run of whitespace in the term any run of spaces and
@@ -131,7 +146,7 @@ class LeakTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.task_margin = TASK_MARGIN
+        self.task_limit = TASK_LIMIT
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -158,36 +173,40 @@ class LeakTestCase(unittest.TestCase):
         pass_fds: tuple[int, ...] = (),
         stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
-        """ARGV in a session and process group of its own, its tasks capped at this uid's live tasks plus
-        self.task_margin (RLIMIT_NPROC), stdin the descriptor STDIN, else /dev/null unless INPUT is given. A command
-        that outlives TIMEOUT fails the test after its whole process group is killed, descendants holding its pipes
-        included."""
-        _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-        task_limit = live_tasks() + self.task_margin
-        limit = task_limit if hard == resource.RLIM_INFINITY else min(task_limit, hard)
-
-        def cap_tasks() -> None:
-            resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
-
+        """ARGV with exactly the environment ENV (this process's when None), in a session and process group of its own
+        and in a cgroup of its own whose task limit is self.task_limit, stdin the descriptor STDIN, else /dev/null
+        unless INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group
+        are killed, descendants holding its pipes included."""
+        if "=" in os.fspath(argv[0]):
+            raise ValueError(f"env would read {argv[0]!r} as a variable, not a command")
+        environment = os.environ if env is None else env
+        # systemd-run runs with this process's environment, which reaches the user manager and, in a box, finds the
+        # shim's tools; env -i then gives ARGV exactly ENVIRONMENT and finds ARGV[0] on its PATH, as Popen would.
+        command = [
+            scope_runner(), "--user", "--scope", "--quiet", "--collect", "-p", f"TasksMax={self.task_limit}", "--",
+            "/usr/bin/env", "-i", *(f"{name}={value}" for name, value in environment.items()), *argv,
+        ]
         process = subprocess.Popen(
-            argv,
+            command,
             cwd=cwd,
-            env=env,
             stdin=stdin if stdin is not None else subprocess.DEVNULL if input is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=text,
             start_new_session=True,
-            preexec_fn=cap_tasks,
             pass_fds=pass_fds,
         )
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
         except subprocess.TimeoutExpired:
-            # The leader is not reaped yet, so its pid still names this group.
+            # The leader is not reaped yet, so its pid still names its cgroup and its group. In a box the leader is
+            # shims/systemd-run, which stays in the box's own cgroup, so only the group kill applies there.
+            cgroup = command_cgroup(process.pid)
+            if cgroup is not None and (cgroup / "cgroup.kill").exists():
+                (cgroup / "cgroup.kill").write_text("1", encoding="ascii")
             os.killpg(process.pid, signal.SIGKILL)
             _, stderr = process.communicate(timeout=30)
-            self.fail(f"{argv[0]} ran past {timeout} s; its process group was killed: {stderr!r}")
+            self.fail(f"{argv[0]} ran past {timeout} s; its cgroup and process group were killed: {stderr!r}")
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     def assert_hidden(self, *outputs: object) -> None:
@@ -1099,7 +1118,7 @@ index 0000000,0000000,0000000..1111111
         # The bound itself, made to fire: a child that outlives the timeout while it holds the output pipes, and a
         # command that starts more tasks than its budget allows.
         pid_file = self.root / "sleeper.pid"
-        with self.assertRaisesRegex(AssertionError, "process group was killed"):
+        with self.assertRaisesRegex(AssertionError, "process group were killed"):
             self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=2)
         sleeper = Path(f"/proc/{int(pid_file.read_text(encoding='ascii'))}/stat")
         for _ in range(100):
@@ -1109,7 +1128,7 @@ index 0000000,0000000,0000000..1111111
         else:
             self.fail("the timed-out command's background child survived the group kill")
 
-        self.task_margin = 50
+        self.task_limit = 50
         spawner = (
             "import subprocess\n"
             "started = []\n"
@@ -1127,7 +1146,131 @@ index 0000000,0000000,0000000..1111111
         )
         result = self.launch([sys.executable, "-c", spawner], timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertLess(int(result.stdout), 400, "the task budget did not stop the forks")
+        self.assertLess(int(result.stdout), self.task_limit, "the task limit did not stop the forks")
+        self.assertGreater(int(result.stdout), 0, "the command could not fork at all")
+
+    def test_harness_task_limit_counts_only_the_commands_own_tasks(self) -> None:
+        # The failure the per-uid cap had: once a command runs, other processes of this uid start more tasks than the
+        # command's whole limit, and the command must still fork. Under RLIMIT_NPROC at the uid's tasks plus a margin,
+        # such forks failed with EAGAIN.
+        self.task_limit = 64
+        ready, go = self.root / "ready", self.root / "go"
+        child = (
+            "import pathlib, subprocess, sys, time\n"
+            f"pathlib.Path({str(ready)!r}).touch()\n"
+            f"go = pathlib.Path({str(go)!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while not go.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.05)\n"
+            "started = []\n"
+            "try:\n"
+            "    for _ in range(32):\n"
+            "        started.append(subprocess.Popen(['sleep', '30']))\n"
+            "except OSError as error:\n"
+            "    print(error, file=sys.stderr)\n"
+            "finally:\n"
+            "    for process in started:\n"
+            "        process.kill()\n"
+            "        process.wait()\n"
+            "print(len(started))\n"
+        )
+        outcome: dict[str, subprocess.CompletedProcess] = {}
+        runner = threading.Thread(
+            target=lambda: outcome.setdefault("result", self.launch([sys.executable, "-c", child], timeout=90))
+        )
+        runner.start()
+        held: list[subprocess.Popen] = []
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(ready.exists(), "the command never started")
+            for _ in range(3 * self.task_limit):
+                held.append(subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL))
+        finally:
+            go.touch()
+            runner.join(timeout=120)
+            for process in held:
+                process.kill()
+                process.wait()
+        self.assertEqual(len(held), 3 * self.task_limit)
+        self.assertIn("result", outcome, "the command did not finish")
+        result = outcome["result"]
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "32"), result.stderr)
+
+    def test_harness_task_limit_stops_a_fork_loop_and_leaves_the_box_forking(self) -> None:
+        # The protection the limit is for, made to fire: a command whose every copy forks again without end, as a shim
+        # that finds itself does, stays at its limit and dies whole at its timeout, while this process, outside its
+        # cgroup, starts more processes than that limit.
+        self.task_limit = 64
+        where = self.root / "cgroup"
+        loop = (
+            "import os, pathlib, time\n"
+            f"pathlib.Path({str(where)!r}).write_text(open('/proc/self/cgroup').read())\n"
+            "while True:\n"
+            "    try:\n"
+            "        os.fork()\n"
+            "    except OSError:\n"
+            "        time.sleep(0.01)\n"
+        )
+
+        def members(cgroup: str) -> list[str]:
+            """Every process whose cgroup is CGROUP, read from /proc."""
+            found = []
+            for entry in os.scandir("/proc"):
+                if entry.name.isdigit():
+                    try:
+                        if f"0::{cgroup}\n" in Path(f"/proc/{entry.name}/cgroup").read_text(encoding="utf-8"):
+                            found.append(entry.name)
+                    except OSError:
+                        pass  # the process exited while /proc was read
+            return found
+
+        seen: dict[str, object] = {}
+
+        def watch() -> None:
+            deadline = time.monotonic() + 30
+            while not where.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            unified = [line for line in where.read_text(encoding="utf-8").splitlines() if line.startswith("0::")]
+            seen["cgroup"] = cgroup = unified[0].removeprefix("0::")
+            directory = Path("/sys/fs/cgroup" + cgroup)
+            while time.monotonic() < deadline:
+                if int((directory / "pids.current").read_text(encoding="ascii")) >= self.task_limit:
+                    break
+                time.sleep(0.05)
+            seen["max"] = (directory / "pids.max").read_text(encoding="ascii").strip()
+            seen["refused"] = int((directory / "pids.events").read_text(encoding="ascii").split()[1])
+            seen["members"] = len(members(cgroup))
+            outside = []
+            try:
+                for _ in range(2 * self.task_limit):
+                    outside.append(subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL))
+            finally:
+                seen["outside"] = len(outside)
+                for process in outside:
+                    process.kill()
+                    process.wait()
+            if (directory / "pids.peak").exists():
+                seen["peak"] = int((directory / "pids.peak").read_text(encoding="ascii"))
+
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        try:
+            with self.assertRaisesRegex(AssertionError, "cgroup and process group were killed"):
+                self.launch([sys.executable, "-c", loop], timeout=10)
+        finally:
+            watcher.join(timeout=60)
+        self.assertEqual(seen["max"], str(self.task_limit))
+        self.assertGreater(seen["refused"], 0, "no fork reached the limit")
+        self.assertGreater(seen["members"], 1, "the /proc scan saw no copy of the loop while it ran")
+        self.assertLessEqual(seen["members"], self.task_limit)
+        self.assertLessEqual(seen.get("peak", 0), self.task_limit)
+        self.assertEqual(seen["outside"], 2 * self.task_limit, "a process outside the loop's cgroup could not fork")
+        deadline = time.monotonic() + 10
+        while members(seen["cgroup"]) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(members(seen["cgroup"]), [], "a copy of the loop outlived the kill")
 
     def test_harness_real_jj_skips_shim_copies_and_mise_shims(self) -> None:
         # With `mise which jj` failing or mise missing, the PATH lookup passes over another copy of shims/jj (its
