@@ -6055,9 +6055,6 @@ move_self_in_box() {
     fi
     [[ -n "$resume" || "${PI_SESSION_FILE:-}" != *_"$sid".jsonl ]] || resume="$PI_SESSION_FILE"
     [[ -n "$resume" ]] || die "no transcript of session $sid can be read here, so a new box could not resume it; nothing was hung up"
-    # The fallback is the session's own word for its file, which a /move not yet written down or
-    # a rename leaves pointing at nothing: resuming it would end the new box (dispatch://INFRA-1720).
-    [[ -f "$resume" ]] || die "the transcript of session $sid, $resume, is not a regular file, so a new box could not resume it; nothing was hung up"
     for d in "${dirs[@]}"; do spec+=(--dir "$d"); done
     echo "agentbox: this session is already in box ${AGENTBOX_BOX:-a box}; moving again into a new one with:"
     echo "  agentbox new ${spec[*]} -- $(move_omp_line "$resume" ${flags[@]+"${flags[@]}"})"
@@ -6065,6 +6062,11 @@ move_self_in_box() {
     [[ -n "$pane" ]] || die "this box has no TMUX_PANE, so it cannot respawn its own pane; run the line above from a host session"
     if [[ -n "${own:-}" ]]; then move_orphans_gate "$own" "$$" "$dry" || die "nothing was hung up: $MOVE_ORPHANS_WHY"; fi
     if [[ "$dry" == true ]]; then return 0; fi
+    # The chosen transcript must be a regular file before the pane respawns, since a /move not yet
+    # written down or a rename leaves the session's own word for its file pointing at nothing, and
+    # resuming a path that is gone ends the new box (dispatch://INFRA-1720). After the dry run,
+    # which stops nothing and only prints the plan.
+    [[ -f "$resume" ]] || die "the transcript of session $sid, $resume, is not a regular file, so a new box could not resume it; nothing was hung up"
     # MOVE_SPEC_KEEP_GONE: the paths are the HOST's, and a box sees only what it was given. A
     # re-box exists to ADD a path, so testing existence in the box's own namespace dropped
     # exactly the new one ("a box may not be given it": LINUX-1301 and

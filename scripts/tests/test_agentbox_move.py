@@ -1514,6 +1514,10 @@ class AgentboxMove(unittest.TestCase):
         self.make_proc(999999901)
         nested = self.home / ".omp/agent/sessions/-lane/2026-10-14T17-14-49-559Z_01a13b68-d957-74b8-ad2b-b642fd17bfd9" \
             / "2026-10-25T02-17-36-102Z_01a19700-0000-7000-8000-000000000d09.jsonl"
+        # A real re-box resumes this transcript, and refuses before the respawn when it is not a
+        # regular file (dispatch://INFRA-1720): the session's transcript is there.
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("{}\n", encoding="utf-8")
         env = {
             "AGENTBOX_BOX": "agentbox-aaaaaaaaaaaa",
             "AGENTBOX_DIRS": f"{self.home}/lane",
@@ -3530,7 +3534,7 @@ class AgentboxMove(unittest.TestCase):
         run = self.run_bash(f'move_to_run "{job}"')
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertEqual(launcher.poll(), -15, "the launcher was not ended")
-        self.assertIn("rm -f agentbox-stuck", docker.read_text(encoding="utf-8"))
+        self.assertIn("rm -fv agentbox-stuck", docker.read_text(encoding="utf-8"))
         self.assertFalse((starting / self.TO).exists())
         self.assertIn("rolled back:", run.stdout)
 
