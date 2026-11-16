@@ -47,6 +47,8 @@ TEN_Z = float(
 )
 ELEVEN_Z = TEN_Z + 3600
 DESCRIPTION = "Alert when an Envoy role's holder process is gone, or an agent tmux pane sits at a shell"
+# What socket.gethostname() reads on sami-devbox, where this watch runs.
+DEVBOX_FQDN = "sami-devbox.us-west4-a.c.theorem-agent-infra.internal"
 
 
 class FakeEnvoy:
@@ -264,6 +266,9 @@ class Harness(unittest.TestCase):
             unittest.mock.patch.object(WATCH, "Envoy", FakeEnvoy),
             unittest.mock.patch.object(WATCH, "last_own_line", lambda *a: (None, "")),
             unittest.mock.patch.dict(os.environ, {"BOX_HEALTH_OWNER": ""}),
+            # The machine this watch runs on, by the name Python reads there: its own host
+            # decides nothing about these messages.
+            unittest.mock.patch.object(WATCH.socket, "gethostname", lambda: DEVBOX_FQDN),
         ]
         for patch in self.patches:
             patch.start()
