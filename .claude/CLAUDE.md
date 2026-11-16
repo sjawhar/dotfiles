@@ -59,7 +59,10 @@ Before such an action, say what changes, what could break, and the safest altern
 
 ## Asking me
 
-- Ask me only for my authority, my taste or my risk appetite. Decide the rest, do it, and tell me.
+- Before you send me a design or question, link the existing code. Link two well-known tools that solve the same problem.
+- Use the names those tools use, not new ones.
+- For each premise in the design or ask, cite its test or record. Write "untested" when neither exists.
+- Ask me only for my authority, my taste or my risk appetite. Keep one decision per ask. Decide the rest, do it, and tell me.
 - Stop for me only on a destructive action, real doubt about the goal, or something I said to ask first.
 - Don't make me your watcher. Start a background watcher and keep working. A command that blocks the turn is not a watcher, and my next message is not your wake signal.
 - When one thing blocks, keep everything else moving.
