@@ -226,7 +226,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   runs after the encrypted-term check above and before the shared public leak check. The `git push` that jj then runs passes through
   `shims/git`, which checks it again.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
-  `git worktree add`, so no box can prune another box's live registration. The prune runs
+  `git worktree add`, so no box can prune another box's live registration. omp's bash tool
+  passes it that command only while `worktree.clone` is off, as `omp/config.yml` sets it:
+  on, omp runs the add itself as `omp worktree add`, unlocked (dispatch://INFRA-3990).
+  The prune runs
   when the repository's common directory, resolved through symlinks, lies under a temporary
   root by whole path components: `$TMPDIR`, `/tmp`, `/var/tmp`, `/mnt/nvme/<user>/session-tmp`,
   `/mnt/nvme/<user>/tmp-omp-batch` or `/mnt/nvme/tmp-omp-batch`. No other session can have a

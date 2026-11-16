@@ -555,6 +555,15 @@ composer:
   shape: box
 isolation:
   backend: auto
+# Off (omp's default is on, dispatch://INFRA-3990). On, the bash tool runs every `git worktree add`
+# as `omp worktree add`, which reflink-copies the whole source checkout: each other session's tree
+# under `.worktrees/` too, its `.git` file still naming that tree's admin directory, so git in the
+# copy works on the original's index and HEAD. The call never reaches shims/git, so the new tree
+# gets no AGENTC-431 lock, and a copy the bash timeout cuts short stays as a partial tree with no
+# `.git` (78 GB at one path on 2026-11-16). Off, `git worktree add` reaches git as typed, and
+# `github pr_checkout` and `/wt` check out plainly.
+worktree:
+  clone: false
 codexResets:
   autoRedeem: "yes"
 # dispatch://INFRA-339: pi-envoy exports DISPATCH_HOST, DISPATCH_SESSION_ID and
