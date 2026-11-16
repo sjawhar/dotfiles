@@ -100,6 +100,8 @@ class NameSessionTest(unittest.TestCase):
         (self.tmp / "plain").write_text("")
         for name, (payload, env) in cases.items():
             with self.subTest(name):
+                # Each case reads its own calls, so one case's calls never fail another's.
+                self.calls.unlink(missing_ok=True)
                 base = {
                     "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.tmp), "CALLS": str(self.calls),
                     "AGENT_SECRETS_HELPER_SOCK": str(self.sock), "XDG_RUNTIME_DIR": str(self.tmp / "run"),
