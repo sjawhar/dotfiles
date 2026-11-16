@@ -269,7 +269,8 @@ class SecretsShim(unittest.TestCase):
         self.assertEqual(result.stdout, b"stdout from real secrets: list\n")
 
     # INFRA-1538: `ssh sami-devbox secrets get HUMAN_KEY` is an agent's call, so it is refused and
-    # sent to the broker; a person at a terminal, and AGENT_SHIM_PERSON=1, still reach the YubiKey.
+    # sent to the broker; a person at a terminal (sshd's or a tmux pane's), and
+    # AGENT_SHIM_PERSON=1, still reach the YubiKey.
     def secrets_over_ssh(self, *args: str, tty: bool, **env: str):
         run = run_with_tty if tty else run_without_tty
         full_env = {**self.base_env, "SSH_CONNECTION": SSH_CONNECTION, **env}
@@ -289,6 +290,18 @@ class SecretsShim(unittest.TestCase):
             with self.subTest(tty=tty):
                 self.log.unlink(missing_ok=True)
                 result = self.secrets_over_ssh("get", "HUMAN_KEY", tty=tty, SSH_TTY=SSH_TTY)
+                self.assertNotEqual(result.returncode, 77, result.stderr)
+                self.assertEqual(self.argv_log(), [["get", "HUMAN_KEY"]])
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_a_persons_pane_with_no_ssh_tty_is_the_person(self) -> None:
+        # dispatch://INFRA-4089: a pane of a tmux server that never carried SSH_TTY holds
+        # SSH_CONNECTION and no SSH_TTY; its terminal makes it the person's, piped stdin or not.
+        for stdin in (None, ""):
+            with self.subTest(piped=stdin is not None):
+                self.log.unlink(missing_ok=True)
+                result = run_with_tty(["secrets", "get", "HUMAN_KEY"], input=stdin, timeout=TIMEOUT,
+                                      env={**self.base_env, "SSH_CONNECTION": SSH_CONNECTION})
                 self.assertNotEqual(result.returncode, 77, result.stderr)
                 self.assertEqual(self.argv_log(), [["get", "HUMAN_KEY"]])
                 self.assertNotIn(self.NOTICE, result.stderr)

@@ -268,9 +268,9 @@ class AzShim(unittest.TestCase):
 
 class AzShimNonInteractiveSsh(unittest.TestCase):
     """INFRA-1538: `ssh sami-devbox az account show` is an agent's command, not Sami's. The shim
-    takes the box identity for it and names the config dir it ended on; a person's own SSH
-    session (sshd gave it a terminal, so SSH_TTY is set, whatever one command reads on stdin) —
-    and a person who sets AGENT_SHIM_PERSON=1 — keep their own login."""
+    takes the box identity for it and names the config dir it ended on; a person's own session —
+    one with a terminal, sshd's (SSH_TTY set) or a tmux pane's, whatever one command reads on stdin
+    — and a person who sets AGENT_SHIM_PERSON=1 keep their own login."""
 
     setUp = AzShim.setUp
     tearDown = AzShim.tearDown
@@ -296,6 +296,17 @@ class AzShimNonInteractiveSsh(unittest.TestCase):
         for stdin_is_a_pipe in (True, False):
             with self.subTest(piped=stdin_is_a_pipe):
                 result = self.az(self.ssh(SSH_TTY=SSH_TTY), "account", "show", tty=not stdin_is_a_pipe)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "config=unset args=account show\n")
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_a_persons_pane_with_no_ssh_tty_is_the_person(self) -> None:
+        # dispatch://INFRA-4089: a pane of a tmux server that never carried SSH_TTY holds
+        # SSH_CONNECTION and no SSH_TTY; its terminal makes it the person's, piped stdin or not.
+        for stdin in (None, ""):
+            with self.subTest(piped=stdin is not None):
+                result = run_with_tty([str(SHIMS / "az"), "account", "show"], input=stdin, cwd=self.root,
+                                      env=self.ssh(), timeout=TIMEOUT)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "config=unset args=account show\n")
                 self.assertNotIn(self.NOTICE, result.stderr)

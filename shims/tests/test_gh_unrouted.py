@@ -152,6 +152,18 @@ class Unrouted(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.gh_calls(), ["token=none args=api user"])
 
+    def test_a_persons_pane_with_no_ssh_tty_reaches_gh_as_the_person(self):
+        # dispatch://INFRA-4089: Sami's own pane of a tmux server that never carried SSH_TTY holds
+        # SSH_CONNECTION and no SSH_TTY. The pane's terminal is the session's, piped stdin or not.
+        for stdin in (None, ""):
+            with self.subTest(piped=stdin is not None):
+                self.log.write_text("")
+                result = run_with_tty([str(GH), "api", "user"], input=stdin, cwd=self.work, timeout=120,
+                                      env={**self.base, "SSH_CONNECTION": SSH_CONNECTION})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("non-interactive SSH", result.stderr)
+                self.assertEqual(self.gh_calls(), ["token=none args=api user"])
+
     def test_agent_shim_person_reaches_gh_as_the_person(self):
         env = {**self.base, "SSH_CONNECTION": SSH_CONNECTION, "AGENT_SHIM_PERSON": "1"}
         result = run_without_tty([str(GH), "api", "user"], env=env, cwd=self.work, timeout=120)

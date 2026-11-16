@@ -474,13 +474,19 @@ agent_context() {
     # the person (round 3 of INFRA-1538). The fix is the other way round: shims/tmux and
     # scripts/agentbox-tmux-guard pass the caller's markers to the new pane with tmux's -e, so an
     # agent's pane carries them and is caught above.
-    # A command that arrives over SSH in a session with no terminal (`ssh host az account show`)
-    # is an agent's, not a person's: sshd gives a person's own session a terminal and names it in
-    # SSH_TTY for the whole session, so a pipe into one command of it (`echo x | az …`, git
-    # handing its credential helper the request) is still the person's, where testing this
-    # command's own stdin made it an agent's. AGENT_SHIM_PERSON=1 is the person's escape for a
-    # deliberate non-interactive SSH command of their own (INFRA-1538).
-    if [[ -n "${SSH_CONNECTION:-}" && -z "${SSH_TTY:-}" && "${AGENT_SHIM_PERSON:-}" != 1 ]]; then
+    # A command that arrives over SSH in a session with no controlling terminal (`ssh host az
+    # account show`) is an agent's, not a person's. The session's terminal decides, not this
+    # command's stdin and not SSH_TTY alone: a person's session has one (sshd's for an interactive
+    # login, tmux's for every pane) and every process of it shares it, so a pipe into one command of
+    # it (`echo x | az …`, git handing its credential helper the request) is still the person's,
+    # where testing this command's own stdin made it an agent's. A tmux server started before
+    # .tmux.conf carried SSH_TTY gives its panes SSH_CONNECTION without SSH_TTY, and on that alone
+    # Sami's own pane was taken for an agent's (INFRA-4089). /dev/tty opens only in a session with
+    # a terminal; `true`, not `:`, since a failed redirection of a special builtin ends a
+    # POSIX-mode bash. AGENT_SHIM_PERSON=1 is the person's escape for a deliberate
+    # non-interactive SSH command of their own (INFRA-1538).
+    if [[ -n "${SSH_CONNECTION:-}" && -z "${SSH_TTY:-}" && "${AGENT_SHIM_PERSON:-}" != 1 ]] &&
+        ! { true < /dev/tty; } 2> /dev/null; then
         AGENT_CONTEXT_VIA_SSH=1
         return 0
     fi

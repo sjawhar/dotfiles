@@ -788,22 +788,30 @@ must retain `DOTFILES_LEAK_TERMS_FILE`, `SOPS_AGE_KEY_FILE` and
 ## Who is an agent
 
 `az`, `gcloud`, `gh`, `git`, `jj` and `tmux` each hold a copy of one `agent_context` function,
-and `secrets` the same test in POSIX sh. All seven read one marker set: `OMP_SESSION_ID`,
-`PI_SESSION_FILE`, `PI_TOOL_BRIDGE_URL`, `AGENTBOX_SESSION`, `CLAUDECODE`, `ENVOY_SESSION_ID`,
-`AGENT_SHIM_AGENT`, Legion's `LEGION_ROLE`, `LEGION_TREE`, `LEGION_CONTROLLER` and
-`LEGION_DAEMON_URL` (`packages/daemon/internal/runtime/tmux/spawn.go`), and the gh-app routing
-include. Until round 3 of dispatch://INFRA-1538 `secrets` read four of those and no routing
-include, and no shim knew Legion at all. A caller is also an agent **when `SSH_CONNECTION` is
-set and `SSH_TTY` is not**: `ssh sami-devbox az account show` carries no marker, and until
-2026-11-07 every such command ran as the person whose login the machine holds — az with
-`~/.azure`, Sami's own.
+`secrets` makes the same test inline and `gh-app-token` makes it in Python. All eight read one
+marker set: `OMP_SESSION_ID`, `PI_SESSION_FILE`, `PI_TOOL_BRIDGE_URL`, `AGENTBOX_SESSION`,
+`CLAUDECODE`, `ENVOY_SESSION_ID`, `AGENT_SHIM_AGENT`, Legion's `LEGION_ROLE`, `LEGION_TREE`,
+`LEGION_CONTROLLER` and `LEGION_DAEMON_URL` (`packages/daemon/internal/runtime/tmux/spawn.go`),
+and the gh-app routing include. Until round 3 of dispatch://INFRA-1538 `secrets` read four of
+those and no routing include, and no shim knew Legion at all. A caller is also an agent **when
+`SSH_CONNECTION` is set, `SSH_TTY` is not, and its session has no controlling terminal**: `ssh
+sami-devbox az account show` carries no marker, and until 2026-11-07 every such command ran as the
+person whose login the machine holds — az with `~/.azure`, Sami's own.
 
-The SESSION decides, not the command's own stdin. sshd sets `SSH_TTY` for a session it gave a
-terminal, and every command of that session inherits it, so `echo x | gh …` in a person's
-interactive SSH shell, and git handing a credential helper its request down a pipe, stay the
-person's; the first draft tested `[[ ! -t 0 ]]` and made both an agent's. A person's own shell
-off SSH is unchanged, and `AGENT_SHIM_PERSON=1` is their escape for a deliberate non-interactive
-SSH command of their own; it does not turn a session marker off.
+The SESSION decides, by its terminal: not the command's own stdin, and not `SSH_TTY` alone. A
+person's session has a controlling terminal — sshd's for an interactive login, tmux's for every
+pane — and every process of it shares it, so `echo x | gh …` in a person's shell, and git handing
+a credential helper its request down a pipe, stay the person's; the first draft tested
+`[[ ! -t 0 ]]` and made both an agent's. A command run as `ssh host cmd` without `-t` has none:
+opening `/dev/tty` fails there with ENXIO, and opens under `ssh -tt` and in a tmux pane (measured
+against a real sshd on 2026-11-17). Until then the rule read `SSH_TTY` alone, and a tmux server
+started before `.tmux.conf` carried `SSH_TTY` gives its panes `SSH_CONNECTION` without it: in
+Sami's own pane, `gh auth status` said "non-interactive SSH, so an agent's call"
+(dispatch://INFRA-4089). The bash copies open the terminal with `{ true < /dev/tty; }`, not `:`,
+because a failed redirection of a special builtin ends a POSIX-mode bash (`POSIXLY_CORRECT` in the
+environment), shim and all. A person's own shell off SSH is unchanged, and `AGENT_SHIM_PERSON=1` is
+their escape for a deliberate non-interactive SSH command of their own; it does not turn a session
+marker off, and a marker means an agent whatever the terminal.
 
 **tmux decides nothing.** A pane takes the SERVER's environment, never the environment of
 whoever asked for the pane, so an exemption for `TMUX` was a hole in both directions: an SSH
@@ -862,10 +870,10 @@ person's server got an unmarked pane that ran `gcloud --account <the person>` wi
 - `scripts/agentbox-tmux-guard` does all three with `AGENTBOX_SESSION=<box>`, so a pane or a
   command a box starts on the host server is marked, or refused, whatever shim the box runs.
 - `.tmux.conf` adds `SSH_TTY` to `update-environment`, beside the `SSH_CONNECTION` tmux carries
-  by default, so the windows a person opens after reattaching over ssh stay the person's. A
-  server started before that line, or under another config, carries `SSH_CONNECTION` without
-  `SSH_TTY` into those windows and they read as a non-interactive ssh command: the safe
-  direction, with `AGENT_SHIM_PERSON=1` as the escape.
+  by default, so the variable stays true in the windows a person opens after reattaching over
+  ssh. The rule does not depend on it: what runs in a pane has the pane's terminal, so the SSH
+  rule does not decide there (short of a process that leaves the session, `setsid`), and a pane
+  is an agent's through the marker this shim or the relay gave it.
 
 `shims/tests/test_shim_agent_context.py` (`TmuxPanes`, `TmuxMarkedArgv`) drives a real server
 and the shim's own argv through each case, and `scripts/tests/test_agentbox_tmux_guard.py` the
@@ -882,6 +890,10 @@ known (dispatch://INFRA-1538, rounds 4 and 5):
   steers other sessions with it (`agentbox/AGENTS.md`) — so this is a deliberate limit, not an
   oversight. Anything that must be an agent's gets its own pane (`new-window -d`), which is
   marked.
+- A command that has a terminal is the person's to the SSH rule, so an agent whose only evidence
+  is that rule and that gets itself a terminal — `script -c …`, a tmux server it starts past this
+  shim — is past the rule. `ssh -t` always was (sshd sets `SSH_TTY` for it). Every agent harness
+  sets a marker, which decides whatever the terminal; the rule is for the bare `ssh host cmd`.
 
 Each shim prints one stderr line when the SSH rule, and not a marker, made the decision, naming
 the escape. `az` and `gcloud` name the identity the call ENDED on, never one they have not
@@ -926,10 +938,13 @@ profile `installers/gh-app-host.sh` writes is `agent`, so both routes mint the s
 The copies are kept identical by hand — `shims/` has no sourced library, and a shim that sources
 one would be a second file every call must find — so `shims/tests/test_shim_agent_context.py`
 compares them byte for byte and drives the whole matrix; each shim's own test file carries its
-end-to-end case. A test that means a person must drop `SSH_CONNECTION` from the environment it
-inherits, or set `SSH_TTY` beside it, and name its own stdin either way
-(`shims/tests/stdin_cases.py`); a test fixture that commits must bring its own `HOME`, git
-configuration and author, or whoever runs the suite decides the case.
+end-to-end case. Each case names its session (`shims/tests/stdin_cases.py`): `run_without_tty`
+starts it with no controlling terminal, as `ssh host cmd` is started, and `run_with_tty` with a pty
+as its controlling terminal, as a pane or `ssh -t` is, with that pty or a pipe on stdin, so the
+terminal of whoever runs the suite decides nothing. A test that means a person must drop
+`SSH_CONNECTION` from the environment it inherits, set `SSH_TTY` beside it, or run with a
+terminal; a test fixture that commits must bring its own `HOME`, git configuration and author, or
+whoever runs the suite decides the case.
 
 ## Adding to a shim
 
