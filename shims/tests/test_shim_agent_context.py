@@ -183,6 +183,19 @@ class TmuxPanes(unittest.TestCase):
     def kill_server(self) -> None:
         subprocess.run([TMUX, "-S", str(self.socket), "kill-server"],
                        env=self.person_env, capture_output=True, timeout=30, check=False)
+        # kill-server returns once the server has the command, not once it is gone, so a
+        # new-session on this socket right after it could reach the exiting server and fail with
+        # "server exited unexpectedly" (6 runs in 20 of the respawn subtests on sami-devbox).
+        # Return when the socket refuses a connection: then a new-session starts its own server.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.connect(str(self.socket))
+                except OSError:  # refused, or no socket at all
+                    return
+            time.sleep(0.05)
+        self.fail("the tmux server still accepts connections 20 s after kill-server")
 
     def tmux(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         """A tmux command through shims/tmux, the way any caller on PATH reaches it."""
