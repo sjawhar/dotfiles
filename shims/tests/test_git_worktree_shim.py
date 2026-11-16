@@ -146,6 +146,14 @@ class GitWorktreeShimTest(unittest.TestCase):
         self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
         self.assertIn(str(path), self.registrations())
 
+    def test_an_agents_commit_over_ssh_names_the_ssh_rule(self):
+        # `git commit` takes the leak-term hooks ahead of the other agent-session rules; the notice still comes first.
+        result = run_without_tty(["git", "commit", "-q", "--allow-empty", "-m", "over ssh"], cwd=self.repo,
+                                 env={**self.plain, "SSH_CONNECTION": SSH_CONNECTION})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("git shim: non-interactive SSH, so an agent's call", result.stderr)
+        self.assertIn("AGENT_SHIM_PERSON=1", result.stderr)
+
     def test_a_persons_ssh_session_is_the_person(self):
         for tty in (True, False):
             with self.subTest(tty=tty):
