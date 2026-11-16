@@ -432,7 +432,7 @@ exec "$(dirname -- "$0")/logging-dpkg" "$@"''',
             {"DPKG_QUERY_OUTPUT": "hold half-configured 1.0"},
         )
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("checked-deb-control is no longer on hold", result.stderr)
+        self.assertIn("could not set the hold on checked-deb-control again", result.stderr)
 
         calls = [(call["cmd"], call["argv"]) for call in self.read_calls()]
         self.assertIn(("dpkg", ["-i", str(deb)]), calls)
@@ -447,7 +447,7 @@ exec "$(dirname -- "$0")/logging-dpkg" "$@"''',
             {"DPKG_QUERY_OUTPUT": "hold half-configured 1.0"},
         )
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("checked-deb-control is no longer on hold", result.stderr)
+        self.assertIn("could not set the hold on checked-deb-control again", result.stderr)
 
     def write_selection_state_fakes(self, state: Path) -> None:
         """Replace the fakes with ones that keep dpkg's selection and status in *state*.
@@ -526,18 +526,35 @@ printf 'dpkg %s\n' "$*" >> "$CALL_LOG.selection"''',
         self.assertEqual([call["cmd"] for call in calls], ["apt-get", "dpkg"])
         self.assertEqual(calls[1]["argv"], ["-i", str(deb)])
 
-    def assert_caller_state(self, deb: Path, expected: str, handled_failure: bool) -> None:
+    def assert_caller_state(
+        self,
+        deb: Path,
+        expected: str,
+        handled_failure: bool,
+        extra_env: dict[str, str] | None = None,
+        suffix: str = "",
+    ) -> None:
         """Compare caller state before and after a successful or handled call."""
-        caller_dir = self.root / ("caller-failure" if handled_failure else "caller-success")
+        name = ("failure" if handled_failure else "success") + suffix
+        caller_dir = self.root / f"caller-{name}"
         caller_dir.mkdir()
-        before = self.root / ("before-failure" if handled_failure else "before-success")
-        after = self.root / ("after-failure" if handled_failure else "after-success")
+        before = self.root / f"before-{name}"
+        after = self.root / f"after-{name}"
         call = (
             'failure_status=0\ninstall_checked_deb "$DEB" "$EXPECTED" || failure_status=$?\n'
             '[[ "$failure_status" -eq 1 ]]'
             if handled_failure
             else 'install_checked_deb "$DEB" "$EXPECTED"'
         )
+        env = {
+            "CALLER_DIR": str(caller_dir),
+            "DEB": str(deb),
+            "EXPECTED": expected,
+            "STATE_BEFORE": str(before),
+            "STATE_AFTER": str(after),
+        }
+        if extra_env:
+            env.update(extra_env)
         result = self.run_shell(
             f'''deb=deb-sentinel
 expected=expected-sentinel
@@ -548,6 +565,7 @@ installed=installed-sentinel
 want=want-sentinel
 state=state-sentinel
 installed_version=installed-version-sentinel
+held=held-sentinel
 pre_depends=pre-depends-sentinel
 depends=depends-sentinel
 rc=rc-sentinel
@@ -555,7 +573,7 @@ deps=(deps-zero deps-one)
 trap 'echo bye' EXIT
 cd "$CALLER_DIR"
 state() {{
-    declare -p deb expected actual package version installed want state installed_version pre_depends depends rc deps
+    declare -p deb expected actual package version installed want state installed_version held pre_depends depends rc deps
     trap -p EXIT
     printf 'shell-options=%s\\n' "$-"
     shopt -o pipefail
@@ -565,13 +583,7 @@ state > "$STATE_BEFORE"
 {call}
 state > "$STATE_AFTER"
 [[ ! -v DEBIAN_FRONTEND ]]''',
-            {
-                "CALLER_DIR": str(caller_dir),
-                "DEB": str(deb),
-                "EXPECTED": expected,
-                "STATE_BEFORE": str(before),
-                "STATE_AFTER": str(after),
-            },
+            env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(before.read_text(encoding="utf-8"), after.read_text(encoding="utf-8"), result.stderr)
@@ -586,6 +598,14 @@ state > "$STATE_AFTER"
         self.assert_caller_state(deb, actual, handled_failure=False)
         wrong = "0" * 64 if actual != "0" * 64 else "1" * 64
         self.assert_caller_state(deb, wrong, handled_failure=True)
+        # A package held at another version reaches the hold refusal, which sets `held`.
+        self.assert_caller_state(
+            deb,
+            actual,
+            handled_failure=True,
+            extra_env={"DPKG_QUERY_OUTPUT": "hold installed 0.5"},
+            suffix="-hold",
+        )
 
 
 if __name__ == "__main__":

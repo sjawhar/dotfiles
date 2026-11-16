@@ -84,8 +84,8 @@ ensure_json() {
 # It keeps the two refusals of apt that `dpkg -i` lacks: it installs nothing over a newer
 # installed version or over a package held at another version. A hold at the pinned version is
 # kept: `dpkg -i` sets the selection back to install, so the hold is set again after it, whether
-# `dpkg -i` succeeds or fails; a failed re-hold says so and returns non-zero, because the package
-# is then on install and the next apt run can move it.
+# `dpkg -i` succeeds or fails; a failed re-hold says it could not set the hold again and returns
+# non-zero, because the package may be left on install, where the next apt run can move it.
 # Every step returns its own failure because `||` and `if` callers disable `set -e` inside it.
 install_checked_deb() {
     local deb="$1" expected="$2"
@@ -133,7 +133,7 @@ install_checked_deb() {
     rc=0
     DEBIAN_FRONTEND=noninteractive dpkg -i "$deb" || rc=$?
     if [[ "$want" == hold ]] && ! dpkg --set-selections <<< "$package hold"; then
-        echo "install_checked_deb: $package is no longer on hold; run apt-mark hold $package" >&2
+        echo "install_checked_deb: could not set the hold on $package again; check apt-mark showhold and run apt-mark hold $package" >&2
         return "$((rc == 0 ? 1 : rc))"
     fi
     return "$rc"
