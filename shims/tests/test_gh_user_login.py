@@ -240,7 +240,7 @@ class UserLogin(unittest.TestCase):
         # is the review App, so an approval this identity cannot give goes to a running Legion
         # reviewer the controller names, with no review issue (dispatch://INFRA-1481 v27, R1 and R3).
         self.assertIn("ask INFRA's Legion controller (Envoy topic notifications.role.legion-infra-controller)", err)
-        self.assertIn("which running Legion reviewer reads it, and send that reviewer the pull request and its head; ask for no review issue", err)
+        self.assertIn("which running Legion reviewer reads it, and send that reviewer the pull request and its head. Ask for no review issue", err)
         self.assertNotIn("for a review issue", err)
         self.assertNotIn(".dotfiles/scripts/", err)  # no script stands between a session and gh
         # No approval uses a person's token (dispatch://INFRA-1481, R3), so the refused review
@@ -254,7 +254,7 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`gh pr comment 7 -R o/r --body-file <file>`", result.stderr)
         self.assertIn("`VERDICT: REQUEST_CHANGES at", result.stderr)
-        self.assertIn("which running Legion reviewer reads it, and send that reviewer the pull request and its head; ask for no review issue", result.stderr)
+        self.assertIn("which running Legion reviewer reads it, and send that reviewer the pull request and its head. Ask for no review issue", result.stderr)
         self.assertNotIn("for a review issue", result.stderr)
         self.assertNotIn(".dotfiles/scripts/", result.stderr)
 
