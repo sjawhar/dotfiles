@@ -322,9 +322,18 @@ describe("the session file of a box", () => {
 	});
 
 	type Agent = { kind: "main" | "sub"; id: string };
-	type Step = { event: string; agent: Agent; manager: string } | { set: string; id?: string; file?: string } | { sleep: number };
+	type Step =
+		| { event: string; agent: Agent; manager: string }
+		| { set: string; id?: string; file?: string }
+		| { sleep: number }
+		| { hold: "open" | "read" };
 	type Snapshot = { content: string; ino: number } | null;
-	type Run = { pid: number; snapshots: Snapshot[]; saved: { manager: string; id: string | null; held: string | null }[] };
+	type Run = {
+		pid: number;
+		snapshots: Snapshot[];
+		saved: { manager: string; id: string | null; held: string | null }[];
+		holds: (string | null)[];
+	};
 	/**
 	 * One script of events in a fresh process (session-env-file-driver.ts). `runner` is where
 	 * AGENTBOX_RUNNER_PID points: at the process's own parent (the omp a box's runner started), at
@@ -357,95 +366,48 @@ describe("the session file of a box", () => {
 		return JSON.parse(out) as Run;
 	}
 
-	// Reads the session file as fast as it can, in a process of its own, until POLL_STOP exists,
-	// and prints how many whole reports it read and up to five reads that were not one: an empty
-	// or cut file, or a file gone after it had been there.
-	function pollSessionFile(): void {
-		const fs = require("node:fs");
-		const file = process.env.POLL_FILE ?? "";
-		const stop = process.env.POLL_STOP ?? "";
-		const whole = /^version=1\npid=\d+\nsession=[0-9a-f-]{36}\nfile=\/[^\n]+\n$/;
-		let reads = 0;
-		let seen = false;
-		const bad: string[] = [];
-		fs.writeFileSync(process.env.POLL_READY ?? "", "");
-		while (!fs.existsSync(stop)) {
-			let text: string;
-			try {
-				text = fs.readFileSync(file, "utf8");
-			} catch (error) {
-				if (seen && bad.length < 5) bad.push(`gone: ${error}`);
-				continue;
-			}
-			seen = true;
-			reads++;
-			if (!whole.test(text) && bad.length < 5) bad.push(JSON.stringify(text));
-		}
-		process.stdout.write(JSON.stringify({ reads, bad }));
-	}
-	async function startPoller(file: string): Promise<() => Promise<{ reads: number; bad: string[] }>> {
-		const stop = path.join(home, "poll-stop");
-		const ready = path.join(home, "poll-ready");
-		const child = Bun.spawn([process.execPath, "-e", `(${pollSessionFile.toString()})()`], {
-			env: { ...process.env, POLL_FILE: file, POLL_STOP: stop, POLL_READY: ready },
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		// The poller says it is reading by a file; nothing else of its process can be awaited.
-		for (let waited = 0; !existsSync(ready); waited += 10) {
-			if (waited > 5_000) throw new Error("the poller did not start");
-			await Bun.sleep(10);
-		}
-		return async () => {
-			writeFileSync(stop, "");
-			const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-			if (code !== 0) throw new Error(`poller exited ${code}: ${err}`);
-			return JSON.parse(out);
-		};
-	}
-
 	test("sessionFileFollowsNewResumeAndBranch: each names its session whole, saved first, through a rename in the same directory", async () => {
 		const seen: string[] = [];
 		const watcher = watch(runtime, (_kind, name) => {
 			if (name) seen.push(String(name));
 		});
-		const stopPolling = await startPoller(path.join(runtime, "agentbox-session"));
-		// Many more switches after the three, so the poller has writes to land in the middle of.
-		const churn: Step[] = Array.from({ length: 200 }, (_, i) => [
-			{ set: "main", id: i % 2 ? C : B, file: transcript(i % 2 ? C : B) },
-			{ event: "session_switch", agent: MAIN, manager: "main" },
-		]).flat();
-		const { pid, snapshots, saved } = await run({
+		// A reader of the session file holds a descriptor across the two writes that follow. A
+		// rename gives the name a NEW file, so that descriptor still reads the whole report it
+		// opened; a write in place would read through to the new bytes, and between the
+		// truncation and the write to none of them. The read is taken after both writes have
+		// returned, so nothing here depends on when a reader is scheduled.
+		const { pid, snapshots, saved, holds } = await run({
 			managers: { main: { id: A, file: transcript(A) } },
 			steps: [
 				{ event: "session_start", agent: MAIN, manager: "main" },
+				{ hold: "open" },
 				{ set: "main", id: B, file: transcript(B) },
 				{ event: "session_switch", agent: MAIN, manager: "main" },
 				{ set: "main", id: C, file: transcript(C) },
 				{ event: "session_branch", agent: MAIN, manager: "main" },
-				...churn,
+				{ hold: "read" },
 			],
 		});
-		const polled = await stopPolling();
 		watcher.close();
-		expect(polled.reads).toBeGreaterThan(0);
-		expect(polled.bad).toEqual([]);
-		expect(snapshots.slice(0, 5).map((s) => s?.content ?? null)).toEqual([
+		expect(holds).toEqual([reportOf(pid, A, transcript(A))]);
+		expect(snapshots.map((s) => s?.content ?? null)).toEqual([
+			reportOf(pid, A, transcript(A)),
 			reportOf(pid, A, transcript(A)),
 			reportOf(pid, A, transcript(A)),
 			reportOf(pid, B, transcript(B)),
 			reportOf(pid, B, transcript(B)),
 			reportOf(pid, C, transcript(C)),
+			reportOf(pid, C, transcript(C)),
 		]);
 		// Each save comes before the write it is for: the file still names the session before.
-		expect(saved.slice(0, 3)).toEqual([
+		expect(saved).toEqual([
 			{ manager: "main", id: A, held: null },
 			{ manager: "main", id: B, held: reportOf(pid, A, transcript(A)) },
 			{ manager: "main", id: C, held: reportOf(pid, B, transcript(B)) },
 		]);
 		// A rename puts a new file in place; a write in place keeps the old one.
-		expect(snapshots[2]?.ino).not.toBe(snapshots[0]?.ino);
-		expect(snapshots[4]?.ino).not.toBe(snapshots[2]?.ino);
+		expect(snapshots[3]?.ino).not.toBe(snapshots[0]?.ino);
+		expect(snapshots[5]?.ino).not.toBe(snapshots[3]?.ino);
 		expect(seen).toContain(`agentbox-session.${pid}.tmp`);
 		expect(readdirSync(runtime)).toEqual(["agentbox-session"]);
 	}, 30_000);

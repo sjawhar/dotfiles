@@ -283,6 +283,20 @@ function report(box: Box, pid: number, file: string, sid = SID): void {
 	fs.writeFileSync(path.join(box.runtime, "agentbox-session"), `version=1\npid=${pid}\nsession=${sid}\nfile=${file}\n`);
 }
 /**
+ * The signals the kernel holds for PID, delivered to none of its threads yet: `SigPnd` (this
+ * thread's) and `ShdPnd` (the process's) of /proc/<pid>/status, as one mask whose bit N-1 is
+ * signal N. A signal that was sent and not yet handled is in it, so a check of "it has not been
+ * signalled" needs no wait.
+ */
+function pendingSignals(pid: number): bigint {
+	let mask = 0n;
+	for (const line of fs.readFileSync(`/proc/${pid}/status`, "utf8").split("\n")) {
+		const hex = /^(?:SigPnd|ShdPnd):\s+([0-9a-f]+)$/.exec(line)?.[1];
+		if (hex) mask |= BigInt(`0x${hex}`);
+	}
+	return mask;
+}
+/**
  * The first omp got no SIGHUP so far: a good report now restarts it, and the one SIGHUP it gets
  * finds every answer before it already in the file, the last one `started`.
  */
@@ -366,8 +380,12 @@ describe("restartAnswersInTheSignalHandler", () => {
 		expect(fs.readFileSync(path.join(box.runtime, "agentbox-runner"), "utf8")).toBe(version);
 	}, 20_000);
 
-	// An answer file nobody reads yet (a FIFO) holds the runner in its append. A hang-up sent
-	// before the answer has reached omp by then; one sent after it cannot have.
+	// An answer file nobody reads yet (a FIFO) holds the runner in its append: with the line in
+	// the handler before the hang-up, the runner cannot reach the hang-up until this test reads
+	// the FIFO. The barrier is the runner's own log line, which `answer` writes as it starts, and
+	// the kernel's pending-signal mask for omp, so a hang-up that was sent but not yet handled is
+	// seen too (`SigPnd`/`ShdPnd` in /proc/<pid>/status, bit 0 for SIGHUP). Nothing here waits on
+	// a clock.
 	test("the started line is written before omp is hung up", async () => {
 		const box = await startBox(["omp"]);
 		const [omp] = ompPids(box);
@@ -376,10 +394,10 @@ describe("restartAnswersInTheSignalHandler", () => {
 		const fifo = path.join(box.runtime, "agentbox-restart");
 		expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
 		box.runner.kill("SIGUSR1");
-		// The marker is written just before the answer, so the runner is at the append now.
-		await until("the relaunch marker", () => fs.existsSync(path.join(box.home, ".cache/omp/agentbox", `restarting-${SID}`)));
-		// Waiting for a hang-up that must not come: a premature one lands in milliseconds.
-		await Bun.sleep(500);
+		// The runner notes each answer before it writes it, so it is now in that write.
+		const log = path.join(box.home, ".cache/omp/agentbox", "agentbox-test.log");
+		await until("the runner's note of the answer", () => fs.readFileSync(log, "utf8").includes("restart request: started"));
+		expect(pendingSignals(omp) & 1n).toBe(0n);
 		expect(fs.existsSync(path.join(box.rec, `hup.${omp}`))).toBe(false);
 		expect(answersIn(fs.readFileSync(fifo, "utf8"))).toEqual([`started session ${SID}: hanging up omp (pid ${omp}) to resume ${file}`]);
 		await until("the hang-up", () => fs.existsSync(path.join(box.rec, `hup.${omp}`)));

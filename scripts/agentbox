@@ -2945,10 +2945,12 @@ close_box_dir() {
 # close_box. Before this change it was deleted only when a later box of the same session started
 # (`agentbox reap-previous`), and kept when a clone in it held work no remote had. Each
 # `agentbox new` now starts the collector, detached and one at a time (a lock), and it deletes
-# every box it finds that nothing uses. It finds boxes only by names of the form agentbox-<12 hex>
-# under its own roots: the box tree (BOXES), the records and images (BOX_RECORDS, BOX_DISKS), the
+# every box it finds that nothing uses. It finds boxes only by names of the form agentbox-<12 hex>:
+# under its own roots, the box tree (BOXES), the records and images (BOX_RECORDS, BOX_DISKS), the
 # caches (BOX_CACHE_ROOT) and $RUN_BASE, where some boxes leave their run dir and nothing else (9
-# of 288 on sami-devbox at 2026-11-15T21:28Z). It deletes a box, in every place the box left
+# of 288 on sami-devbox at 2026-11-15T21:28Z); and in Docker, the exited containers, which can
+# outlive everything else of a box (a `docker rm` that failed, files a person removed) and hold
+# its inner Docker store in their anonymous volume. It deletes a box, in every place the box left
 # (those roots, its exited container with its volumes, its tmux relay unit agentbox-tmux-<box>),
 # when all of these hold:
 #   - it has no container, or an exited one (docker that cannot be asked keeps it);
@@ -2956,7 +2958,8 @@ close_box_dir() {
 #     without one (every box started before this change) counts as a launcher that is not running;
 #   - the newest of its files under those roots is more than an hour old: a box being made has no
 #     container for minutes while its clones are made, and one being closed has none while its
-#     launcher still works;
+#     launcher still works. With no file under the roots, its container ended more than an hour
+#     ago (`.State.FinishedAt`); an end time docker does not give keeps it;
 #   - no process has its working directory under the box's directory or its $RUN_BASE/<box>,
 #     except the box's own tmux relay unit, which outlives a launcher that died.
 # Before it deletes $RUN_BASE/<box>, which holds the box's enrollment files, it runs unenroll_box
@@ -2972,18 +2975,22 @@ COLLECT_LOG_DIR="${AGENTBOX_COLLECT_LOG_DIR:-$HOME/.cache/omp/agentbox}"
 COLLECT_AGE_MIN=60
 collect_say() { echo "$(date -u +%FT%TZ) agentbox collect: $*"; }
 
-# collect_candidates: each box name with an entry under the collector's roots, once.
+# collect_candidates: each box name with an entry under the collector's roots, or an exited
+# container of that name, once.
 collect_candidates() {
     local p n
-    for p in "$BOXES"/agentbox-* "$BOX_DISKS"/agentbox-*.img "$BOX_RECORDS"/agentbox-*.info \
-        "$BOX_RECORDS"/agentbox-*.info.exit "$BOX_CACHE_ROOT"/agentbox-* "$RUN_BASE"/agentbox-*; do
-        [[ -e "$p" || -L "$p" ]] || continue
-        n="${p##*/}"
-        n="${n%.exit}"
-        n="${n%.info}"
-        n="${n%.img}"
-        [[ "$n" =~ ^agentbox-[0-9a-f]{12}$ ]] && printf '%s\n' "$n"
-    done | sort -u
+    {
+        for p in "$BOXES"/agentbox-* "$BOX_DISKS"/agentbox-*.img "$BOX_RECORDS"/agentbox-*.info \
+            "$BOX_RECORDS"/agentbox-*.info.exit "$BOX_CACHE_ROOT"/agentbox-* "$RUN_BASE"/agentbox-*; do
+            [[ -e "$p" || -L "$p" ]] || continue
+            n="${p##*/}"
+            n="${n%.exit}"
+            n="${n%.info}"
+            n="${n%.img}"
+            printf '%s\n' "$n"
+        done
+        docker ps -a --filter name='^agentbox-' --filter status=exited --format '{{.Names}}' 2>/dev/null || true
+    } | grep -E '^agentbox-[0-9a-f]{12}$' | sort -u || true
 }
 
 # collect_paths BOX: each place under the collector's roots that BOX left.
@@ -3057,11 +3064,26 @@ collect_box() {
         return 1
     fi
     mapfile -t paths < <(collect_paths "$box")
-    (( ${#paths[@]} )) || return 0
-    young="$(find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -print -quit 2>/dev/null || true)"
-    if [[ -n "$young" ]]; then
-        collect_say "$box kept: $young is younger than $COLLECT_AGE_MIN minutes"
-        return 1
+    if (( ${#paths[@]} )); then
+        young="$(find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -print -quit 2>/dev/null || true)"
+        if [[ -n "$young" ]]; then
+            collect_say "$box kept: $young is younger than $COLLECT_AGE_MIN minutes"
+            return 1
+        fi
+    elif [[ -n "$names" ]]; then
+        # Nothing of it under the roots: the hour is the container's own, from its end.
+        local finished ended
+        finished="$(docker inspect -f '{{.State.FinishedAt}}' "$box" 2>/dev/null)" || finished=""
+        if ! ended="$(date -u -d "$finished" +%s 2>/dev/null)" || [[ -z "$finished" ]]; then
+            collect_say "$box kept: docker gave no end time for its container ('$finished')"
+            return 1
+        fi
+        if (( $(date -u +%s) - ended < COLLECT_AGE_MIN * 60 )); then
+            collect_say "$box kept: its container ended at $finished, less than $COLLECT_AGE_MIN minutes ago"
+            return 1
+        fi
+    else
+        return 0
     fi
     if pid="$(collect_holder "$box")"; then
         collect_say "$box kept: process $pid has its working directory in it"

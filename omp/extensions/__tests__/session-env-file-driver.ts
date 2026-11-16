@@ -8,9 +8,17 @@
 //     { set: <name>, id?, file? }               a change no event reports: omp's silent change of
 //                                               id, or a /move of the transcript
 //     { sleep: <ms> }                           time for the extension's timer
+//     { hold: "open" | "read" }                 open the session file and keep the descriptor, or
+//                                               read the whole file through the descriptor held
+//                                               since `open` and close it. A rename puts a NEW
+//                                               file in place, so a descriptor opened before a
+//                                               write still reads the whole file as it was; a
+//                                               write in place reads through to the new bytes, and
+//                                               after the truncation to none. `holds` has each
+//                                               read, in order.
 // Each session manager's ensureOnDisk records its session's id and what the session file held
 // when it was called.
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import sessionEnv from "../session-env";
 
@@ -19,7 +27,8 @@ type State = { id?: string; file?: string };
 type Step =
 	| { event: string; agent: { kind: "main" | "sub"; id: string }; manager: string }
 	| ({ set: string } & State)
-	| { sleep: number };
+	| { sleep: number }
+	| { hold: "open" | "read" };
 
 const script = JSON.parse(process.argv[2] ?? "{}") as { managers: Record<string, State>; steps: Step[] };
 const sessionFile = path.join(process.env.XDG_RUNTIME_DIR ?? "", "agentbox-session");
@@ -29,6 +38,21 @@ const held = (): { content: string; ino: number } | null => {
 	} catch {
 		return null;
 	}
+};
+
+const holds: (string | null)[] = [];
+let heldFd: number | undefined;
+// The whole of what the held descriptor points at, from its start, however the file has changed.
+const readHeld = (fd: number): string => {
+	const chunks: Buffer[] = [];
+	const buffer = Buffer.alloc(65536);
+	for (let at = 0; ; ) {
+		const read = readSync(fd, buffer, 0, buffer.length, at);
+		if (read <= 0) break;
+		chunks.push(Buffer.from(buffer.subarray(0, read)));
+		at += read;
+	}
+	return Buffer.concat(chunks).toString("utf8");
 };
 
 const saved: { manager: string; id: string | undefined; held: string | null }[] = [];
@@ -61,9 +85,19 @@ for (const step of script.steps) {
 		const state = states.get(step.set) as State;
 		state.id = step.id;
 		state.file = step.file;
+	} else if ("hold" in step) {
+		if (step.hold === "open") {
+			heldFd = openSync(sessionFile, "r");
+		} else if (heldFd !== undefined) {
+			holds.push(readHeld(heldFd));
+			closeSync(heldFd);
+			heldFd = undefined;
+		} else {
+			holds.push(null);
+		}
 	} else {
 		await Bun.sleep(step.sleep);
 	}
 	snapshots.push(held());
 }
-process.stdout.write(JSON.stringify({ pid: process.pid, snapshots, saved }));
+process.stdout.write(JSON.stringify({ pid: process.pid, snapshots, saved, holds }));

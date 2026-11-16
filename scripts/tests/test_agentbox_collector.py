@@ -101,7 +101,7 @@ if [[ "${1:-}" == inspect ]]; then
         *State.Running*) [[ "$state" == running ]] && echo true || echo false ;;
         *State.ExitCode*) cat "$STUB_CONTAINER_RC" 2>/dev/null || echo 0 ;;
         *State.OOMKilled*) cat "$STUB_CONTAINER_OOM" 2>/dev/null || echo false ;;
-        *State.FinishedAt*) echo "2026-11-07T15:18:00Z" ;;
+        *State.FinishedAt*) cat "$STUB_CONTAINER_FINISHED" 2>/dev/null || echo "2026-11-07T15:18:00Z" ;;
         *) echo "" ;;
     esac
     exit 0
@@ -112,6 +112,12 @@ if [[ "${1:-}" == rm ]]; then
     while [[ "${1:-}" == -* ]]; do shift; done
     grep -vxF "${1:-}" "$STUB_CONTAINERS" >"$STUB_CONTAINERS.new" 2>/dev/null || :
     mv -f "$STUB_CONTAINERS.new" "$STUB_CONTAINERS"
+    exit 0
+fi
+# `ps -a --filter status=exited` lists every stub container while their state is `exited`.
+if [[ " $* " == *" status=exited "* ]]; then
+    state="$(cat "$STUB_CONTAINER_STATE" 2>/dev/null)"
+    [[ "$state" == exited ]] && cat "$STUB_CONTAINERS"
     exit 0
 fi
 want=""
@@ -134,6 +140,8 @@ exit 0''')
                      "STUB_CONTAINER_RC", "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM",
                      "STUB_SYSTEMCTL"):
             (self.root / name).write_text("", encoding="utf-8")
+        # `docker inspect -f {{.State.FinishedAt}}` answers this file; absent, an old end time.
+        self.finished = self.root / "STUB_CONTAINER_FINISHED"
         self.env = {
             # These tests run INSIDE a box themselves, and the script takes its in-box paths when
             # it finds the box identity file; pointed at a path that does not exist.
@@ -156,6 +164,7 @@ exit 0''')
             **{name: str(self.root / name) for name in (
                 "STUB_CONTAINERS", "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE", "STUB_CONTAINER_RC",
                 "STUB_CONTAINER_OOM", "STUB_PS_FAIL", "STUB_DOCKER_RM", "STUB_SYSTEMCTL")},
+            "STUB_CONTAINER_FINISHED": str(self.root / "STUB_CONTAINER_FINISHED"),
         }
 
     # ── fixtures ────────────────────────────────────────────────────────────────────────────
@@ -525,12 +534,11 @@ exit 0''')
         self.assertEqual(self.gone(OLD), [], result.stdout)
         self.assertIn(f"--user stop agentbox-tmux-{OLD}", self.stub_log("STUB_SYSTEMCTL"))
 
-    def test_the_collector_touches_nothing_outside_its_roots(self) -> None:
-        """A container named like a box with nothing of it under the collector's roots is not a
-        candidate: the collector finds boxes only by names under its roots. Names of another form
-        under them are not boxes either."""
+    def test_the_collector_touches_nothing_that_is_not_a_box(self) -> None:
+        """Names of another form under its roots are not boxes, and a container that runs is not
+        a leftover, wherever its files are."""
         self.set_containers("agentbox-0000000000f6")
-        self.set_container_state("exited")
+        self.set_container_state("running")
         for odd in ("agentbox-notabox", "agentbox-0000000000a1x"):
             (self.run_base / odd).mkdir()
             age(self.run_base / odd, 2)
@@ -540,6 +548,44 @@ exit 0''')
         self.assertEqual(self.stub_log("STUB_SYSTEMCTL"), "")
         for odd in ("agentbox-notabox", "agentbox-0000000000a1x"):
             self.assertTrue((self.run_base / odd).exists())
+
+    def test_the_collector_removes_an_exited_container_whose_files_are_gone(self) -> None:
+        """An exited box container with nothing of it left under the collector's roots is what a
+        box left too, with its inner Docker store in its anonymous volume: a box whose files went
+        while its container stayed (any box closed between 72f17697, 2026-11-07, and this change
+        whose `docker rm` failed), or one whose files a person removed. The end of a box deletes
+        everything in it (Sami, dispatch://INFRA-1720/ask/16322992), so the collector removes such
+        a container, with its volume and after its exit row, once it ended more than an hour ago;
+        it judges the hour by the container's end, since it has no file to judge it by."""
+        box = "agentbox-0000000000f6"
+        self.set_containers(box)
+        self.set_container_state("exited", rc="137")
+        with self.subTest("it ended ten minutes ago"):
+            self.finished.write_text(
+                time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime(time.time() - 600)) + "\n",
+                encoding="utf-8")
+            result = self.collect()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.stub_log("STUB_DOCKER_RM"), "")
+            self.assertIn(f"{box} kept: its container ended", result.stdout)
+        with self.subTest("it ended two hours ago"):
+            self.finished.write_text(
+                time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime(time.time() - 7200)) + "\n",
+                encoding="utf-8")
+            result = self.collect()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"rm -v {box}", self.stub_log("STUB_DOCKER_RM"))
+            self.assertIn(box, self.exits_tally())
+            self.assertIn(f"--user stop agentbox-tmux-{box}", self.stub_log("STUB_SYSTEMCTL"))
+            self.assertIn(f"{box} removed", result.stdout)
+            self.assertEqual(self.gone(box), [])
+        with self.subTest("an end time docker does not give keeps it"):
+            self.set_containers(box)
+            (self.root / "STUB_DOCKER_RM").write_text("", encoding="utf-8")
+            self.finished.write_text("0001-01-01T00:00:00Z-not-a-time\n", encoding="utf-8")
+            result = self.collect()
+            self.assertEqual(self.stub_log("STUB_DOCKER_RM"), "")
+            self.assertIn(f"{box} kept", result.stdout)
 
     def test_collectors_run_one_at_a_time(self) -> None:
         self.leftover(OLD)
