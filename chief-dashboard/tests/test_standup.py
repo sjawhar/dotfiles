@@ -436,12 +436,12 @@ def test_dispatch_is_read_at_the_meetings_pace_only_while_the_room_is_in_use(roo
 
 # ------------------------------------------------------------------------------------- the page and its routes
 @pytest.fixture
-def served(tmp_path, monkeypatch):
+def served(tmp_path, socket_dir, monkeypatch):
     monkeypatch.setattr(server, "STATE_DIR", tmp_path)
     dash = server.Dashboard()
     dash.room = standup.Room(tmp_path, dispatch=FakeDispatch(), speech=FakeSpeech())
     dash.room.refresh()
-    path = tmp_path / "page.sock"
+    path = socket_dir / "page.sock"
     srv = server._UnixHTTPServer(str(path), server.make_handler(dash, proxy_uid=os.getuid()))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield path, dash

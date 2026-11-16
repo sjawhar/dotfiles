@@ -20,6 +20,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from disk_fill_watch_no_boxes import no_agent_boxes  # noqa: E402 - found through the path above
 
 SCRIPT = Path(__file__).resolve().parents[1] / "disk-fill-watch"
 LOADER = importlib.machinery.SourceFileLoader("disk_fill_watch", str(SCRIPT))
@@ -77,6 +79,7 @@ class DiskFillWatchAlertRoutingTest(unittest.TestCase):
             WATCH.writers_now = original_writers
 
         self.addCleanup(restore)
+        no_agent_boxes(self, WATCH)
 
     def options(self, **overrides) -> argparse.Namespace:
         values = {
@@ -521,6 +524,7 @@ class DiskFillWatchRateAndOwnershipTest(unittest.TestCase):
             WATCH.time.time = original_time
 
         self.addCleanup(restore)
+        no_agent_boxes(self, WATCH)
 
     def options(self) -> argparse.Namespace:
         return argparse.Namespace(
@@ -927,6 +931,7 @@ class DiskFillWatchSrcEntryTest(unittest.TestCase):
             WATCH.LIVE_READ = False
 
         self.addCleanup(restore)
+        no_agent_boxes(self, WATCH)
         WATCH.LIVE_SESSIONS.clear()
         WATCH.LIVE_READ = False
 
@@ -1570,6 +1575,14 @@ class DiskFillWatchIopsCapTest(unittest.TestCase):
             WATCH.time.time = original_time
 
         self.addCleanup(restore)
+        no_agent_boxes(self, WATCH)
+        # The cap these cases count against is the configured one, so the cloud lookup answers
+        # as off a cloud VM. On a Google VM the real lookup read this host's own /mnt/durable
+        # (sami-devbox's live cap, not CAP) and every case below failed there; LiveIopsCapTest
+        # in test_disk_fill_watch_messages.py holds the live cap.
+        original_live = WATCH.live_caps
+        WATCH.live_caps = lambda mounts: {mount: {"local": "not a cloud VM, so no provisioned cap"} for mount in mounts}
+        self.addCleanup(setattr, WATCH, "live_caps", original_live)
 
     def options(self, **overrides) -> argparse.Namespace:
         values = dict(

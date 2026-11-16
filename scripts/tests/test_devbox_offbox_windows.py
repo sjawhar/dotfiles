@@ -9,7 +9,9 @@ import importlib.machinery
 import importlib.util
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -26,11 +28,22 @@ spec.loader.exec_module(watch)
 
 
 @pytest.fixture
-def workspace(tmp_path: Path):
+def socket_dir():
+    """A directory for the tmux socket. A unix socket's path holds at most 107 bytes, and
+    tmp_path under a session's TMPDIR (/mnt/scratch/<user>/session-tmp/<pid>-<random>/
+    pytest-of-<user>/…) runs past that, so tmux refused with "File name too long" and every
+    test of this file errored there."""
+    path = Path(tempfile.mkdtemp(prefix="offbox-tmux-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def workspace(tmp_path: Path, socket_dir: Path):
     home = tmp_path / "home"
     shims = home / ".dotfiles/shims"
     shims.mkdir(parents=True)
-    socket = tmp_path / "tmux.sock"
+    socket = socket_dir / "tmux.sock"
     tmux = shims / "tmux"
     tmux.write_text(f"#!/bin/sh\nexec /usr/bin/tmux -S {shlex.quote(str(socket))} -f /dev/null \"$@\"\n")
     tmux.chmod(0o755)
