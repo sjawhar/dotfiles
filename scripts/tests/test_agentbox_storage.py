@@ -19,7 +19,9 @@ class BoxStorage(unittest.TestCase):
                     "AGENTBOX_BOX": "", "AGENTBOX_HOST": "sami-devbox",
                     "AGENTBOX_BOXES": str(self.root / "boxes"),
                     "AGENTBOX_DISKS": str(self.root / "disks"),
-                    "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache")}
+                    "AGENTBOX_CACHE_ROOT": str(self.root / "box-cache"),
+                    # The script sources $DOTFILES_DIR/agent-secrets/broker-url.sh: this tree's, not $HOME/.dotfiles's.
+                    "DOTFILES_DIR": str(SCRIPT.parents[1])}
         self.env.pop("AGENTBOX_DISK", None)
 
     def run_shell(self, body, **env):

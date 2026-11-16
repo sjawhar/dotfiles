@@ -64,7 +64,8 @@ class AgentboxPredecessor(unittest.TestCase):
         self.stubs = self.root / "bin"
         self.stubs.mkdir()
         # Nothing here reaches the host. docker answers the two forms the code uses: the census's
-        # `ps --no-trunc --format` listing and reap_box's `ps -a --filter name=^<box>$`.
+        # `ps --no-trunc --format` listing and reap_box's `ps -a --filter name=^<box>$`. For a box
+        # named in $STUB_PS_FAIL, the second form exits 1 with no output: docker could not be asked.
         write_stub(self.stubs, "docker", r'''
 # inspect: the state this test gave the container, defaulting to running, so a test that says
 # nothing about state keeps the old meaning of "the container is still there".
@@ -96,6 +97,7 @@ fi
 want=""
 for a in "$@"; do case "$a" in name=^*) want="${a#name=^}"; want="${want%$}" ;; esac; done
 if [[ -n "$want" ]]; then
+    grep -qxF "$want" "$STUB_PS_FAIL" 2>/dev/null && exit 1
     grep -qxF "$want" "$STUB_CONTAINERS" 2>/dev/null && echo "$want"
     exit 0
 fi
@@ -116,7 +118,7 @@ exit 0''')
         write_stub(self.stubs, "sudo", 'printf "%s\\n" "$*" >>"$STUB_SUDO"; exit "${STUB_SUDO_RC:-1}"')
         for name in ("STUB_CONTAINERS", "STUB_PGREP", "STUB_ENVOY", "STUB_ENVOY_PS",
                      "STUB_SECRETS", "STUB_SUDO", "STUB_CONTAINER_STATE",
-                     "STUB_CONTAINER_RC", "STUB_CONTAINER_OOM"):
+                     "STUB_CONTAINER_RC", "STUB_CONTAINER_OOM", "STUB_PS_FAIL"):
             (self.root / name).write_text("", encoding="utf-8")
         self.env = {
             # These tests run INSIDE a box themselves, and the script takes its in-box paths when
@@ -144,6 +146,7 @@ exit 0''')
             "STUB_CONTAINER_STATE": str(self.root / "STUB_CONTAINER_STATE"),
             "STUB_CONTAINER_RC": str(self.root / "STUB_CONTAINER_RC"),
             "STUB_CONTAINER_OOM": str(self.root / "STUB_CONTAINER_OOM"),
+            "STUB_PS_FAIL": str(self.root / "STUB_PS_FAIL"),
             "AGENTBOX_EXITS": str(self.root / "agentbox-exits.tsv"),
         }
 
@@ -484,10 +487,57 @@ exit 0''')
         found = self.run_bash(f"session_live_box {SID} {mine}")
         self.assertEqual(found.returncode, 0, found.stderr)
         self.assertEqual(found.stdout.strip(), live)
-        # Its own box never counts, and neither does another session's.
+        # Its own box never counts, and neither does another session's: the answer is `none`.
         self.set_containers(mine)
-        self.assertEqual(self.run_bash(f"session_live_box {SID} {mine}").returncode, 1)
-        self.assertEqual(self.run_bash(f"session_live_box {OTHER_SID} {mine}").returncode, 1)
+        for sid in (SID, OTHER_SID):
+            found = self.run_bash(f"session_live_box {sid} {mine}")
+            self.assertEqual((found.returncode, found.stdout), (1, "none\n"), found.stderr)
+        # With no session to look for, there is no answer.
+        found = self.run_bash(f'session_live_box "" {mine}')
+        self.assertEqual((found.returncode, found.stdout), (2, ""), found.stderr)
+
+    def test_session_live_box_answers_2_when_docker_cannot_be_asked(self) -> None:
+        """A `docker ps` that fails for a box of the session is not "no container": status 2 and
+        no output, which the waiter does not read as "no other box is live". A box found live
+        after such a failure still gives status 0 and its name. The box that docker cannot be
+        asked about sorts first, so session_live_box asks about it first."""
+        unknown, live, mine = "agentbox-afail0000001", "agentbox-live00000002", "agentbox-mine00000003"
+        self.enrolled(unknown, SID)
+        self.enrolled(mine, SID)
+        self.set_containers(unknown, mine)
+        (self.root / "STUB_PS_FAIL").write_text(f"{unknown}\n", encoding="utf-8")
+        found = self.run_bash(f"session_live_box {SID} {mine}")
+        self.assertEqual((found.returncode, found.stdout), (2, ""), found.stderr)
+        self.enrolled(live, SID)
+        self.set_containers(unknown, live, mine)
+        found = self.run_bash(f"session_live_box {SID} {mine}")
+        self.assertEqual((found.returncode, found.stdout), (0, f"{live}\n"), found.stderr)
+
+    def test_session_live_box_reads_past_a_record_it_cannot_read(self) -> None:
+        """Two boxes whose `enrollment-session` is there but cannot be read, both sorted before
+        the others: a directory (`-s` is true for it) and a file of mode 000. Under the script's
+        set -e, `$(<file)` of the mode-000 file ended the whole command with status 1 and no
+        output, before it looked at the boxes after it. session_live_box reads past both: with no
+        live box after them it answers 2 (they can be boxes of the session), and with one it names
+        that box."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file of mode 000")
+        folder, locked = "agentbox-adir00000001", "agentbox-alock0000002"
+        live, mine = "agentbox-live00000003", "agentbox-mine00000004"
+        for box in (folder, locked, mine):
+            self.enrolled(box, SID)
+        record = self.run_base / folder / "enrollment-session"
+        record.unlink()
+        record.mkdir()
+        (record / "entry").write_text("", encoding="utf-8")  # a directory with an entry has a size
+        (self.run_base / locked / "enrollment-session").chmod(0)
+        self.set_containers(folder, locked, mine)
+        found = self.run_bash(f"session_live_box {SID} {mine}")
+        self.assertEqual((found.returncode, found.stdout), (2, ""), found.stderr)
+        self.enrolled(live, SID)
+        self.set_containers(folder, locked, live, mine)
+        found = self.run_bash(f"session_live_box {SID} {mine}")
+        self.assertEqual((found.returncode, found.stdout), (0, f"{live}\n"), found.stderr)
 
 
 if __name__ == "__main__":

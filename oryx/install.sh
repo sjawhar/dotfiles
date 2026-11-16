@@ -2,8 +2,8 @@
 # oryx's entry point: arms the dotfiles-follow timer, with oryx's drop-in
 # (oryx/dotfiles-follow.service.d/oryx.conf), so oryx's ~/.dotfiles follows
 # origin's main. Run it once on oryx: bash ~/.dotfiles/oryx/install.sh
-# It needs no Tailscale and runs no forward installer: laptop/oryx-tunnel-setup
-# writes oryx's forward config.
+# It needs no Tailscale and runs no forward installer: oryx-edge-cutover writes
+# oryx's forward configuration.
 set -euo pipefail
 # shellcheck source=oryx/../installers/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"

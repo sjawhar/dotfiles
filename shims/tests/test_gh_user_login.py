@@ -240,11 +240,9 @@ class UserLogin(unittest.TestCase):
         # is the review App, so an approval this identity cannot give is asked of the controller.
         self.assertIn("ask the INFRA Legion controller for a review issue", err)
         self.assertNotIn(".dotfiles/scripts/", err)  # no script stands between a session and gh
-        # A CODEOWNERS approval in Sami's name needs the admin token route, which is offered
-        # for the refused review itself.
-        self.assertIn("a CODEOWNERS approval in his name", err)
-        self.assertIn("GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh \"$@\"' "
-                      "gh pr review 1178 -R o/r --approve --body VERDICT:\\ APPROVE`", err)
+        # No approval uses a person's token (dispatch://INFRA-1481, R3), so the refused review
+        # offers no admin-token route.
+        self.assertNotIn("GITHUB_ADMIN_PAT", err)
 
     def test_an_api_review_refused_for_the_app_gets_the_same_route(self):
         argv = ["api", "-X", "POST", "repos/o/r/pulls/7/reviews", "-f", "event=REQUEST_CHANGES"]

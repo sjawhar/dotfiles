@@ -17,27 +17,56 @@ directory, and the bound is a size cap rather than a lifecycle.
 
 ## The caps
 
-Each is enforced with the tool's own cleaner where the tool has one, and no tool here can trim to
-a size, so over the cap the cache is emptied and the next build, resolve or download is a cold
-one. Everything removed is re-downloadable or rebuildable; none of it is a working copy. Where a
-tool has no non-interactive cleaner at all, the pass removes the cache directory itself.
+No tool here can trim to a size, so over the cap the cache is removed whole and the next build,
+resolve or download is a cold one. Everything removed is re-downloadable or rebuildable; none of it
+is a working copy.
+
+### Never under a running reader
+
+A cache over its cap is removed only when both of these hold, and either one merely unknown keeps
+it (dispatch://INFRA-3905):
+
+- No process holds it: no open file, cwd, exe, root, mapped file or command-line argument at or
+  under it. `devbox/proc-holds.sh` reads that from `/proc` for every path at once, and
+  `devbox/tmp-stale-reap` uses the same code. A scan that does not finish in
+  `NVME_CACHE_SCAN_SECONDS` (600) keeps the cache. The Go module cache holds the toolchain the
+  builds on sami-devbox run from (`golang.org/toolchain@…/pkg/tool/…/compile`, `link`), so while a
+  build runs its compile and link processes hold the cache through their exe.
+- None of the commands that read the cache without keeping a file open runs: `go` and `gopls` for
+  the Go modules, `cargo` and `rustc` for cargo's sources, `uv`, `pip` and `pip3`, `mise`. bun is
+  not one: 168 bun processes ran on sami-devbox on 2026-11-16, nearly all running scripts that never
+  open the install cache, and `bun install` holds the files it links.
+
+Then the cache is renamed to a sibling, `<dir>.removing.<time>.<pid>`, so a reader sees the whole
+cache or none of it and the tool starts a new one, and the sibling is removed once no process holds
+it. A sibling still held, or left by a run that stopped, is removed by a later run. uv's
+`uv cache prune` still runs first when nothing holds the uv cache; uv refuses on its own to prune
+what a uv process is using.
+
+Until 2026-11-16 the pass ran the cleaners in the last column of the old table (`go clean
+-modcache`, `uv cache clean`, `mise cache clear`, `pip cache purge`, `bun pm cache rm`, or `rm -rf`)
+with no such check, so a cache could go from under a build reading it. None had reached its cap on
+sami-devbox: at 04:00Z the Go modules held 7.8 of 40 GB and uv 15.3 of 40 GB.
+
+A held cache stays over its cap until it is free; the disk floors (`devbox/box-cleanup`,
+`scripts/disk-fill-watch`) are what speak if the disk fills.
 
 On sami-devbox the uv and pip caches are on the local-SSD scratch, `/mnt/scratch/<user>/cache/uv`
 and `.../cache/pip` (`devbox/gce-disks` makes the directory at every boot; `.bashrc` and
 `scripts/agent-session` prefer it when it exists), and the pass caps them there with the same caps.
 A stop of the VM empties them too.
 
-| Cache | Variable | Default dir | Cap | Over the cap |
-|---|---|---|---|---|
-| uv | `UV_CACHE_DIR` | `/mnt/nvme/<user>/cache/uv` | **40 GB** | `uv cache prune` (drops entries no env points at); if still over, `uv cache clean` |
-| cargo | `CARGO_HOME` | `/mnt/nvme/<user>/cargo` | **20 GB** | remove `registry/cache`, `registry/src`, `git/checkouts`, `git/db` (keeps `registry/index`, `bin/`, config) |
-| Go modules | `GOMODCACHE` | `/mnt/nvme/<user>/gomodcache` | **40 GB** | `go clean -modcache` |
-| Hugging Face hub | `HF_HOME` | `/mnt/nvme/<user>/cache/huggingface` | **20 GB** | **no cleaner**: `hf cache delete` only asks interactively which revisions to drop, so the pass removes the directory |
-| Playwright browsers | `PLAYWRIGHT_BROWSERS_PATH` | `/mnt/nvme/<user>/cache/ms-playwright` | **10 GB** | **no cleaner**: `playwright uninstall` lives in a project's package, not on PATH, and `PLAYWRIGHT_SKIP_BROWSER_GC=1` (`.bashrc`) stops Playwright's own GC, so the pass removes the directory |
-| mise | `MISE_CACHE_DIR` | `/mnt/nvme/<user>/cache/mise` | **5 GB** | `mise cache clear` (version lists and release metadata only) |
-| Puppeteer browsers | `PUPPETEER_CACHE_DIR` | `/mnt/nvme/<user>/cache/puppeteer` | **10 GB** | **no cleaner**: `@puppeteer/browsers` can only uninstall a named build, so the pass removes the directory |
-| pip | `PIP_CACHE_DIR` | `/mnt/nvme/<user>/cache/pip` | **10 GB** | `pip cache purge` |
-| bun install cache | `BUN_INSTALL_CACHE_DIR` | `/mnt/nvme/<user>/cache/bun` | **20 GB** | `bun pm cache rm` (install cache and bunx packages; `~/.bun`'s binaries and link store are a different directory and are not touched) |
+| Cache | Variable | Default dir | Cap | Removed over the cap | Commands that read it without holding a file |
+|---|---|---|---|---|---|
+| uv | `UV_CACHE_DIR` | `/mnt/nvme/<user>/cache/uv` | **40 GB** | `uv cache prune` first (drops entries no env points at); if still over, the directory | `uv` |
+| cargo | `CARGO_HOME` | `/mnt/nvme/<user>/cargo` | **20 GB** | `registry/cache`, `registry/src`, `git/checkouts`, `git/db`, each on its own (keeps `registry/index`, `bin/`, config) | `cargo`, `rustc` |
+| Go modules | `GOMODCACHE` | `/mnt/nvme/<user>/gomodcache` | **40 GB** | the directory, read-only files included | `go`, `gopls` |
+| Hugging Face hub | `HF_HOME` | `/mnt/nvme/<user>/cache/huggingface` | **20 GB** | the directory | — |
+| Playwright browsers | `PLAYWRIGHT_BROWSERS_PATH` | `/mnt/nvme/<user>/cache/ms-playwright` | **10 GB** | the directory (`PLAYWRIGHT_SKIP_BROWSER_GC=1` in `.bashrc` stops Playwright's own GC) | — |
+| mise | `MISE_CACHE_DIR` | `/mnt/nvme/<user>/cache/mise` | **5 GB** | the directory (version lists and release metadata only) | `mise` |
+| Puppeteer browsers | `PUPPETEER_CACHE_DIR` | `/mnt/nvme/<user>/cache/puppeteer` | **10 GB** | the directory | — |
+| pip | `PIP_CACHE_DIR` | `/mnt/nvme/<user>/cache/pip` | **10 GB** | the directory | `pip`, `pip3` |
+| bun install cache | `BUN_INSTALL_CACHE_DIR` | `/mnt/nvme/<user>/cache/bun` | **20 GB** | the directory (install cache and bunx packages; `~/.bun`'s binaries and link store are a different directory and are not touched) | — |
 
 The caps are generous next to what each cache held on the root disk on 2026-10-30 — Hugging Face
 4.5 GB, Playwright 2.2 GB, mise 1.0 GB, Puppeteer 0.7 GB, pip 0.5 GB, bun's install cache 11.1 GB
@@ -69,8 +98,8 @@ Note which command proves Puppeteer: `@puppeteer/browsers install` (the standalo
 CLI in the `puppeteer` package that every consumer uses, reads it.
 
 The Go **build** cache — `GOCACHE`, a different and faster-growing directory — has its own,
-earlier unit: `devbox/gocache-cap.service`, which trims entries unused for 3 h past 25 GB and
-cleans the cache past 50 GB. This unit does not touch it.
+earlier unit: `devbox/gocache-cap.service`, which deletes entries unused for 3 h past 25 GB and
+for 2 h past 50 GB, never one a running build may hold. This unit does not touch it.
 
 A cache directory outside `/mnt/nvme/<user>` is left alone: every pass refuses a directory that is
 not under the root, so a caller that set its own cache elsewhere keeps it.
@@ -115,17 +144,29 @@ entry made du exit 1 and ended the whole run, so no cap was checked from 20:39Z 
 (`scripts/tests/test_cache_cap_du.py`). Any other du error still fails the run. `gocache-cap`
 sizes its cache the same way.
 
+The outputs above are from before 2026-11-16, when the pass still ran each tool's cleaner. The
+reader rule's proof is `scripts/tests/test_nvme_cache_cap_readers.py`: a real process holds one
+file of a cache open while the pass runs with that cache's cap at 0, then opens a second file of it
+by its path, as a build opens its next source. On sami-devbox on 2026-11-16 the pass from before
+the change, run the same way against a scratch tree, removed the second file under all nine
+readers (uv by `uv cache prune`, the Go modules by `go clean -modcache`, mise by `mise cache
+clear`, pip by `pip cache purge` with the files in pip's own `http-v2`, bun by `bun pm cache rm`,
+cargo, Hugging Face, Playwright and Puppeteer by `rm -rf`). This pass kept all nine, named each
+reader's pid and file, and every reader read its second file. The same caches with no reader were
+renamed away and removed, so a kept cache is the reader's doing.
+
 ## Running it by hand
 
 ```sh
-devbox/nvme-cache-cap --dry-run    # report every cache and what it would do; clean nothing
-journalctl --user -u nvme-cache-cap.service -n 50
+devbox/nvme-cache-cap --dry-run    # every cache's size; for one over its cap, who holds it or what would go
+journalctl --user -u box-cleanup.service -n 50
 ```
 
-`NVME_CACHE_ROOT` overrides the root, and `UV_CACHE_CAP_BYTES`, `CARGO_CACHE_CAP_BYTES`,
-`GOMODCACHE_CAP_BYTES`, `HF_CACHE_CAP_BYTES`, `PLAYWRIGHT_CACHE_CAP_BYTES`, `MISE_CACHE_CAP_BYTES`,
-`PUPPETEER_CACHE_CAP_BYTES`, `PIP_CACHE_CAP_BYTES` and `BUN_CACHE_CAP_BYTES` override the caps for
-a test.
+`NVME_CACHE_ROOT` and `SCRATCH_CACHE_ROOT` override the roots, `NVME_CACHE_PROC` a scratch `/proc`,
+`NVME_CACHE_SCAN_SECONDS` the limit of one scan of it, and `UV_CACHE_CAP_BYTES`,
+`CARGO_CACHE_CAP_BYTES`, `GOMODCACHE_CAP_BYTES`, `HF_CACHE_CAP_BYTES`, `PLAYWRIGHT_CACHE_CAP_BYTES`,
+`MISE_CACHE_CAP_BYTES`, `PUPPETEER_CACHE_CAP_BYTES`, `PIP_CACHE_CAP_BYTES` and `BUN_CACHE_CAP_BYTES`
+override the caps for a test.
 
 ## Rollback
 

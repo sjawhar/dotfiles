@@ -52,36 +52,6 @@ Host oryx-ssm
   ProxyCommand aws ssm start-session --profile personal --region us-west-2 --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p
   IPQoS lowdelay throughput
 
-# This forwarding-only connection for the oryx pair goes to the same hostname as
-# Host oryx. The forward-tunnel@oryx unit opens it with its service token in
-# the environment. It signs in with its own key and never the 1Password agent.
-# ControlMaster no and ControlPath none keep it off the connection that ssh oryx
-# opens and shares under Host *. The host-key alias is only the label under
-# which known_hosts holds oryx's key.
-Host oryx-tunnel
-  HostName oryx.thecybermonk.com
-  User agent
-  HostKeyAlias oryx.tail12ec1c.ts.net
-  ProxyCommand cloudflared access ssh --hostname %h
-  IdentityFile ~/.ssh/oryx-tunnel
-  IdentitiesOnly yes
-  IdentityAgent none
-  ForwardAgent no
-  ControlMaster no
-  ControlPath none
-  StrictHostKeyChecking yes
-  BatchMode yes
-  ExitOnForwardFailure yes
-  ServerAliveInterval 15
-  ServerAliveCountMax 4
-  RemoteForward 127.0.0.1:12800 127.0.0.1:12800
-  RemoteForward 127.0.0.1:12803 127.0.0.1:12803
-  RemoteForward 127.0.0.1:12804 127.0.0.1:12804
-  RemoteForward 127.0.0.1:12806 127.0.0.1:12806
-  LocalForward 127.0.0.1:12801 127.0.0.1:12801
-  LocalForward 127.0.0.1:12802 127.0.0.1:12802
-  LocalForward 127.0.0.1:12805 127.0.0.1:12805
-
 # Every login key lives in 1Password, except trajectory-route's key file.
 Host *
   IdentityAgent ~/.1password/agent.sock

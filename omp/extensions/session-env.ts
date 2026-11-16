@@ -74,6 +74,21 @@
 //     ADC is the metadata server, and a box_credential_config.json there is one
 //     carried over from an Azure box, whose token source a Google VM lacks.
 //
+// It also names a host session to the agent-secrets helper (dispatch://INFRA-3848):
+// `agent-secrets register --session-id <id>`, run once per id in this process,
+// in the background, so a restart of the helper keeps the session's broker
+// identity and its grants. The launcher (scripts/agent-secrets-session) registers
+// the session before omp has a transcript, so it can name no id; the helper takes
+// the name from inside the session it registered, finding the session's root from
+// the caller's pid. It runs only from inside such a session (`agent-secrets
+// identity` exits 0), since a register from outside one makes the helper admit the
+// command's own short-lived pid as a session root (dispatch://INFRA-3890). It does
+// nothing in a box (AGENTBOX_BOX: the box's launcher names its session), with no
+// helper socket, and for a subagent transcript resumed on its own: that process
+// commits as its session but is not it, and naming it would take that session's
+// broker identity from the process that holds it. A refusal writes one line and
+// never fails the session start.
+//
 // omp binds this extension to every subagent too, and a subagent shares its
 // parent's process and environment. A session family deliberately shares one
 // identity (one set of eyes), so a subagent (`ctx.agent.kind === "sub"`)
@@ -150,6 +165,50 @@ const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
 const OVERLAY_DIR = path.join(homedir(), ".cache", "omp", "jj");
 // `jj config path --user` reads no repository and answers in milliseconds.
 const JJ_CONFIG_PATH_TIMEOUT_MS = 10_000;
+// Each agent-secrets call the helper naming makes: `identity` asks the helper once with a 2 s
+// deadline of its own, and `register` redials a helper that is starting for up to 10 s.
+const AGENT_SECRETS_TIMEOUT_MS = 10_000;
+const execFileAsync = promisify(execFile);
+// The ids this process has named, or is naming, to the helper.
+const namedToHelper = new Set<string>();
+
+function isSocket(file: string): boolean {
+	try {
+		return statSync(file).isSocket();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Names a host session to the agent-secrets helper once in this process, in the background.
+ * The rules are in the header above.
+ */
+function nameSessionToHelper(id: string, report: (message: string) => void): void {
+	if (process.env.AGENTBOX_BOX || namedToHelper.has(id)) return;
+	const sock =
+		process.env.AGENT_SECRETS_HELPER_SOCK ||
+		path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 0}`, "agent-secrets", "helper.sock");
+	if (!isSocket(sock)) return;
+	namedToHelper.add(id);
+	const env = { ...process.env, AGENT_SECRETS_HELPER_SOCK: sock };
+	void (async () => {
+		try {
+			await execFileAsync("agent-secrets", ["identity"], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
+		} catch {
+			return; // no session the helper registered: nothing to name
+		}
+		try {
+			await execFileAsync("agent-secrets", ["register", "--session-id", id], { env, timeout: AGENT_SECRETS_TIMEOUT_MS });
+		} catch (error) {
+			const stderr = error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
+			const why = stderr || String(error);
+			report(
+				`session-env: agent-secrets register --session-id ${id} failed, so a helper restart ends this session's broker identity: ${why.split("\n").at(-1)}`,
+			);
+		}
+	})();
+}
 
 function withoutOverlays(chain: string): string {
 	return chain
@@ -285,6 +344,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		process.env.OMP_SESSION_ID = id;
 		process.env.PI_COMMIT_TRAILERS = `Omp-Session: ${id}`;
+		if (file && TOP_LEVEL_TRANSCRIPT.test(path.basename(file))) {
+			nameSessionToHelper(id, message => {
+				if (ctx.hasUI && ctx.ui) ctx.ui.notify(message, "warning");
+				else process.stderr.write(`${message}\n`);
+			});
+		}
 		const base = await jjConfigBase();
 		const overlay = path.join(OVERLAY_DIR, `omp-attribution-${id}.toml`);
 		if (process.env.JJ_CONFIG?.split(":").includes(overlay)) return; // already active — never rewrite a live layer

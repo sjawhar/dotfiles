@@ -9,7 +9,9 @@ marker stays fresh while the launcher still works; what the host writes into the
 dir never follows a link the box planted there, in the key dir or at the key dir's own name in the
 box's runtime dir; the id the host revokes is the one it recorded.
 An enrolled box whose renew is refused as not live is enrolled again by its launcher with the key
-it holds, and a box whose enrollment is live is not.
+it holds, and a box whose enrollment is live is not. An enroll call whose outcome is not known can
+have made an enrollment the host has no id for: the close learns that id from the broker and
+revokes it, in a detached process.
 
 Technique: source scripts/agentbox (its source guard runs nothing) with `docker`, `git`,
 `agent-secrets` and `sleep` stubbed first on PATH, and call its functions on a scratch key dir;
@@ -24,6 +26,7 @@ import functools
 import os
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -31,7 +34,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
@@ -62,6 +65,13 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def wait_until(test: Callable[[], bool], seconds: float) -> None:
+    """Return once `test` answers true, asked every 0.05 s, or after `seconds` whatever it answers."""
+    end = time.monotonic() + seconds
+    while not test() and time.monotonic() < end:
+        time.sleep(0.05)
+
+
 # A box's key dir is where box_keydir puts it, $STUB_RUN_BASE/<box>/$STUB_KEYDIR_REL. `docker run`
 # notes whether the marker is there as the box starts, then lives for a second; with
 # STUB_RUN_UNTIL set it lives until the box's renew.log holds that text (60 s at most), then ends
@@ -74,7 +84,8 @@ def write_stub(directory: Path, name: str, body: str) -> None:
 # --user ubuntu <box> sh -c` runs here too, as a process whose key dir is the box's. `inspect`
 # answers false until its STUB_RUNNING_AFTER'th call when that is set, as a box does while it is
 # still starting. keygen writes a key of its own each time, and a thumbprint of its own after the
-# first.
+# first. `ps -a --filter name=^<box>$` names the box while its name is in $STUB_LIVE_BOXES. With
+# STUB_PS_FAIL set, `ps` exits 1 with no output, as when docker cannot be asked.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
 keydir() {{ echo "$STUB_RUN_BASE/$1/$STUB_KEYDIR_REL"; }}
@@ -132,22 +143,65 @@ case "$*" in
     *"pgrep -x omp"*)
         echo "sid-probe marker-mtime=$(stat -c %Y "$(keydir "$2")/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
         echo "${{STUB_SID:-}}" ;;
+    "ps "*)
+        [[ -z "${{STUB_PS_FAIL:-}}" ]] || exit 1
+        name="${{4#name=^}}"
+        name="${{name%\$}}"
+        [[ " ${{STUB_LIVE_BOXES:-}} " != *" $name "* ]] || echo "$name" ;;
 esac
 """
 
 # keygen writes a key to --out and prints its thumbprint, as the host's session keygen and the
-# in-box one both do. enroll records the marker's mtime as it saw it, then prints the enrollment
-# id and writes it into the key dir, as the real client does; with STUB_ENROLL=broker it answers
-# as the broker does, from a table of its enrollments in $STUB_BROKER, where a revoke (unenroll)
-# and a renew refused as not live end a row; with STUB_HUP_PID set, enroll first sends that
-# process a hangup, as a pane kill can during the call. renew exits as the pinned client's does,
-# and ends its loop on the third run.
+# in-box one both do. enroll logs its arguments, its key dir and the marker's mtime as it saw it.
+# A box's enroll call n then takes the nth word of $STUB_ENROLL (the last word repeats):
+#   ok        prints enr-123 and writes it into the key dir, as the real client does
+#   fail      "broker unreachable", exit 1
+#   known     the pinned client's ENROLL_FAILED line, exit 1
+#   draining  its DRAINING line, exit 1
+#   knownsecond  a warning line, then the ENROLL_FAILED line, exit 1
+#   conflict  a 409 refusal for a session's runtime id, enr-box for any other
+#   broker    the broker's answer (broker_enroll), as the real client prints and writes it
+# and nine words for a call whose outcome the client cannot tell, each of which makes the
+# enrollment at the broker as `broker` does: nofile (exit 0 with the id, and no enrollment file),
+# unknown (the pinned client's ENROLL_OUTCOME_UNKNOWN line), noreply (its line for a helper that
+# gave no answer), oldclient (its line for an old helper's empty reply), unwritable (its line for
+# an id it could not write), buried (a line for a helper that gave no answer, with the
+# ENROLL_FAILED line inside its parentheses), indented (a space, then the ENROLL_FAILED line) and
+# warnfirst (a warning line, then the ENROLL_OUTCOME_UNKNOWN line), each exit 1, and signal (a
+# SIGHUP to itself: no line, exit 129).
+# A learn call (unenroll_learn: no --session-id, and a key dir under $STUB_RUN_BASE/learn.) takes
+# the words of $STUB_LEARN instead (broker by default), and with STUB_LEARN_AFTER set it answers
+# only once that file exists (120 s at most). With STUB_HUP_PID set, a box's enroll call first
+# sends that process a hangup, as a pane kill can during the call. unenroll call n takes the nth
+# word of $STUB_UNENROLL (the last word repeats): ok (the default: the broker ends the
+# enrollment), known (the pinned client's UNENROLL_FAILED line), unknown (its
+# UNENROLL_OUTCOME_UNKNOWN line) or buried (a line for a helper that gave no answer, with the
+# UNENROLL_FAILED line inside its parentheses), each exit 1 with nothing ended. renew exits as the
+# pinned client's does, and ends its loop on the third run.
 AGENT_SECRETS_STUB = r"""
 # end_enrollment ID: enrollment ID is no longer live at the broker.
 end_enrollment() {
     [[ -n "$1" && -e "$STUB_BROKER" ]] || return 0
     sed -i "s/^$1 \(.*\) live\$/$1 \1 ended/" "$STUB_BROKER"
 }
+# broker_enroll RUNTIME THUMBPRINT: the broker's answer to an enroll call (enroll.go
+# recoverConflict), from a table of its enrollments in $STUB_BROKER, one row per enrollment:
+# <id> <runtime id> <thumbprint> live|ended. Per runtime id, the same thumbprint gets the same id
+# back while that enrollment is live, any other thumbprint is refused 409 (status 1), and once it
+# is no longer live (revoked or lapsed) the thumbprint gets a new id. Prints the id.
+broker_enroll() {
+    local id live_tp
+    touch "$STUB_BROKER"
+    read -r id _ live_tp _ < <(awk -v rt="$1" '$2 == rt && $4 == "live"' "$STUB_BROKER")
+    if [[ -z "$id" ]]; then
+        id="enr-$(( $(wc -l <"$STUB_BROKER") + 1 ))"
+        echo "$id $1 $2 live" >>"$STUB_BROKER"
+    elif [[ "$live_tp" != "$2" ]]; then
+        return 1
+    fi
+    echo "$id"
+}
+ALREADY_ENROLLED="agent-secrets enroll: ENROLL_FAILED: broker 409 ALREADY_ENROLLED: this runtime is already enrolled and live"
 case "$1" in
     machine)
         [[ "${STUB_LOGIN_STATUS:-0}" == 0 ]] && { echo issued; exit 0; }
@@ -165,41 +219,57 @@ case "$1" in
             empty) ;;
         esac ;;
     enroll)
-        echo "enroll $* marker-mtime=$(stat -c %Y "$AGENT_SECRETS_KEY_DIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
-        [[ -z "${STUB_HUP_PID:-}" ]] || kill -HUP "$STUB_HUP_PID"
-        case "${STUB_ENROLL:-ok}" in
+        echo "enroll $* keydir=$AGENT_SECRETS_KEY_DIR marker-mtime=$(stat -c %Y "$AGENT_SECRETS_KEY_DIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
+        rt="" tp="" sid=""
+        while (( $# )); do
+            case "$1" in
+                --runtime-id) rt="$2" ;;
+                --thumbprint) tp="$2" ;;
+                --session-id) sid="$2" ;;
+            esac
+            shift
+        done
+        learns=$(grep -cF " keydir=$STUB_RUN_BASE/learn." "$STUB_CALLS")
+        if [[ -z "$sid" && "$AGENT_SECRETS_KEY_DIR" == "$STUB_RUN_BASE"/learn.* ]]; then
+            words="${STUB_LEARN:-broker}" n=$learns
+            if [[ -n "${STUB_LEARN_AFTER:-}" ]]; then
+                for _ in $(seq 1200); do [[ -e "$STUB_LEARN_AFTER" ]] && break; /bin/sleep 0.1; done
+            fi
+        else
+            words="${STUB_ENROLL:-ok}" n=$(( $(grep -c '^enroll ' "$STUB_CALLS") - learns ))
+            [[ -z "${STUB_HUP_PID:-}" ]] || kill -HUP "$STUB_HUP_PID"
+        fi
+        read -ra modes <<<"$words"
+        mode="${modes[n - 1]:-${modes[-1]}}"
+        case "$mode" in
             ok) echo enr-123 >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo enr-123 ;;
             fail) echo "broker unreachable" >&2; exit 1 ;;
-            nofile) echo enr-123 ;;
+            known) echo "agent-secrets enroll: ENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not enroll this runtime" >&2; exit 1 ;;
+            draining) echo "agent-secrets enroll: DRAINING: the helper is shutting down and takes no new calls" >&2; exit 1 ;;
+            knownsecond) printf '%s\n' "agent-secrets: warning: something" "agent-secrets enroll: ENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not enroll this runtime" >&2; exit 1 ;;
             conflict)
                 # A live enrollment of this session under a key this host no longer has.
-                rt=""
-                while (( $# )); do [[ "$1" == --runtime-id ]] && rt="$2"; shift; done
                 case "$rt" in
-                    session-*) echo "409 ALREADY_ENROLLED this runtime is already enrolled and live" >&2; exit 1 ;;
+                    session-*) echo "$ALREADY_ENROLLED" >&2; exit 1 ;;
                     *) echo enr-box >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo enr-box ;;
                 esac ;;
             broker)
-                # As the broker (enroll.go recoverConflict): per runtime id, the same thumbprint
-                # gets the same id back while that enrollment is live, any other thumbprint is
-                # refused 409, and once it is no longer live (revoked or lapsed) the thumbprint
-                # gets a new id. One row per enrollment: <id> <runtime id> <thumbprint> live|ended.
-                rt="" tp=""
-                while (( $# )); do
-                    [[ "$1" == --runtime-id ]] && rt="$2"
-                    [[ "$1" == --thumbprint ]] && tp="$2"
-                    shift
-                done
-                touch "$STUB_BROKER"
-                read -r id _ live_tp _ < <(awk -v rt="$rt" '$2 == rt && $4 == "live"' "$STUB_BROKER")
-                if [[ -z "$id" ]]; then
-                    id="enr-$(( $(wc -l <"$STUB_BROKER") + 1 ))"
-                    echo "$id $rt $tp live" >>"$STUB_BROKER"
-                elif [[ "$live_tp" != "$tp" ]]; then
-                    echo "ENROLL_FAILED: broker 409 ALREADY_ENROLLED: this runtime is already enrolled and live" >&2
-                    exit 1
-                fi
+                id="$(broker_enroll "$rt" "$tp")" || { echo "$ALREADY_ENROLLED" >&2; exit 1; }
                 echo "$id" >"$AGENT_SECRETS_KEY_DIR/enrollment"; echo "$id" ;;
+            nofile|unknown|noreply|oldclient|signal|unwritable|buried|indented|warnfirst)
+                id="$(broker_enroll "$rt" "$tp")"
+                case "$mode" in
+                    nofile) echo "$id" ;;
+                    unknown) echo "agent-secrets enroll: ENROLL_OUTCOME_UNKNOWN: the broker's answer did not come back within 20s" >&2; exit 1 ;;
+                    noreply) echo "agent-secrets enroll: the helper gave no answer (EOF). So it is not known if the broker made the enrollment. Run the same command again: if the broker made the enrollment, the command gets that enrollment." >&2; exit 1 ;;
+                    oldclient) echo "agent-secrets enroll: helper reply is not one JSON object: unexpected end of JSON input" >&2; exit 1 ;;
+                    signal) kill -HUP "$$" ;;
+                    unwritable) echo "agent-secrets enroll: the broker made enrollment $id, but this command could not write its id to $AGENT_SECRETS_KEY_DIR/enrollment: permission denied" >&2; exit 1 ;;
+                    buried) echo "agent-secrets enroll: the helper gave no answer (read unix @->helper.sock: agent-secrets enroll: ENROLL_FAILED: broker 403). So it is not known if the broker made the enrollment." >&2; exit 1 ;;
+                    indented) echo " agent-secrets enroll: ENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not enroll this runtime" >&2; exit 1 ;;
+                    warnfirst) printf '%s\n' "agent-secrets: warning: something" "agent-secrets enroll: ENROLL_OUTCOME_UNKNOWN: the broker's answer did not come back within 20s" >&2; exit 1 ;;
+                esac ;;
+            *) echo "unexpected STUB_ENROLL word $mode" >&2; exit 99 ;;
         esac ;;
     unenroll)
         # The call is logged only once its revoke is done: unenroll_calls returns on the logged
@@ -207,12 +277,20 @@ case "$1" in
         call="unenroll $*"
         id=""
         while (( $# )); do [[ "$1" == --enrollment ]] && id="$2"; shift; done
-        end_enrollment "$id"
-        rc=$?
+        n=$(grep -c '^unenroll ' "$STUB_CALLS" 2>/dev/null)
+        read -ra modes <<<"${STUB_UNENROLL:-ok}"
+        mode="${modes[${n:-0}]:-${modes[-1]}}"
+        case "$mode" in
+            ok) end_enrollment "$id"; rc=$? ;;
+            known) echo "agent-secrets unenroll: UNENROLL_FAILED: broker 403 FORBIDDEN: this launcher may not revoke this enrollment" >&2; rc=1 ;;
+            unknown) echo "agent-secrets unenroll: UNENROLL_OUTCOME_UNKNOWN: the broker's answer did not come back within 20s" >&2; rc=1 ;;
+            buried) echo "agent-secrets unenroll: the helper gave no answer (read unix @->helper.sock: agent-secrets unenroll: UNENROLL_FAILED: broker 403). So it is not known if the broker revoked the enrollment." >&2; rc=1 ;;
+            *) echo "unexpected STUB_UNENROLL word $mode" >&2; rc=99 ;;
+        esac
         echo "$call" >>"$STUB_CALLS"
         exit "$rc" ;;
     renew)
-        # As the pinned client (legion-envoy-v29.54.0) in a box: renew reads `enrollment` once as
+        # As the pinned client (legion-envoy-v30.21.1) in a box: renew reads `enrollment` once as
         # it starts, exits 76 only when the broker refuses the enrollment as not live, and retries
         # every timeout and every other refusal itself without exiting. Run n takes the nth word
         # of $STUB_RENEW (the last word repeats): notlive, the enrollment lapsed (its row in the
@@ -258,11 +336,15 @@ class EnrollFixture(unittest.TestCase):
         # against a slow broker: only a marker renewed before every attempt stays fresh. The
         # STUB_NEW_ID_AT'th sleep writes a new enrollment id into the key dir, as the launcher's
         # re-enrollment does while the renew loop waits. STUB_REAL_SLEEP makes it a real sleep.
+        # With STUB_GRACE_UNTIL set, the unenroll waiter's grace (a sleep of
+        # $AGENTBOX_UNENROLL_GRACE, 180 by default) lasts until that file exists (60 s at most).
         write_stub(
             self.stub_dir,
             "sleep",
             'echo "sleep $*" >>"$STUB_CALLS"\n'
             '[[ -z "${STUB_REAL_SLEEP:-}" ]] || exec /bin/sleep "$@"\n'
+            '[[ -z "${STUB_GRACE_UNTIL:-}" || "$*" != "${AGENTBOX_UNENROLL_GRACE:-180}" ]]'
+            ' || for _ in $(seq 600); do [[ -e "$STUB_GRACE_UNTIL" ]] && break; /bin/sleep 0.1; done\n'
             '[[ -e "$STUB_KEYDIR/enrollment.pending" ]] && touch -h -d "-1000 seconds" "$STUB_KEYDIR/enrollment.pending"\n'
             '[[ -z "${STUB_NEW_ID_AT:-}" ]] || (( $(grep -c "^sleep " "$STUB_CALLS") != STUB_NEW_ID_AT ))'
             ' || echo enr-new >"$STUB_KEYDIR/enrollment"\n'
@@ -301,9 +383,15 @@ class EnrollFixture(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def bash(self, body: str, timeout: float = 300, **stubs: str) -> subprocess.CompletedProcess[str]:
-        script = f'source "{AGENTBOX}"\nRUN_BASE="{self.run_base}"\n{body}\n'
-        env = {
+    def bash_script(self, body: str) -> str:
+        """`body`, after the lines that source scripts/agentbox and set its RUN_BASE to the temp
+        dir's run dir."""
+        return f'source "{AGENTBOX}"\nRUN_BASE="{self.run_base}"\n{body}\n'
+
+    def bash_env(self, **stubs: str) -> dict[str, str]:
+        """The environment a bash_script runs in: the stubs first on PATH, the temp dir's paths for
+        the script and the stubs, and `stubs` over them."""
+        return {
             "HOME": str(self.home),
             "PATH": f"{self.stub_dir}:/usr/bin:/bin",
             "DOTFILES_DIR": str(DOTFILES),
@@ -317,16 +405,26 @@ class EnrollFixture(unittest.TestCase):
             "STUB_KEYDIR": str(self.keydir),
             "STUB_KEYDIR_REL": keydir_in_box_dir(),
             "STUB_RUN_BASE": str(self.run_base),
+            # The run dir again, for a process that runs scripts/agentbox itself rather than
+            # sourcing it: the unenroll waiter's `session-live-box`.
+            "AGENTBOX_RUN_BASE": str(self.run_base),
             "STUB_THUMBPRINT": THUMBPRINT,
             "STUB_BROKER": str(self.broker),
             **stubs,
         }
+
+    def bash(self, body: str, timeout: float = 300, **stubs: str) -> subprocess.CompletedProcess[str]:
         # 300 s, not 60: the slow-box test below deliberately runs 400 passes of the wait, each
         # forking a stub `docker`, and on this host at load 300-550 that alone takes over a
         # minute (it timed out at 60 s on 2026-11-01, on HEAD as well as on the change under
         # test). Every other case here finishes in seconds, so the larger cap only bites a hang.
         return subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, env=env, check=False, timeout=timeout
+            ["bash", "-c", self.bash_script(body)],
+            capture_output=True,
+            text=True,
+            env=self.bash_env(**stubs),
+            check=False,
+            timeout=timeout,
         )
 
     def enroll(self, **stubs: str) -> subprocess.CompletedProcess[str]:
@@ -353,8 +451,8 @@ class EnrollFixture(unittest.TestCase):
         self.assertFalse((self.hostdir / "enrollment-id").exists())
 
     def enrolls(self) -> list[str]:
-        """The enroll calls in order, each without the marker mtime it recorded."""
-        return [call.split(" marker-mtime=")[0] for call in self.calls_matching("enroll ")]
+        """The enroll calls in order, each without the key dir and the marker mtime it recorded."""
+        return [call.split(" keydir=")[0] for call in self.calls_matching("enroll ")]
 
     def broker_rows(self, runtime: str) -> list[list[str]]:
         """The broker's enrollments of one runtime id: [id, runtime id, thumbprint, live|ended]."""
@@ -392,7 +490,7 @@ class EnrollFixture(unittest.TestCase):
     def host_keydir(self, key: bytes | None = None) -> Path:
         """A directory that stands for the host's own /run/user/<uid>/agent-secrets: the helper's
         socket, and with `key` the key.pem a host session's client signs with before it asks the
-        socket (legion-envoy-v29.54.0 cmd/agent-secrets identity.go keyDir, main.go selectSigner)."""
+        socket (legion-envoy-v30.21.1 cmd/agent-secrets identity.go keyDir, main.go selectSigner)."""
         host = self.root / "host-run-user" / "agent-secrets"
         host.mkdir(parents=True)
         with socket.socket(socket.AF_UNIX) as sock:
@@ -555,6 +653,29 @@ class AgentboxEnroll(EnrollFixture):
         (call,) = self.calls_matching("unenroll ")
         self.assertIn("--enrollment enr-123", call)
         self.assertFalse(self.hostdir.exists())
+
+    def test_a_record_the_close_cannot_read_does_not_end_the_close(self) -> None:
+        """box1's enrollment-id, or its enrollment-session, is there but cannot be read (mode 000).
+        Under the script's set -e, `$(<file)` of such a file ended close_box, and another close of
+        the box can remove the file between a test and a read. The close goes on and removes
+        box1's run dir. It makes no unenroll call: an id it cannot read is not revoked, and an
+        enrollment-session it cannot read can name a session, whose enrollment is not box1's to end
+        at once (one line on stderr says so)."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file of mode 000")
+        for name in ("enrollment-id", "enrollment-session"):
+            with self.subTest(unreadable=name):
+                self.reset_box()
+                (self.hostdir / "enrollment-id").write_text("enr-123\n")
+                (self.hostdir / "enrollment-session").write_text("sid-1\n")
+                (self.hostdir / name).chmod(0)
+                (self.home / "boxes" / "box1").mkdir(parents=True, exist_ok=True)
+                result = self.bash('close_box box1 ""\necho closed', STUB_GONE="1")
+                self.assertIn("closed", result.stdout, result.stderr)
+                self.assertEqual(self.calls_matching("unenroll "), [])
+                self.assertFalse(self.hostdir.exists())
+                if name == "enrollment-session":
+                    self.assertIn(f"cannot read {self.hostdir}/enrollment-session; enrollment enr-123", result.stderr)
 
     def test_close_box_drops_the_launchers_pane_from_the_attention_queue(self) -> None:
         # The box's own shutdown drop dies with its container; the launcher runs in the same
@@ -839,6 +960,673 @@ class SessionIdentity(EnrollFixture):
         self.assertIn(f"--enrollment {eid}", call)
         rows = [line.split() for line in self.broker.read_text().splitlines()]
         self.assertIn("ended", [row[-1] for row in rows if row and row[0] == eid], rows)
+
+
+class OpenAttempts(EnrollFixture):
+    """The close of a box whose enroll calls can have made an enrollment the host has no id for:
+    each call whose outcome is not known (ENROLL_OPEN). close_box learns that enrollment's id from
+    the broker, with an enroll call of the attempt's runtime id and thumbprint and no session id,
+    and revokes it, in a detached process.
+
+    ENROLL_OPEN is the launcher's memory, so each case runs the box's enrollment and its close in
+    one bash process (`close`). The body writes a `close` line into the call log before the close,
+    so the calls after that line are the close's, and ends with `wait`: the close's detached
+    processes are children of the body's shell, so it returns once they have ended, before
+    tearDown removes the dir they write in. They log to session-keys/unenroll.log. The cases that
+    kill the body's process group (close_then_kill_the_body) wait for the detached process's last
+    line in that log instead.
+    """
+
+    OWN_OPEN = f"own box1 {THUMBPRINT}"
+    SESSION_OPEN = f"session session-sid-1 {THUMBPRINT}"
+    # Each way an enroll call can end with its outcome not known, as the stub's words.
+    OPEN_WORDS = ("unknown", "noreply", "oldclient", "signal", "unwritable", "nofile")
+    TIMED = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ (.*)")
+
+    def close(
+        self, steps: str, close: str = 'close_box box1 ""', after: str = "", timeout: float = 300, **stubs: str
+    ) -> None:
+        """`steps`, the `close` line, `close`, `after`, then `wait`, in one bash process, with
+        box1's container gone (STUB_GONE). A line after the wait shows that every step ran under
+        the script's set -euo pipefail."""
+        result = self.bash(
+            f'{steps}\necho close >>"$STUB_CALLS"\n{close}\n{after}\nwait\necho closed',
+            timeout=timeout,
+            **{"STUB_GONE": "1", **stubs},
+        )
+        self.assertIn("closed", result.stdout, result.stderr)
+
+    def calls_around_close(self, prefix: str) -> tuple[list[str], list[str]]:
+        """The calls that start with `prefix`: those before the `close` line, and those after it."""
+        lines = self.calls.read_text().splitlines()
+        at = lines.index("close")
+        return (
+            [line for line in lines[:at] if line.startswith(prefix)],
+            [line for line in lines[at + 1 :] if line.startswith(prefix)],
+        )
+
+    def learn_calls(self) -> list[tuple[str, Path]]:
+        """The enroll calls the close made, each as the client's arguments (`enroll …`) and its key
+        dir."""
+        calls = []
+        for call in self.calls_around_close("enroll ")[1]:
+            args, rest = call.removeprefix("enroll ").split(" keydir=", 1)
+            calls.append((args, Path(rest.split(" marker-mtime=")[0])))
+        return calls
+
+    def assert_one_learn_call(self, runtime: str) -> None:
+        """The close made one enroll call, `enroll --helper --runtime-id RUNTIME --thumbprint
+        THUMBPRINT` and no more arguments (so no --session-id), with a key dir outside box1's run
+        dir."""
+        learns = self.learn_calls()
+        self.assertEqual(
+            [args for args, _ in learns], [f"enroll --helper --runtime-id {runtime} --thumbprint {THUMBPRINT}"]
+        )
+        self.assertFalse(learns[0][1].is_relative_to(self.hostdir), learns[0][1])
+
+    def revokes_after_close(self) -> list[str]:
+        """The unenroll calls the close made, each as the client's arguments (`unenroll …`)."""
+        return [call.removeprefix("unenroll ") for call in self.calls_around_close("unenroll ")[1]]
+
+    def unenroll_log(self) -> list[str]:
+        """The lines of session-keys/unenroll.log, each without the UTC time it starts with (a line
+        without one comes back whole)."""
+        log = self.run_base / "session-keys" / "unenroll.log"
+        if not log.exists():
+            return []
+        return [m.group(1) if (m := self.TIMED.fullmatch(line)) else line for line in log.read_text().splitlines()]
+
+    def test_the_close_learns_and_revokes_the_enrollment_of_an_open_attempt(self) -> None:
+        """A box with no session id whose enroll calls each end with the outcome not known while
+        the broker made the enrollment: the pinned client's ENROLL_OUTCOME_UNKNOWN, no answer from
+        the helper, an old helper's empty reply, a signal, an id it could not write, or an exit 0
+        that left no enrollment file. Then close_box. The close makes one learn call, for box1 and
+        the key's thumbprint, and one unenroll call, for the id the learn call got (enr-1); the
+        broker's row of enr-1 has ended; and unenroll.log holds one line, which names enr-1 and
+        the runtime id."""
+        for word in self.OPEN_WORDS:
+            with self.subTest(enroll=word):
+                self.reset_box()
+                self.close('enroll_box box1 "" || true', STUB_ENROLL=word)
+                self.assert_one_learn_call("box1")
+                self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+                self.assertEqual(self.broker_rows("box1"), [["enr-1", "box1", THUMBPRINT, "ended"]])
+                self.assertEqual(self.unenroll_log(), ["box1: enrollment enr-1 (runtime id box1) revoked"])
+
+    def test_a_known_failure_leaves_nothing_to_learn(self) -> None:
+        """Each of enroll_box's ten calls is refused ENROLL_FAILED, or DRAINING: the helper says
+        that no enrollment was made. The close makes no enroll call."""
+        for word in ("known", "draining"):
+            with self.subTest(enroll=word):
+                self.reset_box()
+                self.close('enroll_box box1 "" || true', STUB_ENROLL=word)
+                before, after = self.calls_around_close("enroll ")
+                self.assertEqual(len(before), 10, before)
+                self.assertEqual(after, [])
+
+    def test_a_known_code_where_it_does_not_count_leaves_the_call_open(self) -> None:
+        """Each of enroll_box's calls exits 1 while the broker made the enrollment, and no line of
+        its stderr starts with a known code: the ENROLL_FAILED line inside the text of a line for a
+        helper that gave no answer (buried), the ENROLL_FAILED line after a space (indented), or a
+        warning line and then the ENROLL_OUTCOME_UNKNOWN line (warnfirst). Then close_box. The close
+        makes one learn call, for box1 and the key's thumbprint, and one unenroll call, of enr-1;
+        the broker's row of enr-1 has ended."""
+        for word in ("buried", "indented", "warnfirst"):
+            with self.subTest(enroll=word):
+                self.reset_box()
+                self.close('enroll_box box1 "" || true', STUB_ENROLL=word)
+                self.assert_one_learn_call("box1")
+                self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+                self.assertEqual(self.broker_rows("box1"), [["enr-1", "box1", THUMBPRINT, "ended"]])
+
+    def test_a_known_code_at_the_start_of_a_later_line_leaves_nothing_to_learn(self) -> None:
+        """Each of enroll_box's ten calls is refused with a warning line and then the ENROLL_FAILED
+        line (knownsecond): the code starts the second line of the stderr, not the first. The
+        close makes no enroll call."""
+        self.close('enroll_box box1 "" || true', STUB_ENROLL="knownsecond")
+        before, after = self.calls_around_close("enroll ")
+        self.assertEqual(len(before), 10, before)
+        self.assertEqual(after, [])
+
+    def test_a_recorded_success_settles_an_earlier_open_attempt(self) -> None:
+        """The first call ends with its outcome not known while the broker made enr-1; the retry,
+        with the same runtime id and thumbprint, gets enr-1 back and records it. The close revokes
+        enr-1 and makes no enroll call."""
+        self.close('enroll_box box1 ""', STUB_ENROLL="unknown broker")
+        before, after = self.calls_around_close("enroll ")
+        self.assertEqual(len(before), 2, before)
+        self.assertEqual(after, [])
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+
+    def test_the_learn_call_names_the_thumbprint_of_the_open_attempt(self) -> None:
+        """enroll_box's calls, with the key made first in the box (THUMBPRINT), end with the
+        outcome not known. reenroll_box then finds no key.pem, makes a new key in the box, and its
+        one call, with that key's thumbprint, is refused ENROLL_FAILED. The close's one learn call
+        names THUMBPRINT."""
+        self.close(
+            'enroll_box box1 "" || true\nexport STUB_ENROLL=known\nreenroll_box box1 || true', STUB_ENROLL="unknown"
+        )
+        before, _ = self.calls_around_close("enroll ")
+        self.assertEqual(len(before), 11, before)
+        self.assertIn(f"--runtime-id box1 --thumbprint K{2:042d} keydir=", before[-1])
+        self.assert_one_learn_call("box1")
+
+    def test_each_open_key_of_a_box_is_learned(self) -> None:
+        """enroll_box's calls, with the key made first in the box (THUMBPRINT), end with the
+        outcome not known while the broker made enr-1; then enr-1 ends at the broker. reenroll_box
+        finds no key.pem, makes a new key in the box, and its one call, with that key's thumbprint,
+        also ends with the outcome not known while the broker made enr-2. The launcher holds two
+        open entries of box1. The close learns each: THUMBPRINT first, which the broker refuses 409
+        because enr-2 is live under the other key, then the new key, which gets enr-2 back. One
+        unenroll call, of enr-2, and both rows have ended."""
+        new_tp = f"K{2:042d}"
+        self.close(
+            'enroll_box box1 "" || true\nagent-secrets unenroll --helper --enrollment enr-1\nreenroll_box box1 || true',
+            STUB_ENROLL="unknown",
+        )
+        learns = self.learn_calls()
+        self.assertEqual(
+            [args for args, _ in learns],
+            [
+                f"enroll --helper --runtime-id box1 --thumbprint {THUMBPRINT}",
+                f"enroll --helper --runtime-id box1 --thumbprint {new_tp}",
+            ],
+        )
+        for _, keydir in learns:
+            self.assertFalse(keydir.is_relative_to(self.hostdir), keydir)
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-2"])
+        self.assertEqual(
+            self.broker_rows("box1"),
+            [["enr-1", "box1", THUMBPRINT, "ended"], ["enr-2", "box1", new_tp, "ended"]],
+        )
+        log = self.unenroll_log()
+        self.assertEqual(len(log), 2, log)
+        self.assertTrue(log[0].startswith(f"box1: open attempt '{self.OWN_OPEN}' not learned: "), log)
+        self.assertEqual(log[1], "box1: enrollment enr-2 (runtime id box1) revoked")
+
+    def test_a_session_whose_first_enrollment_ends_open_is_learned_after_its_grace(self) -> None:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone. Each
+        enroll call of box1 for the session ends with its outcome not known, so box1 records no id,
+        and `owner` still names box0 at the close. After the grace (0 s) the waiter learns the
+        enrollment with runtime id session-sid-1 and no --session-id, revokes the id it got (the
+        broker's row has ended), removes the session's key dir, and logs a line for each step."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        self.close(
+            'enroll_box box1 sid-1 || true\ncp "$RUN_BASE/session-keys/sid-1/owner" "$RUN_BASE/owner-at-close"',
+            STUB_ENROLL="unknown",
+            AGENTBOX_UNENROLL_GRACE="0",
+        )
+        self.assertEqual((self.run_base / "owner-at-close").read_text(), "box0\n")
+        self.assert_one_learn_call("session-sid-1")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
+        self.assertFalse(skd.exists())
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment none,"
+                f" and the enrollment of each open attempt: {self.SESSION_OPEN}",
+                "box1: enrollment enr-1 (runtime id session-sid-1) revoked",
+            ],
+        )
+
+    def close_after_the_fallback(self, words: str, **stubs: str) -> Path:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone. Then
+        enroll_box box1 sid-1 with STUB_ENROLL=`words`, whose second word is `conflict`: the first
+        call is for the session, the second is refused 409, and the 409 fallback enrolls under
+        box1 with the same key from the third call on. Then the close, with a grace of 0 s, and
+        `stubs`. Returns the session's key dir."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        self.close("enroll_box box1 sid-1 || true", STUB_ENROLL=words, AGENTBOX_UNENROLL_GRACE="0", **stubs)
+        return skd
+
+    def test_an_open_session_call_and_an_open_call_after_the_fallback_are_each_learned(self) -> None:
+        """close_after_the_fallback with the first call and every call under box1 ending with the
+        outcome not known: the broker made enr-1 for session-sid-1 and enr-2 for box1, and the
+        launcher holds one open entry of each kind. The close learns box1's, and the waiter
+        learns the session's: one learn call for each, two unenroll calls, both rows
+        ended, and the session's key dir removed."""
+        skd = self.close_after_the_fallback("unknown conflict unknown")
+        self.assertEqual(
+            sorted(args for args, _ in self.learn_calls()),
+            [
+                f"enroll --helper --runtime-id box1 --thumbprint {THUMBPRINT}",
+                f"enroll --helper --runtime-id session-sid-1 --thumbprint {THUMBPRINT}",
+            ],
+        )
+        self.assertEqual(
+            sorted(self.revokes_after_close()),
+            ["unenroll --helper --enrollment enr-1", "unenroll --helper --enrollment enr-2"],
+        )
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
+        self.assertFalse(skd.exists())
+
+    def test_the_open_call_after_the_fallback_is_learned_while_the_session_lives_in_another_box(self) -> None:
+        """As the row above, but box2's run dir records sid-1 and its container is there
+        (STUB_LIVE_BOXES), so at its wake the waiter finds the session live in box2 and leaves the
+        session's enrollment alone. box1's own open call is not the session's, so the close learns
+        it at once and does not hand it to the waiter: one learn call, for box1, and one unenroll
+        call, of enr-2. box1's row has ended, the session's row is live, and the session's key dir
+        is still there."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        skd = self.close_after_the_fallback("unknown conflict unknown", STUB_LIVE_BOXES="box2")
+        self.assert_one_learn_call("box1")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-2"])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertTrue(skd.exists())
+
+    def test_a_success_after_the_fallback_keeps_the_open_session_call(self) -> None:
+        """close_after_the_fallback with the first call ending with the outcome not known (the
+        broker made enr-1 for session-sid-1) and the fallback's call succeeding (enr-2, box1's
+        own). The success settles only its own identity, so the session's entry stays open: the
+        close revokes enr-2 at once, and the waiter learns session-sid-1 and revokes enr-1. Both
+        rows have ended."""
+        self.close_after_the_fallback("unknown conflict broker")
+        self.assert_one_learn_call("session-sid-1")
+        self.assertEqual(
+            sorted(self.revokes_after_close()),
+            ["unenroll --helper --enrollment enr-1", "unenroll --helper --enrollment enr-2"],
+        )
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
+        self.assertEqual(self.broker_rows("box1"), [["enr-2", "box1", THUMBPRINT, "ended"]])
+
+    # box1 enrolls for session sid-1 (enr-1, recorded). The broker revokes enr-1, and the launcher's
+    # call to enroll the box again ends with its outcome not known while the broker makes enr-2.
+    # Run with STUB_ENROLL="broker unknown".
+    REENROLLED_OPEN = "\n".join(
+        [
+            "enroll_box box1 sid-1",
+            'agent-secrets unenroll --helper --enrollment "$(<"$RUN_BASE/box1/enrollment-id")"',
+            ': >"$(box_keydir box1)/enrollment.not-live"',
+            "reenroll_if_not_live box1",
+        ]
+    )
+
+    def test_a_session_whose_reenrollment_ends_open_has_both_enrollments_ended(self) -> None:
+        """box1 enrolled for session sid-1 (enr-1, recorded); the broker revoked enr-1, and the
+        launcher's call to enroll the box again ended with its outcome not known while the broker
+        made enr-2. After the grace (0 s) the waiter revokes the recorded enr-1, then learns enr-2
+        with runtime id session-sid-1 and no --session-id, and revokes it: two unenroll calls after
+        the close, both rows ended, and a log line for each step."""
+        self.close(self.REENROLLED_OPEN, STUB_ENROLL="broker unknown", AGENTBOX_UNENROLL_GRACE="0")
+        self.assert_one_learn_call("session-sid-1")
+        self.assertEqual(
+            self.revokes_after_close(),
+            ["unenroll --helper --enrollment enr-1", "unenroll --helper --enrollment enr-2"],
+        )
+        self.assertEqual(
+            self.broker_rows("session-sid-1"),
+            [["enr-1", "session-sid-1", THUMBPRINT, "ended"], ["enr-2", "session-sid-1", THUMBPRINT, "ended"]],
+        )
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment enr-1,"
+                f" and the enrollment of each open attempt: {self.SESSION_OPEN}",
+                "box1: enrollment enr-1 (recorded) revoked",
+                "box1: enrollment enr-2 (runtime id session-sid-1) revoked",
+            ],
+        )
+
+    def test_a_session_live_in_another_box_keeps_the_open_enrollment(self) -> None:
+        """Each enroll call of box1 for session sid-1 ends with its outcome not known, and box2,
+        another box of the session, still runs. After the grace (0 s) the waiter's test 2 finds
+        box2: no learn call, and one line that leaves the open attempt's enrollment alone."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        self.close(
+            'enroll_box box1 sid-1 || true', STUB_ENROLL="unknown", STUB_LIVE_BOXES="box2", AGENTBOX_UNENROLL_GRACE="0"
+        )
+        self.assertEqual(self.learn_calls(), [])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 is live in box box2; enrollment none left alone,"
+                f" and the enrollment of each open attempt: {self.SESSION_OPEN}"
+            ],
+        )
+
+    def close_while_test_2_cannot_be_read(self, steps: str) -> None:
+        """The steps of REENROLLED_OPEN, so box1 has a recorded enrollment (enr-1) and an open
+        session entry (enr-2). box2's run dir records sid-1. Then `steps`, the close and the grace
+        (0 s)."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        self.close(f"{self.REENROLLED_OPEN}\n{steps}", STUB_ENROLL="broker unknown", AGENTBOX_UNENROLL_GRACE="0")
+
+    def assert_test_2_not_read(self, status: int) -> None:
+        """The waiter made no learn call and no unenroll call after the close, the session's key
+        dir is still there, and unenroll.log holds one line: test 2 could not be read, with the
+        status of session-live-box and its empty output, and enr-1 and the open entry left
+        alone."""
+        self.assertEqual(self.learn_calls(), [])
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((self.run_base / "session-keys" / "sid-1" / "key.pem").exists())
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                f"box1: session sid-1: test 2 could not be read (session-live-box exited {status} and"
+                " printed ''), so an enrollment that no box renews ends with its lease (15 min);"
+                f" enrollment enr-1 left alone, and the enrollment of each open attempt: {self.SESSION_OPEN}"
+            ],
+        )
+
+    def test_a_waiter_that_cannot_ask_docker_leaves_the_enrollments_alone(self) -> None:
+        """`docker ps` fails from the close on, so at the waiter's wake session-live-box cannot
+        tell whether box2 has a container. It exits 2 with no output, and the waiter does not
+        read that as "no other box is live"."""
+        self.close_while_test_2_cannot_be_read("export STUB_PS_FAIL=1")
+        self.assert_test_2_not_read(2)
+
+    def self_that_only(self, body: str) -> str:
+        """The step that makes the waiter's SELF a script that only runs `body`: DOTFILES_DIR names
+        a dir whose scripts/agentbox is that script, and unenroll_box gives that file to the waiter
+        as SELF."""
+        scripts = self.root / "dotfiles-stub" / "scripts"
+        scripts.mkdir(parents=True)
+        write_stub(scripts, "agentbox", body)
+        return f'DOTFILES_DIR="{scripts.parent}"'
+
+    def test_a_session_live_box_with_no_answer_leaves_the_enrollments_alone(self) -> None:
+        """The waiter's session-live-box exits 0 with no output, as this script can when a publish
+        replaces it during the read."""
+        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 0"))
+        self.assert_test_2_not_read(0)
+
+    def test_a_session_live_box_that_ends_before_it_looks_leaves_the_enrollments_alone(self) -> None:
+        """The waiter's session-live-box exits 1 with no output, as this script does when a
+        command ends it under set -e before it looks. Status 1 alone is not the answer `none`."""
+        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 1"))
+        self.assert_test_2_not_read(1)
+
+    def test_a_session_that_came_back_keeps_the_open_enrollment(self) -> None:
+        """Each enroll call of box1 for session sid-1 ends with its outcome not known, and after
+        the close `owner` names box2, as when box2 enrolls for the session during the grace. The
+        grace lasts until the body has written that (STUB_GRACE_UNTIL), and the waiter's test 1
+        sees the change: no learn call, and one line that says the session came back."""
+        grace_over = self.run_base / "grace-over"
+        self.close(
+            'enroll_box box1 sid-1 || true',
+            after=f'echo box2 >"$RUN_BASE/session-keys/sid-1/owner"\n: >"{grace_over}"',
+            STUB_ENROLL="unknown",
+            AGENTBOX_UNENROLL_GRACE="180",
+            STUB_GRACE_UNTIL=str(grace_over),
+        )
+        self.assertEqual(self.learn_calls(), [])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 came back in box2; enrollment none left alone,"
+                f" and the enrollment of each open attempt: {self.SESSION_OPEN}"
+            ],
+        )
+
+    def close_then_enroll_another_box(self, steps: str, **stubs: str) -> Path:
+        """`steps`, then the close. During the grace (STUB_GRACE_UNTIL, 180 s), box C of the same
+        session starts its enrollment: its enroll_key touches the session's key dir before its
+        first call, and C has no `owner` and no `enrollment-session` yet, so tests 1 and 2 cannot
+        see it. The body waits 0.1 s first, so the touch is not within the kernel's timestamp
+        granularity of the close. Returns the session's key dir."""
+        grace_over = self.run_base / "grace-over"
+        self.close(
+            steps,
+            after=f'/bin/sleep 0.1\ntouch "$RUN_BASE/session-keys/sid-1"\n: >"{grace_over}"',
+            AGENTBOX_UNENROLL_GRACE="180",
+            STUB_GRACE_UNTIL=str(grace_over),
+            **stubs,
+        )
+        return self.run_base / "session-keys" / "sid-1"
+
+    def test_a_box_that_starts_to_enroll_for_the_session_keeps_the_open_enrollment(self) -> None:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone, and
+        each enroll call of box1 for the session ends with its outcome not known. Then
+        close_then_enroll_another_box. The waiter's test 3 sees that the session's key dir changed
+        after the close: no learn call, no unenroll call, the key dir kept, and one line that says
+        so."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        self.close_then_enroll_another_box("enroll_box box1 sid-1 || true", STUB_ENROLL="unknown")
+        self.assertEqual(self.learn_calls(), [])
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((skd / "key.pem").exists())
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1: its key dir changed after the close, as when a box starts to enroll"
+                " for the session; enrollment none left alone, and the enrollment of each open attempt:"
+                f" {self.SESSION_OPEN}"
+            ],
+        )
+
+    def test_a_box_that_starts_to_enroll_for_the_session_keeps_the_recorded_enrollment(self) -> None:
+        """box1 enrolls for session sid-1 and records enr-1 (owner box1). Then
+        close_then_enroll_another_box. The waiter's test 3 sees that the session's key dir changed
+        after the close: no unenroll call, enr-1 still live, the key dir kept, and one line that
+        says so."""
+        skd = self.close_then_enroll_another_box("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((skd / "key.pem").exists())
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "live"]])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1: its key dir changed after the close, as when a box starts to enroll"
+                " for the session; enrollment enr-1 left alone"
+            ],
+        )
+
+    def waiter(self, skd: Path, owner: str, closed: str) -> list[str]:
+        """unenroll_session_wait called directly, with a grace of 0 s, for box1 of session sid-1:
+        SKD `skd`, OWNER `owner`, EID enr-1, SELF this script (which answers `none`: no other box
+        is in the run dir) and CLOSED `closed`. Returns its lines without their UTC time."""
+        result = self.bash(
+            f'unenroll_session_wait 0 "$RUN_BASE" "{skd}" box1 sid-1 "{owner}" enr-1'
+            f' "$DOTFILES_DIR/scripts/agentbox" "{closed}"'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [m.group(1) if (m := self.TIMED.fullmatch(line)) else line for line in result.stdout.splitlines()]
+
+    def test_a_waiter_that_cannot_read_the_close_time_leaves_the_enrollments_alone(self) -> None:
+        """The waiter's CLOSED is not a number. Tests 1 and 2 pass, and test 3 cannot be read: no
+        unenroll call, the session's key dir kept, and one line that says test 3 could not be
+        read."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        lines = self.waiter(skd, "box0", "not-a-time")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(
+            lines[0].startswith("box1: session sid-1: test 3 could not be read (the close's time 'not-a-time',"),
+            lines,
+        )
+        self.assertTrue(lines[0].endswith("; enrollment enr-1 left alone"), lines)
+        self.assertEqual(self.calls_matching("unenroll "), [])
+        self.assertTrue(skd.exists())
+
+    def test_a_waiter_whose_session_key_dir_is_gone_ends_the_enrollment(self) -> None:
+        """The session's key dir is gone at the wake (no box has made it again), and `owner` read
+        nothing at the close. All three tests pass: one unenroll call, of enr-1, and the lines
+        that say the session did not come back and that enr-1 is revoked."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        lines = self.waiter(skd, "", str(time.time_ns()))
+        self.assertEqual(
+            lines,
+            [
+                "box1: session sid-1 did not come back; ending enrollment enr-1",
+                "box1: enrollment enr-1 (recorded) revoked",
+            ],
+        )
+        # The stub logs a call as `unenroll <its arguments>`, which start with `unenroll` too.
+        self.assertEqual(self.calls_matching("unenroll "), ["unenroll unenroll --helper --enrollment enr-1"])
+
+    def test_a_learn_call_that_fails_leaves_the_enrollment_to_its_lease(self) -> None:
+        """The learn call is refused ENROLL_FAILED, or ends with its outcome not known. unenroll.log
+        holds one line, which names the open attempt and the client's answer and says that the
+        enrollment ends with its lease; the close makes no unenroll call."""
+        for word, code in (("known", "ENROLL_FAILED"), ("unknown", "ENROLL_OUTCOME_UNKNOWN")):
+            with self.subTest(learn=word):
+                self.reset_box()
+                self.close('enroll_box box1 "" || true', STUB_ENROLL="unknown", STUB_LEARN=word)
+                log = self.unenroll_log()
+                self.assertEqual(len(log), 1, log)
+                self.assertRegex(
+                    log[0],
+                    rf"^box1: open attempt '{self.OWN_OPEN}' not learned: agent-secrets enroll exited 1 and"
+                    rf" printed '': agent-secrets enroll: {code}: .*; an enrollment, if the attempt made"
+                    r" one, ends with its lease \(15 min\)$",
+                )
+                self.assertEqual(self.revokes_after_close(), [])
+
+    # The two ways to a revoke that the close's detached process makes: the id a learn call got
+    # (box1 with no session id, its enroll calls open), and a session's recorded id (the waiter,
+    # after its grace). Each: the body's steps, the runtime id, the stubs.
+    REVOKE_PATHS = {
+        "a learned id": ('enroll_box box1 "" || true', "box1", {"STUB_ENROLL": "unknown"}),
+        "a session's recorded id": (
+            "enroll_box box1 sid-1",
+            "session-sid-1",
+            {"STUB_ENROLL": "broker", "AGENTBOX_UNENROLL_GRACE": "0"},
+        ),
+    }
+
+    def test_a_revoke_whose_outcome_is_not_known_is_made_once_more(self) -> None:
+        """The first unenroll call ends UNENROLL_OUTCOME_UNKNOWN and the second succeeds: two
+        unenroll calls of enr-1 after the close, and the broker's row of enr-1 has ended."""
+        for path, (steps, runtime, stubs) in self.REVOKE_PATHS.items():
+            with self.subTest(path=path):
+                self.reset_box()
+                self.close(steps, STUB_UNENROLL="unknown ok", **stubs)
+                self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"] * 2)
+                self.assertEqual(self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "ended"]])
+
+    def test_a_revoke_refused_unenroll_failed_is_not_made_again(self) -> None:
+        """The unenroll call is refused UNENROLL_FAILED, a known outcome: one unenroll call of
+        enr-1 after the close, and the broker's row of enr-1 is still live."""
+        for path, (steps, runtime, stubs) in self.REVOKE_PATHS.items():
+            with self.subTest(path=path):
+                self.reset_box()
+                self.close(steps, STUB_UNENROLL="known", **stubs)
+                self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+                self.assertEqual(self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "live"]])
+
+    def test_a_revoke_whose_known_code_is_inside_other_text_is_made_once_more(self) -> None:
+        """The first unenroll call of a learned id exits 1, and no line of its stderr starts with
+        UNENROLL_FAILED: that line is inside the text of a line for a helper that gave no answer
+        (buried), so the outcome is not known. The second call succeeds: two unenroll calls of
+        enr-1 after the close, and the broker's row of enr-1 has ended."""
+        steps, runtime, stubs = self.REVOKE_PATHS["a learned id"]
+        self.close(steps, STUB_UNENROLL="buried ok", **stubs)
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"] * 2)
+        self.assertEqual(self.broker_rows(runtime), [["enr-1", runtime, THUMBPRINT, "ended"]])
+
+    def test_the_close_does_not_wait_for_the_learn_call(self) -> None:
+        """The stub's learn call answers only once a file exists (STUB_LEARN_AFTER), and the body
+        writes that file only after unenroll_box has returned. The learn call then answers, and
+        the id it got is revoked. A close that waited for the learn call would wait for that file
+        for 120 s, past the run's 60 s timeout."""
+        returned = self.run_base / "unenroll-box-returned"
+        self.close(
+            'enroll_box box1 "" || true',
+            close="unenroll_box box1",
+            after=f': >"{returned}"',
+            timeout=60,
+            STUB_ENROLL="unknown",
+            STUB_LEARN_AFTER=str(returned),
+        )
+        self.assert_one_learn_call("box1")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+
+    def close_then_kill_the_body(self, steps: str, revoked: str, **stubs: str) -> None:
+        """`steps`, the `close` line and close_box, in a bash process that has a process group of
+        its own, as a launcher has, with box1's container gone (STUB_GONE) and a learn call that
+        answers only once a file exists (STUB_LEARN_AFTER). Once close_box has returned and the
+        learn call waits (within 120 s), the body's process group gets SIGKILL, as a cancelled
+        `agentbox move` sends it 30 s after TERM (move_to_cancel_start), and then the file is
+        written. Returns once unenroll.log holds `revoked`, or 60 s after the kill. Asserts that
+        close_box returned."""
+        gate = self.root / "learn-gate"
+        returned = self.root / "close-box-returned"
+        # /bin/sleep, not the stub, which returns at once: the body is still in its process group
+        # when the kill comes.
+        body = f'{steps}\necho close >>"$STUB_CALLS"\nclose_box box1 ""\n: >"{returned}"\n/bin/sleep 60'
+        proc = subprocess.Popen(
+            ["bash", "-c", self.bash_script(body)],
+            env=self.bash_env(STUB_GONE="1", STUB_LEARN_AFTER=str(gate), **stubs),
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            # A child of the detached process logs the learn call as it starts to wait, so the kill
+            # cannot come before that process's setsid.
+            wait_until(lambda: returned.exists() and len(self.learn_calls()) > 0, 120)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
+            gate.write_text("")
+        # The revoke line is the detached process's last write, so waiting for it also keeps that
+        # process from outliving the temp dir.
+        wait_until(lambda: revoked in self.unenroll_log(), 60)
+        self.assertTrue(returned.exists(), "close_box did not return")
+
+    def test_a_kill_of_the_launchers_process_group_does_not_stop_the_learn_call(self) -> None:
+        """Each enroll call of box1 (no session id) ends with its outcome not known; then
+        close_then_kill_the_body. unenroll.log holds one line, the revoke of enr-1 (runtime id
+        box1); the close made one learn call, for box1; and the broker's row of enr-1 has ended."""
+        revoked = "box1: enrollment enr-1 (runtime id box1) revoked"
+        self.close_then_kill_the_body('enroll_box box1 "" || true', revoked, STUB_ENROLL="unknown")
+        self.assertEqual(self.unenroll_log(), [revoked])
+        self.assert_one_learn_call("box1")
+        self.assertEqual(self.broker_rows("box1"), [["enr-1", "box1", THUMBPRINT, "ended"]])
+
+    def test_a_kill_of_the_launchers_process_group_does_not_stop_the_session_waiter(self) -> None:
+        """Session sid-1's `owner` names box0, an earlier box of the session that is gone, and each
+        enroll call of box1 for the session ends with its outcome not known; the grace is 0 s. Then
+        close_then_kill_the_body. unenroll.log holds the waiter's two lines, that the session did
+        not come back and the revoke of enr-1 (runtime id session-sid-1); the close made one learn
+        call, for session-sid-1; and the broker's row of enr-1 has ended."""
+        skd = self.run_base / "session-keys" / "sid-1"
+        skd.mkdir(parents=True)
+        (skd / "owner").write_text("box0\n")
+        revoked = "box1: enrollment enr-1 (runtime id session-sid-1) revoked"
+        self.close_then_kill_the_body(
+            "enroll_box box1 sid-1 || true", revoked, STUB_ENROLL="unknown", AGENTBOX_UNENROLL_GRACE="0"
+        )
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment none,"
+                f" and the enrollment of each open attempt: {self.SESSION_OPEN}",
+                revoked,
+            ],
+        )
+        self.assert_one_learn_call("session-sid-1")
+        self.assertEqual(self.broker_rows("session-sid-1"), [["enr-1", "session-sid-1", THUMBPRINT, "ended"]])
+
+    def test_a_hangup_stops_the_attempts_and_the_close_learns_the_one_made(self) -> None:
+        """A HUP comes during enroll_box's first call (STUB_HUP_PID), and a HUP trap sets
+        `interrupted`, as cmd_new's does. Every call ends with its outcome not known. enroll_box
+        makes one call, not ten, and the close learns that call's enrollment and revokes it."""
+        self.close(
+            "trap 'interrupted=1' HUP\nexport STUB_HUP_PID=$$\nenroll_box box1 \"\" || true", STUB_ENROLL="unknown"
+        )
+        before, _ = self.calls_around_close("enroll ")
+        self.assertEqual(len(before), 1, before)
+        self.assert_one_learn_call("box1")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
 
 
 class EnrollWhenUp(EnrollFixture):
@@ -1287,6 +2075,29 @@ class BoxWait(EnrollFixture):
                 )
                 self.assertEqual(result.stdout.split(), ["trapped", "box-wait-returned"], result.stderr)
                 self.assertLess(time.monotonic() - started, 8)
+
+    def test_a_child_that_ends_during_the_pass_is_not_waited_for(self) -> None:
+        """The child ends while the pass's reenroll_if_not_live runs, as during an enroll call, and
+        bash has reaped it before the pass would wait: box_wait returns in well under the 10 s of
+        that wait, and its stderr holds no `no such job`. With bash 5.2.15 (Debian bookworm), a
+        `wait -n` with the reaped child's pid writes `no such job` and waits for all of the sleep;
+        with bash 5.2.37 it does not."""
+        started = time.monotonic()
+        result = self.bash(
+            "/bin/sleep 30 </dev/null >/dev/null 2>&1 &\nchild=$!\n"
+            # kill -0 fails only once bash has reaped the child: a zombie still takes signal 0.
+            "reenroll_if_not_live() {\n"
+            '    kill "$child"\n'
+            '    while kill -0 "$child" 2>/dev/null; do /bin/sleep 0.1; done\n'
+            "    /bin/sleep 0.5\n"
+            "}\n"
+            'box_wait box1 "$child"\n'
+            "echo box-wait-returned",
+            STUB_REAL_SLEEP="1",
+        )
+        self.assertEqual(result.stdout.split(), ["box-wait-returned"], result.stderr)
+        self.assertNotIn("no such job", result.stderr)
+        self.assertLess(time.monotonic() - started, 5)
 
 
 class CmdNew(EnrollFixture):

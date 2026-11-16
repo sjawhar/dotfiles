@@ -58,8 +58,8 @@ bash "${DOTFILES_DIR}/installers/omp-box-memory-guard.sh"
 arm_user_timer devbox tmp-empty-prune
 
 # The box's one Go build cache, <scratch>/gocache (GOCACHE in .bashrc; <scratch> is
-# /mnt/scratch/<user> where devbox/gce-disks makes it, else /mnt/nvme/<user>), cleaned hourly
-# once it passes 80 GB (devbox/gocache-cap.service).
+# /mnt/scratch/<user> where devbox/gce-disks makes it, else /mnt/nvme/<user>), trimmed past 25 GB
+# without removing an entry a running build may read (devbox/gocache-cap.service).
 arm_user_timer devbox gocache-cap
 
 # Each agent session's own TMPDIR under <scratch>/session-tmp (scripts/agent-session),

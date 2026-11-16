@@ -34,11 +34,13 @@ behavior before handing the call to the real one. One file is data: `person-name
   (`issue create`, `issue
   comment`, `pr comment`) Sami instructed in a Dispatch ask he answered runs again with
   `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>`, which `scripts/gh-approved-post` checks. Every
-  call GitHub refuses for the App, those included, also gets the admin route: a GitHub admin
-  action that work Sami already asked for needs (an App permission, a CODEOWNERS approval in
-  his name, an admin merge, a repository or branch setting) is done by the agent itself with
-  Sami's admin token from the credential broker, never asked of him (he said so five times,
-  2026-10-25 to 2026-11-03, last on dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a).
+  call GitHub refuses for the App except a review also gets the admin route: a GitHub admin
+  action that work Sami already asked for needs (an App permission, an admin merge, a
+  repository or branch setting) is done by the agent itself with Sami's admin token from the
+  credential broker, never asked of him (he said so five times, 2026-10-25 to 2026-11-03, last
+  on dispatch://OSSV-300/ask/dc4e1c38-bd15-4999-9ef5-4c6540a2ce9a). An approval of a pull
+  request is not an admin action: no approval uses a person's token, and a code owner's
+  approval stays that person's (dispatch://INFRA-1481, R3).
   The block prints the refused call ready to run:
   `secret-run --register --reason '<what and why>' GITHUB_ADMIN_PAT -- sh -c 'GH_TOKEN=$GITHUB_ADMIN_PAT exec gh "$@"' gh <the call>`
   for theorem-labs, `GITHUB_PERSONAL_ADMIN_PAT` for sjawhar's own repositories; the `sh -c`

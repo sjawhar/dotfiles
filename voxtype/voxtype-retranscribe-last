@@ -12,8 +12,10 @@ PASTE="$VOXTYPE_DIR/voxtype-paste"
 # shortcut has no such environment.
 source "$VOXTYPE_DIR/secrets.sh"
 
+# tail, not `sort -r | head -1`: head exits after one line, sort then dies of
+# SIGPIPE once the list outgrows the pipe buffer, and pipefail ends the script.
 latest=$(find "$RECORDINGS_DIR" -name '*.wav' -printf '%T@ %p\n' 2>/dev/null \
-    | sort -rn | head -1 | cut -d' ' -f2-)
+    | sort -n | tail -n1 | cut -d' ' -f2-)
 
 if [ -z "$latest" ]; then
     notify-send --app-name=Voxtype "No Recordings" "No recordings found to retranscribe"
@@ -25,9 +27,12 @@ notify-send --app-name=Voxtype --expire-time=2000 "Retranscribing" "$filename"
 
 # `voxtype transcribe` prints progress lines to stdout, then a blank line, then
 # the text (src/app/transcribe_file.rs). Errors go to stderr as the last line.
+# Local Whisper, not the configured Deepgram engine: voxtype sends a file to
+# Deepgram over the live-dictation socket in one message, and Deepgram answers
+# with no text or not at all.
 stderr_file=$(mktemp)
 trap 'rm -f "$stderr_file"' EXIT
-if ! raw=$(voxtype transcribe "$latest" 2>"$stderr_file"); then
+if ! raw=$(voxtype transcribe --engine whisper "$latest" 2>"$stderr_file"); then
     notify-send --app-name=Voxtype --urgency=critical "Retranscription Failed" \
         "$filename: $(tail -n1 "$stderr_file")"
     exit 1
