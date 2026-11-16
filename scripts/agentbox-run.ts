@@ -443,7 +443,10 @@ function appendStderr(chunk: Uint8Array): void {
 	}
 }
 
-function spawnOmp(argv: string[]) {
+/** The omp the runner runs: its stdin and stdout are the pane's, its stderr a pipe it tees. */
+type OmpProcess = Bun.Subprocess<"inherit", "inherit", "pipe">;
+
+function spawnOmp(argv: string[]): OmpProcess {
 	const child = Bun.spawn(argv, {
 		stdio: ["inherit", "inherit", "pipe"],
 		env: { ...process.env, ...dispatchEnv(argv, process.env), AGENTBOX_RUNNER_PID: String(process.pid) },
@@ -548,24 +551,12 @@ if (import.meta.main) {
 		process.exit(3);
 	}
 
-	// Written whole before omp starts, so the host never reads half of it.
-	try {
-		fs.writeFileSync(`${versionPath}.${process.pid}.tmp`, `version=1\npid=${process.pid}\n`);
-		fs.renameSync(`${versionPath}.${process.pid}.tmp`, versionPath);
-	} catch (error) {
-		note(`could not write ${versionPath}: ${error}`);
-	}
-	let child = spawnOmp(launchArgv);
+	// The signal handlers come first, before the version file and before omp: the host signals a
+	// box once `agentbox-runner` names its runner, and a SIGUSR1 that came before its handler was
+	// in place took the signal's default action, which ended the runner and the box with it (seen
+	// under load on sami-devbox, 2026-11-16, as a request that never got its answer).
+	let child: OmpProcess | undefined;
 	let startedAt = Date.now();
-	note(`omp started (pid ${child.pid}): ${launchArgv.join(" ")}`);
-	const oomBias = setInterval(() => {
-		try {
-			oomBiasPass(process.pid, child.pid);
-		} catch (error) {
-			note(`oom bias pass failed: ${error}`);
-		}
-	}, OOM_BIAS_INTERVAL_MS);
-	oomBias.unref();
 	let relaunch: { argv: string[]; sid: string } | undefined;
 	// The session a relaunch marker was written for, so the box's own shutdown can remove it.
 	let markedSid: string | undefined;
@@ -586,7 +577,9 @@ if (import.meta.main) {
 		};
 		if (shuttingDown) return reply("refused", "the box is shutting down");
 		if (restarting) return reply("busy", "a restart is already in progress; this signal is ignored");
-		const session = reportedSession(child.pid);
+		if (!child) return reply("refused", "omp has not started yet; omp left as it is");
+		const running = child;
+		const session = reportedSession(running.pid);
 		if ("refusal" in session) return reply("refused", `${session.refusal}; omp left running`);
 		const argv = relaunchArgv(launchArgv, session.file);
 		const moved = movedRefusal(argv, home, machine);
@@ -596,15 +589,15 @@ if (import.meta.main) {
 		// Before the hang-up, never after it: the gap this marker covers starts here.
 		markedSid = session.sid;
 		markRestarting(session.sid);
-		reply("started", `session ${session.sid}: hanging up omp (pid ${child.pid}) to resume ${session.file}`);
-		child.kill("SIGHUP");
+		reply("started", `session ${session.sid}: hanging up omp (pid ${running.pid}) to resume ${session.file}`);
+		running.kill("SIGHUP");
 	});
 	for (const sig of ["SIGHUP", "SIGTERM"] as const) {
 		process.on(sig, () => {
 			shuttingDown = true;
 			note(`${sig} received: shutting omp down, no relaunch`);
 			relaunch = undefined;
-			child.kill(sig);
+			child?.kill(sig);
 			// The box is going away, so no relaunch follows and a marker from a relaunch that
 			// was already in flight must not outlive it.
 			if (markedSid) clearRestarting(markedSid);
@@ -618,19 +611,40 @@ if (import.meta.main) {
 		relaunch = undefined;
 	});
 
+	// Written whole before omp starts, so the host never reads half of it.
+	try {
+		fs.writeFileSync(`${versionPath}.${process.pid}.tmp`, `version=1\npid=${process.pid}\n`);
+		fs.renameSync(`${versionPath}.${process.pid}.tmp`, versionPath);
+	} catch (error) {
+		note(`could not write ${versionPath}: ${error}`);
+	}
+	let running = spawnOmp(launchArgv);
+	child = running;
+	startedAt = Date.now();
+	note(`omp started (pid ${running.pid}): ${launchArgv.join(" ")}`);
+	const oomBias = setInterval(() => {
+		try {
+			oomBiasPass(process.pid, running.pid);
+		} catch (error) {
+			note(`oom bias pass failed: ${error}`);
+		}
+	}, OOM_BIAS_INTERVAL_MS);
+	oomBias.unref();
+
 	for (;;) {
-		const code = await child.exited;
-		const ran = `after ${Math.round((Date.now() - startedAt) / 1000)}s (exit code ${code ?? "none"}, signal ${child.signalCode ?? "none"})`;
+		const code = await running.exited;
+		const ran = `after ${Math.round((Date.now() - startedAt) / 1000)}s (exit code ${code ?? "none"}, signal ${running.signalCode ?? "none"})`;
 		if (shuttingDown || relaunch === undefined) {
-			note(`omp (pid ${child.pid}) exited ${ran}; the box ends`, true);
+			note(`omp (pid ${running.pid}) exited ${ran}; the box ends`, true);
 			process.exit(code ?? 1);
 		}
 		const next = relaunch;
 		relaunch = undefined;
 		restarting = false;
-		child = spawnOmp(next.argv);
+		running = spawnOmp(next.argv);
+		child = running;
 		startedAt = Date.now();
-		note(`omp exited ${ran} for the restart; relaunched (pid ${child.pid}): ${next.argv.join(" ")}`);
+		note(`omp exited ${ran} for the restart; relaunched (pid ${running.pid}): ${next.argv.join(" ")}`);
 		wakeOverEnvoy(next.sid);
 	}
 }

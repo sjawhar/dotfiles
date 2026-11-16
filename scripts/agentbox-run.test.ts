@@ -230,9 +230,13 @@ afterEach(async () => {
 	}
 });
 
-// Another process's progress shows only in files, so these waits poll them.
+// Another process's progress shows only in files, so these waits poll them: up to 30 s each, and
+// 60 s a test, for a loaded host. With 10 s and 20 s, restartResumesTheReportedSession failed a
+// clean run while three suites ran beside it on sami-devbox (2026-11-16, load near 300); alone it
+// takes under a second.
+const TEST_LIMIT_MS = 60_000;
 async function until(what: string, ready: () => boolean): Promise<void> {
-	for (const deadline = Date.now() + 10_000; !ready(); await Bun.sleep(20)) {
+	for (const deadline = Date.now() + 30_000; !ready(); await Bun.sleep(20)) {
 		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
 	}
 }
@@ -267,8 +271,13 @@ function transcript(home: string, dir = "-work"): string {
 	fs.writeFileSync(file, "");
 	return file;
 }
-/** A runner started on `launch`, once its omp runs. `prepare` sets up the home and returns env. */
-async function startBox(launch: string[], prepare: (home: string) => Record<string, string> = () => ({})): Promise<Box> {
+/** A runner started on `launch`, once its omp runs (at once with `untilOmp` false). `prepare` sets
+ * up the home and returns env. */
+async function startBox(
+	launch: string[],
+	prepare: (home: string) => Record<string, string> = () => ({}),
+	untilOmp = true,
+): Promise<Box> {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "agentbox-run-box-"));
 	const runtime = path.join(home, "run");
 	const rec = path.join(home, "rec");
@@ -290,7 +299,7 @@ async function startBox(launch: string[], prepare: (home: string) => Record<stri
 	const runner = Bun.spawn([process.execPath, RUNNER, ...launch], { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 	const box = { home, runtime, rec, runner };
 	boxes.push(box);
-	await until("the first omp", () => ompPids(box).length === 1);
+	if (untilOmp) await until("the first omp", () => ompPids(box).length === 1);
 	return box;
 }
 /** What session-env writes in the omp of a box. */
@@ -343,7 +352,7 @@ describe("the runner's restart", () => {
 		expect(words(recorded(box, "agentbox-argv")).slice(0, 3)).toEqual(["move", "--wake", SID]);
 		expect(answers(box)).toEqual([`started session ${SID}: hanging up omp (pid ${omp}) to resume ${file}`]);
 		expect(box.runner.exitCode).toBeNull();
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 
 	test.each([
 		["is missing", (dir: string) => path.join(dir, "gone.jsonl")],
@@ -370,7 +379,7 @@ describe("the runner's restart", () => {
 		expect(answers(box)).toEqual([expect.stringMatching(/^refused /)]);
 		expect(answers(box)[0]).toContain(`${gone} is not a regular file`);
 		await expectOmpUntouched(box);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 
 	test("a session moved off this machine is refused with the move's reason, and omp is left running", async () => {
 		const box = await startBox(["omp"]);
@@ -384,7 +393,7 @@ describe("the runner's restart", () => {
 		expect(answers(box)).toEqual([expect.stringMatching(/^refused this session moved to sami-devbox at 2026-11-15T12:00:00Z/)]);
 		fs.rmSync(sessionDir, { recursive: true });
 		await expectOmpUntouched(box);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 });
 
 describe("restartAnswersInTheSignalHandler", () => {
@@ -393,7 +402,26 @@ describe("restartAnswersInTheSignalHandler", () => {
 		const version = `version=1\npid=${box.runner.pid}\n`;
 		expect(recorded(box, `runner-at-start.${ompPids(box)[0]}`)).toBe(version);
 		expect(fs.readFileSync(path.join(box.runtime, "agentbox-runner"), "utf8")).toBe(version);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
+
+	test("a request the moment the version file names the runner is answered, and the runner lives", async () => {
+		// The host signals a box once `agentbox-runner` names its runner. The runner wrote that file,
+		// and started omp, before its SIGUSR1 handler was in place, and a signal in that gap took
+		// SIGUSR1's default action: it ended the runner, and the box with it (seen on sami-devbox
+		// under load, 2026-11-16, as a request that never got its answer). Ten boxes, each signalled
+		// as soon as the file is there.
+		for (let i = 0; i < 10; i++) {
+			const box = await startBox(["omp"], () => ({}), false);
+			const version = path.join(box.runtime, "agentbox-runner");
+			for (const deadline = Date.now() + 30_000; !fs.existsSync(version); ) {
+				if (Date.now() > deadline) throw new Error("the runner never wrote its version file");
+			}
+			box.runner.kill("SIGUSR1");
+			await until("the answer", () => answers(box).length === 1);
+			expect(answers(box)[0]).toMatch(/^refused /);
+			expect(box.runner.exitCode).toBeNull();
+		}
+	}, TEST_LIMIT_MS);
 
 	// An answer file nobody reads yet (a FIFO) holds the runner in its append: with the line in
 	// the handler before the hang-up, the runner cannot reach the hang-up until this test reads
@@ -417,7 +445,7 @@ describe("restartAnswersInTheSignalHandler", () => {
 		expect(answersIn(fs.readFileSync(fifo, "utf8"))).toEqual([`started session ${SID}: hanging up omp (pid ${omp}) to resume ${file}`]);
 		await until("the hang-up", () => fs.existsSync(path.join(box.rec, `hup.${omp}`)));
 		await until("the second omp", () => ompPids(box).length === 2);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 
 	test.each([
 		["no session file", (_box: Box) => {}],
@@ -436,7 +464,7 @@ describe("restartAnswersInTheSignalHandler", () => {
 		await until("the answer", () => answers(box).length === 1);
 		expect(answers(box)).toEqual([expect.stringMatching(/^refused .*the session did not report its id/)]);
 		await expectOmpUntouched(box);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 
 	test("a second request while a restart is in progress gets one busy line and no second restart", async () => {
 		// The first omp takes a second to go, so the second request lands in the middle of the restart.
@@ -456,7 +484,7 @@ describe("restartAnswersInTheSignalHandler", () => {
 		await until("the waker", () => fs.existsSync(path.join(box.rec, "agentbox-argv")));
 		expect(ompPids(box)).toHaveLength(2);
 		expect(answers(box)).toHaveLength(2);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 
 	test("each request is answered under its own id: of two at once the second is busy, and so is one during the restart", async () => {
 		// Two callers that each left a request before one signal reached the runner (two signals can
@@ -483,7 +511,7 @@ describe("restartAnswersInTheSignalHandler", () => {
 		await until("the second omp", () => ompPids(box).length === 2);
 		await until("the waker", () => fs.existsSync(path.join(box.rec, "agentbox-argv")));
 		expect(ompPids(box)).toHaveLength(2);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 
 	// The routes the runner took before the session reported itself, each set up so that it alone
 	// would have found this session. With no report, every one is refused.
@@ -511,5 +539,5 @@ describe("restartAnswersInTheSignalHandler", () => {
 		await until("the answer", () => answers(box).length === 1);
 		expect(answers(box)).toEqual([expect.stringMatching(/^refused .*the session did not report its id/)]);
 		await expectOmpUntouched(box);
-	}, 20_000);
+	}, TEST_LIMIT_MS);
 });
