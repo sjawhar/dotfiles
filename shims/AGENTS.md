@@ -1223,3 +1223,4 @@ in a `shims/` directory (this shim, another checkout's copy). A local build on P
 mise's shims dir wins: `mise env` keeps the entries ahead of that dir ahead of the tool dirs it
 adds, and puts its tool dirs first on a PATH without it; with the pin not installed and no local build, the launch fails with
 exit 127 instead of looping back into the shim.
+Once it has that `omp`, `scripts/agent-session` adds `omp/config.probe.yml` (the subagent progress probe, on) to `PI_CONFIG_FILES`, right after `omp/config.yml` and before the machine's `config.local.yml`, only when the binary's real path is a release directory stamped `20261117-053702` or later (`…-sami.YYYYMMDD-HHMMSS/bin/omp`, dispatch://INFRA-4027), and drops it from an inherited list otherwise, so a local build, an unreadable version or a roll-back of the pin starts with the probe off.

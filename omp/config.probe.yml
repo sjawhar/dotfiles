@@ -1,0 +1,15 @@
+# The subagent progress probe, on, for a session whose omp holds the probe's fix only.
+#
+# Why a file of its own: omp/config.yml is read by every session of every release, and a running
+# session watches each file its PI_CONFIG_FILES names and reads task.completionProbe at each
+# subagent start. So true there would turn the unfixed probe on in each session that still runs
+# an older release, which sent each agent's whole context past the prompt cache (on 2026-11-16,
+# 14% of sami-devbox's model usage). The fix, in v18.18.6-sami.20261117-053702, sends a probe only
+# when at least 95% of its prompt is in the cache (dispatch://INFRA-4027; Sami chose "Move, and turn
+# the probe on" on dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63).
+#
+# scripts/agent-session names this file only when the omp it is about to run is a release stamped
+# 20261117-053702 or later, right after omp/config.yml and before the machine's config.local.yml,
+# which can still turn the probe off. A session that started without it never reads it.
+task:
+  completionProbe: true
