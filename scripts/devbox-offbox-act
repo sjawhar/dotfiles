@@ -70,6 +70,8 @@ train_dir="${DEVBOX_OFFBOX_TRAIN:-/mnt/nvme/sami/tmp/verified-linux/redesign/mer
 # Where agentbox-run.ts records that it is relaunching a box's omp (`restarting` below). It is a
 # mounted path, so a marker written inside a box is readable here on the host.
 restart_markers="${AGENTBOX_RESTART_MARKERS:-$HOME/.cache/omp/agentbox}"
+# The procfs the host holder scan reads (`live`, reading 2): a tree of the tests' own.
+proc_root="${DEVBOX_OFFBOX_PROC:-/proc}"
 # The windows the forced command uses, which match the watcher's own FRESH_SECONDS and
 # AWAIT_SECONDS. A caller that could set them could make every session look fresh.
 forced_fresh_seconds=120
@@ -216,20 +218,33 @@ live)
     #    file open O_WRONLY|O_APPEND for its whole life, and only a writer runs a transcript: an
     #    omp opens another session's file read-only whenever a tool reads it. On the host, only
     #    omp processes are asked, since nothing else writes one.
-    for d in /proc/[0-9]*; do
+    #
+    #    Their descriptors are read by ONE `find` over the omps' fd directories, and the access
+    #    mode only of a transcript of an id asked about. A `readlink` forked per descriptor took
+    #    21.7 s of a 30.8 s run on 2026-11-17 at load 240 (about 3,700 descriptors of 62 omps),
+    #    and this file's tests to 51 s of their 60. `find` passes over an fd directory it cannot
+    #    read (another user's process, or a box's under a shifted uid) and one that goes away.
+    omp_fds=()
+    for d in "$proc_root"/[0-9]*; do
         c=""; read -r c 2>/dev/null <"$d/comm" || continue
-        [[ "$c" == omp ]] || continue
-        for fd in "$d"/fd/*; do
-            target="$(readlink "$fd" 2>/dev/null)" || continue
-            [[ "$target" == *.jsonl ]] || continue
-            flags="$(awk '/^flags:/ { print $2 }' "${fd/\/fd\//\/fdinfo\/}" 2>/dev/null)"
-            [[ "$flags" =~ ^[0-7]+$ ]] && (( (8#$flags & 3) != 0 )) || continue
+        [[ "$c" == omp ]] && omp_fds+=("$d/fd")
+    done
+    if (( ${#omp_fds[@]} )); then
+        while IFS= read -r -d '' fd && IFS= read -r -d '' target; do
+            name="${target##*/}" asked=()
             for id in "$@"; do
-                [[ "${target##*/}" == *"_$id.jsonl" ]] || continue
+                [[ "$name" == *"_$id.jsonl" ]] && asked+=("$id")
+            done
+            (( ${#asked[@]} )) || continue
+            d="${fd%/fd/*}"
+            flags="$(awk '/^flags:/ { print $2 }' "$d/fdinfo/${fd##*/}" 2>/dev/null)"
+            [[ "$flags" =~ ^[0-7]+$ ]] && (( (8#$flags & 3) != 0 )) || continue
+            for id in "${asked[@]}"; do
                 printf 'holder %s host %s\n' "$id" "${d##*/}"
             done
-        done
-    done
+        done < <(LC_ALL=C find "${omp_fds[@]}" -maxdepth 1 -type l -lname '*.jsonl' \
+            -printf '%p\0%l\0' 2>/dev/null || true)
+    fi
 
     # Shared by the host scan below and the box scan further down, so the two can never drift:
     # does THIS command line RUN that session, as against merely mentioning it?
@@ -316,24 +331,27 @@ function owns_session(line, sid,   n, word, w, arg) {
         # boxes, which does not fit inside a 5-minute timer; in parallel it is a few seconds.
         # `docker exec` runs as root in the box, so it sees every process's fds, which the host
         # cannot for a box's uid -- that is what finds a session whose omp carries its id nowhere
-        # in an argv.
+        # in an argv. Inside the box too the descriptors are read by one `find`: a `readlink`
+        # forked per descriptor took up to 7.0 s of a box's answer at load 360 on 2026-11-17, and
+        # 1.2 s in one pass, against a 25 s limit that fails the whole scan.
         answers="$(mktemp -d)"
         trap 'rm -rf "$answers"' EXIT
         running=0
         for container in $boxes; do
             {
                 if inner="$(timeout 25 docker exec "$container" sh -c '
+                    fds=
                     for d in /proc/[0-9]*; do
                         read -r comm <"$d/comm" 2>/dev/null || continue
-                        [ "$comm" = omp ] || continue
-                        for fd in "$d"/fd/*; do
-                            target=$(readlink "$fd" 2>/dev/null) || continue
-                            case "$target" in *.jsonl) ;; *) continue ;; esac
-                            n=${fd##*/}
-                            flags=$(awk "/^flags:/ { print \$2 }" "$d/fdinfo/$n" 2>/dev/null)
-                            [ -n "$flags" ] && [ $(( 0$flags & 3 )) -ne 0 ] || continue
-                            echo "HOLDS ${d#/proc/} $target"
-                        done
+                        [ "$comm" = omp ] && fds="$fds $d/fd"
+                    done
+                    [ -z "$fds" ] || LC_ALL=C find $fds -maxdepth 1 -type l -lname "*.jsonl" \
+                        -printf "%p %l\n" 2>/dev/null |
+                    while read -r fd target; do
+                        d=${fd%/fd/*}
+                        flags=$(awk "/^flags:/ { print \$2 }" "$d/fdinfo/${fd##*/}" 2>/dev/null)
+                        [ -n "$flags" ] && [ $(( 0$flags & 3 )) -ne 0 ] || continue
+                        echo "HOLDS ${d#/proc/} $target"
                     done
                     ps -eo args= | sed "s/^/ARGS /"' 2>/dev/null)"; then
                     printf '%s\n' "$inner" >"$answers/$container"

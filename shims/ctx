@@ -25,7 +25,9 @@ set -u
 # (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
 # temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
 # path under HOME names nothing. Sets, once per process:
-#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise, else the
+#                 mise the shims in a data dir link to (a copy or a worktree of
+#                 the checkout has no bin/, which is not committed)
 #   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
 #                 file under HOME when it is readable, else the checkout's
 #                 mise.toml, which installers link that file to
@@ -75,6 +77,17 @@ mise_paths() {
         _mise_datas+=("$data")
         [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
     done
+    if [[ ! -f "$_mise_bin" || ! -x "$_mise_bin" ]]; then
+        for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+            for dir in "$data"/shims/*; do
+                [[ -L "$dir" ]] || continue
+                dir="$(command -p readlink -f -- "$dir")" || dir=""
+                [[ "$dir" != */mise || ! -f "$dir" || ! -x "$dir" ]] || _mise_bin="$dir"
+                break
+            done
+            [[ ! -x "$_mise_bin" ]] || break
+        done
+    fi
     : "${_mise_data:=${_mise_datas[0]:-}}"
 }
 

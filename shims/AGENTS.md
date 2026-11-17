@@ -778,7 +778,7 @@ behavior before handing the call to the real one. One file is data: `person-name
   `basedpyright` and `secrets` call mise. A unit's, a test harness's or a git credential helper's
   PATH can hold this dir without `~/.dotfiles/bin`, where mise lives; these shims then run the
   `bin/mise` of the dotfiles checkout they are in by its path, with the data dir and configuration
-  of "A moved HOME" below.
+  of "A moved HOME" below, and in a checkout with no `bin/mise` the mise that mise's shims link to.
 - **`gcloud`**'s global-flag table is the installed SDK's. After any `gcloud components update`,
   run `python3 scripts/gcloud-global-flags --check`; on a difference, regenerate the table with
   `python3 scripts/gcloud-global-flags`, and the test fixture with `--json`. Run it with `python3`,
@@ -1061,7 +1061,11 @@ else from their own resolved path. Each shim that finds a binary through mise ho
   a `mise install` run without `.bashrc`'s `MISE_DATA_DIR` puts a tool, as `shims/knives` and
   `shims/gh` already read); with no `MISE_DATA_DIR`, `~/.mise` (.bashrc's) and that default under
   HOME, then the same two under the uid's passwd home, which HOME does not move;
-- mise itself from PATH, else the checkout's `bin/mise`.
+- mise itself from PATH, else the checkout's `bin/mise`, else the mise that the shims in one of
+  those data dirs link to: `bin/` is not committed, so a copy or a worktree of the checkout has no
+  `bin/mise`. Until 2026-11-17 the shims ran the copy's missing `bin/mise`, and eight cases of
+  `shims/tests/test_shim_moved_home.py` exited 127 in a clean clone, which is where the root
+  `AGENTS.md` says to test a shim change.
 
 `is_mise_shim` and `mise_pinned` build on it. `shims/jj`, `tmux` and `gh` run the install of the
 exact pin in place of mise's own shim, which under a moved HOME refuses (`Config files in

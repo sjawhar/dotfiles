@@ -345,6 +345,30 @@ class OmpSessionLive(unittest.TestCase):
         self.assertIn(f"901\tits command line names {SID}", result.stdout)
         self.assertIn(f"900\tthe session file of box {box_name} names {SID}", result.stdout)
 
+    def test_a_boxed_session_whose_transcript_was_deleted_is_still_live(self) -> None:
+        """The descriptor of a transcript deleted under its omp reads `<path> (deleted)`, so no
+        reading by open transcript sees that omp (devbox-offbox-act's two scans match
+        `-lname '*.jsonl'`). A boxed session is still live here by its box's session file, which
+        names the session whatever became of the transcript, and devbox-offbox-act's `live` asks
+        this script for every id: the watch does not restart a boxed session for a deleted
+        transcript."""
+        box_name = "agentbox-0123456789ab"
+        self.omp(900, ["omp"])
+        self.box(900, 42)
+        shutil.rmtree(self.root / "box-proc")
+        run_user = self.root / "run" / box_name / "run-user"
+        run_user.mkdir(parents=True)
+        (run_user / "agentbox-session").write_text(
+            f"version=1\npid=42\nsession={SID}\nfile={self.transcript}\n", encoding="utf-8")
+        self.transcript.unlink()
+        stubs = self.root / "stubs"
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo true ;; *.Id*) echo {BOX} ;; esac')
+        result = self.live(SID, stubs)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, f"900\tthe session file of box {box_name} names {SID}\n")
+
 
 if __name__ == "__main__":
     unittest.main()

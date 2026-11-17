@@ -119,7 +119,10 @@ never inferred from a title or directory. There is no separate window key or pla
 4. Liveness, for every entry with `auto_restart=yes`. **The file is the test that works**, and a
    session is alive on any one of these readings:
    - a process holding its transcript open **for writing**, on the host or inside a box, from the
-     box's own view (`docker exec`, which runs as root there and can read fds the host cannot);
+     box's own view (`docker exec`, which runs as root there and can read fds the host cannot).
+     Each side reads its omps' descriptors in one `find` pass: a `readlink` forked per descriptor
+     took 21.7 s of a 30.8 s `devbox-offbox-act live` on 2026-11-17, and up to 7.0 s of one
+     box's 25 s (`scripts/tests/test_devbox_offbox_act_live.py`);
    - its transcript written in the last 120 seconds;
    - a host process, a process in a box, or `omp-session-live`, naming it.
 
