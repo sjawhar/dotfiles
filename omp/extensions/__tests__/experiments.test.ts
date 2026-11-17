@@ -27,7 +27,7 @@ describe("the draw", () => {
 			expect(on).toBeLessThan(250);
 		}
 		for (const a of FEATURES) for (const b of FEATURES) if (a < b) expect(ids.filter(id => draw(id, a) !== draw(id, b)).length).toBeGreaterThan(150);
-		// 2^8 combinations need more ids than the bounds above: 400 draws leave many of them unseen.
+		// 2 ** FEATURES.length combinations need more ids than the bounds above: 400 draws leave many of them unseen.
 		const many = Array.from({ length: 2_000 }, (_, i) => `01a0f000-0000-7000-8000-${String(i).padStart(12, "0")}`);
 		const combinations = new Set(many.map(id => FEATURES.map(f => (draw(id, f) ? 1 : 0)).join("")));
 		expect(combinations.size).toBe(2 ** FEATURES.length);

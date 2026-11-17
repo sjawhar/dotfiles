@@ -1,5 +1,6 @@
-// The experiments extension: one extension holding the gates of eight experimental session features
-// (gates.ts says how a gate is read and drawn), seven of them run from here.
+// The experiments extension: one extension holding the gates of seven experimental session features
+// (gates.ts says how a gate is read and drawn), six of them run from here; pi-envoy's AskGate
+// reads the seventh.
 //
 //   selfcompact       compacts early at a task boundary when the model says its history can be
 //                     summarized (selfcompact.ts)
