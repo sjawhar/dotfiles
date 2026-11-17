@@ -302,6 +302,7 @@ fi
 printf '%%s\\n' "$$" > "$DAEMON_PID"
 if [[ -v DAEMON_EXIT_STATUS ]]; then
     %s
+    [[ -z "${DAEMON_EXITED:-}" ]] || date +%%s.%%N > "$DAEMON_EXITED"
     exit "$DAEMON_EXIT_STATUS"
 fi
 while :; do sleep 1; done''' % (peer_wait % "SSH_PID"),
@@ -574,16 +575,22 @@ exit 1''',
                     self.ssh_pid.unlink(missing_ok=True)
 
     def test_term_ignoring_survivor_is_killed_within_seven_seconds(self) -> None:
+        """The wrapper gives a survivor that ignores SIGTERM 5 s, then kills it. The clock starts when
+        the daemon exits, not when the wrapper starts: both stubs' start-up, the daemon's wait for
+        the ssh stub included, is no part of the bound, and at load 1000-3000 on sami-devbox
+        (2026-11-17) it alone took the wrapper's whole run to 9.45 s."""
         self.write_wrapper(ssh_path=self.ssh)
-        started = time.monotonic()
+        exited = self.root / "daemon-exited"
         result = self.run_wrapper(
             TUNNEL_SERVICE_TOKEN_ID=TOKEN_ID,
             TUNNEL_SERVICE_TOKEN_SECRET=TOKEN_SECRET,
             DAEMON_EXIT_STATUS="0",
             SSH_IGNORE_TERM="1",
+            DAEMON_EXITED=str(exited),
         )
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 7)
+        ended = time.time()
+        self.assertTrue(exited.exists(), "the daemon stub never reached its exit")
+        self.assertLess(ended - float(exited.read_text(encoding="utf-8")), 7)
         self.assertEqual(result.returncode, 1)
         self.assertIn("forward-oryx: daemon exited with status 0; ", result.stderr)
         self.wait_for_not_alive(self.pid_from(self.ssh_pid))
