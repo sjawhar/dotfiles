@@ -161,8 +161,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   spells it). `pr create --dry-run` sends nothing and is not read. Only a found term (or a list it cannot
   decrypt, or a file it cannot read) makes the check read where the text goes: every repository
   the call names (`-R`, a pull-request or issue URL, a user or a port in it included,
-  `repos/OWNER/REPO/…`, `--branch-repo`, the repository `repo fork` forks, whose visibility a fork
-  takes), else
+  `repos/OWNER/REPO/…` as a path or as an address on `api.github.com` or `uploads.github.com`,
+  where gh sends a `gh api` endpoint holding `://`, `--branch-repo`, the repository `repo fork`
+  forks, whose visibility a fork takes), else
   `GH_REPO`, else each GitHub remote of the directory (the one `gh repo set-default` chose, else
   all), and for a GraphQL mutation the repository of each node id it names (one `nodes(ids:)` read
   through this shim) and each it names by name (createCommitOnBranch's `repositoryNameWithOwner`),
@@ -171,7 +172,8 @@ behavior before handing the call to the real one. One file is data: `person-name
   cache, else one gh read, whose answer it caches). A term of the list every repository has is
   refused when any target is not confirmed private or internal; a term of a scoped list or of
   the registry only when such a target is one its scope names. A visibility it cannot read, a
-  gist, a project, another host, a GraphQL mutation whose nodes cannot all be read or that makes a
+  gist, a project, another host (`GH_HOST`, `gh api --hostname`, or a `gh api` address on any host
+  but those two), a GraphQL mutation whose nodes cannot all be read or that makes a
   repository, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the
   text exists or nothing new is typed: text

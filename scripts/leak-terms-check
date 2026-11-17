@@ -17,6 +17,7 @@ import subprocess
 import threading
 import sys
 import tomllib
+import urllib.parse
 from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2614,6 +2615,36 @@ def gh_local_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | 
     return contents, unreadable
 
 
+# The hosts of github.com's REST and GraphQL API, and of its release-asset uploads.
+GH_API_HOSTS = frozenset(("api.github.com", "uploads.github.com"))
+
+
+def gh_api_endpoint(read: Sequence[tuple[str | None, str | None]], environment: Mapping[str, str]) -> tuple[str, str]:
+    """(the host a `gh api` call sends to, its endpoint as a path on that host's API), as gh 2.98.0 builds the request
+    (pkg/cmd/api/http.go, api.go): an endpoint holding `://` is the address itself, whatever --hostname and GH_HOST say;
+    any other is a path on the host the last --hostname names, else GH_HOST's, else github.com. An http or https
+    address on api.github.com or uploads.github.com is github.com's, with its path (and query) as the endpoint, so
+    `https://uploads.github.com/repos/O/R/releases/1/assets?name=x` is O/R's as `repos/O/R/…` is, and
+    `https://api.github.com/graphql` is `graphql`. An address on any other host is that host's.
+
+    Until 2026-11-17 neither was read: an address named no repository, so a private repository's own release upload
+    with a scoped term in its address was refused, and a call with --hostname was judged as github.com's although gh
+    sent it to the other host."""
+    long = gh_long_names(GH_TEXT_COMMANDS[("api", "")])
+    endpoint = next((value or "" for option, value in read if option is None), "")
+    if "://" in endpoint:
+        try:
+            address = urllib.parse.urlsplit(endpoint)
+            hostname = address.hostname or ""
+        except ValueError:
+            return "an address gh was given that the check cannot read", endpoint
+        if address.scheme.lower() in ("http", "https") and hostname in GH_API_HOSTS:
+            return "github.com", address.path.lstrip("/") + (f"?{address.query}" if address.query else "")
+        return hostname or "an address gh was given that names no host", endpoint
+    hostnames = [value for option, value in read if option and long.get(option, option) == "--hostname" and value]
+    return (hostnames[-1] if hostnames else environment.get("GH_HOST") or "github.com").lower(), endpoint
+
+
 def gh_api_sends(read: Sequence[tuple[str | None, str | None]]) -> bool:
     """Whether a `gh api` call sends a body: a method other than GET or HEAD, else (gh's default POST) a field or an
     --input file."""
@@ -2814,6 +2845,8 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
     whose nodes cannot all be read."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     host = (environment.get("GH_HOST") or "github.com").lower()
+    if group == "api":
+        host, endpoint = gh_api_endpoint(read, environment)
     if host != "github.com":
         return [GhTarget(f"a repository on {host}, read as public", "", True)]
     if group == "gist":
@@ -2846,7 +2879,6 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
         targets.append((positionals[0], gh_repository_url(positionals[0]), True))
     base = True
     if group == "api":
-        endpoint = positionals[0] if positionals else ""
         named = GH_API_REPOSITORY.match(endpoint)
         if named:
             targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
@@ -2926,7 +2958,7 @@ def gh_check(arguments: Sequence[str]) -> int:
     contents += local_contents
     unreadable += local_unreadable
     if group == "api" and read and not unreadable:
-        endpoint = next((value for option, value in read if option is None), "")
+        _, endpoint = gh_api_endpoint(read, environment)
         # GitHub reads an --input payload as JSON, so `\u006dutation` there is the keyword too: the decoded view counts.
         if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
                                              for view in (text, escapes_decoded(text))):

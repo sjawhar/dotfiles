@@ -654,6 +654,58 @@ class GhLeakTerms(unittest.TestCase):
         argv = ["release", "create", "v1", "--notes-from-tag"]
         self.assert_sent(self.run_gh(argv), argv)
 
+    def test_gh_api_with_an_address_is_judged_by_the_repository_the_address_names(self) -> None:
+        # gh sends an endpoint holding `://` to that address, and GitHub's API answers at api.github.com and takes
+        # release assets at uploads.github.com, so such an address names its repository as `repos/O/R/…` does.
+        asset = self.file("asset.bin", TEXT)
+
+        def upload(repo: str) -> list[str]:
+            return ["api", "-X", "POST", "-H", "Content-Type: application/octet-stream", "--input", asset,
+                    f"https://uploads.github.com/repos/{repo}/releases/7/assets?name=flac-bin.tar.zst"]
+
+        def edit(repo: str) -> list[str]:
+            return ["api", "-X", "PATCH", f"https://api.github.com/repos/{repo}/pulls/11", "-f", f"body={TEXT}"]
+
+        for name, form in (("upload", upload), ("api address", edit)):
+            with self.subTest(form=name, repo=PRIVATE):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(form(PRIVATE), env={**self.env, "GH_REPO": PRIVATE}), form(PRIVATE))
+            with self.subTest(form=name, repo=PUBLIC):
+                self.setUp_calls()
+                refused = self.run_gh(form(PUBLIC), env={**self.env, "GH_REPO": PRIVATE})
+                self.assertEqual(refused.returncode, 2, refused.stderr.decode())
+                self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
+                self.assertEqual(self.gh_calls(), [])
+                self.assert_hidden(refused)
+        # A GraphQL address is GraphQL: a mutation on a private repository's node goes out, and a query is a read.
+        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+        for query in ('mutation { addComment(input: {subjectId: "PR_kwDOpriv5678", body: "%s"}) '
+                      "{ clientMutationId } }" % TEXT.strip(),
+                      'query { search(query: "%s", type: ISSUE, first: 1) { issueCount } }' % CANARY):
+            with self.subTest(graphql=query.split()[0]):
+                self.setUp_calls()
+                argv = ["api", "https://api.github.com/graphql", "-f", f"query={query}"]
+                self.assert_sent(self.run_gh(argv), argv)
+
+    def test_gh_api_to_another_host_is_read_as_public(self) -> None:
+        # An address on another host, and --hostname, send the text to that host, whatever repository the path names.
+        for argv in (["api", "-X", "POST", f"https://other.example/repos/{PRIVATE}/issues", "-f", f"title={TEXT}"],
+                     ["api", "-X", "POST", f"http://api.github.com.other.example/repos/{PRIVATE}/issues", "-f",
+                      f"title={TEXT}"],
+                     ["api", "--hostname", "ghe.example.com", "-X", "POST", f"repos/{PRIVATE}/issues", "-f",
+                      f"title={TEXT}"],
+                     ["api", "-X", "POST", f"repos/{PRIVATE}/issues", "--hostname=ghe.example.com", "-f",
+                      f"title={TEXT}"]):
+            with self.subTest(argv=argv[1:4]):
+                self.setUp_calls()
+                refused = self.run_gh(argv)
+                self.assert_refused(refused, "--raw-field title")
+                self.assertIn("read as public", refused.stderr.decode())
+        # Control: --hostname github.com is github.com, where the repository is private.
+        argv = ["api", "--hostname", "github.com", "-X", "POST", f"repos/{PRIVATE}/issues", "-f", f"title={TEXT}"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     # --- what the check does not touch --------------------------------------------------------------------------
 
     def test_gh_api_with_no_body_field_passes_untouched(self) -> None:
