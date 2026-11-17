@@ -14,9 +14,9 @@ not go out. The call passes only when all of these hold:
   - the call is `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`, with the
     repository named (-R/--repo, or a GitHub URL as the comment target), the title in -t/--title
     and the body in one of -b/--body or -F/--body-file <file>, a pull request's head in --head
-    (not -H, which knives does not read) as <owner>:<branch> where the owner is APPROVER_LOGIN (his
-    own fork) and its base, if named, in -B/--base, and no other flag, so what is checked is all
-    that is posted;
+    (not -H, which knives does not read) as <owner>:<branch> where the owner is one of
+    APPROVER_FORK_OWNERS (his own forks) and its base, if named, in -B/--base, and no other flag, so
+    what is checked is all that is posted;
   - the ask exists, is answered by APPROVER, and its one selected option approves (its label
     starts with an approving word and is not a "do not" option);
   - the draft, in the version of the ask's document that first shows the answer (else in the
@@ -38,8 +38,16 @@ import sys
 import time
 
 APPROVER = "sami@theorem.dev"
-# APPROVER's GitHub login: the owner of his own forks, which a cited pull request's head must name.
+# APPROVER's GitHub login.
 APPROVER_LOGIN = "sjawhar"
+# The owners of APPROVER's own forks, one of which a cited pull request's head must name. His forks
+# moved from his login to the cybermonklabs organization: on 2026-11-17 `gh api
+# repos/sjawhar/oh-my-pi` answered cybermonklabs/oh-my-pi, and the head to post,
+# cybermonklabs:upstream/fix-hindsight-recall-cooldown, was refused here. A fixed list, not a lookup
+# of where a repository redirects at post time: which owner's branch may go out as him is decided
+# in this file, not by whatever GitHub answers when the post runs.
+APPROVER_FORK_OWNERS = (APPROVER_LOGIN, "cybermonklabs")
+FORK_OWNERS_TEXT = " or ".join(APPROVER_FORK_OWNERS)
 APPROVING = re.compile(r"^(post|send|publish|file|open|submit|approve|yes|go)\b", re.I)
 NEGATION = re.compile(r"^(do not|don't|dont|no|not|never|hold|wait|skip|cancel)\b|\bnot\b", re.I)
 # An option approves a post when one of its clauses opens with an approving verb ("Push the commit
@@ -153,13 +161,15 @@ def parse_call(argv: list[str]) -> dict:
         head = HEAD_RE.match(call["head"])
         if not head:
             raise Refused(
-                f"a cited pull request names its head as --head <owner>:<branch>, a branch of "
-                f"{APPROVER_LOGIN}'s own fork; this call's head is {call['head'] or 'not given'!r}."
+                f"a cited pull request names its head as --head <owner>:<branch>, a branch of one of "
+                f"{APPROVER_LOGIN}'s own forks (owner {FORK_OWNERS_TEXT}); this call's head is "
+                f"{call['head'] or 'not given'!r}."
             )
-        if head.group(1).lower() != APPROVER_LOGIN.lower():
+        if head.group(1).lower() not in {owner.lower() for owner in APPROVER_FORK_OWNERS}:
             raise Refused(
-                f"the head {call['head']} is not a branch of {APPROVER_LOGIN}'s own fork; a pull request "
-                f"he approved opens from it, as --head {APPROVER_LOGIN}:<branch>."
+                f"the head {call['head']} is not a branch of one of {APPROVER_LOGIN}'s own forks; a pull "
+                f"request he approved opens from one of them, as --head <owner>:<branch> with the owner "
+                f"{FORK_OWNERS_TEXT}."
             )
         if call["base"] is not None and not BASE_RE.match(call["base"]):
             raise Refused(f"the base {call['base']!r} is not a branch name.")
@@ -322,7 +332,7 @@ def main() -> int:
             f"  Instead: fix what is named above. A post as Sami cites a Dispatch ask he answered with "
             f"its approving option, whose document (or question) holds the exact text between two `---` "
             f"lines, with a `Title: <title>` line before them for an issue or a pull request, and a "
-            f"pull request opens from {APPROVER_LOGIN}'s own fork (shims/AGENTS.md). If the text "
+            f"pull request opens from one of {APPROVER_LOGIN}'s own forks (shims/AGENTS.md). If the text "
             f"must change, show him the new text in a new ask; do not look for another credential.",
             file=sys.stderr,
         )

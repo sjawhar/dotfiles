@@ -13,7 +13,7 @@ for t in /proc/$(pgrep -x dockerd)/task/*; do
 done
 ```
 
-- Do not retry the removal: each try parks another daemon thread in the same wait.
+- Do not retry the removal: each try blocks another daemon thread in the same wait.
 - Do not restart the daemon: only this one container is stuck, and a restart stops every other session's containers.
 - Do not trust "healthy" from `docker ps`. `grep -l <container-id> /proc/[0-9]*/cgroup` printing nothing means the container's init is already gone, whatever `docker ps` says.
 - The hang clears when the unmount finishes, or not until a reboot. Send the user the container id and the thread line above, leave the container alone, and carry on with the rest of your task.

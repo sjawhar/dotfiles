@@ -39,8 +39,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   line's trailing whitespace or the leading and trailing blank lines), and no flag but `-R`/`--repo`,
   `-t`/`--title` and one of `-b`/`--body` or `-F`/`--body-file` (gh posts the file over `--body`
   whatever their order, so both are refused) and, for a pull request, `--head` and `-B`/`--base`,
-  with the head `sjawhar:<branch>`, a branch of his own fork (push it first: owner sjawhar routes
-  to the App). A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
+  with the head `<owner>:<branch>`, a branch of one of his own forks, whose owners are a fixed list
+  beside `APPROVER_LOGIN` in the script (`APPROVER_FORK_OWNERS`): `sjawhar`, and `cybermonklabs`,
+  where his forks moved (on 2026-11-17 `gh api repos/sjawhar/oh-my-pi` answered
+  `cybermonklabs/oh-my-pi`, and the gate refused the head to post,
+  `cybermonklabs:upstream/fix-hindsight-recall-cooldown`). Push the branch first: both owners
+  route to the App. A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
   (`has_head_flag`, `src/commands/gh.rs`), and in a jj checkout it adds `--head <bookmark>`,
   which gh takes over `-H`. In an agent session a write
   to an owner without the App, which would go out on his upstream token, is refused without such a
@@ -392,9 +396,19 @@ behavior before handing the call to the real one. One file is data: `person-name
   and system-attribute disablement as the commit hook. A non-empty `info/attributes` makes that
   producer use `--text`; its bytes remain safe because messages use a separate NUL-delimited
   producer and diffs use a separate byte stream. The diff stream frames `commit <object-id>` lines
-  only outside hunks, whose declared parent and result counts are checked before a line can be a
+  only outside hunks, whose declared old and new counts are checked before a line can be a
   boundary. Without `info/attributes`, Git's own binary detection still omits NUL-containing file
-  bytes. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote,
+  bytes. A merge is not read from a diff. Git's combined diff (`--cc`) is wrong for wide octopus
+  merges (`combine-diff.c`, Git 2.43 to master): from 33 parents it shows a removed line under the
+  wrong parent, so its hunks disagree with their own counts, and at 64 parents it leaves out a line
+  that only the merge adds. So the scan reads each merge's files: `git diff-tree --stdin --always`
+  against each parent names the files that differ from every parent's version. The scan reads
+  each such path, and each line of the merge's file that no parent's file at that path holds, as
+  `commit <id> <path>:<line>`. A line the merge took from a parent is scanned in that parent's own
+  commit when the push sends it; otherwise the destination already holds it. Those files are text
+  as the diff producer reads them, and a file that cannot be read refuses the push (exit 4),
+  naming the merge and the file. The scanner refuses combined diff text on its standard input.
+  jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote,
   so no hook runs for that push; the shim directs those pushes through this gate by the same rule.
   The checkout is guarded when a URL `git remote -v` prints (read whole after the tab: a push line
   without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial clone's
@@ -638,25 +652,43 @@ behavior before handing the call to the real one. One file is data: `person-name
   sami-rocqperf brought along: LINUX-1248, 2026-11-03) loses that entry before the call runs,
   through `scripts/gcloud-drop-azure-credential`, and gcloud then takes the VM account's token
   from the metadata server; the shim reports the removal on stderr. Off Google nothing changes,
-  and an Azure box pays no metadata lookup for it. The store is opened only when it is not the
-  one the last check saw: its mtime, size and inode, which `stat` reads without opening it, are
-  kept in a marker under `$XDG_RUNTIME_DIR` (else `~/.cache`) per config dir, together with that
-  check's verdict, and an unchanged store reuses the verdict. The grep ran before every gcloud
-  call before, which the Datadog CWS rule `theorem_gcloud_credential_read` reported as a
+  and an Azure box pays no metadata lookup for it: off a Google VM nothing opens the store.
+  On one, `scripts/gcloud-drop-azure-credential` is the store's one reader: it decides and
+  removes in the same open and prints nothing when there is nothing to remove. A check that
+  removed nothing is kept in a marker under `$XDG_RUNTIME_DIR` (else `~/.cache`) per config dir,
+  with the store's mtime, size and inode, which `stat` reads without opening it, and the boot's
+  id; that store, or any store in that dir later in the same boot, is not opened again, since on
+  a Google VM nothing writes an Azure entry (only `installers/gcloud-box.sh` does, on an Azure
+  box). The cost: a dir copied from an Azure box over a path already checked this boot is noticed
+  at the next boot; a dir at a new path has no marker and is checked. A grep read the store
+  before every gcloud call until 6c93d4e0 (2026-11-06), and after every write to the store until
+  73bc4345 (2026-11-07); the Datadog CWS rule `theorem_gcloud_credential_read` reported it as a
   credential-file read 109 times between 2026-10-30 and 2026-11-06, all of them this shim
   (theorem-labs/agent-infra#2328 proposed excepting the rule instead; an `exec -a ""` caller can
   hide an extra grep argument from argv parsing, so the exception was dropped and the reads
-  were). A store that changed, or one with no readable marker, is checked exactly as before
+  were), and a [high] one at 09:15Z on 2026-11-06 cost a triage
   (`shims/tests/test_gcloud_shim_routing.py`, `GcloudAzureCredentialOnGoogleVm`).
   In an agent session the shim refuses, on every route, each call that writes or removes the
   well-known file: `auth application-default login|revoke`, and an `auth login` with
   `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,
   so an agent's login under the user's own configuration with `--update-adc`, started at
   2026-11-01T02:41Z, wrote the user's login there at 02:53Z. It also refuses a call whose
-  account is a person's own login (`--account` or `CLOUDSDK_CORE_ACCOUNT`, anything but
-  `*.gserviceaccount.com`), unless an explicit `--configuration` names the configuration that
-  holds that login: the route an apply that no declared identity can make yet takes under Sami's
-  standing permission, each use recorded (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec).
+  account is a person's own login (anything but `*.gserviceaccount.com`), whichever way the call
+  reaches it: named, as the `ACCOUNT` argument of `auth print-access-token`, `print-identity-token`,
+  `print-refresh-token` or `describe` (which loads that account's stored credential ahead of
+  `--account` and the configuration), as `--account` or as `CLOUDSDK_CORE_ACCOUNT`; or, where the
+  call names no account, as the account of the configuration it runs under, when anything but an
+  explicit `--configuration` in argv chose that configuration: `GCLOUD_ACCOUNT`,
+  `CLOUDSDK_ACTIVE_CONFIG_NAME`, `active_config` or gcloud's `default`. The one way past it is an
+  explicit `--configuration` naming the configuration that holds that login: the route an apply
+  that no declared identity can make yet takes under Sami's standing permission, each use recorded
+  (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec), which the refusal names wherever a
+  configuration holds the login. A command whose change outlives the call
+  (`persists_config_change`: `auth login`, `auth revoke`, `config set`, …) keeps the configuration
+  it names, and over the SSH rule a call that chose nothing gets `box` instead (below). Until
+  2026-11-17 only `--account` and `CLOUDSDK_CORE_ACCOUNT` were read, so in an agent session
+  `CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud auth print-access-token`, and the same with the
+  login as its `ACCOUNT` argument, ran as the person while `--account <the login>` was refused.
   On 2026-11-02T00:07Z an exported account made one agent shell's kubectl create GKE Jobs as the
   user, and gke-gcloud-auth-plugin's cache beside the kubeconfig, keyed by context and not
   account, gave his token to every caller of it for an hour. Each refusal names the box
@@ -906,7 +938,8 @@ selected:
   `[auth] impersonate_service_account`, as the SDK resolves a property
   (`core/properties.py:5487-5527`). A call that chose nothing gets configuration `box`; one that
   chose a configuration, a `--cred-file` or an account keeps its choice (a person's own login
-  named that way is refused earlier, by the agent-session account guard); and where this machine
+  reached that way, other than through an explicit `--configuration`, is refused earlier, by the
+  agent-session account guard); and where this machine
   has no `box` configuration and the one in force holds a person's login, the call is refused.
 - **A `--flags-file` in an agent session is refused outright, and nothing in it is parsed.** It
   is argv gcloud has not expanded yet: the SDK loads the file's YAML — a mapping, a list of

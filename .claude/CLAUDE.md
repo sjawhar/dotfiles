@@ -37,7 +37,7 @@ Before such an action, say what changes, what could break, and the safest altern
 - I care about good architecture, I don't care about legacy baggage.
 - If my goal isn't solved, you're not done. Do every item I list.
 - Fix an adjacent issue now, or name it and get my yes to skip it.
-- "Follow-up", "backlog", "parked", a "remaining work" list, and handing work to another agent are deferral. Deferral is not allowed
+- "Follow-up", "backlog", a "remaining work" list, and handing work to another agent are deferral. Deferral is not allowed
 - "Pre-existing" or "not ours" doesn't close a goal: pair it with a fix. Every agent works under my accounts, so don't try and frame deferral as respecting my existing work.
 - Check if you already have the access/tools you need before deciding that you're blocked.
 - Make the simplest change that fully solves the request. Do the cleanup it causes. Don't expand scope without asking.

@@ -9,9 +9,9 @@ Reasons: `references/reasons.md`.
 
 ## When a shell hangs
 
-A shell where every command times out, even `echo`, is usually not a broken shell: one stalled filesystem has wedged the session's tool threads. The search tools (`glob`, `grep`, `fuzzyFind`, `ast_grep`, `ast_edit`) and `shell.run` share ONE pool of 8 threads, and each search makes its filesystem calls inside it; an uncached inode on a stalled mount (/mnt/durable or /mnt/nvme) parks a worker in uninterruptible IO wait. At 8 of 8 parked, nothing else in the process runs - and a session is a tenant of its omp process, so one session's unbounded walk wedges every session in that process, including ones running nothing.
+A shell where every command times out, even `echo`, is usually not a broken shell: one stalled filesystem has wedged the session's tool threads. The search tools (`glob`, `grep`, `fuzzyFind`, `ast_grep`, `ast_edit`) and `shell.run` share ONE pool of 8 threads, and each search makes its filesystem calls inside it; an uncached inode on a stalled mount (/mnt/durable or /mnt/nvme) blocks a worker in uninterruptible IO wait. With all 8 blocked, nothing else in the process runs - and a session is a tenant of its omp process, so one session's unbounded walk wedges every session in that process, including ones running nothing.
 
-So the rule that matters most, more than any probe: **scope every search to a specific path, never a bare recursive walk, and never search over /mnt/durable.** Falling back to `grep` or `read` when the shell feels slow is the trap - an unbounded recursive grep parks the next eight workers.
+So the rule that matters most, more than any probe: **scope every search to a specific path, never a bare recursive walk, and never search over /mnt/durable.** Falling back to `grep` or `read` when the shell feels slow is the trap - an unbounded recursive grep blocks the next eight workers.
 
 To tell a stalled mount from a shell that cannot fork, probe in two seconds:
 

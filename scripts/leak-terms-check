@@ -26,6 +26,11 @@ EDITOR_UNREADABLE_EXIT = 5
 EDITOR_WRAPPER_EXIT = 6
 EDITOR_GUARD = "DOTFILES_JJ_EDITOR_WRAPPER_ACTIVE"
 SCISSORS = "------------------------ >8 ------------------------"
+# Git's combined diff (`--cc`) is wrong for wide octopus merges (combine-diff.c, git 2.43 to master): from 33 parents a
+# removed line's `-` lands in the column of parent n-32, so the body disagrees with its own hunk counts, and from 64
+# parents its parent bit masks overflow (with 64, a line only the merge adds is left out of the output). A merge is
+# read from its files instead (scan_outgoing_merges), and combined diff text is refused.
+COMBINED_REFUSAL = "combined diff text (diff --cc), which this check does not read: it reads a merge from its files"
 
 
 class ListError(Exception):
@@ -340,21 +345,12 @@ def parse_diff_path(value: str, prefix: str) -> str | None:
 
 
 def parse_extended_path(value: str) -> str | None:
-    """Read a path that fills the rest of its line: a rename or copy extended header, or a combined diff header."""
+    """Read a path that fills the rest of its line: a rename or copy extended header."""
     quoted = decode_c_quoted(value)
     if quoted:
         path, index = quoted
         return path if index == len(value) else None
     return value or None
-
-
-def parse_combined_header(header: str) -> str | None:
-    """Extract the sole path reported by diff --cc and diff --combined."""
-    if header.startswith("diff --cc "):
-        return parse_extended_path(header.removeprefix("diff --cc "))
-    if header.startswith("diff --combined "):
-        return parse_extended_path(header.removeprefix("diff --combined "))
-    return None
 
 
 def parse_range(value: str) -> tuple[int, int] | None:
@@ -375,29 +371,12 @@ def parse_unified_hunk(line: str) -> tuple[tuple[int, int], tuple[int, int]] | N
     return old_range, new_range
 
 
-def parse_combined_hunk(line: str) -> tuple[list[tuple[int, int]], tuple[int, int]] | None:
-    matched = re.fullmatch(r"(@{3,}) (.+) \1(?:.*)", line)
-    if not matched:
-        return None
-    prefix = matched.group(1)
-    values = matched.group(2).split()
-    parent_values = [value[1:] for value in values if value.startswith("-")]
-    result_values = [value[1:] for value in values if value.startswith("+")]
-    if len(prefix) - 1 != len(parent_values) or len(result_values) != 1:
-        return None
-    parents = [parse_range(value) for value in parent_values]
-    result = parse_range(result_values[0])
-    if result is None or any(value is None for value in parents):
-        return None
-    return [value for value in parents if value is not None], result
-
-
 def header_end(lines: Sequence[str], start: int) -> int:
     """Find the next metadata line after a raw jj diff header.
 
     jj leaves filenames raw in ``diff --git`` headers, including literal newlines. Each extended header line git and
-    jj print after ``diff --git`` is a marker; after ``diff --cc`` git prints ``index`` first, so its ``mode`` line
-    needs none.
+    jj print after ``diff --git`` is a marker. A combined diff's ``diff --cc`` and ``@@@`` lines are markers too, so
+    the scan stops there and refuses them.
     """
     markers = ("diff --git ", "diff --cc ", "diff --combined ", "old mode ", "new mode ", "deleted file mode ",
                "new file mode ", "similarity index ", "dissimilarity index ", "rename from ", "rename to ",
@@ -448,10 +427,7 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             place = place_prefix + display_path(record, path_spans)
             findings.extend(place for _ in path_spans)
 
-    def begin(header: str, kind: str) -> FileRecord:
-        if kind == "combined":
-            path = parse_combined_header(header)
-            return FileRecord(path, path, [], path is not None)
+    def begin(header: str) -> FileRecord:
         candidates = git_header_candidates(header)
         pair = parse_git_header(candidates)
         return FileRecord(pair[1] if pair else None, pair[0] if pair else None, candidates, pair is not None)
@@ -504,40 +480,6 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             raise TextError("malformed unified hunk count")
         return index
 
-    def consume_combined(start: int, record: FileRecord) -> int:
-        parsed = parse_combined_hunk(lines[start])
-        if parsed is None:
-            raise TextError("malformed combined hunk")
-        parents, (new_line, new_count) = parsed
-        seen = [0] * len(parents)
-        new_seen = 0
-        index = start + 1
-        while index < len(lines):
-            line = lines[index]
-            if line.startswith(("diff --git ", "diff --cc ", "diff --combined ", "@@ ", "@@@ ")):
-                break
-            if line.startswith("\\ No newline at end of file"):
-                index += 1
-                continue
-            if len(line) < len(parents) or any(marker not in "+- " for marker in line[:len(parents)]):
-                break
-            marks, content = line[:len(parents)], line[len(parents):]
-            for parent, marker in enumerate(marks):
-                if marker == "-" or ("-" not in marks and marker == " "):
-                    seen[parent] += 1
-            result_present = "-" not in marks
-            if result_present:
-                new_seen += 1
-                if all(marker == "+" for marker in marks):
-                    add_content(record, new_line, content)
-                new_line += 1
-            if any(seen[index] > parents[index][1] for index in range(len(parents))) or new_seen > new_count:
-                raise TextError("malformed combined hunk count")
-            index += 1
-        if any(seen[index] != parents[index][1] for index in range(len(parents))) or new_seen != new_count:
-            raise TextError("malformed combined hunk count")
-        return index
-
     def path_line_end(start: int, marker: str, prefix: str, expected_path: str | None) -> int | None:
         if expected_path is None:
             return start + 1 if lines[start] == f"{marker}/dev/null" else None
@@ -559,15 +501,11 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
         if line.startswith("diff --git "):
             finish(current)
             end = header_end(lines, index)
-            current = begin("\n".join(lines[index:end]), "git")
+            current = begin("\n".join(lines[index:end]))
             index = end
             continue
         if line.startswith(("diff --cc ", "diff --combined ")):
-            finish(current)
-            end = header_end(lines, index)
-            current = begin("\n".join(lines[index:end]), "combined")
-            index = end
-            continue
+            raise TextError(COMBINED_REFUSAL)
         if current is None:
             if line.startswith("@@"):
                 raise TextError("hunk has no file header")
@@ -600,8 +538,7 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
                 index = end
                 continue
         elif line.startswith("@@@"):
-            index = consume_combined(index, current)
-            continue
+            raise TextError(COMBINED_REFUSAL)
         elif line.startswith("@@"):
             index = consume_unified(index, current)
             continue
@@ -1286,28 +1223,22 @@ def newline_records(chunks: Iterator[bytes]) -> Iterator[bytes]:
 
 @dataclass
 class DiffHunk:
-    """The remaining parent and result lines that make a streamed diff hunk unambiguous."""
+    """The remaining old and new lines that make a streamed diff hunk unambiguous."""
 
-    parents: list[int]
-    result: int
-    combined: bool
+    old: int
+    new: int
 
 
 def hunk_start(line: bytes) -> DiffHunk | None:
-    """Return the hunk counts for LINE, refusing a malformed hunk header."""
-    if line.startswith(b"@@@ "):
-        parsed = parse_combined_hunk(line.decode("utf-8", errors="surrogateescape"))
-        if parsed is None:
-            raise TextError("git gave a malformed combined hunk")
-        parents, (_, result) = parsed
-        counts = [count for _, count in parents]
-        return DiffHunk(counts, result, True) if any(counts) or result else None
+    """Return the hunk counts for LINE, refusing a malformed hunk header and a combined one."""
+    if line.startswith(b"@@@"):
+        raise TextError(f"git gave {COMBINED_REFUSAL}")
     if line.startswith(b"@@ "):
         parsed = parse_unified_hunk(line.decode("utf-8", errors="surrogateescape"))
         if parsed is None:
             raise TextError("git gave a malformed unified hunk")
         (_, old), (_, new) = parsed
-        return DiffHunk([old], new, False) if old or new else None
+        return DiffHunk(old, new) if old or new else None
     return None
 
 
@@ -1315,28 +1246,16 @@ def consume_hunk_line(line: bytes, hunk: DiffHunk) -> DiffHunk | None:
     """Consume one physical diff line, returning None only after its declared counts end."""
     if line.startswith(b"\\ No newline at end of file"):
         return hunk
-    if hunk.combined:
-        if len(line) < len(hunk.parents) or any(marker not in b"+- " for marker in line[:len(hunk.parents)]):
-            raise TextError("git gave a malformed combined hunk")
-        marks = line[:len(hunk.parents)]
-        for index, marker in enumerate(marks):
-            if marker == ord("-") or (ord("-") not in marks and marker == ord(" ")):
-                hunk.parents[index] -= 1
-        if ord("-") not in marks:
-            hunk.result -= 1
-        if any(count < 0 for count in hunk.parents) or hunk.result < 0:
-            raise TextError("git gave a malformed combined hunk count")
-    else:
-        if not line or line[0] not in b"+- ":
-            raise TextError("git gave a malformed unified hunk")
-        marker = line[0]
-        if marker in b"- ":
-            hunk.parents[0] -= 1
-        if marker in b"+ ":
-            hunk.result -= 1
-        if hunk.parents[0] < 0 or hunk.result < 0:
-            raise TextError("git gave a malformed unified hunk count")
-    return None if not any(hunk.parents) and hunk.result == 0 else hunk
+    if not line or line[0] not in b"+- ":
+        raise TextError("git gave a malformed unified hunk")
+    marker = line[0]
+    if marker in b"- ":
+        hunk.old -= 1
+    if marker in b"+ ":
+        hunk.new -= 1
+    if hunk.old < 0 or hunk.new < 0:
+        raise TextError("git gave a malformed unified hunk count")
+    return None if hunk.old == 0 and hunk.new == 0 else hunk
 
 
 def outgoing_diff_records(chunks: Iterator[bytes]) -> Iterator[tuple[str, bytes]]:
@@ -1428,7 +1347,6 @@ def scan_outgoing_messages(commits: Sequence[str], matcher: TermMatcher, finding
 
 
 DIFF_OPTIONS = (
-    "--cc",
     "-U0",
     "--no-ext-diff",
     "--no-textconv",
@@ -1462,7 +1380,9 @@ def scan_diff_arguments(command: str, command_arguments: Sequence[str]) -> list[
 
 
 def scan_outgoing_diffs(commits: Sequence[str], matcher: TermMatcher, findings: list[str]) -> None:
-    """Scan a byte-streamed diff producer, framing commits only outside hunk content."""
+    """Scan a byte-streamed diff producer of commits that are not merges, framing commits only outside hunk content."""
+    if not commits:
+        return
     arguments = scan_diff_arguments(
         "log",
         [
@@ -1498,13 +1418,142 @@ def scan_staged_diff() -> list[str]:
     return scan_diff(raw_diff.decode("utf-8", errors="surrogateescape"), load_terms(), "")
 
 
+def commit_parents(commits: Sequence[str]) -> dict[str, list[str]]:
+    """Each commit's parents as every other Git read sees them (a graft or a shallow boundary included), in one call."""
+    output = git_output(
+        ["rev-list", "--no-walk=unsorted", "--stdin", "--parents"],
+        ("\n".join(commits) + "\n").encode(),
+        "git could not read the outgoing commits' parents",
+    )
+    try:
+        lines = output.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise TextError("git gave a malformed list of parents") from error
+    parents: dict[str, list[str]] = {}
+    for line in lines:
+        fields = line.split(" ")
+        if any(OBJECT_ID.fullmatch(field) is None for field in fields) or fields[0] in parents:
+            raise TextError("git gave a malformed list of parents")
+        parents[fields[0]] = fields[1:]
+    if set(parents) != set(commits):
+        raise TextError("git gave a malformed list of parents")
+    return parents
+
+
+RAW_MODE = re.compile(r"[0-7]{6}\Z")
+
+
+@dataclass(frozen=True)
+class RawChange:
+    """One file of a raw tree diff: the parent's mode and object, then the merge's."""
+
+    source_mode: str
+    source: str
+    result_mode: str
+    result: str
+
+
+def merge_changes(merges: Mapping[str, Sequence[str]]) -> dict[str, list[dict[str, RawChange]]]:
+    """For each merge, in its parents' order, every file whose object or mode differs from that parent's.
+
+    One `git diff-tree --stdin` reads every merge against each parent in turn. `--always` prints the merge's id before
+    each pair, an empty one included, so each file is attributed to its parent by position, never by counting.
+    """
+    pairs = [(merge, parent) for merge, parents in merges.items() for parent in parents]
+    output = git_output(
+        ["diff-tree", "--stdin", "--always", "-r", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-relative",
+         "--ignore-submodules=none"],
+        "".join(f"{merge} {parent}\n" for merge, parent in pairs).encode(),
+        "git could not read the files of the outgoing merges",
+    )
+    records = output.split(b"\0")
+    if records.pop() != b"":
+        raise TextError("git gave a malformed raw diff of the outgoing merges")
+    changes: dict[str, list[dict[str, RawChange]]] = {merge: [] for merge in merges}
+    position = 0
+    for merge, _ in pairs:
+        if position >= len(records) or records[position] != merge.encode():
+            raise TextError(f"git gave a malformed raw diff of merge commit {merge[:12]}")
+        position += 1
+        files: dict[str, RawChange] = {}
+        while position < len(records) and records[position].startswith(b":"):
+            try:
+                fields = records[position].decode("ascii")[1:].split(" ")
+            except UnicodeDecodeError as error:
+                raise TextError(f"git gave a malformed raw diff of merge commit {merge[:12]}") from error
+            path = records[position + 1].decode("utf-8", errors="surrogateescape") if position + 1 < len(records) else ""
+            if (
+                len(fields) != 5
+                or not all(RAW_MODE.fullmatch(mode) for mode in fields[:2])
+                or not all(OBJECT_ID.fullmatch(object_id) for object_id in fields[2:4])
+                or fields[4] not in {"A", "D", "M", "T"}
+                or not path
+                or path in files
+            ):
+                raise TextError(f"git gave a malformed raw diff of merge commit {merge[:12]}")
+            files[path] = RawChange(fields[0], fields[2], fields[1], fields[3])
+            position += 2
+        changes[merge].append(files)
+    if position != len(records):
+        raise TextError("git gave a malformed raw diff of the outgoing merges")
+    return changes
+
+
+def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatcher, findings: list[str]) -> None:
+    """Scan what each merge adds itself: the path of each file that differs from every parent's, and each line of the
+    merge's file that no parent's file at that path holds.
+
+    A line the merge took from a parent is that parent's: it is scanned in the parent's own commit when the push sends
+    that commit, and the destination holds it otherwise. The files are read as objects, so no attribute applies; a
+    file is text as the diff producer would read it: always under `--text` (a non-empty `info/attributes`), else when
+    its object has no NUL byte in its first 8,000 bytes, Git's own test. Only a parent's text file holds a line: a
+    binary one was never scanned, so a line of it that the merge writes into a text file is the merge's to scan.
+    """
+    if not merges:
+        return
+    every_file_text = info_attributes_present()
+    for merge, parent_files in merge_changes(merges).items():
+        prefix = f"commit {merge[:12]} "
+        for path in sorted(set(parent_files[0]).intersection(*parent_files[1:])):
+            path_spans = matcher.spans(path)
+            shown = mask_path(path, path_spans)
+            changes = [files[path] for files in parent_files]
+            results = {(change.result_mode, change.result) for change in changes}
+            if len(results) != 1:
+                raise TextError(f"git gave two versions of file {shown} of merge commit {merge[:12]}")
+            result_mode, result = results.pop()
+            if result_mode == "000000":
+                continue
+            findings.extend(prefix + shown for _ in path_spans)
+            if result_mode == "160000":
+                continue
+            sources = {change.source for change in changes if change.source_mode not in {"000000", "160000"}}
+            try:
+                contents = blob_objects(sorted({result, *sources}))
+            except TextError as error:
+                raise TextError(f"cannot read file {shown} of merge commit {merge[:12]}") from error
+            if not every_file_text and b"\0" in contents[result][:8000]:
+                continue
+            held: set[str] = set()
+            for source in sources:
+                if every_file_text or b"\0" not in contents[source][:8000]:
+                    held.update(newline_lines(contents[source].decode("utf-8", errors="surrogateescape")))
+            content = contents[result].decode("utf-8", errors="surrogateescape")
+            for line_number, line in enumerate(newline_lines(content), start=1):
+                if line not in held:
+                    findings.extend(f"{prefix}{shown}:{line_number}" for _ in matcher.spans(line))
+
+
 def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
-    """Scan outgoing messages and diffs with separate producers and verified boundaries."""
+    """Scan outgoing messages, the diffs of commits that are not merges, and what each merge adds, with separate
+    producers and verified boundaries."""
     if not commits:
         return []
+    parents = commit_parents(commits)
     findings: list[str] = []
     scan_outgoing_messages(commits, matcher, findings)
-    scan_outgoing_diffs(commits, matcher, findings)
+    scan_outgoing_diffs([commit for commit in commits if len(parents[commit]) < 2], matcher, findings)
+    scan_outgoing_merges({commit: parents[commit] for commit in commits if len(parents[commit]) >= 2}, matcher, findings)
     return findings
 
 
