@@ -1689,9 +1689,12 @@ class EnrollWhenUp(EnrollFixture):
         self.assertIn(f"--session-id {self.SID}", calls[enroll])
         self.assertEqual([c for c in calls if c.startswith("docker exec ") and " -d " not in c], [],
                          "the session comes from the file, not from the box")
-        # The 120 s, by bash's own clock: each `sleep` here moves it on 59 s and logs it. A
+        # The 120 s, by bash's own clock: the n-th `sleep` here sets it to n × 59 s and logs it. A
         # session file that comes at 118 s is still waited for; with none, the box enrolls under its
         # name at the first pass past 120 s and at no earlier one. A deadline of 10 s or 600 s fails.
+        # The ticks are absolute, not added to SECONDS: under load bash's clock read 1 when the wait
+        # began, its deadline was 121, and a tick of 120 was waited past (`[60, 120, 179]`,
+        # 2026-11-17). The clock starts at 1 here so that case is the one every run checks.
         session = self.hostdir / "run-user" / "agentbox-session"
         clock = self.root / "CLOCK"
         for name, arrives in (("a file at 118 s", True), ("no file", False)):
@@ -1700,8 +1703,9 @@ class EnrollWhenUp(EnrollFixture):
                 clock.unlink(missing_ok=True)
                 write = (f'(( SECONDS >= 118 )) && printf "version=1\\npid=7\\nsession={self.SID}\\nfile=/x.jsonl\\n"'
                          f' >"{session}"; ') if arrives else ""
-                tick = f'sleep() {{ SECONDS=$((SECONDS + 59)); echo "$SECONDS" >>"{clock}"; {write}return 0; }}\n'
-                result = self.when_up("omp", body=tick)
+                tick = (f'sleep() {{ local n=1; [[ -f "{clock}" ]] && n=$(( $(wc -l <"{clock}") + 1 )); '
+                        f'SECONDS=$((n * 59)); echo "$SECONDS" >>"{clock}"; {write}return 0; }}\n')
+                result = self.when_up("omp", body="SECONDS=1\n" + tick)
                 self.assertIn("rc=0", result.stdout, result.stderr)
                 (enroll_line,) = self.calls_matching("enroll ")
                 ticks = [int(t) for t in clock.read_text().split()]
