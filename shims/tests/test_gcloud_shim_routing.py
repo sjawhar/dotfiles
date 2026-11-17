@@ -866,6 +866,20 @@ class GcloudRouting(unittest.TestCase):
         result = self.run_shim(google, args=["auth", "application-default", "login"])
         self.assertEqual(result.stdout.strip(), "SHOULD-NOT-RUN")
 
+    def test_adc_refusal_names_the_configuration_variable(self):
+        """agent-secrets passes gcloud no --configuration, and on a box-active machine a store
+        command takes the active (box) account, so the refusal names the variable that chooses the
+        person's own login and no flag (agent-secrets has no --profile since legion-envoy-v30.42.0)."""
+        server = MetadataStub.start()
+        self.addCleanup(server.stop)
+        google = {"GCE_METADATA_HOST": server.host}
+        self.stub_gcloud_that_must_not_run()
+        result = self.run_shim(google, args=["auth", "application-default", "login"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CLOUDSDK_ACTIVE_CONFIG_NAME=theorem agent-secrets secret create NAME", result.stderr)
+        self.assertNotIn("--profile", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_adc_is_opened_only_for_the_commands_it_can_refuse(self):
         """Ordinary calls leave the ADC unopened: a runtime monitor then sees gcloud read it,
         not this wrapper. An unreadable ADC makes any read by the shim fail loudly under set -e."""

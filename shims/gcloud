@@ -1620,7 +1620,7 @@ main() {
             exit 1
         fi
     elif ((GCLOUD_READING_KINDS == 2)) && adc_is_box_identity; then
-        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
+        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which goes to the ${USER_LOGIN_CONFIGURATION} configuration, and, in your own shell, store a secret with CLOUDSDK_ACTIVE_CONFIG_NAME=${USER_LOGIN_CONFIGURATION} agent-secrets secret create NAME." >&2
         exit 1
     fi
 
