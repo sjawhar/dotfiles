@@ -64,7 +64,8 @@ Executables covering several areas:
     when it cannot read the configuration and 6 when the editor is the wrapper itself; and
     `jj-editor` returns a nonzero failure to jj after it rejects an edit. `gh` reads every text a
     gh call would send (arguments, option values, the files and stdin gh reads) and refuses one that
-    holds a listed term when the call can reach a repository not confirmed private (for a scoped
+    holds a listed term (with the tag message `--notes-from-tag` and the commit messages `--fill`
+    take from git) when the call can reach a repository not confirmed private (for a scoped
     list or a knives registry list, one its scope names), naming the field and the term's number in
     its list; it exits 7 to ask `shims/gh` for the call's stdin. `push` reads the list's scoped
     blocks whose pattern matches its destination; commits read the list every repository has.

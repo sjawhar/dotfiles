@@ -92,7 +92,8 @@ def command_cgroup(pid: int) -> Path | None:
 
 
 # Each test term as the scanner matches it: case folded, each run of whitespace in the term any run of spaces and
-# tabs, inside one line. Every test term the fixture list holds counts, the scoped ones included.
+# tabs, in text read as the scanner reads prose: inside a paragraph a line break, a CRLF or a no-break space is a
+# space, and a blank line ends the paragraph. Every test term the fixture list holds counts, the scoped ones included.
 ALL_TEST_TERMS = (*TEST_TERMS, *(term for listed in (*SCOPED_TEST_TERMS.values(), *REGISTRY_TEST_TERMS.values())
                                   for term in listed))
 TERM_PATTERNS = tuple(
@@ -104,7 +105,7 @@ def leaked_terms(text: str | bytes) -> list[str]:
     """The test terms TEXT holds, by the scanner's matching rule."""
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="surrogateescape")
-    folded = text.casefold()
+    folded = "\n".join(re.sub(r"\s+", " ", paragraph) for paragraph in re.split(r"\n[^\S\n]*\n", text)).casefold()
     return [term for term, pattern in zip(ALL_TEST_TERMS, TERM_PATTERNS) if pattern.search(folded)]
 
 
@@ -476,20 +477,42 @@ class ScanModes(LeakTestCase):
         self.assert_hidden(result)
 
     def test_hidden_term_detector_matches_as_the_scanner_does(self) -> None:
-        # B7: an echo of the matched text, in another case or with another run of spaces, is a leak too. The
-        # detector and the scanner must give the same verdict on each sample.
-        for echoed in ("x quillfeather   LANE 9 y", "QUILLFEATHER\tlane  9", "Zorbleplex", "VINTRAPOLIS-CANARY-7"):
+        # B7: an echo of the matched text, in another case, with another run of spaces, or wrapped inside a
+        # paragraph, is a leak too. The detector and the scanner must give the same verdict on each sample.
+        for echoed in ("x quillfeather   LANE 9 y", "QUILLFEATHER\tlane  9", "Zorbleplex", "VINTRAPOLIS-CANARY-7",
+                       "Quillfeather\nLane 9", "quillfeather\r\nLANE 9", "Quillfeather\u00a0Lane 9"):
             with self.subTest(echoed=echoed):
                 self.assertEqual(self.check("message", f"{echoed}\n").returncode, 3)
                 self.assertNotEqual(leaked_terms(echoed), [])
                 self.assertNotEqual(leaked_terms(echoed.encode()), [])
                 with self.assertRaises(AssertionError):
                     self.assert_hidden(subprocess.CompletedProcess([], 1, "", f"error: {echoed}\n"))
-        for clean in ("Quillfeather Lane", "Quillfeather Lane 8", "Quillfeather\nLane 9", "zorble plex"):
+        # A blank line ends a paragraph, so the term split over two of them is not one.
+        for clean in ("Quillfeather Lane", "Quillfeather Lane 8", "Quillfeather\n\nLane 9", "zorble plex"):
             with self.subTest(clean=clean):
                 self.assertEqual(self.check("message", f"{clean}\n").returncode, 0)
                 self.assertEqual(leaked_terms(clean), [])
                 self.assert_hidden(subprocess.CompletedProcess([], 1, "", clean))
+
+    def test_scanner_reads_messages_and_prose_as_paragraphs_and_code_by_line(self) -> None:
+        # GitHub renders a line break inside a paragraph of prose as a space; code is not reflowed.
+        def diff(path: str, *lines: str) -> str:
+            return (f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+                    f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines))
+
+        self.assert_found(self.check("message", "subject\n\nSee Quillfeather\nLane 9 soon.\n"), "commit message line 3")
+        # Control: a blank line between the words ends the paragraph.
+        result = self.check("message", "subject\n\nSee Quillfeather\n\nLane 9 soon.\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in ("notes.md", "NOTES.MDX", "notes.txt", "notes.rst"):
+            with self.subTest(path=path):
+                self.assert_found(self.check("diff", diff(path, "See Quillfeather", "Lane 9 soon.")), f"{path}:1")
+                result = self.check("diff", diff(path, "See Quillfeather", "", "Lane 9 soon."))
+                self.assertEqual(result.returncode, 0, result.stderr)
+        # A code file is read a line at a time; control: the term on one line of it is refused.
+        result = self.check("diff", diff("notes.py", "# See Quillfeather", "# Lane 9 soon."))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_found(self.check("diff", diff("notes.py", "# See Quillfeather Lane 9 soon.")), "notes.py:1")
 
     def test_scanner_masks_overlapping_path_terms(self) -> None:
         terms = ("alpha beta", "beta gamma")
@@ -1669,6 +1692,28 @@ class GitLeaks(LeakTestCase):
                 staged = self.git_run(repository, "add", "binary.bin", agent=agent)
                 self.assertEqual(staged.returncode, 0, staged.stderr)
                 self.assert_clean(repository, agent, "commit", "-m", "binary")
+
+    def test_git_term_reads_messages_and_prose_as_paragraphs_and_code_by_line(self) -> None:
+        for agent in (False, True):
+            with self.subTest(agent=agent, case="message"):
+                repository = self.repository(agent)
+                self.assert_refused(repository, agent, "commit message line 3", "commit", "-m",
+                                    "subject\n\nSee Quillfeather\nLane 9 soon.")
+                # Control: the words in two paragraphs.
+                self.assert_clean(repository, agent, "commit", "-m", "subject\n\nSee Quillfeather\n\nLane 9 soon.")
+            with self.subTest(agent=agent, case="markdown"):
+                repository = self.repository(agent)
+                self.stage(repository, "notes.md", "See Quillfeather\nLane 9 soon.\n", agent)
+                self.assert_refused(repository, agent, "notes.md:1", "commit", "-m", "notes")
+                self.stage(repository, "notes.md", "See Quillfeather\n\nLane 9 soon.\n", agent)
+                self.assert_clean(repository, agent, "commit", "-m", "notes")
+            with self.subTest(agent=agent, case="code"):
+                repository = self.repository(agent)
+                self.stage(repository, "notes.py", "# See Quillfeather\n# Lane 9 soon.\n", agent)
+                self.assert_clean(repository, agent, "commit", "-m", "code")
+                # Control: the term on one line of code.
+                self.stage(repository, "notes.py", "# See Quillfeather Lane 9 soon.\n", agent)
+                self.assert_refused(repository, agent, "notes.py:1", "commit", "-m", "code")
 
     def test_git_term_reads_paths_that_git_quotes(self) -> None:
         # git C-quotes a path that holds a line feed, a tab or a quote in every diff line that names it, whatever
@@ -3094,6 +3139,27 @@ class OutgoingLeaks(SinkRepositoryCase):
 
     def callers(self) -> tuple[tuple[bool, dict[str, str]], ...]:
         return ((True, self.agent), (False, self.person))
+
+    def test_push_reads_messages_and_prose_as_paragraphs_and_code_by_line(self) -> None:
+        first, rest = self.term.split(" ", 1)
+        for agent, environment in self.callers():
+            with self.subTest(agent=agent, case="markdown"):
+                made = self.commit("notes.md", f"See {first}\n{rest} soon.", "notes", parent=self.base)
+                ref = self.unique("prose")
+                self.assert_push_refused(lambda: self.git_push("origin", made, ref, environment), made, "notes.md:1",
+                                         self.public_url)
+            with self.subTest(agent=agent, case="message"):
+                made = self.commit("clean.txt", "clean", f"subject\n\nSee {first}\n{rest} soon.", parent=self.base)
+                ref = self.unique("message")
+                self.assert_push_refused(lambda: self.git_push("origin", made, ref, environment), made, "message line 3",
+                                         self.public_url)
+            with self.subTest(agent=agent, case="code and controls"):
+                # Code a line at a time, and prose and a message whose words stand in two paragraphs.
+                code = self.commit("notes.py", f"# See {first}\n# {rest} soon.", "code", parent=self.base)
+                made = self.commit("notes.md", f"See {first}\n\n{rest} soon.", f"subject\n\nSee {first}\n\n{rest} soon.",
+                                   parent=code)
+                self.assert_pushed(self.git_push("origin", made, self.unique("controls"), environment), self.public_url,
+                                   code, made)
 
     def combinations(self) -> list[tuple[bool, dict[str, str], str]]:
         """An agent and a person, each to a public remote and to one whose visibility cannot be read."""

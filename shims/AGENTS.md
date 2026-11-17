@@ -136,15 +136,23 @@ behavior before handing the call to the real one. One file is data: `person-name
   `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`),
   and for a file gh reads (`--body-file`,
   `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's files) what the
-  file holds, never its path. Each text is read whole, each whitespace character as a space: GitHub
-  renders a line break inside a paragraph as a space, so a term of several words that a wrapped
-  line or a no-break space splits is the term on the page. Each is read as written and, when it
+  file holds, never its path. Each text is read as GitHub renders prose, a paragraph at a time (as
+  a commit message is, "Leak-term list" below), so a term of several words that a wrapped line or a
+  no-break space splits is the term on the page. Each is read as written and, when it
   holds a backslash, with its JSON escapes decoded as well, since Python's `json.dump` writes each
   letter outside ASCII as a `\u` escape. A file that is the call's stdin while that is a pipe or a
   terminal (`/dev/stdin`, `/dev/fd/0`) is read from the stdin buffer, as `-` is; any other pipe, a
   socket or a device but `/dev/null` is not read at all, since reading a pipe takes the text gh
   reads after the check (until 2026-11-17 a `--body-file <(…)` went out empty), so such a text is
   refused for a target not confirmed private and left to gh for a private one.
+  It also reads the text gh takes from the directory's git: for `release create --notes-from-tag`
+  the tag's message (`git tag --list TAG --format=%(contents)`, as gh reads it), and for `pr create
+  --fill`, `--fill-first` or `--fill-verbose` the message of each commit of the head branch (`--head`,
+  else the current branch) that a base gh may list it against does not hold, and the head branch's
+  name, which gh makes the title of a pull request of more than one commit. The base is `--base`,
+  else the branch's `gh-merge-base`, else the default branch gh asks GitHub for, read here as each
+  remote's `HEAD`; gh takes it on the base repository's remote, else as a local branch, so each name
+  counts on every remote and locally, and a call none of whose bases exists here cannot be read.
   Stdin (`-`, `@-`, `workflow run --json`) comes from the buffer above, through its own
   `DOTFILES_LEAK_TERMS_GH_STDIN=/dev/fd/N` (cleared first, like the gate's) after the check's exit
   7 asks for it, so both checks read the same bytes gh then gets. A `gh api` call counts when it
@@ -168,10 +176,11 @@ behavior before handing the call to the real one. One file is data: `person-name
   endpoint count as public and as any repository. Not checked, because the shim runs before the
   text exists or nothing new is typed: text
   typed into gh's own editor, browser or prompts (`-e`, `-w`, which need a terminal an agent's call
-  has not got), the text `--fill` and `--generate-notes` build from commits and tags already pushed,
+  has not got), the notes `--generate-notes` has GitHub build from pull requests already on it,
   release asset contents (their names and labels are checked), `issue transfer` and the values of
   `secret set`, `variable set` and key titles, which only the account or repository admins see.
-  Extensions (`gh stack`) call the API themselves.
+  `label clone` copies another repository's labels, which the check could read only by asking
+  GitHub for them. Extensions (`gh stack`) call the API themselves.
   It also logs and caches, because every session on a host shares the App installation's
   one primary rate limit: on 2026-11-01 that limit reached zero four times and every
   session that reads GitHub stopped (dispatch://BET-303). Each OUTERMOST call (a re-entry
@@ -886,9 +895,14 @@ text each target's, a commit none, and a destination nobody could name none.
 For tests, `DOTFILES_LEAK_TERMS_SOPS_HOME` makes sops use that directory as both `HOME` and
 `XDG_CONFIG_HOME`. Otherwise, when no `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE` or `SOPS_AGE_KEY_CMD`
 is set and the configured age key does not exist, the scanner gives sops the passwd-home
-`~/.config/sops/age/keys.txt` when it exists. A match ignores case, treats each run of spaces in a
-term as matching one or more spaces or tabs in one line, and ignores blank list lines and lines
-that start with `#`.
+`~/.config/sops/age/keys.txt` when it exists. A match ignores case and treats each run of spaces in a
+term as one or more spaces or tabs; blank list lines and lines that start with `#` are no terms.
+Prose is read as GitHub renders it, a paragraph at a time: a commit, tag or jj message, gh text,
+and the added lines of a file named `*.md`, `*.mdx`, `*.txt` or `*.rst` in a commit, a push or a
+merge. A line break inside a paragraph, a CRLF or a no-break space counts as a space there, and a
+blank line ends the paragraph. Every other file, and a file object pushed with no path, is read a
+line at a time: code is not reflowed, and joining its lines would refuse words no reader sees side
+by side. Until 2026-11-17 every line was read alone, and the list holds terms of several words.
 
 The scanner runs the first `sops` on `PATH`, except mise's shim: in its place it runs the version
 this checkout's `mise.toml` pins, from `installs/sops/<version>/` in the mise data directory that

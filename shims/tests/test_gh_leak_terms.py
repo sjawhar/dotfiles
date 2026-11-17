@@ -419,10 +419,12 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 argv = ["pr", "comment", "11", "-R", PRIVATE, "--body", text]
                 self.assert_sent(self.run_gh(argv), argv)
-        # Control: words that are not the term, wrapped the same way, go to the public repository.
-        self.setUp_calls()
-        argv = ["pr", "comment", "11", "-R", PUBLIC, "--body", f"See {first}\n{rest[:-1]}8 soon.\n"]
-        self.assert_sent(self.run_gh(argv), argv)
+        # Controls: words that are not the term, wrapped the same way, and the term's words in two paragraphs, go to
+        # the public repository.
+        for text in (f"See {first}\n{rest[:-1]}8 soon.\n", f"See {first}\n\n{rest} soon.\n"):
+            self.setUp_calls()
+            argv = ["pr", "comment", "11", "-R", PUBLIC, "--body", text]
+            self.assert_sent(self.run_gh(argv), argv)
 
     def test_the_options_of_gh_api_are_read_as_gh_reads_them(self) -> None:
         # pflag reads `-iXPOST` as -i and -X POST, the last -X winning; `-if` as -i and -f; and `-t -XGET` as a
@@ -585,6 +587,71 @@ class GhLeakTerms(unittest.TestCase):
         # Control: a fork of a private repository is private.
         argv = ["repo", "fork", PRIVATE, "--fork-name", TEXT.strip()]
         self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def git(self, *arguments: str) -> str:
+        """/usr/bin/git in the work directory, past the shims' commit check."""
+        done = subprocess.run(["/usr/bin/git", "-C", str(self.work), "-c", "user.name=Test", "-c",
+                               "user.email=test@example.invalid", *arguments], env=self.env, capture_output=True,
+                              text=True, check=True, timeout=120)
+        return done.stdout.strip()
+
+    def test_the_commits_pr_create_fills_from_are_read(self) -> None:
+        self.git("init", "-q", "-b", "main")
+        # A commit the base holds already: gh lists none of it.
+        self.git("commit", "-q", "--allow-empty", "-m", f"base\n\n{TEXT}")
+        self.git("remote", "add", "origin", f"https://github.com/{PUBLIC}.git")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        self.git("checkout", "-q", "-b", "feature")
+        self.git("commit", "-q", "--allow-empty", "-m", "clean subject\n\nclean body")
+        flags = ("--fill", "-f", "--fill-first", "--fill-verbose")
+        for flag in flags:
+            with self.subTest(flag=flag, text="clean"):
+                self.setUp_calls()
+                argv = ["pr", "create", "-R", PUBLIC, flag]
+                self.assert_sent(self.run_gh(argv), argv)
+        self.git("commit", "-q", "--allow-empty", "-m", f"subject\n\n{TEXT}")
+        commit = self.git("rev-parse", "HEAD")[:12]
+        for flag in flags:
+            with self.subTest(flag=flag, text="term"):
+                self.setUp_calls()
+                long = "--fill" if flag == "-f" else flag
+                self.assert_refused(self.run_gh(["pr", "create", "-R", PUBLIC, flag]), f"{long} commit {commit}")
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(["pr", "create", "-R", PUBLIC, "--head", "feature", "--base", "main",
+                                                 flag]), f"{long} commit {commit}")
+        # Controls: the same branch to a private repository, and without a fill flag.
+        for argv in (["pr", "create", "-R", PRIVATE, "--fill"],
+                     ["pr", "create", "-R", PUBLIC, "--title", "t", "--body", "b"]):
+            with self.subTest(argv=argv):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        # The head branch's name is the title of a pull request of more than one commit, `-` read as a space.
+        self.git("checkout", "-q", "-b", TEST_TERMS[0].replace(" ", "-"), "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "one")
+        self.git("commit", "-q", "--allow-empty", "-m", "two")
+        self.setUp_calls()
+        named = self.run_gh(["pr", "create", "-R", PUBLIC, "--fill"])
+        self.assertEqual(named.returncode, 2, named.stderr.decode())
+        self.assertIn("--fill head branch name line 1: listed leak term 1\n", named.stderr.decode())
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_the_tag_message_release_notes_take_is_read(self) -> None:
+        self.git("init", "-q", "-b", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        self.git("remote", "add", "origin", f"https://github.com/{PUBLIC}.git")
+        self.git("tag", "-a", "v1", "-m", f"Release\n\n{TEXT}")
+        self.git("tag", "-a", "v2", "-m", "Release\n\nclean")
+        self.assert_refused(self.run_gh(["release", "create", "v1", "--notes-from-tag"]), "--notes-from-tag tag v1")
+        # Controls: a clean tag, the same tag without --notes-from-tag, and the same call to a private repository.
+        for argv in (["release", "create", "v2", "--notes-from-tag"], ["release", "create", "v1", "--notes", "x"]):
+            with self.subTest(argv=argv):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        self.git("remote", "set-url", "origin", f"https://github.com/{PRIVATE}.git")
+        self.setUp_calls()
+        argv = ["release", "create", "v1", "--notes-from-tag"]
         self.assert_sent(self.run_gh(argv), argv)
 
     # --- what the check does not touch --------------------------------------------------------------------------

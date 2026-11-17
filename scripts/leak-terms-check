@@ -422,6 +422,51 @@ class TermMatcher:
         return sorted(found, key=lambda span: (span.start, span.end))
 
 
+# The files whose lines are prose, which GitHub renders as paragraphs. Every other file is code, read a line at a time:
+# code is not reflowed, and joining its lines would refuse words that no reader sees side by side.
+PROSE_SUFFIXES = (".md", ".mdx", ".txt", ".rst")
+
+
+def is_prose(path: str) -> bool:
+    """Whether PATH names a prose file (PROSE_SUFFIXES, letter case ignored)."""
+    return path.lower().endswith(PROSE_SUFFIXES)
+
+
+def paragraph_view(text: str) -> str:
+    """TEXT as GitHub renders prose, in a string of the same length: each whitespace character inside a paragraph is a
+    space, so a term of several words that a soft line break, a CRLF or a no-break space splits matches, and each line
+    break that begins or ends a blank line stays, so a term split over two paragraphs does not."""
+    lines = re.sub(r"[^\S\n]", " ", text).split("\n")
+    pieces = [lines[0]]
+    for previous, line in zip(lines, lines[1:]):
+        pieces += [" " if previous.strip() and line.strip() else "\n", line]
+    return "".join(pieces)
+
+
+def line_spans(lines: Sequence[tuple[int, str]], matcher: TermMatcher, prose: bool) -> list[tuple[int, Span]]:
+    """(line number, match) for each listed term in LINES, (number, text) pairs in order: each line alone, or for PROSE
+    each run of lines with consecutive numbers read as paragraphs (paragraph_view). Until 2026-11-17 every line was
+    read alone, so a term a wrapped line split went into a commit message or a Markdown file unread."""
+    if not prose:
+        return [(number, span) for number, line in lines for span in matcher.spans(line)]
+    found: list[tuple[int, Span]] = []
+    run: list[tuple[int, str]] = []
+
+    def flush() -> None:
+        if run:
+            text = "\n".join(line for _, line in run)
+            found.extend((run[0][0] + text.count("\n", 0, span.start), span)
+                         for span in matcher.spans(paragraph_view(text)))
+            run.clear()
+
+    for number, line in lines:
+        if run and number != run[-1][0] + 1:
+            flush()
+        run.append((number, line))
+    flush()
+    return found
+
+
 def c_escape(text: str) -> str:
     escaped: list[str] = []
     for character in text:
@@ -643,13 +688,16 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             record.resolved = True
             record.shown = None
 
-    def add_content(record: FileRecord, line_number: int, content: str) -> None:
+    def add_contents(record: FileRecord, added: Sequence[tuple[int, str]]) -> None:
+        """A hunk's added lines, (new line number, text): a prose file's read as paragraphs, any other a line at a
+        time (line_spans)."""
+        if not added:
+            return
         if not record.resolved:
             raise TextError("cannot resolve a result path from the diff header")
-        content_spans = matcher.spans(content)
-        if content_spans:
-            place = f"{place_prefix}{display_path(record)}:{line_number}"
-            findings.extend(place for _ in content_spans)
+        assert record.path is not None
+        findings.extend(f"{place_prefix}{display_path(record)}:{line_number}"
+                        for line_number, _ in line_spans(added, matcher, is_prose(record.path)))
 
     def consume_unified(start: int, record: FileRecord) -> int:
         parsed = parse_unified_hunk(lines[start])
@@ -657,6 +705,7 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             raise TextError("malformed unified hunk")
         (old_line, old_count), (new_line, new_count) = parsed
         old_seen = new_seen = 0
+        added: list[tuple[int, str]] = []
         index = start + 1
         while index < len(lines):
             line = lines[index]
@@ -673,13 +722,14 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             if marker in "+ ":
                 new_seen += 1
                 if marker == "+":
-                    add_content(record, new_line, content)
+                    added.append((new_line, content))
                 new_line += 1
             if old_seen > old_count or new_seen > new_count:
                 raise TextError("malformed unified hunk count")
             index += 1
         if old_seen != old_count or new_seen != new_count:
             raise TextError("malformed unified hunk count")
+        add_contents(record, added)
         return index
 
     def path_line_end(start: int, marker: str, prefix: str, expected_path: str | None) -> int | None:
@@ -790,11 +840,9 @@ def cleaned_message(text: str, cleanup: str, comment_char: str | None, cut_at_sc
 
 
 def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: str | None, cut_at_scissors: bool, place: str) -> list[str]:
+    """A commit, tag or jj message, cleaned as git or jj cleans it, read as prose (line_spans)."""
     lines = cleaned_message(text, cleanup, comment_char, cut_at_scissors)
-    findings: list[str] = []
-    for line_number, line in enumerate(lines, start=1):
-        findings.extend(f"{place} line {line_number}" for _ in matcher.spans(line))
-    return findings
+    return [f"{place} line {number}" for number, _ in line_spans(list(enumerate(lines, start=1)), matcher, True)]
 
 
 def print_findings(findings: Sequence[str]) -> None:
@@ -1746,9 +1794,8 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
                 if every_file_text or b"\0" not in contents[source][:8000]:
                     held.update(newline_lines(contents[source].decode("utf-8", errors="surrogateescape")))
             content = contents[result].decode("utf-8", errors="surrogateescape")
-            for line_number, line in enumerate(newline_lines(content), start=1):
-                if line not in held:
-                    findings.extend(f"{prefix}{shown}:{line_number}" for _ in matcher.spans(line))
+            own = [(number, line) for number, line in enumerate(newline_lines(content), start=1) if line not in held]
+            findings.extend(f"{prefix}{shown}:{number}" for number, _ in line_spans(own, matcher, is_prose(path)))
 
 
 def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
@@ -1959,7 +2006,7 @@ def scan_outgoing_objects(
         for object_id, kind in objects.items()
         if kind == "tree" and object_id not in destination_objects and object_id not in commit_objects
     )
-    folder_files: list[tuple[str, str]] = []
+    folder_files: list[tuple[str, str, str]] = []
     findings: list[str] = []
     for folder in folders:
         # The places are the ones the commit check names for a commit that adds the same files: each file's whole
@@ -1975,29 +2022,22 @@ def scan_outgoing_objects(
             shown = mask_path(path, spans)
             findings.extend(shown for _ in spans)
             if kind == "blob" and path_object not in destination_objects and path_object not in commit_objects:
-                folder_files.append((path_object, shown))
+                folder_files.append((path_object, shown, path))
 
-    content_ids = sorted(files | {object_id for object_id, _ in folder_files})
+    content_ids = sorted(files | {object_id for object_id, _, _ in folder_files})
     contents = blob_objects(content_ids)
+    # A file object pushed with no path has no kind, so it is read as code, a line at a time.
     for object_id in sorted(files):
         content = contents[object_id]
         if b"\0" not in content[:8000]:
-            findings.extend(
-                scan_message(
-                    content.decode("utf-8", errors="surrogateescape"),
-                    matcher,
-                    "verbatim",
-                    None,
-                    False,
-                    f"object {object_id[:12]}",
-                )
-            )
-    for object_id, shown in folder_files:
+            lines = list(enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1))
+            findings.extend(f"object {object_id[:12]} line {number}" for number, _ in line_spans(lines, matcher, False))
+    for object_id, shown, path in folder_files:
         content = contents[object_id]
         if b"\0" in content[:8000]:
             continue
-        for line_number, line in enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1):
-            findings.extend(f"{shown}:{line_number}" for _ in matcher.spans(line))
+        lines = list(enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1))
+        findings.extend(f"{shown}:{number}" for number, _ in line_spans(lines, matcher, is_prose(path)))
     return findings
 
 
@@ -2250,8 +2290,6 @@ GH_API_REPOSITORY = re.compile(r"^/?repos/([^/?#{}]+)/([^/?#{}]+)")
 GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
 JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
 JSON_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
-# One whitespace character, which gh_findings reads as a space; each is one character, so a match keeps its place.
-GH_WHITESPACE = re.compile(r"\s")
 
 
 @dataclass(frozen=True)
@@ -2495,6 +2533,87 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
     return texts
 
 
+def gh_flag(read: Sequence[tuple[str | None, str | None]], long: Mapping[str, str], name: str) -> bool:
+    """Whether the bool option whose long spelling is NAME is on: the last one given wins, and one with no value is on."""
+    values = [value for option, value in read if option and long.get(option, option) == name]
+    return bool(values) and (values[-1] or "true").lower() in ("1", "t", "true")
+
+
+def gh_git(arguments: Sequence[str]) -> str | None:
+    """What `git ARGUMENTS` prints in this directory, as gh's own git calls run there; None when it fails."""
+    try:
+        completed = subprocess.run(["git", *arguments], stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                                   check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return completed.stdout.decode("utf-8", errors="surrogateescape") if completed.returncode == 0 else None
+
+
+def gh_fill_bases(read: Sequence[tuple[str | None, str | None]], long: Mapping[str, str], head: str) -> list[str]:
+    """Every ref `pr create --fill` may list the head's commits against, as gh 2.98.0 picks it (pkg/cmd/pr/create):
+    the branch `--base` names, else the head's `branch.<head>.gh-merge-base`, else the base repository's default
+    branch, which gh asks GitHub for, read here as each remote's HEAD (else `main` and `master`); gh takes it on the
+    base repository's remote, else as a local name, so each name counts on every remote and locally. Only the refs
+    that exist are given."""
+    bases = [value for option, value in read if option and long.get(option, option) == "--base" and value]
+    names = bases[-1:]
+    if not names:
+        merge_base = (gh_git(["config", "--get", f"branch.{head}.gh-merge-base"]) or "").strip()
+        names = [merge_base] if merge_base else []
+    if not names:
+        heads = gh_git(["for-each-ref", "--format=%(symref)", "refs/remotes/*/HEAD"]) or ""
+        names = sorted({line.split("/", 3)[3] for line in heads.split() if line.count("/") >= 3}) or ["main", "master"]
+    refs = set((gh_git(["for-each-ref", "--format=%(refname)", "refs/remotes", "refs/heads"]) or "").split())
+    return [ref for ref in sorted(refs) if any(ref == f"refs/heads/{name}" or
+                                               (ref.startswith("refs/remotes/") and ref.split("/", 3)[3:] == [name])
+                                               for name in names)]
+
+
+def gh_local_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
+                   ) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]]:
+    """The text gh reads from this directory's git and sends, each with what it holds, and each it cannot read with
+    why: for `release create --notes-from-tag` the tag's message (`git tag --list TAG --format=%(contents)`); for
+    `pr create --fill`, `--fill-first` or `--fill-verbose` the message of each commit of the head branch that a base
+    gh may list it against does not hold (gh_fill_bases), and the head branch's name, which gh makes the title of a
+    pull request of more than one commit, with `-` and `_` read as spaces as gh writes them. Until 2026-11-17 neither
+    was read, on the ground that it was pushed already; but the tag may be local, and a push reads no knives registry
+    list."""
+    long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
+    contents: list[tuple[GhText, str]] = []
+    unreadable: list[tuple[GhText, str]] = []
+    positionals = [value or "" for option, value in read if option is None]
+    if (group, sub) == ("release", "create") and gh_flag(read, long, "--notes-from-tag") and positionals:
+        piece = GhText("--notes-from-tag", f"tag {positionals[0]}")
+        message = gh_git(["tag", "--list", positionals[0], "--format=%(contents)"])
+        if message is None:
+            unreadable.append((piece, "git could not read the tag's message"))
+        else:
+            contents.append((piece, message))
+    fill = next((name for name in ("--fill", "--fill-first", "--fill-verbose") if gh_flag(read, long, name)), None)
+    if (group, sub) != ("pr", "create") or fill is None:
+        return contents, unreadable
+    heads = [value for option, value in read if option and long.get(option, option) == "--head" and value]
+    head = heads[-1].rpartition(":")[2] if heads else (gh_git(["symbolic-ref", "--quiet", "--short", "HEAD"]) or "").strip()
+    bases = gh_fill_bases(read, long, head) if head else []
+    if not bases:
+        unreadable.append((GhText(fill, "commits"), "git names no head branch, or no base branch to list it against"))
+        return contents, unreadable
+    seen: set[str] = set()
+    for base in bases:
+        listed = gh_git(["log", "--no-show-signature", "--format=%H%x00%B%x00", head, "--not", base, "--"])
+        if listed is None:
+            unreadable.append((GhText(fill, "commits"), f"git could not list the commits of {head}"))
+            return contents, unreadable
+        fields = listed.split("\0")
+        for commit, message in zip(fields[0::2], fields[1::2]):
+            commit = commit.strip()
+            if commit not in seen:
+                seen.add(commit)
+                contents.append((GhText(fill, f"commit {commit[:12]}"), message))
+    contents.append((GhText(fill, "head branch name"), re.sub(r"[-_]", " ", head)))
+    return contents, unreadable
+
+
 def gh_api_sends(read: Sequence[tuple[str | None, str | None]]) -> bool:
     """Whether a `gh api` call sends a body: a method other than GET or HEAD, else (gh's default POST) a field or an
     --input file."""
@@ -2567,9 +2686,9 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], matcher: TermMatcher) ->
     """(text, how it was read, line, match) for each listed term in each text: as written, and for a text that holds a
     backslash, with its escapes decoded too.
 
-    A text is read whole, each whitespace character read as a space: GitHub renders a line break inside a paragraph as
-    a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page. Until
-    2026-11-17 each line was read alone, and a body wrapped inside such a term went to a public repository. Both views
+    A text is read as GitHub renders it, a paragraph at a time (paragraph_view): a line break inside a paragraph shows
+    as a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page.
+    Until 2026-11-17 each line was read alone, and a body wrapped inside such a term went to a public repository. Both views
     are read whatever the first finds: a match counts only for a target its list reaches and no allowed token of that
     target holds (gh_check), so the first view's matches can all be dropped there while the second's count. A match of
     the decoded view is left out only when one of the first view has its term, list and allowed tokens, since gh_check
@@ -2581,7 +2700,7 @@ def gh_findings(contents: Sequence[tuple[GhText, str]], matcher: TermMatcher) ->
             views.append((" (escapes decoded)", escapes_decoded(text)))
         seen: set[tuple[int, str, tuple[str, ...]]] = set()
         for how, view in views:
-            for span in matcher.spans(GH_WHITESPACE.sub(" ", view)):
+            for span in matcher.spans(paragraph_view(view)):
                 key = (span.term, span.scope, span.allowed_in)
                 if how and key in seen:
                     continue
@@ -2788,8 +2907,7 @@ def gh_check(arguments: Sequence[str]) -> int:
     if group == "api" and not gh_api_sends(read):
         return 0
     # `pr create --dry-run` prints the pull request it would create and sends none of its text.
-    dry_run = [value for option, value in read if option == "--dry-run"]
-    if (group, sub) == ("pr", "create") and dry_run and (dry_run[-1] or "true").lower() in ("1", "t", "true"):
+    if (group, sub) == ("pr", "create") and gh_flag(read, gh_long_names(GH_TEXT_COMMANDS[(group, sub)]), "--dry-run"):
         return 0
     texts = [GhText(piece.option, piece.detail, path="-", optional=piece.optional)
              if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece
@@ -2804,6 +2922,9 @@ def gh_check(arguments: Sequence[str]) -> int:
         except OSError:
             stdin = None
     contents, unreadable = gh_contents(texts, stdin)
+    local_contents, local_unreadable = gh_local_texts(group, sub, read)
+    contents += local_contents
+    unreadable += local_unreadable
     if group == "api" and read and not unreadable:
         endpoint = next((value for option, value in read if option is None), "")
         # GitHub reads an --input payload as JSON, so `\u006dutation` there is the keyword too: the decoded view counts.
