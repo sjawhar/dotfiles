@@ -86,6 +86,25 @@ mise_paths() {
     : "${_mise_data:=${_mise_datas[0]:-}}"
 }
 
+# mise.toml's [env] `_.path` puts this shims dir first in every PATH mise builds, ahead of the tool
+# dir `mise exec` adds, so the `mise exec` below finds shims/basedpyright again: from 2026-11-02 a
+# basedpyright or pyright with no venv's ran shim and mise in turn, in one process, until killed.
+# mise execs in place, so a visit in the process that set DOTFILES_BASEDPYRIGHT_SHIM is mise's; it
+# runs the first basedpyright on mise's PATH that is neither a shims/ copy nor mise's own shim.
+if [[ "${DOTFILES_BASEDPYRIGHT_SHIM:-}" == "$$" ]]; then
+    self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" found=""
+    IFS=':' read -ra dirs <<< "$PATH"
+    for d in "${dirs[@]}"; do
+        [[ -n "$d" && -f "$d/basedpyright" && -x "$d/basedpyright" ]] || continue
+        real="$(command -p readlink -f -- "$d/basedpyright")" || continue
+        [[ "$real" != "$self" && "${real%/*}" != */shims && "$real" != */mise ]] || continue
+        found="$d/basedpyright"
+        break
+    done
+    [[ -n "$found" ]] || { echo "basedpyright shim: mise ran this shim again, and its PATH ($PATH) holds no other basedpyright" >&2; exit 127; }
+    exec "$found" "$@"
+fi
+
 # Fall back to mise. mise exec resolves the bare name on PATH, putting first only the tool dirs it
 # adds itself; an install dir already on PATH without mise's record of adding it counts as the
 # caller's, so this shim, ahead of it, would win and mise would exec it again, forever
@@ -101,4 +120,5 @@ for d in "${dirs[@]}"; do
     done
     [[ -n "$installed" ]] || mise_path="${mise_path:+$mise_path:}$d"
 done
-MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" PATH="$mise_path" exec "$_mise_bin" exec npm:basedpyright -- basedpyright "$@"
+DOTFILES_BASEDPYRIGHT_SHIM=$$ MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" PATH="$mise_path" \
+    exec "$_mise_bin" exec npm:basedpyright -- basedpyright "$@"
