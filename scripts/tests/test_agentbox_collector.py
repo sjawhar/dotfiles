@@ -16,7 +16,8 @@ was deleted only when a later box of the same session started.
     unit, container and volume, and keeps nothing;
   * `cmd_collect`, which every `agentbox new` starts detached and one at a time, deletes each box
     named `agentbox-<12 hex>` under its own roots whose container is gone or exited, whose launcher
-    is not running, whose newest file is over an hour old and in which no process stands, after
+    is not running, whose newest file is over an hour old and in which no process stands, holds a
+    file open or runs its program, after
     `unenroll_box`, and touches nothing else.
 
 And `unenroll_box`'s waiter, which a close starts: the enrollment is the SESSION's, so it must
@@ -802,15 +803,15 @@ exit "$rc"''')
             self.assertEqual(self.gone(OLD), [], result.stdout + result.stderr)
             self.assertIn(f"{OLD} removed", result.stdout)
 
-    def unreadable_cwd(self, change=None) -> None:
+    def unreadable_cwd(self, change=None, cgroup: str | None = None) -> None:
         """A process of this user whose working directory the walk cannot read: `cwd` is not a
         link the walk can read. Its `status` is this test's own (the same ids, capabilities and pid
         namespace as the collector), so no reason the kernel gives for hiding a cwd applies;
-        CHANGE(lines) edits it into one that does."""
+        CHANGE(lines) edits it into one that does. Its cgroup is an interactive shell's, or CGROUP."""
         d = self.proc / "6161"
         d.mkdir()
         (d / "cwd").write_text("", encoding="utf-8")
-        (d / "cgroup").write_text("0::/user.slice/app.slice/bash.scope\n", encoding="utf-8")
+        (d / "cgroup").write_text((cgroup or "0::/user.slice/app.slice/bash.scope") + "\n", encoding="utf-8")
         lines = Path("/proc/self/status").read_text(encoding="utf-8").splitlines()
         (d / "status").write_text("\n".join(change(lines) if change else lines) + "\n", encoding="utf-8")
 
@@ -845,40 +846,108 @@ exit "$rc"''')
                     self.assertIn(f"{OLD} not removed: cannot tell how old its files are: find: '{runc}': Permission denied", said)
                     self.assertNotIn(f"{OLD} removed", said)
 
-    def test_a_process_the_kernel_hides_from_every_reader_keeps_no_box(self) -> None:
-        """The kernel refuses a process's cwd to a reader without CAP_SYS_PTRACE when the process
-        holds a capability the reader lacks, when its ids are not all the reader's, when it is not
-        dumpable, or when it is in another pid namespace. Those readings fail on every pass, on
-        every host: on sami-devbox the user's systemd manager (CAP_WAKE_ALARM) and a kind cluster's
-        metrics-server (gid 0, a nested pid namespace) made the collector keep all 59 leftovers on
-        2026-11-16. Such a process does not keep a box, and each pass says which it could not see;
-        a process hidden for no such reason still does (test_a_walk_that_cannot_read_keeps_the_box_
-        and_says_why)."""
+    def test_only_a_container_s_process_or_the_user_manager_is_left_uncounted(self) -> None:
+        """The kernel refuses a process's cwd to a reader without CAP_SYS_PTRACE when its ids are
+        not all the reader's, when it holds a capability the reader lacks, or when it is in a pid
+        namespace below the reader's. Two such processes of this user are always on sami-devbox: its
+        systemd manager (CAP_WAKE_ALARM) and a kind cluster's metrics-server (gid 0, a nested pid
+        namespace), and counting them kept all 59 leftovers on 2026-11-16. A process in a nested pid
+        namespace is a container's, and the manager is known by its own cgroup: those two are not
+        counted, and the pass names them. Any other hidden process of this user can stand in a box's
+        directory (a `newgrp docker` shell has other gids, a program with file capabilities holds
+        capabilities the user lacks), so it keeps every box that pass (review of 2d9f544f,
+        dispatch://INFRA-1720/comment/19550300)."""
         def field(name, edit):
             return lambda lines: [edit(line) if line.startswith(name + ":") else line for line in lines]
+
+        def both(*edits):
+            def change(lines):
+                for edit in edits:
+                    lines = edit(lines)
+                return lines
+            return change
+
+        uid = os.getuid()
+        manager = f"0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope"
+        nested = field("NSpid", lambda line: line + "\t1")
+        other_gids = field("Gid", lambda _: "Gid:\t0\t0\t0\t0")
+        capability = field("CapPrm", lambda _: "CapPrm:\t0000000800000000")
         cases = {
-            "a capability the reader lacks": (field("CapPrm", lambda _: "CapPrm:\t0000000800000000"), {},
-                                              "it holds a capability this user lacks"),
-            "ids not all the reader's": (field("Gid", lambda _: "Gid:\t0\t0\t0\t0"), {},
-                                         "its ids are not all this user's"),
-            "a nested pid namespace": (field("NSpid", lambda line: line + "\t1"), {},
-                                       "it is in another pid namespace"),
-            "not dumpable": (None, {"STUB_FIND_ROOT_OWNED": str(self.proc / "6161")}, None),
+            # name: (status change, cgroup, env, removed, the words the pass says)
+            "a nested pid namespace": (nested, None, {}, True, "process 6161 (it is in another pid namespace)"),
+            "a nested pid namespace with gid 0 (kind's metrics-server)": (
+                both(nested, other_gids), None, {}, True, "process 6161 (it is in another pid namespace)"),
+            "the user's systemd manager (CAP_WAKE_ALARM)": (
+                capability, manager, {}, True, "process 6161 (it is this user's systemd manager)"),
+            "a shell with other gids (newgrp docker)": (
+                other_gids, None, {}, False, "cannot tell whether a process stands in it: process 6161"),
+            "a program with file capabilities": (
+                capability, None, {}, False, "cannot tell whether a process stands in it: process 6161"),
+            "other gids in the manager's slice but not its init.scope": (
+                other_gids, f"0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/x.scope", {}, False,
+                "cannot tell whether a process stands in it: process 6161"),
+            # A stated limit, not a rule: a process that is not dumpable has a root-owned /proc entry, so
+            # the walk takes it for another user's (forward and gpg-agent are such, always running).
+            "not dumpable": (None, None, {"STUB_FIND_ROOT_OWNED": str(self.proc / "6161")}, True, None),
         }
-        for name, (change, env, why) in cases.items():
+        for name, (change, cgroup, env, removed, said_words) in cases.items():
             with self.subTest(name):
                 self.forget(OLD)
                 shutil.rmtree(self.proc / "6161", ignore_errors=True)
                 self.idle_process()
                 self.leftover(OLD)
-                self.unreadable_cwd(change)
+                self.unreadable_cwd(change, cgroup)
                 result = self.collect(env)
                 said = result.stdout + result.stderr
                 self.assertEqual(result.returncode, 0, said)
-                self.assertEqual(self.gone(OLD), [], said)
-                self.assertIn(f"{OLD} removed", result.stdout)
-                if why:
-                    self.assertIn(f"process 6161 ({why})", said)
+                if removed:
+                    self.assertEqual(self.gone(OLD), [], said)
+                    self.assertIn(f"{OLD} removed", result.stdout)
+                else:
+                    self.assertTrue((self.boxes / OLD).exists(), said)
+                    self.assertNotIn(f"{OLD} removed", said)
+                if said_words:
+                    self.assertIn(said_words, said)
+
+    def test_a_process_with_a_file_or_its_program_in_the_box_keeps_it(self) -> None:
+        """A process whose working directory is elsewhere still holds the box when a file it holds
+        open, or the program it runs, is under the box's directory or run dir (`tail -f` of a box's
+        log, a tool built in the box's clone and run from $HOME): the walk reads `fd` and `exe` too."""
+        uid = os.getuid()
+        cases = {
+            "an open file": ("fd/3", self.boxes / OLD / "repo" / "build.log", "holds a file in it open"),
+            "an open file since deleted": ("fd/4", f"{self.boxes / OLD / 'repo' / 'gone.log'} (deleted)",
+                                           "holds a file in it open"),
+            "a file of its run dir": ("fd/5", self.run_base / OLD / "run-user" / "agentbox-session",
+                                      "holds a file in it open"),
+            "its program": ("exe", self.boxes / OLD / "repo" / "target" / "tool", "runs a program from it"),
+        }
+        for name, (link, target, words) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                shutil.rmtree(self.proc / "5151", ignore_errors=True)
+                self.idle_process()
+                self.leftover(OLD)
+                d = self.proc / "5151"
+                (d / "fd").mkdir(parents=True)
+                os.symlink("/", d / "cwd")
+                os.symlink(str(target), d / link)
+                (d / "cgroup").write_text(f"0::/user.slice/user-{uid}.slice/session-1.scope\n", encoding="utf-8")
+                result = self.collect()
+                said = result.stdout + result.stderr
+                self.assertTrue((self.boxes / OLD).exists(), said)
+                self.assertIn(f"{OLD} not removed: process 5151 {words}", said)
+        with self.subTest("the control: the same process with nothing in the box"):
+            self.forget(OLD)
+            shutil.rmtree(self.proc / "5151", ignore_errors=True)
+            self.leftover(OLD)
+            d = self.proc / "5151"
+            (d / "fd").mkdir(parents=True)
+            os.symlink("/", d / "cwd")
+            os.symlink("/usr/bin/tail", d / "exe")
+            os.symlink("/var/log/syslog", d / "fd" / "3")
+            result = self.collect()
+            self.assertEqual(self.gone(OLD), [], result.stdout + result.stderr)
 
     def forget(self, box: str) -> None:
         """Remove whatever an earlier subtest left of BOX, read-only directories included."""

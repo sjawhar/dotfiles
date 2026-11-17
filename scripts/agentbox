@@ -56,7 +56,8 @@
 # `agentbox new` starts `agentbox collect` (detached, one at a time, log
 # ~/.cache/omp/agentbox/collect.log), which deletes what any box left when its
 # launcher died: a box with no container or an exited one, whose launcher is not
-# running, whose newest file is over an hour old and in which no process stands.
+# running, whose newest file is over an hour old and in which no process stands,
+# holds a file open or runs its program.
 #
 # A session whose work is NOT a checkout — a lane's scratch tree, a directory of
 # worktrees, a coordination root — names it with --dir instead of a repo
@@ -2995,10 +2996,12 @@ close_box_dir() {
 #     container for minutes while its clones are made, and one being closed has none while its
 #     launcher still works. With no file under the roots, its container ended more than an hour
 #     ago (`.State.FinishedAt`); an end time docker does not give keeps it;
-#   - no process has its working directory under the box's directory or its $RUN_BASE/<box>,
-#     except the box's own tmux relay unit, which outlives a launcher that died.
+#   - no process has its working directory, a file it holds open or the program it runs under the
+#     box's directory or its $RUN_BASE/<box>, except the box's own tmux relay unit, which outlives
+#     a launcher that died.
 # What it cannot read is no answer: an age walk find could not finish, a process of this user whose
-# working directory it cannot read, or a walk of the processes that found none stops it removing
+# working directory it cannot read (but a container's and the user's systemd manager, which it
+# names; collect_read_cwds), or a walk of the processes that found none stops it removing
 # the box that pass. Each box it does not remove gets one line naming why and the command that
 # removes it (collect_not_removed), and a removal that fails one line naming what is still there
 # and that command; no line says a box was kept (dispatch://INFRA-1720, R8).
@@ -3057,30 +3060,33 @@ collect_launcher() {
     printf '%s\n' "$pid"
 }
 
-# The working directory of every process the collector can see, "<pid>\t<cwd>", read once with one
-# `find` (a readlink per process is thousands of forks on a loaded host). A process of another user
-# whose cwd this user cannot read (root's, or a box's under its own uid range) is not one that can
-# stand in a box's host directory as this user.
+# Where every process the collector can see stands and what it holds: "<pid>\t<kind>\t<path>" for its
+# working directory (cwd), each file it holds open (fd) and the program it runs (exe), read with two
+# `find`s (a readlink per process is thousands of forks on a loaded host). A process of another user
+# whose links this user cannot read (root's, or a box's under its own uid range) is not one that can
+# hold a box's host directory as this user. On sami-devbox, 2026-11-17, the walk read 10,504 fd and
+# exe links of this user in 0.1 s, and none was under a box (a box's own processes run under its
+# own uid range, and the host's relays hold sockets).
 #
-# A process of this user whose cwd cannot be read is one of two things. The kernel refuses that read
-# (ptrace access mode READ) to every reader without CAP_SYS_PTRACE when the process is not dumpable
-# (its /proc entries then belong to root, so it never counts as this user's here), when its ids are
-# not all the reader's, when it holds a capability the reader lacks, or when it is in a pid namespace
-# below the reader's. Such a process is hidden on every pass, whatever it does: on sami-devbox the
-# user's systemd manager (CAP_WAKE_ALARM) and a kind cluster's metrics-server (gid 0, a nested pid
-# namespace) are, and counting them made the collector remove nothing at all (59 leftovers kept on
-# 2026-11-16). They are not counted, and each pass says which they were (COLLECT_CWDS_HIDDEN).
-# The limit is real: such a process could stand in a box's directory and the collector cannot see
-# it. A process in another pid namespace is a container's, whose cwd is in its own mount namespace,
-# where a box's host directory exists only in that box's own container, and that box is kept while
-# its container runs. Any other refusal has no reason the collector can name: COLLECT_CWDS_UNREAD
-# then says so, and the collector removes no box that pass. A walk that found no process at all saw
-# nothing (the collector's own process is always one), and says so the same way.
+# A process of this user whose cwd the kernel refuses (ptrace access mode READ, which the fd and exe
+# links share) to every reader without CAP_SYS_PTRACE is one of these. In a pid namespace below the
+# reader's, it is a container's: its cwd is in its own mount namespace, where a box's host directory
+# exists only in that box's own container, which keeps the box while it runs. The user's systemd
+# manager, known by its own cgroup (user@<uid>.service/init.scope, which /proc shows anyone), stands
+# in `/` and holds CAP_WAKE_ALARM. Those two are not counted, and each pass names them
+# (COLLECT_CWDS_HIDDEN): on sami-devbox the manager and a kind cluster's metrics-server are always
+# there, and counting them kept all 59 leftovers on 2026-11-16. Any other hidden process of this user
+# can stand in a box's directory (a `newgrp docker` shell has other gids, a program with file
+# capabilities holds capabilities the user lacks), so COLLECT_CWDS_UNREAD says which it is, and the
+# collector removes no box that pass. A walk that found no process at all saw nothing (the
+# collector's own process is always one), and says so the same way. One limit stays: a process that
+# is not dumpable (a setgid program, gpg-agent, forward) has a /proc entry root owns, so it is taken
+# for another user's and not counted.
 COLLECT_CWDS=()
 COLLECT_CWDS_UNREAD=""
 COLLECT_CWDS_HIDDEN=()
 collect_read_cwds() {
-    local p owner cwd me n=0 self why
+    local p owner cwd me n=0 self why path kind
     COLLECT_CWDS=() COLLECT_CWDS_UNREAD="" COLLECT_CWDS_HIDDEN=()
     me="$(id -u)"
     self="$(collect_status /proc/self/status)"
@@ -3092,17 +3098,28 @@ collect_read_cwds() {
             # Gone since the walk listed it: it stands nowhere.
             if [[ "$owner" == "$me" && -e "$PROC/$p" ]]; then
                 why="$(collect_hidden_why "$(collect_status "$PROC/$p/status")" "$self")"
-                if [[ -n "$why" ]]; then
+                if [[ "$why" == "it is in another pid namespace" ]]; then
                     COLLECT_CWDS_HIDDEN+=("process $p ($why)")
+                elif [[ "$(cat "$PROC/$p/cgroup" 2>/dev/null)" == "0::/user.slice/user-$me.slice/user@$me.service/init.scope" ]]; then
+                    COLLECT_CWDS_HIDDEN+=("process $p (it is this user's systemd manager)")
                 else
-                    COLLECT_CWDS_UNREAD="process $p's working directory could not be read"
+                    COLLECT_CWDS_UNREAD="process $p's working directory could not be read (${why:-the kernel gave no reason the collector can name})"
                 fi
             fi
             continue
         fi
-        COLLECT_CWDS+=("$p"$'\t'"$cwd")
+        COLLECT_CWDS+=("$p"$'\t'cwd$'\t'"$cwd")
     done < <(find "$PROC"/[0-9]*/cwd -maxdepth 0 -printf '%p\t%U\t%l\n' 2>/dev/null || true)
     (( n )) || COLLECT_CWDS_UNREAD="the walk of $PROC found no process"
+    # A link the kernel refuses reads empty and is left out: its process is the cwd walk's to judge.
+    while IFS=$'\t' read -r p path; do
+        [[ "$path" == /* ]] || continue
+        kind=fd
+        [[ "$p" == */exe ]] && kind=exe
+        p="${p#"$PROC"/}"
+        p="${p%%/*}"
+        COLLECT_CWDS+=("$p"$'\t'"$kind"$'\t'"${path% (deleted)}")
+    done < <(find "$PROC"/[0-9]*/fd "$PROC"/[0-9]*/exe -maxdepth 1 -printf '%p\t%l\n' 2>/dev/null || true)
 }
 
 # collect_unreadable_owner PATH: the uid that owns PATH when that is not this user, for a path find
@@ -3126,33 +3143,38 @@ collect_status() {
 
 # collect_hidden_why TARGET SELF: the reason the kernel refuses the reader SELF the cwd of the process
 # TARGET (both collect_status lines), or nothing when none of its rules applies (__ptrace_may_access
-# and cap_ptrace_access_check, mode READ): the target's real, effective and saved uid must each be the
-# reader's filesystem uid, and the same for gids; its permitted capabilities must be a subset of the
-# reader's; and a target in a pid namespace below the reader's is a container's.
+# and cap_ptrace_access_check, mode READ): a target in a pid namespace below the reader's is a
+# container's (asked first, since a container's process also has ids and capabilities of its own);
+# the target's real, effective and saved uid must each be the reader's filesystem uid, and the same
+# for gids; and its permitted capabilities must be a subset of the reader's.
 collect_hidden_why() {
     local tu tg tc tn su sg sc sn a b c _
     [[ -n "$1" && -n "$2" ]] || return 0
     IFS='|' read -r tu tg tc tn <<<"$1"
     IFS='|' read -r su sg sc sn <<<"$2"
+    if (( tn > sn )); then echo "it is in another pid namespace"; return 0; fi
     read -r a b c _ <<<"$tu"
     [[ "$a" == "${su##* }" && "$b" == "${su##* }" && "$c" == "${su##* }" ]] || { echo "its ids are not all this user's"; return 0; }
     read -r a b c _ <<<"$tg"
     [[ "$a" == "${sg##* }" && "$b" == "${sg##* }" && "$c" == "${sg##* }" ]] || { echo "its ids are not all this user's"; return 0; }
     [[ "$tc" =~ ^[0-9a-f]{1,16}$ && "$sc" =~ ^[0-9a-f]{1,16}$ ]] || return 0
-    if (( (16#$tc & ~16#$sc) != 0 )); then echo "it holds a capability this user lacks"; return 0; fi
-    if (( tn > sn )); then echo "it is in another pid namespace"; fi
+    if (( (16#$tc & ~16#$sc) != 0 )); then echo "it holds a capability this user lacks"; fi
 }
 
-# collect_holder BOX: the pid of a process that stands in BOX's directory or run dir, other than
-# its own tmux relay unit's.
+# collect_holder BOX: "<pid>\t<what>" for a process whose working directory, an open file or the
+# program it runs is under BOX's directory or run dir, other than its own tmux relay unit's.
 collect_holder() {
-    local e pid cwd
+    local e pid kind path
     for e in ${COLLECT_CWDS[@]+"${COLLECT_CWDS[@]}"}; do
-        pid="${e%%$'\t'*}" cwd="${e#*$'\t'}"
-        [[ -n "$cwd" ]] || continue
-        move_within "$cwd" "$BOXES/$1" || move_within "$cwd" "$RUN_BASE/$1" || continue
+        IFS=$'\t' read -r pid kind path <<<"$e"
+        [[ -n "$path" ]] || continue
+        move_within "$path" "$BOXES/$1" || move_within "$path" "$RUN_BASE/$1" || continue
         grep -qsF "agentbox-tmux-$1.service" "$PROC/$pid/cgroup" && continue
-        printf '%s\n' "$pid"
+        case "$kind" in
+            fd) printf '%s\tholds a file in it open\n' "$pid" ;;
+            exe) printf '%s\truns a program from it\n' "$pid" ;;
+            *) printf '%s\thas its working directory in it\n' "$pid" ;;
+        esac
         return 0
     done
     return 1
@@ -3258,7 +3280,7 @@ collect_box() {
         return 1
     fi
     if pid="$(collect_holder "$box")"; then
-        collect_not_removed "$box" "$names" "process $pid has its working directory in it"
+        collect_not_removed "$box" "$names" "process ${pid%%$'\t'*} ${pid#*$'\t'}"
         return 1
     fi
     if [[ -n "$names" ]]; then
