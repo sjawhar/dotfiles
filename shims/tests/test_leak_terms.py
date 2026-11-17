@@ -191,8 +191,12 @@ class LeakTestCase(unittest.TestCase):
         environment = os.environ if env is None else env
         # systemd-run runs with this process's environment, which reaches the user manager and, in a box, finds the
         # shim's tools; env -i then gives ARGV exactly ENVIRONMENT and finds ARGV[0] on its PATH, as Popen would.
+        # The description replaces the unit's default one, the whole command line: with the environment in it each
+        # "Started run-u….scope" journal line was about 15 KB, 99% of the user journal's bytes while this suite ran,
+        # and the journal kept only about 18 hours (sami-devbox, 2026-11-17). shims/systemd-run ignores it in a box.
         command = [
-            scope_runner(), "--user", "--scope", "--quiet", "--collect", "-p", f"TasksMax={self.task_limit}", "--",
+            scope_runner(), "--user", "--scope", "--quiet", "--collect",
+            f"--description=test_leak_terms {Path(os.fspath(argv[0])).name}", "-p", f"TasksMax={self.task_limit}", "--",
             "/usr/bin/env", "-i", *(f"{name}={value}" for name, value in environment.items()), *argv,
         ]
         process = subprocess.Popen(
