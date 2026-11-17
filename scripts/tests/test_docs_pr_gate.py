@@ -58,9 +58,35 @@ class DocsPrGateTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def gate(self, *args, files=(), **env):
+        """The gate on `gh pr create ARGS…`."""
+        return self.gate_argv("pr", "create", *args, files=files, **env)
+
+    def gate_argv(self, *argv, files=(), **env):
+        """The gate on the whole gh command line ARGV, as shims/gh hands it over."""
         self.env["STUB_FILES"] = "\n".join(files)
         self.env.update(env)
-        return subprocess.run([str(GATE), *args], env=self.env, capture_output=True, text=True, check=False)
+        return subprocess.run([str(GATE), *argv], env=self.env, capture_output=True, text=True, check=False)
+
+    def test_options_before_the_command_or_its_verb_are_read_as_gh_reads_them(self):
+        # `gh -R o/r pr create` is a pull request too: the shim matched only `pr create` as its first two arguments.
+        for argv in (["-R", REPO, "pr", "create", "--head", "sami/postmortem"],
+                     ["pr", "--repo", REPO, "create", "-Hsami/postmortem"],
+                     ["pr", "new", f"-R{REPO}", "--head=sami/postmortem"],
+                     ["pr", "create", "-dH", "sami/postmortem", f"--repo={REPO}"],
+                     ["pr", "create", "--title", "-R", "-R", REPO, "--head", "sami/postmortem"]):
+            with self.subTest(argv=argv):
+                result = self.gate_argv(*argv, files=["docs/solutions/x.md"])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"compare/main...sami/postmortem", self.log.read_text(encoding="utf-8"))
+                self.log.unlink()
+
+    def test_a_call_that_is_not_pr_create_is_never_judged(self):
+        for argv in (["pr", "view", "-R", REPO], ["issue", "create", "-R", REPO, "--title", "create"],
+                     ["-R", REPO, "pr", "comment", "1", "--body", "create"], ["api", "repos/x/y/pulls", "-f", "title=pr create"]):
+            with self.subTest(argv=argv):
+                result = self.gate_argv(*argv, files=["docs/solutions/x.md"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.log.exists(), "the gate read GitHub for a call that is no pull request")
 
     def test_docs_only_pr_from_an_ordinary_branch_is_refused_with_todays_batch_name(self):
         result = self.gate("--repo", REPO, "--head", "sami/postmortem", files=["docs/solutions/x.md", ".claude/skills/a/SKILL.md"])
@@ -111,6 +137,63 @@ class DocsPrGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"compare/main...sami/postmortem", self.log.read_text(encoding="utf-8"))
+
+
+class ShimHandsTheGateEveryPullRequest(unittest.TestCase):
+    """shims/gh, in an agent session, gives the gate `gh -R o/r pr create` as well as `gh pr create -R o/r`. Its
+    checkout here is this one with a stub gate that records its argv and refuses, so nothing reaches GitHub."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        dotfiles = Path(__file__).resolve().parents[2]
+        fake = root / "dotfiles"
+        (fake / "scripts").mkdir(parents=True)
+        for entry in dotfiles.iterdir():
+            if entry.name != "scripts":
+                (fake / entry.name).symlink_to(entry)
+        for entry in (dotfiles / "scripts").iterdir():
+            if entry.name != "docs-pr-gate":
+                (fake / "scripts" / entry.name).symlink_to(entry)
+        self.gate_log = root / "gate.log"
+        gate = fake / "scripts" / "docs-pr-gate"
+        gate.write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" >> {self.gate_log}\nexit 1\n', encoding="utf-8")
+        gate.chmod(0o755)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        self.gh_log = root / "gh.log"
+        for name, body in (("gh", f'printf "%s\\n" "$*" >> {self.gh_log}'), ("gh-app-token", "echo app")):
+            (bin_dir / name).write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
+            (bin_dir / name).chmod(0o755)
+        self.gh = dotfiles / "shims" / "gh"
+        self.env = {
+            **{k: v for k, v in os.environ.items() if not k.startswith(("GIT_CONFIG_", "GH_", "PUBLIC_LEAK_CHECK"))},
+            "PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"), "TMPDIR": str(root), "DOTFILES_DIR": str(fake),
+            "OMP_SESSION_ID": "01a0fa64-b3a5-7415-b143-c2a338b5da8b", "PUBLIC_LEAK_CHECK": "/bin/true",
+            "KNIVES_GH_BYPASS": "1", "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0",
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_shim(self, *argv):
+        return subprocess.run([str(self.gh), *argv], env=self.env, cwd=self.tmp.name, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=240, check=False)
+
+    def test_a_pull_request_with_options_before_its_command_reaches_the_gate(self):
+        for argv in (["-R", REPO, "pr", "create", "--head", "x", "--title", "t", "--body", "b"],
+                     ["pr", "create", "-R", REPO, "--head", "x", "--title", "t", "--body", "b"]):
+            with self.subTest(argv=argv):
+                self.gate_log.unlink(missing_ok=True)
+                result = self.run_shim(*argv)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(self.gate_log.read_text(encoding="utf-8").splitlines(), [" ".join(argv)])
+                self.assertFalse(self.gh_log.exists(), "gh ran although the gate refused")
+        # Control: a call that is no pull request never starts the gate.
+        self.gate_log.unlink(missing_ok=True)
+        self.assertEqual(self.run_shim("-R", REPO, "pr", "view", "1").returncode, 0)
+        self.assertFalse(self.gate_log.exists())
 
 
 if __name__ == "__main__":

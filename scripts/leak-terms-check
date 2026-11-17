@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Check diffs, commit messages, and outgoing commits against the encrypted leak-term list."""
+"""Check diffs, commit messages, outgoing commits and the text a gh call sends against the encrypted leak-term list."""
 from __future__ import annotations
 
 import argparse
 import codecs
+import fnmatch
+import glob
 import json
 import os
 import pwd
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import threading
 import sys
+import tomllib
 from functools import lru_cache
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
@@ -167,8 +172,95 @@ def list_error(message: str) -> ListError:
     return ListError(f"leak terms: {message}")
 
 
-def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
-    """Decrypt and parse the list, retaining every term only in process memory."""
+@dataclass(frozen=True)
+class Scope:
+    """The repositories a scoped term list is for. LABEL names the list in a refusal (`cybermonklabs/*`, `knives
+    oh-my-pi`); PATTERNS are `owner/name` patterns with shell wildcards, letter case ignored."""
+
+    label: str
+    patterns: tuple[str, ...]
+
+    def reaches(self, repositories: Sequence[str]) -> bool:
+        """Whether one of REPOSITORIES (`owner/name`) is the scope's; an empty string, a repository nobody could
+        name, may be any repository, so it is every scope's."""
+        return any(
+            not repository or any(fnmatch.fnmatchcase(repository.lower(), pattern.lower()) for pattern in self.patterns)
+            for repository in repositories
+        )
+
+
+# Every scope: a repository nobody could name.
+EVERY_REPOSITORY = ("",)
+
+
+def term_lines(block: str) -> list[str]:
+    """The terms of a block of lines: each line stripped, without blank lines and `#` lines."""
+    terms = [line.strip() for line in block.splitlines()]
+    return [line for line in terms if line and not line.startswith("#")]
+
+
+def knives_registry_directory(environment: Mapping[str, str]) -> Path | None:
+    """The directory of knives's fork registry (repos.toml and the private repos.local.toml beside it):
+    DOTFILES_LEAK_TERMS_KNIVES_DIR, else knives's own ~/.config/knives under XDG_CONFIG_HOME or HOME, else under the
+    uid's passwd home, which a caller's HOME does not move. None on a machine with no registry."""
+    if environment.get("DOTFILES_LEAK_TERMS_KNIVES_DIR"):
+        return Path(environment["DOTFILES_LEAK_TERMS_KNIVES_DIR"])
+    candidates = []
+    if environment.get("XDG_CONFIG_HOME"):
+        candidates.append(Path(environment["XDG_CONFIG_HOME"]) / "knives")
+    if environment.get("HOME"):
+        candidates.append(Path(environment["HOME"]) / ".config" / "knives")
+    candidates.append(passwd_home() / ".config" / "knives")
+    return next((directory for directory in candidates if (directory / "repos.toml").is_file()), None)
+
+
+def repository_name(url: str) -> str:
+    """The repository name a URL ends in: `oh-my-pi` of https://github.com/can1357/oh-my-pi.git."""
+    return url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1].removesuffix(".git").lower()
+
+
+def knives_forbidden(environment: Mapping[str, str]) -> list[tuple[Scope, list[str]]]:
+    """The `forbidden` list of each entry of knives's fork registry, repos.toml's then repos.local.toml's (knives adds
+    the private file's values to the entries it names), each for every repository named as the entry's upstream,
+    origin or release, whatever its owner: a fork keeps its upstream's name, and oh-my-pi's fork moved from sjawhar to
+    cybermonklabs while the registry still names sjawhar. A machine with no registry has no such list; a registry that
+    cannot be read refuses, as the encrypted list does."""
+    directory = knives_registry_directory(environment)
+    if directory is None:
+        return []
+    entries: dict[str, tuple[list[str], list[str]]] = {}
+    for name in ("repos.toml", "repos.local.toml"):
+        path = directory / name
+        if not path.exists():
+            continue
+        problem = f"the knives registry {path} is not a [repos.<name>] table whose forbidden values are strings"
+        try:
+            repos = tomllib.loads(path.read_text(encoding="utf-8")).get("repos", {})
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            raise list_error(f"the knives registry {path} cannot be read; fix it or run installers/knives.sh") from error
+        if not isinstance(repos, dict) or not all(isinstance(entry, dict) for entry in repos.values()):
+            raise list_error(problem)
+        for key, entry in repos.items():
+            forbidden = entry.get("forbidden", [])
+            if not isinstance(forbidden, list) or not all(isinstance(term, str) for term in forbidden):
+                raise list_error(problem)
+            terms, urls = entries.setdefault(key, ([], []))
+            terms += [term.strip() for term in forbidden if term.strip()]
+            urls += [entry[role] for role in ("upstream", "origin", "release") if isinstance(entry.get(role), str)]
+    return [
+        (Scope(f"knives {key}", tuple(sorted({f"*/{repository_name(url)}" for url in urls}))), terms)
+        for key, (terms, urls) in entries.items()
+        if terms and urls
+    ]
+
+
+def load_terms(environment: Mapping[str, str] | None = None, repositories: Sequence[str] = (),
+               registry: bool = False) -> "TermMatcher":
+    """Decrypt and parse the list, retaining every term only in process memory. The `terms` block is for every
+    repository. The list's `scoped` map, of repository patterns (`cybermonklabs/*`) to blocks of lines, holds terms for
+    the repositories a pattern matches only; with REGISTRY, so do the `forbidden` lists of knives's fork registry
+    (knives_forbidden). A scoped list is read when its scope reaches one of REPOSITORIES (Scope.reaches): a commit has
+    no repository, so it reads `terms` alone, and a push or gh text names where it goes."""
     environment = dict(os.environ if environment is None else environment)
     source = term_file(environment)
     if not source.is_file():
@@ -212,32 +304,90 @@ def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
         raise list_error("the term list is not a block of lines; fix it with sops edit leak-terms.sops.yaml") from error
     if not isinstance(terms_value, str):
         raise list_error("the term list is not a block of lines; fix it with sops edit leak-terms.sops.yaml")
-    terms = [line.strip() for line in terms_value.splitlines()]
-    terms = [line for line in terms if line and not line.startswith("#")]
+    terms = term_lines(terms_value)
     if not terms:
         raise list_error("the term list holds no term; add a term with sops edit leak-terms.sops.yaml")
-    return TermMatcher(terms)
+    scoped_value = decoded.get("scoped", {})
+    if not isinstance(scoped_value, dict) or not all(isinstance(block, str) for block in scoped_value.values()):
+        raise list_error(
+            "the scoped term lists are not a map of repository patterns to blocks of lines; "
+            "fix it with sops edit leak-terms.sops.yaml"
+        )
+    scoped: list[tuple[Scope, list[str]]] = []
+    for pattern, block in scoped_value.items():
+        if not term_lines(block):
+            raise list_error(f"the scoped term list {pattern} holds no term; fix it with sops edit leak-terms.sops.yaml")
+        scoped.append((Scope(pattern, (pattern,)), term_lines(block)))
+    if registry:
+        scoped += knives_forbidden(environment)
+    allowed_value = decoded.get("allowed", {})
+    if not isinstance(allowed_value, dict) or not all(isinstance(block, str) for block in allowed_value.values()):
+        raise list_error(
+            "the allowed tokens are not a map of repository patterns to blocks of lines; "
+            "fix it with sops edit leak-terms.sops.yaml"
+        )
+    allowed = [(pattern, term_lines(block)) for pattern, block in allowed_value.items()]
+    return TermMatcher(
+        terms,
+        [(scope, listed) for scope, listed in scoped if scope.reaches(repositories)],
+        allowed,
+        # Where the text goes, when it is known: a push names one destination, so a token allowed there is no
+        # match. gh text reaches every scope until its targets are read (gh_check), so it keeps the matches.
+        None if tuple(repositories) == EVERY_REPOSITORY else repositories,
+    )
 
 
 @dataclass(frozen=True)
 class Span:
     start: int
     end: int
+    # The matched term's place in its list: 1 for its first term, counting neither blank lines nor `#` lines, and the
+    # label of a scoped list's Scope ("" for the list every repository has). A refusal may name both, since they tell
+    # the list's owner which term it is and tell nobody else anything.
+    term: int = field(default=0, compare=False)
+    scope: str = field(default="", compare=False)
+    # The repository patterns of the `allowed` tokens this match lies inside.
+    allowed_in: tuple[str, ...] = field(default=(), compare=False)
+
+    def label(self) -> str:
+        return f"{self.term} of {self.scope}" if self.scope else str(self.term)
+
+    def allowed_for(self, repository: str) -> bool:
+        """Whether an allowed token of REPOSITORY (`owner/name`) holds the match; a repository nobody could name has
+        no allowed token."""
+        return bool(repository) and any(fnmatch.fnmatchcase(repository.lower(), pattern.lower())
+                                        for pattern in self.allowed_in)
+
+
+def allowed_token(token: str) -> re.Pattern[str]:
+    """An allowed token as it must stand in a text: exactly, letter case included, and whole, with no character of a
+    name (a letter, a digit, `.`, `_`, `-`, `/`, or `@` before it) on either side, so `@scope/package` allows neither
+    `@scope/other` nor `@scope/package-more`."""
+    return re.compile(r"(?<![A-Za-z0-9._@/-])" + re.escape(token) + r"(?![A-Za-z0-9._/-])")
 
 
 class TermMatcher:
-    """Case-folded, whitespace-flexible matching while keeping source-string positions."""
+    """Case-folded, whitespace-flexible matching while keeping source-string positions. SCOPED holds (Scope, terms) for
+    each scoped list read, and `scopes` maps each label to its Scope. A term two lists hold matches once for each,
+    since each list says where its terms may not go. ALLOWED holds (repository pattern, tokens): a match inside such
+    a token is not a term in that repository (a third-party name that holds one), and with REPOSITORIES, the places a
+    text goes, a match every one of them allows is dropped; otherwise each match says where it is allowed."""
 
-    def __init__(self, terms: Sequence[str]):
-        patterns: list[re.Pattern[str]] = []
-        seen: set[str] = set()
-        for term in terms:
-            pieces = re.split(r"[ \t]+", term.casefold())
-            pattern = r"[ \t]+".join(re.escape(piece) for piece in pieces)
-            if pattern and pattern not in seen:
-                patterns.append(re.compile(pattern))
-                seen.add(pattern)
+    def __init__(self, terms: Sequence[str], scoped: Sequence[tuple[Scope, Sequence[str]]] = (),
+                 allowed: Sequence[tuple[str, Sequence[str]]] = (), repositories: Sequence[str] | None = None):
+        patterns: list[tuple[re.Pattern[str], int, str]] = []
+        seen: set[tuple[str, str]] = set()
+        self.scopes = {scope.label: scope for scope, _ in scoped}
+        for label, listed in (("", terms), *((scope.label, listed) for scope, listed in scoped)):
+            for number, term in enumerate(listed, start=1):
+                pieces = re.split(r"[ \t]+", term.casefold())
+                pattern = r"[ \t]+".join(re.escape(piece) for piece in pieces)
+                if pattern and (label, pattern) not in seen:
+                    patterns.append((re.compile(pattern), number, label))
+                    seen.add((label, pattern))
         self._patterns = patterns
+        self._allowed = [(pattern, allowed_token(token)) for pattern, tokens in allowed for token in tokens]
+        self._repositories = tuple(repositories) if repositories else ()
 
     @staticmethod
     def _origins(text: str) -> list[int]:
@@ -249,13 +399,72 @@ class TermMatcher:
 
     def spans(self, text: str) -> list[Span]:
         folded = text.casefold()
-        matches = [match for pattern in self._patterns for match in pattern.finditer(folded) if match.start() != match.end()]
+        matches = [
+            (match, number, scope)
+            for pattern, number, scope in self._patterns
+            for match in pattern.finditer(folded)
+            if match.start() != match.end()
+        ]
         if not matches:
             return []
-        # Only a text that holds a term pays for the per-character offset map.
+        # Only a text that holds a term pays for the per-character offset map and the allowed tokens.
         origins = self._origins(text)
-        found = [Span(origins[match.start()], origins[match.end() - 1] + 1) for match in matches]
+        tokens = [(pattern, token.start(), token.end()) for pattern, regex in self._allowed
+                  for token in regex.finditer(text)]
+        found = []
+        for match, number, scope in matches:
+            start, end = origins[match.start()], origins[match.end() - 1] + 1
+            allowed_in = tuple(sorted({pattern for pattern, first, last in tokens if first <= start and end <= last}))
+            span = Span(start, end, number, scope, allowed_in)
+            if self._repositories and all(span.allowed_for(repository) for repository in self._repositories):
+                continue
+            found.append(span)
         return sorted(found, key=lambda span: (span.start, span.end))
+
+
+# The files whose lines are prose, which GitHub renders as paragraphs. Every other file is code, read a line at a time:
+# code is not reflowed, and joining its lines would refuse words that no reader sees side by side.
+PROSE_SUFFIXES = (".md", ".mdx", ".txt", ".rst")
+
+
+def is_prose(path: str) -> bool:
+    """Whether PATH names a prose file (PROSE_SUFFIXES, letter case ignored)."""
+    return path.lower().endswith(PROSE_SUFFIXES)
+
+
+def paragraph_view(text: str) -> str:
+    """TEXT as GitHub renders prose, in a string of the same length: each whitespace character inside a paragraph is a
+    space, so a term of several words that a soft line break, a CRLF or a no-break space splits matches, and each line
+    break that begins or ends a blank line stays, so a term split over two paragraphs does not."""
+    lines = re.sub(r"[^\S\n]", " ", text).split("\n")
+    pieces = [lines[0]]
+    for previous, line in zip(lines, lines[1:]):
+        pieces += [" " if previous.strip() and line.strip() else "\n", line]
+    return "".join(pieces)
+
+
+def line_spans(lines: Sequence[tuple[int, str]], matcher: TermMatcher, prose: bool) -> list[tuple[int, Span]]:
+    """(line number, match) for each listed term in LINES, (number, text) pairs in order: each line alone, or for PROSE
+    each run of lines with consecutive numbers read as paragraphs (paragraph_view). Until 2026-11-17 every line was
+    read alone, so a term a wrapped line split went into a commit message or a Markdown file unread."""
+    if not prose:
+        return [(number, span) for number, line in lines for span in matcher.spans(line)]
+    found: list[tuple[int, Span]] = []
+    run: list[tuple[int, str]] = []
+
+    def flush() -> None:
+        if run:
+            text = "\n".join(line for _, line in run)
+            found.extend((run[0][0] + text.count("\n", 0, span.start), span)
+                         for span in matcher.spans(paragraph_view(text)))
+            run.clear()
+
+    for number, line in lines:
+        if run and number != run[-1][0] + 1:
+            flush()
+        run.append((number, line))
+    flush()
+    return found
 
 
 def c_escape(text: str) -> str:
@@ -479,13 +688,16 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             record.resolved = True
             record.shown = None
 
-    def add_content(record: FileRecord, line_number: int, content: str) -> None:
+    def add_contents(record: FileRecord, added: Sequence[tuple[int, str]]) -> None:
+        """A hunk's added lines, (new line number, text): a prose file's read as paragraphs, any other a line at a
+        time (line_spans)."""
+        if not added:
+            return
         if not record.resolved:
             raise TextError("cannot resolve a result path from the diff header")
-        content_spans = matcher.spans(content)
-        if content_spans:
-            place = f"{place_prefix}{display_path(record)}:{line_number}"
-            findings.extend(place for _ in content_spans)
+        assert record.path is not None
+        findings.extend(f"{place_prefix}{display_path(record)}:{line_number}"
+                        for line_number, _ in line_spans(added, matcher, is_prose(record.path)))
 
     def consume_unified(start: int, record: FileRecord) -> int:
         parsed = parse_unified_hunk(lines[start])
@@ -493,6 +705,7 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             raise TextError("malformed unified hunk")
         (old_line, old_count), (new_line, new_count) = parsed
         old_seen = new_seen = 0
+        added: list[tuple[int, str]] = []
         index = start + 1
         while index < len(lines):
             line = lines[index]
@@ -509,21 +722,27 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
             if marker in "+ ":
                 new_seen += 1
                 if marker == "+":
-                    add_content(record, new_line, content)
+                    added.append((new_line, content))
                 new_line += 1
             if old_seen > old_count or new_seen > new_count:
                 raise TextError("malformed unified hunk count")
             index += 1
         if old_seen != old_count or new_seen != new_count:
             raise TextError("malformed unified hunk count")
+        add_contents(record, added)
         return index
 
     def path_line_end(start: int, marker: str, prefix: str, expected_path: str | None) -> int | None:
+        """The index after the --- or +++ line at START that names EXPECTED_PATH, else None. git C-quotes a path that
+        holds a line feed (or a tab, a quote or a backslash) on one line, whatever core.quotePath says; jj writes it
+        raw, over as many lines as it has line feeds. Until 2026-11-17 a path with a line feed was read only in jj's
+        form, so every git commit of such a file was refused as "a result path does not match the diff header"."""
         if expected_path is None:
             return start + 1 if lines[start] == f"{marker}/dev/null" else None
+        if parse_diff_path(lines[start].removeprefix(marker), prefix) == expected_path:
+            return start + 1
         if "\n" not in expected_path:
-            parsed = parse_diff_path(lines[start].removeprefix(marker), prefix)
-            return start + 1 if parsed == expected_path else None
+            return None
         expected = f"{prefix}{expected_path}"
         pieces = expected.split("\n")
         if lines[start] != f"{marker}{pieces[0]}":
@@ -621,11 +840,9 @@ def cleaned_message(text: str, cleanup: str, comment_char: str | None, cut_at_sc
 
 
 def scan_message(text: str, matcher: TermMatcher, cleanup: str, comment_char: str | None, cut_at_scissors: bool, place: str) -> list[str]:
+    """A commit, tag or jj message, cleaned as git or jj cleans it, read as prose (line_spans)."""
     lines = cleaned_message(text, cleanup, comment_char, cut_at_scissors)
-    findings: list[str] = []
-    for line_number, line in enumerate(lines, start=1):
-        findings.extend(f"{place} line {line_number}" for _ in matcher.spans(line))
-    return findings
+    return [f"{place} line {number}" for number, _ in line_spans(list(enumerate(lines, start=1)), matcher, True)]
 
 
 def print_findings(findings: Sequence[str]) -> None:
@@ -1577,9 +1794,8 @@ def scan_outgoing_merges(merges: Mapping[str, Sequence[str]], matcher: TermMatch
                 if every_file_text or b"\0" not in contents[source][:8000]:
                     held.update(newline_lines(contents[source].decode("utf-8", errors="surrogateescape")))
             content = contents[result].decode("utf-8", errors="surrogateescape")
-            for line_number, line in enumerate(newline_lines(content), start=1):
-                if line not in held:
-                    findings.extend(f"{prefix}{shown}:{line_number}" for _ in matcher.spans(line))
+            own = [(number, line) for number, line in enumerate(newline_lines(content), start=1) if line not in held]
+            findings.extend(f"{prefix}{shown}:{number}" for number, _ in line_spans(own, matcher, is_prose(path)))
 
 
 def scan_outgoing_commits(commits: Sequence[str], matcher: TermMatcher) -> list[str]:
@@ -1790,7 +2006,7 @@ def scan_outgoing_objects(
         for object_id, kind in objects.items()
         if kind == "tree" and object_id not in destination_objects and object_id not in commit_objects
     )
-    folder_files: list[tuple[str, str]] = []
+    folder_files: list[tuple[str, str, str]] = []
     findings: list[str] = []
     for folder in folders:
         # The places are the ones the commit check names for a commit that adds the same files: each file's whole
@@ -1806,34 +2022,43 @@ def scan_outgoing_objects(
             shown = mask_path(path, spans)
             findings.extend(shown for _ in spans)
             if kind == "blob" and path_object not in destination_objects and path_object not in commit_objects:
-                folder_files.append((path_object, shown))
+                folder_files.append((path_object, shown, path))
 
-    content_ids = sorted(files | {object_id for object_id, _ in folder_files})
+    content_ids = sorted(files | {object_id for object_id, _, _ in folder_files})
     contents = blob_objects(content_ids)
+    # A file object pushed with no path has no kind, so it is read as code, a line at a time.
     for object_id in sorted(files):
         content = contents[object_id]
         if b"\0" not in content[:8000]:
-            findings.extend(
-                scan_message(
-                    content.decode("utf-8", errors="surrogateescape"),
-                    matcher,
-                    "verbatim",
-                    None,
-                    False,
-                    f"object {object_id[:12]}",
-                )
-            )
-    for object_id, shown in folder_files:
+            lines = list(enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1))
+            findings.extend(f"object {object_id[:12]} line {number}" for number, _ in line_spans(lines, matcher, False))
+    for object_id, shown, path in folder_files:
         content = contents[object_id]
         if b"\0" in content[:8000]:
             continue
-        for line_number, line in enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1):
-            findings.extend(f"{shown}:{line_number}" for _ in matcher.spans(line))
+        lines = list(enumerate(newline_lines(content.decode("utf-8", errors="surrogateescape")), start=1))
+        findings.extend(f"{shown}:{number}" for number, _ in line_spans(lines, matcher, is_prose(path)))
     return findings
 
 
+def repository_of(url: str) -> list[str]:
+    """The repositories a URL can be, for the scoped lists: [`owner/name`] as scripts/github-repo-visibility --slug
+    reads it, nothing for a URL that is not GitHub's, and every repository (EVERY_REPOSITORY) for one it cannot read."""
+    helper = Path(__file__).resolve().parent / "github-repo-visibility"
+    try:
+        completed = subprocess.run([str(helper), "--slug", url], stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return list(EVERY_REPOSITORY)
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or value in ("", "unknown") or "/" not in value and value != "not-github":
+        return list(EVERY_REPOSITORY)
+    return [] if value == "not-github" else [value]
+
+
 def scan_push(text: str, remote: str, url: str) -> list[str]:
-    """Scan outgoing commits, tags, direct file and folder objects, and created or updated ref names."""
+    """Scan outgoing commits, tags, direct file and folder objects, and created or updated ref names, against the list
+    every repository has and each scoped list whose scope reaches the destination URL."""
     local, prior_remote = push_updates(text)
     if not local:
         return []
@@ -1842,7 +2067,7 @@ def scan_push(text: str, remote: str, url: str) -> list[str]:
     held = local_object_ids([*advertised, *prior_remote])
     commits = outgoing_commit_ids([object_id for _, object_id in local], sorted(held))
     tags, objects = outgoing_tag_messages(local, [*advertised, *prior_remote], held)
-    matcher = load_terms()
+    matcher = load_terms(repositories=repository_of(url))
     findings = scan_outgoing_commits(commits, matcher)
     for name, message in tags:
         place = f"tag {mask_path(name, matcher.spans(name))} message"
@@ -1855,6 +2080,906 @@ def scan_push(text: str, remote: str, url: str) -> list[str]:
             shown = mask_path(name, spans)
             findings.extend(f"ref {shown}" for _ in spans)
     return findings
+
+
+# The text a gh call sends to GitHub, read before gh runs. shims/gh hands this check every call that can carry text, as
+# `gh -- ARGV…`, on the pass that runs gh (shims/AGENTS.md). Until 2026-11-17 nothing read that text, and an agent's
+# `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in the body's edit history,
+# which only an admin can delete (dispatch://INFRA-4102).
+
+# A call that reads text from standard input exits so when GH_STDIN is not set. shims/gh then reads its stdin into a
+# private unlinked file, runs the check again with GH_STDIN naming that open file (/dev/fd/N), and gives gh the same
+# bytes when the check passes.
+GH_STDIN_EXIT = 7
+GH_STDIN = "DOTFILES_LEAK_TERMS_GH_STDIN"
+# Every gh command that sends text, with its options as `gh <command> <subcommand> --help` lists them at gh 2.98.0, the
+# version mise.toml pins: (the options that take a value, the options that take none), a short and a long spelling
+# joined by `/`. shims/tests/test_gh_leak_terms.py compares the tables with the gh on PATH, so an upgrade that adds an
+# option fails that test until the table has it. `gh api` is ("api", "").
+GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
+    ("pr", "create"): (
+        "-a/--assignee -B/--base -b/--body -F/--body-file -H/--head -l/--label -m/--milestone -p/--project "
+        "--recover -r/--reviewer -T/--template -t/--title -R/--repo",
+        "-d/--draft --dry-run -e/--editor -f/--fill --fill-first --fill-verbose --no-maintainer-edit -w/--web "
+        "--help",
+    ),
+    ("pr", "edit"): (
+        "--add-assignee --add-label --add-project --add-reviewer -B/--base -b/--body -F/--body-file "
+        "-m/--milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t/--title -R/--repo",
+        "--remove-milestone --help",
+    ),
+    ("pr", "comment"): (
+        "-b/--body -F/--body-file -R/--repo",
+        "--create-if-none --delete-last --edit-last -e/--editor -w/--web --yes --help",
+    ),
+    ("pr", "review"): (
+        "-b/--body -F/--body-file -R/--repo",
+        "-a/--approve -c/--comment -r/--request-changes --help",
+    ),
+    ("pr", "merge"): (
+        "-A/--author-email -b/--body -F/--body-file --match-head-commit -t/--subject -R/--repo",
+        "--admin --auto -d/--delete-branch --disable-auto -m/--merge -r/--rebase -s/--squash --help",
+    ),
+    ("pr", "close"): (
+        "-c/--comment -R/--repo",
+        "-d/--delete-branch --help",
+    ),
+    ("pr", "reopen"): (
+        "-c/--comment -R/--repo",
+        "--help",
+    ),
+    ("pr", "revert"): (
+        "-b/--body -F/--body-file -t/--title -R/--repo",
+        "-d/--draft --help",
+    ),
+    ("issue", "create"): (
+        "-a/--assignee --blocked-by --blocking -b/--body -F/--body-file -l/--label -m/--milestone --parent "
+        "-p/--project --recover -T/--template -t/--title --type -R/--repo",
+        "-e/--editor -w/--web --help",
+    ),
+    ("issue", "edit"): (
+        "--add-assignee --add-blocked-by --add-blocking --add-label --add-project --add-sub-issue -b/--body "
+        "-F/--body-file -m/--milestone --parent --remove-assignee --remove-blocked-by --remove-blocking "
+        "--remove-label --remove-project --remove-sub-issue -t/--title --type -R/--repo",
+        "--remove-milestone --remove-parent --remove-type --help",
+    ),
+    ("issue", "comment"): (
+        "-b/--body -F/--body-file -R/--repo",
+        "--create-if-none --delete-last --edit-last -e/--editor -w/--web --yes --help",
+    ),
+    ("issue", "close"): (
+        "-c/--comment --duplicate-of -r/--reason -R/--repo",
+        "--help",
+    ),
+    ("issue", "reopen"): (
+        "-c/--comment -R/--repo",
+        "--help",
+    ),
+    ("issue", "develop"): (
+        "-b/--base --branch-repo -n/--name -R/--repo",
+        "-c/--checkout -l/--list --help",
+    ),
+    ("release", "create"): (
+        "--discussion-category -n/--notes -F/--notes-file --notes-start-tag --target -t/--title -R/--repo",
+        "-d/--draft --fail-on-no-commits --generate-notes --latest --notes-from-tag -p/--prerelease --verify-tag "
+        "--help",
+    ),
+    ("release", "edit"): (
+        "--discussion-category -n/--notes -F/--notes-file --tag --target -t/--title -R/--repo",
+        "--draft --latest --prerelease --verify-tag --help",
+    ),
+    ("release", "upload"): (
+        "-R/--repo",
+        "--clobber --help",
+    ),
+    ("discussion", "create"): (
+        "-b/--body -F/--body-file -c/--category -l/--label -R/--repo -t/--title",
+        "--help",
+    ),
+    ("discussion", "edit"): (
+        "--add-label -b/--body -F/--body-file -c/--category --remove-label -R/--repo -t/--title",
+        "--help",
+    ),
+    ("discussion", "comment"): (
+        "-b/--body -F/--body-file -R/--repo",
+        "--delete --edit --yes --help",
+    ),
+    ("label", "create"): (
+        "-c/--color -d/--description -R/--repo",
+        "-f/--force --help",
+    ),
+    ("label", "edit"): (
+        "-c/--color -d/--description -n/--name -R/--repo",
+        "--help",
+    ),
+    ("repo", "create"): (
+        "-d/--description -g/--gitignore -h/--homepage -l/--license -r/--remote -s/--source -t/--team -p/--template",
+        "--add-readme -c/--clone --disable-issues --disable-wiki --include-all-branches --internal --private "
+        "--public --push --help",
+    ),
+    ("repo", "edit"): (
+        "--add-topic --default-branch -d/--description -h/--homepage --remove-topic --squash-merge-commit-message "
+        "--visibility",
+        "--accept-visibility-change-consequences --allow-forking --allow-update-branch --delete-branch-on-merge "
+        "--enable-advanced-security --enable-auto-merge --enable-discussions --enable-issues "
+        "--enable-merge-commit --enable-projects --enable-rebase-merge --enable-secret-scanning "
+        "--enable-secret-scanning-push-protection --enable-squash-merge --enable-wiki --template --help",
+    ),
+    ("repo", "fork"): (
+        "--fork-name --org --remote-name",
+        "--clone --default-branch-only --remote --help",
+    ),
+    ("repo", "rename"): (
+        "-R/--repo",
+        "-y/--yes --help",
+    ),
+    ("gist", "create"): (
+        "-d/--desc -f/--filename",
+        "-p/--public -w/--web --help",
+    ),
+    ("gist", "edit"): (
+        "-a/--add -d/--desc -f/--filename -r/--remove",
+        "--help",
+    ),
+    ("gist", "rename"): (
+        "",
+        "--help",
+    ),
+    ("project", "create"): (
+        "--format -q/--jq --owner -t/--template --title",
+        "--help",
+    ),
+    ("project", "copy"): (
+        "--format -q/--jq --source-owner --target-owner -t/--template --title",
+        "--drafts --help",
+    ),
+    ("project", "edit"): (
+        "-d/--description --format -q/--jq --owner --readme -t/--template --title --visibility",
+        "--help",
+    ),
+    ("project", "field-create"): (
+        "--data-type --format -q/--jq --name --owner --single-select-options -t/--template",
+        "--help",
+    ),
+    ("project", "item-create"): (
+        "--body --format -q/--jq --owner -t/--template --title",
+        "--help",
+    ),
+    ("project", "item-edit"): (
+        "--body --date --field --field-id --format --id --iteration-id -q/--jq --number --owner --project-id "
+        "--single-select-option-id -t/--template --text --title --url --value",
+        "--clear --help",
+    ),
+    ("workflow", "run"): (
+        "-F/--field -f/--raw-field -r/--ref -R/--repo",
+        "--json --help",
+    ),
+    ("agent-task", "create"): (
+        "-b/--base -a/--custom-agent -F/--from-file -R/--repo",
+        "--follow --help",
+    ),
+    ("api", ""): (
+        "--cache -F/--field -H/--header --hostname --input -q/--jq -X/--method -p/--preview -f/--raw-field "
+        "-t/--template",
+        "--allow-escape-sequences -i/--include --paginate --silent --slurp --verbose --help",
+    ),
+}
+# gh's own aliases of those commands, and its top-level commands with theirs: a first word that is none of them can be
+# a gh alias of the user's (config.yml's `aliases`), which is read as the command it expands to.
+GH_GROUP_ALIASES = {"agent": "agent-task", "agent-tasks": "agent-task", "agents": "agent-task"}
+GH_SUBCOMMAND_ALIASES = {
+    ("gist", "new"): "create", ("issue", "new"): "create", ("pr", "new"): "create", ("release", "new"): "create",
+    ("repo", "new"): "create",
+}
+GH_COMMANDS = frozenset((
+    "agent", "agent-task", "agent-tasks", "agents", "alias", "api", "at", "attestation", "auth", "browse", "cache",
+    "codespace", "completion", "config", "copilot", "cs", "discussion", "ext", "extension", "extensions", "gist",
+    "gpg-key", "help", "issue", "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "rs",
+    "ruleset", "run", "search", "secret", "skill", "skills", "ssh-key", "status", "variable", "version", "workflow",
+))
+# The options whose value names a file whose text gh sends, `-` naming standard input.
+GH_FILE_OPTIONS = frozenset(("--body-file", "--notes-file", "--from-file", "--recover", "--input"))
+# A repository's URL as gh reads it: the host is the URL's host, a user and a port left out (gh's URL.Hostname()), so
+# https://x@github.com:443/o/r/pull/1 is o/r's.
+GH_REPOSITORY_URL = re.compile(r"^https?://(?:[^/@\s]*@)?(?:www\.)?github\.com(?::\d*)?/([^/\s]+)/([^/\s#?]+)",
+                               re.IGNORECASE)
+# Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time.
+GH_LOCAL_OPTIONS = frozenset((("api", "--jq"), ("api", "--template"), ("api", "--cache"), ("project", "--jq"),
+                              ("project", "--template"), ("project", "--format")))
+GH_API_REPOSITORY = re.compile(r"^/?repos/([^/?#{}]+)/([^/?#{}]+)")
+GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
+JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
+JSON_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+@dataclass(frozen=True)
+class GhText:
+    """One text a gh call sends. OPTION says where it is (an option's long name, or `argument N`) and never holds the
+    caller's text; DETAIL is the caller's own name for it (a path, a field's key), shown with each term masked. The text
+    is TEXT, or what the file PATH holds (`-`: standard input); an OPTIONAL file is read only when it can be."""
+
+    option: str
+    detail: str = ""
+    text: str | None = None
+    path: str | None = None
+    optional: bool = False
+
+    def shown(self, matcher: TermMatcher | None) -> str:
+        detail = ""
+        if self.detail:
+            detail = " " + (mask_path(self.detail, matcher.spans(self.detail)) if matcher else "<not shown>")
+        return f"{self.option}{detail}{' (standard input)' if self.path == '-' else ''}"
+
+
+def gh_options(table: tuple[str, str]) -> dict[str, bool]:
+    """Every spelling of each option of a GH_TEXT_COMMANDS entry: True for one that takes a value."""
+    return {name: takes for takes, names in ((True, table[0]), (False, table[1])) for item in names.split()
+            for name in item.split("/")}
+
+
+def gh_long_names(table: tuple[str, str]) -> dict[str, str]:
+    """The long spelling of each spelling of each option of a GH_TEXT_COMMANDS entry."""
+    return {name: item.split("/")[-1] for item in f"{table[0]} {table[1]}".split() for name in item.split("/")}
+
+
+def gh_config_directory(environment: Mapping[str, str]) -> Path:
+    """gh's configuration directory, found as gh 2.98.0 finds it (config.ConfigDir)."""
+    if environment.get("GH_CONFIG_DIR"):
+        return Path(environment["GH_CONFIG_DIR"])
+    if environment.get("XDG_CONFIG_HOME"):
+        return Path(environment["XDG_CONFIG_HOME"]) / "gh"
+    return Path(environment.get("HOME") or passwd_home()) / ".config" / "gh"
+
+
+def yaml_scalar(value: str) -> str:
+    """A one-line YAML scalar, as gh writes an alias: plain, 'single-quoted' or "double-quoted"."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
+    return re.sub(r"\s+#.*$", "", value)
+
+
+def gh_alias(word: str, environment: Mapping[str, str]) -> str | None:
+    """The expansion of the gh alias WORD in gh's config.yml, or None."""
+    try:
+        lines = (gh_config_directory(environment) / "config.yml").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    inside = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside = line.rstrip() == "aliases:"
+            continue
+        entry = re.match(r"""^\s+("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s:][^:]*?)\s*:(?:\s+(.*))?$""", line)
+        if inside and entry and yaml_scalar(entry.group(1)) == word:
+            return yaml_scalar(entry.group(2) or "")
+    return None
+
+
+def gh_expand_alias(expansion: str, arguments: Sequence[str]) -> list[str] | None:
+    """gh 2.98.0's expansion of an alias (`$1`… take the arguments, the rest follow), or None where gh refuses it."""
+    extra: list[str] = []
+    for number, argument in enumerate(arguments, start=1):
+        if "$" not in expansion:
+            extra.append(argument)
+        else:
+            expansion = expansion.replace(f"${number}", argument)
+    if re.search(r"\$\d", expansion):
+        return None
+    try:
+        return [*shlex.split(expansion), *extra]
+    except ValueError:
+        return None
+
+
+def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
+    """cobra's reading of a command word in ARGUMENTS: the first word that is neither an option nor an option's value
+    (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1` are both `gh pr comment`), and the other words, which go on
+    to the command. As cobra's stripFlags does, an option written apart from any value, but --help and --version, is
+    taken to have its value in the next word."""
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word == "--":
+            return None
+        if (word.startswith("-") and "=" not in word and word not in ("--help", "--version")
+                and (word.startswith("--") or len(word) == 2)):
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            return word, [*arguments[:index], *arguments[index + 1:]]
+    return None
+
+
+def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
+               depth: int = 0) -> tuple[str, str, list[str]] | None:
+    """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias;
+    None for any other call."""
+    found = gh_next_command(arguments)
+    if found is None:
+        return None
+    first, rest = found
+    if first not in GH_COMMANDS:
+        return gh_alias_command(first, rest, environment, depth)
+    group = GH_GROUP_ALIASES.get(first, first)
+    if group == "api":
+        return group, "", rest
+    found = gh_next_command(rest)
+    if found is None:
+        return None
+    word, rest = found
+    sub = GH_SUBCOMMAND_ALIASES.get((group, word), word)
+    if (group, sub) in GH_TEXT_COMMANDS:
+        return group, sub, rest
+    # An alias under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to. Until
+    # 2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked.
+    return gh_alias_command(f"{first} {word}", rest, environment, depth)
+
+
+def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
+                     depth: int) -> tuple[str, str, list[str]] | None:
+    """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
+    runs a shell whose own gh calls come back through shims/gh, and past three aliases in a row."""
+    expansion = gh_alias(name, environment) if depth < 3 else None
+    expanded = None if expansion is None or expansion.startswith("!") else gh_expand_alias(expansion, rest)
+    return gh_command(expanded, environment, depth + 1) if expanded else None
+
+
+def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple[str | None, str | None]]:
+    """Read ARGUMENTS as gh's flag parser (spf13/pflag) does: one (option, value) for each option given, its value None
+    when it has none, and one (None, word) for each positional argument. An option gh does not know makes gh refuse
+    the call, and is read here as one that takes no value."""
+    read: list[tuple[str | None, str | None]] = []
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        index += 1
+        if word == "--":
+            read.extend((None, rest) for rest in arguments[index:])
+            break
+        if word.startswith("--") and len(word) > 2:
+            name, attached, value = word.partition("=")
+            if attached:
+                read.append((name, value))
+            elif options.get(name) and index < len(arguments):
+                read.append((name, arguments[index]))
+                index += 1
+            else:
+                read.append((name, None))
+            continue
+        if word.startswith("-") and len(word) > 1:
+            letters = word[1:]
+            while letters:
+                name, rest = "-" + letters[0], letters[1:]
+                if len(rest) > 1 and rest[0] == "=":
+                    read.append((name, rest[1:]))
+                    break
+                if options.get(name):
+                    if not rest and index < len(arguments):
+                        rest = arguments[index]
+                        index += 1
+                    read.append((name, rest or None))
+                    break
+                read.append((name, None))
+                if name not in options:
+                    break
+                letters = rest
+            continue
+        read.append((None, word))
+    return read
+
+
+def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhText]:
+    """The text gh sends for its positional argument NUMBER: the word itself, or for a file, its name and what it holds."""
+    option = f"argument {number}"
+    if (group, sub) == ("gist", "create"):
+        if value == "-":
+            return [GhText(option, value, path=value)]
+        texts: list[GhText] = []
+        for path in sorted(glob.glob(value)) or [value]:
+            texts += [GhText(option, path, path=path), GhText(f"{option} name", text=os.path.basename(path))]
+        return texts
+    if (group, sub) == ("gist", "edit") and number == 2:
+        return [GhText(option, value, path=value)]
+    if (group, sub) in (("release", "create"), ("release", "upload")) and number >= 2:
+        # An asset: gh sends its file name and the label after a `#`. Its content is a build output, not text.
+        path, _, label = value.partition("#")
+        return [GhText(f"{option} name", text=os.path.basename(path)), GhText(f"{option} label", text=label)]
+    return [GhText(option, text=value)]
+
+
+def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]) -> list[GhText]:
+    """Every text the call sends: each argument and option value, but for a file gh reads, what the file holds."""
+    long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
+    texts: list[GhText] = []
+    number = 0
+    for option, value in read:
+        if option is None:
+            number += 1
+            texts += gh_argument_texts(group, sub, number, value or "")
+            continue
+        name = long.get(option, option)
+        if (group, name) in GH_LOCAL_OPTIONS:
+            continue
+        if value is None:
+            if (group, sub, name) == ("workflow", "run", "--json"):
+                texts.append(GhText(name, path="-"))
+            continue
+        if name in GH_FILE_OPTIONS:
+            texts.append(GhText(name, value, path=value))
+        elif (group, sub, name) == ("gist", "edit", "--add"):
+            texts += [GhText(name, value, path=value), GhText(f"{name} name", text=os.path.basename(value))]
+        elif (group, sub, name) == ("pr", "create", "--template"):
+            # A template's name, which gh also reads as a file's path when there is such a file.
+            texts += [GhText(name, text=value), GhText(name, value, path=value, optional=True)]
+        elif group in ("api", "workflow") and name in ("--field", "--raw-field"):
+            key, _, field_value = value.partition("=")
+            if name == "--field" and field_value.startswith("@"):
+                texts += [GhText(name, key, text=key), GhText(name, value, path=field_value[1:])]
+            else:
+                texts.append(GhText(name, key, text=value))
+        else:
+            texts.append(GhText(name, text=value))
+    if (group, sub) == ("gist", "create") and number == 0:
+        texts.append(GhText("gist", path="-"))
+    return texts
+
+
+def gh_flag(read: Sequence[tuple[str | None, str | None]], long: Mapping[str, str], name: str) -> bool:
+    """Whether the bool option whose long spelling is NAME is on: the last one given wins, and one with no value is on."""
+    values = [value for option, value in read if option and long.get(option, option) == name]
+    return bool(values) and (values[-1] or "true").lower() in ("1", "t", "true")
+
+
+def gh_git(arguments: Sequence[str]) -> str | None:
+    """What `git ARGUMENTS` prints in this directory, as gh's own git calls run there; None when it fails."""
+    try:
+        completed = subprocess.run(["git", *arguments], stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                                   check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return completed.stdout.decode("utf-8", errors="surrogateescape") if completed.returncode == 0 else None
+
+
+def gh_fill_bases(read: Sequence[tuple[str | None, str | None]], long: Mapping[str, str], head: str) -> list[str]:
+    """Every ref `pr create --fill` may list the head's commits against, as gh 2.98.0 picks it (pkg/cmd/pr/create):
+    the branch `--base` names, else the head's `branch.<head>.gh-merge-base`, else the base repository's default
+    branch, which gh asks GitHub for, read here as each remote's HEAD (else `main` and `master`); gh takes it on the
+    base repository's remote, else as a local name, so each name counts on every remote and locally. Only the refs
+    that exist are given."""
+    bases = [value for option, value in read if option and long.get(option, option) == "--base" and value]
+    names = bases[-1:]
+    if not names:
+        merge_base = (gh_git(["config", "--get", f"branch.{head}.gh-merge-base"]) or "").strip()
+        names = [merge_base] if merge_base else []
+    if not names:
+        heads = gh_git(["for-each-ref", "--format=%(symref)", "refs/remotes/*/HEAD"]) or ""
+        names = sorted({line.split("/", 3)[3] for line in heads.split() if line.count("/") >= 3}) or ["main", "master"]
+    refs = set((gh_git(["for-each-ref", "--format=%(refname)", "refs/remotes", "refs/heads"]) or "").split())
+    return [ref for ref in sorted(refs) if any(ref == f"refs/heads/{name}" or
+                                               (ref.startswith("refs/remotes/") and ref.split("/", 3)[3:] == [name])
+                                               for name in names)]
+
+
+def gh_local_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
+                   ) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]]:
+    """The text gh reads from this directory's git and sends, each with what it holds, and each it cannot read with
+    why: for `release create --notes-from-tag` the tag's message (`git tag --list TAG --format=%(contents)`); for
+    `pr create --fill`, `--fill-first` or `--fill-verbose` the message of each commit of the head branch that a base
+    gh may list it against does not hold (gh_fill_bases), and the head branch's name, which gh makes the title of a
+    pull request of more than one commit, with `-` and `_` read as spaces as gh writes them. Until 2026-11-17 neither
+    was read, on the ground that it was pushed already; but the tag may be local, and a push reads no knives registry
+    list."""
+    long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
+    contents: list[tuple[GhText, str]] = []
+    unreadable: list[tuple[GhText, str]] = []
+    positionals = [value or "" for option, value in read if option is None]
+    if (group, sub) == ("release", "create") and gh_flag(read, long, "--notes-from-tag") and positionals:
+        piece = GhText("--notes-from-tag", f"tag {positionals[0]}")
+        message = gh_git(["tag", "--list", positionals[0], "--format=%(contents)"])
+        if message is None:
+            unreadable.append((piece, "git could not read the tag's message"))
+        else:
+            contents.append((piece, message))
+    fill = next((name for name in ("--fill", "--fill-first", "--fill-verbose") if gh_flag(read, long, name)), None)
+    if (group, sub) != ("pr", "create") or fill is None:
+        return contents, unreadable
+    heads = [value for option, value in read if option and long.get(option, option) == "--head" and value]
+    head = heads[-1].rpartition(":")[2] if heads else (gh_git(["symbolic-ref", "--quiet", "--short", "HEAD"]) or "").strip()
+    bases = gh_fill_bases(read, long, head) if head else []
+    if not bases:
+        unreadable.append((GhText(fill, "commits"), "git names no head branch, or no base branch to list it against"))
+        return contents, unreadable
+    seen: set[str] = set()
+    for base in bases:
+        listed = gh_git(["log", "--no-show-signature", "--format=%H%x00%B%x00", head, "--not", base, "--"])
+        if listed is None:
+            unreadable.append((GhText(fill, "commits"), f"git could not list the commits of {head}"))
+            return contents, unreadable
+        fields = listed.split("\0")
+        for commit, message in zip(fields[0::2], fields[1::2]):
+            commit = commit.strip()
+            if commit not in seen:
+                seen.add(commit)
+                contents.append((GhText(fill, f"commit {commit[:12]}"), message))
+    contents.append((GhText(fill, "head branch name"), re.sub(r"[-_]", " ", head)))
+    return contents, unreadable
+
+
+def gh_api_sends(read: Sequence[tuple[str | None, str | None]]) -> bool:
+    """Whether a `gh api` call sends a body: a method other than GET or HEAD, else (gh's default POST) a field or an
+    --input file."""
+    long = gh_long_names(GH_TEXT_COMMANDS[("api", "")])
+    method: str | None = None
+    body = False
+    for option, value in read:
+        name = long.get(option, option) if option else None
+        if name == "--method" and value is not None:
+            method = value
+        elif name in ("--field", "--raw-field", "--input") and value is not None:
+            body = True
+    return method.upper() not in ("GET", "HEAD") if method is not None else body
+
+
+def gh_is_stdin(path: str) -> bool:
+    """Whether PATH (/dev/stdin, /dev/fd/0, …) is this call's standard input while that is a pipe or a terminal, which
+    gh reads after the check: the check then reads the shim's buffer of it, as for `-`."""
+    try:
+        named, standard = os.stat(path), os.fstat(0)
+    except OSError:
+        return False
+    return not stat.S_ISREG(standard.st_mode) and os.path.samestat(named, standard)
+
+
+def gh_contents(texts: Sequence[GhText], stdin: str | None) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]]:
+    """Each text with what gh sends for it, and each file that cannot be read with why. A pipe, a socket or a device
+    other than /dev/null is not read: reading a pipe takes the text gh reads after the check (until 2026-11-17 a
+    `--body-file <(…)` went out empty, and a `gh pr edit --body-file /dev/stdin` emptied the body), and a device may
+    never end. Such a file cannot be read, so its text is refused for a target not confirmed private (gh_check)."""
+    contents: list[tuple[GhText, str]] = []
+    unreadable: list[tuple[GhText, str]] = []
+    for piece in texts:
+        if piece.path is None:
+            contents.append((piece, piece.text or ""))
+        elif piece.path == "-":
+            if stdin is None:
+                unreadable.append((piece, "standard input could not be read"))
+            else:
+                contents.append((piece, stdin))
+        else:
+            try:
+                mode = os.stat(piece.path).st_mode
+                if (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) and \
+                        not os.path.samestat(os.stat(piece.path), os.stat(os.devnull)):
+                    if not piece.optional:
+                        unreadable.append((piece, "a pipe or a device, which the check cannot read without taking its "
+                                                  "text from gh: pass the text in a file, or on standard input as -"))
+                    continue
+                data = Path(piece.path).read_bytes()
+            except OSError as error:
+                if not piece.optional:
+                    unreadable.append((piece, error.strerror or type(error).__name__))
+                continue
+            contents.append((piece, data.decode("utf-8", errors="surrogateescape")))
+    return contents, unreadable
+
+
+def escapes_decoded(text: str) -> str:
+    """TEXT with JSON's string escapes decoded, which GraphQL shares: an `--input` payload written with Python's
+    json.dump spells each letter outside ASCII as a \\u escape, and GitHub stores the letter."""
+    decoded = JSON_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)) if m.group(1) else JSON_SIMPLE_ESCAPES[m.group(2)], text)
+    try:
+        return decoded.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeError:
+        return decoded
+
+
+def gh_findings(contents: Sequence[tuple[GhText, str]], matcher: TermMatcher) -> list[tuple[GhText, str, int, Span]]:
+    """(text, how it was read, line, match) for each listed term in each text: as written, and for a text that holds a
+    backslash, with its escapes decoded too.
+
+    A text is read as GitHub renders it, a paragraph at a time (paragraph_view): a line break inside a paragraph shows
+    as a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page.
+    Until 2026-11-17 each line was read alone, and a body wrapped inside such a term went to a public repository. Both views
+    are read whatever the first finds: a match counts only for a target its list reaches and no allowed token of that
+    target holds (gh_check), so the first view's matches can all be dropped there while the second's count. A match of
+    the decoded view is left out only when one of the first view has its term, list and allowed tokens, since gh_check
+    judges the two alike."""
+    found: list[tuple[GhText, str, int, Span]] = []
+    for piece, text in contents:
+        views = [("", text)]
+        if "\\" in text:
+            views.append((" (escapes decoded)", escapes_decoded(text)))
+        seen: set[tuple[int, str, tuple[str, ...]]] = set()
+        for how, view in views:
+            for span in matcher.spans(paragraph_view(view)):
+                key = (span.term, span.scope, span.allowed_in)
+                if how and key in seen:
+                    continue
+                seen.add(key)
+                found.append((piece, how, view.count("\n", 0, span.start) + 1, span))
+    return found
+
+
+def gh_visibility(url: str) -> str:
+    """What scripts/github-repo-visibility says of URL (the leak check's cache, else gh): public, private, internal,
+    not-github or unknown."""
+    helper = Path(__file__).resolve().parent / "github-repo-visibility"
+    try:
+        completed = subprocess.run([str(helper), url], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    value = completed.stdout.strip()
+    if completed.returncode == 0 and value in ("public", "private", "internal", "not-github"):
+        return value
+    return "unknown"
+
+
+def gh_repository_url(value: str) -> str:
+    """The URL of a repository gh names as `[HOST/]OWNER/REPO` or by its URL."""
+    if "://" in value or value.startswith("git@"):
+        return value
+    parts = value.split("/")
+    return f"https://github.com/{value}" if len(parts) == 2 else f"https://{value}"
+
+
+def gh_remotes() -> list[tuple[str, str]]:
+    """(name, URL) of each remote of this directory gh can take for the repository: the one `gh repo set-default`
+    named (a remote's `gh-resolved`), else every one, since which one gh takes then depends on its version."""
+    def git(*arguments: str) -> list[str]:
+        try:
+            completed = subprocess.run(["git", *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                       timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        return completed.stdout.splitlines() if completed.returncode == 0 else []
+
+    remotes: list[tuple[str, str]] = []
+    for line in git("remote", "-v"):
+        name, _, rest = line.partition("\t")
+        # A fetch line ends at its first ` (fetch)`, since a partial clone's filter follows it.
+        url = rest.split(" (fetch)", 1)[0] if " (fetch)" in rest else rest.removesuffix(" (push)")
+        if name and url and (name, url) not in remotes:
+            remotes.append((name, url))
+    resolved: dict[str, str] = {}
+    for line in git("config", "--get-regexp", r"^remote\..*\.gh-resolved$"):
+        key, _, value = line.partition(" ")
+        resolved[key.removeprefix("remote.").removesuffix(".gh-resolved")] = value.strip()
+    if not resolved:
+        return remotes
+    chosen = [(name, url) for name, url in remotes if resolved.get(name) == "base"]
+    return chosen + [(value, gh_repository_url(value)) for value in resolved.values() if value and value != "base"]
+
+
+@dataclass(frozen=True)
+class GhTarget:
+    """Where a gh call's text can go: SHOWN names it in a refusal, REPOSITORY is its `owner/name` ("" for a target with
+    no repository, or one nobody could name), and OPEN says it is not confirmed private or internal."""
+
+    shown: str
+    repository: str
+    open: bool
+
+
+GH_NODE_ID = re.compile(r"\b(?:[A-Z][A-Za-z]{0,7}_[A-Za-z0-9_-]{6,}|MD[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9_-])")
+# A mutation that names its repository by name, not by node id: createCommitOnBranch's `repositoryNameWithOwner`, as a
+# GraphQL argument, a JSON variable or a gh field (`-F branch[repositoryNameWithOwner]=o/r`); and one that makes a
+# repository.
+GH_GRAPHQL_NAMED = re.compile(r"\brepositoryNameWithOwner\b")
+GH_GRAPHQL_NAMED_VALUE = re.compile(
+    r'\brepositoryNameWithOwner\]?"?\s*[:=]\s*"?([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)')
+GH_GRAPHQL_NEW_REPOSITORY = re.compile(r"\b(?:createRepository|cloneTemplateRepository)\b")
+GH_NODES_QUERY = (
+    "query($ids: [ID!]!) { nodes(ids: $ids) { ... on RepositoryNode { repository { nameWithOwner } } "
+    "... on PullRequestReviewThread { repository { nameWithOwner } } ... on Repository { nameWithOwner } } }"
+)
+
+
+def gh_node_repositories(texts: Sequence[str]) -> list[str] | None:
+    """The repository (`owner/name`) of each GitHub node id in TEXTS, read with one GraphQL query through this
+    checkout's shims/gh; None when there is no id, when the read fails, or when any id has no repository it can read."""
+    ids = sorted({match.group(0) for text in texts for match in GH_NODE_ID.finditer(text)})
+    if not ids:
+        return None
+    gh = Path(__file__).resolve().parent.parent / "shims" / "gh"
+    fields = [argument for node in ids for argument in ("-f", f"ids[]={node}")]
+    try:
+        completed = subprocess.run(
+            [str(gh), "api", "graphql", "-f", f"query={GH_NODES_QUERY}", *fields, "--jq",
+             '.data.nodes[] | (.repository.nameWithOwner // .nameWithOwner // "")'],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    repositories = completed.stdout.split()
+    if completed.returncode != 0 or len(completed.stdout.splitlines()) != len(ids) or len(repositories) != len(ids):
+        return None
+    return sorted({repository.lower() for repository in repositories})
+
+
+def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]],
+             environment: Mapping[str, str], texts: Sequence[str] = ()) -> list[GhTarget]:
+    """Every target the call can reach: the repositories it names, else GH_REPO, else this directory's remotes; for a
+    GraphQL mutation, the repositories of the nodes it names. A visibility that cannot be read is open, and so is a
+    target with no repository: a gist (anyone with its address reads it), a project, another host, a GraphQL mutation
+    whose nodes cannot all be read."""
+    long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
+    host = (environment.get("GH_HOST") or "github.com").lower()
+    if host != "github.com":
+        return [GhTarget(f"a repository on {host}, read as public", "", True)]
+    if group == "gist":
+        return [GhTarget("a gist, which anyone with its address can read", "", True)]
+    if group == "project":
+        return [GhTarget("a project, read as public", "", True)]
+    values: dict[str, list[str | None]] = {}
+    positionals: list[str] = []
+    for option, value in read:
+        if option is None:
+            positionals.append(value or "")
+        else:
+            values.setdefault(long.get(option, option), []).append(value)
+    if (group, sub) == ("repo", "create"):
+        private = any(values.get(name) and (values[name][-1] is None or values[name][-1].lower() in ("1", "t", "true"))
+                      for name in ("--private", "--internal"))
+        name = positionals[0] if positionals else "a new repository"
+        shown = f"{name} ({'private' if private else 'not made private, so read as public'})"
+        return [GhTarget(shown, name.lower() if name.count("/") == 1 else "", not private)]
+    targets: list[tuple[str, str, bool]] = []
+    for value in [*values.get("--repo", []), *values.get("--branch-repo", [])]:
+        if value:
+            targets.append((value, gh_repository_url(value), True))
+    for value in positionals:
+        named = GH_REPOSITORY_URL.match(value)
+        if named:
+            targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
+    # A fork is as visible as the repository it forks, so its new name (--fork-name) goes where that one is.
+    if (group, sub) in (("repo", "edit"), ("repo", "fork")) and positionals and not GH_REPOSITORY_URL.match(positionals[0]):
+        targets.append((positionals[0], gh_repository_url(positionals[0]), True))
+    base = True
+    if group == "api":
+        endpoint = positionals[0] if positionals else ""
+        named = GH_API_REPOSITORY.match(endpoint)
+        if named:
+            targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
+        if endpoint == "graphql" and not targets:
+            # A mutation names what it changes by node id, and each id gh can read gives its repository; it can also
+            # name a repository by name (createCommitOnBranch), or make one. Every such repository is a target: until
+            # 2026-11-17 only the node ids were, so a commit to a public repository by name went out when the text
+            # also held an id of a private one. An id gh cannot read, a name given only through a variable the check
+            # cannot see, a new repository, or no repository at all leaves the target unknown. Each text is read as
+            # written and with its JSON escapes decoded, as gh_findings reads it.
+            views = [view for text in texts for view in dict.fromkeys((text, escapes_decoded(text)))]
+            if any(GH_GRAPHQL_NEW_REPOSITORY.search(view) for view in views):
+                return [GhTarget("a GraphQL mutation that makes a repository, read as public", "", True)]
+            named = [match[1].lower() for view in views for match in GH_GRAPHQL_NAMED_VALUE.finditer(view)]
+            resolved = gh_node_repositories(views) if any(GH_NODE_ID.search(view) for view in views) else []
+            if (resolved is None or sum(len(GH_GRAPHQL_NAMED.findall(view)) for view in views) != len(named)
+                    or not (resolved or named)):
+                return [GhTarget("a GraphQL mutation whose repository could not be read, read as public", "", True)]
+            targets += [(repository, f"https://github.com/{repository}", True)
+                        for repository in dict.fromkeys([*named, *resolved])]
+        base = "{owner}" in endpoint or "{repo}" in endpoint
+        if not targets and not base:
+            return [GhTarget("no repository, read as public", "", True)]
+    if not targets and base:
+        if environment.get("GH_REPO"):
+            targets.append((environment["GH_REPO"], gh_repository_url(environment["GH_REPO"]), True))
+        else:
+            targets = [(f"remote {name}", url, False) for name, url in gh_remotes()]
+    made_public = (group, sub) == ("repo", "edit") and any(
+        (v or "").lower() == "public" for v in values.get("--visibility", []))
+    reached: list[GhTarget] = []
+    for name, url, named_by_call in targets:
+        visibility = gh_visibility(url)
+        if visibility == "not-github" and not named_by_call:
+            continue
+        repository = next(iter(repository_of(url)), "")
+        if made_public:
+            reached.append(GhTarget(f"{name} (made public by the call)", repository, True))
+        elif visibility in ("private", "internal"):
+            reached.append(GhTarget(f"{name} ({visibility})", repository, False))
+        else:
+            shown = "public" if visibility == "public" else "visibility unread, so read as public"
+            reached.append(GhTarget(f"{name} ({shown})", repository, True))
+    return reached or [GhTarget("no GitHub repository found for the call, read as public", "", True)]
+
+
+def gh_check(arguments: Sequence[str]) -> int:
+    """`gh -- ARGV…`: refuse a gh call that sends a listed term to anything not confirmed private (exit 3), whose text
+    cannot be checked because the list cannot be read (exit 2), or that names a file nobody can read (exit 4); exit
+    GH_STDIN_EXIT to ask for standard input. Any other call exits 0 untouched, and the text of a call that reaches only
+    private or internal repositories is not checked, nor are their visibilities read before a term is found."""
+    environment = os.environ
+    command = gh_command(arguments, environment)
+    if command is None:
+        return 0
+    group, sub, rest = command
+    read = gh_walk(rest, gh_options(GH_TEXT_COMMANDS[(group, sub)]))
+    if group == "api" and not gh_api_sends(read):
+        return 0
+    # `pr create --dry-run` prints the pull request it would create and sends none of its text.
+    if (group, sub) == ("pr", "create") and gh_flag(read, gh_long_names(GH_TEXT_COMMANDS[(group, sub)]), "--dry-run"):
+        return 0
+    texts = [GhText(piece.option, piece.detail, path="-", optional=piece.optional)
+             if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece
+             for piece in gh_texts(group, sub, read)]
+    stdin: str | None = None
+    if any(piece.path == "-" for piece in texts):
+        pointer = environment.get(GH_STDIN)
+        if not pointer:
+            return GH_STDIN_EXIT
+        try:
+            stdin = Path(pointer).read_bytes().decode("utf-8", errors="surrogateescape")
+        except OSError:
+            stdin = None
+    contents, unreadable = gh_contents(texts, stdin)
+    local_contents, local_unreadable = gh_local_texts(group, sub, read)
+    contents += local_contents
+    unreadable += local_unreadable
+    if group == "api" and read and not unreadable:
+        endpoint = next((value for option, value in read if option is None), "")
+        # GitHub reads an --input payload as JSON, so `\u006dutation` there is the keyword too: the decoded view counts.
+        if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
+                                             for view in (text, escapes_decoded(text))):
+            return 0
+    matcher: TermMatcher | None = None
+    list_problem: str | None = None
+    findings: list[tuple[GhText, str, int, Span]] = []
+    if any(text for _, text in contents):
+        try:
+            # Every scoped list, the knives registry's included: which ones apply depends on where the text goes,
+            # which is read only when a term is found.
+            matcher = load_terms(repositories=EVERY_REPOSITORY, registry=True)
+        except ListError as error:
+            list_problem = str(error)
+        else:
+            findings = gh_findings(contents, matcher)
+    if not findings and list_problem is None and not unreadable:
+        return 0
+    reached = gh_reach(group, sub, read, environment, [text for _, text in contents])
+    open_targets = [target.repository for target in reached if target.open]
+    if not open_targets:
+        return 0
+    if matcher is not None:
+        # A match counts for an open target its list's scope reaches and no allowed token of that target holds.
+        def counts(span: Span) -> bool:
+            return any((not span.scope or matcher.scopes[span.scope].reaches([target]))
+                       and not span.allowed_for(target) for target in open_targets)
+
+        findings = [finding for finding in findings if counts(finding[3])]
+        if not findings and list_problem is None and not unreadable:
+            return 0
+    name = f"gh {group} {sub}".rstrip()
+    # Without the list nothing can be masked, so no name the caller gave is shown.
+    target = "a repository not confirmed private"
+    if matcher:
+        target = ", ".join(mask_path(item.shown, matcher.spans(item.shown)) for item in reached)
+    for piece, how, line, span in findings:
+        print(f"leak terms: {name} to {target}: {piece.shown(matcher)}{how} line {line}: listed leak term "
+              f"{span.label()}", file=sys.stderr)
+    for piece, reason in unreadable:
+        print(f"leak terms: {name} to {target}: cannot read {piece.shown(matcher)}: {reason}", file=sys.stderr)
+    if list_problem:
+        print(list_problem, file=sys.stderr)
+        print(f"leak terms: {name} to {target}: its text cannot be checked without the list", file=sys.stderr)
+    print(
+        f"leak terms: {name}: refused before gh ran, so nothing was sent. Remove the term from the text, or if it is "
+        "not private remove it from its list: sops edit leak-terms.sops.yaml, or for `of knives <name>` the "
+        "registry's forbidden list (listed leak term N is the Nth term of its list, counting neither blank lines nor "
+        "# lines)",
+        file=sys.stderr,
+    )
+    return FOUND_EXIT if findings else LIST_EXIT if list_problem else TEXT_EXIT
+
 
 def parser() -> argparse.ArgumentParser:
     argument_parser = argparse.ArgumentParser(prog="leak-terms-check")
@@ -1879,10 +3004,16 @@ def parser() -> argparse.ArgumentParser:
     push = modes.add_parser("push")
     push.add_argument("--remote", required=True)
     push.add_argument("--url", required=True)
+    # `gh -- ARGV…` takes a gh call's own arguments, which main hands to gh_check without parsing them.
+    modes.add_parser("gh", help="check the text a gh call sends: gh -- ARGV...")
     return argument_parser
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
+    arguments = sys.argv[1:] if arguments is None else list(arguments)
+    if arguments[:1] == ["gh"]:
+        rest = arguments[1:]
+        return gh_check(rest[1:] if rest[:1] == ["--"] else rest)
     args = parser().parse_args(arguments)
     if args.mode == "jj-editor":
         return jj_editor(args.file)

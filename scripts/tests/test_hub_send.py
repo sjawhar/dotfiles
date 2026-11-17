@@ -38,6 +38,12 @@ HOME_DISCORD_SECRET = "home-discord-secret"
 DECOY_DISCORD_SECRET = "decoy-discord-secret"
 ROOM = "!room:chathub"
 EVENT = "$ev1"
+# A request the fake holds gets this real timeout, so hub-send's own timeout handling runs
+# without the test waiting hub-send's 10 s or 30 s for it.
+HOLD_TIMEOUT = 0.05
+# The one hang guard: how long a request the fake answers may take, and how long the test waits
+# for the fake to take a request. A stall does not use it up; reaching it means the test hung.
+HANG_GUARD = 120.0
 
 
 @dataclass(frozen=True)
@@ -104,7 +110,11 @@ class FakeHub:
         self.post_statuses: list[dict[str, object]] = []
         self.discord_status: dict[str, object] = {"logged_in": True, "connected": True}
         self.clock: FakeClock | None = None
-        self.hang_seconds = 0.12
+        self.released = threading.Event()  # set by close(), which ends every held request
+        self._taken = threading.Condition()
+        self.taken = 0  # requests the handler has finished deciding, in the order it took them
+        self.expect_hold = False  # what the test's urlopen told the client about this request
+        self.hold_mismatches: list[str] = []
         self._after_added = False
         self._due_added = False
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHubHandler)
@@ -127,9 +137,47 @@ class FakeHub:
         self._thread.start()
 
     def close(self) -> None:
+        self.released.set()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=2)
+
+    def holds(self, method: str, path: str) -> bool:
+        """Whether the handler will hold this request with no answer, read from the same modes.
+
+        The test's urlopen takes one request at a time (wait_taken), so the next relation read's
+        mode is the head of read_failure_modes. took() records any request where this answer and
+        the handler disagree.
+        """
+        parts = [urllib.parse.unquote(part) for part in path.split("/") if part]
+        rooms = parts[:4] == ["_matrix", "client", "v3", "rooms"]
+        if len(parts) >= 2 and parts[0] == "port":
+            mode = self.provision_modes.get(parts[1], "ok")
+        elif rooms and len(parts) >= 6 and parts[5] == "state":
+            mode = self.state_mode
+        elif rooms and parts[5:7] == ["send", "m.room.message"] and method == "PUT":
+            mode = self.post_mode
+        elif parts == ["_matrix", "media", "v3", "upload"] and method == "POST":
+            mode = self.upload_mode
+        elif parts[:4] == ["_matrix", "client", "v1", "rooms"] and len(parts) >= 6 and parts[5] == "relations":
+            mode = self.read_failure_modes[0] if self.read_failure_modes else self.read_failure_forever
+        else:
+            return False
+        return mode == "hang"
+
+    def took(self, path: str, *, held: bool) -> None:
+        """Mark that the handler has decided this request: it answers it now, or holds it."""
+        with self._taken:
+            if held != self.expect_hold:
+                done = "held" if held else "answered"
+                expected = "a hold" if self.expect_hold else "an answer"
+                self.hold_mismatches.append(f"the fake {done} {path}; the test expected {expected}")
+            self.taken += 1
+            self._taken.notify_all()
+
+    def wait_taken(self, count: int) -> bool:
+        with self._taken:
+            return self._taken.wait_for(lambda: self.taken >= count, timeout=HANG_GUARD)
 
     def room_state(self, room: str) -> list[dict[str, object]]:
         return self.states.setdefault(
@@ -252,6 +300,7 @@ class FakeHubHandler(BaseHTTPRequestHandler):
         return self.headers.get("Authorization") == f"Bearer {token}"
 
     def _json(self, status: int, value: object) -> None:
+        self.fake.took(self.path, held=False)
         data = json.dumps(value, separators=(",", ":")).encode("utf-8")
         try:
             self.send_response(status)
@@ -264,6 +313,7 @@ class FakeHubHandler(BaseHTTPRequestHandler):
             pass
 
     def _truncated_json(self, status: int) -> None:
+        self.fake.took(self.path, held=False)
         data = b'{"partial":'
         try:
             self.send_response(status)
@@ -284,9 +334,13 @@ class FakeHubHandler(BaseHTTPRequestHandler):
         self._json(status, {"errcode": errcode, "error": error})
 
     def _hang(self) -> None:
-        time.sleep(self.fake.hang_seconds)
+        """Hold the request unanswered until the fake closes: however late hub-send reads its
+        timer, the request has no answer to find, so it times out."""
+        self.fake.took(self.path, held=True)
+        self.fake.released.wait()
 
     def _drop(self) -> None:
+        self.fake.took(self.path, held=False)
         try:
             self.connection.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -495,8 +549,6 @@ class HubSendTest(unittest.TestCase):
         sys.modules[name] = module
         loader.exec_module(module)
         module.PROVISION_URL = f"{self.fake.url}/port/{{port}}"
-        module.POST_TIMEOUT = 0.03
-        module.READ_TIMEOUT = 0.03
         return name, module
 
     def invoke(
@@ -517,6 +569,7 @@ class HubSendTest(unittest.TestCase):
         clock = FakeClock(sleep_late)
         self.fake.clock = clock
         old_urlopen = module.urllib.request.urlopen
+        problems: list[str] = []
 
         def sleeper(seconds: float) -> None:
             if interrupt == "keyboard":
@@ -534,18 +587,37 @@ class HubSendTest(unittest.TestCase):
                 self.fail(f"hub-send requested outside the fake: {url}")
             if interrupt_during_provision and parsed.path.startswith("/port/"):
                 sleeper(0)
+            bound = request_kwargs.get("timeout")
+            if isinstance(bound, bool) or not isinstance(bound, (int, float)) or bound <= 0:
+                problems.append(f"hub-send sent {parsed.path} with no timeout: {bound!r}")
+            # hub-send's timeout fires only where the fake holds the request. A request the fake
+            # answers waits for its answer, so a stalled fake thread cannot time it out.
+            held = self.fake.holds(request.get_method(), parsed.path)
+            request_kwargs["timeout"] = HOLD_TIMEOUT if held else HANG_GUARD
+            self.fake.expect_hold = held
+            taken = self.fake.taken + 1
             try:
                 return old_urlopen(request, *request_args, **request_kwargs)
             except (socket.timeout, TimeoutError) as error:
+                if not held:
+                    problems.append(f"the fake did not answer {parsed.path} within the hang guard")
                 if urlopen_errors is not None:
                     urlopen_errors.append(error)
                 raise
             except urllib.error.URLError as error:
-                if urlopen_errors is not None and isinstance(
-                    error.reason, (socket.timeout, TimeoutError)
-                ):
-                    urlopen_errors.append(error.reason)
+                if isinstance(error.reason, (socket.timeout, TimeoutError)):
+                    if not held:
+                        problems.append(f"the fake did not answer {parsed.path} within the hang guard")
+                    if urlopen_errors is not None:
+                        urlopen_errors.append(error.reason)
                 raise
+            finally:
+                # The next request goes out only once the fake has taken this one, so its record
+                # and its per-read modes follow hub-send's order even when a stalled fake thread
+                # takes a request after hub-send gave up on it.
+                if not self.fake.wait_taken(taken):
+                    problems.append(f"the fake did not take {parsed.path} within the hang guard")
+                self.fake.expect_hold = False
 
         variables = {
             "HOME": str(self.home),
@@ -571,6 +643,7 @@ class HubSendTest(unittest.TestCase):
                     result = int(error.code)
         finally:
             sys.modules.pop(name, None)
+        self.assertEqual(problems + self.fake.hold_mismatches, [])
         self.assertLessEqual(len(self.fake.post_requests()), 1)
         return result, stdout.getvalue(), stderr.getvalue(), clock
 
@@ -886,7 +959,6 @@ class HubSendTest(unittest.TestCase):
 
     def test_status_read_failures_then_success(self) -> None:
         self.fake.read_failure_modes = ["http500", "hang"]
-        self.fake.hang_seconds = 1.2
         self.fake.status_after_reads = 2
         self.fake.after_statuses = [{"status": "SUCCESS"}]
         timeout_errors: list[BaseException] = []
@@ -1246,7 +1318,7 @@ class HubSendTest(unittest.TestCase):
             capture_output=True,
             text=True,
             env=environment,
-            timeout=5,
+            timeout=HANG_GUARD,
         )
         self.assertEqual(sent.returncode, 0)
         self.assertEqual(sent.stdout, f"SENT {EVENT}\n")
@@ -1258,7 +1330,7 @@ class HubSendTest(unittest.TestCase):
             capture_output=True,
             text=True,
             env=environment,
-            timeout=5,
+            timeout=HANG_GUARD,
         )
         self.assertEqual(bad.returncode, 2)
         self.assertEqual(bad.stdout, "")
