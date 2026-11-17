@@ -159,13 +159,19 @@ def forward_argument(listen: str, target: str) -> str:
 
 
 class TcpServer:
+    """Answers `ok` to each connection, whenever it comes, until it is closed. It gave up after 3 s
+    before: on a loaded machine the allowed forward reached it later than that, nothing accepted the
+    connection the kernel had queued, and the test failed with "local forward did not listen" (a
+    4 s pause after start makes that happen anywhere). For a target the test expects nothing to
+    reach, a connection that came after 3 s went unnoticed, so those checks were weaker than they read."""
     def __init__(self) -> None:
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
-        self.listener.settimeout(3)
+        self.listener.settimeout(0.2)
         self.port = int(self.listener.getsockname()[1])
+        self.closed = threading.Event()
         self.connected = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True)
 
@@ -173,25 +179,31 @@ class TcpServer:
         self.thread.start()
 
     def serve(self) -> None:
-        try:
-            connection, _ = self.listener.accept()
-        except OSError:
-            return
-        with connection:
-            self.connected.set()
-            connection.sendall(b"ok")
+        while not self.closed.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                self.connected.set()
+                connection.sendall(b"ok")
 
     def close(self) -> None:
-        self.listener.close()
+        self.closed.set()
         self.thread.join(timeout=5)
+        self.listener.close()
 
 
 class UnixServer:
+    """Records a connection to PATH, whenever it comes, until it is closed."""
     def __init__(self, path: Path) -> None:
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.bind(str(path))
         self.listener.listen()
-        self.listener.settimeout(1)
+        self.listener.settimeout(0.2)
+        self.closed = threading.Event()
         self.connected = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True)
 
@@ -199,16 +211,20 @@ class UnixServer:
         self.thread.start()
 
     def serve(self) -> None:
-        try:
-            connection, _ = self.listener.accept()
-        except OSError:
-            return
-        with connection:
-            self.connected.set()
+        while not self.closed.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                self.connected.set()
 
     def close(self) -> None:
-        self.listener.close()
+        self.closed.set()
         self.thread.join(timeout=5)
+        self.listener.close()
 
 
 class OryxTunnelKey(unittest.TestCase):
@@ -676,7 +692,7 @@ class OryxTunnelKey(unittest.TestCase):
         return "; ".join(lines) + f"\nclient stderr tail:\n{self.stderr_of(process)[-1500:]}"
 
     def wait_for_forward(self, process: subprocess.Popen[str], port: int) -> None:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 self.fail(f"permitted remote forward exited: {self.stderr_of(process)}")
@@ -688,17 +704,28 @@ class OryxTunnelKey(unittest.TestCase):
         self.fail(f"remote forward did not listen on {port}; {self.stuck(process)}")
 
     def read_forward(self, process: subprocess.Popen[str], port: int) -> bytes:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
+        """The first bytes a connection to the forward's local PORT gets: the target's `ok` through an
+        allowed forward, b"" when sshd refuses the channel. Only a refused connect is retried; a
+        connection that gets no answer fails at once, saying so. Before, a reply that took over 5 s
+        was retried as though nothing listened and reported as "did not listen" (2026-11-17)."""
+        deadline = time.monotonic() + 30
+        while True:
             if process.poll() is not None:
                 self.fail(f"local forward exited: {self.stderr_of(process)}")
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.1) as connection:
-                    connection.settimeout(5)
-                    return connection.recv(2)
+                connection = socket.create_connection(("127.0.0.1", port), timeout=0.1)
             except OSError:
+                if time.monotonic() >= deadline:
+                    self.fail(f"local forward did not listen on {port}; {self.stuck(process)}")
                 time.sleep(0.05)
-        self.fail(f"local forward did not listen on {port}; {self.stuck(process)}")
+                continue
+            with connection:
+                connection.settimeout(30)
+                try:
+                    return connection.recv(2)
+                except TimeoutError:
+                    self.fail(f"local forward on {port} took the connection but sent nothing in 30 s; "
+                              f"{self.stuck(process)}")
 
     @staticmethod
     def stop_agent(pid: int) -> None:
