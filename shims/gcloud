@@ -1014,16 +1014,26 @@ find_real_gcloud() {
     done < <(type -ap gcloud)
     # Minimal-PATH spawners (MCP servers, cron, etc.) carry neither the
     # dotfiles shims nor the SDK's own bin dir; fall back to the documented
-    # install location, under the home gcloud itself would use, before failing.
-    candidate=""
+    # install location, under the home gcloud itself would use, then under the
+    # uid's passwd home, which a moved HOME (a test's temporary one) does not
+    # move (shims/AGENTS.md, "A moved HOME"), before failing.
+    local home
+    local -a homes=() tried=()
     if resolve_user_home; then
-        candidate="${GCLOUD_USER_HOME}/.gcloud/google-cloud-sdk/bin/gcloud"
+        homes+=("$GCLOUD_USER_HOME")
     fi
-    if [[ -n "$candidate" && -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
-        printf '%s\n' "$candidate"
-        return 0
-    fi
-    echo "gcloud shim: real gcloud binary not found on PATH or at the default SDK install location" >&2
+    # With HOME unset, ~ is the uid's home in the passwd database.
+    homes+=("$(unset HOME; printf '%s' ~)")
+    for home in "${homes[@]}"; do
+        [[ "$home" == /?* ]] || continue
+        candidate="$home/.gcloud/google-cloud-sdk/bin/gcloud"
+        tried+=("$candidate")
+        if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    echo "gcloud shim: real gcloud binary not found on PATH ($PATH) or at the default SDK install location (${tried[*]-})" >&2
     return 127
 }
 
@@ -1610,7 +1620,7 @@ main() {
             exit 1
         fi
     elif ((GCLOUD_READING_KINDS == 2)) && adc_is_box_identity; then
-        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
+        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which goes to the ${USER_LOGIN_CONFIGURATION} configuration, and, in your own shell, store a secret with CLOUDSDK_ACTIVE_CONFIG_NAME=${USER_LOGIN_CONFIGURATION} agent-secrets secret create NAME." >&2
         exit 1
     fi
 

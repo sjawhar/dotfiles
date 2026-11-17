@@ -337,6 +337,15 @@ task:
     test-analyzer: "@review"
     type-checker: anthropic/claude-opus-5-5:xhigh
     ux-designer: "@vision"
+    # 2026-11-17 — THE SECURITY REVIEW AGENT ALONE ON CLAUDE, UNTIL OPENAI APPROVES THEOREM'S
+    # ORGANIZATION FOR DAYBREAK RED (its cyber-access program). Sami, 07:07:07Z on
+    # dispatch://INFRA-3682/ask/69b3e36a-c5b4-411b-8e34-d79109f5cfb4: "Both, for a time". OpenAI
+    # refused nine of this agent's calls on cyber_policy from 05:46Z to 06:47Z, and repeated refusals
+    # can revoke the whole organization's access when no per-user safety_identifier is sent (the
+    # gateway sends none), which would take gpt-6.1-sol from every team. Every other role keeps its
+    # model. REVERT this line when Daybreak Red is approved: the agent's own frontmatter,
+    # model: ["@review"], then applies again.
+    thermonuclear-deep-review: anthropic/claude-opus-5-5:xhigh
     # 2026-11-12 — EVERY CLAUDE WORKLOAD ON OPUS 5.5 AT XHIGH. Sami, 2026-11-12T06:00:10Z
     # (dispatch://INFRA-1393/comment/6d689bf2-526e-4224-86f6-56a585ce1267): "Unless we're actually running
     # into rate limits, please just make sure that we bump everything up to the latest model version ...

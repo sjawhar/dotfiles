@@ -16,6 +16,13 @@
 # registration survives a prune. Everything else goes straight to the real git.
 set -euo pipefail
 
+# This shim's own directory, through a link to it: a caller may run the shim by a link in a
+# directory of its own, and scripts/ and the hook dirs are beside the shim, not beside the link
+# (shims/AGENTS.md, "A moved HOME").
+_shim_dir="${BASH_SOURCE[0]}"
+[[ ! -L "$_shim_dir" ]] || _shim_dir="$(command -p readlink -f -- "$_shim_dir")"
+_shim_dir="${_shim_dir%/*}"
+
 LOCK_REASON="agent session: locked on add (AGENTC-431)"
 # The lock shims/jj puts on a workspace's git worktree when this shim did not lock it
 # already (a `jj workspace add` outside an agent session). Ours as well.
@@ -568,9 +575,9 @@ fi
 # made through a shell alias (`!…`), `git rebase`, `git am` or `git commit-tree` carries none.
 session_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 if ((scan_commit)); then
-    hook_dir="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks"
+    hook_dir="$(cd -P -- "$_shim_dir" && pwd)/git-hooks"
     if ((is_agent)) && [[ "${OMP_SESSION_ID:-}" =~ $session_re ]] &&
-        "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
+        "$_shim_dir/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
         exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent -c "core.hooksPath=$hook_dir" \
             commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
     fi
@@ -583,11 +590,11 @@ fi
 case "${args[i]:-}" in
     commit | merge | pull | cherry-pick | revert)
         if [[ "${OMP_SESSION_ID:-}" =~ $session_re ]] &&
-            "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
+            "$_shim_dir/../scripts/omp-session-trailer" "$_real" "${args[@]:0:i}" > /dev/null 2>&1; then
             if [[ "${args[i]}" == commit ]]; then
                 exec "$_real" "${args[@]:0:i}" -c trailer.Omp-Session.ifexists=addIfDifferent commit --trailer "Omp-Session: $OMP_SESSION_ID" "${args[@]:i+1}"
             fi
-            [[ $caller_hooks_path -eq 1 ]] || exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/git-hooks" "${args[@]:i}"
+            [[ $caller_hooks_path -eq 1 ]] || exec "$_real" "${args[@]:0:i}" -c "core.hooksPath=$(cd -P -- "$_shim_dir" && pwd)/git-hooks" "${args[@]:i}"
         fi
         ;;
 esac
@@ -698,7 +705,7 @@ jj_push_refuse() {
 }
 JJ_PUSH_UNREAD="Nothing was pushed, and nothing is wrong with your commits: your commits were not read."
 # The visibility helper, as shims/jj finds it: scripts/ beside this shims dir.
-jj_gate_visibility="${BASH_SOURCE[0]%/*}/../scripts/github-repo-visibility"
+jj_gate_visibility="$_shim_dir/../scripts/github-repo-visibility"
 # jj_push_guarded LISTING: true when the checkout whose `git remote -v` is LISTING is guarded (above): some URL in it
 # is GUARD. Each URL is read once, and the first GUARD one decides. The checkout's core.sshCommand goes to the helper
 # as GIT_SSH_COMMAND, which git itself puts ahead of it. A helper that exits other than 0 is unknown, whatever it
@@ -1038,7 +1045,7 @@ push_effective_repository() {
 # `--rece`, `--recu`, `--e`, `--pu`), and after a lone `-o` is a value and is skipped.
 person_branch_gate() {
     local tool="$1" k a c dry=0 rc=0
-    local helper="${BASH_SOURCE[0]%/*}/../scripts/person-branch-guard"
+    local helper="$_shim_dir/../scripts/person-branch-guard"
     for ((k = i + 1; k < ${#args[@]}; k++)); do
         a="${args[k]}"
         case "$a" in
@@ -1116,7 +1123,7 @@ if [[ "${args[i]}" == push ]]; then
     fi
     ((term_gate || public_check)) || exec "$_real" "$@"
 
-    PUSH_GATE_HOOKS="$(cd -P -- "${BASH_SOURCE[0]%/*}" && pwd)/jj-push-hooks"
+    PUSH_GATE_HOOKS="$(cd -P -- "$_shim_dir" && pwd)/jj-push-hooks"
     [[ -x "$PUSH_GATE_HOOKS/pre-push" ]] ||
         jj_push_refuse "the leak gate's hook $PUSH_GATE_HOOKS/pre-push is missing, so this push is refused." \
             "$JJ_PUSH_UNREAD"

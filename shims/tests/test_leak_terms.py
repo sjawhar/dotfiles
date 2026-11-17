@@ -119,11 +119,16 @@ def unreadable_lists(root: Path, path: str) -> tuple[tuple[str, dict[str, str], 
     invalid.write_text("terms: clear text\n", encoding="utf-8")
     empty_sops_home = root / "empty-sops-home"
     empty_sops_home.mkdir()
+    # Empty mise data dirs: with no sops on PATH the scanner runs the pinned sops from MISE_DATA_DIR and mise's
+    # default dir under XDG_DATA_HOME, and from the passwd home's only where MISE_DATA_DIR is unset.
+    no_mise_data = root / "no-mise-data"
+    no_mise_data.mkdir()
     no_sops = os.pathsep.join(entry for entry in path.split(os.pathsep) if not (Path(entry) / "sops").exists())
     if shutil.which("sops", path=no_sops) is not None:
         raise AssertionError("the PATH without sops still finds sops")
     return (
-        ("sops", {"PATH": no_sops}, "install sops with mise"),
+        ("sops", {"PATH": no_sops, "MISE_DATA_DIR": str(no_mise_data), "XDG_DATA_HOME": str(no_mise_data)},
+         "install sops with mise"),
         # A fresh age key that no rule of the list names, and a sops home that holds no other identity.
         (
             "key",
@@ -796,7 +801,10 @@ index 0000000,0000000,0000000..1111111
         python_bin = self.root / "no-sops-bin"
         python_bin.mkdir()
         (python_bin / "python3").symlink_to(sys.executable)
-        missing_sops = {**self.env, "PATH": str(python_bin)}
+        no_mise_data = self.root / "no-mise-data"
+        no_mise_data.mkdir()
+        missing_sops = {**self.env, "PATH": str(python_bin), "MISE_DATA_DIR": str(no_mise_data),
+                        "XDG_DATA_HOME": str(no_mise_data)}
         unrelated = {**self.env, "SOPS_AGE_KEY_FILE": str(unrelated_key_file())}
         missing = {**self.env, "DOTFILES_LEAK_TERMS_FILE": str(self.root / "missing.sops.yaml")}
         invalid_file = self.root / "not-sops.yaml"
@@ -897,6 +905,45 @@ index 0000000,0000000,0000000..1111111
         self.assertIn(f"({shim} exited 1)", refused.stderr)
         self.assert_hidden(refused)
         self.assert_no_key_material(refused)
+
+    def test_scanner_runs_the_pinned_sops_when_path_holds_no_sops(self) -> None:
+        # A Legion test pane's PATH is `<bin>:/usr/local/bin:/usr/bin:/bin`, with no sops on it, and its HOME is a
+        # temporary directory: every commit through shims/jj there was refused until 2026-11-17. The pinned install in
+        # mise's data dirs runs instead: MISE_DATA_DIR's, else the ones under HOME and then the passwd home.
+        import tomllib
+
+        module = scanner_module()
+        pin = tomllib.loads((ROOT / "mise.toml").read_text(encoding="utf-8"))["tools"]["sops"]
+        data = self.root / "mise-data"
+        install = data / "installs" / "sops" / pin
+        install.mkdir(parents=True)
+        (install / "sops").symlink_to(real_sops())
+        python_bin = self.root / "python-bin"
+        python_bin.mkdir()
+        (python_bin / "python3").symlink_to(sys.executable)
+        moved_home = self.root / "moved-home"
+        moved_home.mkdir()
+        environment = {**self.env, "HOME": str(moved_home), "PATH": str(python_bin), "MISE_DATA_DIR": str(data),
+                       "XDG_DATA_HOME": str(moved_home / "share")}
+        clean = self.launch([str(CHECK), "message"], input="clean\n", env=environment, cwd=self.root)
+        self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "", ""))
+        self.assert_found(
+            self.launch([str(CHECK), "message"], input="Quillfeather Lane 9\n", env=environment, cwd=self.root),
+            "commit message line 1",
+        )
+        # With MISE_DATA_DIR unset, the passwd home's ~/.mise, which the moved HOME does not hide.
+        passwd_home = self.root / "passwd-home"
+        passwd_home.mkdir()
+        (passwd_home / ".mise").symlink_to(data, target_is_directory=True)
+        unset = {name: value for name, value in environment.items() if name != "MISE_DATA_DIR"}
+        with mock.patch.object(module, "passwd_home", return_value=passwd_home):
+            self.assertEqual(module.sops_command(unset), str(passwd_home / ".mise" / "installs" / "sops" / pin / "sops"))
+        # Control: with no install of the pin there, the refusal names every dir it searched.
+        (install / "sops").unlink()
+        refused = self.launch([str(CHECK), "message"], input="clean\n", env=environment, cwd=self.root)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        searched = f"{install}, {moved_home / 'share' / 'mise' / 'installs' / 'sops' / pin}"
+        self.assertIn(f"the pinned sops {pin} is installed in none of {searched}; install sops with mise", refused.stderr)
 
     def test_scanner_selects_gits_auto_comment_character(self) -> None:
         selected = self.check(
@@ -2814,12 +2861,20 @@ class JjLeaks(LeakTestCase):
         self.assertIn("jj shim: no real jj found on PATH", result.stderr)
         self.assertNotIn("recurs", result.stderr.casefold())
 
+    def real_session_overlay(self) -> Path:
+        """The session's attribution overlay where omp/extensions/session-env.ts writes a real session's: under
+        ~/.cache, no temporary root, so its trailer stays out of a throwaway repository (scripts/omp-session-trailer).
+        An overlay under a temporary root is a session the test made itself, whose trailer stays."""
+        cache = Path.home() / ".cache"
+        cache.mkdir(exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="leak-terms-overlay-", dir=cache))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        overlay = directory / f"omp-attribution-{self.session}.toml"
+        overlay.write_text(f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n", encoding="utf-8")
+        return overlay
+
     def test_jj_message_uses_an_attached_repository_for_trailer_decisions(self) -> None:
-        overlay = self.root / f"omp-attribution-{self.session}.toml"
-        overlay.write_text(
-            f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n",
-            encoding="utf-8",
-        )
+        overlay = self.real_session_overlay()
         repository = self.repository(False)
         result = self.jj(
             self.root,
@@ -2834,11 +2889,7 @@ class JjLeaks(LeakTestCase):
         self.assertEqual(self.description(repository, False), "clean\n")
 
     def test_jj_message_accepts_an_empty_description_with_session_trailer_overlay(self) -> None:
-        overlay = self.root / f"omp-attribution-{self.session}.toml"
-        overlay.write_text(
-            f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n",
-            encoding="utf-8",
-        )
+        overlay = self.real_session_overlay()
         repository = self.repository(False)
         result = self.jj(
             repository,
@@ -2855,11 +2906,7 @@ class JjLeaks(LeakTestCase):
     def test_jj_message_reads_a_repository_after_the_command_for_trailer_decisions(self) -> None:
         # A writing command the shim does not check (`jj squash`) names its repository after the command: the trailer
         # decision is that repository's, not the current directory's.
-        overlay = self.root / f"omp-attribution-{self.session}.toml"
-        overlay.write_text(
-            f"[templates]\ncommit_trailers = '\"Omp-Session: {self.session}\"'\n",
-            encoding="utf-8",
-        )
+        overlay = self.real_session_overlay()
         repository = self.repository(False)
         made = self.jj(repository, "commit", "-m", "base", agent=False)
         self.assertEqual(made.returncode, 0, made.stderr)

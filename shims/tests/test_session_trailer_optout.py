@@ -188,12 +188,15 @@ class JjTest(Base):
         self.agent["PATH"] = os.pathsep.join([str(self.tmp / "fake-bin"), str(SHIMS), str(Path(jj).parent), self.agent["PATH"]])
         user = self.tmp / "jj-user.toml"
         user.write_text('[user]\nname = "Agent"\nemail = "agent@example.com"\n[signing]\nbehavior = "drop"\n')
-        # What omp/extensions/session-env.ts writes.
-        overlay = self.tmp / f"omp-attribution-{SESSION}.toml"
-        overlay.write_text(
+        # What omp/extensions/session-env.ts writes, where it writes it: under ~/.cache (self.kept), which is no
+        # temporary root, as a real session's overlay is not.
+        self.overlay_text = (
             f"[templates]\ncommit_trailers = '\"{TRAILER}\"'\n\n[revset-aliases]\n"
             f"\"immutable_heads()\" = 'builtin_immutable_heads() | (ancestors(visible_heads(), 4) ~ ::builtin_immutable_heads() ~ description(glob:\"*{TRAILER}*\") ~ empty() ~ present(@) ~ (description(exact:\"\") ~ working_copies()))'\n"
         )
+        overlay = self.kept / f"omp-attribution-{SESSION}.toml"
+        overlay.write_text(self.overlay_text)
+        self.user = user
         self.agent["JJ_CONFIG"] = f"{user}:{overlay}"
 
     def jj(self, *args: str, cwd: Path) -> str:
@@ -221,6 +224,18 @@ class JjTest(Base):
 
     def test_a_throwaway_repository_leaves_it_off(self):
         self.assertEqual(self.commit(self.colocated("none", None)), "work\n")
+
+    def test_a_throwaway_repository_keeps_the_trailer_of_a_session_the_test_made(self):
+        # Legion's commit-trailers test starts an omp pane whose overlay is in its scratch root, under a temporary
+        # root, and asserts the pane's commit in a scratch repository carries the pane's trailer.
+        overlay = self.tmp / f"omp-attribution-{SESSION}.toml"
+        overlay.write_text(self.overlay_text)
+        self.agent["JJ_CONFIG"] = f"{self.user}:{overlay}"
+        self.assertIn(TRAILER, self.commit(self.colocated("none", None)))
+        self.assertEqual(self.commit(self.colocated("out", None, opt_out=True)), "work\n")
+        # One overlay that is a real session's leaves it off again.
+        self.agent["JJ_CONFIG"] = f"{self.user}:{overlay}:{self.kept / f'omp-attribution-{SESSION}.toml'}"
+        self.assertEqual(self.commit(self.colocated("mixed", None)), "work\n")
 
     def test_the_opt_out_leaves_it_off_and_its_commit_stays_rewritable(self):
         repo = self.colocated("out", PUBLIC, opt_out=True)

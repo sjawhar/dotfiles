@@ -5,7 +5,9 @@
 # (agent-infra's spend loaders, 2026-10-29). A command is called by name; a path is for data.
 #
 # Resolution: the first bq past this shim's own PATH entry (below), else the SDK's documented
-# install location under the home gcloud itself uses. It never execs itself.
+# install location under the home gcloud itself uses, then under the uid's passwd home, which a
+# moved HOME (a test's temporary one) does not move (shims/AGENTS.md, "A moved HOME"). It never
+# execs itself.
 #
 # bq shares gcloud's config directory and its per-call log files, which gcloud never prunes
 # (8,356 files in one day on sami-rocqperf, dispatch://INFRA-6), so file logging is off unless
@@ -39,16 +41,21 @@ for pass in after-self from-top; do
 done
 
 if [[ -z "$real" ]]; then
-	home="${HOME:-}"
-	[[ -n "$home" ]] || home="$(getent passwd "$(id -u)" | cut -d: -f6)"
-	candidate="${home}/.gcloud/google-cloud-sdk/bin/bq"
-	if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
-		real="$candidate"
-	fi
+	tried=()
+	# With HOME unset, ~ is the uid's home in the passwd database.
+	for home in "${HOME:-}" "$(unset HOME; printf '%s' ~)"; do
+		[[ "$home" == /?* ]] || continue
+		candidate="${home}/.gcloud/google-cloud-sdk/bin/bq"
+		tried+=("$candidate")
+		if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+			real="$candidate"
+			break
+		fi
+	done
 fi
 
 if [[ -z "$real" ]]; then
-	echo "bq shim: real bq binary not found on PATH or at the default SDK install location" >&2
+	echo "bq shim: real bq binary not found on PATH ($PATH) or at the default SDK install location (${tried[*]})" >&2
 	exit 127
 fi
 

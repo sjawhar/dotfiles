@@ -234,7 +234,7 @@ class BoxSessionId(SessionFileFixture):
 class SessionWaiterTest2(SessionFileFixture):
     def test_test_2_sees_a_box_of_the_session_that_is_still_enrolling(self) -> None:
         """dispatch://INFRA-1720/comment/4fab10d7, gap 1. A box of the session that is still
-        enrolling has no `enrollment-session` yet, so the waiter's test 2 (session-live-box)
+        enrolling has no `enrollment-session` yet, so the waiter's test 2 (session_live_box)
         could not see it, and with a broker slower than the 180-second grace the waiter ended the
         session's enrollment while that box enrolled. The session file is written before the
         enrollment, and test 2 reads it."""

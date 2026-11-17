@@ -57,12 +57,18 @@ class TmuxGuard(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def run_shim(self, *args: str, tmux: str | None = None, allow: bool = False,
-                 path: list[Path] | None = None, marker: str | None = None):
+                 path: list[Path] | None = None, marker: str | None = None,
+                 no_pinned_install: bool = False):
         env = {
             "PATH": ":".join(map(str, path)) if path else f"{SHIM.parent}:{self.stub_dir}:/usr/bin:/bin",
             "HOME": self.temp_dir.name,
             "DOTFILES_DIR": str(DOTFILES),
         }
+        if no_pinned_install:
+            # No tmux past PATH either: under this HOME mise has no configuration, and DOTFILES_DIR
+            # names a checkout with no mise.toml, so the shim's pinned-install lookup
+            # (shims/AGENTS.md, "A moved HOME") has no pin to look up.
+            env["DOTFILES_DIR"] = self.temp_dir.name
         if tmux is not None:
             env["TMUX"] = tmux
         if allow:
@@ -131,7 +137,7 @@ class TmuxGuard(unittest.TestCase):
 
     def test_when_every_tmux_hands_the_call_back_the_shim_fails_instead_of_looping(self) -> None:
         result = self.run_shim("display-message", "-p", "#{client_termfeatures}",
-                               path=[SHIM.parent, self.hand_back_dir, self.bash_dir])
+                               path=[SHIM.parent, self.hand_back_dir, self.bash_dir], no_pinned_install=True)
         self.assertEqual(result.returncode, 127, result.stderr)
         self.assertIn(f"{self.hand_back_dir / 'tmux'} handed the call back", result.stderr)
 

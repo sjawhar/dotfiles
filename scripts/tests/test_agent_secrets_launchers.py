@@ -262,6 +262,26 @@ class AgentSecretsSession(unittest.TestCase):
         self.assertEqual(result.stdout.splitlines(), [f"AGENT pid={pid} --flag"])
         self.assertIn("agent-secrets is not on PATH", result.stderr)
 
+    def test_a_closed_stderr_still_launches_unregistered(self) -> None:
+        """Both unregistered paths write one stderr line first; under set -e a closed stderr (2>&-)
+        must not stop the launch there. secret-run --register runs its command through here."""
+        self.install_helper_unit()
+        for case in ("no state", "no client"):
+            with self.subTest(case=case):
+                if case == "no client":
+                    (self.stub_dir / "agent-secrets").unlink()
+                result = subprocess.run(
+                    ["sh", "-c", 'exec "$@" 2>&-', "sh", str(SESSION), "agent", "--flag"],
+                    capture_output=True,
+                    text=True,
+                    env={**self.env, "STUB_LOGIN_STATE": "unreachable"},
+                    check=False,
+                    timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+                lines = result.stdout.splitlines()
+                self.assertTrue(lines and lines[-1].startswith("AGENT pid="), result.stdout)
+
     def test_box_or_machine_without_the_helper_never_asks(self) -> None:
         cases = {
             "no helper unit": {},
