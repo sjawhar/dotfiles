@@ -224,7 +224,7 @@ gh_shim_call_digest() {
 # are `gh pr comment`): an option written apart from any value, but --help and --version, takes the
 # next word as its value.
 gh_shim_is_write() {
-    local a method="" group="" verb="" skip=0
+    local a method="" group="" verb="" skip=0 letters value kind pending="" body=0
     for a in "$@"; do
         if ((skip)); then
             skip=0
@@ -248,26 +248,57 @@ gh_shim_is_write() {
     done
     case "$group" in
         api)
+            # gh api's options as gh's flag parser (pflag) reads them (`gh api --help`, gh 2.98.0): the method is the
+            # last -X/--method given, and with none, a field (-f/-F) or an --input body makes gh POST. A value option
+            # takes the rest of its word (`-XPOST`, `-X=POST`, `--method=POST`) or else the next word, also at the end
+            # of a cluster after -i, gh api's one short flag that takes none (`-iXPOST`, `-if k=v`), and a word an
+            # option takes is never read as an option (`-t -XGET` is a template). Until 2026-11-17 neither a cluster
+            # nor a taken word was read, so `gh api -X GET -iXPOST …`, `gh api … -if body=…` and
+            # `gh api … -f body=… -t -XGET` were reads here, and gh POSTed their text without the leak-term check.
             for a in "$@"; do
+                if [[ -n "$pending" ]]; then
+                    case "$pending" in method) method="$a" ;; body) body=1 ;; esac
+                    pending=""
+                    continue
+                fi
                 case "$a" in
-                    -X | --method) method="NEXT" ;;
-                    -X?* ) method="${a#-X}" ;;
+                    --) break ;;
                     --method=*) method="${a#--method=}" ;;
-                    *) [[ "$method" == NEXT ]] && method="$a" ;;
+                    --field=* | --raw-field=* | --input=*) body=1 ;;
+                    --method) pending=method ;;
+                    --field | --raw-field | --input) pending=body ;;
+                    --cache | --header | --hostname | --jq | --preview | --template) pending=other ;;
+                    --*) ;;
+                    -?*)
+                        letters="${a#-}"
+                        while [[ "$letters" == i* ]]; do
+                            letters="${letters#i}"
+                            [[ "$letters" != =* ]] || letters=""
+                        done
+                        case "${letters:0:1}" in
+                            X) kind=method ;;
+                            f | F) kind=body ;;
+                            H | p | q | t) kind=other ;;
+                            *) continue ;;
+                        esac
+                        value="${letters:1}"
+                        [[ ${#value} -le 1 || "${value:0:1}" != = ]] || value="${value:1}"
+                        if [[ -z "$value" ]]; then
+                            pending="$kind"
+                        elif [[ "$kind" == method ]]; then
+                            method="$value"
+                        elif [[ "$kind" == body ]]; then
+                            body=1
+                        fi
+                        ;;
                 esac
             done
-            # No method named is a GET, and `-f`/`-F` fields or an `--input` body make gh POST without -X.
-            if [[ -z "$method" || "$method" == NEXT ]]; then
-                for a in "$@"; do
-                    case "$a" in
-                        -f | -F | --field | --raw-field | -f?* | -F?* | --field=* | --raw-field=* | --input | --input=*)
-                            return 0 ;;
-                    esac
-                done
-                return 1
+            if [[ -n "$method" ]]; then
+                [[ "${method^^}" == GET || "${method^^}" == HEAD ]] && return 1
+                return 0
             fi
-            [[ "${method^^}" == GET || "${method^^}" == HEAD ]] && return 1
-            return 0
+            ((body)) && return 0
+            return 1
             ;;
         issue | pr | discussion)
             case "$verb" in
@@ -289,20 +320,37 @@ gh_shim_is_write() {
     return 1
 }
 # gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then
-# decides: a write (gh_shim_is_write), or a first word that is not one of gh 2.98.0's own commands,
-# which can be an option before the command or a gh alias of the user's that the check expands. It
-# may be wider than the check's own table, never narrower (shims/tests/test_gh_leak_terms.py); a
-# read never starts the check.
+# decides: a write (gh_shim_is_write), a first word that is not one of gh 2.98.0's own commands,
+# which can be an option before the command or a gh alias of the user's that the check expands, or a
+# command under which gh's config.yml may hold an alias (gh_shim_has_nested_alias). It may be wider
+# than the check's own table, never narrower (shims/tests/test_gh_leak_terms.py); a read never
+# starts the check.
 gh_shim_may_send_text() {
     gh_shim_is_write "$@" && return 0
     case "${1:-}" in
-        '' | --help | --version | agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
+        '' | --help | --version) return 1 ;;
+        agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
             | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | ext \
             | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \
             | project | release | repo | rs | ruleset | run | search | secret | skill | skills | ssh-key \
-            | status | variable | version | workflow) return 1 ;;
+            | status | variable | version | workflow)
+            gh_shim_has_nested_alias "$1"
+            return
+            ;;
     esac
     return 0
+}
+# gh_shim_has_nested_alias COMMAND: true when gh's config.yml (in gh's own config dir) may hold an
+# alias under COMMAND, such as `gh alias set 'pr say' 'pr comment'`, which gh runs as what it
+# expands to; the check then reads the call and decides. Until 2026-11-17 `gh pr say 11 --body …`
+# was a read here, and its text went out unchecked. A line that only looks like one starts the
+# check, which finds no alias and lets the call go.
+gh_shim_has_nested_alias() {
+    local config="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/config.yml" text pattern
+    [[ -r "$config" ]] || return 1
+    text="$(< "$config")" || return 1
+    pattern=$'(^|\n)[ \t]+["\']?'"$1"$'[ \t][^:\n]*:'
+    [[ "$text" =~ $pattern ]]
 }
 # gh_shim_refuse WHY INSTEAD ARGV…: the shim itself refuses, before gh runs.
 gh_shim_refuse() {

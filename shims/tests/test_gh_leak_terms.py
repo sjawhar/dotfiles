@@ -62,6 +62,8 @@ fi
 n=$(find "$CALLS" -name '*.args' | wc -l)
 printf '%s\0' "$@" > "$CALLS/$n.args"
 stat -L -c %F /dev/stdin > "$CALLS/$n.kind"
+# What gh would read from a --body-file other than `-` (a pipe can be read only once).
+prev=""; for a in "$@"; do [[ "$prev" == --body-file && "$a" != - ]] && cat -- "$a" > "$CALLS/$n.body"; prev="$a"; done
 cat > "$CALLS/$n.stdin"
 exit 0
 """
@@ -397,6 +399,194 @@ class GhLeakTerms(unittest.TestCase):
         self.assertEqual(unread.returncode, 2, unread.stderr.decode())
         self.assertIn("could not be read, read as public", unread.stderr.decode())
 
+    # --- found by the review of the change that added this check (2026-11-17) ----------------------------------------
+
+    def test_a_term_of_several_words_split_by_a_line_break_is_refused(self) -> None:
+        # GitHub renders a line break inside a paragraph as a space, so a body wrapped inside a term shows the term.
+        first, rest = TEST_TERMS[0].split(" ", 1)
+        for name, text in (("line break", f"See {first}\n{rest} soon.\n"), ("CRLF", f"See {first}\r\n{rest}.\n"),
+                           ("no-break space", f"See {first}\u00a0{rest}.\n"), ("hard break", f"See {first}  \n{rest}\n")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                refused = self.run_gh(["pr", "comment", "11", "-R", PUBLIC, "--body", text])
+                stderr = refused.stderr.decode("utf-8", "replace")
+                self.assertEqual(refused.returncode, 2, stderr)
+                self.assertEqual(self.gh_calls(), [])
+                self.assertIn("--body line 1: listed leak term 1\n", stderr)
+                self.assertNotIn(first.casefold(), stderr.casefold())
+                self.assert_hidden(refused)
+                # Control: the same text goes to a private repository unchanged.
+                self.setUp_calls()
+                argv = ["pr", "comment", "11", "-R", PRIVATE, "--body", text]
+                self.assert_sent(self.run_gh(argv), argv)
+        # Control: words that are not the term, wrapped the same way, go to the public repository.
+        self.setUp_calls()
+        argv = ["pr", "comment", "11", "-R", PUBLIC, "--body", f"See {first}\n{rest[:-1]}8 soon.\n"]
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_the_options_of_gh_api_are_read_as_gh_reads_them(self) -> None:
+        # pflag reads `-iXPOST` as -i and -X POST, the last -X winning; `-if` as -i and -f; and `-t -XGET` as a
+        # template `-XGET`. gh POSTs each of these fields.
+        endpoint = f"repos/{PUBLIC}/issues"
+        for argv in (["api", "-X", "GET", "-iXPOST", endpoint, "-f", f"title={TEXT}"],
+                     ["api", "-X", "GET", "-iX", "POST", endpoint, "-f", f"title={TEXT}"],
+                     ["api", "-X", "GET", "-iX=POST", endpoint, "-f", f"title={TEXT}"],
+                     ["api", endpoint, "-if", f"title={TEXT}"],
+                     ["api", endpoint, "-f", f"title={TEXT}", "-t", "-XGET"],
+                     ["api", endpoint, "-f", f"title={TEXT}", "-q", "-XGET"]):
+            with self.subTest(argv=argv[1:5]):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "--raw-field title")
+        # Control: a cluster that names GET last is a read, whose fields gh sends as a query, and is left untouched.
+        self.setUp_calls()
+        argv = ["api", "-X", "POST", "-iXGET", f"repos/{PUBLIC}/issues", "-f", f"labels={CANARY}"]
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_graphql_mutation_spelled_with_a_json_escape_is_a_mutation(self) -> None:
+        mutation = 'mutation { addComment(input: {subjectId: "I_1", body: "%s"}) { clientMutationId } }' % TEXT.strip()
+        payload = json.dumps({"query": mutation}).replace("mutation", "\\u006dutation", 1)
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("m.json", payload)]), "--input m.json")
+        # Control: a query whose escape spells another word (`mutations`) is a read.
+        query = 'query { search(query: "%s mutations", type: ISSUE, first: 1) { issueCount } }' % CANARY
+        argv = ["api", "graphql", "--input", self.file("q.json", json.dumps({"query": query}).replace(
+            "mutations", "\\u006dutations"))]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_an_escaped_term_counts_beside_a_term_its_target_does_not_take(self) -> None:
+        # The registry's oh-my-pi term does not reach o/pub and is dropped there; the canary in the same payload,
+        # spelled with JSON escapes, is still what GitHub stores.
+        registry = REGISTRY_TEST_TERMS["oh-my-pi"][0]
+        escaped = "".join(f"\\u{ord(c):04x}" for c in CANARY)
+        body = json.dumps({"body": f"Built with {registry}; see NOTE."}).replace("NOTE", escaped)
+        argv = ["api", "--method", "PATCH", f"repos/{PUBLIC}/pulls/11", "--input", self.file("e.json", body)]
+        self.assert_refused(self.run_gh(argv), "--input e.json (escapes decoded)")
+        # Control: the registry term alone goes to o/pub.
+        argv = ["api", "--method", "PATCH", f"repos/{PUBLIC}/pulls/11", "--input",
+                self.file("r.json", json.dumps({"body": f"Built with {registry}."}))]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_body_file_that_is_a_pipe_is_left_for_gh_to_read(self) -> None:
+        # /dev/stdin on a pipe is read from the shim's buffer, and gh gets the same bytes on its stdin.
+        argv = ["pr", "edit", "11", "-R", PRIVATE, "--body-file", "/dev/stdin"]
+        self.assert_sent(self.run_gh(argv, TEXT.encode()), argv, TEXT.encode())
+        self.assertEqual((self.calls / "0.body").read_bytes(), TEXT.encode())
+        argv = ["pr", "edit", "11", "-R", PUBLIC, "--body-file", "/dev/stdin"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv, CLEAN.encode()), argv, CLEAN.encode())
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(argv, TEXT.encode()), "--body-file /dev/stdin (standard input)")
+        # Another pipe, a process substitution, is not read: gh reads it for a private repository, and for any other
+        # target the call is refused, since its text cannot be checked.
+        script = '"$GH" pr edit 11 -R "$REPO" --body-file <(printf %s "$BODY")'
+        for repo, body in ((PRIVATE, TEXT), (PUBLIC, CLEAN)):
+            with self.subTest(repo=repo):
+                self.setUp_calls()
+                result = subprocess.run(["bash", "-c", script], env={**self.env, "GH": str(GH), "REPO": repo, "BODY": body},
+                                        cwd=self.work, stdin=subprocess.DEVNULL, capture_output=True, timeout=240,
+                                        check=False)
+                stderr = result.stderr.decode("utf-8", "replace")
+                if repo == PRIVATE:
+                    self.assertEqual(result.returncode, 0, stderr)
+                    self.assertEqual((self.calls / "0.body").read_bytes(), body.encode())
+                else:
+                    self.assertEqual(result.returncode, 2, stderr)
+                    self.assertEqual(self.gh_calls(), [])
+                    self.assertIn(": a pipe or a device, which the check cannot read", stderr)
+
+    def test_a_graphql_mutation_that_names_its_repository_is_judged_by_that_repository_too(self) -> None:
+        # createCommitOnBranch names its repository by name; the private node id in its message is not its only target.
+        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+
+        def commit(repository: str) -> list[str]:
+            return ["api", "graphql", "-f", "query=mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "
+                    f'"{repository}", branchName: "main"}}, expectedHeadOid: "{"0" * 40}", message: {{headline: "x", '
+                    f'body: "{TEXT.strip()} after PR_kwDOpriv5678"}}}}) {{ commit {{ oid }} }} }}']
+
+        refused = self.run_gh(commit(PUBLIC))
+        self.assert_refused(refused, "--raw-field query")
+        self.assertIn(f"{PUBLIC} (public)", refused.stderr.decode())
+        # The same name as a JSON variable of an --input payload, and as a gh field.
+        payload = json.dumps({"query": "mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, "
+                                       f'message: {{headline: "{TEXT.strip()}"}}}}) {{ commit {{ oid }} }} }}',
+                              "variables": {"b": {"repositoryNameWithOwner": PUBLIC, "branchName": "main"}}})
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("v.json", payload)]), "--input v.json")
+        # A mutation that makes a repository goes to one nobody can name yet, read as public.
+        self.setUp_calls()
+        made = self.run_gh(["api", "graphql", "-f", "query=mutation { createRepository(input: {name: \"x\", "
+                                                      f'visibility: PUBLIC, description: "{TEXT.strip()} PR_kwDOpriv5678"}}) '
+                                                      "{ repository { url } } }"])
+        self.assertEqual(made.returncode, 2, made.stderr.decode())
+        self.assertIn("a GraphQL mutation that makes a repository", made.stderr.decode())
+        # Control: the same commit to the private repository, named and by node id, goes out.
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(commit(PRIVATE)), commit(PRIVATE))
+
+    def test_a_gh_alias_under_a_command_is_read_as_the_command_it_expands_to(self) -> None:
+        config = self.tmp / "config" / "gh"
+        config.mkdir()
+        (config / "config.yml").write_text("version: 1\naliases:\n    pr say: pr comment\n", encoding="utf-8")
+        self.assert_refused(self.run_gh(["pr", "say", "11", "-R", PUBLIC, "--body", TEXT]), "--body")
+        # Control: the same alias to a private repository goes out.
+        argv = ["pr", "say", "11", "-R", PRIVATE, "--body", TEXT]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_graphql_node_id_spelled_with_json_escapes_is_read(self) -> None:
+        (self.nodes / "PR_kwDOpub09876").write_text(f"{PUBLIC}\n", encoding="utf-8")
+        (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
+        mutation = ('mutation { addComment(input: {subjectId: "NODE", body: "%s after PR_kwDOpriv5678"}) '
+                    "{ clientMutationId } }" % TEXT.strip())
+        payload = json.dumps({"query": mutation}).replace("NODE", "\\u0050R_kwDOpub09876")
+        refused = self.run_gh(["api", "graphql", "--input", self.file("n.json", payload)])
+        self.assert_refused(refused, "--input n.json")
+        self.assertIn(f"{PUBLIC} (public)", refused.stderr.decode())
+        # Control: the same payload whose node is the private repository's goes out.
+        argv = ["api", "graphql", "--input", self.file("p.json", json.dumps({"query": mutation.replace(
+            "NODE", "PR_kwDOpriv5678")}))]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_pull_request_url_with_a_user_or_a_port_names_its_repository(self) -> None:
+        # gh takes the URL's host without its user and port, so these name o/pub, not the directory's private remote.
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True, env=self.env)
+        subprocess.run(["git", "-C", str(self.work), "remote", "add", "origin", f"https://github.com/{PRIVATE}.git"],
+                       check=True, env=self.env)
+        for url in (f"https://x@github.com/{PUBLIC}/pull/11", f"https://github.com:443/{PUBLIC}/pull/11"):
+            with self.subTest(url=url):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(["pr", "comment", url, "--body", TEXT]), "--body")
+        # Control: the same URL form for the private repository goes out.
+        argv = ["pr", "comment", f"https://x@github.com:443/{PRIVATE}/pull/11", "--body", TEXT]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_text_gh_keeps_to_itself_is_not_read(self) -> None:
+        # A jq filter and a Go template shape gh's own output, and a dry run prints the pull request it would create.
+        endpoint = f"repos/{PUBLIC}/issues"
+        for argv in (["api", "-X", "POST", endpoint, "-f", "title=x", "--jq", f'select(.title == "{CANARY}")'],
+                     ["api", "-X", "POST", endpoint, "-f", "title=x", "-t", f"{{{{.{CANARY}}}}}"],
+                     ["pr", "create", "-R", PUBLIC, "--head", "h", "--title", TEXT, "--body", "x", "--dry-run"]):
+            with self.subTest(argv=argv[:3]):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        # Controls: the term in the text the call sends, and a dry run turned off, are refused.
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["api", "-X", "POST", endpoint, "-f", f"title={TEXT}", "--jq", ".id"]),
+                            "--raw-field title")
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["pr", "create", "-R", PUBLIC, "--head", "h", "--title", TEXT, "--body", "x",
+                                         "--dry-run=false"]), "--title")
+
+    def test_a_fork_s_new_name_goes_where_the_repository_it_forks_is(self) -> None:
+        self.assert_refused(self.run_gh(["repo", "fork", PUBLIC, "--fork-name", TEXT.strip()]), "--fork-name")
+        # Control: a fork of a private repository is private.
+        argv = ["repo", "fork", PRIVATE, "--fork-name", TEXT.strip()]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     # --- what the check does not touch --------------------------------------------------------------------------
 
     def test_gh_api_with_no_body_field_passes_untouched(self) -> None:
@@ -489,7 +679,7 @@ class Tables(unittest.TestCase):
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
         text = GH.read_text(encoding="utf-8")
         functions = ""
-        for name in ("gh_shim_is_write", "gh_shim_may_send_text"):
+        for name in ("gh_shim_is_write", "gh_shim_may_send_text", "gh_shim_has_nested_alias"):
             start = text.index(f"{name}() {{")
             functions += text[start:text.index("\n}\n", start) + 3]
         for group, sub in self.scanner().GH_TEXT_COMMANDS:

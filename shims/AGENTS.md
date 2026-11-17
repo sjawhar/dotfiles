@@ -125,28 +125,46 @@ behavior before handing the call to the real one. One file is data: `person-name
   admin can delete, so refusing before the post is the only fix (dispatch://INFRA-4102). The
   shim hands the check every write `gh_shim_is_write` names (the
   command and its verb found past any option before them, as cobra finds them, so `gh -R o/r pr
-  comment` is a `pr comment`) and every first word that is not a gh command, since a gh alias in
-  gh's `config.yml` is read as what it expands to; a read never starts it. The check reads gh's
+  comment` is a `pr comment`, and the options of `gh api` read as pflag reads them: a cluster such as
+  `-iXPOST` or `-if k=v`, and a word an option takes, such as the template of `-t -XGET`), every
+  first word that is not a gh command, and every command under which gh's `config.yml` holds an
+  alias (`gh alias set 'pr say' 'pr comment'`), since a gh alias is read as what it expands to; a
+  read never starts it. The check reads gh's
   arguments as gh does, with each command's options from `gh <command> --help` at the pinned gh
   (`GH_TEXT_COMMANDS`; `shims/tests/test_gh_leak_terms.py` fails when the installed gh's options
-  differ), and scans every argument and option value, and for a file gh reads (`--body-file`,
+  differ), and scans every argument and option value but those gh keeps to itself (the `--jq`,
+  `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`),
+  and for a file gh reads (`--body-file`,
   `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's files) what the
-  file holds, never its path; each text is read as written and, where that finds nothing, with its
-  JSON escapes decoded, since Python's `json.dump` writes each letter outside ASCII as a `\u`
-  escape. Stdin (`-`, `@-`, `workflow run --json`) comes from the buffer above, through its own
+  file holds, never its path. Each text is read whole, each whitespace character as a space: GitHub
+  renders a line break inside a paragraph as a space, so a term of several words that a wrapped
+  line or a no-break space splits is the term on the page. Each is read as written and, when it
+  holds a backslash, with its JSON escapes decoded as well, since Python's `json.dump` writes each
+  letter outside ASCII as a `\u` escape. A file that is the call's stdin while that is a pipe or a
+  terminal (`/dev/stdin`, `/dev/fd/0`) is read from the stdin buffer, as `-` is; any other pipe, a
+  socket or a device but `/dev/null` is not read at all, since reading a pipe takes the text gh
+  reads after the check (until 2026-11-17 a `--body-file <(…)` went out empty), so such a text is
+  refused for a target not confirmed private and left to gh for a private one.
+  Stdin (`-`, `@-`, `workflow run --json`) comes from the buffer above, through its own
   `DOTFILES_LEAK_TERMS_GH_STDIN=/dev/fd/N` (cleared first, like the gate's) after the check's exit
   7 asks for it, so both checks read the same bytes gh then gets. A `gh api` call counts when it
   sends a body (a method other than GET or HEAD, or gh's default POST for a field or `--input`), and
-  a GraphQL one only when its text holds `mutation`. Only a found term (or a list it cannot
+  a GraphQL one only when its text holds `mutation` (in an `--input` payload, also as a JSON escape
+  spells it). `pr create --dry-run` sends nothing and is not read. Only a found term (or a list it cannot
   decrypt, or a file it cannot read) makes the check read where the text goes: every repository
-  the call names (`-R`, a pull-request or issue URL, `repos/OWNER/REPO/…`, `--branch-repo`), else
+  the call names (`-R`, a pull-request or issue URL, a user or a port in it included,
+  `repos/OWNER/REPO/…`, `--branch-repo`, the repository `repo fork` forks, whose visibility a fork
+  takes), else
   `GH_REPO`, else each GitHub remote of the directory (the one `gh repo set-default` chose, else
   all), and for a GraphQL mutation the repository of each node id it names (one `nodes(ids:)` read
-  through this shim), through `scripts/github-repo-visibility` (the leak check's per-repository
+  through this shim) and each it names by name (createCommitOnBranch's `repositoryNameWithOwner`),
+  both read as written and with JSON escapes decoded, through `scripts/github-repo-visibility` (the
+  leak check's per-repository
   cache, else one gh read, whose answer it caches). A term of the list every repository has is
   refused when any target is not confirmed private or internal; a term of a scoped list or of
   the registry only when such a target is one its scope names. A visibility it cannot read, a
-  gist, a project, another host, a GraphQL mutation whose nodes cannot all be read and any other
+  gist, a project, another host, a GraphQL mutation whose nodes cannot all be read or that makes a
+  repository, and any other
   endpoint count as public and as any repository. Not checked, because the shim runs before the
   text exists or nothing new is typed: text
   typed into gh's own editor, browser or prompts (`-e`, `-w`, which need a terminal an agent's call

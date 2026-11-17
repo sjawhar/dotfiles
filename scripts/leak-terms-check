@@ -12,6 +12,7 @@ import pwd
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import threading
 import sys
@@ -2159,6 +2160,10 @@ GH_TEXT_COMMANDS: dict[tuple[str, str], tuple[str, str]] = {
         "--enable-merge-commit --enable-projects --enable-rebase-merge --enable-secret-scanning "
         "--enable-secret-scanning-push-protection --enable-squash-merge --enable-wiki --template --help",
     ),
+    ("repo", "fork"): (
+        "--fork-name --org --remote-name",
+        "--clone --default-branch-only --remote --help",
+    ),
     ("repo", "rename"): (
         "-R/--repo",
         "-y/--yes --help",
@@ -2229,11 +2234,19 @@ GH_COMMANDS = frozenset((
 ))
 # The options whose value names a file whose text gh sends, `-` naming standard input.
 GH_FILE_OPTIONS = frozenset(("--body-file", "--notes-file", "--from-file", "--recover", "--input"))
-GH_REPOSITORY_URL = re.compile(r"^https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s#?]+)", re.IGNORECASE)
+# A repository's URL as gh reads it: the host is the URL's host, a user and a port left out (gh's URL.Hostname()), so
+# https://x@github.com:443/o/r/pull/1 is o/r's.
+GH_REPOSITORY_URL = re.compile(r"^https?://(?:[^/@\s]*@)?(?:www\.)?github\.com(?::\d*)?/([^/\s]+)/([^/\s#?]+)",
+                               re.IGNORECASE)
+# Options whose value gh keeps to itself: a jq filter, a Go template or a format for its own output, a cache time.
+GH_LOCAL_OPTIONS = frozenset((("api", "--jq"), ("api", "--template"), ("api", "--cache"), ("project", "--jq"),
+                              ("project", "--template"), ("project", "--format")))
 GH_API_REPOSITORY = re.compile(r"^/?repos/([^/?#{}]+)/([^/?#{}]+)")
 GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
 JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
 JSON_SIMPLE_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+# One whitespace character, which gh_findings reads as a space; each is one character, so a match keeps its place.
+GH_WHITESPACE = re.compile(r"\s")
 
 
 @dataclass(frozen=True)
@@ -2343,7 +2356,8 @@ def gh_next_command(arguments: Sequence[str]) -> tuple[str, list[str]] | None:
     return None
 
 
-def gh_command(arguments: Sequence[str], environment: Mapping[str, str]) -> tuple[str, str, list[str]] | None:
+def gh_command(arguments: Sequence[str], environment: Mapping[str, str],
+               depth: int = 0) -> tuple[str, str, list[str]] | None:
     """(group, subcommand, the arguments the subcommand reads) of a gh call that can send text, after a gh alias;
     None for any other call."""
     found = gh_next_command(arguments)
@@ -2351,22 +2365,29 @@ def gh_command(arguments: Sequence[str], environment: Mapping[str, str]) -> tupl
         return None
     first, rest = found
     if first not in GH_COMMANDS:
-        # A shell alias (`!…`) runs a shell, whose own gh calls come back through shims/gh.
-        expansion = gh_alias(first, environment)
-        expanded = None if expansion is None or expansion.startswith("!") else gh_expand_alias(expansion, rest)
-        found = gh_next_command(expanded) if expanded else None
-        if found is None or found[0] not in GH_COMMANDS:
-            return None
-        first, rest = found
+        return gh_alias_command(first, rest, environment, depth)
     group = GH_GROUP_ALIASES.get(first, first)
     if group == "api":
         return group, "", rest
     found = gh_next_command(rest)
     if found is None:
         return None
-    sub, rest = found
-    sub = GH_SUBCOMMAND_ALIASES.get((group, sub), sub)
-    return (group, sub, rest) if (group, sub) in GH_TEXT_COMMANDS else None
+    word, rest = found
+    sub = GH_SUBCOMMAND_ALIASES.get((group, word), word)
+    if (group, sub) in GH_TEXT_COMMANDS:
+        return group, sub, rest
+    # An alias under a command (`gh alias set 'pr say' 'pr comment'`), which gh runs as what it expands to. Until
+    # 2026-11-17 only an alias of the first word was read, so `gh pr say 11 --body …` went out unchecked.
+    return gh_alias_command(f"{first} {word}", rest, environment, depth)
+
+
+def gh_alias_command(name: str, rest: Sequence[str], environment: Mapping[str, str],
+                     depth: int) -> tuple[str, str, list[str]] | None:
+    """gh_command of what the gh alias NAME runs with REST; None for no such alias, for a shell alias (`!…`), which
+    runs a shell whose own gh calls come back through shims/gh, and past three aliases in a row."""
+    expansion = gh_alias(name, environment) if depth < 3 else None
+    expanded = None if expansion is None or expansion.startswith("!") else gh_expand_alias(expansion, rest)
+    return gh_command(expanded, environment, depth + 1) if expanded else None
 
 
 def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple[str | None, str | None]]:
@@ -2443,6 +2464,8 @@ def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
             texts += gh_argument_texts(group, sub, number, value or "")
             continue
         name = long.get(option, option)
+        if (group, name) in GH_LOCAL_OPTIONS:
+            continue
         if value is None:
             if (group, sub, name) == ("workflow", "run", "--json"):
                 texts.append(GhText(name, path="-"))
@@ -2482,8 +2505,21 @@ def gh_api_sends(read: Sequence[tuple[str | None, str | None]]) -> bool:
     return method.upper() not in ("GET", "HEAD") if method is not None else body
 
 
+def gh_is_stdin(path: str) -> bool:
+    """Whether PATH (/dev/stdin, /dev/fd/0, …) is this call's standard input while that is a pipe or a terminal, which
+    gh reads after the check: the check then reads the shim's buffer of it, as for `-`."""
+    try:
+        named, standard = os.stat(path), os.fstat(0)
+    except OSError:
+        return False
+    return not stat.S_ISREG(standard.st_mode) and os.path.samestat(named, standard)
+
+
 def gh_contents(texts: Sequence[GhText], stdin: str | None) -> tuple[list[tuple[GhText, str]], list[tuple[GhText, str]]]:
-    """Each text with what gh sends for it, and each file that cannot be read with why."""
+    """Each text with what gh sends for it, and each file that cannot be read with why. A pipe, a socket or a device
+    other than /dev/null is not read: reading a pipe takes the text gh reads after the check (until 2026-11-17 a
+    `--body-file <(…)` went out empty, and a `gh pr edit --body-file /dev/stdin` emptied the body), and a device may
+    never end. Such a file cannot be read, so its text is refused for a target not confirmed private (gh_check)."""
     contents: list[tuple[GhText, str]] = []
     unreadable: list[tuple[GhText, str]] = []
     for piece in texts:
@@ -2496,6 +2532,13 @@ def gh_contents(texts: Sequence[GhText], stdin: str | None) -> tuple[list[tuple[
                 contents.append((piece, stdin))
         else:
             try:
+                mode = os.stat(piece.path).st_mode
+                if (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) and \
+                        not os.path.samestat(os.stat(piece.path), os.stat(os.devnull)):
+                    if not piece.optional:
+                        unreadable.append((piece, "a pipe or a device, which the check cannot read without taking its "
+                                                  "text from gh: pass the text in a file, or on standard input as -"))
+                    continue
                 data = Path(piece.path).read_bytes()
             except OSError as error:
                 if not piece.optional:
@@ -2516,19 +2559,29 @@ def escapes_decoded(text: str) -> str:
 
 
 def gh_findings(contents: Sequence[tuple[GhText, str]], matcher: TermMatcher) -> list[tuple[GhText, str, int, Span]]:
-    """(text, how it was read, line, match) for each listed term in each text: as written, and, where that finds none,
-    with its escapes decoded."""
+    """(text, how it was read, line, match) for each listed term in each text: as written, and for a text that holds a
+    backslash, with its escapes decoded too.
+
+    A text is read whole, each whitespace character read as a space: GitHub renders a line break inside a paragraph as
+    a space, so a term of several words that a wrapped line (or a no-break space) splits is the term on the page. Until
+    2026-11-17 each line was read alone, and a body wrapped inside such a term went to a public repository. Both views
+    are read whatever the first finds: a match counts only for a target its list reaches and no allowed token of that
+    target holds (gh_check), so the first view's matches can all be dropped there while the second's count. A match of
+    the decoded view is left out only when one of the first view has its term, list and allowed tokens, since gh_check
+    judges the two alike."""
     found: list[tuple[GhText, str, int, Span]] = []
     for piece, text in contents:
         views = [("", text)]
         if "\\" in text:
             views.append((" (escapes decoded)", escapes_decoded(text)))
+        seen: set[tuple[int, str, tuple[str, ...]]] = set()
         for how, view in views:
-            hits = [(line, span) for line, words in enumerate(newline_lines(view), start=1)
-                    for span in matcher.spans(words)]
-            found += [(piece, how, line, span) for line, span in hits]
-            if hits:
-                break
+            for span in matcher.spans(GH_WHITESPACE.sub(" ", view)):
+                key = (span.term, span.scope, span.allowed_in)
+                if how and key in seen:
+                    continue
+                seen.add(key)
+                found.append((piece, how, view.count("\n", 0, span.start) + 1, span))
     return found
 
 
@@ -2594,6 +2647,13 @@ class GhTarget:
 
 
 GH_NODE_ID = re.compile(r"\b(?:[A-Z][A-Za-z]{0,7}_[A-Za-z0-9_-]{6,}|MD[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9_-])")
+# A mutation that names its repository by name, not by node id: createCommitOnBranch's `repositoryNameWithOwner`, as a
+# GraphQL argument, a JSON variable or a gh field (`-F branch[repositoryNameWithOwner]=o/r`); and one that makes a
+# repository.
+GH_GRAPHQL_NAMED = re.compile(r"\brepositoryNameWithOwner\b")
+GH_GRAPHQL_NAMED_VALUE = re.compile(
+    r'\brepositoryNameWithOwner\]?"?\s*[:=]\s*"?([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)')
+GH_GRAPHQL_NEW_REPOSITORY = re.compile(r"\b(?:createRepository|cloneTemplateRepository)\b")
 GH_NODES_QUERY = (
     "query($ids: [ID!]!) { nodes(ids: $ids) { ... on RepositoryNode { repository { nameWithOwner } } "
     "... on PullRequestReviewThread { repository { nameWithOwner } } ... on Repository { nameWithOwner } } }"
@@ -2657,7 +2717,8 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
         named = GH_REPOSITORY_URL.match(value)
         if named:
             targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
-    if (group, sub) == ("repo", "edit") and positionals and not GH_REPOSITORY_URL.match(positionals[0]):
+    # A fork is as visible as the repository it forks, so its new name (--fork-name) goes where that one is.
+    if (group, sub) in (("repo", "edit"), ("repo", "fork")) and positionals and not GH_REPOSITORY_URL.match(positionals[0]):
         targets.append((positionals[0], gh_repository_url(positionals[0]), True))
     base = True
     if group == "api":
@@ -2666,12 +2727,22 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
         if named:
             targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
         if endpoint == "graphql" and not targets:
-            # A mutation names what it changes by node id; each id gh can read gives its repository, and an id it
-            # cannot read, or none at all, leaves the target unknown.
-            resolved = gh_node_repositories(texts)
-            if resolved is None:
+            # A mutation names what it changes by node id, and each id gh can read gives its repository; it can also
+            # name a repository by name (createCommitOnBranch), or make one. Every such repository is a target: until
+            # 2026-11-17 only the node ids were, so a commit to a public repository by name went out when the text
+            # also held an id of a private one. An id gh cannot read, a name given only through a variable the check
+            # cannot see, a new repository, or no repository at all leaves the target unknown. Each text is read as
+            # written and with its JSON escapes decoded, as gh_findings reads it.
+            views = [view for text in texts for view in dict.fromkeys((text, escapes_decoded(text)))]
+            if any(GH_GRAPHQL_NEW_REPOSITORY.search(view) for view in views):
+                return [GhTarget("a GraphQL mutation that makes a repository, read as public", "", True)]
+            named = [match[1].lower() for view in views for match in GH_GRAPHQL_NAMED_VALUE.finditer(view)]
+            resolved = gh_node_repositories(views) if any(GH_NODE_ID.search(view) for view in views) else []
+            if (resolved is None or sum(len(GH_GRAPHQL_NAMED.findall(view)) for view in views) != len(named)
+                    or not (resolved or named)):
                 return [GhTarget("a GraphQL mutation whose repository could not be read, read as public", "", True)]
-            targets += [(repository, f"https://github.com/{repository}", True) for repository in resolved]
+            targets += [(repository, f"https://github.com/{repository}", True)
+                        for repository in dict.fromkeys([*named, *resolved])]
         base = "{owner}" in endpoint or "{repo}" in endpoint
         if not targets and not base:
             return [GhTarget("no repository, read as public", "", True)]
@@ -2711,7 +2782,13 @@ def gh_check(arguments: Sequence[str]) -> int:
     read = gh_walk(rest, gh_options(GH_TEXT_COMMANDS[(group, sub)]))
     if group == "api" and not gh_api_sends(read):
         return 0
-    texts = gh_texts(group, sub, read)
+    # `pr create --dry-run` prints the pull request it would create and sends none of its text.
+    dry_run = [value for option, value in read if option == "--dry-run"]
+    if (group, sub) == ("pr", "create") and dry_run and (dry_run[-1] or "true").lower() in ("1", "t", "true"):
+        return 0
+    texts = [GhText(piece.option, piece.detail, path="-", optional=piece.optional)
+             if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece
+             for piece in gh_texts(group, sub, read)]
     stdin: str | None = None
     if any(piece.path == "-" for piece in texts):
         pointer = environment.get(GH_STDIN)
@@ -2724,7 +2801,9 @@ def gh_check(arguments: Sequence[str]) -> int:
     contents, unreadable = gh_contents(texts, stdin)
     if group == "api" and read and not unreadable:
         endpoint = next((value for option, value in read if option is None), "")
-        if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(text) for _, text in contents):
+        # GitHub reads an --input payload as JSON, so `\u006dutation` there is the keyword too: the decoded view counts.
+        if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents
+                                             for view in (text, escapes_decoded(text))):
             return 0
     matcher: TermMatcher | None = None
     list_problem: str | None = None
