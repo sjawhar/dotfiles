@@ -812,13 +812,21 @@ behavior before handing the call to the real one. One file is data: `person-name
   session's sqlite stores are its own and on `/mnt/nvme`; `devbox/session-scratch-reap` removes
   the copy with the session's scratch. The shared stores on the root disk took 2,148 fsyncs and
   238 s of fsync time in 300 s on 2026-11-03, and the retry above logged 2,000-4,200 lock lines
-  an hour. Left alone: a `CLOUDSDK_CONFIG` the caller set, an agentbox (its container binds the
-  host's `.config/gcloud`), and a session with no scratch directory or a copy that cannot be
-  made. A change that must outlive the session (`auth login|revoke|activate-service-account|
+  an hour. An agentbox session, which has no such scratch, gets its copy at
+  `$XDG_RUNTIME_DIR/gcloud-session/<the session its marker names>/gcloud`, each directory the
+  user's own with mode 0700: until 2026-11-17 it was `${TMPDIR:-/tmp}/agentbox-gcloud-session`,
+  one fixed name in the host's shared `/tmp` for a host process with a box's marker. Left alone: a
+  `CLOUDSDK_CONFIG` the caller set, a session with neither a scratch nor a private runtime
+  directory, and a copy that cannot be made. A change that must outlive the session (`auth login|revoke|activate-service-account|
   application-default|configure-docker`, `config set|unset|configurations`, `init`, or a path an
   unknown flag makes ambiguous) runs on `~/.config/gcloud`, and the session's copy is set aside so
   its next call copies again. A sign-in made outside a running session reaches its copy only after
-  the session runs one of those commands, or in its next session.
+  the session runs one of those commands, or in its next session. A copy serves only the
+  configuration directory it was made from, which its `.gcloud-session-copied` names: a call whose
+  `HOME` gives another directory (a child with a `HOME` of its own, a test with a fake one, in the
+  same scratch) runs on its own directory. Until 2026-11-17 any copy was taken, and gcloud tests
+  running in parallel under the agentbox marker, with no `TMPDIR`, judged a person's login by a copy
+  another test's `HOME` had published in `/tmp`, and ran the call.
   In an agent session with `KUBECONFIG` unset or empty, `container clusters get-credentials
   <cluster>` writes `~/.kube/config.d/<cluster>` (mode 0700 directory) instead of `~/.kube/config`,
   and prints the `export KUBECONFIG=…` to use it; one whose cluster name it cannot read from argv

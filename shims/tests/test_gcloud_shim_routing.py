@@ -107,11 +107,15 @@ class GcloudRouting(unittest.TestCase):
         for name in ("default", "gws-personal", "theorem"):
             (self.configs_dir / f"config_{name}").write_text("[core]\n", encoding="utf-8")
         (self.cloudsdk_config / "active_config").write_text("box\n", encoding="utf-8")
+        # A TMPDIR of the test's own, so nothing a call writes there reaches the machine's /tmp, which every test and
+        # session shares. No XDG_RUNTIME_DIR: an agentbox session then makes no copy of the configuration directory.
+        (self.stub_dir / "tmp").mkdir()
         self.env = {
             "PATH": f"{self.stub_dir}:{SHIMS}:/usr/bin:/bin",
             "HOME": str(self.fake_home),
             # Not a Google VM, wherever the suite runs (scripts/on-google-vm): a closed port.
             "GCE_METADATA_HOST": "127.0.0.1:9",
+            "TMPDIR": str(self.stub_dir / "tmp"),
         }
 
     def tearDown(self) -> None:
@@ -1258,6 +1262,40 @@ class GcloudRouting(unittest.TestCase):
                     self.assertIn(self.HOLDER_ROUTE, result.stderr)
                     self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
 
+    def test_a_session_copy_of_another_configuration_directory_is_not_this_callers(self):
+        """The session's copy of gcloud's configuration directory (scripts/gcloud-session-config) is shared by whatever
+        shares the scratch it is in, and the first call publishes it. A copy another HOME made, here one whose theorem
+        configuration holds no person's login, says nothing of this caller's directory: the same call is refused."""
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        runtime = self.stub_dir / "runtime"
+        scratch = runtime / "gcloud-session" / "1"
+        for directory in (runtime, runtime / "gcloud-session", scratch):
+            directory.mkdir()
+            directory.chmod(0o700)
+        copy = scratch / "gcloud"
+        (copy / "configurations").mkdir(parents=True)
+        (copy / "configurations" / "config_theorem").write_text("[core]\n", encoding="utf-8")
+        (copy / "active_config").write_text("box\n", encoding="utf-8")
+        marker = copy / ".gcloud-session-copied"
+        marker.write_text(f"{self.stub_dir / 'another-home'}/.config/gcloud\n", encoding="utf-8")
+        sessions = ({"AGENTBOX_SESSION": "1", "XDG_RUNTIME_DIR": str(runtime)},
+                    {**self.AGENT_MARKERS[0], "AGENT_SESSION_SCRATCH": str(scratch)})
+        for session in sessions:
+            with self.subTest(session=session):
+                result = self.run_shim({**session, "CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"},
+                                       args=["auth", "print-access-token"])
+                self.assert_agent_refusal(result)
+                self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration theorem, "
+                              "chosen by CLOUDSDK_ACTIVE_CONFIG_NAME.", result.stderr)
+        # Control: a copy of this caller's own directory is the one gcloud runs on, so the call is judged by it.
+        marker.write_text(f"{self.cloudsdk_config}\n", encoding="utf-8")
+        for session in sessions:
+            with self.subTest(session=session, copy="own"):
+                result = self.run_shim({**session, "CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"},
+                                       args=["auth", "print-access-token"])
+                self.assertEqual((result.returncode, result.stdout.strip()), (0, "SHOULD-NOT-RUN"), result.stderr)
+
     def test_agent_session_refuses_an_active_configuration_holding_a_persons_login(self):
         self.write_identity_configs()
         self.stub_gcloud_that_must_not_run()
@@ -2304,16 +2342,41 @@ class GcloudSessionConfig(unittest.TestCase):
                 self.assertEqual(self.rows(self.copy / "credentials.db"), ["-".join(args)])
         self.assertTrue(list(self.scratch.glob("gcloud.replaced.*")))
 
-    def test_an_agentbox_session_runs_on_a_copy_in_the_box_tmp(self) -> None:
-        box_tmp = Path(self.tmp.name) / "box-tmp"
-        box_tmp.mkdir()
-        box_copy = box_tmp / "agentbox-gcloud-session" / "gcloud"
-        got = self.run_shim(["storage", "ls"], AGENT_SESSION_SCRATCH=None, AGENTBOX_BOX="agentbox-0123", TMPDIR=str(box_tmp))
+    def test_an_agentbox_session_runs_on_a_copy_in_its_runtime_directory(self) -> None:
+        runtime = Path(self.tmp.name) / "runtime"
+        runtime.mkdir(mode=0o700)
+        box_copy = runtime / "gcloud-session" / "agentbox-0123" / "gcloud"
+        got = self.run_shim(["storage", "ls"], AGENT_SESSION_SCRATCH=None, AGENTBOX_BOX="agentbox-0123",
+                            XDG_RUNTIME_DIR=str(runtime))
         self.assertEqual(got, str(box_copy))
         self.assertEqual(self.rows(box_copy / "credentials.db"), ["refresh-1"])
-        self.assertEqual(stat.S_IMODE(box_copy.parent.stat().st_mode), 0o700)
+        for directory in (box_copy.parent, box_copy.parent.parent):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
         self.assertFalse(self.copy.exists())
         self.assertEqual(self.rows(self.origin / "credentials.db"), ["refresh-1"], "the box's seed was written")
+
+    def test_two_agentbox_sessions_of_one_user_never_share_a_copy(self) -> None:
+        """A session with no scratch keeps its copy in <XDG_RUNTIME_DIR>/gcloud-session/<its session>, the user's own
+        directory, mode 0700: two sessions that share /tmp (on the host, panes the tmux relay starts with two boxes'
+        markers) share no copy. Until 2026-11-17 both took ${TMPDIR:-/tmp}/agentbox-gcloud-session/gcloud, and the
+        second ran on the first one's copy."""
+        shared_tmp = Path(self.tmp.name) / "shared-tmp"
+        shared_tmp.mkdir()
+        runtime = Path(self.tmp.name) / "runtime"
+        runtime.mkdir(mode=0o700)
+        env = {"AGENT_SESSION_SCRATCH": None, "TMPDIR": str(shared_tmp), "XDG_RUNTIME_DIR": str(runtime)}
+        for session in ("agentbox-aaaa", "agentbox-bbbb"):
+            with self.subTest(session=session):
+                got = self.run_shim(["storage", "ls"], AGENTBOX_SESSION=session, **env)
+                self.assertEqual(got, str(runtime / "gcloud-session" / session / "gcloud"))
+        self.assertEqual(list(shared_tmp.iterdir()), [], "a copy went to the shared /tmp")
+        # Controls: a runtime directory another user can reach, and none at all, make no copy.
+        runtime.chmod(0o755)
+        self.assertEqual(self.run_shim(["storage", "ls"], AGENTBOX_SESSION="agentbox-cccc", **env), "<unset>")
+        runtime.chmod(0o700)
+        self.assertEqual(self.run_shim(["storage", "ls"], AGENTBOX_SESSION="agentbox-cccc",
+                                       **{**env, "XDG_RUNTIME_DIR": None}), "<unset>")
+        self.assertFalse((runtime / "gcloud-session" / "agentbox-cccc").exists())
 
     def test_a_copy_that_cannot_be_made_leaves_the_call_on_the_shared_directory(self) -> None:
         (self.origin / "credentials.db").write_text("not a sqlite database")
