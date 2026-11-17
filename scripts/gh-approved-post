@@ -22,7 +22,8 @@ not go out. The call passes only when all of these hold:
   - the draft, in the version of the ask's document that first shows the answer (else in the
     ask's own question), names the repository, and holds the posted body, exactly, between two
     `---` lines; for an issue or a pull request, a `Title: <title>` line before them gives the
-    title;
+    title, and the body may then hold `---` lines of its own: it runs to the last `---` line
+    before the next `Title:` line or `:::` block (drafts());
   - or, for an ask KIND_APPROVALS lists by its id, whose answer approves a KIND of post with no
     fixed text (dispatch://INFRA-3412): his answer still says the words the entry reads, the ask
     or its answer names the entry's repository, the call is one of the entry's verbs on that
@@ -287,8 +288,11 @@ def ask_blocks(doc: str, question: str) -> list[dict]:
 
 
 def drafts(source: str) -> list[tuple[str | None, str]]:
-    """(title, body) for each text between two consecutive `---` lines; the title is the last
-    `Title: …` line before that section's opening rule."""
+    """(title, body) for each text between two consecutive `---` lines, the title the last
+    `Title: …` line before that section's opening rule; and, for each `Title:` line, the text from
+    the first `---` line after it to the last `---` line before the next `Title:` line or `:::` block
+    line, or the end. So a body that holds `---` lines of its own (oh-my-pi's pull request template
+    has one) is one draft, and no draft runs into the next one or into an ask block."""
     lines = source.split("\n")
     rules = [i for i, line in enumerate(lines) if line.strip() == "---"]
     found = []
@@ -301,6 +305,14 @@ def drafts(source: str) -> list[tuple[str | None, str]]:
                 title = line[len("Title: "):].strip()
                 break
         found.append((title, "\n".join(lines[a + 1:b])))
+    for t, line in enumerate(lines):
+        if not line.startswith("Title: "):
+            continue
+        end = next((i for i in range(t + 1, len(lines))
+                    if lines[i].startswith(("Title: ", ":::"))), len(lines))
+        inside = [i for i in rules if t < i < end]
+        if len(inside) > 2:
+            found.append((line[len("Title: "):].strip(), "\n".join(lines[inside[0] + 1:inside[-1]])))
     return found
 
 
