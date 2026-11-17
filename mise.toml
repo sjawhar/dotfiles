@@ -46,6 +46,16 @@ idiomatic_version_file_enable_tools = ["rust"]
 [settings.upgrade]
 auto_prune = false
 
+# The global `go` pin below made mise export GOROOT (its 1.27.0 install dir) into every shell and
+# every mise shim, python3 included. A GOROOT in the environment overrides the root each Go
+# toolchain finds from its own executable, so every other toolchain used 1.27.0's tree: a
+# module's pinned go run directly failed with `compile: version "go1.27.0" does not match go tool
+# version "go1.26.8"` (agent-infra), and legion's check-ci-filters.sh, which finds its toolchain
+# with `go env GOROOT`, reported 1,485 false errors (both measured 2026-11-17). Go needs no
+# GOROOT: mise's go and each toolchain it switches to find their own.
+[settings.go]
+set_goroot = false
+
 # mise's GitHub API calls (release lookups) need a token: this box exhausts the shared 60/h
 # anonymous limit. gh-app-token mints the box's GitHub App installation token, which lives one
 # hour, so it is fetched per mise run here rather than exported once by .bashrc, where a
