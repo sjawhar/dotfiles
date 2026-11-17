@@ -406,7 +406,7 @@ class EnrollFixture(unittest.TestCase):
             "STUB_KEYDIR_REL": keydir_in_box_dir(),
             "STUB_RUN_BASE": str(self.run_base),
             # The run dir again, for a process that runs scripts/agentbox itself rather than
-            # sourcing it: the unenroll waiter's `session-live-box`.
+            # sourcing it, so that it too works in this tree.
             "AGENTBOX_RUN_BASE": str(self.run_base),
             "STUB_THUMBPRINT": THUMBPRINT,
             "STUB_BROKER": str(self.broker),
@@ -1307,7 +1307,7 @@ class OpenAttempts(EnrollFixture):
     def assert_test_2_not_read(self, status: int) -> None:
         """The waiter made no learn call and no unenroll call after the close, the session's key
         dir is still there, and unenroll.log holds one line: test 2 could not be read, with the
-        status of session-live-box and its empty output, and enr-1 and the open entry left
+        status of session_live_box and its empty output, and enr-1 and the open entry left
         alone."""
         self.assertEqual(self.learn_calls(), [])
         self.assertEqual(self.revokes_after_close(), [])
@@ -1315,39 +1315,103 @@ class OpenAttempts(EnrollFixture):
         self.assertEqual(
             self.unenroll_log(),
             [
-                f"box1: session sid-1: test 2 could not be read (session-live-box exited {status} and"
+                f"box1: session sid-1: test 2 could not be read (session_live_box returned {status} and"
                 " printed ''), so an enrollment that no box renews ends with its lease (15 min);"
                 f" enrollment enr-1 left alone, and the enrollment of each open attempt: {self.SESSION_OPEN}"
             ],
         )
 
     def test_a_waiter_that_cannot_ask_docker_leaves_the_enrollments_alone(self) -> None:
-        """`docker ps` fails from the close on, so at the waiter's wake session-live-box cannot
-        tell whether box2 has a container. It exits 2 with no output, and the waiter does not
+        """`docker ps` fails from the close on, so at the waiter's wake session_live_box cannot
+        tell whether box2 has a container. It returns 2 with no output, and the waiter does not
         read that as "no other box is live"."""
         self.close_while_test_2_cannot_be_read("export STUB_PS_FAIL=1")
         self.assert_test_2_not_read(2)
 
-    def self_that_only(self, body: str) -> str:
-        """The step that makes the waiter's SELF a script that only runs `body`: DOTFILES_DIR names
-        a dir whose scripts/agentbox is that script, and unenroll_box gives that file to the waiter
-        as SELF."""
-        scripts = self.root / "dotfiles-stub" / "scripts"
-        scripts.mkdir(parents=True)
-        write_stub(scripts, "agentbox", body)
-        return f'DOTFILES_DIR="{scripts.parent}"'
+    def live_box_that_only(self, body: str) -> str:
+        """The step that makes the waiter's test 2 a session_live_box that only runs `body`: the
+        close gives the waiter the functions as they are defined at the close (unenroll_fns)."""
+        return f"session_live_box() {{ {body}; }}"
 
     def test_a_session_live_box_with_no_answer_leaves_the_enrollments_alone(self) -> None:
-        """The waiter's session-live-box exits 0 with no output, as this script can when a publish
-        replaces it during the read."""
-        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 0"))
+        """The waiter's session_live_box returns 0 with no output. Status 0 is the answer "live"
+        only with a box's name."""
+        self.close_while_test_2_cannot_be_read(self.live_box_that_only("return 0"))
         self.assert_test_2_not_read(0)
 
     def test_a_session_live_box_that_ends_before_it_looks_leaves_the_enrollments_alone(self) -> None:
-        """The waiter's session-live-box exits 1 with no output, as this script does when a
-        command ends it under set -e before it looks. Status 1 alone is not the answer `none`."""
-        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 1"))
+        """The waiter's session_live_box returns 1 with no output. Status 1 alone is not the answer
+        `none`."""
+        self.close_while_test_2_cannot_be_read(self.live_box_that_only("return 1"))
         self.assert_test_2_not_read(1)
+
+    def close_and_remove_the_checkout(self, steps: str, **stubs: str) -> None:
+        """`steps`, then the close of box1 by a launcher that runs from a checkout of its own
+        (DOTFILES_DIR names a copy of scripts/agentbox and agent-secrets/), as a tester's real-box
+        run starts its boxes (`DOTFILES_DIR=<clone> <clone>/scripts/agentbox new`). During the
+        waiter's grace (STUB_GRACE_UNTIL, 180 s) the checkout is removed, as that run's cleanup
+        removes its clones once its boxes have closed."""
+        checkout = self.root / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy2(AGENTBOX, checkout / "scripts" / "agentbox")
+        shutil.copytree(DOTFILES / "agent-secrets", checkout / "agent-secrets")
+        grace_over = self.run_base / "grace-over"
+        self.close(
+            f'DOTFILES_DIR="{checkout}"\n{steps}',
+            after=f'rm -rf -- "{checkout}"\n: >"{grace_over}"',
+            AGENTBOX_UNENROLL_GRACE="180",
+            STUB_GRACE_UNTIL=str(grace_over),
+            **stubs,
+        )
+        self.assertFalse(checkout.exists())
+
+    def test_a_waiter_whose_checkout_is_removed_in_the_grace_ends_the_enrollment(self) -> None:
+        """box1 enrolls for session sid-1 and records enr-1, and no other box of the session is in
+        the run dir. close_and_remove_the_checkout. Test 2 still answers `none`, from the text the
+        waiter carries: one unenroll call, of enr-1, the session's key dir removed, and the two
+        lines of a session that did not come back. A waiter that ran <checkout>/scripts/agentbox
+        at its wake found no file there, so it got status 127 and logged that test 2 could not be
+        read (8 such lines on sami-devbox on 2026-11-16 and 2026-11-17, each after a real-box run
+        removed its clones)."""
+        self.close_and_remove_the_checkout("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+        self.assertFalse((self.run_base / "session-keys" / "sid-1").exists())
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment enr-1",
+                "box1: enrollment enr-1 (recorded) revoked",
+            ],
+        )
+
+    def test_a_waiter_whose_checkout_is_removed_in_the_grace_finds_the_live_box(self) -> None:
+        """As the row above, but box2's run dir records sid-1 and its container is there
+        (STUB_LIVE_BOXES). Test 2 names box2: no unenroll call, the session's key dir kept, and one
+        line that says the session is live in box2."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        self.close_and_remove_the_checkout("enroll_box box1 sid-1", STUB_ENROLL="broker", STUB_LIVE_BOXES="box2")
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((self.run_base / "session-keys" / "sid-1").exists())
+        self.assertEqual(
+            self.unenroll_log(), ["box1: session sid-1 is live in box box2; enrollment enr-1 left alone"]
+        )
+
+    def test_the_waiter_text_calls_no_function_it_does_not_carry(self) -> None:
+        """A detached process of the close has only the text unenroll_fns gives it. A function of
+        this script that the text calls and does not hold fails there with status 127, and in a
+        test of session_live_box such as `if <function> …` that reads as a box it did not see. So
+        each function `declare -F` lists once the script is sourced is either defined in the text
+        or not named in it."""
+        result = self.bash("declare -F\necho ---\nunenroll_fns")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed, text = result.stdout.split("\n---\n", 1)
+        names = {line.split()[-1] for line in listed.splitlines()}
+        carried = set(re.findall(r"^(\S+) \(\)\s*$", text, re.M))
+        self.assertIn("session_live_box", carried)
+        named = {name for name in names if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text)}
+        self.assertEqual(named - carried, set())
 
     def test_a_session_that_came_back_keeps_the_open_enrollment(self) -> None:
         """Each enroll call of box1 for session sid-1 ends with its outcome not known, and after
@@ -1429,12 +1493,9 @@ class OpenAttempts(EnrollFixture):
 
     def waiter(self, skd: Path, owner: str, closed: str) -> list[str]:
         """unenroll_session_wait called directly, with a grace of 0 s, for box1 of session sid-1:
-        SKD `skd`, OWNER `owner`, EID enr-1, SELF this script (which answers `none`: no other box
-        is in the run dir) and CLOSED `closed`. Returns its lines without their UTC time."""
-        result = self.bash(
-            f'unenroll_session_wait 0 "$RUN_BASE" "{skd}" box1 sid-1 "{owner}" enr-1'
-            f' "$DOTFILES_DIR/scripts/agentbox" "{closed}"'
-        )
+        SKD `skd`, OWNER `owner`, EID enr-1 and CLOSED `closed`. Test 2 answers `none`: no other
+        box is in the run dir. Returns its lines without their UTC time."""
+        result = self.bash(f'unenroll_session_wait 0 "$RUN_BASE" "{skd}" box1 sid-1 "{owner}" enr-1 "{closed}"')
         self.assertEqual(result.returncode, 0, result.stderr)
         return [m.group(1) if (m := self.TIMED.fullmatch(line)) else line for line in result.stdout.splitlines()]
 
