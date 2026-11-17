@@ -82,25 +82,63 @@ def pinned_sops() -> str | None:
     return None
 
 
+def mise_data_dirs(environment: Mapping[str, str]) -> list[Path]:
+    """The mise data dirs a pinned tool may be installed in, as shims/ reads them (shims/AGENTS.md, "A moved HOME"):
+    MISE_DATA_DIR and mise's default ~/.local/share/mise under HOME; with no MISE_DATA_DIR, ~/.mise (.bashrc's) and
+    that default under HOME, then the same two under the uid's passwd home, which a caller's HOME does not move."""
+    home = environment.get("HOME")
+    share = Path(environment.get("XDG_DATA_HOME") or Path(home or "/nonexistent") / ".local" / "share") / "mise"
+    if environment.get("MISE_DATA_DIR"):
+        dirs = [Path(environment["MISE_DATA_DIR"]), share]
+    else:
+        dirs = [Path(home) / ".mise", share] if home else []
+        dirs += [passwd_home() / ".mise", passwd_home() / ".local" / "share" / "mise"]
+    return list(dict.fromkeys(d for d in dirs if d.is_absolute()))
+
+
+def pinned_install(data: Path, pin: str) -> str | None:
+    install = data / "installs" / "sops" / pin
+    for candidate in (install / "sops", install / "bin" / "sops"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def sops_command(environment: Mapping[str, str]) -> str | None:
-    """The sops to run: the first on PATH, except that mise's shim gives way to the pinned sops it would run.
+    """The sops to run: the first on PATH, except that mise's shim gives way to the pinned sops it would run; with no
+    sops on PATH, the pinned sops in mise's data dirs.
 
     mise's shim takes its version from the caller's HOME (mise's global config) or from a mise.toml in the caller's
     directory, so a commit made with a test's HOME outside this checkout found no version and the shim exited 1
     (2026-11-16, every Legion fixture repository on sami-devbox). The pinned install sits in the same mise data
     directory as the shims directory, so finding it reads no HOME. With no exact pin in this checkout's mise.toml, or
-    no install of it there, the shim runs as found."""
+    no install of it there, the shim runs as found. A Legion test pane's PATH holds no sops at all
+    (`<bin>:/usr/local/bin:/usr/bin:/bin`), so every commit through shims/jj there was refused until 2026-11-17."""
+    pin = pinned_sops()
     found = shutil.which("sops", path=environment.get("PATH", os.defpath))
     if found is None:
+        if not pin:
+            return None
+        for data in mise_data_dirs(environment):
+            install = pinned_install(data, pin)
+            if install:
+                return install
         return None
     shims = Path(found).parent
-    pin = pinned_sops()
     if shims.name == "shims" and pin:
-        install = shims.parent / "installs" / "sops" / pin
-        for candidate in (install / "sops", install / "bin" / "sops"):
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
+        install = pinned_install(shims.parent, pin)
+        if install:
+            return install
     return found
+
+
+def missing_sops(environment: Mapping[str, str]) -> str:
+    """The refusal for no sops: what was searched, and the correction."""
+    pin = pinned_sops()
+    if not pin:
+        return "sops is not on PATH, and this checkout's mise.toml pins no exact sops; install sops with mise"
+    searched = ", ".join(str(data / "installs" / "sops" / pin) for data in mise_data_dirs(environment))
+    return f"sops is not on PATH, and the pinned sops {pin} is installed in none of {searched}; install sops with mise"
 
 
 def sops_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -138,7 +176,7 @@ def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
 
     sops = sops_command(environment)
     if sops is None:
-        raise list_error("sops is not on PATH; install sops with mise")
+        raise list_error(missing_sops(environment))
     try:
         completed = subprocess.run(
             [sops, "--decrypt", "--output-type", "json", str(source)],
@@ -150,7 +188,7 @@ def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
             check=False,
         )
     except FileNotFoundError as error:
-        raise list_error("sops is not on PATH; install sops with mise") from error
+        raise list_error(missing_sops(environment)) from error
     except subprocess.TimeoutExpired as error:
         raise list_error("sops timed out while reading the term list; fix it with sops edit leak-terms.sops.yaml") from error
     except OSError as error:

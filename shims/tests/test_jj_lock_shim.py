@@ -159,8 +159,9 @@ class JjLockShimTest(unittest.TestCase):
         hand_back = self.hand_back_dir()
         home = self.tmp / "home"
         home.mkdir()
-        # No real jj on PATH or in the shim's fallbacks under this HOME.
-        env = {**self.env, "PATH": os.pathsep.join([str(SHIMS), str(hand_back)]), "HOME": str(home), "DOTFILES_DIR": str(home / ".dotfiles")}
+        # No real jj on PATH, and none past it: no mise configuration under this HOME and no
+        # mise.toml in DOTFILES_DIR, so there is no pin to look up.
+        env = {**self.no_pinned_install(home), "PATH": os.pathsep.join([str(SHIMS), str(hand_back)])}
         result = run_bounded(["jj", "--version"], self.repo, env)
         self.assertEqual(result.returncode, 127, result.stderr)
         self.assertIn(f"{hand_back / 'jj'} handed the call back", result.stderr)
@@ -169,21 +170,26 @@ class JjLockShimTest(unittest.TestCase):
     def test_a_marker_from_another_pid_skips_nothing(self):
         # A nested jj (a git hook, `jj util exec -- jj …`) inherits the outer shim's marker under
         # another pid; pid 1 is never the shim. The real jj the marker names is the only jj on
-        # PATH or in the shim's fallbacks, so skipping it would leave the call nothing to run.
+        # PATH, and there is no pinned install past it, so skipping it would leave the call
+        # nothing to run.
         real = real_jj()
         direct = subprocess.run([str(real), "log", "-r", "@", "--no-graph", "-T", "change_id"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         home = self.tmp / "home"
         home.mkdir()
         env = {
-            **self.env,
+            **self.no_pinned_install(home),
             "PATH": os.pathsep.join([str(SHIMS), str(real.parent)]),
-            "HOME": str(home),
-            "DOTFILES_DIR": str(home / ".dotfiles"),
             "DOTFILES_JJ_SHIM": f"1 {real}",
         }
         result = run_bounded(["jj", "log", "-r", "@", "--no-graph", "-T", "change_id"], self.repo, env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, direct)
+
+    def no_pinned_install(self, home: Path) -> dict[str, str]:
+        """self.env under HOME, with no mise configuration there or in DOTFILES_DIR's checkout: the
+        shim's lookup past PATH (shims/AGENTS.md, "A moved HOME") has no pin to look up."""
+        env = {name: value for name, value in self.env.items() if name not in ("MISE_GLOBAL_CONFIG_FILE", "XDG_CONFIG_HOME")}
+        return {**env, "HOME": str(home), "DOTFILES_DIR": str(home / ".dotfiles")}
 
 
 if __name__ == "__main__":

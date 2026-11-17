@@ -16,6 +16,13 @@
 # Omp-Session trailer. Everything else goes straight to the real jj.
 set -euo pipefail
 
+# This shim's own directory, through a link to it: a caller may run the shim by a link in a
+# directory of its own (a Legion test pane links it into its bin), and scripts/ is beside the
+# shim, not beside the link (shims/AGENTS.md, "A moved HOME").
+_shim_dir="${BASH_SOURCE[0]}"
+[[ ! -L "$_shim_dir" ]] || _shim_dir="$(command -p readlink -f -- "$_shim_dir")"
+_shim_dir="${_shim_dir%/*}"
+
 # A jj that hands the call to the first jj on PATH re-enters this shim in the same
 # pid: mise's shim does, when mise has no jj version for the directory (under a
 # relocated XDG_CONFIG_HOME, mise reads no global config), and this shim is that
@@ -35,8 +42,121 @@ handed_back() {
     return 1
 }
 
-# The first jj on PATH that is not this shim, judged by content like shims/gh,
-# and not one that handed the call back.
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+# is_mise_shim FILE: whether FILE is mise's own shim, a file in the shims dir of
+# one of mise's data dirs or a link to mise. It reaches its tool only where mise
+# reads its config and trust list under HOME, which a moved HOME hides.
+is_mise_shim() {
+    local IFS=$' \t\n'
+    local data
+    mise_paths
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        [[ "${1%/*}" -ef "$data/shims" ]] && return 0
+    done
+    [[ -L "$1" && "$(command -p readlink -f -- "$1")" == */mise ]]
+}
+
+# mise_pinned BIN TOOL: sets _pinned to BIN in the install of TOOL at the exact
+# version mise's global configuration pins (a [tools] line), from mise's data
+# dirs, whatever HOME and PATH the caller set (mise_paths). Without one, _pinned
+# is empty and _pinned_searched says what was read, for the caller's refusal.
+mise_pinned() {
+    local bin="$1" tool="$2"
+    local IFS=$' \t\n'
+    local line section="" pin="" key data candidate searched=""
+    local section_re='^[[:space:]]*\[([^]]*)\]'
+    local pin_re='^[[:space:]]*"?([^"=[:space:]]+)"?[[:space:]]*=[[:space:]]*"([0-9][0-9A-Za-z.+-]*)"'
+    _pinned="" _pinned_searched=""
+    mise_paths
+    if [[ -r "$_mise_config" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ $section_re ]]; then
+                section="${BASH_REMATCH[1]}"
+            elif [[ "$section" == tools && "$line" =~ $pin_re && "${BASH_REMATCH[1]}" == "$tool" ]]; then
+                pin="${BASH_REMATCH[2]}"
+                break
+            fi
+        done < "$_mise_config"
+    fi
+    if [[ -z "$pin" ]]; then
+        _pinned_searched="no exact version of $tool pinned in $_mise_config"
+        return 1
+    fi
+    key="${tool//[:\/]/-}"
+    key="${key//@/}"
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        for candidate in "$data/installs/$key/$pin/$bin" "$data/installs/$key/$pin/bin/$bin" "$data/installs/$key/$pin"/*/bin/"$bin"; do
+            if [[ -f "$candidate" && -x "$candidate" ]]; then
+                _pinned="$candidate"
+                return 0
+            fi
+        done
+        searched+="${searched:+, }$data/installs/$key/$pin"
+    done
+    _pinned_searched="$tool $pin, pinned in $_mise_config, is installed in none of $searched (\`mise install\` installs it)"
+    return 1
+}
+
+# Sets _real to the first jj on PATH that is not this shim, judged by content like
+# shims/gh, and not one that handed the call back. mise's own shim gives way to
+# the jj it would run, the pinned install, where there is one; past PATH, the
+# pinned install.
 real_jj() {
     local IFS=':'
     local dir candidate header
@@ -47,23 +167,16 @@ real_jj() {
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *jj-lock-shim* ]] && continue
         handed_back "$candidate" && continue
-        echo "$candidate"
-        return
+        if is_mise_shim "$candidate" && mise_pinned jj github:sjawhar/jj && ! handed_back "$_pinned"; then
+            candidate="$_pinned"
+        fi
+        _real="$candidate"
+        return 0
     done
-    # A caller that builds its own PATH may leave the real binary off it.
-    for candidate in "${DOTFILES_DIR:-$HOME/.dotfiles}/bin/jj" "$HOME/.mise/shims/jj"; do
-        [[ -f "$candidate" && -x "$candidate" ]] || continue
-        header=""
-        IFS= read -r -n 512 -d '' header < "$candidate" || true
-        [[ "$header" == *jj-lock-shim* ]] && continue
-        handed_back "$candidate" && continue
-        echo "$candidate"
-        return
-    done
-    return 1
+    mise_pinned jj github:sjawhar/jj && ! handed_back "$_pinned" && _real="$_pinned"
 }
-if ! _real="$(real_jj)"; then
-    echo "jj shim: no real jj found on PATH${_handed:+; ${_handed//:/, } handed the call back to this shim, as a mise shim does when mise has no jj version for the directory}" >&2
+if ! real_jj; then
+    echo "jj shim: no real jj found on PATH ($PATH), and ${_pinned_searched:-the pinned install handed the call back}${_handed:+; ${_handed//:/, } handed the call back to this shim, as a mise shim does when mise has no jj version for the directory}" >&2
     exit 127
 fi
 _handed="${_handed:+$_handed:}$_real"
@@ -125,7 +238,7 @@ fi
 find_leak_check() {
     _check="${PUBLIC_LEAK_CHECK:-}"
     [[ -n "$_check" ]] || _check="$(command -v public-leak-check.sh 2> /dev/null || true)"
-    _pointer="${XDG_CONFIG_HOME:-$HOME/.config}/public-leak-check/path"
+    _pointer="${XDG_CONFIG_HOME:-${HOME:-}/.config}/public-leak-check/path"
     if [[ -z "$_check" && -s "$_pointer" ]]; then IFS= read -r _check < "$_pointer" || true; fi
 }
 # Who the push gate runs for: `agent` in an agent session; `person` outside one, on a machine with the check
@@ -397,8 +510,9 @@ fi
 # cannot make conditional on a repository. So the shim asks
 # scripts/omp-session-trailer, as shims/git does, about the repository's backing
 # git repository, and where it says no (`git config omp.sessionTrailer false`
-# there, or a throwaway repository: no remote, and under a temporary root) runs
-# jj with `templates.commit_trailers` empty.
+# there, or a throwaway repository: no remote, and under a temporary root, unless
+# every overlay on JJ_CONFIG is under a temporary root too, as the overlay of an
+# omp session a test started is) runs jj with `templates.commit_trailers` empty.
 # That call also takes `immutable_heads()` back to `builtin_immutable_heads()`:
 # session-env.ts's cross-session guard (AGENTC-318) tells a session's own commits
 # by their trailer, so without one every commit the session describes would be
@@ -410,7 +524,8 @@ fi
 _pre=()
 
 trailer_on() {
-    local d="" repo target=""
+    local d="" repo target="" entry
+    local -a overlays=() entries=()
     # jj accepts globals after the command, so this shared reader scans the
     # expanded argv through --.
     d="$(repository_option)"
@@ -432,7 +547,13 @@ trailer_on() {
     IFS= read -r target < "$repo/store/git_target" 2> /dev/null || true
     [[ -n "$target" ]] || return 0 # not git-backed, so no remote
     [[ "$target" == /* ]] || target="$repo/store/$target"
-    "${BASH_SOURCE[0]%/*}/../scripts/omp-session-trailer" git --git-dir="$target" > /dev/null 2>&1
+    # The overlays that give jj its trailers, so a session a test made itself keeps its own
+    # trailer in the test's throwaway repository (scripts/omp-session-trailer).
+    IFS=':' read -ra entries <<< "${JJ_CONFIG:-}"
+    for entry in ${entries[@]+"${entries[@]}"}; do
+        if [[ "${entry##*/}" == omp-attribution-*.toml ]]; then overlays+=(--overlay "$entry"); fi
+    done
+    "$_shim_dir/../scripts/omp-session-trailer" ${overlays[@]+"${overlays[@]}"} git --git-dir="$target" > /dev/null 2>&1
 }
 git_target() {
     local d="" repo target=""
@@ -461,11 +582,11 @@ git_target() {
 }
 
 # The leak-term scanner, for the push check below and the commit, describe and new checks after it.
-_jj_scanner="${BASH_SOURCE[0]%/*}/../scripts/leak-terms-check"
+_jj_scanner="$_shim_dir/../scripts/leak-terms-check"
 push_gate() {
     local target out rc=0 a remote="" kind ref action old new url urls slug check pointer visibility line sshcmd term_out term_rc start index dry=0 tag_object
     local zero=0000000000000000000000000000000000000000
-    local scripts="${BASH_SOURCE[0]%/*}/../scripts"
+    local scripts="$_shim_dir/../scripts"
     local header='^Changes to push to (.+):$'
     local update='^  (bookmark|tag): (.+) \[(.*)\]$'
     local add='^add to ([0-9a-f]+)$' delete='^delete from ([0-9a-f]+)$'

@@ -152,8 +152,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   The real gh is the first gh past this dir on PATH. When that is mise's own shim, the gh pinned
   exactly in mise's global config runs straight from its install dir, as `shims/knives` runs
   knives: mise's shim is one more process per call, and under load mise hung for minutes
-  (2026-11-03). mise's shim runs only when that install is missing
-  (`shims/tests/test_gh_mise_pin.py`).
+  (2026-11-03). mise's shim runs only when that install is missing. With no gh on PATH at all the
+  pinned install runs too, found without HOME ("A moved HOME" below), and with neither the shim
+  names PATH, the configuration and the install dirs it read (`shims/tests/test_gh_mise_pin.py`).
   A `gh api` call for a job's log (`…actions/jobs/<id>/logs`) gets
   `--allow-escape-sequences` unless it already carries it: a job log holds terminal escape
   sequences, which gh refuses to print, so the call returned nothing and the caller read no CI
@@ -161,7 +162,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   not a document to render.
 - **`jj`** locks the git worktree of every workspace `jj workspace add` creates, and where
   `scripts/omp-session-trailer` says no for the backing git repository (`git config
-  omp.sessionTrailer false` there, or a throwaway repository, as for `git` below)
+  omp.sessionTrailer false` there, or a throwaway repository, as for `git` below, unless every
+  `omp-attribution-*.toml` on `JJ_CONFIG` lies under a temporary root too: the overlay of an omp
+  session a test started, whose trailer is the test's subject, as in Legion's commit-trailers test)
   runs every command that can write a description with `templates.commit_trailers` empty and
   `immutable_heads()` back at `builtin_immutable_heads()`: the session overlay's cross-session
   guard (AGENTC-318) tells a session's own commits by their trailer, so it is off there, and
@@ -512,7 +515,8 @@ behavior before handing the call to the real one. One file is data: `person-name
 - **`claude`** and **`codex`** (a link to `claude`) export the model-spend environment of
   `scripts/agent-spend-env.sh` (dispatch://INFRA-165), then exec the first real binary of that name
   past this dir on PATH, skipping mise's shims dir and any file whose real path is in a `shims/` dir,
-  else `mise which` it; arguments, stdin and PATH go through unchanged. They are for a claude or codex
+  else `mise which` it (the directory's pin, then the machine's, `-C /`), asked without HOME ("A
+  moved HOME" below); arguments, stdin and PATH go through unchanged. They are for a claude or codex
   that a script or a session's bash tool starts by name (`claude -p` workers): those inherit their
   omp parent's collector and `OTEL_LOGS_EXPORTER=none`, and Claude Code sent nothing. Through the shim
   Claude Code gets `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, traces and metrics off,
@@ -571,12 +575,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   is a YubiKey blink the firmware holds about 15 seconds, and on 2026-11-01 thirteen agent
   requests timed out on it. An agent is a caller with `OMP_SESSION_ID`, `PI_SESSION_FILE`,
   `CLAUDECODE` or `ENVOY_SESSION_ID` set; every other call, and every call from Sami's shells,
-  execs the first `secrets` past its own PATH entry with the same arguments. A shell that ran
+  execs the first `secrets` past its own PATH entry with the same arguments, else the one mise
+  names, asked without HOME ("A moved HOME" below). A shell that ran
   `secrets` before the shim existed has the old path hashed and bypasses it until `hash -r`.
 - **`bq`** puts BigQuery's CLI on PATH at all. The Cloud SDK installs it beside gcloud in the
   SDK's own bin dir, which is on nobody's PATH here, so every caller named the SDK's full path
   instead (agent-infra's spend loaders, 2026-10-29). It takes the first `bq` past its own PATH
-  entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses, and
+  entry (`shims/ssh-keygen`'s lookup), else the SDK's install location under the home gcloud uses,
+  then under the uid's passwd home ("A moved HOME" below), and
   turns gcloud's per-call file logging off, since bq shares that config dir and those logs.
 - **`dispatch`** puts the Dispatch CLI on PATH at all. omp adds the pi-envoy plugin's bin dir to a
   session's PATH, but a login shell, a plain `ssh sami-devbox dispatch …` and a unit have no such
@@ -608,7 +614,8 @@ behavior before handing the call to the real one. One file is data: `person-name
   `backend.url` in the `Pulumi.yaml`/`Pulumi.yml` the command would read (searched upward from
   the working directory, which `--cwd`/`-C` moves). It sets `PULUMI_SKIP_UPDATE_CHECK=true`
   either way, and is otherwise transparent: same argv, stdin, stdout and exit code, and no output
-  of its own. It takes the first `pulumi` past its own PATH entry (`shims/ssh-keygen`'s lookup).
+  of its own. It takes the first `pulumi` past its own PATH entry (`shims/ssh-keygen`'s lookup),
+  else the one mise names, asked without HOME as `shims/az` asks it ("A moved HOME" below).
 - **`az`** keeps an agent off the user's Azure login. The default config dir (`~/.azure`) holds
   Sami's own `az login`, so every az call an agent made without `AZURE_CONFIG_DIR` acted as
   Sami@Theorem.dev; three `az vm run-command invoke` calls did on 2026-11-01
@@ -621,7 +628,9 @@ behavior before handing the call to the real one. One file is data: `person-name
   `~/.azure` holds a user login, which is refused with the reason. An explicit
   `AZURE_CONFIG_DIR`, empty included, is kept, and outside an agent session nothing changes, so
   the user's own shell still runs as the user. It takes the first `az` past its own PATH entry
-  (`shims/ssh-keygen`'s lookup), else the mise pin (`"pipx:azure-cli"` in `mise.toml`), and is
+  (`shims/ssh-keygen`'s lookup), else the mise pin (`"pipx:azure-cli"` in `mise.toml`), asked
+  without HOME, also in place of mise's own shim under a HOME that holds no mise configuration
+  ("A moved HOME" below), and is
   otherwise transparent: same argv, stdin, stdout and exit code, no output of its own. On a
   Google VM (`scripts/on-google-vm`; sami-devbox, dispatch://INFRA-993), which has no Azure
   managed identity, the agent's dir holds the agents' own Azure identity `agent-azure`
@@ -765,10 +774,11 @@ behavior before handing the call to the real one. One file is data: `person-name
   names the flags (with `--instance-termination-action=STOP` and, for local SSD,
   `--discard-local-ssds-at-termination-timestamp=true`), Google's run-time limit page and the
   escape; a call that passes keeps its argv. Outside an agent session nothing changes.
-- **mise off PATH:** `omp`, `knives`, `pyright` and `basedpyright` call mise. A unit's, a test
-  harness's or a git credential helper's PATH can hold this dir without `~/.dotfiles/bin`, where
-  mise lives; these shims then run `~/.dotfiles/bin/mise` by its path, with `~/.mise` as its data
-  dir when `MISE_DATA_DIR` is unset.
+- **mise off PATH:** `az`, `claude`/`codex`, `ctx`, `knives`, `omp`, `pulumi`, `pyright`,
+  `basedpyright` and `secrets` call mise. A unit's, a test harness's or a git credential helper's
+  PATH can hold this dir without `~/.dotfiles/bin`, where mise lives; these shims then run the
+  `bin/mise` of the dotfiles checkout they are in by its path, with the data dir and configuration
+  of "A moved HOME" below.
 - **`gcloud`**'s global-flag table is the installed SDK's. After any `gcloud components update`,
   run `python3 scripts/gcloud-global-flags --check`; on a difference, regenerate the table with
   `python3 scripts/gcloud-global-flags`, and the test fixture with `--json`. Run it with `python3`,
@@ -797,7 +807,9 @@ this checkout's `mise.toml` pins, from `installs/sops/<version>/` in the mise da
 holds that shims directory. mise's shim takes its version from the caller's `HOME` or from a
 `mise.toml` in the caller's directory, so with a test's `HOME` outside this checkout it had none,
 exited 1, and every commit a Legion test made through the shims was refused (2026-11-16). With
-no exact pin or no install of it, the shim runs as found. A sops that exits with any status but
+no exact pin or no install of it, the shim runs as found. With no sops on `PATH` at all (a Legion
+test pane's `<bin>:/usr/local/bin:/usr/bin:/bin`), it runs that pinned version from mise's data
+dirs as "A moved HOME" below reads them, and its refusal names each dir it searched. A sops that exits with any status but
 0 or 128 is named in the refusal with its status.
 
 The `diff`, `message` and `push` modes print one stderr line per match with a place and
@@ -996,12 +1008,15 @@ marker line), since two copies on PATH called each other until an agent box's 81
 were used up on 2026-11-03 (`GcloudShimCopiesOnPath`). `shims/jj` and `shims/tmux` also search
 from the top, and hand the binary they find the whole PATH: jj's own `git` calls must still reach
 `shims/git`, and a tmux server started through the shim gives its PATH to every pane. The first
-jj or tmux they find is usually mise's shim, which hands the call back to the first one on PATH
-whenever mise has no version of it for the directory (a relocated `HOME` or `XDG_CONFIG_HOME`
-hides mise's global config). So `DOTFILES_JJ_SHIM` and `DOTFILES_TMUX_SHIM` name every binary
-the shim has handed the call to in that pid, and a re-entry in the same pid skips each one (and
-every path to the same file), taking the next one on PATH or failing with exit 127 instead of
-looping.
+jj or tmux they find is usually mise's shim. In its place they run the install of the exact
+version mise's global configuration pins, found without HOME, and past PATH they run that install
+too ("A moved HOME" below). Where it is missing they run mise's shim, which hands the call back to
+the first one on PATH whenever mise has no version of it for the directory (a relocated `HOME` or
+`XDG_CONFIG_HOME` hides mise's global config). So `DOTFILES_JJ_SHIM` and `DOTFILES_TMUX_SHIM`
+name every binary the shim has handed the call to in that pid, and a re-entry in the same pid
+skips each one (and every path to the same file), taking the next one on PATH, then the pinned
+install, or failing with exit 127 and one line naming PATH, the configuration and the install
+dirs it read, instead of looping.
 
 A shim that finds its real binary by a marker in its first 512 bytes must keep that marker in its
 header: `git-worktree-shim` for `shims/git` and `jj-lock-shim` for `shims/jj`. On 2026-11-12 a
@@ -1017,9 +1032,63 @@ user-wide `ulimit -u` at the user's live tasks plus 1000 until 2026-11-16; other
 288-CPU box grew by more than that within seconds, and the tests' own jj and git forks failed with
 `Resource temporarily unavailable` in about two of three runs.
 
+## A moved HOME
+
+A caller may give a shim a HOME of its own. A Legion test pane starts Oh My Pi with exactly
+`HOME=<temporary dir>` and `PATH=<bin>:/usr/local/bin:/usr/bin:/bin`, where `<bin>/jj` is a link
+to the jj the test process found, which on a dotfiles machine is `shims/jj`. Every path under such
+a HOME names nothing: no `~/.dotfiles`, no `~/.mise`, no mise configuration and no record of the
+configurations mise trusts. Until 2026-11-17 `shims/jj` looked past PATH only at
+`$HOME/.dotfiles/bin/jj` and `$HOME/.mise/shims/jj`, so every jj in such a pane exited 127 with `jj
+shim: no real jj found on PATH`, and ten pi-legion rows that run the real binary failed on
+sami-devbox while CI passed them. The same pane showed two more faults of the class: `shims/jj` and
+`shims/git` found `scripts/` and their hook dirs beside the path they were run by, the pane's link,
+not beside themselves, so every jj commit there was refused (`cannot read the diff`) and a git
+commit through such a link ran with no leak-term scan at all; and `scripts/leak-terms-check` found
+sops only on PATH, which holds none there.
+
+So no shim finds its real binary, or a file of its own checkout, through HOME or through the path
+it was run by. `jj` and `git` take their own directory through a link to them (`_shim_dir`);
+`gh`, `claude`/`codex`, `omp` and `scripts/agent-session` take the checkout from `DOTFILES_DIR`,
+else from their own resolved path. Each shim that finds a binary through mise holds a copy of
+`mise_paths`, which takes:
+
+- the dotfiles checkout from `DOTFILES_DIR`, else from the shim's own path (`readlink -f`), so a
+  link to the shim in another directory finds it too;
+- mise's global configuration from `MISE_GLOBAL_CONFIG_FILE`, else from under HOME when that file
+  is readable, else the checkout's `mise.toml`, which installers link mise's global config to;
+- mise's data dirs from `MISE_DATA_DIR` and mise's default `~/.local/share/mise` under HOME (where
+  a `mise install` run without `.bashrc`'s `MISE_DATA_DIR` puts a tool, as `shims/knives` and
+  `shims/gh` already read); with no `MISE_DATA_DIR`, `~/.mise` (.bashrc's) and that default under
+  HOME, then the same two under the uid's passwd home, which HOME does not move;
+- mise itself from PATH, else the checkout's `bin/mise`.
+
+`is_mise_shim` and `mise_pinned` build on it. `shims/jj`, `tmux` and `gh` run the install of the
+exact pin in place of mise's own shim, which under a moved HOME refuses (`Config files in
+~/.config/mise/config.toml are not trusted`), and past PATH; so a project's own mise pin of jj or
+tmux is not read, as gh's was not before (no repository under `~/src` pins either on 2026-11-17),
+and the call skips one mise process (5 `jj --version` in 0.11 s against 0.30 s through mise's
+shim, measured that day). `az`, `secrets` and `pulumi` ask that
+mise past PATH, and in place of mise's own shim when HOME holds no mise configuration. `knives`,
+`claude`/`codex`, `ctx`, `pyright`, `basedpyright` and `omp` give mise that configuration and data
+dir. `bq` and `gcloud` look for the Cloud SDK under the passwd home after HOME. `gh-app-token`
+gives the `secrets` and `agent-secrets` it runs through mise's shims the same data dir and
+configuration, and `scripts/leak-terms-check` runs the pinned sops from those data dirs when PATH
+holds no sops. The shell copies are kept identical by hand, as `agent_context` is, and
+`shims/tests/test_shim_moved_home.py` compares them and runs each of these shims under such a
+pane's HOME and PATH against the real binary, a jj commit and a git commit through a link
+included.
+
+Two binaries stay on PATH alone. Claude Code's own binary is its native install
+(`~/.local/bin/claude`), not a mise tool, so `shims/claude` finds it only on PATH; and codex is an
+npm package whose launcher needs `node` on PATH, which `shims/codex` passes on unchanged. State a
+caller's HOME owns stays under it: caches, the gh agent config, the omp profile, tmux's sockets.
+
 ## How `shims/omp` resolves omp
 
-`shims/omp` runs `mise env -s bash` first. A session keeps the PATH it started with, and that
+`shims/omp` takes the dotfiles checkout from `DOTFILES_DIR`, else from its own resolved path, and
+runs `mise env -s bash` first, with the data dir and configuration of "A moved HOME" above.
+A session keeps the PATH it started with, and that
 PATH can name the install dir of an older pin; mise swaps it for the current pin's dir, so a
 stale PATH still starts the pinned omp. Then `scripts/agent-session` takes the first `omp` on
 PATH that is not a wrapper: it skips mise's shims dir (`~/.mise/shims`), whose `omp` hands the
