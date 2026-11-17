@@ -770,6 +770,24 @@ class SecretRun(unittest.TestCase):
         self.assertNotIn("private", reason)
         self.assertIn(f"SESSION_ID {self.SESSION}", result.stderr.splitlines())
 
+    def test_a_request_whose_identifying_parts_do_not_fit_is_refused_never_cut(self) -> None:
+        """The session, the command and the host are never cut from the card's reason: when they
+        alone leave no room, secret-run requests nothing, dry run included."""
+        self.with_client()
+        session = "s" * 400
+        for dry_run in ((), ("--dry-run",)):
+            with self.subTest(dry_run=bool(dry_run)):
+                result = self.run_secret_run(
+                    *dry_run, "--reason", "gws theorem modify", "AIRTABLE_TOKEN", *self.CMD,
+                    STUB_IDENTITY="0", OMP_SESSION_ID=session,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("secret-run: refused, nothing requested", result.stderr)
+                self.assertIn(f"session: omp {session} |", result.stderr)
+                for absent in ("BROKER", "via=", "nothing requested\nstore"):
+                    self.assertNotIn(absent, result.stdout)
+                self.assertNotIn("REASON ", result.stderr)
+
     def test_a_session_file_alone_names_the_session_to_the_client(self) -> None:
         """omp's eval kernel runs with PI_SESSION_FILE and no OMP_SESSION_ID: secret-run exports
         the session id the file names, so the request body names its session."""
