@@ -18,6 +18,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 DOTFILES = Path(__file__).resolve().parents[2]
 AGENT_ACCESS = DOTFILES / "scripts" / "agent-access"
@@ -29,12 +30,115 @@ def write_stub(directory: Path, name: str, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+# The core utils the script and its private checks rely on, on the PATH run_access gives it.
+CORE_TOOLS = (
+    "awk", "basename", "bash", "cat", "cut", "date", "dirname", "find", "grep", "head", "id", "jq", "ls",
+    "mktemp", "paste", "python3", "readlink", "rm", "sort", "tail", "timeout", "tr",
+)
+
+
+def real_binary(tool: str) -> str | None:
+    """Resolve a tool before HOME changes, or return None if no binary is usable.
+
+    Ask a mise python3 shim for its interpreter, and other mise shims for
+    `mise which`. If resolution fails or names an unusable target, continue
+    along PATH without putting the shim into the isolated environment.
+    """
+    for directory in os.get_exec_path():
+        found = shutil.which(tool, path=directory or os.curdir)
+        if found is None:
+            continue
+        found = os.path.abspath(found)
+        resolved = Path(found).resolve()
+        if resolved.name != "mise":
+            return found
+        if tool == "python3":
+            command = [found, "-c", "import sys; print(sys.executable)"]
+        else:
+            command = [str(resolved), "which", tool]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            target = Path(result.stdout.strip())
+            if (target.is_absolute() and target.is_file() and os.access(target, os.X_OK)
+                    and target.resolve().name != "mise"):
+                return str(target)
+    return None
+
+
 # Secret-shaped substrings this script must never print, however a stub or a
 # real CLI answers: token-prefixed credentials.
 SECRET_MARKERS = [
     "ghs_should_never_print",
     "sk-ant-should-never-print",
 ]
+
+
+class RealBinary(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.shims = self.root / "shims"
+        self.shims.mkdir()
+        self.binaries = self.root / "bin"
+        self.binaries.mkdir()
+        write_stub(self.root, "mise", "exit 1")
+        for tool in ("jq", "python3"):
+            (self.shims / tool).symlink_to(self.root / "mise")
+        environment = patch.dict(os.environ, PATH=os.pathsep.join(map(str, (self.shims, self.binaries))))
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_plain_binary_needs_no_mise_installation(self) -> None:
+        write_stub(self.binaries, "jq", "exit 0")
+        with patch.dict(os.environ, PATH=str(self.binaries)):
+            self.assertEqual(real_binary("jq"), str(self.binaries / "jq"))
+            self.assertIsNone(real_binary("missing-tool"))
+
+    def test_failed_shim_resolution_uses_the_next_binary(self) -> None:
+        for tool in ("jq", "python3"):
+            with self.subTest(tool=tool):
+                write_stub(self.binaries, tool, "exit 0")
+                self.assertEqual(real_binary(tool), str(self.binaries / tool))
+
+    def test_shim_without_an_installed_target_is_missing(self) -> None:
+        for tool in ("jq", "python3"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(real_binary(tool))
+
+    def test_resolution_errors_use_the_next_binary(self) -> None:
+        for tool in ("jq", "python3"):
+            write_stub(self.binaries, tool, "exit 0")
+            for error in (OSError("cannot start mise"), subprocess.TimeoutExpired("mise", 10)):
+                with self.subTest(tool=tool, error=type(error).__name__), patch(
+                    "subprocess.run", side_effect=error
+                ):
+                    self.assertEqual(real_binary(tool), str(self.binaries / tool))
+
+    def test_mise_which_selects_an_executable_target(self) -> None:
+        write_stub(self.root, "managed-jq", "exit 0")
+        write_stub(self.root, "mise", '[ "$1 $2" = "which jq" ] || exit 2\nprintf "%s\\n" "$REAL_BINARY_TARGET"')
+        with patch.dict(os.environ, REAL_BINARY_TARGET=str(self.root / "managed-jq")):
+            self.assertEqual(real_binary("jq"), str(self.root / "managed-jq"))
+
+    def test_shim_output_must_name_a_real_executable_not_another_shim(self) -> None:
+        write_stub(self.root, "mise", 'printf "%s\\n" "$REAL_BINARY_TARGET"')
+        nonexecutable = self.root / "not-executable"
+        nonexecutable.write_text("not executable", encoding="utf-8")
+        for target in ("", "relative-target", str(self.root / "missing"), str(self.root),
+                       str(nonexecutable), str(self.shims / "jq")):
+            for tool in ("jq", "python3"):
+                with self.subTest(target=target, tool=tool), patch.dict(os.environ, REAL_BINARY_TARGET=target):
+                    self.assertIsNone(real_binary(tool))
+
+    def test_python_shim_reports_its_interpreter_not_mise_which(self) -> None:
+        write_stub(self.binaries, "python3.99", "exit 0")
+        write_stub(self.root, "mise", '[ "$1" = "-c" ] || exit 2\nprintf "%s\\n" "$REAL_BINARY_TARGET"')
+        with patch.dict(os.environ, REAL_BINARY_TARGET=str(self.binaries / "python3.99")):
+            self.assertEqual(real_binary("python3"), str(self.binaries / "python3.99"))
 
 
 class AgentAccess(unittest.TestCase):
@@ -48,21 +152,24 @@ class AgentAccess(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
 
     def run_access(self, *args: str, timeout: float = 20, script: Path = AGENT_ACCESS) -> subprocess.CompletedProcess:
-        # Only stub_dir plus the directories holding core utils the script
-        # itself relies on (python3, jq, awk, timeout, grep, ...) - never the
-        # host's real PATH, or a real aws/gcloud/vercel install would answer
-        # instead of the stub and leak this machine's actual identity.
-        core_dirs = []
-        for tool in ("python3", "jq", "awk", "timeout", "grep", "date", "head",
-                      "tr", "paste", "bash", "ls", "cat"):
-            found = shutil.which(tool)
+        # Expose only named core tools, not their neighbors (which may include
+        # real credential CLIs), and keep aliases such as python3 even when its
+        # resolved interpreter is named python3.12.
+        core_dir = self.root / "core-bin"
+        core_dir.mkdir(exist_ok=True)
+        for tool in CORE_TOOLS:
+            found = real_binary(tool)
             self.assertIsNotNone(found, f"test host is missing required tool: {tool}")
-            d = str(Path(found).parent)
-            if d not in core_dirs:
-                core_dirs.append(d)
+            link = core_dir / tool
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(found)
         env = {
-            "PATH": ":".join([str(self.stub_dir), *core_dirs]),
+            "PATH": os.pathsep.join((str(self.stub_dir), str(core_dir))),
             "HOME": str(self.home),
+            # Not this machine's user: check_github_app reads /mnt/nvme/$USER/gh-app-token when that disk holds the
+            # user's directory, which made the github_app stub under HOME unread and this machine's owners the answer.
+            "USER": "agent-access-test",
         }
         start = time.monotonic()
         result = subprocess.run(
@@ -74,6 +181,32 @@ class AgentAccess(unittest.TestCase):
         )
         self.elapsed = time.monotonic() - start
         return result
+
+    def test_core_tools_are_their_binaries_not_mise_shims(self) -> None:
+        write_stub(self.root, "probe", 'for tool in "$@"; do command -v "$tool" || exit 1; done')
+        result = self.run_access(*CORE_TOOLS, script=self.root / "probe")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = result.stdout.splitlines()
+        self.assertEqual(len(paths), len(CORE_TOOLS))
+        for tool, found in zip(CORE_TOOLS, paths):
+            with self.subTest(tool=tool):
+                self.assertTrue(os.path.samefile(found, real_binary(tool)), found)
+                self.assertNotEqual(Path(found).resolve().name, "mise", found)
+
+    def test_versioned_python_is_available_as_python3_without_neighboring_clis(self) -> None:
+        tools = self.root / "tools"
+        tools.mkdir()
+        write_stub(tools, "python3.99", 'printf "resolved-python\\n"')
+        write_stub(tools, "python3", "exit 99")
+        write_stub(tools, "aws", 'printf "host-identity\\n"')
+        write_stub(self.root, "probe", 'python3 || exit\nif command -v aws; then exit 1; fi')
+        resolve = real_binary
+        with patch(f"{__name__}.real_binary", side_effect=lambda tool: (
+            str(tools / "python3.99") if tool == "python3" else resolve(tool)
+        )):
+            result = self.run_access(script=self.root / "probe")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "resolved-python\n")
 
     def assert_no_secrets(self, *texts: str) -> None:
         for text in texts:
@@ -250,10 +383,10 @@ fi
         )
         write_stub(self.stub_dir, "agent-secrets", 'exit 0')
 
-        # github_app cache: covered owners
+        # github_app cache: covered owners, one no real cache holds, so only the stub can answer it
         cache = self.home / ".cache" / "gh-app-token"
         cache.mkdir(parents=True)
-        (cache / "covered-123.json").write_text(json.dumps({"sjawhar": 1}))
+        (cache / "covered-123.json").write_text(json.dumps({"stub-owner": 1}))
 
         result = self.run_access("--json")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -263,7 +396,7 @@ fi
         self.assertIn("assumed-role/test", rows["aws"]["identity"])
         self.assertEqual(rows["anthropic_ant"]["status"], "live")
         self.assertEqual(rows["github_app"]["status"], "live")
-        self.assertIn("sjawhar", rows["github_app"]["identity"])
+        self.assertIn("stub-owner", rows["github_app"]["identity"])
         self.assertEqual(rows["vercel"]["identity"], "sami-2219")
         self.assertEqual(rows["datadog_pup"]["status"], "live")
         self.assertEqual(rows["gcloud"]["status"], "live")
