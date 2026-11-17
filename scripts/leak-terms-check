@@ -683,11 +683,16 @@ def scan_diff(text: str, matcher: TermMatcher, place_prefix: str) -> list[str]:
         return index
 
     def path_line_end(start: int, marker: str, prefix: str, expected_path: str | None) -> int | None:
+        """The index after the --- or +++ line at START that names EXPECTED_PATH, else None. git C-quotes a path that
+        holds a line feed (or a tab, a quote or a backslash) on one line, whatever core.quotePath says; jj writes it
+        raw, over as many lines as it has line feeds. Until 2026-11-17 a path with a line feed was read only in jj's
+        form, so every git commit of such a file was refused as "a result path does not match the diff header"."""
         if expected_path is None:
             return start + 1 if lines[start] == f"{marker}/dev/null" else None
+        if parse_diff_path(lines[start].removeprefix(marker), prefix) == expected_path:
+            return start + 1
         if "\n" not in expected_path:
-            parsed = parse_diff_path(lines[start].removeprefix(marker), prefix)
-            return start + 1 if parsed == expected_path else None
+            return None
         expected = f"{prefix}{expected_path}"
         pieces = expected.split("\n")
         if lines[start] != f"{marker}{pieces[0]}":

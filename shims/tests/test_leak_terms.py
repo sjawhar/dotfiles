@@ -1670,6 +1670,28 @@ class GitLeaks(LeakTestCase):
                 self.assertEqual(staged.returncode, 0, staged.stderr)
                 self.assert_clean(repository, agent, "commit", "-m", "binary")
 
+    def test_git_term_reads_paths_that_git_quotes(self) -> None:
+        # git C-quotes a path that holds a line feed, a tab or a quote in every diff line that names it, whatever
+        # core.quotePath says, and quotes a letter outside ASCII where core.quotePath is true. Until 2026-11-17 a
+        # commit of a file whose name holds a line feed was refused: "a result path does not match the diff header".
+        # Each name: (the name, how a refusal shows it).
+        names = (("line\nfeed.txt", "line\\nfeed.txt"), ('tab\tand "quotes".txt', 'tab\\tand "quotes".txt'),
+                 ("caf\u00e9-\u00fcber.txt", "caf\u00e9-\u00fcber.txt"))
+        for agent in (False, True):
+            for quote_path in ("true", "false"):
+                for name, shown in names:
+                    with self.subTest(agent=agent, quote_path=quote_path, name=name):
+                        repository = self.repository(agent)
+                        configured = self.git_run(repository, "config", "core.quotePath", quote_path, agent=agent)
+                        self.assertEqual(configured.returncode, 0, configured.stderr)
+                        self.stage(repository, name, "clean\n", agent)
+                        self.assert_clean(repository, agent, "commit", "-m", "add")
+                        self.stage(repository, name, "clean\nmore\n", agent)
+                        self.assert_clean(repository, agent, "commit", "-m", "change")
+                        # Control: a listed term inside such a file is still refused, at its line.
+                        self.stage(repository, name, "clean\nmore\nQuillfeather Lane 9\n", agent)
+                        self.assert_refused(repository, agent, f"{shown}:3", "commit", "-m", "blocked")
+
     def test_git_term_handles_invalid_and_binary_file_bytes(self) -> None:
         # An invalid byte is still text and cannot break surrogateescape decoding. A NUL makes
         # the same term binary, so it remains outside the text-only scope.
