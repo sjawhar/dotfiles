@@ -659,10 +659,22 @@ behavior before handing the call to the real one. One file is data: `person-name
   `--update-adc` or a `--flags-file`. Only a routed bare login dropped `--update-adc` before,
   so an agent's login under the user's own configuration with `--update-adc`, started at
   2026-11-01T02:41Z, wrote the user's login there at 02:53Z. It also refuses a call whose
-  account is a person's own login (`--account` or `CLOUDSDK_CORE_ACCOUNT`, anything but
-  `*.gserviceaccount.com`), unless an explicit `--configuration` names the configuration that
-  holds that login: the route an apply that no declared identity can make yet takes under Sami's
-  standing permission, each use recorded (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec).
+  account is a person's own login (anything but `*.gserviceaccount.com`), whichever way the call
+  reaches it: named, as the `ACCOUNT` argument of `auth print-access-token`, `print-identity-token`,
+  `print-refresh-token` or `describe` (which loads that account's stored credential ahead of
+  `--account` and the configuration), as `--account` or as `CLOUDSDK_CORE_ACCOUNT`; or, where the
+  call names no account, as the account of the configuration it runs under, when anything but an
+  explicit `--configuration` in argv chose that configuration: `GCLOUD_ACCOUNT`,
+  `CLOUDSDK_ACTIVE_CONFIG_NAME`, `active_config` or gcloud's `default`. The one way past it is an
+  explicit `--configuration` naming the configuration that holds that login: the route an apply
+  that no declared identity can make yet takes under Sami's standing permission, each use recorded
+  (dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec), which the refusal names wherever a
+  configuration holds the login. A command whose change outlives the call
+  (`persists_config_change`: `auth login`, `auth revoke`, `config set`, …) keeps the configuration
+  it names, and over the SSH rule a call that chose nothing gets `box` instead (below). Until
+  2026-11-17 only `--account` and `CLOUDSDK_CORE_ACCOUNT` were read, so in an agent session
+  `CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud auth print-access-token`, and the same with the
+  login as its `ACCOUNT` argument, ran as the person while `--account <the login>` was refused.
   On 2026-11-02T00:07Z an exported account made one agent shell's kubectl create GKE Jobs as the
   user, and gke-gcloud-auth-plugin's cache beside the kubeconfig, keyed by context and not
   account, gave his token to every caller of it for an hour. Each refusal names the box
@@ -912,7 +924,8 @@ selected:
   `[auth] impersonate_service_account`, as the SDK resolves a property
   (`core/properties.py:5487-5527`). A call that chose nothing gets configuration `box`; one that
   chose a configuration, a `--cred-file` or an account keeps its choice (a person's own login
-  named that way is refused earlier, by the agent-session account guard); and where this machine
+  reached that way, other than through an explicit `--configuration`, is refused earlier, by the
+  agent-session account guard); and where this machine
   has no `box` configuration and the one in force holds a person's login, the call is refused.
 - **A `--flags-file` in an agent session is refused outright, and nothing in it is parsed.** It
   is argv gcloud has not expanded yet: the SDK loads the file's YAML — a mapping, a list of

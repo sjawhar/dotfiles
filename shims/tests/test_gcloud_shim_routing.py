@@ -1205,6 +1205,145 @@ class GcloudRouting(unittest.TestCase):
                                   result.stderr)
                     self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
 
+    # The same login reached through a CONFIGURATION is the same act: only an explicit
+    # --configuration in argv is the standing route above. An exported CLOUDSDK_ACTIVE_CONFIG_NAME, or
+    # GCLOUD_ACCOUNT, which the shim exports as it, reaches every later call of that shell as the
+    # exported account of 2026-11-02 did, and active_config every call on the machine. Measured on
+    # 2026-11-17 at about 03:37Z: `CLOUDSDK_ACTIVE_CONFIG_NAME=theorem gcloud auth print-access-token`
+    # ran as the person in an agent session, while `--account <the person>` was refused.
+    HOLDER_ROUTE = "select its configuration (theorem) explicitly with --configuration on that one command"
+
+    def test_agent_session_refuses_a_configuration_the_environment_chose_for_a_persons_login(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        cases = (
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "print-access-token"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["config", "config-helper", "--format=json"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            # An empty --configuration chooses none (named_configs.py:119-148), so the environment's stands.
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["--configuration=", "projects", "list"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            # Impersonation borrows another identity WITH the person's own credential.
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"},
+             ["auth", "print-access-token", f"--impersonate-service-account={self.APPLIER}"],
+             "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+            ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"], "GCLOUD_ACCOUNT"),
+            # main exports GCLOUD_ACCOUNT over CLOUDSDK_ACTIVE_CONFIG_NAME, so theorem is what runs.
+            ({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, ["auth", "print-access-token"],
+             "GCLOUD_ACCOUNT"),
+        )
+        for marker in self.AGENT_MARKERS:
+            for env, args, source in cases:
+                with self.subTest(marker=marker, env=env, args=args):
+                    result = self.run_shim({**marker, **env}, args=args)
+                    self.assert_agent_refusal(result)
+                    self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration "
+                                  f"theorem, chosen by {source}.", result.stderr)
+                    self.assertIn(f"unset {source}", result.stderr)
+                    self.assertIn(self.HOLDER_ROUTE, result.stderr)
+                    self.assertIn("dispatch://INFRA-6/ask/6c7b1e80-176f-40e3-967e-e5d642d501ec", result.stderr)
+
+    def test_agent_session_refuses_an_active_configuration_holding_a_persons_login(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        active = self.cloudsdk_config / "active_config"
+        with self.subTest("active_config"):
+            active.write_text("theorem\n", encoding="utf-8")
+            result = self.run_shim(self.AGENT_MARKERS[0], args=["auth", "print-access-token"])
+            self.assert_agent_refusal(result)
+            self.assertIn(f"from the configuration theorem, chosen by active_config ({active}).", result.stderr)
+            self.assertIn("--configuration box", result.stderr)
+            self.assertIn(self.HOLDER_ROUTE, result.stderr)
+        with self.subTest("no active configuration"):
+            active.unlink()
+            (self.configs_dir / "config_default").write_text(f"[core]\naccount = {self.USER}\n", encoding="utf-8")
+            result = self.run_shim(self.AGENT_MARKERS[0], args=["auth", "print-access-token"])
+            self.assert_agent_refusal(result)
+            self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration default,",
+                          result.stderr)
+            self.assertIn("select its configuration (default) explicitly with --configuration", result.stderr)
+
+    # `auth print-access-token ACCOUNT` (and print-identity-token, print-refresh-token, describe)
+    # loads the stored credential of that ACCOUNT argument, ahead of --account and of the
+    # configuration (surface/auth/print_access_token.py:131-136,176-177; core/credentials/
+    # store.py:959-960), so a person's login named there prints that person's token whatever
+    # account or configuration the call otherwise holds.
+    def test_agent_session_refuses_a_persons_login_as_the_account_argument(self):
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        cases = (
+            ({}, ["auth", "print-access-token", self.USER], "print-access-token"),
+            ({}, ["auth", "print-access-token", "--lifetime", "3600s", self.USER], "print-access-token"),
+            ({}, ["beta", "auth", "print-identity-token", "--audiences", "https://a.example", self.USER],
+             "print-identity-token"),
+            ({}, ["auth", "print-refresh-token", self.USER], "print-refresh-token"),
+            ({}, ["auth", "describe", self.USER], "describe"),
+            ({}, ["--account", self.BOX, "auth", "print-access-token", "--", self.USER], "print-access-token"),
+            ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token", self.USER], "print-access-token"),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, ["--project", "p", "auth", "print-access-token", self.USER],
+             "print-access-token"),
+        )
+        for marker in self.AGENT_MARKERS:
+            for env, args, verb in cases:
+                with self.subTest(marker=marker, env=env, args=args):
+                    result = self.run_shim({**marker, **env}, args=args)
+                    self.assert_agent_refusal(result)
+                    self.assertIn(f"Identity: {self.USER}, a person's own Google login, named by the ACCOUNT "
+                                  f"argument of auth {verb}.", result.stderr)
+                    self.assertIn(self.HOLDER_ROUTE, result.stderr)
+
+    def test_agent_session_passes_a_machine_configuration_and_the_explicit_route(self):
+        self.write_identity_configs()
+        cases = (
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, ["auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "box"}, ["config", "config-helper", "--format=json"]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["--configuration", "theorem", "auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "theorem"}, ["--configuration=theorem", "config", "config-helper"]),
+            # The call's own account is the service account, so the configuration's is not used.
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem", "CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token"]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "gws-personal"}, ["auth", "list"]),
+            # A service account as the ACCOUNT argument, as agent-secrets passes the box's.
+            ({}, ["auth", "print-access-token", self.BOX]),
+            ({}, ["auth", "print-identity-token", "--audiences", "https://a.example", self.BOX]),
+            ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "print-access-token", self.BOX]),
+            ({}, ["auth", "print-identity-token", "--audiences", "https://a.example"]),
+            ({}, ["--configuration", "theorem", "auth", "print-access-token", self.USER]),
+        )
+        for env, args in cases:
+            with self.subTest(env=env, args=args):
+                result = self.run_shim({**self.AGENT_MARKERS[0], **env}, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_agent_session_keeps_changes_that_outlive_the_call_under_such_a_configuration(self):
+        # persists_config_change: a sign-in, a revoke, a property or a configuration change runs
+        # under the configuration it names, as before.
+        self.write_identity_configs()
+        for env, args in (({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login"]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login", "--cred-file=/tmp/key.json"]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "revoke"]),
+                          ({"GCLOUD_ACCOUNT": "theorem"}, ["config", "set", "project", "p"]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["config", "configurations", "activate", "box"])):
+            with self.subTest(env=env, args=args):
+                result = self.run_shim({**self.AGENT_MARKERS[0], **env}, args=args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stub_argv(result), args)
+
+    def test_a_persons_own_session_keeps_a_configuration_holding_his_login(self):
+        # No marker and a terminal, on or off SSH: the person's, whatever configuration he exports.
+        self.write_identity_configs()
+        for env, args in (({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "print-access-token"]),
+                          ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"]),
+                          ({}, ["auth", "print-access-token", self.USER]),
+                          ({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, ["auth", "login"])):
+            for ssh in ({}, {"SSH_CONNECTION": SSH_CONNECTION}, {"SSH_CONNECTION": SSH_CONNECTION, "SSH_TTY": SSH_TTY}):
+                with self.subTest(env=env, args=args, ssh=sorted(ssh)):
+                    result = run_with_tty([str(SHIMS / "gcloud"), *args], env={**self.env, **ssh, **env})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(stub_argv(result), args)
+                    self.assertNotIn("REFUSED", result.stderr)
+
     # A --flags-file is argv gcloud has not expanded yet: it loads YAML — a mapping, a list of
     # mappings, a JSON one-liner — expands it IN PLACE before it resolves --account,
     # --configuration, --cred-file and impersonation, and follows a flags file a flags file
@@ -1261,7 +1400,7 @@ class GcloudRouting(unittest.TestCase):
             ({"CLOUDSDK_CORE_ACCOUNT": self.USER}, ["--configuration", "theorem", "auth", "print-access-token"]),
             ({}, ["--configuration=theorem", "--account", self.USER, "projects", "list"]),
             ({}, ["--configuration", "theorem", "auth", "print-access-token"]),
-            ({"GCLOUD_ACCOUNT": "theorem"}, ["auth", "print-access-token"]),
+            ({"GCLOUD_ACCOUNT": "box"}, ["auth", "print-access-token"]),
             ({"CLOUDSDK_CORE_ACCOUNT": self.BOX}, ["auth", "print-access-token"]),
             ({}, ["auth", "print-access-token", f"--account={self.BOX}"]),
             ({}, ["auth", "print-access-token", f"--impersonate-service-account={self.APPLIER}"]),
@@ -2078,7 +2217,10 @@ class GcloudSessionConfig(unittest.TestCase):
         write_stub(root, "gcloud", 'echo "CLOUDSDK_CONFIG=${CLOUDSDK_CONFIG:-<unset>}"\nprintf "ARG=%s\\n" "$@"')
         self.origin = root / "home" / ".config" / "gcloud"
         (self.origin / "configurations").mkdir(parents=True)
-        (self.origin / "configurations" / "config_default").write_text("[core]\naccount = a@example.com\n")
+        # A service account: the copy is what these tests read, and an agent session refuses a
+        # configuration holding a person's login that active_config chose.
+        (self.origin / "configurations" / "config_default").write_text(
+            "[core]\naccount = a@p.iam.gserviceaccount.com\n")
         (self.origin / "active_config").write_text("default")
         for name in ("logs", ".gcloud-shim-retry-slots", "cache"):
             (self.origin / name).mkdir()
@@ -2237,24 +2379,48 @@ class GcloudNonInteractiveSsh(unittest.TestCase):
         self.assertNotIn("machine identity", result.stderr)
         self.assertEqual(stub_argv(result), ["--configuration", "theorem", "config", "list"])
 
+    def write_machine_configuration(self, name: str = "alt") -> None:
+        (self.configs_dir / f"config_{name}").write_text(f"[core]\naccount = {self.SERVICE_ACCOUNT}\n",
+                                                         encoding="utf-8")
+
     def test_gcloud_account_still_selects_its_configuration(self) -> None:
         self.write_identity_configs()
-        result = self.run_shim({"GCLOUD_ACCOUNT": "theorem"})
+        self.write_machine_configuration()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "alt"})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CONFIG=theorem", result.stdout)
-        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+        self.assertIn("CONFIG=alt", result.stdout)
+        self.assertIn(f"configuration alt, account {self.SERVICE_ACCOUNT}", result.stderr)
 
     # The notice must name the configuration and account the command ENDS UP on, in main's own
     # order, not the first one some helper resolves: with CLOUDSDK_ACTIVE_CONFIG_NAME=box and
     # GCLOUD_ACCOUNT=theorem it said box while gcloud ran theorem (re-review of INFRA-1538).
     def test_gcloud_account_beats_an_active_config_name_in_the_notice_too(self) -> None:
         self.write_identity_configs()
-        result = self.run_shim({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"},
+        self.write_machine_configuration()
+        result = self.run_shim({"GCLOUD_ACCOUNT": "alt", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"},
                                args=["auth", "print-access-token"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("CONFIG=theorem", result.stdout)
-        self.assertIn(f"configuration theorem, account {self.USER}", result.stderr)
+        self.assertIn("CONFIG=alt", result.stdout)
+        self.assertIn(f"configuration alt, account {self.SERVICE_ACCOUNT}", result.stderr)
         self.assertNotIn("configuration box", result.stderr)
+
+    # A person's login that the ENVIRONMENT chose is refused here as in a marked session; the
+    # refusal names the configuration the call would have ended on, in main's order (theorem
+    # through GCLOUD_ACCOUNT over box), and no notice claims an identity.
+    def test_an_environment_selected_human_configuration_is_refused(self) -> None:
+        self.write_identity_configs()
+        self.stub_gcloud_that_must_not_run()
+        for env, source in (({"CLOUDSDK_ACTIVE_CONFIG_NAME": "theorem"}, "CLOUDSDK_ACTIVE_CONFIG_NAME"),
+                            ({"GCLOUD_ACCOUNT": "theorem"}, "GCLOUD_ACCOUNT"),
+                            ({"GCLOUD_ACCOUNT": "theorem", "CLOUDSDK_ACTIVE_CONFIG_NAME": "box"}, "GCLOUD_ACCOUNT")):
+            with self.subTest(env=env):
+                result = self.run_shim(env, args=["auth", "print-access-token"])
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertNotIn("SHOULD-NOT-RUN", result.stdout)
+                self.assertIn("gcloud shim: REFUSED in an agent session", result.stderr)
+                self.assertIn(f"Identity: {self.USER}, a person's own Google login, from the configuration theorem, "
+                              f"chosen by {source}.", result.stderr)
+                self.assertNotIn(self.NOTICE, result.stderr)
 
     def test_a_configuration_flag_beats_both_environment_selections(self) -> None:
         # gcloud reads --configuration from raw argv before any environment variable.
