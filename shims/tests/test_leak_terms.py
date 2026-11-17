@@ -22,7 +22,8 @@ from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
-from leak_terms_fixture import TEST_TERMS, encrypt_yaml, fixture_environment, real_sops, unrelated_key_file
+from leak_terms_fixture import (ALLOWED_TEST_TOKENS, REGISTRY_TEST_TERMS, SCOPED_TEST_TERMS, TEST_TERMS, encrypt_yaml,
+                                fixture_environment, real_sops, unrelated_key_file)
 from test_jj_push_leak_gate import SERVER_SIDE, SINK_HELPER
 
 
@@ -91,9 +92,11 @@ def command_cgroup(pid: int) -> Path | None:
 
 
 # Each test term as the scanner matches it: case folded, each run of whitespace in the term any run of spaces and
-# tabs, inside one line.
+# tabs, inside one line. Every test term the fixture list holds counts, the scoped ones included.
+ALL_TEST_TERMS = (*TEST_TERMS, *(term for listed in (*SCOPED_TEST_TERMS.values(), *REGISTRY_TEST_TERMS.values())
+                                  for term in listed))
 TERM_PATTERNS = tuple(
-    re.compile(r"[ \t]+".join(re.escape(part) for part in term.casefold().split())) for term in TEST_TERMS
+    re.compile(r"[ \t]+".join(re.escape(part) for part in term.casefold().split())) for term in ALL_TEST_TERMS
 )
 
 
@@ -102,7 +105,7 @@ def leaked_terms(text: str | bytes) -> list[str]:
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="surrogateescape")
     folded = text.casefold()
-    return [term for term, pattern in zip(TEST_TERMS, TERM_PATTERNS) if pattern.search(folded)]
+    return [term for term, pattern in zip(ALL_TEST_TERMS, TERM_PATTERNS) if pattern.search(folded)]
 
 
 def write_executable(path: Path, content: str) -> Path:
@@ -5019,6 +5022,66 @@ class OutgoingLeaks(SinkRepositoryCase):
                         # The list was not read, so the refusal must not say the push holds a listed term.
                         self.assertNotIn("holds a listed leak term", result.stderr)
                         self.assertEqual(self.sink_state(self.public_url), before, "a refused push changed the sink")
+
+    def test_a_scoped_term_is_refused_only_in_a_push_to_a_public_repository_of_its_scope(self) -> None:
+        # The list's `scoped` map holds terms for some repositories only: cybermonklabs/legion's 29 private names are
+        # refused there and may stand in another public repository (dispatch://INFRA-4102).
+        (pattern, (term,)), = SCOPED_TEST_TERMS.items()
+        self.assertEqual(pattern, "cybermonklabs/*")
+        scoped_public = "https://github.com/cybermonklabs/legion.git"
+        scoped_private = "https://github.com/cybermonklabs/inner-fixture.git"
+        (self.cache / "cybermonklabs_legion").write_text("public", encoding="utf-8")
+        (self.cache / "cybermonklabs_inner-fixture").write_text("private", encoding="utf-8")
+        for agent, environment in self.callers():
+            with self.subTest(agent=agent):
+                commit = self.commit(f"{self.unique('scoped')}.txt", f"Ask {term.upper()} first.", "scoped",
+                                     parent=self.base)
+                path = f"scoped-{self.made}.txt"
+                self.set_url(scoped_public)
+                self.assert_push_refused(lambda: self.git_push("origin", commit, self.unique("refused"), environment),
+                                         commit, f"{path}:1", scoped_public)
+                # Controls: another public repository, and a private one of the scope, get the same commit.
+                for url in (self.public_url, scoped_private):
+                    self.set_url(url)
+                    self.assert_pushed(self.git_push("origin", commit, self.unique("sent"), environment), url, commit)
+
+    def test_an_allowed_token_holds_a_scoped_term_only_whole_and_only_in_its_repository(self) -> None:
+        # Term 20 of cybermonklabs/* is also a public npm organisation's name, and upstream oh-my-pi's browser-MCP
+        # filter names one of its packages (upstream d5b28d6d, PR #13896). The list's `allowed` map lets that exact
+        # token, as written and as a JavaScript regular expression escapes its slash, stand in cybermonklabs/oh-my-pi;
+        # the bare term, the scope with another package and the token anywhere else stay refused.
+        (repository, tokens), = ALLOWED_TEST_TOKENS.items()
+        (_, (term,)), = SCOPED_TEST_TERMS.items()
+        fork = f"https://github.com/{repository}.git"
+        legion = "https://github.com/cybermonklabs/legion.git"
+        for name in ("oh-my-pi", "legion"):
+            (self.cache / f"cybermonklabs_{name}").write_text("public", encoding="utf-8")
+
+        def commit(content: str) -> tuple[str, str]:
+            made = self.commit(f"{self.unique('allowed')}.txt", content, "allowed", parent=self.base)
+            return made, f"allowed-{self.made}.txt"
+
+        for token in tokens:
+            with self.subTest(case="the token in the fork", token=token):
+                made, _ = commit(f"filter: /(?:{token}|other)/i")
+                self.set_url(fork)
+                self.assert_pushed(self.git_push("origin", made, self.unique("sent"), self.agent), fork, made)
+        package = tokens[0].rsplit("/", 1)[-1]
+        for label, content in (("the bare term", f"ask {term} first"),
+                               ("the scope with another package", f"uses @{term}/other-{package}"),
+                               ("the token run on into another name", f"uses {tokens[0]}-extra"),
+                               ("the token in another letter case", f"uses {tokens[0].upper()}")):
+            with self.subTest(case=f"{label} in the fork"):
+                made, path = commit(content)
+                self.set_url(fork)
+                self.assert_push_refused(lambda: self.git_push("origin", made, self.unique("refused"), self.agent),
+                                         made, f"{path}:1", fork)
+        for token in tokens:
+            with self.subTest(case="the token in cybermonklabs/legion", token=token):
+                made, path = commit(f"filter: /(?:{token}|other)/i")
+                self.set_url(legion)
+                self.assert_push_refused(lambda: self.git_push("origin", made, self.unique("refused"), self.agent),
+                                         made, f"{path}:1", legion)
 
 
 class SecrecyTrace(SinkRepositoryCase):

@@ -19,6 +19,7 @@ SHIMS = Path(__file__).parents[1]
 DOTFILES = SHIMS.parent
 GH = SHIMS / "gh"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from leak_terms_fixture import leak_check_environment  # noqa: E402
 from stdin_cases import SSH_CONNECTION, SSH_TTY, run_with_tty, run_without_tty  # noqa: E402
 
 KNIVES = """#!/bin/bash
@@ -54,7 +55,8 @@ class Unrouted(unittest.TestCase):
         self.work = self.tmp / "work"  # no repository here
         self.work.mkdir()
         self.base = {
-            "PATH": os.pathsep.join([str(SHIMS), str(self.bin), "/usr/bin", "/bin"]),
+            # The leak-term check reads every write's text (shims/AGENTS.md, "Leak-term list").
+            **leak_check_environment(os.pathsep.join([str(SHIMS), str(self.bin), "/usr/bin", "/bin"])),
             "HOME": str(self.tmp / "home"),
             "USER": "no-such-user-gh-unrouted-test",
             "DOTFILES_DIR": str(DOTFILES),

@@ -109,9 +109,51 @@ behavior before handing the call to the real one. One file is data: `person-name
   text gh would read from stdin (its exit 4: `--input -`, `--body-file -`, `-F name=@-`), the
   shim reads all of stdin (at most 64 MiB) into a private file it unlinks before writing a
   byte, hands that open file to the check as `PUBLIC_LEAK_CHECK_STDIN=/dev/fd/N` (a value its
-  caller set is cleared first), and gives gh the same bytes only when the check passes. The
+  caller set is cleared first), and gives gh the same bytes only when every check passes. The
   shim's stdin buffer has no pathname after it is opened; killing the shim leaves no named shim
   stdin buffer (`shims/tests/test_gh_public_text_gate.py`).
+  For every caller, agent or person, a call that can carry text then goes to the leak-term check,
+  `scripts/leak-terms-check gh -- <argv>`, on the same pass, after that gate: the encrypted list
+  that refuses a term in a commit or a push (below), its repository-scoped lists, and the
+  `forbidden` lists of knives's fork registry, all read by the one matcher ("Leak-term list"
+  below), refuse a term in a title, a body, a comment, a review, release notes or an API field
+  before gh sends it, with exit 2 and one line per match naming the command, the target, the field
+  and line, and the term's number in its list (`listed leak term 3`, `… 14 of cybermonklabs/*`,
+  `… 15 of knives oh-my-pi`), never the term. On 2026-11-17 an agent's `gh pr edit` put a listed
+  term into a public pull request's body, and the fork's pull-request bodies took terms of the
+  registry's oh-my-pi list; GitHub keeps every body revision in the edit history, which only an
+  admin can delete, so refusing before the post is the only fix (dispatch://INFRA-4102). The
+  shim hands the check every write `gh_shim_is_write` names (the
+  command and its verb found past any option before them, as cobra finds them, so `gh -R o/r pr
+  comment` is a `pr comment`) and every first word that is not a gh command, since a gh alias in
+  gh's `config.yml` is read as what it expands to; a read never starts it. The check reads gh's
+  arguments as gh does, with each command's options from `gh <command> --help` at the pinned gh
+  (`GH_TEXT_COMMANDS`; `shims/tests/test_gh_leak_terms.py` fails when the installed gh's options
+  differ), and scans every argument and option value, and for a file gh reads (`--body-file`,
+  `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's files) what the
+  file holds, never its path; each text is read as written and, where that finds nothing, with its
+  JSON escapes decoded, since Python's `json.dump` writes each letter outside ASCII as a `\u`
+  escape. Stdin (`-`, `@-`, `workflow run --json`) comes from the buffer above, through its own
+  `DOTFILES_LEAK_TERMS_GH_STDIN=/dev/fd/N` (cleared first, like the gate's) after the check's exit
+  7 asks for it, so both checks read the same bytes gh then gets. A `gh api` call counts when it
+  sends a body (a method other than GET or HEAD, or gh's default POST for a field or `--input`), and
+  a GraphQL one only when its text holds `mutation`. Only a found term (or a list it cannot
+  decrypt, or a file it cannot read) makes the check read where the text goes: every repository
+  the call names (`-R`, a pull-request or issue URL, `repos/OWNER/REPO/…`, `--branch-repo`), else
+  `GH_REPO`, else each GitHub remote of the directory (the one `gh repo set-default` chose, else
+  all), and for a GraphQL mutation the repository of each node id it names (one `nodes(ids:)` read
+  through this shim), through `scripts/github-repo-visibility` (the leak check's per-repository
+  cache, else one gh read, whose answer it caches). A term of the list every repository has is
+  refused when any target is not confirmed private or internal; a term of a scoped list or of
+  the registry only when such a target is one its scope names. A visibility it cannot read, a
+  gist, a project, another host, a GraphQL mutation whose nodes cannot all be read and any other
+  endpoint count as public and as any repository. Not checked, because the shim runs before the
+  text exists or nothing new is typed: text
+  typed into gh's own editor, browser or prompts (`-e`, `-w`, which need a terminal an agent's call
+  has not got), the text `--fill` and `--generate-notes` build from commits and tags already pushed,
+  release asset contents (their names and labels are checked), `issue transfer` and the values of
+  `secret set`, `variable set` and key titles, which only the account or repository admins see.
+  Extensions (`gh stack`) call the API themselves.
   It also logs and caches, because every session on a host shares the App installation's
   one primary rate limit: on 2026-11-01 that limit reached zero four times and every
   session that reads GitHub stopped (dispatch://BET-303). Each OUTERMOST call (a re-entry
@@ -795,6 +837,34 @@ behavior before handing the call to the real one. One file is data: `person-name
 file, command argument or environment variable. `DOTFILES_LEAK_TERMS_FILE` selects a different
 encrypted list for a run.
 
+The list has three parts. `terms`, a block of lines, is for every repository. `scoped`, a map of
+repository patterns (`owner/name`, shell wildcards, letter case ignored) to blocks of lines,
+holds terms that are private in some repositories and may stand in others: `cybermonklabs/*`
+holds cybermonklabs/legion's private names, which reached its public main in pushes the list did
+not hold (dispatch://INFRA-4102), while another public repository may name some of them. A commit
+reads `terms` alone, since it goes nowhere yet. A push reads `terms` and each scoped block whose
+pattern matches its destination (`github-repo-visibility --slug`; a destination it cannot name
+matches every pattern). gh text reads both, and a third source: the `forbidden` list of each
+entry of knives's fork registry (`~/.config/knives/repos.toml`, and the private
+`repos.local.toml` beside it, whose values knives adds to the entries it names; under
+`XDG_CONFIG_HOME` or `HOME`, else the passwd home's; `DOTFILES_LEAK_TERMS_KNIVES_DIR` for a test;
+a machine with none has no such list, and one that cannot be read refuses). An entry's list is
+for every repository named as its `upstream`, `origin` or `release`, whatever the owner: a fork
+keeps its upstream's name, and oh-my-pi's fork moved from sjawhar to cybermonklabs while the
+registry still names sjawhar. A push reads no registry list: the fork's own release branch names
+several of those terms, and the lists are for what is posted to the repositories they name. A
+term two lists hold counts in each, since each says where its terms may not go.
+
+`allowed`, a third map of repository patterns to blocks of exact tokens (with `#` lines giving the
+reason), lets a token that holds a term stand in those repositories: a match that lies wholly
+inside such a token, written exactly so (letter case included) and whole (no letter, digit, `.`,
+`_`, `-` or `/` after it, nor those or `@` before it), is no match there. cybermonklabs/oh-my-pi
+allows one npm package, whose scope is term 20 of `cybermonklabs/*`, a public npm organisation's
+name: upstream's browser-MCP filter names it (upstream d5b28d6d, PR #13896), as written and as a
+JavaScript regular expression escapes its slash. The bare term, the scope with any other package
+and the token in any other repository stay refused. A push applies its destination's tokens, gh
+text each target's, a commit none, and a destination nobody could name none.
+
 For tests, `DOTFILES_LEAK_TERMS_SOPS_HOME` makes sops use that directory as both `HOME` and
 `XDG_CONFIG_HOME`. Otherwise, when no `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE` or `SOPS_AGE_KEY_CMD`
 is set and the configured age key does not exist, the scanner gives sops the passwd-home
@@ -819,15 +889,25 @@ The `diff`, `message` and `push` modes print one stderr line per match with a pl
 any nonzero scan result as a refusal. A missing list or sops, an undecryptable or invalid list, an
 empty list, a malformed diff or an unreadable push advertisement therefore fails closed.
 
-A machine whose age key is not a recipient refuses commits and guarded pushes. Add that key above
-the YubiKey line of `.sops.yaml`, then run `sops updatekeys leak-terms.sops.yaml` on a machine
-that can decrypt the list.
+The `gh` mode (`leak-terms-check gh -- <gh argv>`, the text a gh call sends; `gh` above) prints
+`leak terms: gh <command> to <target>: <field> line <n>: listed leak term <k>` for each match:
+`<k>` is the term's place in its list, counting neither blank lines nor `#` lines, followed by
+`of <pattern>` for a scoped list and `of knives <entry>` for the registry's (whose list counts
+repos.toml's terms, then repos.local.toml's), which tells the list's owner which term it is and
+nobody else anything. It exits 3 on a match, 2 when the list cannot be read and 4 when a file the
+call names cannot be read, each only for a call that can reach something not confirmed private,
+and 7 to ask for the call's stdin; `shims/gh` exits 2 on any of those but 7.
 
-Tests that commit or push through the shims get their isolated list from
-`shims/tests/leak_terms_fixture.py`. The `shims/tests` and `scripts/tests` conftests put its
-three variables in `os.environ` for pytest; a fixture that builds an environment from scratch
-must retain `DOTFILES_LEAK_TERMS_FILE`, `SOPS_AGE_KEY_FILE` and
-`DOTFILES_LEAK_TERMS_SOPS_HOME`.
+A machine whose age key is not a recipient refuses commits, guarded pushes and gh text bound for a
+repository not confirmed private. Add that key above the YubiKey line of `.sops.yaml`, then run
+`sops updatekeys leak-terms.sops.yaml` on a machine that can decrypt the list.
+
+Tests that commit, push or write through gh with the shims get their isolated list and knives
+registry from `shims/tests/leak_terms_fixture.py`. The `shims/tests` and `scripts/tests` conftests
+put its four variables in `os.environ` for pytest; a fixture that builds an environment from
+scratch must retain `DOTFILES_LEAK_TERMS_FILE`, `SOPS_AGE_KEY_FILE`,
+`DOTFILES_LEAK_TERMS_SOPS_HOME` and `DOTFILES_LEAK_TERMS_KNIVES_DIR`, and a `PATH` that finds sops:
+`leak_check_environment(path)` gives all five, with sops last on that `PATH`.
 
 ## Who is an agent
 

@@ -1,27 +1,12 @@
 """Give every shim test the encrypted test term list."""
 import os
-from functools import lru_cache
-from pathlib import Path
 
-from leak_terms_fixture import fixture_environment, real_sops
+from leak_terms_fixture import fixture_environment, sops_directory
 from test_person_branch_guard import PersonBranchGuardTest
 
 
 def pytest_configure() -> None:
     os.environ.update(fixture_environment())
-
-
-@lru_cache(maxsize=1)
-def _sops_directory() -> str:
-    """A directory holding only `sops`, linked to the binary this run's sops resolves to (past a mise shim, which reads
-    the caller's home)."""
-    found = real_sops()
-    directory = Path(fixture_environment()["DOTFILES_LEAK_TERMS_FILE"]).parent / "sops-bin"
-    directory.mkdir(exist_ok=True)
-    link = directory / "sops"
-    if not link.exists():
-        link.symlink_to(found)
-    return str(directory)
 
 
 # test_person_branch_guard builds each command's environment from nothing, so neither the list above nor sops reaches
@@ -33,7 +18,7 @@ _person_branch_guard_env = PersonBranchGuardTest.env
 
 def _fixture_person_branch_guard_env(self, *args, **kwargs):
     result = {**_person_branch_guard_env(self, *args, **kwargs), **fixture_environment()}
-    result["PATH"] = os.pathsep.join([result["PATH"], _sops_directory()])
+    result["PATH"] = os.pathsep.join([result["PATH"], sops_directory()])
     return result
 
 

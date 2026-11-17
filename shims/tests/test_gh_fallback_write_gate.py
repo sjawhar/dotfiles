@@ -24,6 +24,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from leak_terms_fixture import leak_check_environment
+
 SHIMS = Path(__file__).resolve().parents[1]
 GH_SHIM = SHIMS / "gh"
 
@@ -46,7 +48,8 @@ class FallbackWriteGate(unittest.TestCase):
         stub(self.bin, "gh", 'exit 0')
         # git exists so the profile lookup works; it finds no config in the scratch HOME.
         self.env = {
-            "PATH": os.pathsep.join([str(self.bin), "/usr/bin", "/bin"]),
+            # The leak-term check reads every write's text (shims/AGENTS.md, "Leak-term list").
+            **leak_check_environment(os.pathsep.join([str(self.bin), "/usr/bin", "/bin"])),
             "HOME": str(self.tmp),
             "XDG_CONFIG_HOME": str(self.tmp / "config"),
             "TMPDIR": str(self.tmp),

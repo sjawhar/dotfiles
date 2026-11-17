@@ -219,10 +219,34 @@ gh_shim_call_digest() {
 # gh_shim_is_write ARGV…: true when this call changes something on GitHub. `gh api` counts when
 # it names a method other than GET, which is how gh itself decides; every other verb is listed,
 # because a verb this misses is a write that goes out ungated. Read verbs are never listed, so a
-# new read command keeps working without an edit here.
+# new read command keeps working without an edit here. The command and its verb are found as cobra
+# finds them, past the options before each (`gh -R o/r pr comment 1` and `gh pr -R o/r comment 1`
+# are `gh pr comment`): an option written apart from any value, but --help and --version, takes the
+# next word as its value.
 gh_shim_is_write() {
-    local a method=""
-    case "${1:-}" in
+    local a method="" group="" verb="" skip=0
+    for a in "$@"; do
+        if ((skip)); then
+            skip=0
+            continue
+        fi
+        case "$a" in
+            --) break ;;
+            --help | --version | -*=*) ;;
+            --* | -?) skip=1 ;;
+            -*) ;;
+            *)
+                if [[ -z "$group" ]]; then
+                    group="$a"
+                    [[ "$a" != api ]] || break
+                else
+                    verb="$a"
+                    break
+                fi
+                ;;
+        esac
+    done
+    case "$group" in
         api)
             for a in "$@"; do
                 case "$a" in
@@ -232,33 +256,53 @@ gh_shim_is_write() {
                     *) [[ "$method" == NEXT ]] && method="$a" ;;
                 esac
             done
-            # No method named is a GET, and `-f`/`-F` fields make gh POST without -X.
+            # No method named is a GET, and `-f`/`-F` fields or an `--input` body make gh POST without -X.
             if [[ -z "$method" || "$method" == NEXT ]]; then
                 for a in "$@"; do
-                    case "$a" in -f | -F | --field | --raw-field | -f?* | -F?*) return 0 ;; esac
+                    case "$a" in
+                        -f | -F | --field | --raw-field | -f?* | -F?* | --field=* | --raw-field=* | --input | --input=*)
+                            return 0 ;;
+                    esac
                 done
                 return 1
             fi
             [[ "${method^^}" == GET || "${method^^}" == HEAD ]] && return 1
             return 0
             ;;
-        issue | pr)
-            case "${2:-}" in
-                create | comment | edit | close | reopen | merge | review | ready | delete | lock \
-                    | unlock | pin | unpin | transfer | develop | checkout) return 0 ;;
+        issue | pr | discussion)
+            case "$verb" in
+                create | new | comment | edit | close | reopen | merge | review | ready | delete | lock \
+                    | unlock | pin | unpin | transfer | develop | checkout | revert) return 0 ;;
             esac
             ;;
         release | repo | label | secret | variable | gist | ruleset | project | codespace)
-            case "${2:-}" in
-                create | edit | delete | upload | set | remove | rename | archive | sync | fork \
-                    | clone | deploy-key | copy | close | stop) return 0 ;;
+            case "$verb" in
+                create | new | edit | delete | upload | set | remove | rename | archive | sync | fork \
+                    | clone | deploy-key | copy | close | stop | field-create | item-create | item-edit) return 0 ;;
             esac
             ;;
-        workflow) case "${2:-}" in run | enable | disable) return 0 ;; esac ;;
-        run) case "${2:-}" in rerun | cancel | delete) return 0 ;; esac ;;
-        cache) case "${2:-}" in delete) return 0 ;; esac ;;
+        agent-task | agent-tasks | agent | agents) case "$verb" in create) return 0 ;; esac ;;
+        workflow) case "$verb" in run | enable | disable) return 0 ;; esac ;;
+        run) case "$verb" in rerun | cancel | delete) return 0 ;; esac ;;
+        cache) case "$verb" in delete) return 0 ;; esac ;;
     esac
     return 1
+}
+# gh_shim_may_send_text ARGV…: true when scripts/leak-terms-check must read this call, and it then
+# decides: a write (gh_shim_is_write), or a first word that is not one of gh 2.98.0's own commands,
+# which can be an option before the command or a gh alias of the user's that the check expands. It
+# may be wider than the check's own table, never narrower (shims/tests/test_gh_leak_terms.py); a
+# read never starts the check.
+gh_shim_may_send_text() {
+    gh_shim_is_write "$@" && return 0
+    case "${1:-}" in
+        '' | --help | --version | agent | agent-task | agent-tasks | agents | alias | api | at | attestation \
+            | auth | browse | cache | codespace | completion | config | copilot | cs | discussion | ext \
+            | extension | extensions | gist | gpg-key | help | issue | label | licenses | org | pr | preview \
+            | project | release | repo | rs | ruleset | run | search | secret | skill | skills | ssh-key \
+            | status | variable | version | workflow) return 1 ;;
+    esac
+    return 0
 }
 # gh_shim_refuse WHY INSTEAD ARGV…: the shim itself refuses, before gh runs.
 gh_shim_refuse() {
@@ -411,6 +455,50 @@ gh_shim_rate_limited() {
         echo "  Instead: retry after the reset. To read more cheaply, use one GraphQL query (\`gh api graphql\`), which has a budget of its own, in place of repeated REST calls, and poll no faster than once every few minutes. Do not look for another credential."
     } >&2
     exit "$rc"
+}
+# The text of a call that reads stdin (`--input -`, `--body-file -`, `-F name=@-`, …) is read by the checks below
+# before gh runs, and gh then gets the same bytes. gh_shim_buffer_stdin reads all of stdin (at most 64 MiB), once a
+# call, into a private file (mktemp, mode 0600), opened once to write and then twice more through that descriptor
+# (/dev/fd/N, so all three are the same file whatever its pathname names by then), and unlinked BEFORE any byte is
+# written: no pathname holds the bytes, so no kill (SIGKILL included) leaves them on disk, and nothing can swap the
+# file after a check. Each check reads that open file as /dev/fd/$_stdin_g, and gh_shim_stdin_to_gh gives gh the same
+# file as its stdin once every check passed. A read or write error, or more than 64 MiB, refuses the call. Measured
+# 2026-11-01 21-23Z: 122 agent calls piped their text.
+_stdin_g=""
+_stdin_h=""
+gh_shim_buffer_stdin() {
+    [[ -z "$_stdin_g" ]] || return 0
+    local max=$((64 * 1024 * 1024)) buffer size
+    buffer="$(mktemp "${TMPDIR:-/tmp}/gh-shim-stdin.XXXXXX")" || {
+        echo "gh shim: refusing: cannot make a private file to hold stdin for the leak check" >&2
+        exit 1
+    }
+    if ! exec {_stdin_w}> "$buffer" || ! exec {_stdin_g}< "/dev/fd/$_stdin_w" {_stdin_h}< "/dev/fd/$_stdin_w"; then
+        rm -f "$buffer"
+        echo "gh shim: refusing: cannot open the private file that holds stdin for the leak check" >&2
+        exit 1
+    fi
+    rm -f "$buffer" || {
+        echo "gh shim: refusing: cannot unlink the private file that holds stdin for the leak check" >&2
+        exit 1
+    }
+    head -c "$((max + 1))" >&"$_stdin_w" || {
+        echo "gh shim: refusing: cannot read stdin into a file for the leak check" >&2
+        exit 1
+    }
+    exec {_stdin_w}>&-
+    size="$(stat -L -c %s "/dev/fd/$_stdin_g")" || exit 1
+    if ((size > max)); then
+        echo "gh shim: refusing: stdin is over 64 MiB, more than the leak check reads; pass the text in a file" >&2
+        exit 1
+    fi
+}
+# gh_shim_stdin_to_gh: when stdin was buffered, gh gets the buffer as its stdin and the checks' descriptors close.
+gh_shim_stdin_to_gh() {
+    [[ -n "$_stdin_g" ]] || return 0
+    exec 0<&"$_stdin_h" {_stdin_g}<&- {_stdin_h}<&-
+    _stdin_g=""
+    _stdin_h=""
 }
 if agent_context; then
     # The dotfiles checkout this file is in, through a link to it, not the one under HOME: a
@@ -644,52 +732,25 @@ if agent_context; then
         # parent that died before it could ask the kernel shows as another pid.
         GH_READ_CACHE_GH="$_self" GH_READ_CACHE_PARENT="$PPID" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
     fi
-    # A standalone docs-only pull request is refused where docs are batched.
-    if [[ "${1:-}" == pr && "${2:-}" == create ]]; then
-        "$_dotfiles/scripts/docs-pr-gate" "${@:3}"
+    # A standalone docs-only pull request is refused where docs are batched. The gate reads the whole command line and
+    # finds `pr create` (or `pr new`) as cobra does, past any option before either word; until 2026-11-17 this matched
+    # only the first two arguments, so `gh -R o/r pr create` was never gated. A call without both words is not one.
+    if [[ " $* " == *" pr "* && ( " $* " == *" create "* || " $* " == *" new "* ) ]]; then
+        "$_dotfiles/scripts/docs-pr-gate" "$@"
     fi
     # Public repository text: refuse an internal reference before gh posts it.
     # A call that reads text from stdin (`--input -`, `--body-file -`, `-F name=@-`, …) makes the check exit 4: it
-    # cannot read those bytes without taking them from gh. So all of stdin goes into a private file (mktemp, mode
-    # 0600), opened once to write and then twice more through that descriptor (/dev/fd/N, so all three are the same
-    # file whatever its pathname names by then), and unlinked BEFORE any byte is written: no pathname holds the
-    # bytes, so no kill (SIGKILL included) leaves them on disk, and nothing can swap the file after the check.
-    # The check reads that open file as /dev/fd/N, and only when it passes does gh get the same file as its stdin. A
-    # read or write error, or more than 64 MiB, refuses the call. Which forms read stdin is the check's decision
-    # (gh-guard), not a list kept here; PUBLIC_LEAK_CHECK_STDIN_BUFFERS tells it this caller buffers, so its exit 4
-    # prints nothing. PUBLIC_LEAK_CHECK_STDIN is this block's alone: a value the caller set made gh send stdin the
-    # check never read (re-check, 2026-11-02), so it is cleared first. Measured 2026-11-01 21-23Z: 122 agent calls
-    # piped their text.
+    # cannot read those bytes without taking them from gh. The shim then buffers stdin (gh_shim_buffer_stdin) and runs
+    # the check again on the buffer; which forms read stdin is the check's decision (gh-guard), not a list kept here.
+    # PUBLIC_LEAK_CHECK_STDIN_BUFFERS tells it this caller buffers, so its exit 4 prints nothing.
+    # PUBLIC_LEAK_CHECK_STDIN is this block's alone: a value the caller set made gh send stdin the check never read
+    # (re-check, 2026-11-02), so it is cleared first.
     unset PUBLIC_LEAK_CHECK_STDIN
     _gate_rc=0
     PUBLIC_LEAK_CHECK_STDIN_BUFFERS=1 "$_dotfiles/scripts/public-text-gate" "$@" || _gate_rc=$?
     if ((_gate_rc == 4)); then
-        _stdin_max=$((64 * 1024 * 1024))
-        _stdin_buf="$(mktemp "${TMPDIR:-/tmp}/gh-shim-stdin.XXXXXX")" || {
-            echo "gh shim: refusing: cannot make a private file to hold stdin for the leak check" >&2
-            exit 1
-        }
-        if ! exec {_stdin_w}> "$_stdin_buf" || ! exec {_stdin_g}< "/dev/fd/$_stdin_w" {_stdin_h}< "/dev/fd/$_stdin_w"; then
-            rm -f "$_stdin_buf"
-            echo "gh shim: refusing: cannot open the private file that holds stdin for the leak check" >&2
-            exit 1
-        fi
-        rm -f "$_stdin_buf" || {
-            echo "gh shim: refusing: cannot unlink the private file that holds stdin for the leak check" >&2
-            exit 1
-        }
-        head -c "$((_stdin_max + 1))" >&"$_stdin_w" || {
-            echo "gh shim: refusing: cannot read stdin into a file for the leak check" >&2
-            exit 1
-        }
-        exec {_stdin_w}>&-
-        _stdin_size="$(stat -L -c %s "/dev/fd/$_stdin_g")" || exit 1
-        if ((_stdin_size > _stdin_max)); then
-            echo "gh shim: refusing: stdin is over 64 MiB, more than the leak check reads; pass the text in a file" >&2
-            exit 1
-        fi
+        gh_shim_buffer_stdin
         PUBLIC_LEAK_CHECK_STDIN="/dev/fd/$_stdin_g" "$_dotfiles/scripts/public-text-gate" "$@" || exit 1
-        exec 0<&"$_stdin_h" {_stdin_g}<&- {_stdin_h}<&-
     elif ((_gate_rc != 0)); then
         exit 1
     fi
@@ -734,6 +795,39 @@ if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && "${1:-}" != auth ]] && ! agent_cont
     fi
     unset _host_token
 fi
+
+# Listed leak terms (leak-terms.sops.yaml) in the text a gh call sends, for every caller, as for a commit or a push:
+# on 2026-11-17 an agent's `gh pr edit` put a listed term into a public pull request's body, where GitHub keeps it in
+# the body's edit history (dispatch://INFRA-4102). A call that can carry text (gh_shim_may_send_text) goes to
+# `scripts/leak-terms-check gh` on the pass that runs gh: for an agent, after the read cache and the public text gate,
+# on exactly the arguments gh then gets. The check reads every text the call sends, files and stdin included, and
+# refuses one that holds a listed term when the call can reach anything not confirmed private, a visibility it cannot
+# read counting as public; a text it cannot read, or a list it cannot decrypt, is refused the same way. A refused call
+# exits 2, and gh never runs. When the check needs stdin (its exit 7), it gets the buffer the public text gate shares.
+# DOTFILES_LEAK_TERMS_GH_STDIN is this block's alone, for the reason PUBLIC_LEAK_CHECK_STDIN is the gate's.
+unset DOTFILES_LEAK_TERMS_GH_STDIN
+if gh_shim_may_send_text "$@"; then
+    # The check of this shim's own checkout, found through a link to the shim as the agent block finds it.
+    _term_check="${BASH_SOURCE[0]}"
+    [[ ! -L "$_term_check" ]] || _term_check="$(command -p readlink -f -- "$_term_check")"
+    _term_check="${_term_check%/*}/../scripts/leak-terms-check"
+    _term_rc=0
+    if [[ -n "$_stdin_g" ]]; then
+        DOTFILES_LEAK_TERMS_GH_STDIN="/dev/fd/$_stdin_g" "$_term_check" gh -- "$@" || _term_rc=$?
+    else
+        "$_term_check" gh -- "$@" || _term_rc=$?
+        if ((_term_rc == 7)); then
+            gh_shim_buffer_stdin
+            _term_rc=0
+            DOTFILES_LEAK_TERMS_GH_STDIN="/dev/fd/$_stdin_g" "$_term_check" gh -- "$@" || _term_rc=$?
+        fi
+    fi
+    if ((_term_rc != 0)); then
+        ((_term_rc < 126)) || echo "gh shim: refusing: the leak-term check $_term_check could not run (exit $_term_rc)" >&2
+        exit 2
+    fi
+fi
+gh_shim_stdin_to_gh
 
 # mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
 # (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
