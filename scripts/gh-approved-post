@@ -25,8 +25,9 @@ not go out. The call passes only when all of these hold:
     title, and the body may then hold `---` lines of its own: it runs to the last `---` line
     before the next `Title:` line or `:::` block (drafts());
   - or, for an ask KIND_APPROVALS lists by its id, whose answer approves a KIND of post with no
-    fixed text (dispatch://INFRA-3412): his answer still says the words the entry reads, the ask
-    or its answer names the entry's repository, the call is one of the entry's verbs on that
+    fixed text (dispatch://INFRA-3412): he selected the entry's option (which then need not read
+    as an approving one), his answer still says the words the entry reads, the ask or its answer
+    names the entry's repository, the call is one of the entry's verbs on that
     repository, and GH_SHIM_VERDICT names the fresh reviewer's verdict on record, a Dispatch
     comment whose first line is `VERDICT: APPROVE at sha256:<SHA-256 of the body as posted>`, with
     a `Title: <title>` line for an issue or a pull request, written by a session that is none of
@@ -84,11 +85,14 @@ BASE_RE = re.compile(rf"^{BRANCH}\Z")
 POST_FLAGS = ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file")
 PR_FLAGS = ("--head", "-B", "--base")
 # Asks whose answer approves a KIND of post, with no fixed text (dispatch://INFRA-3412), by ask id:
-# the repository and the verbs the answer is read as approving, and the answer's own words that say
+# the repository and the verbs the answer is read as approving, the option he selected, the name the
+# ask or his answer gives the repository (`names`, else `repo`), and the answer's own words that say
 # so. A program cannot read "the Rock repo" as a repository, so the reading is made here, in a
 # reviewed change to this file, as APPROVER_FORK_OWNERS is; the check then finds each of `words` in
-# his answer and the repository in the ask or the answer, so no entry stands on words he did not
-# write. Each post under an entry also needs a fresh reviewer's verdict (check_verdict).
+# his answer, the name in the ask or the answer, and the option as his selection, so no entry stands
+# on words he did not write. For a listed ask the option stands in for an approving option: his
+# selection there need not read as one. Each post under an entry also needs a fresh reviewer's
+# verdict (check_verdict).
 KIND_APPROVALS = {
     # dispatch://BET-422/ask/48d87cd6-f3d0-44d5-9a79-30c8b38f28d0, answered 2026-11-12T19:33:21Z on an
     # ask about rocq-prover/rocq#22456: "The answer is the same every single time for rock. Just open
@@ -96,8 +100,19 @@ KIND_APPROVALS = {
     # repo." His three steps end in a fresh reviewer's cut (skill outside-message): the verdict.
     "48d87cd6-f3d0-44d5-9a79-30c8b38f28d0": {
         "repo": "rocq-prover/rocq",
+        "option": "Send it as a public issue instead",
         "verbs": ("issue create", "pr create"),
         "words": ("Just open an issue and a PR.", "anything going to the Rock repo"),
+    },
+    # dispatch://OSSV-142/ask/9a66d8e5-92ad-429b-8568-1af4d7ad5a53, answered 2026-10-27T17:55Z: "I need
+    # to approve every message, except for messages to Oh My Pie; those can go out". Oh My Pi is
+    # can1357/oh-my-pi, and every post of an agent there is one of the four verbs.
+    "9a66d8e5-92ad-429b-8568-1af4d7ad5a53": {
+        "repo": "can1357/oh-my-pi",
+        "names": "Oh My Pie",
+        "option": "Person for every outside message",
+        "verbs": ("issue create", "pr create", "issue comment", "pr comment"),
+        "words": ("except for messages to Oh My Pie; those can go out",),
     },
 }
 VERDICT_REF_RE = re.compile(
@@ -333,20 +348,27 @@ def listed(ref: str) -> list[str]:
 
 
 def approves_text(kind: dict) -> str:
-    return f"{' and '.join(f'`gh {verb}`' for verb in kind['verbs'])} on {kind['repo']}"
+    verbs = [f"`gh {verb}`" for verb in kind["verbs"]]
+    listed_verbs = verbs[0] if len(verbs) == 1 else ", ".join(verbs[:-1]) + " and " + verbs[-1]
+    return f"{listed_verbs} on {kind['repo']}"
 
 
 def check_kind(ask: dict, kind: dict, call: dict) -> dict:
-    """A citation of an ask whose answer approves a kind of post: the answer's words, the
-    repository, the kind, and the fresh reviewer's verdict. Any refusal names what it approves."""
+    """A citation of an ask whose answer approves a kind of post: the option he selected, the
+    answer's words, the name of the repository, the kind, and the fresh reviewer's verdict. Any
+    refusal names what it approves."""
     approves = approves_text(kind)
+    names = kind.get("names", kind["repo"])
     try:
+        if ask["selected"] != kind["option"]:
+            raise Refused(f"the answer selects {ask['selected']!r}, not {kind['option']!r}, the option "
+                          f"KIND_APPROVALS reads as approving {approves}.")
         for words in kind["words"]:
             if words not in ask["text"]:
                 raise Refused(f"his answer does not say {words!r}, which KIND_APPROVALS reads as approving "
                               f"{approves}.")
-        if not repo_named(kind["repo"]).search(ask["question"] + "\n" + ask["text"]):
-            raise Refused(f"neither the ask nor its answer names {kind['repo']}, the repository KIND_APPROVALS "
+        if not repo_named(names).search(ask["question"] + "\n" + ask["text"]):
+            raise Refused(f"neither the ask nor its answer names {names}, the repository KIND_APPROVALS "
                           "reads his answer as approving.")
         if call["repo"].lower() != kind["repo"].lower() or call["verb"] not in kind["verbs"]:
             raise Refused(f"his answer approves {approves}, and no other post; this call is `gh {call['verb']}` "
@@ -418,8 +440,6 @@ def check(ref: str, call: dict) -> dict:
         raise Refused(f"the ask was answered by {ask['by'] or 'nobody'}, not {APPROVER}.")
     if ask["selected"] not in ask["options"]:
         raise Refused(f"the answer selects {ask['selected']!r}, which is not exactly one of the ask's options.")
-    if not approves(ask["selected"]):
-        raise Refused(f"the selected option {ask['selected']!r} does not approve a post.")
     # The entry comes from the citation, and Dispatch's own ask id must be that entry's.
     kind_ids = listed(ref)
     if kind_ids and ask["id"] not in kind_ids:
@@ -428,6 +448,8 @@ def check(ref: str, call: dict) -> dict:
     if kind:
         record.update(check_kind(ask, kind, call))
         return record
+    if not approves(ask["selected"]):
+        raise Refused(f"the selected option {ask['selected']!r} does not approve a post.")
     source, where = ask["question"], ref
     if ask["document"]:
         versions = re.search(r"^Versions: (\d+)$", dispatch("read", "--ref", ask["document"]), re.M)

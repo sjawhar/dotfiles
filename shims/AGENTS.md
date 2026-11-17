@@ -50,10 +50,14 @@ behavior before handing the call to the real one. One file is data: `person-name
   (`has_head_flag`, `src/commands/gh.rs`), and in a jj checkout it adds `--head <bookmark>`,
   which gh takes over `-H`. An ask Sami answered by approving a KIND of post, with no fixed text
   (dispatch://INFRA-3412), is listed by its id in the script's `KIND_APPROVALS`, with the
-  repository and the verbs his answer is read as approving and the words that say so, which the
-  check finds in his answer: dispatch://BET-422/ask/48d87cd6-f3d0-44d5-9a79-30c8b38f28d0 ("Just
-  open an issue and a PR. … anything going to the Rock repo") is `gh issue create` and `gh pr
-  create` on `rocq-prover/rocq`. A program cannot read "the Rock repo" as a repository, so each
+  repository and the verbs his answer is read as approving, the option he selected, the name his
+  ask or answer gives the repository and the words that say so, which the check finds there:
+  dispatch://BET-422/ask/48d87cd6-f3d0-44d5-9a79-30c8b38f28d0 ("Just open an issue and a PR. …
+  anything going to the Rock repo") is `gh issue create` and `gh pr create` on `rocq-prover/rocq`,
+  and dispatch://OSSV-142/ask/9a66d8e5-92ad-429b-8568-1af4d7ad5a53 ("except for messages to Oh My
+  Pie; those can go out", under the option "Person for every outside message", which approves
+  nothing by itself) is all four verbs on `can1357/oh-my-pi`. A program cannot read "the Rock
+  repo" or "Oh My Pie" as a repository, so each
   entry is a reviewed change to the script. The entry is chosen by the cited id (or a short id of
   it), never by Dispatch's text, and Dispatch's own ask id must be the entry's. A citation of a
   listed ask passes for those verbs on that repository only, and every refusal of it names what the

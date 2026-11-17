@@ -980,7 +980,8 @@ class KindOfPost(ShimHarness):
     def test_the_ask_must_be_answered_by_him_with_an_approving_option(self):
         for ask, why in (
             (kind_ask_text(by="someone@theorem.dev"), "answered by someone@theorem.dev, not sami@theorem.dev"),
-            (kind_ask_text(selected="Do not send"), "the selected option 'Do not send' does not approve a post"),
+            (kind_ask_text(selected="Do not send"),
+             "the answer selects 'Do not send', not 'Send it as a public issue instead'"),
             (kind_ask_text(state="open"), "the ask is open, not answered"),
         ):
             with self.subTest(why=why):
@@ -1201,6 +1202,165 @@ class KindOfPostOnTheUpstreamToken(KindOfPost):
                             "--body-file", str(self.rocq_body)])
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual((self.routed(), self.sent_calls()), ([], []))
+
+
+# --- Oh My Pi: his exemption as a kind of post (dispatch://INFRA-3412) --------------------------
+
+OMP_ASK = "dispatch://OSSV-142/ask/9a66d8e5-92ad-429b-8568-1af4d7ad5a53"
+OMP_OPTION = "Person for every outside message"
+# The first sentence of his answer, word for word (2026-10-27T17:55Z). It names the project as
+# "Oh My Pie", never as can1357/oh-my-pi; KIND_APPROVALS makes that reading.
+OMP_ANSWER = ("Until we get this under control, I need to approve every message, except for messages to "
+              "Oh My Pie; those can go out, or I guess those are the only ones.")
+OMP_APPROVES = ("`gh issue create`, `gh pr create`, `gh issue comment` and `gh pr comment` on "
+                "can1357/oh-my-pi")
+OMP_BODY = "The retry path calls the same cooldown function, so the fix covers it.\n"
+OMP_SHA = hashlib.sha256(OMP_BODY.encode()).hexdigest()
+
+
+def omp_ask_text(selected=OMP_OPTION, text=OMP_ANSWER, ref=OMP_ASK, question=None):
+    """`dispatch read --ref` of the ask in the shape Dispatch printed it on 2026-11-17. A block that
+    mentions the answer names can1357/oh-my-pi; that is another session's text, not his."""
+    b = f"{ref}#b-"
+    question = question or "Who approves a message that leaves the company, before it goes out?"
+    return (
+        f"Question: {question}\nOptions:\n"
+        f"- Agent gate only — Every outside message goes through the agent gate. ({b}b2)\n"
+        f"- Person for reports to projects that did not enroll (recommended) — You approve each such report. ({b}b3)\n"
+        f"- {OMP_OPTION} — Each message waits for a person. ({b}b4)\n"
+        f"State: answered\nAsk id: {ref.rsplit('/', 1)[1]}\nAnswer:\n- By: sami@theorem.dev\n"
+        f"- Selected: {selected}\n- Text: {text}\n- Reference: {b}b5\n"
+        "  Referenced by:\n  - mentions block dispatch://INFRA-1/spec#b-1 (the upstream pull request on "
+        "can1357/oh-my-pi · 2026-11-14T19:00:00Z)\n"
+        f"Replies:\n- none\nNode: ask {ref} · made by session s at 2026-10-27T17:00:00Z · part of "
+        "dispatch://OSSV-142\nReferenced by:\n- none\nLinks:\n- none\n"
+    )
+
+
+class OhMyPi(ShimHarness):
+    """His answer on dispatch://OSSV-142/ask/9a66d8e5 exempts messages to Oh My Pi from his approval.
+    KIND_APPROVALS reads it as the four post verbs on can1357/oh-my-pi, each with a fresh reviewer's
+    verdict on the exact bytes, as every kind of post needs."""
+
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
+        self.omp_body = Path()
+
+    def setUp(self):
+        super().setUp()
+        executable(self.front / "dispatch",
+                   f'd={self.fixtures}\n'
+                   'case "$1 $3" in\n'
+                   f'  "read {OMP_ASK}") cat "$d/omp-ask.txt" ;;\n'
+                   f'  "read {OTHER_ASK}") cat "$d/other-ask.txt" ;;\n'
+                   f'  "read {VERDICT}") cat "$d/verdict.txt" ;;\n'
+                   '  *) echo "dispatch stub: no fixture for $*" >&2; exit 1 ;;\n'
+                   'esac')
+        self.omp_body = self.tmp / "omp-body.md"
+        self.omp_body.write_text(OMP_BODY)
+        self.omp()
+
+    def omp(self, ask=None, other=None, title: str | None = ROCQ_TITLE):
+        (self.fixtures / "omp-ask.txt").write_text(ask or omp_ask_text())
+        (self.fixtures / "other-ask.txt").write_text(other or omp_ask_text(ref=OTHER_ASK))
+        (self.fixtures / "verdict.txt").write_text(verdict_text(sha=OMP_SHA, title=title))
+
+    def post(self, argv, verdict: str | None = VERDICT, ask=OMP_ASK, **extra):
+        return self.run_gh(argv, cite=False, GH_SHIM_APPROVAL=ask, GH_SHIM_VERDICT=verdict, **extra)
+
+    def posts(self, repo="can1357/oh-my-pi"):
+        body = str(self.omp_body)
+        return (
+            ["issue", "create", "-R", repo, "--title", ROCQ_TITLE, "--body-file", body],
+            ["pr", "create", "-R", repo, "--title", ROCQ_TITLE, "--body-file", body,
+             "--head", "cybermonklabs:fix/recall-cooldown", "--base", "main"],
+            ["issue", "comment", f"https://github.com/{repo}/issues/1234", "--body-file", body],
+            ["pr", "comment", "1235", "-R", repo, "--body-file", body],
+        )
+
+    def assert_refused(self, result, why, call, ask=OMP_ASK):
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"gh shim: REFUSED: `gh {call}", result.stderr)
+        self.assertIn(why, result.stderr)
+        self.assertEqual(self.routed(), [], "a refused citation must not reach GitHub")
+        [record] = self.log()
+        self.assertEqual((record["verdict"], record["ask"]), ("refused", ask))
+
+    def test_each_post_his_answer_exempts_goes_out(self):
+        for argv in self.posts():
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                result = self.post(argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.routed()[-1], " ".join(as_posted(argv)))
+                allowed = self.log()[0]
+                self.assertEqual((allowed["verdict"], allowed["approves"], allowed["review"]),
+                                 ("allowed", OMP_APPROVES, VERDICT))
+
+    def test_another_repository_is_refused_naming_what_it_approves(self):
+        for repo in ("cybermonklabs/oh-my-pi", "can1357/oh-my-pi-docs", "can1357/other"):
+            for argv in self.posts(repo):
+                with self.subTest(repo=repo, verb=argv[:2]):
+                    self.fresh_log()
+                    self.assert_refused(self.post(argv),
+                                        f"his answer approves {OMP_APPROVES}, and no other post",
+                                        call=" ".join(argv[:3]))
+
+    def test_another_verb_is_refused_naming_what_it_approves(self):
+        argv = ["release", "create", "v1", "-R", "can1357/oh-my-pi", "--notes", "x"]
+        self.assert_refused(self.post(argv), f"approves a kind of post with no fixed text ({OMP_APPROVES})",
+                            call="release create v1")
+
+    def test_without_a_verdict_it_is_refused(self):
+        for argv in self.posts():
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                self.assert_refused(self.post(argv, verdict=None), "needs a fresh reviewer's verdict on record",
+                                    call=" ".join(argv[:3]))
+
+    def test_an_unrelated_ask_quoting_this_id_is_refused(self):
+        argv = self.posts()[2]
+        # Cited by its own id, an ask whose question quotes this ask's answered block.
+        quoted = omp_ask_text().split("Replies:\n", 1)[0]
+        self.omp(other=omp_ask_text(ref=OTHER_ASK, question="Quoting it:\n" + quoted))
+        self.assert_refused(self.post(argv, ask=OTHER_ASK), "holds 2 `Ask id:` lines", call=" ".join(argv[:3]),
+                            ask=OTHER_ASK)
+        # Cited by this id, while Dispatch answers with another ask.
+        self.fresh_log()
+        self.omp(ask=omp_ask_text(ref=OTHER_ASK))
+        self.assert_refused(self.post(argv), "Dispatch's ask id does not match the cited kind approval",
+                            call=" ".join(argv[:3]))
+
+    def test_another_selected_option_is_refused(self):
+        self.omp(ask=omp_ask_text(selected="Agent gate only"))
+        argv = self.posts()[2]
+        self.assert_refused(self.post(argv), f"the answer selects 'Agent gate only', not '{OMP_OPTION}'",
+                            call=" ".join(argv[:3]))
+
+    def test_an_answer_without_his_words_is_refused(self):
+        self.omp(ask=omp_ask_text(text="I need to approve every message."))
+        argv = self.posts()[2]
+        self.assert_refused(self.post(argv), "his answer does not say 'except for messages to Oh My Pie",
+                            call=" ".join(argv[:3]))
+
+
+class OhMyPiOnTheUpstreamToken(OhMyPi):
+    """can1357 has no App installation, so every case runs again on the upstream token, the real
+    route, where the fallback-write gate lets a write through only after the citation passed."""
+
+    def setUp(self):
+        super().setUp()
+        self.route_on_the_upstream_token()
+
+    def test_each_post_reaches_gh_on_the_upstream_token(self):
+        for argv in self.posts():
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                for sent in self.sent.iterdir():
+                    sent.unlink()
+                result = self.post(argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.sent_calls(), [["upstream-route", *as_posted(argv)]])
 
 
 if __name__ == "__main__":
