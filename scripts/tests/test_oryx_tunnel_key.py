@@ -230,6 +230,7 @@ class OryxTunnelKey(unittest.TestCase):
         self._finish_registered = True
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        self._stderr_files: dict[int, Path] = {}
         self.home = self.root / "home"
         self.home.mkdir()
         self._previous_subreaper = get_child_subreaper()
@@ -444,12 +445,8 @@ class OryxTunnelKey(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        sshd = subprocess.Popen(
-            [str(SSHD), "-D", "-f", str(sshd_config), "-E", str(sshd_log)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        sshd = self.spawn([str(SSHD), "-D", "-f", str(sshd_config), "-E", str(sshd_log)])
+        self._sshd_pid = sshd.pid
         self.addCleanup(stop_process, sshd)
         self.wait_for_sshd(sshd, pid_file, sshd_port, sshd_log)
 
@@ -485,12 +482,9 @@ class OryxTunnelKey(unittest.TestCase):
         self.assertNotIn("uid=", forced_id.stdout)
 
         for listen, target in remote_forwards:
-            process = subprocess.Popen(
+            process = self.spawn(
                 [str(SSH), "-F", str(client_config), "-N", "-R", forward_argument(remap(listen), remap(target)), "restricted"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=ssh_env,
+                ssh_env,
             )
             self.addCleanup(stop_process, process)
             self.wait_for_forward(process, int(remap(listen).rsplit(":", 1)[1]))
@@ -507,15 +501,12 @@ class OryxTunnelKey(unittest.TestCase):
         self.assertEqual(blocked_remote.returncode, 255, blocked_remote.stderr)
 
         local_port = free_port()
-        allowed_local = subprocess.Popen(
+        allowed_local = self.spawn(
             [
                 str(SSH), "-F", str(client_config), "-N", "-L",
                 forward_argument(f"127.0.0.1:{local_port}", mapped["127.0.0.1:12801"]), "restricted",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=ssh_env,
+            ssh_env,
         )
         self.addCleanup(stop_process, allowed_local)
         self.assertEqual(self.read_forward(allowed_local, local_port), b"ok")
@@ -525,22 +516,18 @@ class OryxTunnelKey(unittest.TestCase):
         blocked_target.start()
         self.addCleanup(blocked_target.close)
         blocked_local_port = free_port()
-        blocked_local = subprocess.Popen(
+        blocked_local = self.spawn(
             [
                 str(SSH), "-vv", "-F", str(client_config), "-N", "-L",
                 forward_argument(f"127.0.0.1:{blocked_local_port}", f"127.0.0.1:{blocked_target.port}"), "restricted",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=ssh_env,
+            ssh_env,
         )
         self.addCleanup(stop_process, blocked_local)
         self.assertEqual(self.read_forward(blocked_local, blocked_local_port), b"")
         self.assertFalse(blocked_target.connected.wait(0.2))
         stop_process(blocked_local)
-        _, blocked_local_stderr = blocked_local.communicate(timeout=5)
-        self.assertIn("administratively prohibited", blocked_local_stderr)
+        self.assertIn("administratively prohibited", self.stderr_of(blocked_local))
 
         direct_stream = self.ssh(client_config, ssh_env, "restricted", "-W", "127.0.0.1:22")
         self.assertEqual(direct_stream.returncode, 255, direct_stream.stderr)
@@ -562,21 +549,17 @@ class OryxTunnelKey(unittest.TestCase):
         unix_server.start()
         self.addCleanup(unix_server.close)
         blocked_socket_local_port = free_port()
-        blocked_socket_local = subprocess.Popen(
+        blocked_socket_local = self.spawn(
             [
                 str(SSH), "-vv", "-F", str(client_config), "-N", "-L",
                 f"127.0.0.1:{blocked_socket_local_port}:{unix_target}", "restricted",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=ssh_env,
+            ssh_env,
         )
         self.addCleanup(stop_process, blocked_socket_local)
         self.assertEqual(self.read_forward(blocked_socket_local, blocked_socket_local_port), b"")
         stop_process(blocked_socket_local)
-        _, blocked_socket_stderr = blocked_socket_local.communicate(timeout=5)
-        self.assertIn("open failed", blocked_socket_stderr)
+        self.assertIn("open failed", self.stderr_of(blocked_socket_local))
         self.assertFalse(unix_server.connected.wait(0.2))
 
         agent = subprocess.run([str(SSH_AGENT), "-s"], capture_output=True, text=True, timeout=30, check=False)
@@ -647,7 +630,7 @@ class OryxTunnelKey(unittest.TestCase):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                stderr = process.stderr.read() if process.stderr else ""
+                stderr = self.stderr_of(process)
                 self.fail(f"sshd exited before startup: {stderr}\n{log.read_text(encoding='utf-8') if log.exists() else ''}")
             if pid_file.exists():
                 try:
@@ -658,32 +641,64 @@ class OryxTunnelKey(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"sshd did not start: {log.read_text(encoding='utf-8') if log.exists() else ''}")
 
+    def spawn(self, argv: list[str], env: dict[str, str] | None = None) -> subprocess.Popen[str]:
+        """ARGV in the background, its stdout on /dev/null and its stderr in a file of its own (stderr_of).
+        A pipe nobody reads until the process ends stalls a process that fills it: with its stderr pipe
+        set to 4 KiB (F_SETPIPE_SZ), the `ssh -vv` below blocked in anon_pipe_write before it read the
+        server's refusal, and the forward never answered (124 s, 2026-11-17). A new pipe gets that
+        little room once this uid's pipes pass fs.pipe-user-pages-soft, and on sami-devbox, where this
+        uid runs about 60,000 tasks, six of these tests run at once failed at that step 5 times in 6,
+        their ssh logs ending at the same line. A file never fills."""
+        path = self.root / f"process-{len(self._stderr_files) + 1}.stderr"
+        with open(path, "w", encoding="utf-8") as stderr:
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+                                       text=True, env=env)
+        self._stderr_files[process.pid] = path
+        return process
+
+    def stderr_of(self, process: subprocess.Popen[str]) -> str:
+        return self._stderr_files[process.pid].read_text(encoding="utf-8", errors="replace")
+
+    def stuck(self, process: subprocess.Popen[str]) -> str:
+        """Where PROCESS and sshd are when a wait runs out, so a failure says why rather than only
+        that the port never answered: each one's state and wait channel, and PROCESS's stderr tail."""
+        lines = []
+        for name, pid in (("client", process.pid), ("sshd", getattr(self, "_sshd_pid", None))):
+            if pid is None:
+                continue
+            try:
+                state = next(line for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+                             if line.startswith("State:"))
+                wchan = Path(f"/proc/{pid}/wchan").read_text()
+            except (OSError, StopIteration):
+                state, wchan = "gone", "-"
+            lines.append(f"{name} {pid}: {state}, waiting in {wchan or '-'}")
+        return "; ".join(lines) + f"\nclient stderr tail:\n{self.stderr_of(process)[-1500:]}"
+
     def wait_for_forward(self, process: subprocess.Popen[str], port: int) -> None:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                _, stderr = process.communicate(timeout=5)
-                self.fail(f"permitted remote forward exited: {stderr}")
+                self.fail(f"permitted remote forward exited: {self.stderr_of(process)}")
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                     return
             except OSError:
                 time.sleep(0.05)
-        self.fail(f"remote forward did not listen on {port}")
+        self.fail(f"remote forward did not listen on {port}; {self.stuck(process)}")
 
     def read_forward(self, process: subprocess.Popen[str], port: int) -> bytes:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                _, stderr = process.communicate(timeout=5)
-                self.fail(f"local forward exited: {stderr}")
+                self.fail(f"local forward exited: {self.stderr_of(process)}")
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=0.1) as connection:
                     connection.settimeout(5)
                     return connection.recv(2)
             except OSError:
                 time.sleep(0.05)
-        self.fail(f"local forward did not listen on {port}")
+        self.fail(f"local forward did not listen on {port}; {self.stuck(process)}")
 
     @staticmethod
     def stop_agent(pid: int) -> None:
