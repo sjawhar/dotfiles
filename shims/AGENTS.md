@@ -52,16 +52,22 @@ behavior before handing the call to the real one. One file is data: `person-name
   check finds in his answer: dispatch://BET-422/ask/48d87cd6-f3d0-44d5-9a79-30c8b38f28d0 ("Just
   open an issue and a PR. … anything going to the Rock repo") is `gh issue create` and `gh pr
   create` on `rocq-prover/rocq`. A program cannot read "the Rock repo" as a repository, so each
-  entry is a reviewed change to the script. A citation of a listed ask passes for those verbs on
-  that repository only, and every other refusal names what the answer approves. It needs no draft;
+  entry is a reviewed change to the script. The entry is chosen by the cited id (or a short id of
+  it), never by Dispatch's text, and Dispatch's own ask id must be the entry's. A citation of a
+  listed ask passes for those verbs on that repository only, and every refusal of it names what the
+  answer approves. It needs no draft;
   it needs `GH_SHIM_VERDICT=dispatch://<KEY>/comment/<id>`, the fresh reviewer's verdict on record
-  (his three steps end in that reviewer's cut): a Dispatch comment whose first line is
-  `VERDICT: APPROVE at sha256:<sha256sum of the body file>`, with a `Title: <title>` line for an
-  issue or a pull request, written by a session that is none of the call's (`OMP_SESSION_ID`,
-  `DISPATCH_SESSION_ID`, `PI_SESSION_ID`, `ENVOY_SESSION_ID`). A subagent of the posting session
-  writes to Dispatch as that session, so its verdict is refused: the reviewer is another session,
-  such as a Legion reviewer. A text that changes after the verdict needs a new verdict, not a new
-  ask. An ask that is not listed gets only the word-for-word check. In an agent session a write
+  (his three steps end in that reviewer's cut): a Dispatch comment whose first line is exactly
+  `VERDICT: APPROVE at sha256:<sha256sum of the body file>` (of a `--body`, its UTF-8 bytes), with
+  a `Title: <title>` line for an issue or a pull request, written by a session that is none of the
+  call's (`OMP_SESSION_ID`, `DISPATCH_SESSION_ID`, `PI_SESSION_ID`, `ENVOY_SESSION_ID`, compared
+  without letter case). A subagent of the posting session writes to Dispatch as that session, so
+  its verdict is refused: the reviewer is another session, such as a Legion reviewer. A text that
+  changes after the verdict needs a new verdict, not a new ask. An ask that is not listed gets
+  only the word-for-word check. For every citation, his answer's text ends before Dispatch's
+  `- Reference:` line and the blocks it lists under the answer, which other sessions wrote, and
+  an ask whose `dispatch read` holds more than one `Ask id:` line is refused: a question or a
+  reply that holds an answer block cannot stand in for his answer. In an agent session a write
   to an owner without the App, which would go out on his upstream token, is refused without such a
   citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation
   is checked on the outermost pass only; the later passes of the same call (the stderr-keeping
