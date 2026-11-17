@@ -395,7 +395,8 @@ IMDS_PORT="${AGENTBOX_IMDS_PORT:-8169}"
 ENVOY_PORT="${AGENTBOX_ENVOY_PORT:-9020}"
 UID_="$(id -u)"
 # AGENTBOX_RUN_BASE: the tests' own tree, and it reaches a detached child that runs this script
-# again (the reaper, `reap-previous`), which a shell variable would not.
+# again (the collector, `agentbox collect`, which `agentbox new` starts), which a shell variable
+# would not.
 RUN_BASE="${AGENTBOX_RUN_BASE:-/run/user/$UID_/agentbox}"
 # The relayed session bus, in its own dir so a box sees the socket socat
 # recreates after a unit restart.

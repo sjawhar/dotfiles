@@ -30,8 +30,6 @@ none there; run as `mise which -C / agent-secrets --tool agent-secrets` it print
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import json
 import re
 import socket
@@ -43,13 +41,6 @@ from pathlib import Path
 
 DOTFILES = Path(__file__).resolve().parents[2]
 SECRET_RUN = DOTFILES / "scripts" / "secret-run"
-# This machine's name as secret-run-reason writes it: clipped to HOST_MAX, which
-# test_secret_run_reason.py holds. A name over the cap (sami-devbox's is 54 characters, the cap
-# 32) never appears whole in a reason.
-_REASON_LOADER = importlib.machinery.SourceFileLoader("secret_run_reason_host", str(DOTFILES / "scripts" / "secret-run-reason"))
-_REASON = importlib.util.module_from_spec(importlib.util.spec_from_loader(_REASON_LOADER.name, _REASON_LOADER))
-_REASON_LOADER.exec_module(_REASON)
-REASON_HOST = _REASON.clip(_REASON.clean(socket.gethostname()), _REASON.HOST_MAX)
 BROKER_URL = next(
     line.split("=", 1)[1].strip()
     for line in (DOTFILES / "agent-secrets" / "broker.env").read_text().splitlines()
@@ -846,7 +837,7 @@ class SecretRun(unittest.TestCase):
             + re.escape(
                 f'gws theorem modify; retitle the environment tabs | session: omp {self.SESSION} "TASKCOACH: RL task '
                 'difficulty coach" subagent CarryCensus | runs: gws docs documents batchUpdate '
-                f"documentId=1PTCUrEOLmYbHUx9Zf-ruQ5P5GhDAnpsEptQWOvRcKZk +4 args | host: {REASON_HOST} pid "
+                f"documentId=1PTCUrEOLmYbHUx9Zf-ruQ5P5GhDAnpsEptQWOvRcKZk +4 args | host: {socket.gethostname()} pid "
             )
             + r"\d+$",
         )
