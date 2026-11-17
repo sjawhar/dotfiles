@@ -5,7 +5,7 @@ description: "Use before you read, grep, jq or script over agent session transcr
 
 # Using the transcript store
 
-Every omp session, subagent transcript and session artifact on sami-rocqperf and sami-leanperf is in one ClickHouse store, about 10 minutes behind the live files, **and so are the Claude Code and Codex logs copied from seven of Nickolai's hosts** (`machcsl-gcp-1` to `-3`, `share1014-desktop`, `share1014-vm1` to `-vm3`), merged into the same `transcripts` database on 2026-10-30 and readable with the default reader (agent-infra#996, on dispatch://LINUX-31/ask/ecd0eab6: "it's just one big pool of data"). **So `tq time` and `tq top` with no `--host` count his sessions beside ours**; pass `--host` when you mean one machine. `tq` answers in under a second what a hand-written script answers in minutes over 25 GB, so query `tq` first. Open a raw file only at the `FILE:LINE` that `tq` gives you.
+The omp sessions, subagent transcripts and session artifacts of every host the store imports are in one ClickHouse store, about 10 minutes behind the live files, **and so are the Claude Code and Codex logs copied from Nickolai's hosts**, merged into the same `transcripts` database on 2026-10-30 and readable with the default reader (agent-infra#996, on dispatch://LINUX-31/ask/ecd0eab6: "it's just one big pool of data"). For the host list, read `transcript-store/README.md` in theorem-labs/agent-infra, which says where each host's sessions come from; `tq sql "SELECT host, count() FROM sessions GROUP BY host"` lists the hosts the store holds now. **So `tq time` and `tq top` with no `--host` count every host's sessions together**; pass `--host` when you mean one machine. `tq` answers in under a second what a hand-written script answers in minutes over 25 GB, so query `tq` first. Open a raw file only at the `FILE:LINE` that `tq` gives you.
 
 | Question | Command | Default window |
 |---|---|---|
@@ -45,9 +45,10 @@ To list every instruction a person gave one session since a time, and what the s
 
 ## When the store does not have it
 
-- **Not in the store:** the last ~10 minutes, and any machine outside the list above. sami-leanperf lags more while a timed benchmark runs there, and a copied host loads on its own 30-minute timer. `tq` warns on stderr when a host's last load is over 30 minutes old.
+- **Not in the store:** the last ~10 minutes, and any machine the store does not import (the hosts query above lists the ones it does). A copied host loads on its own 30-minute timer.
+- **The stale-load warning:** `tq` warns on stderr only about the hosts in its record of the hosts expected to load (`transcript_store/expected_hosts.txt` in the package it runs from), each one when its newest load is over 30 minutes old: `tq: warning: last load from <host> <age> ago; the store does not have the newer lines of that host`. A host outside the record gets no warning, and an expected host with no load at all gets none either. A query that names a host outside the record, with `--host` or as a quoted host in `tq sql` (`WHERE host = '<host>'`), still answers, and `tq` says once when that host last loaded: `tq: note: <host> is not a host expected to load; its last load was <time> (<age> ago)`. A `--host` the store holds no load of gets `tq: note: the store holds no load of <host>`. A host named any other way in SQL (`LIKE`, a subquery) gets no note.
 - **`history://<id>` is a condensed view:** `read` and `grep` on it see only the dialogue still in the agent's context: turns a compaction removed are a one-line summary, peer messages and job results are one-line previews or labels, each tool call is one line without its output, and thinking is left out. A miss there does not mean something never happened; for data from the last ~10 minutes, grep the agent's session `.jsonl` file (a subagent's is `<id>.jsonl`).
-- **`tq` not found:** the host is not a store client. Run the query on sami-rocqperf or sami-leanperf.
-- Read raw files by hand only for data the store does not have (the first bullet), and never scan the whole sessions tree on sami-rocqperf: other work shares its CPU and disk.
+- **`tq` not found:** install it as "Use" in `transcript-store/README.md` says.
+- Read raw files by hand only for data the store does not have (the first bullet), and never scan a whole sessions tree on a machine other work shares: its CPU and disk are that work's.
 
 Setup, tables and operations: `transcript-store/README.md` in theorem-labs/agent-infra.
