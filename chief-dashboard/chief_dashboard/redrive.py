@@ -383,9 +383,9 @@ class Driver:
     @staticmethod
     def legion(w: Wait, data: dict, passed: list[tuple[str, str, str]]) -> bool:
         """Whether the row belongs to a Legion tree: its issue or an ancestor carries the `legion` label, or a
-        Legion architect opened it. Such a tree's architect is not running, not gone — a Legion claim outlives its
-        process by design — and its controller is the one session that can wake it (it also triages that project's
-        board)."""
+        Legion architect opened it. When such a tree's architect is not running, the tree is not gone — a Legion claim
+        outlives its process by design — and its controller is the one session that can wake it (it also triages that
+        project's board)."""
         if any(label.startswith(LEGION_ARCHITECT) for _, label, _ in passed):
             return True
         seen: set[str] = set()

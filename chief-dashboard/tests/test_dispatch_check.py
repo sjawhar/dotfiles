@@ -450,9 +450,9 @@ def test_a_proof_part_waiting_in_triage_for_release_is_neither_unowned_nor_runni
 
 def test_no_status_write_is_proposed_inside_a_legion_tree():
     # Verified Linux owner line, 2026-10-27 00:17Z: agent comments on a triage child under a `legion` root are its
-    # architect explaining why it is NOT released. Legion's "Using Legion" page: the daemon sets back a status that
-    # an agent session writes there, a move to backlog or icebox stops its workers, and only a person, the Legion
-    # controller or the daemon may write it. The same issue outside a Legion tree is still reported.
+    # architect explaining why it is NOT released. Legion's "Using Legion" page: the daemon sets back a status that an
+    # agent session writes on a running issue of the tree, a move to backlog or icebox stops its workers, and only a
+    # person, the Legion controller or the daemon may write it. The same issue outside a Legion tree is still reported.
     url = "https://github.com/o/r/pull/2"
     api = FakeDispatch([
         issue("BET-9", status="in_progress", labels=["legion"]),
