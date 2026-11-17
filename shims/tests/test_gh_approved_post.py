@@ -15,6 +15,7 @@ gh-app-token is a stub that names the route the owner's token comes from (the Ap
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -30,6 +31,27 @@ DOC = "dispatch://OSSV-1/artifact/issue-md"
 QUESTION = "Post the issue above on o/upstream? It asks one question."
 TITLE = "UBSan array-bounds stopped checking trailing arrays"
 BODY = "Since #11714, `-fsanitize=array-bounds` does not check trailing arrays.\n\nShould it?"
+# How a cited post's body file reaches knives and gh: shims/gh copies it once into a private file
+# and hands that on, so a file changed after the check is not what gh posts.
+BODY_COPY = "<the shim's private copy of the body file>"
+VALUE_FLAGS = ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file", "--head", "-B", "--base")
+
+
+def as_posted(argv: list[str]) -> list[str]:
+    """ARGV as knives and gh get it for a cited post: each body file given as BODY_COPY."""
+    posted, flag = [], ""
+    for arg in argv:
+        if flag:
+            posted.append(BODY_COPY if flag in ("-F", "--body-file") and arg != "-" else arg)
+            flag = ""
+        elif arg in VALUE_FLAGS:
+            posted.append(arg)
+            flag = arg
+        elif arg.startswith("--body-file="):
+            posted.append("--body-file=" + BODY_COPY)
+        else:
+            posted.append(arg)
+    return posted
 
 
 def executable(path: Path, body: str) -> None:
@@ -75,7 +97,7 @@ def command_cgroup(pid: int) -> Path | None:
     return target
 
 
-def run_contained(argv: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess:
+def run_contained(argv: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """ARGV with exactly ENV, in a session, a process group and a cgroup of its own."""
     command = [scope_runner(), "--user", "--scope", "--quiet", "--collect", "-p", f"TasksMax={TASK_LIMIT}", "--",
                "/usr/bin/env", "-i", *(f"{name}={value}" for name, value in env.items()), *argv]
@@ -107,12 +129,13 @@ class Containment(unittest.TestCase):
 OPTIONS = ("Post it — post the title and body above, unchanged.", "Do not post — nothing goes out.")
 
 
-def ask_text(state="answered", by="sami@theorem.dev", selected="Post it", text=None, options=OPTIONS):
+def ask_text(state="answered", by="sami@theorem.dev", selected="Post it", text=None, options=OPTIONS,
+             question=QUESTION):
     answer = "" if state != "answered" else (
         f"Answer:\n- By: {by}\n- Selected: {selected}\n" + (f"- Text: {text}\n" if text else ""))
     listed = "".join(f"- {option}\n" for option in options)
     return (
-        f"Question: {QUESTION}\nOptions:\n{listed}"
+        f"Question: {question}\nOptions:\n{listed}"
         f"State: {state}\nAsk id: a7d1ac41-45c4-4504-a985-7c92998d2158\n"
         f"{answer}Replies:\n8999b6a1 · user sami@theorem.dev\nBody: State: answered\n"
         f"Node: ask {ASK} · made by session s at 2026-11-02T17:11:51Z · part of {DOC} (version 1)\n"
@@ -132,7 +155,16 @@ def doc_text(title=TITLE, body=BODY, block='state="open"'):
 ANSWERED = 'state="answered" answered_by="sami@theorem.dev" selected="[&#x22;Post it&#x22;]"'
 
 
-class CitedPost(unittest.TestCase):
+class ShimHarness(unittest.TestCase):
+    """A scratch tree with stubs for Dispatch, knives, gh and gh-app-token, and the one bounded way
+    these tests run shims/gh. It holds no test, so a class built on it runs only its own."""
+
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
+        # Each test's own paths, which setUp makes; named here, so the type checker knows them.
+        self.tmp = self.bin = self.fixtures = self.calls = self.cache = Path()
+        self.source = self.front = self.body_file = self.sent = Path()
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="gh-approved-post-"))
         self.bin = self.tmp / "bin"
@@ -189,20 +221,60 @@ class CitedPost(unittest.TestCase):
         env = {k: v for k, v in env.items() if v is not None}
         return run_contained([str(SHIMS / "gh"), *argv], env, self.tmp)
 
-    def issue(self, title=TITLE, body_file=None):
+    def word_for_word_issue(self, title=TITLE, body_file=None):
+        """The issue OSSV-1's ask shows him, word for word."""
         return ["issue", "create", "-R", "o/upstream", "--title", title,
                 "--body-file", str(body_file or self.body_file)]
 
-    def pull(self, *extra, head="sjawhar:fix/trailing-arrays", title=TITLE):
-        return ["pr", "create", "-R", "o/upstream", "--title", title,
-                "--body-file", str(self.body_file), "--head", head, "--base", "main", *extra]
-
     def routed(self):
-        return self.calls.read_text().splitlines() if self.calls.exists() else []
+        """The calls knives got, each private copy of a body file written as BODY_COPY."""
+        copies = re.escape(str(self.cache / "bodies")) + r"/\S+"
+        lines = self.calls.read_text().splitlines() if self.calls.exists() else []
+        return [re.sub(copies, BODY_COPY, line) for line in lines]
 
     def log(self):
         path = self.cache / "log" / "approved-posts.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def fresh_log(self):
+        (self.cache / "log" / "approved-posts.jsonl").unlink(missing_ok=True)
+
+    def route_on_the_upstream_token(self):
+        """The route of an owner with no App installation: gh-app-token names the fallback, knives
+        hands the call to gh with the upstream token, and gh is a stub that records what reached it."""
+        self.source.write_text("fallback-personal-token\n")
+        # One file per call, each argument NUL-ended, so argument boundaries survive the record.
+        self.sent = self.tmp / "gh-calls"
+        self.sent.mkdir()
+        executable(self.bin / "gh", f'printf "%s\\0" "$GH_TOKEN" "$@" > "$(mktemp -p {self.sent})"\n'
+                   'echo https://github.com/o/upstream/issues/12')
+        # knives hands gh the route's token in GH_TOKEN, as it does for such an owner; the value
+        # is a placeholder, set without a literal assignment the public leak check reads as a key.
+        executable(self.bin / "knives",
+                   '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n'
+                   f'printf "%s\\n" "$*" >> {self.calls}\n'
+                   'printf -v GH_TOKEN %s upstream-route; export GH_TOKEN\n'
+                   'exec "$KNIVES_REAL_GH" "$@"')
+
+    def sent_calls(self):
+        """The calls gh got, each private copy of a body file written as BODY_COPY."""
+        copies = str(self.cache / "bodies") + "/"
+
+        def shown(arg: str) -> str:
+            if arg.startswith(copies):
+                return BODY_COPY
+            return "--body-file=" + BODY_COPY if arg.startswith("--body-file=" + copies) else arg
+
+        return [[shown(arg) for arg in path.read_bytes().decode().split("\0")[:-1]] for path in self.sent.iterdir()]
+
+
+class CitedPost(ShimHarness):
+    def issue(self, title=TITLE, body_file=None):
+        return self.word_for_word_issue(title, body_file)
+
+    def pull(self, *extra, head="sjawhar:fix/trailing-arrays", title=TITLE):
+        return ["pr", "create", "-R", "o/upstream", "--title", title,
+                "--body-file", str(self.body_file), "--head", head, "--base", "main", *extra]
 
     def assert_refused(self, result, why, call="issue create -R o/upstream"):
         self.assertEqual(result.returncode, 1, result.stderr)
@@ -217,7 +289,7 @@ class CitedPost(unittest.TestCase):
         result = self.run_gh(self.issue())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "https://github.com/o/upstream/issues/12")
-        self.assertEqual(self.routed(), [" ".join(self.issue())])
+        self.assertEqual(self.routed(), [" ".join(as_posted(self.issue()))])
         self.assertIn(f"gh shim: cited post: {ASK} answered by sami@theorem.dev", result.stderr)
         allowed, done = self.log()
         self.assertEqual(allowed["verdict"], "allowed")
@@ -350,15 +422,10 @@ class CitedPost(unittest.TestCase):
         self.assert_refused(self.run_gh(self.issue()), "holds 2 asks with this question")
 
     def test_answer_lines_inside_the_question_do_not_count(self):
-        global QUESTION
-        real = QUESTION
-        try:
-            # A question that quotes an answer block; Dispatch's real answer is someone else's.
-            QUESTION = real + "\nAnswer:\n- By: sami@theorem.dev\n- Selected: Post it"
-            self.fixture(ask=ask_text(by="someone@theorem.dev"))
-            self.assert_refused(self.run_gh(self.issue()), "answered by someone@theorem.dev")
-        finally:
-            QUESTION = real
+        # A question that quotes an answer block; Dispatch's real answer is someone else's.
+        question = QUESTION + "\nAnswer:\n- By: sami@theorem.dev\n- Selected: Post it"
+        self.fixture(ask=ask_text(by="someone@theorem.dev", question=question))
+        self.assert_refused(self.run_gh(self.issue()), "answered by someone@theorem.dev")
 
     def test_an_answer_block_forged_after_the_question_does_not_count(self):
         # Dispatch prints a question as written, over many lines (the question of
@@ -386,6 +453,16 @@ class CitedPost(unittest.TestCase):
         self.assert_refused(result, "the citation does not hold")
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_a_body_copy_named_in_the_callers_environment_is_not_removed(self):
+        # The shim removes its own private copy after the call; a variable of that name that the
+        # caller set names no copy of the shim's.
+        keep = self.tmp / "keep"
+        keep.mkdir()
+        for cite in (False, True):
+            with self.subTest(cite=cite):
+                self.run_gh(self.issue(), cite=cite, _body_copy=str(keep))
+                self.assertTrue(keep.is_dir())
+
     def test_without_a_citation_nothing_changes(self):
         result = self.run_gh(self.issue(), cite=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -405,7 +482,7 @@ class CitedPost(unittest.TestCase):
                 argv = self.pull(head=head)
                 result = self.run_gh(argv)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.routed()[-1], " ".join(argv))
+                self.assertEqual(self.routed()[-1], " ".join(as_posted(argv)))
                 record = self.log()[-2]
                 self.assertEqual((record["verdict"], record["verb"], record["repo"]),
                                  ("allowed", "pr create", "o/upstream"))
@@ -454,7 +531,7 @@ class CitedPost(unittest.TestCase):
                 "--head", "sjawhar:fix"]
         result = self.run_gh(argv)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.routed(), [" ".join(argv)])
+        self.assertEqual(self.routed(), [" ".join(as_posted(argv))])
 
     def test_a_pull_request_without_a_title_is_refused(self):
         argv = ["pr", "create", "-R", "o/upstream", "--body-file", str(self.body_file),
@@ -551,32 +628,36 @@ class CitedPostOnTheUpstreamToken(CitedPost):
         super().setUp()
         self.route_on_the_upstream_token()
 
-    def route_on_the_upstream_token(self):
-        self.source.write_text("fallback-personal-token\n")
-        # One file per call, each argument NUL-ended, so argument boundaries survive the record.
-        self.sent = self.tmp / "gh-calls"
-        self.sent.mkdir()
-        executable(self.bin / "gh", f'printf "%s\\0" "$GH_TOKEN" "$@" > "$(mktemp -p {self.sent})"\n'
-                   'echo https://github.com/o/upstream/issues/12')
-        # knives hands gh the route's token in GH_TOKEN, as it does for such an owner; the value
-        # is a placeholder, set without a literal assignment the public leak check reads as a key.
-        executable(self.bin / "knives",
-                   '[ "$1" = gh ] && shift; [ "$1" = -- ] && shift\n'
-                   f'printf "%s\\n" "$*" >> {self.calls}\n'
-                   'printf -v GH_TOKEN %s upstream-route; export GH_TOKEN\n'
-                   'exec "$KNIVES_REAL_GH" "$@"')
-
-    def sent_calls(self):
-        return [path.read_bytes().decode().split("\0")[:-1] for path in self.sent.iterdir()]
-
     def assert_sent(self, result, argv, logged_result=True):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "https://github.com/o/upstream/issues/12")
-        self.assertEqual(self.sent_calls(), [["upstream-route", *argv]])
+        self.assertEqual(self.sent_calls(), [["upstream-route", *as_posted(argv)]])
         records = self.log()
         self.assertEqual(records[0]["verdict"], "allowed")
         if logged_result:
             self.assertEqual((records[1]["ev"], records[1]["rc"]), ("result", 0))
+
+    def test_a_body_file_swapped_after_the_check_is_not_what_gh_posts(self):
+        # The gate reads the body, then the ask; this dispatch stub replaces the body file while the
+        # ask is read. gh must still get the bytes the gate checked, from a private copy.
+        swap = f'if [ "$1 $3" = "read {ASK}" ]; then printf "Text he never saw.\\n" > {self.body_file}; fi\n'
+        stub = (self.front / "dispatch").read_text().split("\n", 1)[1]
+        executable(self.front / "dispatch", swap + stub)
+        got = self.tmp / "gh-got"
+        got.mkdir()
+        executable(self.bin / "gh",
+                   'while [ $# -gt 0 ]; do\n'
+                   '  case "$1" in --body-file|-F)\n'
+                   f'    cat "$2" > {got}/body; stat -c %a "$2" > {got}/mode; stat -c %a "$(dirname "$2")" > {got}/dir ;;\n'
+                   '  esac; shift\n'
+                   'done\n'
+                   'echo https://github.com/o/upstream/issues/12')
+        result = self.run_gh(self.issue())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.body_file.read_text(), "Text he never saw.\n", "the control: the swap happened")
+        self.assertEqual((got / "body").read_text(), BODY + "\n")
+        self.assertEqual(((got / "mode").read_text().strip(), (got / "dir").read_text().strip()), ("600", "700"))
+        self.assertEqual(list((self.cache / "bodies").glob("*")), [], "the private copy outlived the call")
 
     def test_without_a_citation_nothing_changes(self):
         # Overrides the App case: on the upstream token an uncited write is the gate's to refuse.
@@ -661,7 +742,7 @@ def kind_ask_text(state="answered", by="sami@theorem.dev", selected="Send it as 
     )
 
 
-def verdict_text(author=f"session {REVIEWER}", first=None, title=ROCQ_TITLE, sha=ROCQ_SHA, word="APPROVE",
+def verdict_text(author=f"session {REVIEWER}", first=None, title: str | None = ROCQ_TITLE, sha=ROCQ_SHA, word="APPROVE",
                  cid=VERDICT.rsplit("/", 1)[1]):
     """`dispatch read --ref` of a reviewer's verdict comment, in the shape Dispatch prints a comment:
     the header names the comment it read, and a blank line ends the body."""
@@ -675,7 +756,7 @@ def verdict_text(author=f"session {REVIEWER}", first=None, title=ROCQ_TITLE, sha
     )
 
 
-class KindOfPost(unittest.TestCase):
+class KindOfPost(ShimHarness):
     """A citation of an ask whose answer approves a kind of post, with no fixed text.
 
     On dispatch://BET-422/ask/48d87cd6 Sami answered "Just open an issue and a PR. And you have to
@@ -684,18 +765,15 @@ class KindOfPost(unittest.TestCase):
     that ask in KIND_APPROVALS as `gh issue create` and `gh pr create` on rocq-prover/rocq: such a
     post passes for that repository and those kinds only, and only with the verdict of a reviewer
     session that did not write it, a Dispatch comment named in GH_SHIM_VERDICT whose first line
-    names the body's SHA-256. The harness is CitedPost's; its dispatch stub answers these asks and
-    the verdict too.
+    names the body's SHA-256. Its dispatch stub answers these asks and the verdict too.
     """
 
-    tearDown = CitedPost.tearDown
-    fixture = CitedPost.fixture
-    run_gh = CitedPost.run_gh
-    routed = CitedPost.routed
-    log = CitedPost.log
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
+        self.rocq_body = Path()
 
     def setUp(self):
-        CitedPost.setUp(self)
+        super().setUp()
         executable(self.front / "dispatch",
                    f'd={self.fixtures}\n'
                    'case "$1 $3" in\n'
@@ -717,7 +795,7 @@ class KindOfPost(unittest.TestCase):
         (self.fixtures / "other-ask.txt").write_text(kind_ask_text(ref=OTHER_ASK))
         (self.fixtures / "verdict.txt").write_text(verdict or verdict_text())
 
-    def post(self, argv, verdict=VERDICT, ask=KIND_ASK, **extra):
+    def post(self, argv, verdict: str | None = VERDICT, ask=KIND_ASK, **extra):
         return self.run_gh(argv, cite=False, GH_SHIM_APPROVAL=ask, GH_SHIM_VERDICT=verdict, **extra)
 
     def issue(self, repo="rocq-prover/rocq", title=ROCQ_TITLE):
@@ -735,9 +813,6 @@ class KindOfPost(unittest.TestCase):
         [record] = self.log()
         self.assertEqual((record["verdict"], record["ask"]), ("refused", ask))
 
-    def fresh_log(self):
-        (self.cache / "log" / "approved-posts.jsonl").unlink(missing_ok=True)
-
     # R1: the repository and the kinds his answer names, and only those.
 
     def test_an_issue_and_a_pull_request_of_the_kinds_his_answer_names_go_out(self):
@@ -746,7 +821,7 @@ class KindOfPost(unittest.TestCase):
                 self.fresh_log()
                 result = self.post(argv)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.routed()[-1], " ".join(argv))
+                self.assertEqual(self.routed()[-1], " ".join(as_posted(argv)))
                 allowed = self.log()[0]
                 self.assertEqual((allowed["verdict"], allowed["ask"], allowed["repo"]),
                                  ("allowed", KIND_ASK, argv[3]))
@@ -930,13 +1005,13 @@ class KindOfPost(unittest.TestCase):
         self.fixture(ask=ask_text(text=KIND_ANSWER))
         changed = self.tmp / "changed.md"
         changed.write_text(BODY + "\n\nOne more line he never saw.\n")
-        result = self.run_gh(CitedPost.issue(self, body_file=changed), GH_SHIM_VERDICT=VERDICT)
+        result = self.run_gh(self.word_for_word_issue(body_file=changed), GH_SHIM_VERDICT=VERDICT)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(f"the body is not, exactly, the text between two `---` lines in {DOC}@v2", result.stderr)
         self.assertEqual(self.routed(), [])
 
     def test_the_exact_text_needs_no_verdict(self):
-        result = self.run_gh(CitedPost.issue(self))
+        result = self.run_gh(self.word_for_word_issue())
         self.assertEqual(result.returncode, 0, result.stderr)
         [allowed, _] = self.log()
         self.assertEqual((allowed["verdict"], allowed["draft"]), ("allowed", f"{DOC}@v2"))
@@ -1058,9 +1133,6 @@ class KindOfPostOnTheUpstreamToken(KindOfPost):
     goes out on the upstream token, and the fallback-write gate lets it through only because the
     citation passed."""
 
-    route_on_the_upstream_token = CitedPostOnTheUpstreamToken.route_on_the_upstream_token
-    sent_calls = CitedPostOnTheUpstreamToken.sent_calls
-
     def setUp(self):
         super().setUp()
         self.route_on_the_upstream_token()
@@ -1073,7 +1145,7 @@ class KindOfPostOnTheUpstreamToken(KindOfPost):
                     sent.unlink()
                 result = self.post(argv, GH_READ_CACHE=None)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.sent_calls(), [["upstream-route", *argv]])
+                self.assertEqual(self.sent_calls(), [["upstream-route", *as_posted(argv)]])
                 records = self.log()
                 self.assertEqual(records[0]["verdict"], "allowed")
                 self.assertEqual((records[1]["ev"], records[1]["rc"]), ("result", 0))

@@ -67,7 +67,11 @@ behavior before handing the call to the real one. One file is data: `person-name
   only the word-for-word check. For every citation, his answer's text ends before Dispatch's
   `- Reference:` line and the blocks it lists under the answer, which other sessions wrote, and
   an ask whose `dispatch read` holds more than one `Ask id:` line is refused: a question or a
-  reply that holds an answer block cannot stand in for his answer. In an agent session a write
+  reply that holds an answer block cannot stand in for his answer. The shim copies a cited post's
+  body file (`-F`/`--body-file`) once, before the check, into a private file under the read cache
+  root's `bodies/` (directory 0700, file 0600), and the gate checks that copy and gh posts it, so a
+  file changed after the check is not what goes out. The copy goes when the call ends; one left by
+  a pass that ran gh in place goes at the next cited post an hour on. In an agent session a write
   to an owner without the App, which would go out on his upstream token, is refused without such a
   citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation
   is checked on the outermost pass only; the later passes of the same call (the stderr-keeping
