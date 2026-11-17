@@ -407,15 +407,42 @@ def log_decision(profile: str, owner: str, request: dict[str, str], decision: st
         pass  # the log is diagnostics; never fail a mint because of it
 
 
+def mise_environment() -> dict[str, str]:
+    """mise's data dir and configuration as shims/ reads them, whatever HOME the caller set
+    (shims/AGENTS.md, "A moved HOME"): MISE_DATA_DIR, as mise itself reads it, else the first
+    of ~/.mise (.bashrc's) and mise's default ~/.local/share/mise that exists, under HOME and
+    then under the uid's passwd home; and, where neither MISE_GLOBAL_CONFIG_FILE nor mise's
+    global config file under HOME names one, the mise.toml of the checkout this file is in,
+    which installers link mise's global config to. Without them, mise's shims under a moved
+    HOME have no version of anything."""
+    import pwd
+
+    environment: dict[str, str] = {}
+    data = os.environ.get("MISE_DATA_DIR")
+    if not data:
+        candidates: list[Path] = []
+        if os.environ.get("HOME"):
+            home = Path(os.environ["HOME"])
+            candidates += [home / ".mise", Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share") / "mise"]
+        passwd = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        candidates += [passwd / ".mise", passwd / ".local" / "share" / "mise"]
+        data = str(next((c for c in candidates if c.is_dir()), candidates[0]))
+    environment["MISE_DATA_DIR"] = data
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path(os.environ.get("HOME", "/nonexistent")) / ".config")
+    if not os.environ.get("MISE_GLOBAL_CONFIG_FILE") and not os.access(Path(config_home) / "mise" / "config.toml", os.R_OK):
+        environment["MISE_GLOBAL_CONFIG_FILE"] = str(Path(__file__).resolve().parents[1] / "mise.toml")
+    return environment
+
+
 def mise_shims() -> Path:
-    """mise's shims dir.
+    """mise's shims dir (mise_environment).
 
     mise runs [settings.github] credential_command with its own shims dir taken off PATH,
     and outside an interactive shell (where `mise activate` adds the install dirs) that dir
     is the only place `secrets` and `agent-secrets` are found: every mint then failed
     (2026-10-24, INFRA-219).
     """
-    return Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".mise") / "shims"
+    return Path(mise_environment()["MISE_DATA_DIR"]) / "shims"
 
 
 def secrets_executable() -> str:
@@ -426,9 +453,10 @@ def secrets_executable() -> str:
 def secret_run_command() -> tuple[str, dict[str, str]]:
     """secret-run on PATH, else the one in this shim's own checkout, and the environment to run
     it in: the caller's, with mise's shims dir after its PATH, so secret-run finds
-    agent-secrets (the broker) and secrets where the caller's PATH lacks them (mise_shims)."""
+    agent-secrets (the broker) and secrets where the caller's PATH lacks them (mise_shims), and
+    mise's data dir and configuration for those shims (mise_environment)."""
     executable = shutil.which("secret-run") or str(Path(__file__).resolve().parents[1] / "scripts" / "secret-run")
-    environment = dict(os.environ)
+    environment = {**os.environ, **mise_environment()}
     environment["PATH"] = os.pathsep.join(part for part in (environment.get("PATH", ""), str(mise_shims())) if part)
     return executable, environment
 
@@ -442,6 +470,7 @@ def resolve_secret(name: str) -> str:
             capture_output=True,
             text=True,
             check=True,
+            env={**os.environ, **mise_environment()},
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as error:
         detail = (getattr(error, "stderr", None) or "").strip() or str(error)

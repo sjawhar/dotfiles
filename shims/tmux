@@ -399,6 +399,119 @@ handed_back() {
     return 1
 }
 
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+# is_mise_shim FILE: whether FILE is mise's own shim, a file in the shims dir of
+# one of mise's data dirs or a link to mise. It reaches its tool only where mise
+# reads its config and trust list under HOME, which a moved HOME hides.
+is_mise_shim() {
+    local IFS=$' \t\n'
+    local data
+    mise_paths
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        [[ "${1%/*}" -ef "$data/shims" ]] && return 0
+    done
+    [[ -L "$1" && "$(command -p readlink -f -- "$1")" == */mise ]]
+}
+
+# mise_pinned BIN TOOL: sets _pinned to BIN in the install of TOOL at the exact
+# version mise's global configuration pins (a [tools] line), from mise's data
+# dirs, whatever HOME and PATH the caller set (mise_paths). Without one, _pinned
+# is empty and _pinned_searched says what was read, for the caller's refusal.
+mise_pinned() {
+    local bin="$1" tool="$2"
+    local IFS=$' \t\n'
+    local line section="" pin="" key data candidate searched=""
+    local section_re='^[[:space:]]*\[([^]]*)\]'
+    local pin_re='^[[:space:]]*"?([^"=[:space:]]+)"?[[:space:]]*=[[:space:]]*"([0-9][0-9A-Za-z.+-]*)"'
+    _pinned="" _pinned_searched=""
+    mise_paths
+    if [[ -r "$_mise_config" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ $section_re ]]; then
+                section="${BASH_REMATCH[1]}"
+            elif [[ "$section" == tools && "$line" =~ $pin_re && "${BASH_REMATCH[1]}" == "$tool" ]]; then
+                pin="${BASH_REMATCH[2]}"
+                break
+            fi
+        done < "$_mise_config"
+    fi
+    if [[ -z "$pin" ]]; then
+        _pinned_searched="no exact version of $tool pinned in $_mise_config"
+        return 1
+    fi
+    key="${tool//[:\/]/-}"
+    key="${key//@/}"
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        for candidate in "$data/installs/$key/$pin/$bin" "$data/installs/$key/$pin/bin/$bin" "$data/installs/$key/$pin"/*/bin/"$bin"; do
+            if [[ -f "$candidate" && -x "$candidate" ]]; then
+                _pinned="$candidate"
+                return 0
+            fi
+        done
+        searched+="${searched:+, }$data/installs/$key/$pin"
+    done
+    _pinned_searched="$tool $pin, pinned in $_mise_config, is installed in none of $searched (\`mise install\` installs it)"
+    return 1
+}
+
+# mise's own shim gives way to the tmux it would run, the pinned install, where
+# there is one; past PATH, the pinned install (shims/jj's lookup).
 IFS=':' read -ra dirs <<< "$PATH"
 for dir in "${dirs[@]}"; do
     candidate="$dir/tmux"
@@ -407,8 +520,15 @@ for dir in "${dirs[@]}"; do
     IFS= read -r -n 512 -d '' header < "$candidate" || true
     [[ "$header" == *tmux-guard-shim* ]] && continue
     handed_back "$candidate" && continue
+    if is_mise_shim "$candidate" && mise_pinned tmux github:sjawhar/tmux-builds && ! handed_back "$_pinned"; then
+        candidate="$_pinned"
+    fi
     export DOTFILES_TMUX_SHIM="$$ ${_handed:+$_handed:}$candidate"
     exec "$candidate" "$@"
 done
-echo "tmux shim: no real tmux found on PATH${_handed:+; ${_handed//:/, } handed the call back to this shim, as a mise shim does when mise has no tmux version for the directory}" >&2
+if mise_pinned tmux github:sjawhar/tmux-builds && ! handed_back "$_pinned"; then
+    export DOTFILES_TMUX_SHIM="$$ ${_handed:+$_handed:}$_pinned"
+    exec "$_pinned" "$@"
+fi
+echo "tmux shim: no real tmux found on PATH ($PATH), and ${_pinned_searched:-the pinned install handed the call back}${_handed:+; ${_handed//:/, } handed the call back to this shim, as a mise shim does when mise has no tmux version for the directory}" >&2
 exit 127

@@ -16,14 +16,76 @@ while [[ "$dir" != "/" ]]; do
     dir="$(dirname "$dir")"
 done
 
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
 # Fall back to mise. mise exec resolves the bare name on PATH, putting first only the tool dirs it
 # adds itself; an install dir already on PATH without mise's record of adding it counts as the
 # caller's, so shims/basedpyright, ahead of it, would win and mise would exec it again, forever
-# (AGENTS.md, "A shim composes"). mise therefore starts from PATH without its install dirs.
+# (AGENTS.md, "A shim composes"). mise therefore starts from PATH without the install dirs of
+# any of mise's data dirs, given mise's configuration (mise_paths).
+mise_paths
 mise_path=""
 IFS=':' read -ra dirs <<< "$PATH"
 for d in "${dirs[@]}"; do
-    [[ "$d" == "${MISE_DATA_DIR:-$HOME/.mise}"/installs/* ]] || mise_path="${mise_path:+$mise_path:}$d"
+    installed=""
+    for data in "${_mise_datas[@]}"; do
+        [[ "$d" == "$data"/installs/* ]] && installed=1
+    done
+    [[ -n "$installed" ]] || mise_path="${mise_path:+$mise_path:}$d"
 done
-mise_bin="$(command -v mise)" || mise_bin="${DOTFILES_DIR:-$HOME/.dotfiles}/bin/mise"
-MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}" PATH="$mise_path" exec "$mise_bin" exec npm:basedpyright -- basedpyright "$@"
+MISE_DATA_DIR="$_mise_data" MISE_GLOBAL_CONFIG_FILE="$_mise_config" PATH="$mise_path" exec "$_mise_bin" exec npm:basedpyright -- basedpyright "$@"

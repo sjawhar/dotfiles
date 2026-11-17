@@ -5,16 +5,81 @@
 # pinned release ("github:sjawhar/oh-my-pi" in mise.toml), or a local build ahead of ~/.mise/shims.
 set -euo pipefail
 
-DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+# The dotfiles checkout this file is in, through a link to it, not the one under HOME: a caller
+# may give omp a HOME of its own (shims/AGENTS.md, "A moved HOME").
+_omp_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
+DOTFILES_DIR="${DOTFILES_DIR:-${_omp_self%/shims/*}}"
 
 # mise's environment for this directory. A session keeps the PATH it started with, so a PATH can
 # still name the install dir of an older pin; mise puts the current pin's dir in its place. A pin
 # that is not installed leaves no omp install dir, and agent-session refuses.
 # mise lives in ~/.dotfiles/bin, which a unit's or harness's PATH can leave out while it keeps
-# this shim; then the shim runs that mise by its path, with .bashrc's data dir.
-export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.mise}"
-mise_bin="$(command -v mise)" || mise_bin="$DOTFILES_DIR/bin/mise"
-mise_env="$("$mise_bin" env -s bash)"
+# this shim; then the shim runs that mise by its path, with .bashrc's data dir, and, where HOME
+# holds no mise configuration, the checkout's mise.toml as mise's global configuration (mise_paths).
+mise_paths
+export MISE_DATA_DIR="$_mise_data"
+if [[ "$_mise_config" == "${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml" ]]; then
+    mise_env="$("$_mise_bin" env -s bash)"
+else
+    mise_env="$(MISE_GLOBAL_CONFIG_FILE="$_mise_config" "$_mise_bin" env -s bash)"
+fi
 eval "$mise_env"
 
 # glibc gives each allocating thread its own 64 MiB arena and never returns freed chunks; omp's

@@ -32,7 +32,10 @@
 #     exits 127 only when it is missing. A failed install's last lines go to stderr, never stdout.
 set -euo pipefail
 
-DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+# The dotfiles checkout this script is in, not the one under HOME: a caller may give the session a
+# HOME of its own (shims/AGENTS.md, "A moved HOME"), and shims/omp execs this script by its path.
+_agent_session_self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")"
+DOTFILES_DIR="${DOTFILES_DIR:-${_agent_session_self%/scripts/*}}"
 # Absolute once, before any cd. A prefix of $PWD, not a `cd` into it, so a directory that exists
 # but cannot be entered does not end the launch here under set -e.
 [[ "$DOTFILES_DIR" = /* ]] || DOTFILES_DIR="$PWD/$DOTFILES_DIR"

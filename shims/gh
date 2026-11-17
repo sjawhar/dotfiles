@@ -446,7 +446,15 @@ gh_shim_rate_limited() {
     exit "$rc"
 }
 if agent_context; then
-    _dotfiles="${DOTFILES_DIR:-$HOME/.dotfiles}"
+    # The dotfiles checkout this file is in, through a link to it, not the one under HOME: a
+    # caller may give gh a HOME of its own (shims/AGENTS.md, "A moved HOME").
+    _gh_src="${BASH_SOURCE[0]}"
+    [[ ! -L "$_gh_src" ]] || _gh_src="$(command -p readlink -f -- "$_gh_src")"
+    case "$_gh_src" in
+        */shims/*) _dotfiles="${_gh_src%/shims/*}" ;;
+        *) _dotfiles="${_gh_src%/*}/.." ;;
+    esac
+    _dotfiles="${DOTFILES_DIR:-$_dotfiles}"
     _routed=0
     for ((_i = 0; _i < ${GIT_CONFIG_COUNT:-0}; _i++)); do
         _v="GIT_CONFIG_VALUE_$_i"
@@ -775,6 +783,117 @@ if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && "${1:-}" != auth ]] && ! agent_cont
     unset _host_token
 fi
 
+# mise_paths: mise as this machine runs it, whatever HOME and PATH the caller set
+# (shims/AGENTS.md, "A moved HOME"). A Legion test pane runs a shim with a
+# temporary HOME and the PATH <bin>:/usr/local/bin:/usr/bin:/bin, where every
+# path under HOME names nothing. Sets, once per process:
+#   _mise_bin     mise on PATH, else the dotfiles checkout's bin/mise
+#   _mise_config  mise's global configuration: MISE_GLOBAL_CONFIG_FILE, else the
+#                 file under HOME when it is readable, else the checkout's
+#                 mise.toml, which installers link that file to
+#   _mise_datas   the data dirs a tool may be installed in: MISE_DATA_DIR and mise's
+#                 default ~/.local/share/mise under HOME; with no MISE_DATA_DIR,
+#                 ~/.mise (.bashrc's) and that default, under HOME, then the passwd home's
+#   _mise_data    the one to give mise: MISE_DATA_DIR, else the first that exists
+# The checkout is DOTFILES_DIR, else the one this file's own path is in.
+mise_paths() {
+    local IFS=$' \t\n'
+    local self dotfiles home dir data seen=""
+    local -a all=()
+    [[ -z "${_mise_config:-}" ]] || return 0
+    _mise_bin=""
+    IFS=':'
+    for dir in ${PATH:-}; do
+        if [[ -n "$dir" && -f "$dir/mise" && -x "$dir/mise" ]]; then
+            _mise_bin="$dir/mise"
+            break
+        fi
+    done
+    IFS=$' \t\n'
+    _mise_config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/mise/config.toml}"
+    if [[ -z "$_mise_bin" || ( -z "${MISE_GLOBAL_CONFIG_FILE:-}" && ! -r "$_mise_config" ) ]]; then
+        dotfiles="${DOTFILES_DIR:-}"
+        if [[ -z "$dotfiles" ]]; then
+            self="$(command -p readlink -f -- "${BASH_SOURCE[0]}")" || self=""
+            dotfiles="${self%/shims/*}"
+        fi
+        [[ -n "$_mise_bin" ]] || _mise_bin="$dotfiles/bin/mise"
+        [[ -n "${MISE_GLOBAL_CONFIG_FILE:-}" || -r "$_mise_config" ]] || _mise_config="$dotfiles/mise.toml"
+    fi
+    if [[ -n "${MISE_DATA_DIR:-}" ]]; then
+        all=("$MISE_DATA_DIR" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+    else
+        all=("${HOME:-}/.mise" "${XDG_DATA_HOME:-${HOME:-}/.local/share}/mise")
+        # With HOME unset, ~ is the uid's home in the passwd database, which HOME does not move.
+        local HOME
+        unset HOME
+        home=~
+        [[ "$home" != /?* ]] || all+=("$home/.mise" "$home/.local/share/mise")
+    fi
+    _mise_datas=() _mise_data="${MISE_DATA_DIR:-}"
+    for data in "${all[@]}"; do
+        [[ "$data" == /?* && ":$seen:" != *":$data:"* ]] || continue
+        seen+=":$data"
+        _mise_datas+=("$data")
+        [[ -n "$_mise_data" || ! -d "$data" ]] || _mise_data="$data"
+    done
+    : "${_mise_data:=${_mise_datas[0]:-}}"
+}
+
+# is_mise_shim FILE: whether FILE is mise's own shim, a file in the shims dir of
+# one of mise's data dirs or a link to mise. It reaches its tool only where mise
+# reads its config and trust list under HOME, which a moved HOME hides.
+is_mise_shim() {
+    local IFS=$' \t\n'
+    local data
+    mise_paths
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        [[ "${1%/*}" -ef "$data/shims" ]] && return 0
+    done
+    [[ -L "$1" && "$(command -p readlink -f -- "$1")" == */mise ]]
+}
+
+# mise_pinned BIN TOOL: sets _pinned to BIN in the install of TOOL at the exact
+# version mise's global configuration pins (a [tools] line), from mise's data
+# dirs, whatever HOME and PATH the caller set (mise_paths). Without one, _pinned
+# is empty and _pinned_searched says what was read, for the caller's refusal.
+mise_pinned() {
+    local bin="$1" tool="$2"
+    local IFS=$' \t\n'
+    local line section="" pin="" key data candidate searched=""
+    local section_re='^[[:space:]]*\[([^]]*)\]'
+    local pin_re='^[[:space:]]*"?([^"=[:space:]]+)"?[[:space:]]*=[[:space:]]*"([0-9][0-9A-Za-z.+-]*)"'
+    _pinned="" _pinned_searched=""
+    mise_paths
+    if [[ -r "$_mise_config" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ $section_re ]]; then
+                section="${BASH_REMATCH[1]}"
+            elif [[ "$section" == tools && "$line" =~ $pin_re && "${BASH_REMATCH[1]}" == "$tool" ]]; then
+                pin="${BASH_REMATCH[2]}"
+                break
+            fi
+        done < "$_mise_config"
+    fi
+    if [[ -z "$pin" ]]; then
+        _pinned_searched="no exact version of $tool pinned in $_mise_config"
+        return 1
+    fi
+    key="${tool//[:\/]/-}"
+    key="${key//@/}"
+    for data in ${_mise_datas[@]+"${_mise_datas[@]}"}; do
+        for candidate in "$data/installs/$key/$pin/$bin" "$data/installs/$key/$pin/bin/$bin" "$data/installs/$key/$pin"/*/bin/"$bin"; do
+            if [[ -f "$candidate" && -x "$candidate" ]]; then
+                _pinned="$candidate"
+                return 0
+            fi
+        done
+        searched+="${searched:+, }$data/installs/$key/$pin"
+    done
+    _pinned_searched="$tool $pin, pinned in $_mise_config, is installed in none of $searched (\`mise install\` installs it)"
+    return 1
+}
+
 # real_gh: sets _real to the gh this shim hands the call to.
 # Content decides what is "real", never the path: any candidate carrying the
 # knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string
@@ -782,6 +901,13 @@ fi
 # differently from PATH, and knives gh re-entered this shim in an unbounded
 # fork chain (2026-08-27, ~300k processes). Mirrors real_gh() in knives
 # src/commands/gh.rs. A variable, not output, so no subshell is forked.
+# mise's own shim gives way to the gh pinned exactly in mise's global config,
+# straight from its install dir, as shims/knives runs knives: mise's shim is
+# mise itself, which reads its config, then execs that gh, one more process on
+# every call (0.15 s p50, 0.51 s p90 over 20 calls at load ~290 on 2026-11-03),
+# and under load mise hung for minutes (2026-11-03 ~00:3x-01:00Z, shims/knives).
+# With no exact pin, or no install of it, _real stays mise's shim. Past PATH,
+# the pinned install.
 real_gh() {
     local IFS=':'
     local dir candidate header
@@ -796,54 +922,19 @@ real_gh() {
         IFS= read -r -n 512 -d '' header < "$candidate" || true
         [[ "$header" == *knives-gh-shim* ]] && continue
         _real="$candidate"
-        mise_pinned_gh "$dir" || true
+        if is_mise_shim "$candidate" && mise_pinned gh gh; then
+            _real="$_pinned"
+        fi
         return 0
     done
-    return 1
-}
-# mise_pinned_gh DIR: when DIR is mise's shims directory, sets _real to the gh
-# pinned exactly in mise's global config, straight from its install dir, as
-# shims/knives runs knives. mise's shim is mise itself: it reads its config,
-# then execs that gh, one more process on every call (0.15 s p50, 0.51 s p90
-# over 20 calls at load ~290 on 2026-11-03), and under load mise hung for
-# minutes (2026-11-03 ~00:3x-01:00Z, shims/knives). With no exact pin, or no
-# install of it, _real stays mise's shim.
-mise_pinned_gh() {
-    local IFS=$' \t\n'
-    local root data="" config line section="" pin="" candidate
-    local section_re='^[[:space:]]*\[([^]]*)\]' pin_re='^[[:space:]]*"?gh"?[[:space:]]*=[[:space:]]*"([0-9][0-9A-Za-z.+-]*)"'
-    for root in "${MISE_DATA_DIR:-$HOME/.mise}" "${XDG_DATA_HOME:-$HOME/.local/share}/mise"; do
-        if [[ "$1" -ef "$root/shims" ]]; then
-            data="$root"
-            break
-        fi
-    done
-    [[ -n "$data" ]] || return 1
-    config="${MISE_GLOBAL_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}"
-    [[ -r "$config" ]] || return 1
-    while IFS= read -r line; do
-        if [[ "$line" =~ $section_re ]]; then
-            section="${BASH_REMATCH[1]}"
-        elif [[ "$section" == tools && "$line" =~ $pin_re ]]; then
-            pin="${BASH_REMATCH[1]}"
-            break
-        fi
-    done < "$config"
-    [[ -n "$pin" ]] || return 1
-    for candidate in "$data/installs/gh/$pin/bin/gh" "$data/installs/gh/$pin"/*/bin/gh; do
-        if [[ -f "$candidate" && -x "$candidate" ]]; then
-            _real="$candidate"
-            return 0
-        fi
-    done
-    return 1
+    mise_pinned gh gh && _real="$_pinned"
 }
 
 # Resolve the real gh FIRST and refuse to proceed without it (a bare `gh`
 # fallback would re-enter this shim and recurse), and honor the bypass before
 # involving knives at all.
 if ! real_gh; then
-    echo "gh shim: no real gh found on PATH" >&2
+    echo "gh shim: no real gh found on PATH ($PATH), and $_pinned_searched" >&2
     exit 127
 fi
 if [[ -z "${KNIVES_GH_BYPASS:-}" ]] && command -v knives > /dev/null 2>&1; then

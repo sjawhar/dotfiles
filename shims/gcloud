@@ -1014,16 +1014,26 @@ find_real_gcloud() {
     done < <(type -ap gcloud)
     # Minimal-PATH spawners (MCP servers, cron, etc.) carry neither the
     # dotfiles shims nor the SDK's own bin dir; fall back to the documented
-    # install location, under the home gcloud itself would use, before failing.
-    candidate=""
+    # install location, under the home gcloud itself would use, then under the
+    # uid's passwd home, which a moved HOME (a test's temporary one) does not
+    # move (shims/AGENTS.md, "A moved HOME"), before failing.
+    local home
+    local -a homes=() tried=()
     if resolve_user_home; then
-        candidate="${GCLOUD_USER_HOME}/.gcloud/google-cloud-sdk/bin/gcloud"
+        homes+=("$GCLOUD_USER_HOME")
     fi
-    if [[ -n "$candidate" && -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
-        printf '%s\n' "$candidate"
-        return 0
-    fi
-    echo "gcloud shim: real gcloud binary not found on PATH or at the default SDK install location" >&2
+    # With HOME unset, ~ is the uid's home in the passwd database.
+    homes+=("$(unset HOME; printf '%s' ~)")
+    for home in "${homes[@]}"; do
+        [[ "$home" == /?* ]] || continue
+        candidate="$home/.gcloud/google-cloud-sdk/bin/gcloud"
+        tried+=("$candidate")
+        if [[ -x "$candidate" && "$(readlink -f "$candidate")" != "$self" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    echo "gcloud shim: real gcloud binary not found on PATH ($PATH) or at the default SDK install location (${tried[*]-})" >&2
     return 127
 }
 
