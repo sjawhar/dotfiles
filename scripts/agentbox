@@ -2098,11 +2098,26 @@ ensure_forwarders() {
     if "$DOTFILES_DIR/scripts/on-google-vm" 2>/dev/null; then
         # Google's metadata server refuses a Host header naming the relay, so a byte relay will
         # not do: scripts/agentbox-gce-metadata-relay rewrites it.
-        local relay="$DOTFILES_DIR/scripts/agentbox-gce-metadata-relay"
-        if systemctl --user is-active --quiet agentbox-imds \
-            && ! systemctl --user show -p ExecStart --value agentbox-imds 2>/dev/null | grep -qF "$relay"; then
-            systemctl --user stop agentbox-imds 2>/dev/null || true
+        #
+        # This one unit serves every box on the machine, so it runs the installed dotfiles' relay
+        # ($HOME/.dotfiles), never the relay of the checkout a launch runs from. A launch from a
+        # scratch clone used to stop it and start it from that clone; the clone was then deleted,
+        # and every box's relay ran a deleted script from 19:20Z on 2026-11-16 to 00:57:43Z
+        # (Proof1720, INFRA-1720). A relay running from anywhere else goes back onto the installed
+        # one. A machine with no installed relay keeps a running relay as it is, and starts this
+        # checkout's only when none runs.
+        local own="$DOTFILES_DIR/scripts/agentbox-gce-metadata-relay"
+        local relay="$HOME/.dotfiles/scripts/agentbox-gce-metadata-relay"
+        if [[ -f "$relay" ]]; then
+            if systemctl --user is-active --quiet agentbox-imds \
+                && ! systemctl --user show -p ExecStart --value agentbox-imds 2>/dev/null | grep -qF "$relay"; then
+                systemctl --user stop agentbox-imds 2>/dev/null || true
+            fi
+        else
+            relay="$own"
         fi
+        [[ "$(readlink -f "$relay")" == "$(readlink -f "$own")" ]] \
+            || echo "agentbox: agentbox-imds, the metadata relay every box shares, runs $relay, not this checkout's" >&2
         start_unit agentbox-imds python3 "$relay" "$NETWORK_GATEWAY" "$IMDS_PORT" "$NETWORK_SUBNET" || true
         wait_for bash -c "ss -ltn 'sport = :$IMDS_PORT' | grep -q '$NETWORK_GATEWAY:$IMDS_PORT'" \
             || die "forwarder agentbox-imds did not bind $NETWORK_GATEWAY:$IMDS_PORT (journalctl --user -u agentbox-imds)"
