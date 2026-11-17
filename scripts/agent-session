@@ -17,8 +17,6 @@
 #     none, and the libraries take the VM's account from the metadata server;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
-#   - points omp's session-store fallback ledger at the durable disk, which the host and every
-#     agent box share, so one file holds the whole machine's fallbacks (below);
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
 #   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
