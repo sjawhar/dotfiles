@@ -200,8 +200,8 @@ def test_an_issue_under_no_stream_falls_back_to_the_project_s_lead(tmp_path):
     assert "you lead BET's stream BET-59 and nothing nearer the issue can take this" in sent[0]["message"]
 
 
-def test_a_parked_legion_row_goes_to_its_controller_and_to_no_other_lead(tmp_path):
-    """A Legion architect's claim outlives its process, so Envoy not listing it means parked, not gone. Its tree is
+def test_a_legion_row_whose_architect_is_not_running_goes_to_its_controller_and_to_no_other_lead(tmp_path):
+    """A Legion architect's claim outlives its process, so Envoy not listing it means not running, not gone. Its tree is
     woken by that project's Legion controller, which also triages the board; another stream's lead cannot take it."""
     sent = Sent()
     controller = "01a1ctrl-0000-0000-0000-000000000000"

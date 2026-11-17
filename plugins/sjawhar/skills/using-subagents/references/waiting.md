@@ -1,4 +1,4 @@
-# Silent lanes, waits and parks
+# Silent lanes and waits
 
 Answer on the channel a message arrived on: `hub send` reaches only agents listed in your session's roster, addressed by roster name, so addressing a peer by its session id returns `Unknown agent`, and a parent cannot delegate the relay — it sends over Envoy itself, with the full ids. A full id is required: a prefix is refused as "no live session".
 
@@ -19,9 +19,9 @@ Answer on the channel a message arrived on: `hub send` reaches only agents liste
 - Never wait in the foreground: a bash `sleep` holds the turn, so Envoy messages cannot reach the session until it returns. Yield when idle and put a timed re-check in a supervised background process.
 - An agent revived with `hub send` is no longer a job, so `hub wait` returns on its own window rather than the agent's. Read the tail of its transcript instead (`history://<id>:-3`) and keep `wait` for jobs.
 
-## Parks
+## Stopping work until an event
 
-Before you stop work to wait on an event (park), write down which Envoy topic or timed re-check will resume you. A hold names the artifact it waits on, because a hold condition you cannot name the artifact for is not one. Subscribe when the PR or issue is opened, not when you park:
+Before you stop work to wait on an event, write down which Envoy topic or timed re-check will resume you. A hold names the artifact it waits on, because a hold condition you cannot name the artifact for is not one. Subscribe when the PR or issue is opened, not when you stop work:
 
 - a PR: `notifications.github.<owner>.<repo>.pr.<N>.>` — with the `.>`, because the base alone gets only opened/synchronize/closed;
 - a workflow run with no PR: `notifications.github.<owner>.<repo>.workflow.<file>.>`;

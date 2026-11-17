@@ -16,8 +16,8 @@ What it does with each WAITING-ON-US row:
    own stream scoreboard names (with standing leads gone, that is the project's Legion controller wherever a
    scoreboard names one). A candidate that is
    not alive is passed over. A row of a Legion tree, or one a Legion architect opened, takes only that project's
-   Legion controller at the last step: an architect's claim outlives its process, so the tree is parked rather than
-   gone, and the controller is the session that wakes it. When nothing resolves, the row prints as
+   Legion controller at the last step: an architect's claim outlives its process, so a tree whose architect is not
+   running is not gone, and the controller is the session that wakes it. When nothing resolves, the row prints as
    `DISPATCH-NO-EXECUTOR` with what was checked about each candidate it passed over. That row is for the chief to
    place by hand; it is never dropped and nothing is invented to send it to. The claim holder is read whatever the
    lead roster says, as long as it acted on the issue after Sami wrote: it has already taken the issue, so the
@@ -61,7 +61,7 @@ STATE_DIR = Path(os.environ.get("DASHBOARD_STATE_DIR", Path.home() / ".local" / 
 # The pause screen omp draws over a paused session's pane.
 PAUSE_SCREEN = re.compile(r"P\s?A\s?U\s?S\s?E\s?D")
 # The titles the two Legion sessions carry: "Legion architect · INFRA-156" and "Legion controller · INFRA". An
-# architect's claim outlives its process, so an architect Envoy does not list is parked, not gone; the controller
+# architect's claim outlives its process, so an architect Envoy does not list is not running, not gone; the controller
 # of its project is the session that can wake its tree, and the one that triages that project's board.
 LEGION_ARCHITECT = "Legion architect"
 LEGION_CONTROLLER = "Legion controller"
@@ -383,8 +383,9 @@ class Driver:
     @staticmethod
     def legion(w: Wait, data: dict, passed: list[tuple[str, str, str]]) -> bool:
         """Whether the row belongs to a Legion tree: its issue or an ancestor carries the `legion` label, or a
-        Legion architect opened it. Such a tree is parked, not gone — a Legion claim outlives its process by design
-        — and its controller is the one session that can wake it (it also triages that project's board)."""
+        Legion architect opened it. When such a tree's architect is not running, the tree is not gone — a Legion claim
+        outlives its process by design — and its controller is the one session that can wake it (it also triages that
+        project's board)."""
         if any(label.startswith(LEGION_ARCHITECT) for _, label, _ in passed):
             return True
         seen: set[str] = set()

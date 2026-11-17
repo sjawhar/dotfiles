@@ -450,7 +450,8 @@ def test_a_proof_part_waiting_in_triage_for_release_is_neither_unowned_nor_runni
 
 def test_no_status_write_is_proposed_inside_a_legion_tree():
     # Verified Linux owner line, 2026-10-27 00:17Z: agent comments on a triage child under a `legion` root are its
-    # architect explaining why it is NOT released; a status write there parks it and stops its workers, and only a
+    # architect explaining why it is NOT released. Legion's "Using Legion" page: the daemon sets back a status that an
+    # agent session writes on a running issue of the tree, a move to backlog or icebox stops its workers, and only a
     # person, the Legion controller or the daemon may write it. The same issue outside a Legion tree is still reported.
     url = "https://github.com/o/r/pull/2"
     api = FakeDispatch([
@@ -484,7 +485,7 @@ def test_a_child_under_a_live_legion_architect_is_run_by_its_tree():
         "BET-31 [triage] title of BET-31 (no claim)"]
 
 
-def test_a_parked_legion_claim_is_not_unowned_and_prints_one_line():
+def test_a_legion_claim_that_is_not_running_is_not_unowned_and_prints_one_line():
     # INFRA Legion controller, 2026-10-27 07:29Z: a Legion claim is the tree's identity, held for the tree's whole life
     # and released only when the tree finishes, so Dispatch shows it "not running" whenever the session is suspended,
     # waiting for a slot or its pod is gone. On 2026-10-27 that printed 181 of 504 LINUX lines as unowned — every one
@@ -496,19 +497,20 @@ def test_a_parked_legion_claim_is_not_unowned_and_prints_one_line():
         issue("BET-43", labels=["legion"]),
     ])
     lines = check(api, dc.Scope("BET"))
-    # The dead non-Legion claim and the unclaimed legion issue still need an owner; the two parked trees do not.
+    # The dead non-Legion claim and the unclaimed legion issue still need an owner; the two trees whose claims are
+    # not running do not.
     assert found(lines, "UNOWNED") == [
         f"BET-42 [in_progress] title of BET-42 (claim by CHIEF: chief of staff since {ago(48)[:16]}Z: not running)",
         "BET-43 [in_progress] title of BET-43 (no claim)"]
-    parked = found(lines, "LEGION-PARKED")
-    assert len(parked) == 1
-    assert parked[0].startswith("2 legion-labelled issues are held by a Legion claim whose session is not running")
-    assert "legion/v1/state" in parked[0]
+    not_running = found(lines, "LEGION-CLAIM-NOT-RUNNING")
+    assert len(not_running) == 1
+    assert not_running[0].startswith("2 legion-labelled issues are held by a Legion claim whose session is not running")
+    assert "legion/v1/state" in not_running[0]
     # The summary counts LINES, as it does for every kind: one line here, naming two issues.
-    assert "1 LEGION-PARKED" in lines[-1]
+    assert "1 LEGION-CLAIM-NOT-RUNNING" in lines[-1]
 
 
-def test_a_child_of_a_suspended_legion_architect_is_parked_not_unowned():
+def test_a_child_of_a_suspended_legion_architect_counts_under_its_claim_not_unowned():
     # INFRA Legion controller, 2026-10-31 21:24Z: during a restart of the Legion pods, INFRA-514's architect claim was
     # suspended and five of its children (no claim of their own) read as unowned, though their implementers worked.
     api = FakeDispatch([
@@ -520,7 +522,7 @@ def test_a_child_of_a_suspended_legion_architect_is_parked_not_unowned():
     lines = check(api, dc.Scope("BET"))
     # The child of the suspended architect is Legion's; an unclaimed legion issue with no architect above it is not.
     assert found(lines, "UNOWNED") == ["BET-63 [in_progress] title of BET-63 (no claim)"]
-    assert found(lines, "LEGION-PARKED")[0].startswith("3 legion-labelled issues")
+    assert found(lines, "LEGION-CLAIM-NOT-RUNNING")[0].startswith("3 legion-labelled issues")
 
 
 def test_an_admitted_legion_issue_waiting_in_the_daemon_queue_is_not_unowned():

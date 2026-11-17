@@ -47,7 +47,7 @@ SCAN_STACK = """[<0>] __schedule+0x2d0/0x660
 [<0>] process_one_work+0x17c/0x350
 [<0>] worker_thread+0xaa/0x350"""
 
-# An umount parked in the global wait: the waiting half, the one 7.0.0-1017 does not fix.
+# An umount blocked in the global wait: the waiting half, the one 7.0.0-1017 does not fix.
 WAIT_STACK = """[<0>] __schedule+0x2d0/0x660
 [<0>] schedule+0x27/0xb0
 [<0>] schedule_timeout+0x9e/0x170
