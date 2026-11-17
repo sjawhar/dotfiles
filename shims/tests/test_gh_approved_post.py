@@ -300,8 +300,12 @@ class CitedPost(unittest.TestCase):
 
     # --- a pull request (dispatch://INFRA-3904) ---------------------------
 
-    def test_a_pull_request_from_his_fork_cites_the_same_way(self):
-        for head in ("sjawhar:fix/trailing-arrays", "SJawhar:fix-trailing-arrays"):
+    # His forks moved from his own login to the cybermonklabs organization: on 2026-11-17
+    # `gh api repos/sjawhar/oh-my-pi` answered cybermonklabs/oh-my-pi, and the branch to post was
+    # cybermonklabs/oh-my-pi:upstream/fix-hindsight-recall-cooldown, which the gate refused.
+    def test_a_pull_request_from_his_forks_cites_the_same_way(self):
+        for head in ("sjawhar:fix/trailing-arrays", "SJawhar:fix-trailing-arrays",
+                     "cybermonklabs:upstream/fix-hindsight-recall-cooldown", "CybermonkLabs:fix-trailing-arrays"):
             with self.subTest(head=head):
                 argv = self.pull(head=head)
                 result = self.run_gh(argv)
@@ -384,18 +388,31 @@ class CitedPost(unittest.TestCase):
                             call="pr create -R o/upstream")
 
     def test_a_head_that_is_not_his_own_fork_is_refused(self):
+        not_his = "is not a branch of one of sjawhar's own forks"
         for head, why in (
-            ("someone:fix/trailing-arrays", "the head someone:fix/trailing-arrays is not a branch of sjawhar's own fork"),
-            ("o:fix/trailing-arrays", "the head o:fix/trailing-arrays is not a branch of sjawhar's own fork"),
-            ("sjawhar-bot:fix", "the head sjawhar-bot:fix is not a branch of sjawhar's own fork"),
+            ("someone:fix/trailing-arrays", f"the head someone:fix/trailing-arrays {not_his}"),
+            ("o:fix/trailing-arrays", f"the head o:fix/trailing-arrays {not_his}"),
+            ("sjawhar-bot:fix", f"the head sjawhar-bot:fix {not_his}"),
+            # A third owner: the upstream of the fork, and names that only start like the org's.
+            ("can1357:upstream/fix-hindsight-recall-cooldown",
+             f"the head can1357:upstream/fix-hindsight-recall-cooldown {not_his}"),
+            ("cybermonklabs-bot:fix", f"the head cybermonklabs-bot:fix {not_his}"),
+            ("cybermonk:fix", f"the head cybermonk:fix {not_his}"),
             ("fix/trailing-arrays", "names its head as --head <owner>:<branch>"),
             ("sjawhar:", "names its head as --head <owner>:<branch>"),
+            ("cybermonklabs:", "names its head as --head <owner>:<branch>"),
             ("sjawhar:fix with space", "names its head as --head <owner>:<branch>"),
             ("sjawhar:fix/trailing-arrays\n", "names its head as --head <owner>:<branch>"),
+            ("cybermonklabs:fix/trailing-arrays\n", "names its head as --head <owner>:<branch>"),
         ):
             with self.subTest(head=head):
                 (self.cache / "log" / "approved-posts.jsonl").unlink(missing_ok=True)
                 self.assert_refused(self.run_gh(self.pull(head=head)), why, call="pr create -R o/upstream")
+
+    def test_a_refused_head_names_every_owner_it_may_have(self):
+        self.assert_refused(self.run_gh(self.pull(head="someone:fix")),
+                            "as --head <owner>:<branch> with the owner sjawhar or cybermonklabs",
+                            call="pr create -R o/upstream")
 
     def test_a_pull_request_without_a_head_is_refused(self):
         argv = ["pr", "create", "-R", "o/upstream", "--title", TITLE, "--body-file", str(self.body_file)]
@@ -476,6 +493,10 @@ class CitedPostOnTheUpstreamToken(CitedPost):
 
     def test_an_approved_pull_request_reaches_gh_on_the_upstream_token(self):
         self.assert_sent(self.run_gh(self.pull()), self.pull())
+
+    def test_an_approved_pull_request_from_the_cybermonklabs_fork_reaches_gh_on_the_upstream_token(self):
+        argv = self.pull(head="cybermonklabs:upstream/fix-hindsight-recall-cooldown")
+        self.assert_sent(self.run_gh(argv), argv)
 
     def test_with_the_read_cache_on_it_reaches_gh_through_the_cache(self):
         # The cache is on in every session; its re-entry is one more pass of the same call.

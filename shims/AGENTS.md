@@ -39,8 +39,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   line's trailing whitespace or the leading and trailing blank lines), and no flag but `-R`/`--repo`,
   `-t`/`--title` and one of `-b`/`--body` or `-F`/`--body-file` (gh posts the file over `--body`
   whatever their order, so both are refused) and, for a pull request, `--head` and `-B`/`--base`,
-  with the head `sjawhar:<branch>`, a branch of his own fork (push it first: owner sjawhar routes
-  to the App). A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
+  with the head `<owner>:<branch>`, a branch of one of his own forks, whose owners are a fixed list
+  beside `APPROVER_LOGIN` in the script (`APPROVER_FORK_OWNERS`): `sjawhar`, and `cybermonklabs`,
+  where his forks moved (on 2026-11-17 `gh api repos/sjawhar/oh-my-pi` answered
+  `cybermonklabs/oh-my-pi`, and the gate refused the head to post,
+  `cybermonklabs:upstream/fix-hindsight-recall-cooldown`). Push the branch first: both owners
+  route to the App. A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
   (`has_head_flag`, `src/commands/gh.rs`), and in a jj checkout it adds `--head <bookmark>`,
   which gh takes over `-H`. In an agent session a write
   to an owner without the App, which would go out on his upstream token, is refused without such a
