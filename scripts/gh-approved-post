@@ -22,9 +22,19 @@ not go out. The call passes only when all of these hold:
   - the draft, in the version of the ask's document that first shows the answer (else in the
     ask's own question), names the repository, and holds the posted body, exactly, between two
     `---` lines; for an issue or a pull request, a `Title: <title>` line before them gives the
-    title.
+    title;
+  - or, for an ask KIND_APPROVALS lists by its id, whose answer approves a KIND of post with no
+    fixed text (dispatch://INFRA-3412): his answer still says the words the entry reads, the ask
+    or its answer names the entry's repository, the call is one of the entry's verbs on that
+    repository, and GH_SHIM_VERDICT names the fresh reviewer's verdict on record, a Dispatch
+    comment whose first line is `VERDICT: APPROVE at sha256:<SHA-256 of the body as posted>`, with
+    a `Title: <title>` line for an issue or a pull request, written by a session that is none of
+    this call's (SESSION_VARS). A subagent of the posting session writes to Dispatch as that
+    session, so its verdict is refused: the reviewer is another session, such as a Legion
+    reviewer. An ask that is not listed approves only the text it showed him.
 Every check, passed or refused, appends one JSON line to FILE: who (session, pid, cwd), which ask,
-which repository, the title and the body.
+which repository, the title and the body, and for a kind of post what the answer approves and the
+verdict that passed.
 """
 
 import hashlib
@@ -72,10 +82,40 @@ HEAD_RE = re.compile(rf"^([A-Za-z0-9-]+):({BRANCH})\Z")
 BASE_RE = re.compile(rf"^{BRANCH}\Z")
 POST_FLAGS = ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file")
 PR_FLAGS = ("--head", "-B", "--base")
+# Asks whose answer approves a KIND of post, with no fixed text (dispatch://INFRA-3412), by ask id:
+# the repository and the verbs the answer is read as approving, and the answer's own words that say
+# so. A program cannot read "the Rock repo" as a repository, so the reading is made here, in a
+# reviewed change to this file, as APPROVER_FORK_OWNERS is; the check then finds each of `words` in
+# his answer and the repository in the ask or the answer, so no entry stands on words he did not
+# write. Each post under an entry also needs a fresh reviewer's verdict (check_verdict).
+KIND_APPROVALS = {
+    # dispatch://BET-422/ask/48d87cd6-f3d0-44d5-9a79-30c8b38f28d0, answered 2026-11-12T19:33:21Z on an
+    # ask about rocq-prover/rocq#22456: "The answer is the same every single time for rock. Just open
+    # an issue and a PR. And you have to follow the three-step process for anything going to the Rock
+    # repo." His three steps end in a fresh reviewer's cut (skill outside-message): the verdict.
+    "48d87cd6-f3d0-44d5-9a79-30c8b38f28d0": {
+        "repo": "rocq-prover/rocq",
+        "verbs": ("issue create", "pr create"),
+        "words": ("Just open an issue and a PR.", "anything going to the Rock repo"),
+    },
+}
+VERDICT_REF_RE = re.compile(
+    r"^dispatch://[A-Z][A-Z0-9]*-\d+/comment/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\Z")
+VERDICT_LINE_RE = re.compile(r"^VERDICT: (\S+) at sha256:([0-9a-f]{64})\Z")
+# The ids a session runs under; a verdict written by any of them is the poster's own.
+SESSION_VARS = ("OMP_SESSION_ID", "DISPATCH_SESSION_ID", "PI_SESSION_ID", "ENVOY_SESSION_ID")
 
 
 class Refused(Exception):
     pass
+
+
+class KindRefused(Refused):
+    """A refusal of a citation of an ask KIND_APPROVALS lists; `approves` says what it approves."""
+
+    def __init__(self, why: str, approves: str):
+        super().__init__(why)
+        self.approves = approves
 
 
 def parse_call(argv: list[str]) -> dict:
@@ -113,6 +153,7 @@ def parse_call(argv: list[str]) -> dict:
                 call["title"] = value
             elif name in ("-b", "--body"):
                 call["body"] = value
+                call["sha256"] = hashlib.sha256(value.encode()).hexdigest()
                 bodies.add("--body")
             elif name == "--head":
                 call["head"] = value
@@ -123,10 +164,13 @@ def parse_call(argv: list[str]) -> dict:
                 if value == "-":
                     raise Refused("the body comes from stdin; pass it in a file (--body-file <file>).")
                 try:
-                    with open(value, encoding="utf-8") as f:
-                        call["body"] = f.read()
+                    with open(value, "rb") as f:
+                        raw = f.read()
                 except OSError as e:
                     raise Refused(f"cannot read the body file {value}: {e.strerror}.") from None
+                # The SHA-256 of the bytes gh posts; the body as a text file reads it, newlines and all.
+                call["sha256"] = hashlib.sha256(raw).hexdigest()
+                call["body"] = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         elif arg.startswith("-"):
             raise Refused(
                 f"`{arg}` is not checked against the approved draft; a cited post takes only "
@@ -203,8 +247,11 @@ def parse_ask(text: str) -> dict:
             # Dispatch prints each option's own block reference after it: `(dispatch://…#b-<id>)`.
             label = re.sub(r" \(dispatch://\S+#b-[^()\s]+\)$", "", line[2:])
             options.append(label.split(" — ", 1)[0].strip())
-    ask = {"question": question, "options": options, "state": state, "by": "", "selected": "", "text": ""}
+    ask = {"question": question, "options": options, "state": state, "by": "", "selected": "", "text": "",
+           "id": ""}
     after = re.split(r"\n(?:Replies:\n|Node: ask )", text[m.end() - 1:], maxsplit=1)[0]
+    asked = re.match(r"\nAsk id: ([0-9a-f-]+)\n", after)
+    ask["id"] = asked.group(1) if asked else ""
     answer = re.match(r"\nAsk id: [^\n]*\nAnswer:\n- By: ([^\n]*)\n- Selected: ([^\n]*)(?:\n- Text: (.*))?", after, re.S)
     if answer:
         ask["by"] = answer.group(1).strip()
@@ -251,6 +298,79 @@ def norm(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n")).strip("\n")
 
 
+def repo_named(repo: str) -> re.Pattern:
+    """A repository named whole: `o/up` is not named by `o/upstream`, nor `o/a` by `o/a.b`."""
+    return re.compile(rf"(?<![\w.-]){re.escape(repo)}(?![\w-]|\.\w)", re.I)
+
+
+def check_kind(ask: dict, kind: dict, call: dict) -> dict:
+    """A citation of an ask whose answer approves a kind of post: the answer's words, the
+    repository, the kind, and the fresh reviewer's verdict."""
+    approves = f"{' and '.join(f'`gh {verb}`' for verb in kind['verbs'])} on {kind['repo']}"
+
+    def refuse(why: str):
+        raise KindRefused(why, approves)
+
+    for words in kind["words"]:
+        if words not in ask["text"]:
+            refuse(f"his answer does not say {words!r}, which KIND_APPROVALS reads as approving {approves}.")
+    if not repo_named(kind["repo"]).search(ask["question"] + "\n" + ask["text"]):
+        refuse(f"neither the ask nor its answer names {kind['repo']}, which KIND_APPROVALS reads it as approving.")
+    if call["repo"].lower() != kind["repo"].lower() or call["verb"] not in kind["verbs"]:
+        refuse(f"his answer approves {approves}, and no other post; this call is `gh {call['verb']}` on "
+               f"{call['repo']}.")
+    review, reviewer = check_verdict(call, refuse)
+    return {"approves": approves, "review": review, "reviewer": reviewer}
+
+
+def check_verdict(call: dict, refuse) -> tuple[str, str]:
+    """The fresh reviewer's verdict on record: the Dispatch comment GH_SHIM_VERDICT names, written
+    by a session that is not this call's, approving this body and title."""
+    ref = os.environ.get("GH_SHIM_VERDICT", "")
+    titled = call["verb"] in CREATES
+    if not ref:
+        refuse("a post of a kind he approved needs a fresh reviewer's verdict on record, from a session "
+               "that did not write the text: a Dispatch comment whose first line is `VERDICT: APPROVE at "
+               f"sha256:<SHA-256 of the body as posted>`{', with a `Title: <title>` line,' if titled else ''} "
+               f"named as GH_SHIM_VERDICT=dispatch://<KEY>/comment/<id>. This body's SHA-256 is {call['sha256']}.")
+    want = VERDICT_REF_RE.match(ref)
+    if not want:
+        refuse(f"GH_SHIM_VERDICT={ref!r} is not a Dispatch comment reference (dispatch://KEY/comment/<id>).")
+    # The header line comes before the body, so no text in the body can stand in for it.
+    read = re.match(r"Comment:\n(\S+) · ([^\n]*)\nBody: (.*?)\nReply chain:\n", dispatch("read", "--ref", ref), re.S)
+    if not read or read.group(1) != want.group(1):
+        refuse(f"Dispatch's answer for {ref} is not that comment.")
+    author, body = read.group(2).strip(), read.group(3)
+    session = re.fullmatch(r"session (\S+)", author)
+    if not session:
+        refuse(f"the verdict {ref} was written by {author}, not by a session; the verdict is a reviewer session's.")
+    reviewer = session.group(1)
+    ours = {os.environ.get(name, "") for name in SESSION_VARS} - {""}
+    if not ours:
+        refuse(f"this call runs under no session id ({', '.join(SESSION_VARS)}), so the verdict cannot be "
+               "told to come from another session.")
+    if reviewer in ours:
+        refuse(f"the verdict {ref} was written by session {reviewer}, which is the session making this post. "
+               "A reviewer session that did not write the text records it; a subagent of this session "
+               "writes to Dispatch as this session, so it cannot.")
+    lines = body.split("\n")
+    line = VERDICT_LINE_RE.match(next((text.strip() for text in lines if text.strip()), ""))
+    if not line:
+        refuse(f"the verdict {ref} does not begin with a `VERDICT: APPROVE at sha256:<64 hex>` line.")
+    if line.group(1).upper() != "APPROVE":
+        refuse(f"the verdict {ref} is {line.group(1)}, not APPROVE.")
+    if line.group(2) != call["sha256"]:
+        refuse(f"the verdict {ref} approves the text with SHA-256 {line.group(2)}, and this body's is "
+               f"{call['sha256']}: a text that changed after the review goes back to a reviewer.")
+    if titled:
+        titles = [text[len("Title: "):].strip() for text in lines if text.startswith("Title: ")]
+        if not titles:
+            refuse(f"the verdict {ref} has no `Title: <title>` line, so the title it approves cannot be told.")
+        if titles[0] != call["title"].strip():
+            refuse(f"the verdict {ref} names the title {titles[0]!r}, not {call['title']!r}.")
+    return ref, reviewer
+
+
 def check(ref: str, call: dict) -> dict:
     if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}\Z", ref):
         raise Refused(f"GH_SHIM_APPROVAL={ref!r} is not a Dispatch ask reference (dispatch://KEY/ask/<id>).")
@@ -264,6 +384,10 @@ def check(ref: str, call: dict) -> dict:
         raise Refused(f"the answer selects {ask['selected']!r}, which is not exactly one of the ask's options.")
     if not approves(ask["selected"]):
         raise Refused(f"the selected option {ask['selected']!r} does not approve a post.")
+    kind = KIND_APPROVALS.get(ask["id"])
+    if kind:
+        record.update(check_kind(ask, kind, call))
+        return record
     source, where = ask["question"], ref
     if ask["document"]:
         versions = re.search(r"^Versions: (\d+)$", dispatch("read", "--ref", ask["document"]), re.M)
@@ -285,8 +409,7 @@ def check(ref: str, call: dict) -> dict:
         else:
             raise Refused(f"no version of {ask['document']} shows the ask answered.")
     record["draft"] = where
-    named = re.compile(rf"(?<![\w.-]){re.escape(call['repo'])}(?![\w-]|\.\w)", re.I)
-    if not named.search(source + "\n" + ask["question"]):
+    if not repo_named(call["repo"]).search(source + "\n" + ask["question"]):
         raise Refused(f"neither the ask nor its draft ({where}) names {call['repo']}.")
     body = norm(call["body"])
     sections = drafts(source)
@@ -317,7 +440,7 @@ def main() -> int:
     try:
         call = parse_call(argv)
         record.update(repo=call["repo"], verb=call["verb"], target=call["target"], title=call["title"],
-                      body=call["body"], body_sha256=hashlib.sha256(call["body"].encode()).hexdigest())
+                      body=call["body"], body_sha256=call["sha256"])
         if call["verb"] == "pr create":
             record.update(head=call["head"], base=call["base"] or "")
         record.update(check(ref, call))
@@ -327,13 +450,26 @@ def main() -> int:
         record["verdict"] = "refused"
         record["why"] = str(e)
         quoted = shlex.join(argv)
+        if isinstance(e, KindRefused):
+            instead = (
+                f"{ref} approves a kind of post with no fixed text ({e.approves}), each one after a fresh "
+                f"reviewer's verdict: a Dispatch comment by a session that did not write the text (not a "
+                f"subagent of this session, which writes as this session), whose first line is `VERDICT: "
+                f"APPROVE at sha256:<SHA-256 of the body as posted>`, with a `Title: <title>` line for an "
+                f"issue or a pull request, named in GH_SHIM_VERDICT (shims/AGENTS.md). A text that "
+                f"changes goes back to a reviewer, not to him in a new ask"
+            )
+        else:
+            instead = (
+                f"A post as Sami cites a Dispatch ask he answered with its approving option, whose "
+                f"document (or question) holds the exact text between two `---` lines, with a "
+                f"`Title: <title>` line before them for an issue or a pull request, and a pull request "
+                f"opens from one of {APPROVER_LOGIN}'s own forks (shims/AGENTS.md). If the text must "
+                f"change, show him the new text in a new ask"
+            )
         print(
             f"gh shim: REFUSED: `gh {quoted}` cites {ref}, and the citation does not hold: {e}\n"
-            f"  Instead: fix what is named above. A post as Sami cites a Dispatch ask he answered with "
-            f"its approving option, whose document (or question) holds the exact text between two `---` "
-            f"lines, with a `Title: <title>` line before them for an issue or a pull request, and a "
-            f"pull request opens from one of {APPROVER_LOGIN}'s own forks (shims/AGENTS.md). If the text "
-            f"must change, show him the new text in a new ask; do not look for another credential.",
+            f"  Instead: fix what is named above. {instead}; do not look for another credential.",
             file=sys.stderr,
         )
         code = 1
@@ -347,9 +483,14 @@ def main() -> int:
             print(f"gh shim: cannot log the cited post to {log}: {e}", file=sys.stderr)
             return 1
     if code == 0:
+        if "approves" in record:
+            held = (f"his answer approves {record['approves']}, and the text has a reviewer's verdict "
+                    f"{record['review']} (session {record['reviewer']})")
+        else:
+            held = f"the text matches {record['draft']}"
         print(
-            f"gh shim: cited post: {ref} answered by {APPROVER} ({record['selected']!r}); "
-            f"the text matches {record['draft']}. Logged to {log or 'nowhere'}.",
+            f"gh shim: cited post: {ref} answered by {APPROVER} ({record['selected']!r}); {held}. "
+            f"Logged to {log or 'nowhere'}.",
             file=sys.stderr,
         )
         if record.get("answer_text"):

@@ -12,6 +12,7 @@ real shape; knives is a stub that records the call it would route and prints an 
 gh-app-token is a stub that names the route the owner's token comes from (the App, here).
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -454,6 +455,9 @@ class CitedPostOnTheUpstreamToken(CitedPost):
 
     def setUp(self):
         super().setUp()
+        self.route_on_the_upstream_token()
+
+    def route_on_the_upstream_token(self):
         self.source.write_text("fallback-personal-token\n")
         # One file per call, each argument NUL-ended, so argument boundaries survive the record.
         self.sent = self.tmp / "gh-calls"
@@ -510,6 +514,322 @@ class CitedPostOnTheUpstreamToken(CitedPost):
 
     def test_a_refused_citation_sends_nothing_on_the_upstream_token(self):
         result = self.run_gh(self.pull(head="someone:fix"))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual((self.routed(), self.sent_calls()), ([], []))
+
+
+# --- a kind of post (dispatch://INFRA-3412) -----------------------------------
+
+KIND_ASK = "dispatch://BET-422/ask/48d87cd6-f3d0-44d5-9a79-30c8b38f28d0"
+# The ask BET-422 opened next, with the same question; it is not in KIND_APPROVALS.
+OTHER_ASK = "dispatch://BET-422/ask/57841a7e-d374-491a-b367-0f61b0d420b7"
+# The ask's question in short: it names the repository as rocq-prover/rocq#22456, as the real one does.
+KIND_QUESTION = "May this report go to the two authors of rocq-prover/rocq#22456, and who sends it?"
+# The first sentences of his answer, word for word (2026-11-12T19:33:21Z).
+KIND_ANSWER = (
+    "I need to stop being asked the same question. The answer is the same every single time for rock. "
+    "Just open an issue and a PR. And you have to follow the three-step process for anything going to "
+    "the Rock repo."
+)
+APPROVES = "`gh issue create` and `gh pr create` on rocq-prover/rocq"
+ROCQ_TITLE = "An issue of the kind his answer approves"
+ROCQ_BODY = "### Description of the problem\n\nA body no draft of the ask holds.\n"
+ROCQ_SHA = hashlib.sha256(ROCQ_BODY.encode()).hexdigest()
+VERDICT = "dispatch://BET-1269/comment/5f0c2a7e-9b1d-4c3e-8a6f-2d4b7e9c1a03"
+REVIEWER = "01a1f00d-0000-7000-8000-00000000beef"
+
+
+def kind_ask_text(state="answered", by="sami@theorem.dev", selected="Send it as a public issue instead",
+                  text=KIND_ANSWER, question=KIND_QUESTION, ref=KIND_ASK):
+    """`dispatch read --ref` of the ask in the shape Dispatch printed it on 2026-11-17: each option
+    with its block reference, the answer with its own, and no document."""
+    b = f"{ref}#b-"
+    answer = "" if state != "answered" else (
+        f"Answer:\n- By: {by}\n- Selected: {selected}\n- Text: {text}\n- Reference: {b}b6\n")
+    return (
+        f"Question: {question}\nOptions:\n"
+        f"- Send as written, by you — You send the report. ({b}b2)\n"
+        f"- Send it as a public issue instead — The report goes out as an issue. ({b}b3)\n"
+        f"- Change it (say what) — The changed text goes back through a fresh review. ({b}b4)\n"
+        f"- Do not send — Nothing goes out. ({b}b5)\n"
+        f"State: {state}\nAsk id: {ref.rsplit('/', 1)[1]}\n{answer}Replies:\n- none\n"
+        f"Node: ask {ref} · made by session 01a1c95f-5b41-7581-a9fe-265ede4e53bd at "
+        "2026-11-12T19:17:44.578071Z · part of dispatch://BET-422\nReferenced by:\n- none\n"
+        f"Links:\n- mentions issue dispatch://BET-885 (an issue · 2026-11-12T19:17:44Z) (block {b}b1)\n"
+    )
+
+
+def verdict_text(author=f"session {REVIEWER}", first=None, title=ROCQ_TITLE, sha=ROCQ_SHA, word="APPROVE"):
+    """`dispatch read --ref` of a reviewer's verdict comment, in the shape Dispatch prints a comment."""
+    first = f"VERDICT: {word} at sha256:{sha}" if first is None else first
+    body = first + "\n\n" + (f"Title: {title}\n\n" if title else "") + \
+        "The reviewer removed one sentence on a release the branch does not hold."
+    return (
+        f"Comment:\n{VERDICT.rsplit('/', 1)[1]} · {author}\nBody: {body}\nReply chain:\n- none\n"
+        f"Node: comment {VERDICT} · made by {author} at 2026-11-17T10:00:00Z · part of dispatch://BET-1269\n"
+        "Referenced by:\n- none\nLinks:\n- none\n"
+    )
+
+
+class KindOfPost(unittest.TestCase):
+    """A citation of an ask whose answer approves a kind of post, with no fixed text.
+
+    On dispatch://BET-422/ask/48d87cd6 Sami answered "Just open an issue and a PR. And you have to
+    follow the three-step process for anything going to the Rock repo", and the shim still refused
+    the issue, for a body that was not a draft of that ask (dispatch://INFRA-3412). The script lists
+    that ask in KIND_APPROVALS as `gh issue create` and `gh pr create` on rocq-prover/rocq: such a
+    post passes for that repository and those kinds only, and only with the verdict of a reviewer
+    session that did not write it, a Dispatch comment named in GH_SHIM_VERDICT whose first line
+    names the body's SHA-256. The harness is CitedPost's; its dispatch stub answers these asks and
+    the verdict too.
+    """
+
+    tearDown = CitedPost.tearDown
+    fixture = CitedPost.fixture
+    run_gh = CitedPost.run_gh
+    routed = CitedPost.routed
+    log = CitedPost.log
+
+    def setUp(self):
+        CitedPost.setUp(self)
+        executable(self.front / "dispatch",
+                   f'd={self.fixtures}\n'
+                   'case "$1 $3" in\n'
+                   f'  "read {KIND_ASK}") cat "$d/kind-ask.txt" ;;\n'
+                   f'  "read {OTHER_ASK}") cat "$d/other-ask.txt" ;;\n'
+                   f'  "read {VERDICT}") cat "$d/verdict.txt" ;;\n'
+                   f'  "read {ASK}") cat "$d/ask.txt" ;;\n'
+                   f'  "read {DOC}") echo "Document: OSSV-1 / issue.md"; echo "Versions: 2" ;;\n'
+                   f'  "doc-read {DOC}@v1") cat "$d/v1.md" ;;\n'
+                   f'  "doc-read {DOC}@v2") cat "$d/v2.md" ;;\n'
+                   '  *) echo "dispatch stub: no fixture for $*" >&2; exit 1 ;;\n'
+                   'esac')
+        self.rocq_body = self.tmp / "rocq-body.md"
+        self.rocq_body.write_text(ROCQ_BODY)
+        self.kind()
+
+    def kind(self, ask=None, verdict=None):
+        (self.fixtures / "kind-ask.txt").write_text(ask or kind_ask_text())
+        (self.fixtures / "other-ask.txt").write_text(kind_ask_text(ref=OTHER_ASK))
+        (self.fixtures / "verdict.txt").write_text(verdict or verdict_text())
+
+    def post(self, argv, verdict=VERDICT, ask=KIND_ASK, **extra):
+        return self.run_gh(argv, cite=False, GH_SHIM_APPROVAL=ask, GH_SHIM_VERDICT=verdict, **extra)
+
+    def issue(self, repo="rocq-prover/rocq", title=ROCQ_TITLE):
+        return ["issue", "create", "-R", repo, "--title", title, "--body-file", str(self.rocq_body)]
+
+    def pull(self, repo="rocq-prover/rocq", title=ROCQ_TITLE):
+        return ["pr", "create", "-R", repo, "--title", title, "--body-file", str(self.rocq_body),
+                "--head", "sjawhar:rocqchk-forged-aliases", "--base", "master"]
+
+    def assert_refused(self, result, why, call="issue create -R rocq-prover/rocq", ask=KIND_ASK):
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"gh shim: REFUSED: `gh {call}", result.stderr)
+        self.assertIn(why, result.stderr)
+        self.assertEqual(self.routed(), [], "a refused citation must not reach GitHub")
+        [record] = self.log()
+        self.assertEqual((record["verdict"], record["ask"]), ("refused", ask))
+
+    def fresh_log(self):
+        (self.cache / "log" / "approved-posts.jsonl").unlink(missing_ok=True)
+
+    # R1: the repository and the kinds his answer names, and only those.
+
+    def test_an_issue_and_a_pull_request_of_the_kinds_his_answer_names_go_out(self):
+        for argv in (self.issue(), self.pull(), self.issue(repo="Rocq-Prover/Rocq")):
+            with self.subTest(argv=argv[:4]):
+                self.fresh_log()
+                result = self.post(argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.routed()[-1], " ".join(argv))
+                allowed = self.log()[0]
+                self.assertEqual((allowed["verdict"], allowed["ask"], allowed["repo"]),
+                                 ("allowed", KIND_ASK, argv[3]))
+                self.assertEqual((allowed["approves"], allowed["review"], allowed["reviewer"]),
+                                 (APPROVES, VERDICT, REVIEWER))
+                self.assertEqual(allowed["body_sha256"], ROCQ_SHA)
+                self.assertIn(f"his answer approves {APPROVES}", result.stderr)
+                self.assertIn(f"a reviewer's verdict {VERDICT} (session {REVIEWER})", result.stderr)
+
+    def test_a_kind_his_answer_does_not_name_is_refused_naming_what_it_approves(self):
+        for argv in (
+            ["issue", "comment", "https://github.com/rocq-prover/rocq/issues/22637",
+             "--body-file", str(self.rocq_body)],
+            ["pr", "comment", "22644", "-R", "rocq-prover/rocq", "--body-file", str(self.rocq_body)],
+        ):
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                self.assert_refused(
+                    self.post(argv),
+                    f"his answer approves {APPROVES}, and no other post; this call is "
+                    f"`gh {argv[0]} {argv[1]}` on rocq-prover/rocq",
+                    call=" ".join(argv[:3]))
+
+    # R4: a repository the answer does not name is refused, and the refusal names what it approves.
+
+    def test_a_repository_his_answer_does_not_name_is_refused_naming_what_it_approves(self):
+        # A prefix and an extension of the name, his fork, Rocq's old home, and another repository.
+        for repo in ("rocq-prover/roc", "rocq-prover/rocq-elpi", "sjawhar/rocq", "coq/coq", "o/upstream"):
+            for argv in (self.issue(repo=repo), self.pull(repo=repo)):
+                with self.subTest(repo=repo, verb=argv[:2]):
+                    self.fresh_log()
+                    self.assert_refused(
+                        self.post(argv),
+                        f"his answer approves {APPROVES}, and no other post; this call is "
+                        f"`gh {argv[0]} {argv[1]}` on {repo}",
+                        call=f"{argv[0]} {argv[1]} -R {repo}")
+
+    # R2: a verdict on record from a reviewer session that did not write the text.
+
+    def test_without_a_reviewers_verdict_it_is_refused(self):
+        for verdict in (None, ""):
+            with self.subTest(verdict=verdict):
+                self.fresh_log()
+                self.assert_refused(self.post(self.issue(), verdict=verdict),
+                                    "needs a fresh reviewer's verdict on record")
+        self.assertIn(ROCQ_SHA, self.log()[0]["why"])
+
+    def test_a_verdict_that_is_not_a_comment_reference_is_refused(self):
+        for verdict in (KIND_ASK, VERDICT + "\n", "dispatch://BET-1269/comment/5f0c2a7e"):
+            with self.subTest(verdict=verdict):
+                self.fresh_log()
+                self.assert_refused(self.post(self.issue(), verdict=verdict),
+                                    "is not a Dispatch comment reference (dispatch://KEY/comment/<id>)")
+
+    def test_a_verdict_written_by_the_posting_session_is_refused(self):
+        # A subagent writes to Dispatch as its parent session, so its verdict reads as the poster's.
+        for extra in ({"OMP_SESSION_ID": REVIEWER}, {"DISPATCH_SESSION_ID": REVIEWER},
+                      {"PI_SESSION_ID": REVIEWER}, {"ENVOY_SESSION_ID": REVIEWER}):
+            with self.subTest(extra=extra):
+                self.fresh_log()
+                self.assert_refused(self.post(self.issue(), **extra),
+                                    f"was written by session {REVIEWER}, which is the session making this post")
+
+    def test_a_session_with_no_id_cannot_tell_its_reviewer_apart(self):
+        # An agent box with no session id set: the shim still checks the citation.
+        self.assert_refused(self.post(self.issue(), OMP_SESSION_ID=None, AGENTBOX_SESSION="box-1"),
+                            "this call runs under no session id")
+
+    def test_a_verdict_a_person_wrote_is_not_a_reviewer_sessions(self):
+        self.kind(verdict=verdict_text(author="user sami@theorem.dev"))
+        self.assert_refused(self.post(self.issue()), "was written by user sami@theorem.dev, not by a session")
+
+    def test_a_verdict_for_another_text_is_refused(self):
+        later = self.tmp / "later.md"
+        later.write_text(ROCQ_BODY + "\nA sentence added after the review.\n")
+        argv = ["issue", "create", "-R", "rocq-prover/rocq", "--title", ROCQ_TITLE, "--body-file", str(later)]
+        self.assert_refused(self.post(argv),
+                            f"approves the text with SHA-256 {ROCQ_SHA}, and this body's is "
+                            f"{hashlib.sha256(later.read_bytes()).hexdigest()}")
+
+    def test_a_verdict_for_another_title_is_refused(self):
+        for title, why in (("Another title", "names the title 'Another title', not"),
+                           (None, "has no `Title: <title>` line")):
+            with self.subTest(title=title):
+                self.fresh_log()
+                self.kind(verdict=verdict_text(title=title))
+                self.assert_refused(self.post(self.issue()), why)
+
+    def test_a_verdict_that_does_not_approve_or_does_not_open_with_its_line_is_refused(self):
+        for verdict, why in (
+            (verdict_text(word="CHANGES"), "is CHANGES, not APPROVE"),
+            (verdict_text(first="Looks good.\nVERDICT: APPROVE at sha256:" + ROCQ_SHA),
+             "does not begin with a `VERDICT: APPROVE at sha256:<64 hex>` line"),
+            (verdict_text(first="VERDICT: APPROVE at " + ROCQ_SHA),
+             "does not begin with a `VERDICT: APPROVE at sha256:<64 hex>` line"),
+        ):
+            with self.subTest(why=why, verdict=verdict[:80]):
+                self.fresh_log()
+                self.kind(verdict=verdict)
+                self.assert_refused(self.post(self.issue()), why)
+
+    # The other checks hold for a kind of post too.
+
+    def test_the_ask_must_be_answered_by_him_with_an_approving_option(self):
+        for ask, why in (
+            (kind_ask_text(by="someone@theorem.dev"), "answered by someone@theorem.dev, not sami@theorem.dev"),
+            (kind_ask_text(selected="Do not send"), "the selected option 'Do not send' does not approve a post"),
+            (kind_ask_text(state="open"), "the ask is open, not answered"),
+        ):
+            with self.subTest(why=why):
+                self.fresh_log()
+                self.kind(ask=ask)
+                self.assert_refused(self.post(self.issue()), why)
+
+    def test_an_answer_without_the_words_the_list_reads_is_refused(self):
+        # KIND_APPROVALS reads his words; an answer that does not say them approves nothing by kind.
+        self.kind(ask=kind_ask_text(text="Post it."))
+        self.assert_refused(self.post(self.issue()), "his answer does not say 'Just open an issue and a PR.'")
+
+    def test_an_ask_that_does_not_name_the_repository_is_refused(self):
+        self.kind(ask=kind_ask_text(question="May this report go to the authors of the alias check?"))
+        self.assert_refused(self.post(self.issue()), "neither the ask nor its answer names rocq-prover/rocq")
+
+    def test_a_pull_request_of_the_kind_still_opens_from_his_own_fork(self):
+        argv = self.pull()
+        argv[argv.index("--head") + 1] = "someone:rocqchk-forged-aliases"
+        self.assert_refused(self.post(argv), "is not a branch of one of sjawhar's own forks",
+                            call="pr create -R rocq-prover/rocq")
+
+    # R3: the word-for-word citation works as before, and an ask id not in KIND_APPROVALS gets only
+    # that path.
+
+    def test_an_ask_id_not_in_the_list_gets_only_the_word_for_word_path(self):
+        # BET-422's next ask, with the same question, the same answer and a verdict: its id is not in
+        # KIND_APPROVALS, so the body must be a draft between two `---` lines of it, and is not.
+        self.assert_refused(self.post(self.issue(), ask=OTHER_ASK),
+                            f"the body is not, exactly, the text between two `---` lines in {OTHER_ASK}",
+                            ask=OTHER_ASK)
+        self.assertNotIn("approves", self.log()[0])
+
+    def test_an_ask_not_in_the_list_still_needs_the_exact_text(self):
+        # OSSV-1's ask answered in the same words: only KIND_APPROVALS makes an answer approve a kind
+        # of post, so the text he was shown is still the whole approval, verdict or not.
+        self.fixture(ask=ask_text(text=KIND_ANSWER))
+        changed = self.tmp / "changed.md"
+        changed.write_text(BODY + "\n\nOne more line he never saw.\n")
+        result = self.run_gh(CitedPost.issue(self, body_file=changed), GH_SHIM_VERDICT=VERDICT)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"the body is not, exactly, the text between two `---` lines in {DOC}@v2", result.stderr)
+        self.assertEqual(self.routed(), [])
+
+    def test_the_exact_text_needs_no_verdict(self):
+        result = self.run_gh(CitedPost.issue(self))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [allowed, _] = self.log()
+        self.assertEqual((allowed["verdict"], allowed["draft"]), ("allowed", f"{DOC}@v2"))
+        self.assertNotIn("review", allowed)
+
+
+class KindOfPostOnTheUpstreamToken(KindOfPost):
+    """Every case above again for an owner the App does not cover, rocq-prover's case: the post
+    goes out on the upstream token, and the fallback-write gate lets it through only because the
+    citation passed."""
+
+    route_on_the_upstream_token = CitedPostOnTheUpstreamToken.route_on_the_upstream_token
+    sent_calls = CitedPostOnTheUpstreamToken.sent_calls
+
+    def setUp(self):
+        super().setUp()
+        self.route_on_the_upstream_token()
+
+    def test_an_approved_kind_of_post_reaches_gh_on_the_upstream_token(self):
+        for argv in (self.issue(), self.pull()):
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                for sent in self.sent.iterdir():
+                    sent.unlink()
+                result = self.post(argv, GH_READ_CACHE=None)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.sent_calls(), [["upstream-route", *argv]])
+                records = self.log()
+                self.assertEqual(records[0]["verdict"], "allowed")
+                self.assertEqual((records[1]["ev"], records[1]["rc"]), ("result", 0))
+
+    def test_a_refused_kind_of_post_sends_nothing_on_the_upstream_token(self):
+        result = self.post(["issue", "comment", "https://github.com/rocq-prover/rocq/issues/22637",
+                            "--body-file", str(self.rocq_body)])
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual((self.routed(), self.sent_calls()), ([], []))
 
