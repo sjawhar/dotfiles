@@ -63,12 +63,28 @@ set_goroot = false
 [settings.github]
 credential_command = "gh-app-token agent --owner sjawhar"
 
+# No mise shims for the python commands the OS ships. mise shims every command of every
+# installed version, selected or not. On sami-devbox python 3.11 and 3.13 were installed while no
+# config selected a python, so python3, pip, pip3, pydoc3 and python3-config were shims that, in
+# every directory, found no version and ran the next same-named file on PATH. A python3 path
+# taken from PATH (`command -v`, Go's exec.LookPath) was therefore the shim, not an interpreter:
+# a test that wrote it into a python3 stand-in placed first on PATH looped, since the shim's
+# fallback found the stand-in, which ran the shim again, until mise stopped with `shim fallback
+# recursion detected for python3` (2026-11-16); with HOME moved and the environment cleared, the
+# same shim refused ~/.config/mise/config.toml as untrusted instead. Excluded, these names are the
+# OS's in every directory and under any HOME, and `mise exec python@3.13 --` still runs mise's
+# build. A config that pins python gets these names only under `mise activate`, so take them out
+# of this list before pinning python anywhere.
+[settings.shims]
+exclude = ["python", "python3", "pip", "pip3", "pydoc3", "python3-config"]
+
 # shims/ first in every PATH mise builds: `mise exec`, `mise env`, and each mise shim, which runs
-# its tool with mise's tool dirs put ahead of the caller's PATH. omp starts its Python eval kernel
-# through mise's python3 shim, so that kernel found mise's own gh before shims/gh, and on
-# 2026-11-02T00:07Z an eval cell's `gh pr review --approve` ran on the user's login and approved
-# theorem-labs/agent-infra#1178 as him (shims/gh header). Every shim is a pass-through outside an
-# agent session, so the user's own shells, which already put shims/ first, see no change.
+# its tool with mise's tool dirs put ahead of the caller's PATH. omp started its Python eval kernel
+# through mise's python3 shim until [settings.shims] above dropped it, so that kernel found mise's
+# own gh before shims/gh, and on 2026-11-02T00:07Z an eval cell's `gh pr review --approve` ran on
+# the user's login and approved theorem-labs/agent-infra#1178 as him (shims/gh header). Every shim
+# is a pass-through outside an agent session, so the user's own shells, which already put shims/
+# first, see no change.
 [env]
 _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims']
 
