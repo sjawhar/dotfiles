@@ -207,10 +207,10 @@ FORGET_AFTER = 86400.0
 # node-envprobe-d10302249-2 alerted, and all four sources above were CORRECTLY silent: no omp
 # process named the holder, no transcript under ~/.omp/agent/sessions carried it,
 # GET /v1/sessions omitted it and GET /v1/registry/<holder> answered 404. The Verified Linux
-# scheduler's envprobe claims a role named node-<deployment>-<number> from a process that is not
-# an omp agent -- Envoy's registry takes any registered session id string
+# scheduler's envprobe claimed a role named node-<deployment>-<number> from a process that was
+# not an omp agent -- Envoy's registry takes any registered session id string
 # (store.Registry.SetRole, packages/envoy/internal/store/kv.go:602; registration is an HTTP
-# call) -- and the lane writes its transcripts into the run directory, not the session root. So
+# call) -- and the lane wrote its transcripts into the run directory, not the session root. So
 # nothing those four sources read could ever see that holder and the alert could never clear: at
 # 30 s a cycle it escalated until the lane ended, and every repeat taught a reader to skip the
 # one real alert.
@@ -230,9 +230,8 @@ DIR_SCAN_ENTRIES = 20000
 DIR_SCAN_DEPTH = 8
 DIR_SCAN_SECONDS = 1.0
 # A suppressed role is dropped from the state file this long after it was first suppressed.
-# Nothing will ever be sent for it, so keeping it is pure bookkeeping, and the suppressed class
-# claims a new role every few minutes -- up to a thousand in the stepped capacity test -- in a
-# file this watch rewrites and fsyncs every 30 s.
+# Nothing will ever be sent for it, so keeping it is pure bookkeeping, and a suppressed class can
+# claim a new role every few minutes in a file this watch rewrites and fsyncs every 30 s.
 SUPPRESSED_FORGET = 600.0
 
 # ------------------------------------------------------------------- what one run may cost
@@ -266,29 +265,14 @@ REPORT_KEEP = 7 * 86400.0
 #
 # WHEN IT EXPIRES NOTHING SILENTLY CHANGES BACK. Past `until` the class alerts again under the
 # ordinary rules, and the watch logs and prints `EXPIRED` in the same places it printed the
-# suppression, every run, until somebody deletes the entry. If the clearing rule below turns out
-# to be enough on its own, deleting this tuple is the whole removal.
-SUPPRESSIONS = (
-    {
-        "name": "verified-linux envprobe node roles",
-        # Narrow on purpose: it matches the scheduler's own role shape and nothing else. The
-        # roles live on this box at the same time (bet-owner-*, lead-*, stream-lead-*, node-*
-        # claimed by hand) do not match, and a real role-holder alert for any of them still
-        # fires tonight.
-        "pattern": re.compile(r"^node-envprobe-[0-9a-z]+-[0-9]+$"),
-        "shown": "^node-envprobe-[0-9a-z]+-[0-9]+$",
-        "until": "2026-11-06T00:00:00Z",
-        "why": (
-            "envprobe claims this role from a process that is not an omp session and releases it"
-            " at the end of each run (Verified Linux lead, 2026-10-30 22:55Z), so the holder is"
-            " gone by design minutes after it appears and all four session-level sources are"
-            " correctly silent. Four alerts came this way between 22:21Z and 22:57Z on"
-            " 2026-10-30, the last three inside 33 minutes, and none of them could clear. The"
-            " directory rule in this file is meant to make the class harmless on its own; this"
-            " suppression covers the days it takes to watch that rule against real runs"
-        ),
-    },
-)
+# suppression, every run, until somebody deletes the entry.
+#
+# An entry is a dict: `name`, `pattern` (a compiled regex matched against the role), `shown` (that
+# pattern as text, the key its tally is kept under), `until` (`YYYY-MM-DDTHH:MM:SSZ`) and `why`.
+# Empty since 2026-11-16: the one entry there has been, the Verified Linux envprobe node roles
+# (^node-envprobe-[0-9a-z]+-[0-9]+$ until 2026-11-06T00:00:00Z), was deleted once it had expired
+# and Envoy listed no such role any more.
+SUPPRESSIONS: tuple[dict, ...] = ()
 
 # THE MARKED PLACE FOR THE RELEASE CALL. Agent infra is adding an explicit release that records
 # who released the claim, and the same change makes GET /v1/roles/<role> pure. Neither exists
@@ -2100,8 +2084,8 @@ def alert_text(
     the session.
 
     And since 2026-10-30 it says that the holder may not be an omp session at all. Envoy's
-    registry takes any registered session id, and the Verified Linux scheduler's envprobe claims
-    roles from a process that is not an agent, so "no pane, no transcript, no process, no
+    registry takes any registered session id, and the Verified Linux scheduler's envprobe claimed
+    roles from a process that was not an agent, so "no pane, no transcript, no process, no
     registry entry" is exactly what a non-omp holder looks like, and also what a holder whose
     harness writes its transcript outside the session root looks like. Sending a reader to find
     a pane that never existed and read a transcript that does not exist is how an alert trains
@@ -2162,9 +2146,9 @@ def alert_text(
     lines += [f"  - {name}: {sentence}" for name, _, sentence in record.get("sources") or []]
     lines.append(
         "THE HOLDER MAY NOT BE AN omp SESSION AT ALL. Envoy's registry takes any registered"
-        " session id (store.Registry.SetRole; registration is an HTTP call), and the Verified"
-        " Linux scheduler's envprobe claims roles named node-<deployment>-<number> from a"
-        " process that is no agent. Every source above answering \"cannot see\" is as consistent"
+        " session id (store.Registry.SetRole; registration is an HTTP call), and on 2026-10-30 the"
+        " Verified Linux scheduler's envprobe claimed roles named node-<deployment>-<number> from"
+        " a process that was no agent. Every source above answering \"cannot see\" is as consistent"
         " with a holder this machine's omp-shaped searches can never find -- a non-omp claimer,"
         " or a lane whose harness writes its transcript outside the session root, or a lane"
         " inside an agent box with a uid-shifted /proc -- as it is with a session that stopped."
@@ -3473,9 +3457,8 @@ def check_roles(
             ):
                 clears += 1
             if started - (record.get("suppressed_at") or started) > SUPPRESSED_FORGET:
-                # Pure bookkeeping, and it has to happen: this class claims a new role every
-                # couple of minutes and up to a thousand in one capacity test, and the state
-                # file is rewritten and fsynced every 30 s.
+                # Pure bookkeeping, and it has to happen: a suppressed class can claim a new role
+                # every couple of minutes, and the state file is rewritten and fsynced every 30 s.
                 incidents.pop(key, None)
                 roles_state.pop(role, None)
             state.commit(options)

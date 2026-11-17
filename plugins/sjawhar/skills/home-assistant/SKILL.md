@@ -34,8 +34,8 @@ An ha-mcp webhook whose auth mode (HA-MCP Server options, `webhook_auth: ha_auth
 ## Work
 
 1. Orient: `ha_get_overview` (summary), `ha_search` (fuzzy entity/config lookup), `ha_get_state` (live states).
-2. Before you write automations, scripts or helpers, read and follow the bundled guides. `ha_get_skill_guide` with no args lists them, and `skill` + `file` reads one.
-3. Config writes (`ha_config_set_automation/_script/_scene/_helper/_dashboard`) fail without the current BestPracticeKey. Read it from `ha_get_skill_guide(skill='home-assistant-best-practices', file='references/automation-patterns.md')`. It rotates hourly, so read it again each session and each hour. Pass `MandatoryBPS=false` to skip receiving the reference content again.
+2. Before you write automations, scripts or helpers, read and follow the bundled guide. `ha_get_skill_guide` with no arguments returns its `SKILL.md`, which lists the reference files (`references/automation-actions.md`, `references/template-guidelines.md`, …); pass `file` to read one.
+3. Config writes (`ha_config_set_automation/_script/_scene/_helper/_dashboard`) fail without the current BestPracticeKey. It is in the answer of `ha_get_skill_guide` called with no arguments (checked on both instances, 2026-11-16; there is no `references/automation-patterns.md`). It rotates hourly, so read it again each session and each hour. Pass `MandatoryBPS=false` to skip receiving the reference content again.
 4. Validate Jinja2 with `ha_eval_template` before you put it in a config.
 5. Debug automations: `ha_get_automation_traces`, `ha_get_history`, `ha_get_logs`.
 

@@ -237,8 +237,11 @@ class UserLogin(unittest.TestCase):
         self.assertIn("`gh pr comment 1178 -R o/r --body-file <file>`", err)
         self.assertIn("`VERDICT: APPROVE at <full 40-character head sha>`", err)
         # agent-infra main needs an approving review, which a comment is not. Nothing on the box
-        # is the review App, so an approval this identity cannot give is asked of the controller.
-        self.assertIn("ask the INFRA Legion controller for a review issue", err)
+        # is the review App, so an approval this identity cannot give goes to a running Legion
+        # reviewer the controller names, with no review issue (dispatch://INFRA-1481 v27, R1 and R3).
+        self.assertIn("ask INFRA's Legion controller (Envoy topic notifications.role.legion-infra-controller)", err)
+        self.assertIn("which running Legion reviewer reads it, and send that reviewer the pull request and its head. Ask for no review issue", err)
+        self.assertNotIn("for a review issue", err)
         self.assertNotIn(".dotfiles/scripts/", err)  # no script stands between a session and gh
         # No approval uses a person's token (dispatch://INFRA-1481, R3), so the refused review
         # offers no admin-token route.
@@ -251,7 +254,8 @@ class UserLogin(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("`gh pr comment 7 -R o/r --body-file <file>`", result.stderr)
         self.assertIn("`VERDICT: REQUEST_CHANGES at", result.stderr)
-        self.assertIn("ask the INFRA Legion controller for a review issue", result.stderr)
+        self.assertIn("which running Legion reviewer reads it, and send that reviewer the pull request and its head. Ask for no review issue", result.stderr)
+        self.assertNotIn("for a review issue", result.stderr)
         self.assertNotIn(".dotfiles/scripts/", result.stderr)
 
     def test_an_unrouted_call_is_not_sent_and_says_to_name_a_repository(self):

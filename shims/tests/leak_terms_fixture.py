@@ -74,6 +74,20 @@ def unrelated_key_file() -> Path:
 
 
 @lru_cache(maxsize=1)
+def real_sops() -> str:
+    """The binary this run's `sops` resolves to, past a mise shim, which reads the caller's home."""
+    found = shutil.which("sops")
+    if found is None:
+        raise RuntimeError("sops is not on PATH")
+    mise = shutil.which("mise")
+    if mise is not None:
+        resolved = subprocess.run([mise, "which", "sops"], capture_output=True, text=True, check=False)
+        if resolved.returncode == 0 and resolved.stdout.strip():
+            found = resolved.stdout.strip()
+    return found
+
+
+@lru_cache(maxsize=1)
 def fixture_environment() -> dict[str, str]:
     """Build the encrypted list once for this Python process and clean it at exit."""
     root = Path(tempfile.mkdtemp(prefix="leak-terms-"))

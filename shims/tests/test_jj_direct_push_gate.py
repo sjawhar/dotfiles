@@ -8,8 +8,10 @@ import os
 import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import test_jj_push_leak_gate as gate
+from stdin_cases import run_with_tty
 from test_jj_push_leak_gate import ROCQ, PRIVATE
 from test_jj_lock_shim import real_jj, run_bounded
 
@@ -344,6 +346,21 @@ class DirectPushGateTest(gate.JjPushLeakGateTest):
         checks = self.count_checks()
         commit = self.leak()
         self.assert_pushed(self.push("-b", "b1"), commit)
+        self.assertEqual(self.lines(checks), [])
+
+    def test_a_persons_pane_with_no_ssh_tty_keeps_the_persons_skip(self):
+        # dispatch://INFRA-4089: a push from Sami's own pane of a tmux server that never carried
+        # SSH_TTY, so SSH_CONNECTION and no SSH_TTY. The pane's terminal is the session's, so the
+        # push is his and so is the skip. Only the push runs in that terminal.
+        self.as_person()
+        self.env["SSH_CONNECTION"] = "10.0.0.1 54321 10.0.0.2 22"
+        self.env["DOTFILES_JJ_NO_LEAK_CHECK"] = "1"
+        checks = self.count_checks()
+        commit = self.leak()
+        with patch.object(gate, "run_bounded",
+                          lambda argv, cwd, env: run_with_tty(argv, cwd=cwd, env=env, timeout=60)):
+            result = self.push("-b", "b1")
+        self.assert_pushed(result, commit)
         self.assertEqual(self.lines(checks), [])
 
     def test_an_agent_without_a_check_is_unchanged(self):

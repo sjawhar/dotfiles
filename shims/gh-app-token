@@ -708,15 +708,24 @@ def agent_context() -> bool:
     for i in range(int(os.environ.get("GIT_CONFIG_COUNT") or 0)):
         if (os.environ.get(f"GIT_CONFIG_VALUE_{i}") or "").endswith("gh-app-routes.gitconfig"):
             return True
-    # A command over SSH with no terminal is an agent's: sshd names a person's terminal in
-    # SSH_TTY for the whole session, so a pipe into one command of it -- git handing its
-    # credential helper the request -- is still the person's. AGENT_SHIM_PERSON=1 is their
-    # escape for a deliberate non-interactive SSH command of their own (INFRA-1538).
-    return bool(
-        os.environ.get("SSH_CONNECTION")
-        and not os.environ.get("SSH_TTY")
-        and os.environ.get("AGENT_SHIM_PERSON") != "1"
-    )
+    # A command over SSH in a session with no controlling terminal is an agent's. The session's
+    # terminal decides, as in shims/gh, not stdin and not SSH_TTY alone: a person's session has
+    # one (sshd's for an interactive login, tmux's for every pane) and every process of it shares
+    # it, so a pipe into one command of it -- git handing its credential helper the request -- is
+    # still the person's, and so is a pane of a tmux server that never carried SSH_TTY
+    # (INFRA-4089). AGENT_SHIM_PERSON=1 is their escape for a deliberate non-interactive SSH
+    # command of their own (INFRA-1538).
+    if (
+        not os.environ.get("SSH_CONNECTION")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("AGENT_SHIM_PERSON") == "1"
+    ):
+        return False
+    try:
+        os.close(os.open("/dev/tty", os.O_RDONLY))
+    except OSError:
+        return True
+    return False
 
 
 def select_owner(explicit_owner: str | None, request: dict[str, str]) -> str | None:

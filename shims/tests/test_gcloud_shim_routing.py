@@ -2173,9 +2173,9 @@ class GcloudNonInteractiveSsh(unittest.TestCase):
     agent-session rules apply to it, the shim selects the machine's own configuration for it, and
     the notice names the identity the call ENDED on — the first draft announced "the machine
     identity" before resolving one, and with active_config naming a person's configuration the
-    call ran as that person under that claim (review of INFRA-1538). A person's own SSH session
-    (SSH_TTY set, whatever one command reads on stdin), and a person who sets
-    AGENT_SHIM_PERSON=1, are unchanged."""
+    call ran as that person under that claim (review of INFRA-1538). A person's own session —
+    one with a terminal, sshd's (SSH_TTY set) or a tmux pane's, whatever one command reads on
+    stdin — and a person who sets AGENT_SHIM_PERSON=1, are unchanged."""
 
     USER = "Sami@Theorem.dev"
     BOX = "box-identity@theorem-agent-infra.iam.gserviceaccount.com"
@@ -2347,6 +2347,18 @@ class GcloudNonInteractiveSsh(unittest.TestCase):
                 self.write_user_adc()
                 result = self.run_shim({"SSH_TTY": SSH_TTY}, args=["auth", "application-default", "login"],
                                        tty=not stdin_is_a_pipe)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("REFUSED in an agent session", result.stderr)
+                self.assertNotIn(self.NOTICE, result.stderr)
+
+    def test_a_persons_pane_with_no_ssh_tty_is_the_person(self) -> None:
+        # dispatch://INFRA-4089: a pane of a tmux server that never carried SSH_TTY holds
+        # SSH_CONNECTION and no SSH_TTY; its terminal makes it the person's, piped stdin or not.
+        for stdin in (None, ""):
+            with self.subTest(piped=stdin is not None):
+                self.write_user_adc()
+                result = run_with_tty([str(SHIMS / "gcloud"), "auth", "application-default", "login"],
+                                      input=stdin, env={**self.env, "SSH_CONNECTION": SSH_CONNECTION})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn("REFUSED in an agent session", result.stderr)
                 self.assertNotIn(self.NOTICE, result.stderr)

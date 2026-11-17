@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 import re
-import resource
 import shlex
 import shutil
 import signal
@@ -23,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
-from leak_terms_fixture import TEST_TERMS, encrypt_yaml, fixture_environment, unrelated_key_file
+from leak_terms_fixture import TEST_TERMS, encrypt_yaml, fixture_environment, real_sops, unrelated_key_file
 from test_jj_push_leak_gate import SERVER_SIDE, SINK_HELPER
 
 
@@ -37,16 +36,14 @@ AGENT_MARKERS = (
     "ENVOY_SESSION_ID", "AGENT_SHIM_AGENT", "LEGION_ROLE", "LEGION_TREE", "LEGION_CONTROLLER",
     "LEGION_DAEMON_URL", "SSH_CONNECTION", "SSH_TTY", "TMUX", "AGENT_SHIM_PERSON",
 )
-# A launch may start this many tasks of its own. A shim or editor that recurses (an earlier draft of this file
-# fork-bombed its machine) then fails to fork instead of exhausting the shared uid's tasks. Where a user manager
-# answers, the launch runs in a transient scope of its own whose TasksMax is the margin (task_scope), so the bound
-# is the launch's own tasks and nothing else. RLIMIT_NPROC counts every task of the uid, on the whole machine:
-# capped at this uid's live tasks plus the margin, a launch failed whenever other sessions of the uid grew by the
-# margin while it ran. On sami-devbox the uid holds about 60,000 tasks and moves by 2,000 in 30 s, and 160 of this
-# file's cases failed with "fork: retry: Resource temporarily unavailable" on 2026-11-16 (6 of 30 plain `bash`
-# launches under that cap, the same hour). Where no user manager answers (a pod, CI), the RLIMIT_NPROC cap is kept,
-# read at each launch.
-TASK_MARGIN = 1000
+# Every command a test starts runs in a cgroup of its own, whose task limit (pids.max) counts that command's own
+# processes and threads and nothing else. A shim or editor that finds itself and forks without end (an earlier draft
+# of this file fork-bombed its machine) fails to fork at the limit and is killed at its timeout, while every other
+# process of this uid forks as before. The limit leaves room for a jj, whose thread pool holds a thread per CPU, with
+# a Go sops under it (measured 2026-11-16 on 288 CPUs: 294 and 80 tasks at their peaks). Until 2026-11-16 the cap was
+# RLIMIT_NPROC at this uid's live tasks plus 1000, which counts every session of the uid: other sessions grew by up to
+# 9,543 tasks in 10 s, and jj's thread pool and git's forks failed with EAGAIN in about two of three runs of a test.
+TASK_LIMIT = 1024 + 4 * (os.cpu_count() or 1)
 LAUNCH_TIMEOUT = 120
 AGE_PUBLIC_KEY = re.compile(r"\bage1[02-9ac-hj-np-z]{58}\b")
 
@@ -60,52 +57,37 @@ def base_environment(*dropped: str) -> dict[str, str]:
     }
 
 
-def live_tasks() -> int:
-    """This uid's live tasks, threads included, read from /proc: what RLIMIT_NPROC counts."""
-    uid = os.getuid()
-    count = 0
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
-        try:
-            with open(f"/proc/{entry.name}/status", encoding="ascii", errors="replace") as status:
-                fields = dict(line.split(":", 1) for line in status if ":" in line)
-        except OSError:
-            continue  # the process exited while /proc was read
-        if int(fields["Uid"].split()[0]) == uid:
-            count += int(fields["Threads"])
-    if count == 0:
-        # This process is one of them, so a count of 0 means /proc showed nothing of this uid.
-        raise AssertionError("no task of this uid is readable in /proc (UNKNOWN)")
-    return count
-
-
-# Runs ARGV with the environment and the deletion of a JSON file named by sys.argv[1], and with the descriptor
-# STDIN on 0 when the spec names one: the in-scope half of a launch, so systemd-run gets the caller's environment
-# (its bus) and the command exactly the test's.
-EXEC_FROM_FILE = (
-    "import json, os, sys\n"
-    "path = sys.argv[1]\n"
-    "with open(path, encoding='utf-8') as source:\n"
-    "    spec = json.load(source)\n"
-    "os.unlink(path)\n"
-    "if spec['stdin'] is not None:\n"
-    "    os.dup2(spec['stdin'], 0)\n"
-    "    os.close(spec['stdin'])\n"
-    "os.execvpe(spec['argv'][0], spec['argv'], spec['env'])\n"
-)
-
-
 @lru_cache(maxsize=1)
-def task_scope() -> tuple[str, ...]:
-    """The argv that runs a command in a transient user scope of its own, before `-p TasksMax=N -- command`, or
-    () where the user manager cannot make one (no systemd user instance, a pod, CI)."""
-    command = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
-    try:
-        probe = subprocess.run([*command, "-p", "TasksMax=8", "--", "true"], capture_output=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return ()
-    return command if probe.returncode == 0 else ()
+def scope_runner() -> str:
+    """The systemd-run that puts a command in a transient cgroup of its own: the first one past shims/ on PATH, except
+    in an agent box, where the host's user manager cannot adopt a box's process and shims/systemd-run makes the cgroup
+    under the box's delegated root instead. The shim's own lookup costs about 0.3 s a call on the host, the real one
+    0.015 s."""
+    if os.environ.get("AGENTBOX_BOX") or Path("/etc/agentbox-identity").exists():
+        return str(ROOT / "shims" / "systemd-run")
+    shims = (ROOT / "shims").resolve()
+    entries = [entry for entry in os.environ.get("PATH", os.defpath).split(os.pathsep) if entry]
+    found = shutil.which("systemd-run", path=os.pathsep.join(entry for entry in entries if Path(entry).resolve() != shims))
+    if found is None:
+        raise RuntimeError("no systemd-run past shims/ on PATH, so no command can run under a task limit of its own")
+    return found
+
+
+def command_cgroup(pid: int) -> Path | None:
+    """The cgroup v2 directory PID is in, unless it is this process's own cgroup or one that holds it: the one cgroup
+    launch may kill whole."""
+    def cgroup_of(name: str) -> Path | None:
+        try:
+            lines = Path(f"/proc/{name}/cgroup").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        unified = [line.removeprefix("0::") for line in lines if line.startswith("0::")]
+        return Path("/sys/fs/cgroup" + unified[0]) if unified else None
+
+    target, own = cgroup_of(str(pid)), cgroup_of("self")
+    if target is None or own is None or target == own or target in own.parents:
+        return None
+    return target
 
 
 # Each test term as the scanner matches it: case folded, each run of whitespace in the term any run of spaces and
@@ -164,7 +146,7 @@ class LeakTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.task_margin = TASK_MARGIN
+        self.task_limit = TASK_LIMIT
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -191,61 +173,40 @@ class LeakTestCase(unittest.TestCase):
         pass_fds: tuple[int, ...] = (),
         stdin: int | None = None,
     ) -> subprocess.CompletedProcess:
-        """ARGV in a session and process group of its own, its own tasks capped at self.task_margin (a user scope's
-        TasksMax where task_scope can make one, else RLIMIT_NPROC at this uid's live tasks plus the margin), stdin
-        the descriptor STDIN, else /dev/null unless INPUT is given. A command that outlives TIMEOUT fails the test
-        after its whole process group is killed, descendants holding its pipes included."""
-        scope = task_scope()
-        spec_path = None
-        if scope:
-            # systemd-run runs with this process's environment, which reaches the user manager, and execs in place,
-            # so the pid, session, cwd and descriptors are the command's; the command gets ENV from the spec file.
-            descriptor, spec_path = tempfile.mkstemp(prefix="leak-launch-", suffix=".json")
-            with os.fdopen(descriptor, "w", encoding="utf-8") as spec:
-                json.dump({"argv": [os.fspath(part) for part in argv],
-                           "env": dict(os.environ) if env is None else env, "stdin": stdin}, spec)
-            command = [*scope, "-p", f"TasksMax={self.task_margin}", "--", sys.executable, "-c", EXEC_FROM_FILE,
-                       spec_path]
-            command_env = None
-            preexec = None
-        else:
-            _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-            task_limit = live_tasks() + self.task_margin
-            limit = task_limit if hard == resource.RLIM_INFINITY else min(task_limit, hard)
-
-            def preexec() -> None:
-                resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
-
-            command, command_env = argv, env
-        child_stdin = stdin if stdin is not None else subprocess.DEVNULL if input is None else subprocess.PIPE
-        child_fds = pass_fds
-        if scope and stdin is not None:
-            # The Python step starts on /dev/null and puts STDIN on 0 itself: a test's stdin can be one Python
-            # cannot start on (a directory: "init_sys_streams: <stdin> is a directory").
-            child_stdin, child_fds = subprocess.DEVNULL, (*pass_fds, stdin)
+        """ARGV with exactly the environment ENV (this process's when None), in a session and process group of its own
+        and in a cgroup of its own whose task limit is self.task_limit, stdin the descriptor STDIN, else /dev/null
+        unless INPUT is given. A command that outlives TIMEOUT fails the test after its whole cgroup and process group
+        are killed, descendants holding its pipes included."""
+        if "=" in os.fspath(argv[0]):
+            raise ValueError(f"env would read {argv[0]!r} as a variable, not a command")
+        environment = os.environ if env is None else env
+        # systemd-run runs with this process's environment, which reaches the user manager and, in a box, finds the
+        # shim's tools; env -i then gives ARGV exactly ENVIRONMENT and finds ARGV[0] on its PATH, as Popen would.
+        command = [
+            scope_runner(), "--user", "--scope", "--quiet", "--collect", "-p", f"TasksMax={self.task_limit}", "--",
+            "/usr/bin/env", "-i", *(f"{name}={value}" for name, value in environment.items()), *argv,
+        ]
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=stdin if stdin is not None else subprocess.DEVNULL if input is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            start_new_session=True,
+            pass_fds=pass_fds,
+        )
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                env=command_env,
-                stdin=child_stdin,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=text,
-                start_new_session=True,
-                preexec_fn=preexec,
-                pass_fds=child_fds,
-            )
-            try:
-                stdout, stderr = process.communicate(input, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                # The leader is not reaped yet, so its pid still names this group.
-                os.killpg(process.pid, signal.SIGKILL)
-                _, stderr = process.communicate(timeout=30)
-                self.fail(f"{argv[0]} ran past {timeout} s; its process group was killed: {stderr!r}")
-        finally:
-            if spec_path is not None:
-                Path(spec_path).unlink(missing_ok=True)  # left only when the scope never ran the command
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # The leader is not reaped yet, so its pid still names its cgroup and its group. In a box the leader is
+            # shims/systemd-run, which stays in the box's own cgroup, so only the group kill applies there.
+            cgroup = command_cgroup(process.pid)
+            if cgroup is not None and (cgroup / "cgroup.kill").exists():
+                (cgroup / "cgroup.kill").write_text("1", encoding="ascii")
+            os.killpg(process.pid, signal.SIGKILL)
+            _, stderr = process.communicate(timeout=30)
+            self.fail(f"{argv[0]} ran past {timeout} s; its cgroup and process group were killed: {stderr!r}")
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
     def assert_hidden(self, *outputs: object) -> None:
@@ -868,6 +829,64 @@ index 0000000,0000000,0000000..1111111
             matcher = module.load_terms(environment)
         self.assertTrue(matcher.spans("Quillfeather Lane 9"))
 
+    def test_scanner_runs_the_pinned_sops_past_a_mise_shim_with_no_version(self) -> None:
+        # mise's shim takes its sops version from the caller's HOME or from a mise.toml in the caller's directory, so
+        # under a moved HOME outside this checkout it has none and exits 1: every commit a Legion test made through
+        # the shims was refused on 2026-11-16. The fake mise here keeps mise's layout and fails as mise did.
+        import tomllib
+
+        module = scanner_module()
+        pin = tomllib.loads((ROOT / "mise.toml").read_text(encoding="utf-8"))["tools"]["sops"]
+        self.assertRegex(pin, r"^[0-9][0-9A-Za-z.+-]*$", "mise.toml pins no exact sops version")
+        mise = self.root / "mise"
+        shim = write_executable(
+            mise / "shims" / "sops", "#!/bin/sh\necho 'mise ERROR No version is set for shim: sops' >&2\nexit 1\n"
+        )
+        install = mise / "installs" / "sops" / pin
+        install.mkdir(parents=True)
+        (install / "sops").symlink_to(real_sops())
+        python_bin = self.root / "python-bin"
+        python_bin.mkdir()
+        (python_bin / "python3").symlink_to(sys.executable)
+        moved_home = self.root / "moved-home"
+        moved_home.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        environment = {
+            **self.env,
+            "HOME": str(moved_home),
+            "XDG_CONFIG_HOME": str(moved_home / ".config"),
+            "PATH": os.pathsep.join([str(shim.parent), str(python_bin)]),
+        }
+
+        def scan(text: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            return self.launch([str(CHECK), "message"], input=text, env=env, cwd=outside)
+
+        clean = scan("clean\n", environment)
+        self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "", ""))
+        self.assert_found(scan("Quillfeather Lane 9\n", environment), "commit message line 1")
+
+        # The machine's key is found as before, and a machine with no key that can decrypt the list still refuses.
+        passwd_home = self.root / "passwd-home"
+        key_dir = passwd_home / ".config" / "sops" / "age"
+        key_dir.mkdir(parents=True)
+        keyless = {name: value for name, value in environment.items() if name not in (
+            "SOPS_AGE_KEY", "SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY_CMD", "DOTFILES_LEAK_TERMS_SOPS_HOME"
+        )}
+        with mock.patch.object(module, "passwd_home", return_value=passwd_home):
+            with self.assertRaisesRegex(module.ListError, "no age key can decrypt the term list"):
+                module.load_terms(keyless)
+            shutil.copyfile(self.env["SOPS_AGE_KEY_FILE"], key_dir / "keys.txt")
+            self.assertTrue(module.load_terms(keyless).spans("Quillfeather Lane 9"))
+
+        # Control: with no install of the pin beside the shims, the shim runs as found, and its exit is named.
+        (install / "sops").unlink()
+        refused = scan("clean\n", environment)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn(f"({shim} exited 1)", refused.stderr)
+        self.assert_hidden(refused)
+        self.assert_no_key_material(refused)
+
     def test_scanner_selects_gits_auto_comment_character(self) -> None:
         selected = self.check(
             "git-comment-char",
@@ -1099,7 +1118,7 @@ index 0000000,0000000,0000000..1111111
         # The bound itself, made to fire: a child that outlives the timeout while it holds the output pipes, and a
         # command that starts more tasks than its budget allows.
         pid_file = self.root / "sleeper.pid"
-        with self.assertRaisesRegex(AssertionError, "process group was killed"):
+        with self.assertRaisesRegex(AssertionError, "process group were killed"):
             self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=2)
         sleeper = Path(f"/proc/{int(pid_file.read_text(encoding='ascii'))}/stat")
         for _ in range(100):
@@ -1109,7 +1128,7 @@ index 0000000,0000000,0000000..1111111
         else:
             self.fail("the timed-out command's background child survived the group kill")
 
-        self.task_margin = 50
+        self.task_limit = 50
         spawner = (
             "import subprocess\n"
             "started = []\n"
@@ -1127,7 +1146,131 @@ index 0000000,0000000,0000000..1111111
         )
         result = self.launch([sys.executable, "-c", spawner], timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertLess(int(result.stdout), 400, "the task budget did not stop the forks")
+        self.assertLess(int(result.stdout), self.task_limit, "the task limit did not stop the forks")
+        self.assertGreater(int(result.stdout), 0, "the command could not fork at all")
+
+    def test_harness_task_limit_counts_only_the_commands_own_tasks(self) -> None:
+        # The failure the per-uid cap had: once a command runs, other processes of this uid start more tasks than the
+        # command's whole limit, and the command must still fork. Under RLIMIT_NPROC at the uid's tasks plus a margin,
+        # such forks failed with EAGAIN.
+        self.task_limit = 64
+        ready, go = self.root / "ready", self.root / "go"
+        child = (
+            "import pathlib, subprocess, sys, time\n"
+            f"pathlib.Path({str(ready)!r}).touch()\n"
+            f"go = pathlib.Path({str(go)!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while not go.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.05)\n"
+            "started = []\n"
+            "try:\n"
+            "    for _ in range(32):\n"
+            "        started.append(subprocess.Popen(['sleep', '30']))\n"
+            "except OSError as error:\n"
+            "    print(error, file=sys.stderr)\n"
+            "finally:\n"
+            "    for process in started:\n"
+            "        process.kill()\n"
+            "        process.wait()\n"
+            "print(len(started))\n"
+        )
+        outcome: dict[str, subprocess.CompletedProcess] = {}
+        runner = threading.Thread(
+            target=lambda: outcome.setdefault("result", self.launch([sys.executable, "-c", child], timeout=90))
+        )
+        runner.start()
+        held: list[subprocess.Popen] = []
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(ready.exists(), "the command never started")
+            for _ in range(3 * self.task_limit):
+                held.append(subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL))
+        finally:
+            go.touch()
+            runner.join(timeout=120)
+            for process in held:
+                process.kill()
+                process.wait()
+        self.assertEqual(len(held), 3 * self.task_limit)
+        self.assertIn("result", outcome, "the command did not finish")
+        result = outcome["result"]
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "32"), result.stderr)
+
+    def test_harness_task_limit_stops_a_fork_loop_and_leaves_the_box_forking(self) -> None:
+        # The protection the limit is for, made to fire: a command whose every copy forks again without end, as a shim
+        # that finds itself does, stays at its limit and dies whole at its timeout, while this process, outside its
+        # cgroup, starts more processes than that limit.
+        self.task_limit = 64
+        where = self.root / "cgroup"
+        loop = (
+            "import os, pathlib, time\n"
+            f"pathlib.Path({str(where)!r}).write_text(open('/proc/self/cgroup').read())\n"
+            "while True:\n"
+            "    try:\n"
+            "        os.fork()\n"
+            "    except OSError:\n"
+            "        time.sleep(0.01)\n"
+        )
+
+        def members(cgroup: str) -> list[str]:
+            """Every process whose cgroup is CGROUP, read from /proc."""
+            found = []
+            for entry in os.scandir("/proc"):
+                if entry.name.isdigit():
+                    try:
+                        if f"0::{cgroup}\n" in Path(f"/proc/{entry.name}/cgroup").read_text(encoding="utf-8"):
+                            found.append(entry.name)
+                    except OSError:
+                        pass  # the process exited while /proc was read
+            return found
+
+        seen: dict[str, object] = {}
+
+        def watch() -> None:
+            deadline = time.monotonic() + 30
+            while not where.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            unified = [line for line in where.read_text(encoding="utf-8").splitlines() if line.startswith("0::")]
+            seen["cgroup"] = cgroup = unified[0].removeprefix("0::")
+            directory = Path("/sys/fs/cgroup" + cgroup)
+            while time.monotonic() < deadline:
+                if int((directory / "pids.current").read_text(encoding="ascii")) >= self.task_limit:
+                    break
+                time.sleep(0.05)
+            seen["max"] = (directory / "pids.max").read_text(encoding="ascii").strip()
+            seen["refused"] = int((directory / "pids.events").read_text(encoding="ascii").split()[1])
+            seen["members"] = len(members(cgroup))
+            outside = []
+            try:
+                for _ in range(2 * self.task_limit):
+                    outside.append(subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL))
+            finally:
+                seen["outside"] = len(outside)
+                for process in outside:
+                    process.kill()
+                    process.wait()
+            if (directory / "pids.peak").exists():
+                seen["peak"] = int((directory / "pids.peak").read_text(encoding="ascii"))
+
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        try:
+            with self.assertRaisesRegex(AssertionError, "cgroup and process group were killed"):
+                self.launch([sys.executable, "-c", loop], timeout=10)
+        finally:
+            watcher.join(timeout=60)
+        self.assertEqual(seen["max"], str(self.task_limit))
+        self.assertGreater(seen["refused"], 0, "no fork reached the limit")
+        self.assertGreater(seen["members"], 1, "the /proc scan saw no copy of the loop while it ran")
+        self.assertLessEqual(seen["members"], self.task_limit)
+        self.assertLessEqual(seen.get("peak", 0), self.task_limit)
+        self.assertEqual(seen["outside"], 2 * self.task_limit, "a process outside the loop's cgroup could not fork")
+        deadline = time.monotonic() + 10
+        while members(seen["cgroup"]) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(members(seen["cgroup"]), [], "a copy of the loop outlived the kill")
 
     def test_harness_real_jj_skips_shim_copies_and_mise_shims(self) -> None:
         # With `mise which jj` failing or mise missing, the PATH lookup passes over another copy of shims/jj (its

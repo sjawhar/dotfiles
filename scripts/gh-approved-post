@@ -11,15 +11,18 @@ His rule (CLAUDE.md): anything that commits him outside the company is drafted, 
 then sent; his answer to the draft is the permission to send it. On 2026-11-02 he answered
 dispatch://OSSV-232/ask/a7d1ac41-45c4-4504-a985-7c92998d2158 "Post it" and the post still did
 not go out. The call passes only when all of these hold:
-  - the call is `gh issue create`, `gh issue comment` or `gh pr comment`, with the repository
-    named (-R/--repo, or a GitHub URL as the comment target), the title in -t/--title and the
-    body in -b/--body or -F/--body-file <file>, and no other flag, so what is checked is all
+  - the call is `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`, with the
+    repository named (-R/--repo, or a GitHub URL as the comment target), the title in -t/--title
+    and the body in one of -b/--body or -F/--body-file <file>, a pull request's head in --head
+    (not -H, which knives does not read) as <owner>:<branch> where the owner is APPROVER_LOGIN (his
+    own fork) and its base, if named, in -B/--base, and no other flag, so what is checked is all
     that is posted;
   - the ask exists, is answered by APPROVER, and its one selected option approves (its label
     starts with an approving word and is not a "do not" option);
   - the draft, in the version of the ask's document that first shows the answer (else in the
     ask's own question), names the repository, and holds the posted body, exactly, between two
-    `---` lines; for an issue, a `Title: <title>` line before them gives the title.
+    `---` lines; for an issue or a pull request, a `Title: <title>` line before them gives the
+    title.
 Every check, passed or refused, appends one JSON line to FILE: who (session, pid, cwd), which ask,
 which repository, the title and the body.
 """
@@ -35,11 +38,32 @@ import sys
 import time
 
 APPROVER = "sami@theorem.dev"
+# APPROVER's GitHub login: the owner of his own forks, which a cited pull request's head must name.
+APPROVER_LOGIN = "sjawhar"
 APPROVING = re.compile(r"^(post|send|publish|file|open|submit|approve|yes|go)\b", re.I)
 NEGATION = re.compile(r"^(do not|don't|dont|no|not|never|hold|wait|skip|cancel)\b|\bnot\b", re.I)
-VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment")}
-REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# An option approves a post when one of its clauses opens with an approving verb ("Push the commit
+# and post both comments") and nothing in it negates one.
+CLAUSES = re.compile(r"\s*(?:,|;|\band\b|\bthen\b)\s*", re.I)
+
+
+def approves(option: str) -> bool:
+    if NEGATION.search(option):
+        return False
+    return any(APPROVING.match(clause) for clause in CLAUSES.split(option) if clause)
+
+
+VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment"), ("pr", "create")}
+CREATES = {"issue create", "pr create"}
+# A pattern that must match a whole value ends in `\Z`, never `$`: Python's `$` also matches before
+# a final newline, so `o/upstream\n` passed as a repository.
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+")
+BRANCH = r"[^\s:~^?*\[\\]+"
+HEAD_RE = re.compile(rf"^([A-Za-z0-9-]+):({BRANCH})\Z")
+BASE_RE = re.compile(rf"^{BRANCH}\Z")
+POST_FLAGS = ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file")
+PR_FLAGS = ("--head", "-B", "--base")
 
 
 class Refused(Exception):
@@ -49,16 +73,25 @@ class Refused(Exception):
 def parse_call(argv: list[str]) -> dict:
     if len(argv) < 2 or (argv[0], argv[1]) not in VERBS:
         raise Refused(
-            "a cited post is `gh issue create`, `gh issue comment` or `gh pr comment`; this call is "
-            f"`gh {' '.join(argv[:2])}`."
+            "a cited post is `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`; "
+            f"this call is `gh {' '.join(argv[:2])}`."
         )
-    call = {"verb": f"{argv[0]} {argv[1]}", "repo": "", "title": None, "body": None, "target": ""}
+    call = {"verb": f"{argv[0]} {argv[1]}", "repo": "", "title": None, "body": None, "target": "",
+            "head": "", "base": None}
+    flags = POST_FLAGS + (PR_FLAGS if call["verb"] == "pr create" else ())
     rest = argv[2:]
+    bodies = set()
     i = 0
     while i < len(rest):
         arg = rest[i]
         name, eq, inline = arg.partition("=") if arg.startswith("--") else (arg, "", "")
-        if name in ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file"):
+        if name == "-H" and call["verb"] == "pr create":
+            # knives 3.2.3 (src/commands/gh.rs, has_head_flag) sees only --head, and in a jj
+            # checkout it then adds `--head <current bookmark>`, which gh takes over -H.
+            raise Refused("write the head as --head <owner>:<branch>, not -H: knives, which routes the "
+                          "call, reads only --head, and in a jj checkout it adds its own --head, which "
+                          "gh would use instead.")
+        if name in flags:
             if eq:
                 value = inline
             elif i + 1 < len(rest):
@@ -72,7 +105,13 @@ def parse_call(argv: list[str]) -> dict:
                 call["title"] = value
             elif name in ("-b", "--body"):
                 call["body"] = value
+                bodies.add("--body")
+            elif name == "--head":
+                call["head"] = value
+            elif name in ("-B", "--base"):
+                call["base"] = value
             else:
+                bodies.add("--body-file")
                 if value == "-":
                     raise Refused("the body comes from stdin; pass it in a file (--body-file <file>).")
                 try:
@@ -83,13 +122,19 @@ def parse_call(argv: list[str]) -> dict:
         elif arg.startswith("-"):
             raise Refused(
                 f"`{arg}` is not checked against the approved draft; a cited post takes only "
-                "-R/--repo, -t/--title, -b/--body and -F/--body-file."
+                "-R/--repo, -t/--title, -b/--body and -F/--body-file, and a pull request also "
+                "--head and -B/--base."
             )
-        elif call["verb"] != "issue create" and not call["target"]:
+        elif call["verb"] not in CREATES and not call["target"]:
             call["target"] = arg
         else:
             raise Refused(f"unexpected argument `{arg}`.")
         i += 1
+    # gh posts a body file over --body whatever their order (gh 2.98.0, pr/create/create.go and
+    # issue/create/create.go), so with both the text checked could be the one not posted.
+    if len(bodies) == 2:
+        raise Refused("pass the body once, with -b/--body or -F/--body-file: given both, gh posts the "
+                      "file and drops --body.")
     m = URL_RE.match(call["target"])
     if m and call["repo"] and call["repo"].lower() != m.group(1).lower():
         raise Refused(f"-R {call['repo']} and the target {call['target']} name different repositories.")
@@ -97,12 +142,27 @@ def parse_call(argv: list[str]) -> dict:
         call["repo"] = m.group(1)
     if not REPO_RE.match(call["repo"]):
         raise Refused("name the repository: -R <owner>/<repo>.")
-    if call["verb"] == "issue create" and not call["title"]:
-        raise Refused("an issue needs its title in -t/--title.")
-    if call["verb"] != "issue create" and not call["target"]:
+    if call["verb"] in CREATES and not call["title"]:
+        what = "an issue" if call["verb"] == "issue create" else "a pull request"
+        raise Refused(f"{what} needs its title in -t/--title.")
+    if call["verb"] not in CREATES and not call["target"]:
         raise Refused(f"`gh {call['verb']}` needs the number or URL it comments on.")
-    if call["verb"] != "issue create" and call["title"] is not None:
+    if call["verb"] not in CREATES and call["title"] is not None:
         raise Refused(f"`gh {call['verb']}` takes no title.")
+    if call["verb"] == "pr create":
+        head = HEAD_RE.match(call["head"])
+        if not head:
+            raise Refused(
+                f"a cited pull request names its head as --head <owner>:<branch>, a branch of "
+                f"{APPROVER_LOGIN}'s own fork; this call's head is {call['head'] or 'not given'!r}."
+            )
+        if head.group(1).lower() != APPROVER_LOGIN.lower():
+            raise Refused(
+                f"the head {call['head']} is not a branch of {APPROVER_LOGIN}'s own fork; a pull request "
+                f"he approved opens from it, as --head {APPROVER_LOGIN}:<branch>."
+            )
+        if call["base"] is not None and not BASE_RE.match(call["base"]):
+            raise Refused(f"the base {call['base']!r} is not a branch name.")
     if not call["body"] or not call["body"].strip():
         raise Refused("the body is empty; pass it with -b/--body or -F/--body-file.")
     return call
@@ -130,7 +190,9 @@ def parse_ask(text: str) -> dict:
     options = []
     for line in options_text.splitlines():
         if line.startswith("- "):
-            options.append(line[2:].split(" — ", 1)[0].strip())
+            # Dispatch prints each option's own block reference after it: `(dispatch://…#b-<id>)`.
+            label = re.sub(r" \(dispatch://\S+#b-[^()\s]+\)$", "", line[2:])
+            options.append(label.split(" — ", 1)[0].strip())
     ask = {"question": question, "options": options, "state": state, "by": "", "selected": "", "text": ""}
     after = re.split(r"\n(?:Replies:\n|Node: ask )", text[m.end() - 1:], maxsplit=1)[0]
     answer = re.match(r"\nAsk id: [^\n]*\nAnswer:\n- By: ([^\n]*)\n- Selected: ([^\n]*)(?:\n- Text: (.*))?", after, re.S)
@@ -180,7 +242,7 @@ def norm(text: str) -> str:
 
 
 def check(ref: str, call: dict) -> dict:
-    if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}$", ref):
+    if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}\Z", ref):
         raise Refused(f"GH_SHIM_APPROVAL={ref!r} is not a Dispatch ask reference (dispatch://KEY/ask/<id>).")
     ask = parse_ask(dispatch("read", "--ref", ref))
     record = {"answered_by": ask["by"], "selected": ask["selected"], "answer_text": ask["text"]}
@@ -190,7 +252,7 @@ def check(ref: str, call: dict) -> dict:
         raise Refused(f"the ask was answered by {ask['by'] or 'nobody'}, not {APPROVER}.")
     if ask["selected"] not in ask["options"]:
         raise Refused(f"the answer selects {ask['selected']!r}, which is not exactly one of the ask's options.")
-    if not APPROVING.match(ask["selected"]) or NEGATION.search(ask["selected"]):
+    if not approves(ask["selected"]):
         raise Refused(f"the selected option {ask['selected']!r} does not approve a post.")
     source, where = ask["question"], ref
     if ask["document"]:
@@ -246,6 +308,8 @@ def main() -> int:
         call = parse_call(argv)
         record.update(repo=call["repo"], verb=call["verb"], target=call["target"], title=call["title"],
                       body=call["body"], body_sha256=hashlib.sha256(call["body"].encode()).hexdigest())
+        if call["verb"] == "pr create":
+            record.update(head=call["head"], base=call["base"] or "")
         record.update(check(ref, call))
         record["verdict"] = "allowed"
         code = 0
@@ -257,7 +321,8 @@ def main() -> int:
             f"gh shim: REFUSED: `gh {quoted}` cites {ref}, and the citation does not hold: {e}\n"
             f"  Instead: fix what is named above. A post as Sami cites a Dispatch ask he answered with "
             f"its approving option, whose document (or question) holds the exact text between two `---` "
-            f"lines, with a `Title: <title>` line before them for an issue (shims/AGENTS.md). If the text "
+            f"lines, with a `Title: <title>` line before them for an issue or a pull request, and a "
+            f"pull request opens from {APPROVER_LOGIN}'s own fork (shims/AGENTS.md). If the text "
             f"must change, show him the new text in a new ask; do not look for another credential.",
             file=sys.stderr,
         )

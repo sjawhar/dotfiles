@@ -31,6 +31,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(os.environ.get("RHW_SCRIPT") or Path(__file__).resolve().parents[1] / "envoy-role-holder-watch")
@@ -50,6 +51,19 @@ EXIT_LINE = (
     '"recordedAt":"2026-11-02T05:41:32.174Z"},"id":"da4a6644",'
     '"timestamp":"2026-11-02T05:41:32.174Z"}\n'
 )
+
+
+def suppression(until: float) -> dict:
+    """A SUPPRESSIONS entry for the tests alone, matching roles `probe-<n>` until `until`.
+
+    The watch ships with no suppression, so the mechanism is tested on this one."""
+    return {
+        "name": "test probe roles",
+        "pattern": re.compile(r"^probe-[0-9]+$"),
+        "shown": "^probe-[0-9]+$",
+        "until": WATCH.iso(until),
+        "why": "a suppression the tests define",
+    }
 
 
 class RunEnvoy:
@@ -220,6 +234,7 @@ class QuietJournalTest(Box):
         self.assertEqual([line for line in second if "%41" in line], [], second)
 
     def test_each_period_writes_one_summary_line_that_carries_the_suppression(self) -> None:
+        self.enterContext(patch.object(WATCH, "SUPPRESSIONS", (suppression(self.now + 86400),)))
         self.healthy()
         self.period()
 
@@ -227,7 +242,18 @@ class QuietJournalTest(Box):
 
         self.assertEqual(len(second), 1, second)
         self.assertIn("checked 1 local role(s)", second[0])
-        self.assertIn("SUPPRESSION", second[0])
+        self.assertIn("SUPPRESSION ACTIVE: ^probe-[0-9]+$", second[0])
+
+    def test_with_no_suppression_the_summary_line_names_none(self) -> None:
+        self.enterContext(patch.object(WATCH, "SUPPRESSIONS", ()))
+        self.healthy()
+        self.period()
+
+        second = self.period()
+
+        self.assertEqual(len(second), 1, second)
+        self.assertIn("checked 1 local role(s)", second[0])
+        self.assertNotIn("SUPPRESSION", second[0])
 
 
 class MessageTest(Box):
@@ -312,13 +338,8 @@ class MessageTest(Box):
         self.assertIn("EXITED NORMALLY", RunEnvoy.sent[0][1][:200])
 
     def test_a_suppression_clear_is_short(self) -> None:
-        role = "node-envprobe-d10302249-2"
-        # The suppression in force at this test's clock: the live one ended 2026-11-06T00:00:00Z,
-        # and from then on this test only skipped.
-        until = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now + 86400))
-        original = WATCH.SUPPRESSIONS
-        WATCH.SUPPRESSIONS = (dict(original[0], until=until),)
-        self.addCleanup(setattr, WATCH, "SUPPRESSIONS", original)
+        role = "probe-7"
+        self.enterContext(patch.object(WATCH, "SUPPRESSIONS", (suppression(self.now + 86400),)))
         self.write_state(
             {role: self.role()},
             {f"{role}|{HOLDER}": {"opened_at": self.now - 700, "alerted_at": self.now - 100, "told": [OTHER]}},
@@ -328,6 +349,7 @@ class MessageTest(Box):
 
         self.assertEqual(len(RunEnvoy.sent), 1)
         self.assert_short(RunEnvoy.sent[0][1])
+        self.assertIn("CLOSED BY A SUPPRESSION", RunEnvoy.sent[0][1][:200])
 
     def pane_pass(self, **pane) -> None:
         self.write_state({})

@@ -296,6 +296,14 @@ retry:
       - anthropic/claude-opus-4-6:high
 task:
   maxRecursionDepth: 3
+  # The progress probe is off. It asks each running subagent of a top-level session for a
+  # percent and a line on what it does now, and each ask sends the agent's whole context.
+  # On 2026-11-16 those asks were 14% of sami-devbox's model usage, because they read only
+  # about 30% of that context from the prompt cache. Sami chose "Turn it off now" on
+  # dispatch://INFRA-4027/ask/e1be5d7e-c945-438b-b7aa-e1649ca8a9b4 (2026-11-16 19:41Z).
+  # A subagent that ran before this edit keeps its probe until it ends. Turn the probe on
+  # again only with his yes, after a release of the fork holds the fix of dispatch://INFRA-4027.
+  completionProbe: false
   # task.softRequestBudget is deliberately ABSENT: the shipped default of 200 stands.
   # Sami decided it on 2026-10-25 04:55Z, choosing "Keep 200" from options that
   # included removing it and raising it to 1000, with the words "I do not care about
@@ -547,6 +555,15 @@ composer:
   shape: box
 isolation:
   backend: auto
+# Off (omp's default is on, dispatch://INFRA-3990). On, the bash tool runs every `git worktree add`
+# as `omp worktree add`, which reflink-copies the whole source checkout: each other session's tree
+# under `.worktrees/` too, its `.git` file still naming that tree's admin directory, so git in the
+# copy works on the original's index and HEAD. The call never reaches shims/git, so the new tree
+# gets no AGENTC-431 lock, and a copy the bash timeout cuts short stays as a partial tree with no
+# `.git` (78 GB at one path on 2026-11-16). Off, `git worktree add` reaches git as typed, and
+# `github pr_checkout` and `/wt` check out plainly.
+worktree:
+  clone: false
 codexResets:
   autoRedeem: "yes"
 # dispatch://INFRA-339: pi-envoy exports DISPATCH_HOST, DISPATCH_SESSION_ID and

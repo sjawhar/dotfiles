@@ -130,8 +130,8 @@ class GitWorktreeShimTest(unittest.TestCase):
         self.assertNotIn(str(path), self.registrations())
 
     # INFRA-1538: `ssh sami-devbox git …` is an agent's command, so the agent-session rules apply;
-    # a person's own SSH session (SSH_TTY set, whatever one command reads on stdin), and a person
-    # who sets AGENT_SHIM_PERSON=1, keep git as it was.
+    # a person's own session (one with a terminal: sshd's, SSH_TTY set, or a tmux pane's, whatever
+    # one command reads on stdin), and a person who sets AGENT_SHIM_PERSON=1, keep git as it was.
     def prune_over_ssh(self, tty: bool, **extra: str):
         run = run_with_tty if tty else run_without_tty
         env = {**self.plain, "SSH_CONNECTION": SSH_CONNECTION, **extra}
@@ -162,6 +162,16 @@ class GitWorktreeShimTest(unittest.TestCase):
                 result = self.prune_over_ssh(tty=tty, SSH_TTY=SSH_TTY)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn(str(path), self.registrations())
+
+    def test_a_persons_pane_with_no_ssh_tty_is_the_person(self):
+        # dispatch://INFRA-4089: a pane of a tmux server that never carried SSH_TTY holds
+        # SSH_CONNECTION and no SSH_TTY; its terminal makes it the person's.
+        self.use_shared_store()
+        path = self.missing_worktree("gone")
+        result = self.prune_over_ssh(tty=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("non-interactive SSH", result.stderr)
+        self.assertNotIn(str(path), self.registrations())
 
     def test_agent_shim_person_is_the_persons_escape(self):
         self.use_shared_store()

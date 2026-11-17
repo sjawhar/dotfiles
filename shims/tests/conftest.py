@@ -1,11 +1,9 @@
 """Give every shim test the encrypted test term list."""
 import os
-import shutil
-import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-from leak_terms_fixture import fixture_environment
+from leak_terms_fixture import fixture_environment, real_sops
 from test_person_branch_guard import PersonBranchGuardTest
 
 
@@ -17,14 +15,7 @@ def pytest_configure() -> None:
 def _sops_directory() -> str:
     """A directory holding only `sops`, linked to the binary this run's sops resolves to (past a mise shim, which reads
     the caller's home)."""
-    found = shutil.which("sops")
-    if found is None:
-        raise RuntimeError("sops is not on PATH")
-    mise = shutil.which("mise")
-    if mise is not None:
-        resolved = subprocess.run([mise, "which", "sops"], capture_output=True, text=True, check=False)
-        if resolved.returncode == 0 and resolved.stdout.strip():
-            found = resolved.stdout.strip()
+    found = real_sops()
     directory = Path(fixture_environment()["DOTFILES_LEAK_TERMS_FILE"]).parent / "sops-bin"
     directory.mkdir(exist_ok=True)
     link = directory / "sops"

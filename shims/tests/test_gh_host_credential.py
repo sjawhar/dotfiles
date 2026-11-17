@@ -156,6 +156,20 @@ class HostCredential(unittest.TestCase):
         self.assertIn("password=ghs_APPSTUB", result.stdout)
         self.assertEqual(self.recorded()[0], "gh-app-token hostprof get")
 
+    def test_git_in_a_persons_pane_with_no_ssh_tty_keeps_the_host_route(self):
+        # dispatch://INFRA-4089: the same chain in Sami's own pane of a tmux server that never
+        # carried SSH_TTY: SSH_CONNECTION and no SSH_TTY. The helper reads its request from a pipe,
+        # and the pane's terminal is still its session's, so it is his.
+        self.shared_config('[credential "https://github.com"]\n\thelper =\n\thelper = !gh auth git-credential\n'
+                           "[credential]\n\tuseHttpPath = true\n")
+        self.machine_config(self.HOST_PROFILE)
+        env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "GIT_TERMINAL_PROMPT": "0"}
+        result = run_with_tty(["git", "credential", "fill"], input=REQUEST, env=env, cwd=self.tmp, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("non-interactive SSH", result.stderr)
+        self.assertIn("password=ghs_APPSTUB", result.stdout)
+        self.assertEqual(self.recorded()[0], "gh-app-token hostprof get")
+
     def test_a_session_marker_over_ssh_still_takes_the_agent_route(self):
         self.machine_config(self.HOST_PROFILE)
         env = {**self.env, "SSH_CONNECTION": SSH_CONNECTION, "OMP_SESSION_ID": "01a1-session",

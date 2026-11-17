@@ -28,12 +28,31 @@ behavior before handing the call to the real one. One file is data: `person-name
   2026-11-02. `gh auth` verbs other than `status` are refused, and a call GitHub refuses for
   the App (a review of the App's own pull request, a permission its installation lacks) ends
   with a `gh shim: REFUSED` block naming the call, the identity, why, and the route: where a
-  repository requires an approval your own identity cannot give, ask the INFRA Legion
-  controller for a review issue; elsewhere a verdict goes out as an App
-  comment beginning `VERDICT: <verdict> at <head sha>`. A post
-  (`issue create`, `issue
-  comment`, `pr comment`) Sami instructed in a Dispatch ask he answered runs again with
-  `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>`, which `scripts/gh-approved-post` checks. Every
+  repository requires an approval your own identity cannot give, ask INFRA's Legion controller
+  which running Legion reviewer reads it and send that reviewer the pull request and its head,
+  asking for no review issue (dispatch://INFRA-1481, R1 and R3); elsewhere a verdict goes out as an App
+  comment beginning `VERDICT: <verdict> at <head sha>`. A post (`issue create`, `issue comment`,
+  `pr comment`, `pr create`) Sami instructed in a Dispatch ask he answered runs again with
+  `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>`, which `scripts/gh-approved-post` checks: his
+  approving answer, the repository named in the draft, the title as the draft's `Title:` line, the
+  body as the text between two `---` lines of it (compared with `\r\n` read as `\n`, without each
+  line's trailing whitespace or the leading and trailing blank lines), and no flag but `-R`/`--repo`,
+  `-t`/`--title` and one of `-b`/`--body` or `-F`/`--body-file` (gh posts the file over `--body`
+  whatever their order, so both are refused) and, for a pull request, `--head` and `-B`/`--base`,
+  with the head `sjawhar:<branch>`, a branch of his own fork (push it first: owner sjawhar routes
+  to the App). A pull request's `-H` is refused: knives 3.2.3 reads only `--head`
+  (`has_head_flag`, `src/commands/gh.rs`), and in a jj checkout it adds `--head <bookmark>`,
+  which gh takes over `-H`. In an agent session a write
+  to an owner without the App, which would go out on his upstream token, is refused without such a
+  citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation
+  is checked on the outermost pass only; the later passes of the same call (the stderr-keeping
+  re-run, the read cache's re-entry, knives' own queries) get its pass as `GH_SHIM_APPROVED_CALL`,
+  the SHA-256 of the citation and the exact argv, which counts only where both match and which an
+  outermost call drops unread. Until 2026-11-16 nothing carried it, so that gate refused every
+  approved post to such an owner after its `allowed` verdict (dispatch://INFRA-3904,
+  `shims/tests/test_gh_approved_post.py`). As with the agent markers below, this is a guardrail
+  against an accident, not a sandbox: a caller that sets `GH_SHIM_INNER` and computes the digest
+  gets past the gate, as one that sets `GH_TOKEN` does. Every
   call GitHub refuses for the App except a review also gets the admin route: a GitHub admin
   action that work Sami already asked for needs (an App permission, an admin merge, a
   repository or branch setting) is done by the agent itself with Sami's admin token from the
@@ -207,7 +226,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   runs after the encrypted-term check above and before the shared public leak check. The `git push` that jj then runs passes through
   `shims/git`, which checks it again.
 - **`git`**, in an agent session, refuses a bare `git worktree prune` and locks every
-  `git worktree add`, so no box can prune another box's live registration. The prune runs
+  `git worktree add`, so no box can prune another box's live registration. omp's bash tool
+  passes it that command only while `worktree.clone` is off, as `omp/config.yml` sets it:
+  on, omp runs the add itself as `omp worktree add`, unlocked (dispatch://INFRA-3990).
+  The prune runs
   when the repository's common directory, resolved through symlinks, lies under a temporary
   root by whole path components: `$TMPDIR`, `/tmp`, `/var/tmp`, `/mnt/nvme/<user>/session-tmp`,
   `/mnt/nvme/<user>/tmp-omp-batch` or `/mnt/nvme/tmp-omp-batch`. No other session can have a
@@ -738,6 +760,14 @@ is set and the configured age key does not exist, the scanner gives sops the pas
 term as matching one or more spaces or tabs in one line, and ignores blank list lines and lines
 that start with `#`.
 
+The scanner runs the first `sops` on `PATH`, except mise's shim: in its place it runs the version
+this checkout's `mise.toml` pins, from `installs/sops/<version>/` in the mise data directory that
+holds that shims directory. mise's shim takes its version from the caller's `HOME` or from a
+`mise.toml` in the caller's directory, so with a test's `HOME` outside this checkout it had none,
+exited 1, and every commit a Legion test made through the shims was refused (2026-11-16). With
+no exact pin or no install of it, the shim runs as found. A sops that exits with any status but
+0 or 128 is named in the refusal with its status.
+
 The `diff`, `message` and `push` modes print one stderr line per match with a place and
 `listed leak term`, never the matching text, then name how to remove it. They exit 0 when clean,
 3 on a match, 2 when the list cannot be read and 4 when the text to scan cannot be read;
@@ -758,22 +788,30 @@ must retain `DOTFILES_LEAK_TERMS_FILE`, `SOPS_AGE_KEY_FILE` and
 ## Who is an agent
 
 `az`, `gcloud`, `gh`, `git`, `jj` and `tmux` each hold a copy of one `agent_context` function,
-and `secrets` the same test in POSIX sh. All seven read one marker set: `OMP_SESSION_ID`,
-`PI_SESSION_FILE`, `PI_TOOL_BRIDGE_URL`, `AGENTBOX_SESSION`, `CLAUDECODE`, `ENVOY_SESSION_ID`,
-`AGENT_SHIM_AGENT`, Legion's `LEGION_ROLE`, `LEGION_TREE`, `LEGION_CONTROLLER` and
-`LEGION_DAEMON_URL` (`packages/daemon/internal/runtime/tmux/spawn.go`), and the gh-app routing
-include. Until round 3 of dispatch://INFRA-1538 `secrets` read four of those and no routing
-include, and no shim knew Legion at all. A caller is also an agent **when `SSH_CONNECTION` is
-set and `SSH_TTY` is not**: `ssh sami-devbox az account show` carries no marker, and until
-2026-11-07 every such command ran as the person whose login the machine holds — az with
-`~/.azure`, Sami's own.
+`secrets` makes the same test inline and `gh-app-token` makes it in Python. All eight read one
+marker set: `OMP_SESSION_ID`, `PI_SESSION_FILE`, `PI_TOOL_BRIDGE_URL`, `AGENTBOX_SESSION`,
+`CLAUDECODE`, `ENVOY_SESSION_ID`, `AGENT_SHIM_AGENT`, Legion's `LEGION_ROLE`, `LEGION_TREE`,
+`LEGION_CONTROLLER` and `LEGION_DAEMON_URL` (`packages/daemon/internal/runtime/tmux/spawn.go`),
+and the gh-app routing include. Until round 3 of dispatch://INFRA-1538 `secrets` read four of
+those and no routing include, and no shim knew Legion at all. A caller is also an agent **when
+`SSH_CONNECTION` is set, `SSH_TTY` is not, and its session has no controlling terminal**: `ssh
+sami-devbox az account show` carries no marker, and until 2026-11-07 every such command ran as the
+person whose login the machine holds — az with `~/.azure`, Sami's own.
 
-The SESSION decides, not the command's own stdin. sshd sets `SSH_TTY` for a session it gave a
-terminal, and every command of that session inherits it, so `echo x | gh …` in a person's
-interactive SSH shell, and git handing a credential helper its request down a pipe, stay the
-person's; the first draft tested `[[ ! -t 0 ]]` and made both an agent's. A person's own shell
-off SSH is unchanged, and `AGENT_SHIM_PERSON=1` is their escape for a deliberate non-interactive
-SSH command of their own; it does not turn a session marker off.
+The SESSION decides, by its terminal: not the command's own stdin, and not `SSH_TTY` alone. A
+person's session has a controlling terminal — sshd's for an interactive login, tmux's for every
+pane — and every process of it shares it, so `echo x | gh …` in a person's shell, and git handing
+a credential helper its request down a pipe, stay the person's; the first draft tested
+`[[ ! -t 0 ]]` and made both an agent's. A command run as `ssh host cmd` without `-t` has none:
+opening `/dev/tty` fails there with ENXIO, and opens under `ssh -tt` and in a tmux pane (measured
+against a real sshd on 2026-11-17). Until then the rule read `SSH_TTY` alone, and a tmux server
+started before `.tmux.conf` carried `SSH_TTY` gives its panes `SSH_CONNECTION` without it: in
+Sami's own pane, `gh auth status` said "non-interactive SSH, so an agent's call"
+(dispatch://INFRA-4089). The bash copies open the terminal with `{ true < /dev/tty; }`, not `:`,
+because a failed redirection of a special builtin ends a POSIX-mode bash (`POSIXLY_CORRECT` in the
+environment), shim and all. A person's own shell off SSH is unchanged, and `AGENT_SHIM_PERSON=1` is
+their escape for a deliberate non-interactive SSH command of their own; it does not turn a session
+marker off, and a marker means an agent whatever the terminal.
 
 **tmux decides nothing.** A pane takes the SERVER's environment, never the environment of
 whoever asked for the pane, so an exemption for `TMUX` was a hole in both directions: an SSH
@@ -832,10 +870,10 @@ person's server got an unmarked pane that ran `gcloud --account <the person>` wi
 - `scripts/agentbox-tmux-guard` does all three with `AGENTBOX_SESSION=<box>`, so a pane or a
   command a box starts on the host server is marked, or refused, whatever shim the box runs.
 - `.tmux.conf` adds `SSH_TTY` to `update-environment`, beside the `SSH_CONNECTION` tmux carries
-  by default, so the windows a person opens after reattaching over ssh stay the person's. A
-  server started before that line, or under another config, carries `SSH_CONNECTION` without
-  `SSH_TTY` into those windows and they read as a non-interactive ssh command: the safe
-  direction, with `AGENT_SHIM_PERSON=1` as the escape.
+  by default, so the variable stays true in the windows a person opens after reattaching over
+  ssh. The rule does not depend on it: what runs in a pane has the pane's terminal, so the SSH
+  rule does not decide there (short of a process that leaves the session, `setsid`), and a pane
+  is an agent's through the marker this shim or the relay gave it.
 
 `shims/tests/test_shim_agent_context.py` (`TmuxPanes`, `TmuxMarkedArgv`) drives a real server
 and the shim's own argv through each case, and `scripts/tests/test_agentbox_tmux_guard.py` the
@@ -852,6 +890,10 @@ known (dispatch://INFRA-1538, rounds 4 and 5):
   steers other sessions with it (`agentbox/AGENTS.md`) — so this is a deliberate limit, not an
   oversight. Anything that must be an agent's gets its own pane (`new-window -d`), which is
   marked.
+- A command that has a terminal is the person's to the SSH rule, so an agent whose only evidence
+  is that rule and that gets itself a terminal — `script -c …`, a tmux server it starts past this
+  shim — is past the rule. `ssh -t` always was (sshd sets `SSH_TTY` for it). Every agent harness
+  sets a marker, which decides whatever the terminal; the rule is for the bare `ssh host cmd`.
 
 Each shim prints one stderr line when the SSH rule, and not a marker, made the decision, naming
 the escape. `az` and `gcloud` name the identity the call ENDED on, never one they have not
@@ -896,10 +938,13 @@ profile `installers/gh-app-host.sh` writes is `agent`, so both routes mint the s
 The copies are kept identical by hand — `shims/` has no sourced library, and a shim that sources
 one would be a second file every call must find — so `shims/tests/test_shim_agent_context.py`
 compares them byte for byte and drives the whole matrix; each shim's own test file carries its
-end-to-end case. A test that means a person must drop `SSH_CONNECTION` from the environment it
-inherits, or set `SSH_TTY` beside it, and name its own stdin either way
-(`shims/tests/stdin_cases.py`); a test fixture that commits must bring its own `HOME`, git
-configuration and author, or whoever runs the suite decides the case.
+end-to-end case. Each case names its session (`shims/tests/stdin_cases.py`): `run_without_tty`
+starts it with no controlling terminal, as `ssh host cmd` is started, and `run_with_tty` with a pty
+as its controlling terminal, as a pane or `ssh -t` is, with that pty or a pipe on stdin, so the
+terminal of whoever runs the suite decides nothing. A test that means a person must drop
+`SSH_CONNECTION` from the environment it inherits, set `SSH_TTY` beside it, or run with a
+terminal; a test fixture that commits must bring its own `HOME`, git configuration and author, or
+whoever runs the suite decides the case.
 
 ## Adding to a shim
 
@@ -929,8 +974,15 @@ A shim that finds its real binary by a marker in its first 512 bytes must keep t
 header: `git-worktree-shim` for `shims/git` and `jj-lock-shim` for `shims/jj`. On 2026-11-12 a
 draft of the leak-term check (dispatch://HOME-131) rewrote the header of `shims/jj` without
 `jj-lock-shim`; the shim found itself as the real jj, and its editor wrapper started copies of
-itself until the machine ran out of memory. A test that runs a shim, jj or an editor runs under a
-process cap (`ulimit -u`) and a timeout.
+itself until the machine ran out of memory. A test that runs a shim, jj or an editor runs it in a
+cgroup of its own whose task limit counts only that command's processes and threads
+(`systemd-run --user --scope -p TasksMax=…`; in an agent box, the cgroup `shims/systemd-run`
+makes), and under a timeout that kills that cgroup and the command's process group. A command
+that forks without end stops at the limit and dies at the timeout, and every other process of the
+user forks as before (`shims/tests/test_leak_terms.py`, `test_harness_*`). The cap was the
+user-wide `ulimit -u` at the user's live tasks plus 1000 until 2026-11-16; other sessions on a
+288-CPU box grew by more than that within seconds, and the tests' own jj and git forks failed with
+`Resource temporarily unavailable` in about two of three runs.
 
 ## How `shims/omp` resolves omp
 

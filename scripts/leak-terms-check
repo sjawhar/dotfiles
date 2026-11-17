@@ -55,6 +55,49 @@ def term_file(environment: Mapping[str, str]) -> Path:
     return Path(__file__).resolve().parent.parent / "leak-terms.sops.yaml"
 
 
+SOPS_PIN = re.compile(r'^[ \t]*"?sops"?[ \t]*=[ \t]*"([0-9][0-9A-Za-z.+-]*)"')
+TOML_SECTION = re.compile(r"^[ \t]*\[([^]]*)\]")
+
+
+def pinned_sops() -> str | None:
+    """The sops version this checkout's mise.toml pins exactly under [tools], else None."""
+    try:
+        lines = (Path(__file__).resolve().parent.parent / "mise.toml").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    section = ""
+    for line in lines:
+        header = TOML_SECTION.match(line)
+        if header:
+            section = header.group(1).strip()
+        elif section == "tools":
+            pin = SOPS_PIN.match(line)
+            if pin:
+                return pin.group(1)
+    return None
+
+
+def sops_command(environment: Mapping[str, str]) -> str | None:
+    """The sops to run: the first on PATH, except that mise's shim gives way to the pinned sops it would run.
+
+    mise's shim takes its version from the caller's HOME (mise's global config) or from a mise.toml in the caller's
+    directory, so a commit made with a test's HOME outside this checkout found no version and the shim exited 1
+    (2026-11-16, every Legion fixture repository on sami-devbox). The pinned install sits in the same mise data
+    directory as the shims directory, so finding it reads no HOME. With no exact pin in this checkout's mise.toml, or
+    no install of it there, the shim runs as found."""
+    found = shutil.which("sops", path=environment.get("PATH", os.defpath))
+    if found is None:
+        return None
+    shims = Path(found).parent
+    pin = pinned_sops()
+    if shims.name == "shims" and pin:
+        install = shims.parent / "installs" / "sops" / pin
+        for candidate in (install / "sops", install / "bin" / "sops"):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return found
+
+
 def sops_environment(environment: Mapping[str, str]) -> dict[str, str]:
     """Prepare sops's environment without changing the caller's process environment."""
     result = dict(environment)
@@ -88,9 +131,12 @@ def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
     if not source.is_file():
         raise list_error("the term list is missing; run scripts/dotfiles-sync local")
 
+    sops = sops_command(environment)
+    if sops is None:
+        raise list_error("sops is not on PATH; install sops with mise")
     try:
         completed = subprocess.run(
-            ["sops", "--decrypt", "--output-type", "json", str(source)],
+            [sops, "--decrypt", "--output-type", "json", str(source)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -111,7 +157,10 @@ def load_terms(environment: Mapping[str, str] | None = None) -> "TermMatcher":
             "above the YubiKey line and run sops updatekeys leak-terms.sops.yaml on a machine that can decrypt the list"
         )
     if completed.returncode != 0:
-        raise list_error("the term list is not valid sops; fix it with sops edit leak-terms.sops.yaml")
+        raise list_error(
+            f"the term list is not valid sops ({sops} exited {completed.returncode}); "
+            "fix it with sops edit leak-terms.sops.yaml"
+        )
 
     try:
         decoded = json.loads(completed.stdout.decode("utf-8", errors="surrogateescape"))

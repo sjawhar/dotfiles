@@ -56,8 +56,9 @@ def run_bounded(argv: list[str], cwd: Path, env: dict[str, str], stdin: int = su
     """argv in a session of its own, so a shim that loops fails the test at the timeout and
     leaves no process behind: the workspace-add path forks a new subshell on every pass.
 
-    stdin is /dev/null unless a case names its own: shims/jj reads whether stdin is a terminal
-    (INFRA-1538), so the terminal of whoever runs the suite must not decide a case."""
+    The session has no controlling terminal, and stdin is /dev/null unless a case names its own:
+    shims/jj reads whether the session has a terminal (INFRA-1538, INFRA-4089), so the terminal of
+    whoever runs the suite must not decide a case."""
     proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         out, err = proc.communicate(timeout=60)
