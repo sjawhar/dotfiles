@@ -366,52 +366,6 @@ class CitedPost(ShimHarness):
         changed.write_text(BODY + "\n\nAdded later.\n")
         self.assert_refused(self.run_gh(self.issue(body_file=changed)), f"{DOC}@v1")
 
-    # A body may hold `---` lines of its own: oh-my-pi's pull request template ends its sections with
-    # one before the checklist. The draft is then the text from the rule after the `Title:` line to
-    # the last rule before the next `Title:` line or `:::` block.
-    RULED = ("## What\n\nThe recall waits out its cooldown.\n\n## Testing\n\nRan the suite.\n\n---\n\n"
-             "- [x] `bun check` passes\n- [x] Tested locally")
-
-    def ruled_draft(self, body=RULED):
-        self.fixture(v1=doc_text(body=self.RULED), v2=doc_text(body=self.RULED, block=ANSWERED))
-        posted = self.tmp / "ruled.md"
-        posted.write_text(body + "\n")
-        return posted
-
-    def test_a_body_with_a_rule_line_of_its_own_passes(self):
-        posted = self.ruled_draft()
-        for argv in (self.issue(body_file=posted),
-                     ["pr", "create", "-R", "o/upstream", "--title", TITLE, "--body-file", str(posted),
-                      "--head", "sjawhar:fix/recall"]):
-            with self.subTest(verb=argv[:2]):
-                self.fresh_log()
-                result = self.run_gh(argv)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.log()[0]["draft"], f"{DOC}@v2")
-
-    def test_a_rule_and_text_added_after_such_a_body_is_refused(self):
-        posted = self.ruled_draft(self.RULED + "\n\n---\n\nA line he never saw.")
-        self.assert_refused(self.run_gh(self.issue(body_file=posted)),
-                            f"the body is not, exactly, the text between two `---` lines in {DOC}@v2")
-
-    def test_a_body_that_runs_into_the_next_draft_is_refused(self):
-        # Two drafts in one document: a body from the first draft's opening rule to the second
-        # draft's closing rule takes in the second `Title:` line, so it is no draft of either.
-        second = "Title: Second\n\n---\n\nSecond text.\n\n---\n\n**If you say no:**"
-        two = doc_text(body="First text.", block=ANSWERED).replace("**If you say no:**", second, 1)
-        self.fixture(v1=two, v2=two)
-        posted = self.tmp / "spans.md"
-        posted.write_text("First text.\n\n---\n\nTitle: Second\n\n---\n\nSecond text.\n")
-        self.assert_refused(self.run_gh(self.issue(body_file=posted)),
-                            f"the body is not, exactly, the text between two `---` lines in {DOC}@v1")
-        self.fresh_log()
-        self.assertEqual(self.run_gh(self.issue(title="Second", body_file=self.ruled_text("Second text."))).returncode, 0)
-
-    def ruled_text(self, text):
-        posted = self.tmp / "text.md"
-        posted.write_text(text + "\n")
-        return posted
-
     def test_a_title_that_differs_from_the_approved_draft_is_refused(self):
         self.assert_refused(self.run_gh(self.issue(title="Another title")),
                             "the title 'Another title' is not the `Title:` line of that draft")

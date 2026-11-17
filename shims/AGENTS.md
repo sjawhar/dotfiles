@@ -35,9 +35,7 @@ behavior before handing the call to the real one. One file is data: `person-name
   `pr comment`, `pr create`) Sami instructed in a Dispatch ask he answered runs again with
   `GH_SHIM_APPROVAL=dispatch://<KEY>/ask/<id>`, which `scripts/gh-approved-post` checks: his
   approving answer, the repository named in the draft, the title as the draft's `Title:` line, the
-  body as the text between two `---` lines of it (after a `Title:` line, from the first `---` line
-  to the last one before the next `Title:` line or `:::` block, so a body may hold `---` lines of
-  its own; compared with `\r\n` read as `\n`, without each
+  body as the text between two `---` lines of it (compared with `\r\n` read as `\n`, without each
   line's trailing whitespace or the leading and trailing blank lines), and no flag but `-R`/`--repo`,
   `-t`/`--title` and one of `-b`/`--body` or `-F`/`--body-file` (gh posts the file over `--body`
   whatever their order, so both are refused) and, for a pull request, `--head` and `-B`/`--base`,
