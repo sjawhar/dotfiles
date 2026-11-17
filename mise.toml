@@ -80,10 +80,24 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261110-032522 advances all 46 release members onto upstream main and carries
-# the fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
-# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset is
-# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
+# v18.18.6-sami.20261117-053702 (commit 7ae9bc73) adds the fix for the subagent progress probe
+# (dispatch://INFRA-4027, cybermonklabs/oh-my-pi#14): a probe goes out only when at least 95% of
+# its prompt is in the agent's prompt cache, the agent's tools and thinking level are unchanged,
+# and the cache entry has more than 30 s of its lifetime left; and a side request (/btw, a probe)
+# now carries its parent's session id, so a gateway serves it from the parent's cache. Both checks
+# of INFRA-4027 pass on this linux-x64 asset against v18.18.6-sami.20261117-013345: 10 of 10
+# probes read at least 95% from the cache, where the control had 5 of 8 gateway Claude probes
+# under 95% (lowest 41.3%). task.completionProbe stays false in omp/config.yml, although Sami said
+# on 2026-11-17 to turn the probe on (dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63):
+# the comment at that key says why. Since 11-10 the release also carries RPC startup
+# dispatch (#19126: a command sent after `ready` is answered while startup still runs) and a pause
+# after a failed Hindsight auto-recall (hindsight.recallCooldownMs), and it still carries the
+# 11-10 fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
+# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset (sha256
+# 642dab6d0b95abf2daaf2b207aeff0bd2c0d72715a0b2c6a1149100f1d774aba) is smoke-tested:
+# `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`. packages/mnemopi
+# is unchanged since the 11-10 release, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261117-053702
 #
 # There is NO macOS split here, and do not add one. A darwin-arm64 asset is published but was
 # cross-built on Linux and has never been executed. On 2026-11-10 this file briefly held macOS
@@ -100,8 +114,10 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # 11-10 push of the sami branch (which sami-build.yml triggers on) created no run. The only field
 # nobody here can read is orgs/cybermonklabs/actions/permissions (403, needs admin:org), and an
 # org-level policy or spending limit fits every observation. Check the ORG settings page, not the
-# repository's Actions tab.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261110-032522"
+# repository's Actions tab. Still so on 2026-11-17: no run exists for commit 7ae9bc73, the
+# repository's newest runs sit `queued`, and the release notes of v18.18.6-sami.20261117-053702 say
+# it was built by hand in the same way.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261117-053702"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.

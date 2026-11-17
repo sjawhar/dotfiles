@@ -301,8 +301,13 @@ task:
   # On 2026-11-16 those asks were 14% of sami-devbox's model usage, because they read only
   # about 30% of that context from the prompt cache. Sami chose "Turn it off now" on
   # dispatch://INFRA-4027/ask/e1be5d7e-c945-438b-b7aa-e1649ca8a9b4 (2026-11-16 19:41Z).
-  # A subagent that ran before this edit keeps its probe until it ends. Turn the probe on
-  # again only with his yes, after a release of the fork holds the fix of dispatch://INFRA-4027.
+  # A subagent that ran before this edit keeps its probe until it ends.
+  # The fix of dispatch://INFRA-4027 is in v18.18.6-sami.20261117-053702, the release mise.toml
+  # pins, and Sami said on 2026-11-17 to turn the probe on
+  # (dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63). It stays false in THIS file:
+  # a running session watches every PI_CONFIG_FILES entry and reads this key at each subagent
+  # start, so true here turns the unfixed probe on in every session that still runs an older
+  # release. Do not set it true here while a process of such a release runs on any machine.
   completionProbe: false
   # task.softRequestBudget is deliberately ABSENT: the shipped default of 200 stands.
   # Sami decided it on 2026-10-25 04:55Z, choosing "Keep 200" from options that
@@ -443,7 +448,16 @@ doubleEscapeAction: tree
 extendedContext: true
 dev:
   autoqaConsent: granted
-setupVersion: 2
+# omp's setup wizard shows every scene newer than this number at each interactive start that is
+# not a resume, and holds the session's first prompt until a person answers it. Its answer goes
+# only to the profile's own config.yml (setupVersion, update.auto), which this committed value
+# overrides, so the wizard came back at every start. The pinned releases since
+# v18.18.6-sami.20261110-032522 have setup version 3, whose one new scene is "Keep omp up to
+# date" (measured 2026-11-17 on that release and on v18.18.6-sami.20261117-053702: with 2 here a
+# fresh session, one started with a prompt included, stops at that scene; with 3 it does not).
+# Keep this equal to the pinned release's CURRENT_SETUP_VERSION
+# (packages/tui/src/setup/setup-version.ts in the fork).
+setupVersion: 3
 # The update check asks upstream (can1357/oh-my-pi) and `omp update` would
 # `mise upgrade github:can1357/oh-my-pi` - the fork's pin in mise.toml is the
 # only version of record; no banner steering a session toward upstream.
