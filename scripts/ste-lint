@@ -2,10 +2,12 @@
 # Copied from https://github.com/danyuchn/asd-ste100-skill, scripts/ste-lint.py at
 # commit 32511c6992ecb5f1971e46a2943f2e6adceedafe, under its MIT License, which is
 # in ste-lint.LICENSE beside this file. Changed from that file: this comment, the
-# file name, and one rule of reading: on a line that opens or closes a container
+# file name, and two rules of reading. On a line that opens or closes a container
 # directive (":::check{#an-id run="…"}", ":::"), only a quoted attribute value
-# of two or more words that holds no address is prose. The asd-ste100 skill does
-# not ship it (pi-envoy ships that skill).
+# of two or more words that holds no address is prose. And no rule reads a link's
+# address, as no rule reads a code span (NOT_PROSE), and a finding after either
+# keeps its column in the source. The asd-ste100 skill does not ship it (pi-envoy
+# ships that skill).
 """Deterministic linter for the structural STE rules in SKILL.md.
 
 Checks only rules verifiable without ASD's dictionary. Deliberately never
@@ -86,7 +88,21 @@ CODE_FENCE = re.compile(r"^(```|~~~)")
 # address.
 DIRECTIVE_FENCE = re.compile(r"^:{3,}")
 DIRECTIVE_ATTRIBUTE = re.compile(r'[\w-]+="((?:[^"\\]|\\.)*)"')
-INLINE_CODE = re.compile(r"`[^`]*`")
+# Text that is a name, not prose, so no rule reads it: a code span, and a link's
+# address. The address of a Markdown link or image is its destination, its
+# reference label, or a reference definition's label and destination; the words
+# in its brackets, its title and a footnote stay prose. A bare address has a
+# scheme (https://…, dispatch://…) and ends before an en or em dash, before
+# trailing punctuation and before a closing bracket that it did not open.
+_URL_CHAR = r"[^\s<>()\[\]`|–—]"
+NOT_PROSE = re.compile("|".join((
+    r"`[^`]*`",
+    r"^ {0,3}\[(?!\^)[^\]]+\]:[ \t]*(?:<[^<>]*>|\S+)(?=[ \t]*$|[ \t]+[\"'(])",
+    r"(?<=\]\()(?:<[^<>]*>|(?:[^\s()]|\([^\s()]*\))+)",
+    r"(?<=\])\[[^\]]*\]",
+    rf"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://(?:{_URL_CHAR}|\({_URL_CHAR}*\))*"
+    rf"(?:[^\s<>()\[\]`|–—.,:;!?*_~'\"“”‘’«»…]|\({_URL_CHAR}*\))",
+)))
 LIST_ITEM_START = re.compile(
     r"^(?P<indent> {0,3})(?P<marker>[-*+]|[0-9]+[.)])(?P<gap> +)(?P<body>.*)$"
 )
@@ -96,6 +112,19 @@ TABLE_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
 
 def _word_re(base):
     return re.compile(r"\b" + base + r"(?:s|es|ed|d|ing)?\b", re.I)
+
+
+def _prose(text):
+    """Return text without its NOT_PROSE spans, and the column in text of each
+    character kept, so that a finding keeps its column in the source."""
+    kept, columns, start = [], [], 0
+    for match in NOT_PROSE.finditer(text):
+        kept.append(text[start:match.start()])
+        columns.extend(range(start, match.start()))
+        start = match.end()
+    kept.append(text[start:])
+    columns.extend(range(start, len(text)))
+    return "".join(kept), columns
 
 
 def _leading_spaces(line):
@@ -214,8 +243,8 @@ def _dangling_conjunction_findings(text, filename):
 
         meaningful = []
         for line_index, item_line in item_lines:
-            # Preserve code spans as neutral operands while ignoring their contents.
-            cleaned = INLINE_CODE.sub(" CODE ", item_line).strip()
+            # Keep code spans and link addresses as neutral operands, without their contents.
+            cleaned = NOT_PROSE.sub(" CODE ", item_line).strip()
             if cleaned:
                 meaningful.append((line_index, cleaned))
         if meaningful:
@@ -232,7 +261,7 @@ def _dangling_conjunction_findings(text, filename):
                     raw for line_index, raw in item_lines
                     if line_index == end_line_index
                 )
-                masked_end_line = INLINE_CODE.sub(
+                masked_end_line = NOT_PROSE.sub(
                     lambda match: " " * len(match.group(0)), raw_end_line
                 )
                 raw_conjunction = CONJUNCTION_END.search(masked_end_line)
@@ -274,7 +303,7 @@ def lint(text, filename="<stdin>"):
         else:
             segments = table_cells.get(lineno - 1, [(raw_line, 0)])
         for segment, source_column in segments:
-            line = INLINE_CODE.sub("", segment)
+            line, columns = _prose(segment)
             words_total += len(line.split())
             for rule_id, level, pattern, msg in RULES:
                 for m in pattern.finditer(line):
@@ -283,7 +312,7 @@ def lint(text, filename="<stdin>"):
                     ):
                         continue
                     findings.append({"file": filename, "line": lineno,
-                                     "col": source_column + m.start() + 1,
+                                     "col": source_column + columns[m.start()] + 1,
                                      "rule": rule_id, "level": level,
                                      "match": m.group(0), "message": msg})
             for gi, group in enumerate(SYNONYM_GROUPS):
@@ -293,7 +322,7 @@ def lint(text, filename="<stdin>"):
                     m = _word_re(base).search(line)
                     if m:
                         seen_synonyms[(gi, base)] = (
-                            lineno, source_column + m.start() + 1, m.group(0)
+                            lineno, source_column + columns[m.start()] + 1, m.group(0)
                         )
             for sent in re.split(r"(?<=[.!?])\s+", line):
                 n = len(sent.split())
@@ -490,6 +519,12 @@ def selftest():
     thirty = " ".join(f"term{number}" for number in range(1, 31)) + "."
     findings, _ = lint(f':::check{{#v-long run="{thirty}"}}')
     assert any(f["rule"] == "long-sentence" for f in findings), findings
+    # a link's address is a name: no rule reads it, and a finding after it or
+    # after a code span keeps its column in the source
+    findings, _ = lint("Start the job.\n"
+                       "[Statement](dispatch://ACME-1/spec#no-launch-attempt); stop. "
+                       "Use `x` here; go.")
+    assert [(f["rule"], f["col"]) for f in findings] == [("semicolon", 54), ("semicolon", 74)], findings
     # per-file labels
     findings, _ = lint("a; b", filename="x.md")
     assert findings[0]["file"] == "x.md"
