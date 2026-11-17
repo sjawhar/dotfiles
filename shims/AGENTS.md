@@ -638,15 +638,21 @@ behavior before handing the call to the real one. One file is data: `person-name
   sami-rocqperf brought along: LINUX-1248, 2026-11-03) loses that entry before the call runs,
   through `scripts/gcloud-drop-azure-credential`, and gcloud then takes the VM account's token
   from the metadata server; the shim reports the removal on stderr. Off Google nothing changes,
-  and an Azure box pays no metadata lookup for it. The store is opened only when it is not the
-  one the last check saw: its mtime, size and inode, which `stat` reads without opening it, are
-  kept in a marker under `$XDG_RUNTIME_DIR` (else `~/.cache`) per config dir, together with that
-  check's verdict, and an unchanged store reuses the verdict. The grep ran before every gcloud
-  call before, which the Datadog CWS rule `theorem_gcloud_credential_read` reported as a
+  and an Azure box pays no metadata lookup for it: off a Google VM nothing opens the store.
+  On one, `scripts/gcloud-drop-azure-credential` is the store's one reader: it decides and
+  removes in the same open and prints nothing when there is nothing to remove. A check that
+  removed nothing is kept in a marker under `$XDG_RUNTIME_DIR` (else `~/.cache`) per config dir,
+  with the store's mtime, size and inode, which `stat` reads without opening it, and the boot's
+  id; that store, or any store in that dir later in the same boot, is not opened again, since on
+  a Google VM nothing writes an Azure entry (only `installers/gcloud-box.sh` does, on an Azure
+  box). The cost: a dir copied from an Azure box over a path already checked this boot is noticed
+  at the next boot; a dir at a new path has no marker and is checked. A grep read the store
+  before every gcloud call until 6c93d4e0 (2026-11-06), and after every write to the store until
+  73bc4345 (2026-11-07); the Datadog CWS rule `theorem_gcloud_credential_read` reported it as a
   credential-file read 109 times between 2026-10-30 and 2026-11-06, all of them this shim
   (theorem-labs/agent-infra#2328 proposed excepting the rule instead; an `exec -a ""` caller can
   hide an extra grep argument from argv parsing, so the exception was dropped and the reads
-  were). A store that changed, or one with no readable marker, is checked exactly as before
+  were), and a [high] one at 09:15Z on 2026-11-06 cost a triage
   (`shims/tests/test_gcloud_shim_routing.py`, `GcloudAzureCredentialOnGoogleVm`).
   In an agent session the shim refuses, on every route, each call that writes or removes the
   well-known file: `auth application-default login|revoke`, and an `auth login` with
