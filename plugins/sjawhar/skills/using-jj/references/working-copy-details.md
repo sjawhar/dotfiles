@@ -40,6 +40,6 @@
 
 ## Colocated `HEAD`
 
-- jj parks git `HEAD` at `@-`, so `git status` shows `@`'s content as uncommitted. That is expected. `git reset --hard`, `git checkout -- .`, `git clean` or `git stash` destroys `@`'s work past the last snapshot.
+- jj keeps git `HEAD` at `@-`, so `git status` shows `@`'s content as uncommitted. That is expected. `git reset --hard`, `git checkout -- .`, `git clean` or `git stash` destroys `@`'s work past the last snapshot.
 - While `@` is the bookmark commit, `git show HEAD:<file>` reads the commit before it. An added file is missing. An edited file returns the old version with exit 0. On a merge `@`, `HEAD` is only the first parent.
 - `jj new`, `jj commit` and `jj squash` into the parent put the content in `@-`, where `HEAD` sees it. `jj describe` does not. Name the SHA you measured, never `HEAD`.

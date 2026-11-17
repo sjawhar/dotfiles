@@ -21,11 +21,11 @@ requests of ORG that name each issue in triage or in_progress, plus the pull req
                           Dispatch shows it as "not running" whenever the session is suspended, waiting for a slot or
                           its pod is gone (INFRA Legion controller, 2026-10-27 07:29Z). On 2026-10-27 that printed 181
                           of 504 LINUX lines, every one of them expected: all LINUX pods were stopped at 23:33Z on
-                          Sami's order. A legion-labelled issue whose claim is not live prints one DISPATCH-LEGION-
-                          PARKED summary line for the project, naming the count and the daemon state to read
-                          (`GET $LEGION_DAEMON_URL/legion/v1/state`: issues.<KEY>.phase and
+                          Sami's order. A legion-labelled issue whose claim is not live prints one
+                          DISPATCH-LEGION-CLAIM-NOT-RUNNING summary line for the project, naming the count and the
+                          daemon state to read (`GET $LEGION_DAEMON_URL/legion/v1/state`: issues.<KEY>.phase and
                           workers.<role>.claim.state; `held` or a failed claim is a stall, a suspended worker under a
-                          waiting tree is parking), not one line per issue; and an issue the Legion DAEMON itself
+                          waiting tree is not), not one line per issue; and an issue the Legion DAEMON itself
                           admitted into its waiting line (its actor `legion-daemon:<PROJECT>` moved the status to
                           `todo`) that waits there unclaimed is not one either: Legion claims an issue only when its
                           architect starts, so unclaimed is the queue, not a drop (INFRA-1552, ninth of 136 at
@@ -123,7 +123,7 @@ EVENTS = 200
 # The person the check runs for: an issue assigned to anyone else is that person's, never unowned.
 OPERATOR = os.environ.get("DASHBOARD_OPERATOR", "sami@theorem.dev")
 KINDS = ("UNOWNED", "QUIET", "OVERDUE", "WAITING-ON-US", "PAST-ACK", "NO-EXECUTOR", "STATUS", "NO-PLAN",
-         "LEGION-PARKED", "LEGION-QUEUED", "STALE-NUMBER")
+         "LEGION-CLAIM-NOT-RUNNING", "LEGION-QUEUED", "STALE-NUMBER")
 # The summary always carries these, so a run that found nothing still shows every check ran, and a re-drive that
 # matched no row says so instead of printing nothing. PAST-ACK is the number to drive to zero: the rows whose time
 # to acknowledge has passed. The rest are about Legion's claim model and the scoreboards rather than this project's
@@ -722,8 +722,9 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
 
     def in_legion_tree(key: str) -> bool:
         """Whether KEY or an ancestor carries the `legion` label. Only a person, the Legion controller or the daemon
-        writes such an issue's status: a status out of Legion's flow parks a child and stops its workers
-        (skill://dispatch/references/issues.md; the Verified Linux owner line, 2026-10-27 00:17Z)."""
+        writes such an issue's status: the daemon sets back a status that an agent session writes on a running issue,
+        and a move to backlog or icebox stops the tree's work (Legion's "Using Legion" page, cybermonklabs/legion
+        docs/site/src/content/docs/legion/using-legion.md; the Verified Linux owner line, 2026-10-27 00:17Z)."""
         seen: set[str] = set()
         k: str | None = key
         while k and k not in seen:
@@ -742,8 +743,8 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
         (`legion-daemon:<PROJECT>`) moves the status to `todo`, and that event is in the issue's events this run
         already read. Narrow on purpose: a legion-labelled issue the daemon has NOT admitted (still `triage`, no such
         event) is still unowned, and so is an admitted one that moved on and lost its holder -- a dead tree keeps its
-        architect's claim, which is the parked reading below, and an admitted issue in `in_progress` with no claim at
-        all is a real stall."""
+        architect's claim, which is the LEGION-CLAIM-NOT-RUNNING reading below, and an admitted issue in `in_progress`
+        with no claim at all is a real stall."""
         if r["status"] != "todo" or not in_legion_tree(key):
             return False
         return any(e["type"] == "issue.updated" and str((e.get("actor") or {}).get("id") or "").startswith(DAEMON)
@@ -751,7 +752,7 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
                    and "status" in ((e.get("payload") or {}).get("changed") or [])
                    for e in r["events"])
 
-    legion_parked: list[str] = []
+    legion_claim_not_running: list[str] = []
     legion_queued: list[str] = []
     for key, r in reads.items():
         holder, is_live = claim(r)
@@ -762,7 +763,7 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
             # stalled; only the daemon's state does. Count these, print one line per project, and never ask a lead to
             # own an issue Legion still holds.
             if in_legion_tree(key) and (holder is not None or under_architect(key, live_only=False)):
-                legion_parked.append(key)
+                legion_claim_not_running.append(key)
             elif holder is None and admitted_and_queued(key, r):
                 legion_queued.append(key)
             else:
@@ -858,14 +859,16 @@ def evaluate(data: dict, scope: Scope, now: dt.datetime) -> tuple[dict[str, list
                     f"plan dispatch://{key}/artifact/{slug} states neither a date nor its work items with a state")
             out["NO-PLAN"].append((key, f"{key} [{reads[key]['status']}] {reads[key]['title'][:80]} ({what}; "
                                         f"claimed by {claim(reads[key])[0]})"))
-    if legion_parked:
-        out["LEGION-PARKED"].append((legion_parked[0], f"{len(legion_parked)} legion-labelled issues are held by a "
-                                     f"Legion claim whose session is not running, their own or their architect's "
-                                     f"({short(sorted(legion_parked)[:5])}...). A Legion "
-                                     "claim is the tree's identity and outlives its process, so this is parking until "
-                                     "the daemon says otherwise: read GET $LEGION_DAEMON_URL/legion/v1/state, "
-                                     "issues.<KEY>.phase and workers.<role>.claim.state (held or a failed claim is a "
-                                     "stall; a suspended worker under a waiting tree is parking)"))
+    if legion_claim_not_running:
+        out["LEGION-CLAIM-NOT-RUNNING"].append((legion_claim_not_running[0],
+                                                f"{len(legion_claim_not_running)} legion-labelled issues are held by a "
+                                                "Legion claim whose session is not running, their own or their "
+                                                f"architect's ({short(sorted(legion_claim_not_running)[:5])}...). A "
+                                                "Legion claim is the tree's identity and outlives its process, so "
+                                                "read these as waiting, not stalled, until the daemon says otherwise: "
+                                                "read GET $LEGION_DAEMON_URL/legion/v1/state, issues.<KEY>.phase and "
+                                                "workers.<role>.claim.state (held or a failed claim is a stall; a "
+                                                "suspended worker under a waiting tree is not)"))
     if legion_queued:
         out["LEGION-QUEUED"].append((legion_queued[0], f"{len(legion_queued)} legion-labelled issues the Legion "
                                      f"daemon has admitted wait unclaimed in its queue for an architect "

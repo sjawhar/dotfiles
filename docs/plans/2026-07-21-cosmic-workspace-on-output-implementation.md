@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **jj only, never git commands** (repos in `~/Code` are already jj-colocated; the one allowed exception already happened: `git fetch --unshallow`).
-- Patch against installed rev: cosmic-comp `7ee78d9c1369033aa4f963e22d2864bbcda1fbff`, cosmic-settings-config `e37160f14d1e7ee428f973cd2848b4e95f83dfe1` (both repos already have `@` parked on these revs).
+- Patch against installed rev: cosmic-comp `7ee78d9c1369033aa4f963e22d2864bbcda1fbff`, cosmic-settings-config `e37160f14d1e7ee428f973cd2848b4e95f83dfe1` (in both repos `@` is already on these revs).
 - Build with `mise x rust@1.93.0 -- cargo ...` (repo requires rust 1.93; mise-pinned default is 1.92; 1.93.0 already installed).
 - **Install with `sudo install`, never `cp`** onto the running binary; verify by comparing `sha256sum` of built artifact vs `/usr/bin/cosmic-comp`. Never verify via terminal-scrollback grep.
 - sudo runs happen in the user's tmux pane (`dev` session — verify the pane is a plain shell immediately before every send) or by asking the user; sudo prompt = YubiKey touch, tell the user when to touch.
@@ -62,7 +62,7 @@ Expected: no output. Verify with `jj git remote list` showing `origin` + `sjawha
 **Interfaces:**
 - Produces: `Action::SwitchToOutput(String)` and `Action::WorkspaceOnOutput(String, u8)` — consumed by cosmic-comp in Tasks 5.
 
-Working copy is already parked on `e37160f1` (`jj log -r @` to confirm).
+Working copy is already on `e37160f1` (`jj log -r @` to confirm).
 
 - [ ] **Step 1: Add variants**
 

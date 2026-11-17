@@ -50,5 +50,5 @@
 ## Served checkouts
 
 - A served checkout is a checkout a running service or another session reads files from. Advance one only when its working-copy change is empty. Fetch, then inspect it.
-- Leave another session's edits in place and coordinate. Do not park them with `jj new`. If an operation already parked them, inspect the old working-copy commit and recover its whole path set with its owner. After `jj new`, `@-` is the new parent, not the parked edits.
+- Leave another session's edits in place and coordinate. Do not move the working copy off them with `jj new`, which leaves them in the old working-copy commit. If an operation already did, inspect the old working-copy commit and recover its whole path set with its owner. After `jj new`, `@-` is the new parent, not the commit that holds the edits.
 - Recover the complete path set, lockfiles and generated files too. Use structured path output, not diff text split on spaces.

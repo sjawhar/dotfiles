@@ -23,7 +23,7 @@
 #                          every parent process runs pi-legion-envoy with
 #                          sjawhar/legion#1249 (LEGION-225) — the leftover
 #                          registration of a finished task subagent, whose
-#                          inbox still wakes that parked subagent. Once that
+#                          inbox still wakes that finished subagent. Once that
 #                          release is installed everywhere, make untitled rows
 #                          the default and drop the flag.
 #   envoy config-path — print the envoy.json envoy reads (below)

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Forked cosmic-greeter: restarts the PAM conversation on user activity at the
 # lock screen, so the YubiKey/fingerprint window is live when you sit down
-# instead of having expired at lock time (stock behavior parks at the password
+# instead of having expired at lock time (stock behavior stays at the password
 # prompt until a failed submission restarts the stack).
 #
 # Fork:      https://github.com/sjawhar/cosmic-greeter  (restart-auth-conversation)
