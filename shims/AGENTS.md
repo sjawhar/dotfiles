@@ -392,9 +392,19 @@ behavior before handing the call to the real one. One file is data: `person-name
   and system-attribute disablement as the commit hook. A non-empty `info/attributes` makes that
   producer use `--text`; its bytes remain safe because messages use a separate NUL-delimited
   producer and diffs use a separate byte stream. The diff stream frames `commit <object-id>` lines
-  only outside hunks, whose declared parent and result counts are checked before a line can be a
+  only outside hunks, whose declared old and new counts are checked before a line can be a
   boundary. Without `info/attributes`, Git's own binary detection still omits NUL-containing file
-  bytes. jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote,
+  bytes. A merge is not read from a diff. Git's combined diff (`--cc`) is wrong for wide octopus
+  merges (`combine-diff.c`, Git 2.43 to master): from 33 parents it shows a removed line under the
+  wrong parent, so its hunks disagree with their own counts, and at 64 parents it leaves out a line
+  that only the merge adds. So the scan reads each merge's files: `git diff-tree --stdin --always`
+  against each parent names the files that differ from every parent's version. The scan reads
+  each such path, and each line of the merge's file that no parent's file at that path holds, as
+  `commit <id> <path>:<line>`. A line the merge took from a parent is scanned in that parent's own
+  commit when the push sends it; otherwise the destination already holds it. Those files are text
+  as the diff producer reads them, and a file that cannot be read refuses the push (exit 4),
+  naming the merge and the file. The scanner refuses combined diff text on its standard input.
+  jj runs `git … push --porcelain --no-verify … -- <remote> <sha>:<ref>…` once per remote,
   so no hook runs for that push; the shim directs those pushes through this gate by the same rule.
   The checkout is guarded when a URL `git remote -v` prints (read whole after the tab: a push line
   without its final ` (push)`, a fetch line up to its first ` (fetch)`, since a partial clone's

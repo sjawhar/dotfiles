@@ -685,20 +685,16 @@ Quillfeather Lane 9
         result = self.check("diff", generated)
         self.assert_found(result, 'raw-"\\t\\\\\\n<listed term>.txt')
 
-    def test_scanner_reads_combined_diffs_and_ignores_lines_from_one_parent(self) -> None:
-        added = """diff --cc merge.txt
+    def test_scanner_refuses_combined_diff_text(self) -> None:
+        # The scanner reads no combined diff: Git's is wrong past 32 parents (scripts/leak-terms-check, above
+        # COMBINED_REFUSAL), and a push reads each merge from its files. Combined text is refused (exit 4), whether
+        # it comes alone, after a file the scanner can read, or as an @@@ hunk under a plain header.
+        two_parents = """diff --cc merge.txt
 index 0000000,0000000..1111111
 --- a/merge.txt
 +++ b/merge.txt
 @@@ -1,0 -1,0 +1,1 @@@
 ++Quillfeather Lane 9
-"""
-        from_one_parent = """diff --cc merge.txt
-index 0000000,0000000..1111111
---- a/merge.txt
-+++ b/merge.txt
-@@@ -1,1 -1,0 +1,1 @@@
- +Quillfeather Lane 9
 """
         octopus = """diff --cc octopus.txt
 index 0000000,0000000,0000000..1111111
@@ -707,11 +703,26 @@ index 0000000,0000000,0000000..1111111
 @@@@ -1,0 -1,0 -1,0 +1,1 @@@@
 +++Quillfeather Lane 9
 """
-        self.assert_found(self.check("diff", added), "merge.txt:1")
-        clean = self.check("diff", from_one_parent)
-        self.assertEqual(clean.returncode, 0, clean.stderr)
-        self.assert_hidden(clean)
-        self.assert_found(self.check("diff", octopus), "octopus.txt:1")
+        readable_first = """diff --git a/plain.txt b/plain.txt
+--- a/plain.txt
++++ b/plain.txt
+@@ -0,0 +1 @@
++clean
+""" + two_parents
+        under_plain_header = """diff --git a/plain.txt b/plain.txt
+--- a/plain.txt
++++ b/plain.txt
+@@@ -1,0 -1,0 +1,1 @@@
+++Quillfeather Lane 9
+"""
+        for label, text in (("two parents", two_parents), ("octopus", octopus), ("after a readable file", readable_first),
+                            ("under a plain header", under_plain_header)):
+            with self.subTest(case=label):
+                result = self.check("diff", text)
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertIn("combined diff text (diff --cc), which this check does not read", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assert_hidden(result)
 
     def test_scanner_refuses_a_malformed_hunk_count(self) -> None:
         malformed = """diff --git a/plain.txt b/plain.txt
@@ -3806,7 +3817,7 @@ class OutgoingLeaks(SinkRepositoryCase):
         self.real("commit", "--no-verify", "-m", "resolve")
         return self.real("rev-parse", "HEAD")
 
-    def test_push_refuses_a_combined_diff(self) -> None:
+    def test_push_refuses_a_term_a_merge_resolution_adds(self) -> None:
         # (12) a merge of two clean parents whose conflict resolution adds a line with the term.
         leaky = self.merge("merge", self.term)
         clean = self.merge("clean-merge", "resolution")
@@ -3848,6 +3859,146 @@ class OutgoingLeaks(SinkRepositoryCase):
                     if kind == "jj" and not agent:
                         # A person's clean jj push still runs the public check once.
                         self.assertEqual(self.public_checks(), checks + 1)
+
+    def octopus(self, label: str, count: int, resolution: str, carried: int | None = None) -> tuple[str, list[str]]:
+        """An octopus merge of COUNT parents, made with one `git fast-import`: its id and its parents' ids, in order.
+
+        Each parent inserts one line of its own into octopus.txt ("side <i>" after line 10*i+10; parent CARRIED
+        inserts the test term there instead), and parents 1 and COUNT-1 both change line 1, which the merge keeps,
+        so Git's combined diff coalesces their two removals of it. From 33 parents Git shows that removed line under
+        parent COUNT-32 instead of parent COUNT (combine-diff.c), so its hunk body disagrees with its own header. The
+        merge takes every parent's line and adds RESOLUTION as its last line, which no parent has."""
+        length = 10 * count + 20
+        own = {side: self.term if side == carried else f"side {side}" for side in range(count)}
+
+        def text(first: str, sides: dict[int, str]) -> str:
+            lines = [first]
+            for number in range(2, length + 1):
+                lines.append(f"line {number}")
+                lines.extend(line for side, line in sides.items() if number == 10 * side + 10)
+            return "".join(f"{line}\n" for line in lines)
+
+        chunks: list[str] = []
+        marks = iter(range(1, 1_000_000))
+
+        def commit(ref: str, message: str, content: str, parents: list[str]) -> int:
+            """REF is a full ref name: the merge's is a branch, so jj, which imports branches, can push it."""
+            blob = next(marks)
+            chunks.append(f"blob\nmark :{blob}\ndata {len(content.encode())}\n{content}\n")
+            mark = next(marks)
+            chunks.append(
+                f"commit {ref}\nmark :{mark}\n"
+                f"committer {self.identity} <push-test@example.invalid> 1700000000 +0000\n"
+                f"data {len(message.encode())}\n{message}\n"
+                + "".join(f"{'from' if index == 0 else 'merge'} {parent}\n" for index, parent in enumerate(parents))
+                + f"deleteall\nM 100644 :{blob} octopus.txt\n\n"
+            )
+            return mark
+
+        base = commit(f"refs/octopus/{label}/base", "octopus base", text("line 1", {}), [self.base])
+        parents = [
+            commit(f"refs/octopus/{label}/p{side}", f"side {side}",
+                   text("removed line" if side in (1, count - 1) else "line 1", {side: own[side]}), [f":{base}"])
+            for side in range(count)
+        ]
+        merge = commit(f"refs/heads/octopus-{label}", "octopus", text("line 1", own) + f"{resolution}\n",
+                       [f":{mark}" for mark in parents])
+        marks_file = self.root / f"{label}.marks"
+        made = self.launch(["/usr/bin/git", "fast-import", "--quiet", f"--export-marks={marks_file}"], cwd=self.repo,
+                           env=self.person, input="".join(chunks))
+        self.assertEqual(made.returncode, 0, made.stderr)
+        ids = dict(line.split(" ", 1) for line in marks_file.read_text(encoding="ascii").splitlines())
+        return ids[f":{merge}"], [ids[f":{mark}"] for mark in parents]
+
+    def test_push_reads_an_octopus_merge_from_its_files(self) -> None:
+        # A merge of 3 and of 40 parents whose own resolution adds the term: refused at that line of the merge. Past
+        # 32 parents Git's combined diff disagrees with itself (see octopus), which the check once refused for
+        # (exit 4) before it could read the term; it now reads each merge from its files. A clean octopus goes out.
+        self.init_jj()
+        for count in (3, 40):
+            line = 11 * count + 21
+            leaky, _ = self.octopus(f"leaky-{count}", count, self.term)
+            clean, parents = self.octopus(f"clean-{count}", count, "merge resolution")
+            self.set_url(self.public_url)
+            for kind in ("git", "jj") if count == 40 else ("git",):
+                with self.subTest(count=count, kind=kind):
+                    ref = self.unique("octopus")
+                    push = (lambda: self.git_push("origin", leaky, ref, self.agent)) if kind == "git" else (
+                        lambda: self.jj_push(leaky, ref, self.agent))
+                    self.assert_push_refused(push, leaky, f"octopus.txt:{line}", self.public_url, kind)
+            with self.subTest(count=count, control="clean"):
+                url = self.fresh_public_url()
+                self.set_url(url)
+                self.assert_pushed(self.git_push("origin", clean, self.unique("clean"), self.agent), url, clean, *parents)
+
+    def test_push_refuses_a_term_a_parent_carries_into_an_octopus(self) -> None:
+        # The term is in one parent's own commit, and the merge takes that line: the parent's commit is refused for it,
+        # at its line, and the merge, which adds nothing of its own there, is not named.
+        merge, parents = self.octopus("carried", 40, "merge resolution", carried=5)
+        result = self.assert_push_refused(
+            lambda: self.git_push("origin", merge, self.unique("carried"), self.agent), parents[5], "octopus.txt:61",
+            self.public_url,
+        )
+        self.assertNotIn(f"commit {merge[:12]}", result.stderr)
+
+    def test_push_refuses_a_term_a_merge_moves_out_of_a_binary_file(self) -> None:
+        # One parent's file is binary (a NUL byte), so Git's diff never reads its lines for a term; the merge writes one
+        # of them into a text file. That line is the merge's to scan, at its line, and the binary parent is not named.
+        files = {
+            "base": "start\n",
+            "binary": f"\0binary\n{self.term}\n",
+            "text": "start\nside\n",
+            "merge": f"start\n{self.term}\n",
+        }
+        stream = []
+        for mark, (name, content) in enumerate(files.items(), start=1):
+            parents = {"base": [self.base], "binary": [":1"], "text": [":1"], "merge": [":2", ":3"]}[name]
+            message = f"{name} commit"
+            stream.append(
+                f"commit refs/heads/binary-{name}\nmark :{mark}\n"
+                f"committer {self.identity} <push-test@example.invalid> 1700000000 +0000\n"
+                f"data {len(message)}\n{message}\n"
+                + "".join(f"{'from' if index == 0 else 'merge'} {parent}\n" for index, parent in enumerate(parents))
+                + f"deleteall\nM 100644 inline moved.txt\ndata {len(content.encode())}\n{content}\n\n"
+            )
+        marks_file = self.root / "binary.marks"
+        made = self.launch(["/usr/bin/git", "fast-import", "--quiet", f"--export-marks={marks_file}"], cwd=self.repo,
+                           env=self.person, input="".join(stream))
+        self.assertEqual(made.returncode, 0, made.stderr)
+        ids = dict(line.split(" ", 1) for line in marks_file.read_text(encoding="ascii").splitlines())
+        result = self.assert_push_refused(
+            lambda: self.git_push("origin", ids[":4"], self.unique("binary"), self.agent), ids[":4"], "moved.txt:2",
+            self.public_url,
+        )
+        self.assertNotIn(f"commit {ids[':2'][:12]}", result.stderr)
+
+    def test_push_refuses_a_merge_whose_file_cannot_be_read(self) -> None:
+        # A merge whose own file object is missing cannot be read, so the push is refused (exit 4), naming the merge
+        # and the file, and nothing goes out.
+        _, parents = self.octopus("unreadable", 3, "merge resolution")
+        blob = self.launch(["/usr/bin/git", "hash-object", "-w", "--stdin"], cwd=self.repo, env=self.person,
+                           input="written loose, then removed\n")
+        self.assertEqual(blob.returncode, 0, blob.stderr)
+        blob_id = blob.stdout.strip()
+        tree = self.launch(["/usr/bin/git", "mktree"], cwd=self.repo, env=self.person,
+                           input=f"100644 blob {blob_id}\toctopus.txt\n")
+        self.assertEqual(tree.returncode, 0, tree.stderr)
+        merge = self.real("commit-tree", tree.stdout.strip(), *(item for parent in parents for item in ("-p", parent)),
+                          "-m", "unreadable merge")
+        (self.repo / ".git" / "objects" / blob_id[:2] / blob_id[2:]).unlink()
+        before = self.sink_state(self.public_url)
+        result = self.git_push("origin", merge, self.unique("unreadable"), self.agent)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"error: leak terms: cannot read text to check: cannot read file octopus.txt of merge commit {merge[:12]}",
+            result.stderr,
+        )
+        self.assertIn(
+            f"error: git shim: the leak-term check did not pass, so this push to {self.public_url} is refused.",
+            result.stderr,
+        )
+        self.assertEqual(self.sink_state(self.public_url), before, "a refused push changed the sink")
+        self.assert_hidden(result)
 
     leaky_tag_message = f"clean first line\n{TEST_TERMS[0]}\n"
     clean_tag_message = "clean first line\nclean second line\n"

@@ -49,6 +49,8 @@ Executables covering several areas:
     created or updated ref names are outgoing before it reads the list. It scans a direct object
     only when the destination does not have it and no outgoing commit includes it. A push that
     creates or updates no ref (one that only deletes, or changes nothing) does not read the list.
+    A merge is read from its files, not from Git's combined diff, which is wrong past 32 parents,
+    and `diff` refuses combined diff text (exit 4); `shims/AGENTS.md` has the rule.
     An outgoing tag uses its `encoding` header, then strict UTF-8,
     then the pushing repository's `i18n.commitEncoding`; outgoing commit text uses strict UTF-8
     after Git's conversion, then that same configured encoding. An unknown encoding or bytes that
