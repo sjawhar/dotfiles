@@ -1205,8 +1205,17 @@ index 0000000,0000000,0000000..1111111
         with self.assertRaisesRegex(AssertionError, "process group were killed"):
             self.launch(["/bin/sh", "-c", f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; wait"], timeout=2)
         sleeper = Path(f"/proc/{int(pid_file.read_text(encoding='ascii'))}/stat")
+
+        def gone() -> bool:
+            # One read: a process reaped after an exists() check makes the read fail with ESRCH, which is gone too
+            # (ProcessLookupError in the 14:18Z suite run of 2026-11-17).
+            try:
+                return sleeper.read_text(encoding="ascii").rsplit(")", 1)[1].split()[0] == "Z"
+            except (ProcessLookupError, FileNotFoundError):
+                return True
+
         for _ in range(100):
-            if not sleeper.exists() or sleeper.read_text(encoding="ascii").rsplit(")", 1)[1].split()[0] == "Z":
+            if gone():
                 break
             time.sleep(0.05)
         else:
