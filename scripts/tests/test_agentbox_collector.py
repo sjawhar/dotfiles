@@ -918,6 +918,13 @@ exit "$rc"''')
             "an open file": ("fd/3", self.boxes / OLD / "repo" / "build.log", "holds a file in it open"),
             "an open file since deleted": ("fd/4", f"{self.boxes / OLD / 'repo' / 'gone.log'} (deleted)",
                                            "holds a file in it open"),
+            # The kernel names an open directory that is gone with " (deleted)" after its path. The box's
+            # own directory, or its run dir, held open that way still holds the box. A file under the
+            # box does not pin the strip (`<box>/x (deleted)` is under `<box>` either way); these do.
+            "the box's directory, held open since deleted": ("fd/6", f"{self.boxes / OLD} (deleted)",
+                                                             "holds a file in it open"),
+            "its run dir, held open since deleted": ("fd/7", f"{self.run_base / OLD} (deleted)",
+                                                     "holds a file in it open"),
             "a file of its run dir": ("fd/5", self.run_base / OLD / "run-user" / "agentbox-session",
                                       "holds a file in it open"),
             "its program": ("exe", self.boxes / OLD / "repo" / "target" / "tool", "runs a program from it"),
@@ -994,6 +1001,34 @@ exit "$rc"''')
         self.assertTrue(self.waiters(), "the waiter must still be waiting for the test to mean anything")
         self.assertNotIn("another collector runs", second.stdout, second.stdout)
         self.assertEqual(self.gone(second_box), [], second.stdout + second.stderr)
+
+    def test_a_detached_learn_child_does_not_hold_the_collector_lock(self) -> None:
+        """unenroll_box starts a second kind of detached child besides the session waiter: the one
+        that learns and revokes the box's own open enroll attempts (ENROLL_OPEN, kind `own`). Run with
+        fd 8 holding the collector's lock, as cmd_collect holds it, and with a learn call that waits,
+        that child must not hold the lock once its parent lets go: a collector started while it waits
+        runs and removes its leftover."""
+        write_stub(self.stubs, "agent-secrets",
+                   'printf "%s\\n" "$*" >>"$STUB_SECRETS"; case "$1" in enroll) sleep 60 ;; esac; exit 1')
+        lock_dir = self.root / "collect-logs"
+        lock_dir.mkdir()
+        started = self.run_bash(
+            f'exec 8>>"{lock_dir / "collect.lock"}"; flock -n 8 || exit 9\n'
+            f'ENROLL_OPEN=("own runtime-{OLD} SHA256:own-thumbprint")\n'
+            f'unenroll_box {OLD}')
+        self.addCleanup(self.end_waiters)
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        for _ in range(100):
+            if "enroll --helper" in self.stub_log("STUB_SECRETS"):
+                break
+            time.sleep(0.05)
+        self.assertIn("enroll --helper", self.stub_log("STUB_SECRETS"), "the learn child never made its call")
+        self.assertTrue(self.waiters(), "the learn child must still be waiting for the test to mean anything")
+        self.leftover(OLD)
+        result = self.collect()
+        self.assertTrue(self.waiters(), "the learn child must still be waiting for the test to mean anything")
+        self.assertNotIn("another collector runs", result.stdout, result.stdout)
+        self.assertEqual(self.gone(OLD), [], result.stdout + result.stderr)
 
     def waiters(self) -> list[int]:
         """The pids of this test's unenroll waiters: `agentbox-unenroll` processes naming its run base."""
