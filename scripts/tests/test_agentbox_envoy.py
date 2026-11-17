@@ -49,6 +49,8 @@ NO_HOST = (
     "check_box_disk_space() { :; };\n"
     f'ensure_network() {{ NETWORK_GATEWAY={GATEWAY} NETWORK_SUBNET=172.31.0.0/16; }}\n'
     "mount_args() { :; }; clone_checkout() { :; }; close_box() { :; }\n"
+    # The collector every launch starts would walk this host's own run dir: never from a test.
+    "collect_start() { :; }\n"
 )
 
 

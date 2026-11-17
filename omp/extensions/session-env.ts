@@ -111,8 +111,11 @@
 // answers (a PATH wrapper that loops) falls back to jj's default user config
 // paths instead of holding the session past omp's 30 s extension-handler
 // deadline.
+//
+// In an agent box it also tells the box's runner (scripts/agentbox-run.ts) which session the box
+// runs, in one file the runner restarts from and nothing else: see BOX_SESSION_FILE below.
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -308,20 +311,78 @@ async function dropOverlays(): Promise<void> {
 	process.env.JJ_CONFIG = (process.env.JJ_CONFIG ? withoutOverlays(process.env.JJ_CONFIG) : "") || (await jjConfigBase());
 }
 
+// The session file of an agent box (dispatch://INFRA-1720, spec v13): `version=1`, this omp's
+// pid, the main session's id and its transcript path, one `key=value` per line. The box's runner
+// restarts the session this file names, resumed by that path, and refuses when there is none. It
+// used to guess instead -- the transcript omp held open, the newest file in a directory named
+// after the box, its own `--resume` flag -- and each guess was wrong for some session: one that
+// held no writer, worked in a shared tree, or had forked or switched since its launch.
+//
+// Only the omp the runner started writes it: AGENTBOX_RUNNER_PID is exported to every process in
+// the box, so an `omp -p` that a tool runs (whose parent is a shell) must not overwrite the
+// report of the session the box runs. Only for the main session: a subagent's and an advisor's
+// events reach these handlers in the same process, with `ctx.agent.kind === "sub"`. omp fires no
+// event when it changes a session's id silently or when /move moves its transcript, so turn_end,
+// each tool call and a timer write again whenever the id or path differs from the last report;
+// the in-box `agentbox restart` is itself a tool call, so the runner reads a current file. Each
+// write first saves the session (ensureOnDisk, as omp's own /new does), so a session with no
+// prompt yet has a transcript to resume. Written to a temporary file in the same directory and
+// renamed over the old one, so a reader never sees half a file.
+const IN_BOX = !!process.env.AGENTBOX_RUNNER_PID && process.env.AGENTBOX_RUNNER_PID === String(process.ppid);
+const BOX_SESSION_FILE = path.join(process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.()}`, "agentbox-session");
+const BOX_SESSION_INTERVAL_MS = Number(process.env.OMP_AGENTBOX_SESSION_MS) > 0 ? Number(process.env.OMP_AGENTBOX_SESSION_MS) : 10_000;
+
+type SessionSource = {
+	getSessionId?: () => string | undefined;
+	getSessionFile?: () => string | undefined;
+	ensureOnDisk?: () => Promise<void>;
+};
+type SessionContext = {
+	agent?: { kind: "main" | "sub" };
+	hasUI?: boolean;
+	ui?: { notify: (message: string, type?: "info" | "warning" | "error") => void };
+	sessionManager?: SessionSource;
+};
+// One per process: omp rebinds this extension to every subagent session, in the same process.
+/** The main session's manager, kept from the last main event, which the timer reads. */
+let boxSession: SessionSource | undefined;
+/** What this omp last wrote to the session file. */
+let boxReported: { id: string; file: string } | undefined;
+let boxTimerStarted = false;
+
+async function reportBoxSession(session: SessionSource, always: boolean): Promise<void> {
+	try {
+		const id = session.getSessionId?.();
+		const file = session.getSessionFile?.();
+		if (!id || !file) return; // `--no-session`: nothing to resume
+		if (!always && id === boxReported?.id && file === boxReported.file) return;
+		await session.ensureOnDisk?.();
+		// Read again after the save: a report that started later may already have written a newer
+		// id, and this one must not put the older one back.
+		const nowId = session.getSessionId?.();
+		const nowFile = session.getSessionFile?.();
+		if (!nowId || !nowFile || nowFile.includes("\n")) return;
+		const tmp = `${BOX_SESSION_FILE}.${process.pid}.tmp`;
+		writeFileSync(tmp, `version=1\npid=${process.pid}\nsession=${nowId}\nfile=${nowFile}\n`);
+		renameSync(tmp, BOX_SESSION_FILE);
+		boxReported = { id: nowId, file: nowFile };
+	} catch {
+		// Never fatal for omp. Without a report the runner refuses a restart and says why.
+	}
+}
+
+async function reportBox(ctx: SessionContext, always: boolean): Promise<void> {
+	if (!IN_BOX || ctx.agent?.kind === "sub" || !ctx.sessionManager) return;
+	boxSession = ctx.sessionManager;
+	await reportBoxSession(ctx.sessionManager, always);
+}
+
 export default function (pi: ExtensionAPI) {
 	const ghConfigDir = agentGhConfigDir();
 	if (ghConfigDir) process.env.GH_CONFIG_DIR = ghConfigDir;
 	const googleCredentials = agentGoogleCredentials();
 	if (googleCredentials) process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
-	const set = async (
-		_event: unknown,
-		ctx: {
-			agent?: { kind: "main" | "sub" };
-			hasUI?: boolean;
-			ui?: { notify: (message: string, type?: "info" | "warning" | "error") => void };
-			sessionManager?: { getSessionFile?: () => string | undefined };
-		},
-	) => {
+	const set = async (_event: unknown, ctx: SessionContext) => {
 		if (ctx.agent?.kind === "sub") return; // a subagent keeps its family's identity
 		const file = ctx.sessionManager?.getSessionFile?.();
 		const id = file ? attributedSessionId(file) : undefined;
@@ -366,7 +427,22 @@ export default function (pi: ExtensionAPI) {
 			process.env.JJ_CONFIG = base; // degrade to no trailer, never a stale one
 		}
 	};
-	pi.on("session_start", set);
-	pi.on("session_switch", set);
-	pi.on("session_branch", set);
+	// The box's report first: `set` can wait on jj for seconds.
+	const onSession = async (event: unknown, ctx: SessionContext) => {
+		await reportBox(ctx, true);
+		await set(event, ctx);
+	};
+	pi.on("session_start", onSession);
+	pi.on("session_switch", onSession);
+	pi.on("session_branch", onSession);
+	if (IN_BOX) {
+		pi.on("turn_end", (_event: unknown, ctx: SessionContext) => reportBox(ctx, false));
+		pi.on("tool_call", (_event: unknown, ctx: SessionContext) => reportBox(ctx, false));
+		if (!boxTimerStarted) {
+			boxTimerStarted = true;
+			setInterval(() => {
+				if (boxSession) void reportBoxSession(boxSession, false);
+			}, BOX_SESSION_INTERVAL_MS).unref();
+		}
+	}
 }

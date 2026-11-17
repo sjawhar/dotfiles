@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# omp-session-dsn -- keep this machine's omp session-store DSN in tmpfs, where every agent box sees
-# it (dispatch://INFRA-1192).
+# omp-session-dsn -- keep this machine's omp session-store DSN in tmpfs, for the host's sessions
+# (dispatch://INFRA-1192).
 #
 # omp's Postgres session store reads its connection string from the file `session.sql.dsnFile`
 # names. The database is omp_sessions on agents-postgres, which agent-infra's postgres/ declares
@@ -12,10 +12,10 @@
 # (postgres/README.md, "The developer boxes").
 #
 # It is written 0600 to $XDG_RUNTIME_DIR/omp-session-sql/dsn, which is tmpfs, so it is gone after a
-# reboot and the timer puts it back; scripts/agentbox binds that directory into every box at the
-# same path, the route the gateway key already takes, and relays the proxy's 127.0.0.1:5432 in on
-# the same address and port, so one DSN serves the host and every box. A directory, not a bare
-# file, so the rename below reaches a box that was started before it.
+# reboot and the timer puts it back. It serves host sessions only: scripts/agentbox gives a box no
+# route to the database, neither this directory nor the proxy's 127.0.0.1:5432
+# (dispatch://INFRA-1720/ask/16322992), so a box resumes a session only from its transcript file.
+# The file is replaced by a rename, so a reader never sees half of it.
 set -uo pipefail
 # The unit runs in systemd's non-login environment. shims/gcloud finds the SDK on either machine.
 export PATH="$HOME/.dotfiles/shims:$HOME/.dotfiles/bin:$HOME/.mise/shims:$PATH"

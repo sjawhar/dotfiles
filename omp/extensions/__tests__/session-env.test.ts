@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, watch, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { agentGhConfigDir, agentGoogleCredentials, userConfigChain } from "../session-env";
@@ -292,5 +292,216 @@ describe("the identity a session exports", () => {
 			{ FAKE_JJ_FAIL: "1" },
 		);
 		expect(exported.jjConfig).toBe(`${path.join(home, ".jjconfig.toml")}:${path.join(home, ".config", "jj", "config.toml")}:${overlayOf(ROOT)}`);
+	});
+});
+
+describe("the session file of a box", () => {
+	// The box's runner (scripts/agentbox-run.ts) restarts the session this file names and no other
+	// (dispatch://INFRA-1720), so it must name the main session of the omp the runner started, and
+	// a reader must never see half of it. The timer rows wait in real time: the timer is the
+	// extension's own setInterval, in the driver's process, where no fake clock reaches.
+	const A = "01a1e000-0000-7000-8000-00000000000a";
+	const B = "01a1e000-0000-7000-8000-00000000000b";
+	const C = "01a1e000-0000-7000-8000-00000000000c";
+	const SUB = "01a1e000-0000-7000-8000-0000000000aa";
+	const ADVISOR = "01a1e000-0000-7000-8000-0000000000ad";
+	const MAIN = { kind: "main", id: "Main" } as const;
+	const SUBAGENT = { kind: "sub", id: "0-Task" } as const;
+	// How an advisor reaches the advising session's handlers (omp's ExtensionAgentIdentity).
+	const ADVISING = { kind: "sub", id: "advisor" } as const;
+	const HOUR = 3_600_000;
+	let home = "";
+	let runtime = "";
+	const transcript = (id: string) => path.join(home, ".omp", "agent", "sessions", "--work--", `2026-11-15T10-00-00-000Z_${id}.jsonl`);
+	const reportOf = (pid: number, id: string, file: string) => `version=1\npid=${pid}\nsession=${id}\nfile=${file}\n`;
+	beforeEach(() => {
+		home = mkdtempSync(path.join(os.tmpdir(), "session-env-box-"));
+		dirs.push(home);
+		runtime = path.join(home, "run");
+		mkdirSync(runtime);
+	});
+
+	type Agent = { kind: "main" | "sub"; id: string };
+	type Step =
+		| { event: string; agent: Agent; manager: string }
+		| { set: string; id?: string; file?: string }
+		| { sleep: number }
+		| { hold: "open" | "read" };
+	type Snapshot = { content: string; ino: number } | null;
+	type Run = {
+		pid: number;
+		snapshots: Snapshot[];
+		saved: { manager: string; id: string | null; held: string | null }[];
+		holds: (string | null)[];
+	};
+	/**
+	 * One script of events in a fresh process (session-env-file-driver.ts). `runner` is where
+	 * AGENTBOX_RUNNER_PID points: at the process's own parent (the omp a box's runner started), at
+	 * its grandparent through a shell (an `omp -p` that a tool runs in a box), or nowhere (an omp
+	 * outside any box).
+	 */
+	async function run(
+		script: { managers: Record<string, { id?: string; file?: string }>; steps: Step[] },
+		{ runner = "parent", intervalMs = HOUR }: { runner?: "parent" | "grandparent" | "none"; intervalMs?: number } = {},
+	): Promise<Run> {
+		const env: Record<string, string | undefined> = {
+			...process.env,
+			HOME: home,
+			XDG_RUNTIME_DIR: runtime,
+			// A chain to inherit and a gh directory of its own: no jj and no gh-agent-config runs.
+			JJ_CONFIG: "/u/config.toml",
+			GH_CONFIG_DIR: path.join(home, "gh"),
+			OMP_AGENTBOX_SESSION_MS: String(intervalMs),
+		};
+		for (const key of ["OMP_SESSION_ID", "PI_COMMIT_TRAILERS", "AGENTBOX_RUNNER_PID", "XDG_CONFIG_HOME", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS"]) {
+			delete env[key];
+		}
+		if (runner !== "none") env.AGENTBOX_RUNNER_PID = String(process.pid);
+		const driver = [process.execPath, path.join(import.meta.dir, "session-env-file-driver.ts"), JSON.stringify(script)];
+		// Two commands, so the shell forks the driver rather than exec'ing it.
+		const argv = runner === "grandparent" ? ["sh", "-c", '"$@"; exit $?', "sh", ...driver] : driver;
+		const child = Bun.spawn(argv, { env, stdout: "pipe", stderr: "pipe" });
+		const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		if (code !== 0) throw new Error(`driver exited ${code}: ${err}`);
+		return JSON.parse(out) as Run;
+	}
+
+	test("sessionFileFollowsNewResumeAndBranch: each names its session whole, saved first, through a rename in the same directory", async () => {
+		const seen: string[] = [];
+		const watcher = watch(runtime, (_kind, name) => {
+			if (name) seen.push(String(name));
+		});
+		// A reader of the session file holds a descriptor across the two writes that follow. A
+		// rename gives the name a NEW file, so that descriptor still reads the whole report it
+		// opened; a write in place would read through to the new bytes, and between the
+		// truncation and the write to none of them. The read is taken after both writes have
+		// returned, so nothing here depends on when a reader is scheduled.
+		const { pid, snapshots, saved, holds } = await run({
+			managers: { main: { id: A, file: transcript(A) } },
+			steps: [
+				{ event: "session_start", agent: MAIN, manager: "main" },
+				{ hold: "open" },
+				{ set: "main", id: B, file: transcript(B) },
+				{ event: "session_switch", agent: MAIN, manager: "main" },
+				{ set: "main", id: C, file: transcript(C) },
+				{ event: "session_branch", agent: MAIN, manager: "main" },
+				{ hold: "read" },
+			],
+		});
+		watcher.close();
+		expect(holds).toEqual([reportOf(pid, A, transcript(A))]);
+		expect(snapshots.map((s) => s?.content ?? null)).toEqual([
+			reportOf(pid, A, transcript(A)),
+			reportOf(pid, A, transcript(A)),
+			reportOf(pid, A, transcript(A)),
+			reportOf(pid, B, transcript(B)),
+			reportOf(pid, B, transcript(B)),
+			reportOf(pid, C, transcript(C)),
+			reportOf(pid, C, transcript(C)),
+		]);
+		// Each save comes before the write it is for: the file still names the session before.
+		expect(saved).toEqual([
+			{ manager: "main", id: A, held: null },
+			{ manager: "main", id: B, held: reportOf(pid, A, transcript(A)) },
+			{ manager: "main", id: C, held: reportOf(pid, B, transcript(B)) },
+		]);
+		// A rename puts a new file in place; a write in place keeps the old one.
+		expect(snapshots[3]?.ino).not.toBe(snapshots[0]?.ino);
+		expect(snapshots[5]?.ino).not.toBe(snapshots[3]?.ino);
+		expect(seen).toContain(`agentbox-session.${pid}.tmp`);
+		expect(readdirSync(runtime)).toEqual(["agentbox-session"]);
+	}, 30_000);
+
+	const everyTrigger = (agent: Agent, manager: string): Step[] =>
+		["session_start", "session_switch", "session_branch", "turn_end", "tool_call"].map((event) => ({ event, agent, manager }));
+
+	test.each([
+		["an omp -p that a tool runs in a box, whose parent is a shell and not the runner", "grandparent"],
+		["an omp outside any box", "none"],
+	] as const)("noSessionFileFromANestedOmp: %s writes no session file and saves no session", async (_name, runner) => {
+		const { snapshots, saved } = await run(
+			{
+				managers: { main: { id: A, file: transcript(A) } },
+				steps: [
+					...everyTrigger(MAIN, "main"),
+					{ set: "main", id: B, file: transcript(B) },
+					...everyTrigger(MAIN, "main"),
+					{ sleep: 300 },
+				],
+			},
+			{ runner, intervalMs: 50 },
+		);
+		expect(snapshots.filter((s) => s !== null)).toEqual([]);
+		expect(saved).toEqual([]);
+		expect(readdirSync(runtime)).toEqual([]);
+	}, 15_000);
+
+	test.each([
+		["a subagent's", SUBAGENT, SUB],
+		["an advisor's", ADVISING, ADVISOR],
+	] as const)("%s events, and the timer after them, leave the main session's file as it was", async (_name, agent, id) => {
+		const { pid, snapshots, saved } = await run(
+			{
+				managers: { main: { id: A, file: transcript(A) }, other: { id, file: transcript(id) } },
+				steps: [{ event: "session_start", agent: MAIN, manager: "main" }, ...everyTrigger(agent, "other"), { sleep: 300 }],
+			},
+			{ intervalMs: 50 },
+		);
+		expect(snapshots.map((s) => s?.content)).toEqual(snapshots.map(() => reportOf(pid, A, transcript(A))));
+		expect(snapshots.map((s) => s?.ino)).toEqual(snapshots.map(() => snapshots[0]?.ino));
+		expect(saved).toEqual([{ manager: "main", id: A, held: null }]);
+	}, 15_000);
+
+	test.each([
+		["turn_end", { event: "turn_end", agent: MAIN, manager: "main" }, HOUR],
+		["tool_call", { event: "tool_call", agent: MAIN, manager: "main" }, HOUR],
+		["the timer", { sleep: 400 }, 50],
+	] as const)("%s rewrites the file when the session's id or path changed with no event, and only then", async (_name, trigger, intervalMs) => {
+		const moved = path.join(home, "moved", `2026-11-15T10-00-00-000Z_${B}.jsonl`);
+		const { pid, snapshots, saved } = await run(
+			{
+				managers: { main: { id: A, file: transcript(A) } },
+				steps: [
+					{ event: "session_start", agent: MAIN, manager: "main" },
+					trigger,
+					// omp's silent change of id: no event says so.
+					{ set: "main", id: B, file: transcript(B) },
+					trigger,
+					// A /move: the same session, its transcript somewhere else.
+					{ set: "main", id: B, file: moved },
+					trigger,
+					trigger,
+					// An id that changes while the path stays, which the report must follow too.
+					{ set: "main", id: C, file: moved },
+					trigger,
+				],
+			},
+			{ intervalMs },
+		);
+		expect(snapshots.map((s) => s?.content)).toEqual([
+			reportOf(pid, A, transcript(A)),
+			reportOf(pid, A, transcript(A)),
+			reportOf(pid, A, transcript(A)),
+			reportOf(pid, B, transcript(B)),
+			reportOf(pid, B, transcript(B)),
+			reportOf(pid, B, moved),
+			reportOf(pid, B, moved),
+			reportOf(pid, B, moved),
+			reportOf(pid, C, moved),
+		]);
+		// Unchanged, nothing is written or saved.
+		expect(snapshots[1]?.ino).toBe(snapshots[0]?.ino);
+		expect(snapshots[6]?.ino).toBe(snapshots[5]?.ino);
+		expect(saved).toEqual([
+			{ manager: "main", id: A, held: null },
+			{ manager: "main", id: B, held: reportOf(pid, A, transcript(A)) },
+			{ manager: "main", id: B, held: reportOf(pid, B, transcript(B)) },
+			{ manager: "main", id: C, held: reportOf(pid, B, moved) },
+		]);
+	}, 15_000);
+
+	test("a session with no transcript (--no-session) writes no session file", async () => {
+		const { snapshots } = await run({ managers: { main: { id: A } }, steps: everyTrigger(MAIN, "main") });
+		expect(snapshots).toEqual([null, null, null, null, null]);
 	});
 });

@@ -74,6 +74,10 @@ def options(state: Path, **overrides) -> argparse.Namespace:
         "print_alert": False,
         "consumers": False,
         "json": False,
+        # d5e75142 added the dying-cgroup reclaim, which every run reads first, and every run here
+        # then died on the missing options.reclaim. Off: a test must never write to this host's
+        # /sys/fs/cgroup/user.slice/memory.reclaim.
+        "reclaim": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
