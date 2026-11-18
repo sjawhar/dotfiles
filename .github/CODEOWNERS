@@ -1,0 +1,5 @@
+# Agent instruction files and skills: a pull request that changes one requests the owner's review.
+**/AGENTS.md @sjawhar
+**/CLAUDE.md @sjawhar
+**/SKILL.md @sjawhar
+skills/ @sjawhar
