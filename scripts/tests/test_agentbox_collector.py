@@ -205,6 +205,8 @@ exit "$rc"''')
             "STUB_UNITS": str(self.root / "STUB_UNITS"),
         }
         self.idle_process()
+        # Paths unprivileged() gives to another uid than the scratch one (make_foreign).
+        self.foreign_paths: list[Path] = []
 
     # ── fixtures ────────────────────────────────────────────────────────────────────────────
     def run_bash(self, script: str, extra_env: dict[str, str] | None = None, *,
@@ -253,6 +255,11 @@ exit "$rc"''')
             for name in dirs + files:
                 os.chown(Path(root) / name, self.SCRATCH_UID, self.SCRATCH_UID, follow_symlinks=False)
         os.chown(self.root, self.SCRATCH_UID, self.SCRATCH_UID)
+        for path in self.foreign_paths:
+            for root, dirs, files in os.walk(path):
+                for name in dirs + files:
+                    os.chown(Path(root) / name, self.FOREIGN_UID, self.FOREIGN_UID, follow_symlinks=False)
+            os.chown(path, self.FOREIGN_UID, self.FOREIGN_UID)
         argv = [setpriv, f"--reuid={self.SCRATCH_UID}", f"--regid={self.SCRATCH_UID}", "--clear-groups", "--"]
         reach = subprocess.run([*argv, "test", "-r", str(AGENTBOX), "-a", "-w", str(self.root)],
                                capture_output=True, text=True, check=False)
@@ -821,12 +828,14 @@ exit "$rc"''')
         walk's find could not open it in any dead box, and c2237788 kept every one as "cannot tell
         how old its files are". The age check is for files this user is still making; nothing under
         a directory another user owns and this user may not open is that. Such a directory is left
-        out of the age, and the pass names it. A directory this user owns and still may not read
-        (or any other find error) keeps the box as before."""
+        out of the age, and the pass names it. A directory this user owns that it still may not read
+        once its own mode lets it in (here find says so of one of mode 755, as for an I/O error), or
+        any other find error, keeps the box as before."""
         runc = self.run_base / OLD / "run-user" / "runc"
         cases = {
             "runc's directory, root's": ({"STUB_FIND_DENY": str(runc), "STUB_FIND_ROOT_OWNED": str(runc)}, True),
-            "a directory of this user's that it may not read": ({"STUB_FIND_DENY": str(runc)}, False),
+            "a directory of this user's that it may not read for a reason other than its mode": (
+                {"STUB_FIND_DENY": str(runc)}, False),
         }
         for name, (env, goes) in cases.items():
             with self.subTest(name):
@@ -845,6 +854,171 @@ exit "$rc"''')
                     self.assertTrue((self.boxes / OLD).exists(), said)
                     self.assertIn(f"{OLD} not removed: cannot tell how old its files are: find: '{runc}': Permission denied", said)
                     self.assertNotIn(f"{OLD} removed", said)
+
+    def shut(self, box: str, mode: int, *, nested: bool = False, young: bool = False) -> Path:
+        """What a permission-error test leaves in a box's /tmp: `tmp/.tmpn6wbon/parent/leaf`, a
+        directory of mode MODE with a file in it, every path two hours old. NESTED: the file is in a
+        directory of mode MODE inside it. YOUNG: the file is new. Returns the file."""
+        leaf = self.boxes / box / "tmp" / ".tmpn6wbon" / "parent" / "leaf"
+        inner = leaf / "inner" if nested else leaf
+        inner.mkdir(parents=True)
+        made = inner / "fixture.txt"
+        made.write_text("x\n", encoding="utf-8")
+        age(self.boxes / box, 2)
+        if young:
+            os.utime(made, None)
+        for d in ([inner, leaf] if nested else [leaf]):
+            d.chmod(mode)
+        return made
+
+    def test_a_directory_whose_own_mode_shuts_this_user_out_is_opened_and_its_age_read(self) -> None:
+        """Tests leave directories that shut their own owner out by mode: a permission-error
+        test's `<tmp>/.tmpXXXXXX/parent/leaf`, an ask gate test's
+        `zzprobe-*/sessions/ses-1/askgate-verdicts-v*`. agentbox-6524e39d61ae on sami-devbox held 61
+        such directories of mode 000 in its /tmp, every one its own user's, and the collector said
+        of it "not removed: cannot tell how old its files are: find: '…/tmp/.tmpn6wbon/parent/leaf':
+        Permission denied" from its session's death on 2026-11-12 until it was removed by hand: no
+        box whose agent ran such a test could ever be collected. Once no process stands in a box
+        whose container and launcher are gone, the collector gives this user back its own such
+        directories and judges the box's age by what is in them: a young file there keeps the box.
+        find names a directory of mode 000, 100 or 111 itself, and the entries of one of mode 400 or
+        600, which it may list but not enter."""
+        cases = {
+            # name: (mode, nested, young, removed, directories opened)
+            "mode 000 (a permission-error test's leaf)": (0o000, False, False, True, 1),
+            "mode 111": (0o111, False, False, True, 1),
+            "mode 100": (0o100, False, False, True, 1),
+            "mode 400: it may list it but not enter it": (0o400, False, False, True, 1),
+            "mode 600: it may list it but not enter it": (0o600, False, False, True, 1),
+            "mode 000 inside mode 000": (0o000, True, False, True, 2),
+            "a young file in it keeps the box": (0o000, False, True, False, 1),
+        }
+        for name, (mode, nested, young, removed, opened) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                self.leftover(OLD)
+                made = self.shut(OLD, mode, nested=nested, young=young)
+                # Root reads a directory of mode 000: as root, this runs as a scratch uid that owns the fixture.
+                result = self.run_bash("cmd_collect", unprivileged=True)
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, said)
+                self.assertNotIn("cannot tell how old", said)
+                self.assertIn(f"{OLD}: opened {opened} of its directories whose own mode shut this user out", said)
+                if removed:
+                    self.assertEqual(self.gone(OLD), [], said)
+                    self.assertIn(f"{OLD} removed", result.stdout)
+                else:
+                    self.assertTrue(made.exists(), said)
+                    self.assertIn(f"{OLD} not removed: {made} is younger than 60 minutes", said)
+
+    def test_a_box_that_something_keeps_keeps_its_shut_directories_shut(self) -> None:
+        """The collector opens a box's directories only once nothing else keeps the box: a box
+        whose container runs or is being made, whose launcher runs, in which a process stands, or
+        for which the walk of processes cannot tell, keeps its directories as its tests left them."""
+        start = (Path("/proc") / str(os.getpid()) / "stat").read_text().rsplit(")", 1)[1].split()[19]
+
+        def launcher_runs() -> None:
+            d = self.proc / "4242"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "stat").write_text(f"4242 (agentbox) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0\n",
+                                    encoding="utf-8")
+
+        def stands_in(path: Path) -> None:
+            d = self.proc / "5151"
+            d.mkdir(parents=True, exist_ok=True)
+            os.symlink(path, d / "cwd")
+            (d / "cgroup").write_text("0::/user.slice/app.slice/bash.scope\n", encoding="utf-8")
+
+        cases = {
+            "its container runs": (lambda: (self.set_containers(OLD), self.set_container_state("running")),
+                                   "its container is running"),
+            "its container is being made": (lambda: (self.set_containers(OLD), self.set_container_state("created")),
+                                            "its container is created"),
+            "its launcher runs": (launcher_runs, "its launcher, pid 4242, runs"),
+            "a process stands in its directory": (lambda: stands_in(self.boxes / OLD / "repo"),
+                                                  "process 5151 has its working directory in it"),
+            "a process's working directory cannot be read": (lambda: self.unreadable_cwd(),
+                                                             "cannot tell whether a process stands in it"),
+        }
+        for name, (make, why) in cases.items():
+            with self.subTest(name):
+                self.forget(OLD)
+                shutil.rmtree(self.proc)
+                self.proc.mkdir()
+                self.idle_process()
+                self.set_containers()
+                self.set_container_state("exited")
+                self.leftover(OLD, launcher=f"launcher=4242\nlauncher_start={start}\n")
+                made = self.shut(OLD, 0o000)
+                make()
+                result = self.run_bash("cmd_collect", unprivileged=True)
+                said = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 0, said)
+                self.assertIn(f"{OLD} not removed: {why}", said)
+                self.assertEqual(stat.S_IMODE(os.lstat(made.parent).st_mode), 0o000, said)
+                self.assertNotIn("opened", said)
+
+    FOREIGN_UID = 65533
+
+    def make_foreign(self, path: Path) -> None:
+        """PATH and everything in it belong to a uid other than the collector's from now on. As
+        root, unprivileged() gives them to FOREIGN_UID after it gives the rest of the fixture to the
+        scratch uid; as any other user, passwordless sudo gives them, and removes them at the end.
+        With neither, this user cannot make another user's directory."""
+        if os.geteuid() == 0:
+            self.foreign_paths.append(path)
+            return
+        if subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode != 0:
+            self.skipTest("another user's directory needs root or passwordless sudo")
+        subprocess.run(["sudo", "-n", "chown", "-R", f"{self.FOREIGN_UID}:{self.FOREIGN_UID}", str(path)],
+                       check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", str(path)], check=False, capture_output=True)
+
+    def test_a_shut_directory_another_user_owns_is_not_opened(self) -> None:
+        """The collector opens only this user's own directories. Another uid's directory of mode 000
+        stays as it was: it is left out of the age, as runc's state directory is, and the removal
+        cannot delete what is in it, so the box is never said to be removed and the line names what
+        is left."""
+        self.leftover(OLD)
+        made = self.shut(OLD, 0o000)
+        self.make_foreign(made.parent)
+        result = self.run_bash("cmd_collect", unprivileged=True)
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, said)
+        here = os.lstat(made.parent)
+        self.assertEqual((stat.S_IMODE(here.st_mode), here.st_uid), (0o000, self.FOREIGN_UID), said)
+        self.assertNotIn("opened", said)
+        self.assertIn(f"not counted in its age, since another user owns it and this user may not read it: "
+                      f"{made.parent} (uid {self.FOREIGN_UID})", said)
+        self.assertIn(f"removing {OLD} failed", said)
+        self.assertNotIn(f"{OLD} removed", said)
+        self.assertTrue((self.boxes / OLD).exists(), said)
+
+    def test_beside_its_own_shut_directory_another_user_s_stays_shut(self) -> None:
+        """The walk that opens a box's own shut directories passes over another uid's directory of
+        mode 000 in the same box: the box's own directory is opened, the other user's stays as it
+        was and is left out of the age, and the removal cannot delete what is in it, so the box is
+        never said to be removed."""
+        foreign = self.boxes / OLD / "tmp" / "zzprobe-1" / "sessions" / "ses-1" / "askgate-verdicts-v1"
+        self.leftover(OLD)
+        foreign.mkdir(parents=True)
+        (foreign / "verdict.json").write_text("{}\n", encoding="utf-8")
+        made = self.shut(OLD, 0o000)  # ages the whole box, the other user's directory included
+        foreign.chmod(0o000)
+        self.make_foreign(foreign)
+        result = self.run_bash("cmd_collect", unprivileged=True)
+        said = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, said)
+        here = os.lstat(foreign)
+        self.assertEqual((stat.S_IMODE(here.st_mode), here.st_uid), (0o000, self.FOREIGN_UID), said)
+        self.assertIn(f"{OLD}: opened 1 of its directories whose own mode shut this user out", said)
+        self.assertIn(f"not counted in its age, since another user owns it and this user may not read it: "
+                      f"{foreign} (uid {self.FOREIGN_UID})", said)
+        self.assertNotIn("cannot tell how old", said)
+        self.assertFalse(made.exists(), said)
+        self.assertIn(f"removing {OLD} failed", said)
+        self.assertNotIn(f"{OLD} removed", said)
+        self.assertTrue((self.boxes / OLD).exists(), said)
 
     def test_only_a_container_s_process_or_the_user_manager_is_left_uncounted(self) -> None:
         """The kernel refuses a process's cwd to a reader without CAP_SYS_PTRACE when its ids are

@@ -3035,7 +3035,10 @@ close_box_dir() {
 # What it cannot read is no answer: an age walk find could not finish, a process of this user whose
 # working directory it cannot read (but a container's and the user's systemd manager, which it
 # names; collect_read_cwds), or a walk of the processes that found none stops it removing
-# the box that pass. Each box it does not remove gets one line naming why and the command that
+# the box that pass. Two exceptions in the age walk, each named in the pass: a directory another
+# user owns and this user may not open is left out of the age, and a directory this user owns whose
+# own mode shuts it out (a test's fixture) is opened once no process stands in the box, and read
+# (collect_box). Each box it does not remove gets one line naming why and the command that
 # removes it (collect_not_removed), and a removal that fails one line naming what is still there
 # and that command; no line says a box was kept (dispatch://INFRA-1720, R8).
 # Before it deletes $RUN_BASE/<box>, which holds the box's enrollment files, it runs unenroll_box
@@ -3164,6 +3167,29 @@ collect_unreadable_owner() {
     printf '%s\n' "$owner"
 }
 
+# collect_shut_dir PATH: status 0 when PATH, a path find said this user may not read, is a directory
+# this user owns whose own mode denies it read or search, or an entry of one. find names a directory
+# of mode 000, 100 or 111 itself, and each entry of one of mode 400 or 600, which it may list but not
+# enter.
+collect_shut_dir() {
+    local d me
+    me="$(id -u)"
+    for d in "$1" "${1%/*}"; do
+        [[ -n "$(find "$d" -maxdepth 0 -type d -user "$me" ! -perm -u+rx -print 2>/dev/null)" ]] && return 0
+    done
+    return 1
+}
+
+# collect_open_own PATH...: give this user read and search on each directory under the PATHs that it
+# owns and whose own mode denies it either, and print how many it opened. find runs chmod on a
+# directory before it reads it, so a directory shut inside another is opened in the same walk.
+# Another user's directory is never touched.
+collect_open_own() {
+    local n
+    n="$(find "$@" -type d -user "$(id -u)" ! -perm -u+rx -exec chmod u+rx {} \; -printf . 2>/dev/null)" || true
+    printf '%s\n' "${#n}"
+}
+
 # collect_status FILE: a /proc/<pid>/status (world-readable) as `<uid×4>|<gid×4>|<CapPrm>|<pid
 # namespaces>`: the four uids and gids (real, effective, saved, filesystem), the permitted
 # capabilities in hex, and how many pid namespaces deep the process is (NSpid's count). Nothing
@@ -3213,6 +3239,21 @@ collect_holder() {
     return 1
 }
 
+# collect_in_use BOX CONTAINER: status 0, after the line that says BOX is not removed, when a process
+# stands in BOX (collect_holder) or the walk of the processes cannot tell (COLLECT_CWDS_UNREAD).
+collect_in_use() {
+    local pid
+    if [[ -n "$COLLECT_CWDS_UNREAD" ]]; then
+        collect_not_removed "$1" "$2" "cannot tell whether a process stands in it: $COLLECT_CWDS_UNREAD"
+        return 0
+    fi
+    if pid="$(collect_holder "$1")"; then
+        collect_not_removed "$1" "$2" "process ${pid%%$'\t'*} ${pid#*$'\t'}"
+        return 0
+    fi
+    return 1
+}
+
 # box_remove_command BOX [CONTAINER]: the command line that removes what is left of BOX: its
 # container with its volumes when CONTAINER is not empty, its tmux relay unit, its filesystem when
 # mounted, and each place under the collector's roots. A line that says BOX was not removed names it,
@@ -3237,7 +3278,8 @@ collect_not_removed() {
 # collect_box BOX: delete BOX in every place it left, or say why it was not removed and the command
 # that removes it. Status 1 when it stays.
 collect_box() {
-    local box="$1" names state pid out rc young paths=() failed=0 left=()
+    local box="$1" names state pid out rc young paths=() failed=0 left=() line owner unread shut hidden=() opened=""
+    local denied="find: '(.+)': Permission denied$"
     if ! names="$(docker ps -a --filter "name=^${box}\$" --format '{{.Names}}' 2>/dev/null)"; then
         collect_not_removed "$box" "unknown" "docker could not be asked whether it has a container"
         return 1
@@ -3255,37 +3297,60 @@ collect_box() {
     fi
     mapfile -t paths < <(collect_paths "$box")
     if (( ${#paths[@]} )); then
-        # Every file of it, and one find cannot read is no proof the box is old, with one named
-        # exception. Every box that ran holds run-user/runc, the state directory runc makes at
+        # Every file of it, and one find cannot read is no proof the box is old, with two named
+        # exceptions. Every box that ran holds run-user/runc, the state directory runc makes at
         # container start, root's and mode 1700, which find may not open. The age is for files this
         # user is still making, and nothing under a directory another user owns and this user may
         # not open is that: such a directory is left out (collect_unreadable_owner), and the pass
-        # names it. Any other error, a directory of this user's that it may not read included, keeps
-        # the box. Each young path comes tagged, so an error line is never taken for one.
-        rc=0
-        out="$(LC_ALL=C find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
-        young="$(sed -n 's/^young\t//p' <<<"$out" | head -n 1)"
-        if [[ -n "$young" ]]; then
-            collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"
-            return 1
-        fi
-        if (( rc )); then
-            local line owner unread="" hidden=() denied="find: '(.+)': Permission denied$"
+        # names it. And tests leave directories that shut their own owner out by mode: a
+        # permission-error test's `<tmp>/.tmpXXXXXX/parent/leaf`, an ask gate test's
+        # `zzprobe-*/sessions/ses-1/askgate-verdicts-v*`. agentbox-6524e39d61ae on sami-devbox held
+        # 61 of mode 000 in its /tmp, all its user's, and was kept as "cannot tell how old its files
+        # are" from its session's death on 2026-11-12 until it was removed by hand. A denial at such
+        # a directory or at an entry of one (collect_shut_dir) makes the collector, once no process
+        # stands in the box (collect_in_use), give this user back read and search on every such
+        # directory of the box (collect_open_own), say how many, and read the age again. Any other
+        # error keeps the box: a directory of this user's that it may read and find still may not,
+        # and one the collector could not open, included. Each young path comes tagged, so an error
+        # line is never taken for one.
+        while :; do
+            rc=0
+            out="$(LC_ALL=C find "${paths[@]}" -mmin "-$COLLECT_AGE_MIN" -printf 'young\t%p\n' -quit 2>&1)" || rc=$?
+            young="$(sed -n 's/^young\t//p' <<<"$out" | head -n 1)"
+            if [[ -n "$young" ]]; then
+                collect_not_removed "$box" "$names" "$young is younger than $COLLECT_AGE_MIN minutes"
+                return 1
+            fi
+            (( rc )) || break
+            unread="" shut=0 hidden=()
             while IFS= read -r line; do
                 [[ -n "$line" ]] || continue
-                if [[ "$line" =~ $denied ]] && owner="$(collect_unreadable_owner "${BASH_REMATCH[1]}")"; then
-                    hidden+=("${BASH_REMATCH[1]} (uid $owner)")
-                else
-                    unread="$line"
-                    break
+                if [[ "$line" =~ $denied ]]; then
+                    if owner="$(collect_unreadable_owner "${BASH_REMATCH[1]}")"; then
+                        hidden+=("${BASH_REMATCH[1]} (uid $owner)")
+                        continue
+                    fi
+                    if [[ -z "$opened" ]] && collect_shut_dir "${BASH_REMATCH[1]}"; then
+                        shut=1
+                        continue
+                    fi
                 fi
+                unread="$line"
+                break
             done <<<"$out"
+            if [[ -z "$unread" ]] && (( shut )); then
+                collect_in_use "$box" "$names" && return 1
+                opened="$(collect_open_own "${paths[@]}")"
+                collect_say "$box: opened $opened of its directories whose own mode shut this user out"
+                continue
+            fi
             if [[ -n "$unread" || ${#hidden[@]} -eq 0 ]]; then
                 collect_not_removed "$box" "$names" "cannot tell how old its files are: ${unread:-find exited $rc}"
                 return 1
             fi
             collect_say "$box: not counted in its age, since another user owns it and this user may not read it: ${hidden[*]}"
-        fi
+            break
+        done
     elif [[ -n "$names" ]]; then
         # Nothing of it under the roots: the hour is the container's own, from its end.
         local finished ended
@@ -3308,14 +3373,7 @@ collect_box() {
         fi
         return 0
     fi
-    if [[ -n "$COLLECT_CWDS_UNREAD" ]]; then
-        collect_not_removed "$box" "$names" "cannot tell whether a process stands in it: $COLLECT_CWDS_UNREAD"
-        return 1
-    fi
-    if pid="$(collect_holder "$box")"; then
-        collect_not_removed "$box" "$names" "process ${pid%%$'\t'*} ${pid#*$'\t'}"
-        return 1
-    fi
+    collect_in_use "$box" "$names" && return 1
     if [[ -n "$names" ]]; then
         record_box_exit "$box" "$(box_record_get "$box" session)" ""
         if ! docker rm -v "$box" >/dev/null 2>&1; then
