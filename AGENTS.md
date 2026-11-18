@@ -14,6 +14,7 @@ jj-allowed-signers   # Signing keys trusted for local verification (every identi
 starship.toml        # Starship prompt config
 aerospace.toml       # macOS window manager (AeroSpace)
 mise.toml            # Tool version manager — pinned versions for all CLI tools
+pyrightconfig.json   # basedpyright: shims/tests resolve their sibling imports by the paths pytest uses
 omp/                 # oh-my-pi config, agents, and plugin pins (binary is mise-managed; wrapper in shims/)
 nvim/init.lua        # Neovim config (single file)
 install.sh           # Main installer — runs the installers it lists, in order
