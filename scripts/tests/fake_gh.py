@@ -23,7 +23,7 @@ from pathlib import Path
 ORIGIN = os.environ["FAKE_GH_ORIGIN"]
 STATE = Path(os.environ["FAKE_GH_STATE"])
 VALUED = {"-R", "--repo", "--json", "--jq", "-q", "--base", "-B", "--head", "-H", "--title", "-t", "--body", "-b",
-          "--match-head-commit", "--subject", "-t"}
+          "--match-head-commit", "--subject"}
 
 
 def load() -> dict:
