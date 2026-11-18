@@ -7,9 +7,11 @@ into a public pull request's body, and GitHub keeps that text in the body's edit
 
 Here a fake gh, first on PATH, records each call it gets (its arguments, its stdin and what kind of file that stdin
 is) and answers the visibility reads of scripts/github-repo-visibility from a directory of answers. The term list is
-the encrypted test list of leak_terms_fixture.py, so the canary below is a listed term (term 3 of that list) and no
-private term appears anywhere. Each refusal is shown with its control: the same text to a private repository goes out
-unchanged, with the same stdin."""
+the encrypted test list of leak_terms_fixture.py, so the canary below is a listed term and no private term appears
+anywhere. A refusal names the field, the line in it, the text that matched as it is written, the list that holds the
+term and the line it is on (dispatch://INFRA-4383, R2): the caller wrote that text, so showing it copies nothing to a
+new place. Each refusal is shown with its control: the same text to a private repository goes out unchanged, with the
+same stdin."""
 from __future__ import annotations
 
 import json
@@ -29,7 +31,7 @@ DOTFILES = SHIMS.parent
 GH = SHIMS / "gh"
 CHECK = DOTFILES / "scripts" / "leak-terms-check"
 CANARY = TEST_TERMS[2]
-CANARY_INDEX = 3
+GLOBAL = "the global list"
 # A term the list holds for cybermonklabs/* repositories only (leak_terms_fixture.SCOPED_TEST_TERMS).
 SCOPE, (SCOPED,) = next(iter(SCOPED_TEST_TERMS.items()))
 # The canary as a body would carry it: another letter case, in a sentence.
@@ -160,19 +162,27 @@ class GhLeakTerms(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return name
 
-    def assert_hidden(self, result: subprocess.CompletedProcess[bytes]) -> None:
-        """No output of the call holds either canary, in any letter case."""
-        for stream in (result.stdout, result.stderr):
-            for canary in (CANARY, SCOPED, *REGISTRY_TEST_TERMS["oh-my-pi"]):
-                self.assertNotIn(canary.casefold(), stream.decode("utf-8", "replace").casefold())
+    def assert_shown(self, result: subprocess.CompletedProcess[bytes], field: str, matched: str,
+                     term_list: str = GLOBAL, line: int | None = None) -> str:
+        """The refusal has a line naming FIELD, the line in it (LINE, when given), MATCHED as the text wrote it (C-escaped,
+        as the refusal prints it), the list that holds the term, and the line of the text it is on, which holds MATCHED;
+        returns that line of the text."""
+        stderr = result.stderr.decode("utf-8", "replace")
+        number = r"\d+" if line is None else str(line)
+        found = re.search(rf'^leak terms: gh [^\n]*: {re.escape(field)} line {number}: "{re.escape(matched)}" '
+                          rf"\({re.escape(term_list)}\), in: ([^\n]*)$", stderr, re.MULTILINE)
+        self.assertIsNotNone(found, stderr)
+        assert found is not None
+        self.assertIn(matched, found.group(1))
+        return found.group(1)
 
-    def assert_refused(self, result: subprocess.CompletedProcess[bytes], field: str) -> None:
+    def assert_refused(self, result: subprocess.CompletedProcess[bytes], field: str, matched: str = CANARY.upper(),
+                       term_list: str = GLOBAL, line: int | None = None) -> str:
         stderr = result.stderr.decode("utf-8", "replace")
         self.assertEqual(result.returncode, 2, stderr)
         self.assertEqual(self.gh_calls(), [], "gh ran although the text holds a listed term")
-        self.assertRegex(stderr, rf"leak terms: gh [^\n]*: {re.escape(field)} line \d+: listed leak term {CANARY_INDEX}\n")
         self.assertIn("nothing was sent", stderr)
-        self.assert_hidden(result)
+        return self.assert_shown(result, field, matched, term_list, line)
 
     def assert_sent(self, result: subprocess.CompletedProcess[bytes], argv: list[str], stdin: bytes = b"") -> None:
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
@@ -220,9 +230,9 @@ class GhLeakTerms(unittest.TestCase):
              "--field body=@- (standard input)"),
             ("api --input FILE, JSON escapes", ["api", "--method", "PATCH", f"repos/{repo}/pulls/11", "--input",
                                                  f("d.json", json.dumps({"body": "x"}).replace('"x"', f'"{escaped}"'))],
-             b"", "--input d.json (escapes decoded)"),
+             b"", "--input d.json .body"),
             ("api --input -", ["api", f"/repos/{repo}/pulls/11/reviews", "--input", "-"],
-             json.dumps({"event": "COMMENT", "body": text}).encode(), "--input - (standard input)"),
+             json.dumps({"event": "COMMENT", "body": text}).encode(), "--input - (standard input) .body"),
         ]
 
     def test_a_listed_term_in_every_input_form_is_refused_for_a_public_repository(self) -> None:
@@ -288,7 +298,7 @@ class GhLeakTerms(unittest.TestCase):
 
     def test_a_graphql_mutation_is_read_as_public_and_a_graphql_query_is_a_read(self) -> None:
         mutation = 'mutation { addComment(input: {subjectId: "I_1", body: "%s"}) { clientMutationId } }' % TEXT.strip()
-        self.assert_refused(self.run_gh(["api", "graphql", "-f", f"query={mutation}"]), "--raw-field query")
+        self.assert_refused(self.run_gh(["api", "graphql", "-f", f"query={mutation}"]), "--raw-field query string 2")
         query = 'query { search(query: "%s", type: ISSUE, first: 1) { issueCount } }' % CANARY
         argv = ["api", "graphql", "-f", f"query={query}"]
         self.assert_sent(self.run_gh(argv), argv)
@@ -310,11 +320,7 @@ class GhLeakTerms(unittest.TestCase):
         self.answer("cybermonklabs/legion", "public")
         self.answer("cybermonklabs/inner", "private")
         refused = self.run_gh(["pr", "comment", "11", "-R", "cybermonklabs/legion", "--body", text])
-        stderr = refused.stderr.decode("utf-8", "replace")
-        self.assertEqual(refused.returncode, 2, stderr)
-        self.assertEqual(self.gh_calls(), [])
-        self.assertIn(f"--body line 1: listed leak term 1 of {SCOPE}\n", stderr)
-        self.assert_hidden(refused)
+        self.assert_refused(refused, "--body", SCOPED.upper(), f"the {SCOPE} list", line=1)
         # Controls: the same text to a public repository outside the scope, and to a private one inside it, goes out.
         for repo in (PUBLIC, "cybermonklabs/inner"):
             with self.subTest(repo=repo):
@@ -325,9 +331,7 @@ class GhLeakTerms(unittest.TestCase):
         mutation = 'mutation { addComment(input: {subjectId: "PR_1", body: "%s"}) { clientMutationId } }' % text.strip()
         self.setUp_calls()
         unnamed = self.run_gh(["api", "graphql", "-f", f"query={mutation}"])
-        self.assertEqual(unnamed.returncode, 2, unnamed.stderr.decode())
-        self.assertIn(f"listed leak term 1 of {SCOPE}", unnamed.stderr.decode())
-        self.assertEqual(self.gh_calls(), [])
+        self.assert_refused(unnamed, "--raw-field query string 2", SCOPED.upper(), f"the {SCOPE} list")
 
     def test_an_allowed_token_holds_a_scoped_term_only_in_its_repository(self) -> None:
         (repository, (token, escaped)), = ALLOWED_TEST_TOKENS.items()
@@ -340,9 +344,7 @@ class GhLeakTerms(unittest.TestCase):
                 self.assert_sent(self.run_gh(argv), argv)
                 self.setUp_calls()
                 refused = self.run_gh(["pr", "comment", "11", "-R", "cybermonklabs/legion", "--body", text])
-                self.assertEqual(refused.returncode, 2, refused.stderr.decode())
-                self.assertIn(f"listed leak term 1 of {SCOPE}", refused.stderr.decode())
-                self.assert_hidden(refused)
+                self.assert_refused(refused, "--body", SCOPED, f"the {SCOPE} list")
         # The scope with another package is no allowed token, in the fork either.
         self.setUp_calls()
         other = self.run_gh(["pr", "comment", "11", "-R", repository, "--body", f"uses @{SCOPED}/other-package\n"])
@@ -359,12 +361,8 @@ class GhLeakTerms(unittest.TestCase):
                          ["pr", "edit", "12", "-R", "cybermonklabs/oh-my-pi", "--body-file", self.file("fork.md", body)]):
                 with self.subTest(term=number, command=argv[1]):
                     self.setUp_calls()
-                    refused = self.run_gh(argv)
-                    stderr = refused.stderr.decode("utf-8", "replace")
-                    self.assertEqual(refused.returncode, 2, stderr)
-                    self.assertEqual(self.gh_calls(), [])
-                    self.assertIn(f"line 1: listed leak term {number} of knives oh-my-pi\n", stderr)
-                    self.assert_hidden(refused)
+                    self.assert_refused(self.run_gh(argv), "--body" if argv[1] == "create" else "--body-file fork.md",
+                                        term.upper(), "the knives oh-my-pi list", line=1)
             # Controls: a public repository of another name, and a private one named oh-my-pi, get the same body.
             for repo in (PUBLIC, "o/oh-my-pi"):
                 with self.subTest(term=number, repo=repo):
@@ -404,17 +402,14 @@ class GhLeakTerms(unittest.TestCase):
     def test_a_term_of_several_words_split_by_a_line_break_is_refused(self) -> None:
         # GitHub renders a line break inside a paragraph as a space, so a body wrapped inside a term shows the term.
         first, rest = TEST_TERMS[0].split(" ", 1)
-        for name, text in (("line break", f"See {first}\n{rest} soon.\n"), ("CRLF", f"See {first}\r\n{rest}.\n"),
-                           ("no-break space", f"See {first}\u00a0{rest}.\n"), ("hard break", f"See {first}  \n{rest}\n")):
+        for name, text, matched in (("line break", f"See {first}\n{rest} soon.\n", f"{first}\\n{rest}"),
+                                    ("CRLF", f"See {first}\r\n{rest}.\n", f"{first}\\r\\n{rest}"),
+                                    ("no-break space", f"See {first}\u00a0{rest}.\n", f"{first}\u00a0{rest}"),
+                                    ("hard break", f"See {first}  \n{rest}\n", f"{first}  \\n{rest}")):
             with self.subTest(form=name):
                 self.setUp_calls()
                 refused = self.run_gh(["pr", "comment", "11", "-R", PUBLIC, "--body", text])
-                stderr = refused.stderr.decode("utf-8", "replace")
-                self.assertEqual(refused.returncode, 2, stderr)
-                self.assertEqual(self.gh_calls(), [])
-                self.assertIn("--body line 1: listed leak term 1\n", stderr)
-                self.assertNotIn(first.casefold(), stderr.casefold())
-                self.assert_hidden(refused)
+                self.assert_refused(refused, "--body", matched, line=1)
                 # Control: the same text goes to a private repository unchanged.
                 self.setUp_calls()
                 argv = ["pr", "comment", "11", "-R", PRIVATE, "--body", text]
@@ -447,7 +442,8 @@ class GhLeakTerms(unittest.TestCase):
     def test_a_graphql_mutation_spelled_with_a_json_escape_is_a_mutation(self) -> None:
         mutation = 'mutation { addComment(input: {subjectId: "I_1", body: "%s"}) { clientMutationId } }' % TEXT.strip()
         payload = json.dumps({"query": mutation}).replace("mutation", "\\u006dutation", 1)
-        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("m.json", payload)]), "--input m.json")
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("m.json", payload)]),
+                            "--input m.json .query string 2")
         # Control: a query whose escape spells another word (`mutations`) is a read.
         query = 'query { search(query: "%s mutations", type: ISSUE, first: 1) { issueCount } }' % CANARY
         argv = ["api", "graphql", "--input", self.file("q.json", json.dumps({"query": query}).replace(
@@ -462,7 +458,7 @@ class GhLeakTerms(unittest.TestCase):
         escaped = "".join(f"\\u{ord(c):04x}" for c in CANARY)
         body = json.dumps({"body": f"Built with {registry}; see NOTE."}).replace("NOTE", escaped)
         argv = ["api", "--method", "PATCH", f"repos/{PUBLIC}/pulls/11", "--input", self.file("e.json", body)]
-        self.assert_refused(self.run_gh(argv), "--input e.json (escapes decoded)")
+        self.assert_refused(self.run_gh(argv), "--input e.json .body", CANARY)
         # Control: the registry term alone goes to o/pub.
         argv = ["api", "--method", "PATCH", f"repos/{PUBLIC}/pulls/11", "--input",
                 self.file("r.json", json.dumps({"body": f"Built with {registry}."}))]
@@ -507,14 +503,15 @@ class GhLeakTerms(unittest.TestCase):
                     f'body: "{TEXT.strip()} after PR_kwDOpriv5678"}}}}) {{ commit {{ oid }} }} }}']
 
         refused = self.run_gh(commit(PUBLIC))
-        self.assert_refused(refused, "--raw-field query")
+        self.assert_refused(refused, "--raw-field query string 5")
         self.assertIn(f"{PUBLIC} (public)", refused.stderr.decode())
         # The same name as a JSON variable of an --input payload, and as a gh field.
         payload = json.dumps({"query": "mutation($b: CommittableBranch!) { createCommitOnBranch(input: {branch: $b, "
                                        f'message: {{headline: "{TEXT.strip()}"}}}}) {{ commit {{ oid }} }} }}',
                               "variables": {"b": {"repositoryNameWithOwner": PUBLIC, "branchName": "main"}}})
         self.setUp_calls()
-        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("v.json", payload)]), "--input v.json")
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("v.json", payload)]),
+                            "--input v.json .query string 1")
         # A mutation that makes a repository goes to one nobody can name yet, read as public.
         self.setUp_calls()
         made = self.run_gh(["api", "graphql", "-f", "query=mutation { createRepository(input: {name: \"x\", "
@@ -543,7 +540,7 @@ class GhLeakTerms(unittest.TestCase):
                     "{ clientMutationId } }" % TEXT.strip())
         payload = json.dumps({"query": mutation}).replace("NODE", "\\u0050R_kwDOpub09876")
         refused = self.run_gh(["api", "graphql", "--input", self.file("n.json", payload)])
-        self.assert_refused(refused, "--input n.json")
+        self.assert_refused(refused, "--input n.json .query string 2")
         self.assertIn(f"{PUBLIC} (public)", refused.stderr.decode())
         # Control: the same payload whose node is the private repository's goes out.
         argv = ["api", "graphql", "--input", self.file("p.json", json.dumps({"query": mutation.replace(
@@ -633,9 +630,7 @@ class GhLeakTerms(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "-m", "two")
         self.setUp_calls()
         named = self.run_gh(["pr", "create", "-R", PUBLIC, "--fill"])
-        self.assertEqual(named.returncode, 2, named.stderr.decode())
-        self.assertIn("--fill head branch name line 1: listed leak term 1\n", named.stderr.decode())
-        self.assertEqual(self.gh_calls(), [])
+        self.assert_refused(named, "--fill head branch name", TEST_TERMS[0], line=1)
 
     def test_the_tag_message_release_notes_take_is_read(self) -> None:
         self.git("init", "-q", "-b", "main")
@@ -673,10 +668,8 @@ class GhLeakTerms(unittest.TestCase):
             with self.subTest(form=name, repo=PUBLIC):
                 self.setUp_calls()
                 refused = self.run_gh(form(PUBLIC), env={**self.env, "GH_REPO": PRIVATE})
-                self.assertEqual(refused.returncode, 2, refused.stderr.decode())
+                self.assert_refused(refused, "--input asset.bin" if name == "upload" else "--raw-field body")
                 self.assertIn(f"to {PUBLIC} (public)", refused.stderr.decode())
-                self.assertEqual(self.gh_calls(), [])
-                self.assert_hidden(refused)
         # A GraphQL address is GraphQL: a mutation on a private repository's node goes out, and a query is a read.
         (self.nodes / "PR_kwDOpriv5678").write_text(f"{PRIVATE}\n", encoding="utf-8")
         for query in ('mutation { addComment(input: {subjectId: "PR_kwDOpriv5678", body: "%s"}) '
@@ -706,6 +699,198 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    # --- each value read on its own, decoded, as GitHub stores it (dispatch://INFRA-4383, R1) ----------------------
+
+    # One text as GitHub stores it, with the canary on its third line.
+    STORED = f"First line.\n\nThe third line names {CANARY.upper()} once.\n"
+
+    def transports(self, repo: str, text: str) -> list[tuple[str, list[str], bytes, str]]:
+        """(name, argv, stdin, the field the refusal names) for each way a gh call carries the one stored TEXT, all
+        aimed at REPO."""
+        f = self.file
+        comments = f"repos/{repo}/issues/1/comments"
+        return [
+            ("--input compact JSON", ["api", comments, "--input", f("compact.json", json.dumps({"body": text},
+                                                                                            separators=(",", ":")))],
+             b"", "--input compact.json .body"),
+            ("--input indented JSON", ["api", comments, "--input", f("indented.json", json.dumps({"body": text}, indent=2))],
+             b"", "--input indented.json .body"),
+            ("-f", ["api", comments, "-f", f"body={text}"], b"", "--raw-field body"),
+            ("-F", ["api", comments, "-F", f"body={text}"], b"", "--field body"),
+            ("-F key=@file", ["api", comments, "-F", f"body=@{f('stored.md', text)}"], b"", "--field body=@stored.md"),
+            ("--body-file", ["issue", "comment", "1", "-R", repo, "--body-file", f("body.md", text)], b"",
+             "--body-file body.md"),
+            ("stdin", ["issue", "comment", "1", "-R", repo, "--body-file", "-"], text.encode(),
+             "--body-file - (standard input)"),
+            ("--input - nested array", ["api", comments, "--input", "-"], json.dumps({"items": [["first", text]]}).encode(),
+             "--input - (standard input) .items[0][1]"),
+            ("workflow run --json", ["workflow", "run", "w.yml", "-R", repo, "--json"], json.dumps({"note": text}).encode(),
+             "--json (standard input) .note"),
+        ]
+
+    def test_one_stored_text_gets_one_verdict_in_every_transport(self) -> None:
+        # Each form names the value by its field or JSON path and the line in that value, the third, as GitHub shows it.
+        for name, argv, stdin, field in self.transports(PUBLIC, self.STORED):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, stdin), field, line=3)
+        # Controls: the same text to a private repository, and the text without the canary to the public one, go out
+        # unchanged in every form.
+        for repo, text in ((PRIVATE, self.STORED), (PUBLIC, self.STORED.replace(CANARY.upper(), "nothing"))):
+            for name, argv, stdin, _ in self.transports(repo, text):
+                with self.subTest(form=name, repo=repo):
+                    self.setUp_calls()
+                    self.assert_sent(self.run_gh(argv, stdin), argv, stdin)
+
+    def test_two_values_are_never_read_as_one_and_a_wrapped_value_is_one(self) -> None:
+        first, rest = TEST_TERMS[0].split(" ", 1)
+        comments = f"repos/{PUBLIC}/issues/1/comments"
+        apart = {"items": [f"See {first}", f"{rest} soon."]}
+        for name, argv in (("compact JSON", ["api", comments, "--input", self.file("apart.json", json.dumps(apart))]),
+                           ("indented JSON", ["api", comments, "--input",
+                                              self.file("apart2.json", json.dumps(apart, indent=2))]),
+                           ("two fields", ["api", comments, "-f", f"title=See {first}", "-f", f"body={rest} soon."]),
+                           ("a key and its value", ["api", comments, "-f", f"See {first}={rest} soon."])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        # Control: the term's words wrapped inside one value are the term on the page.
+        wrapped = {"items": [f"See {first}\n{rest} soon."]}
+        for name, payload in (("compact JSON", json.dumps(wrapped)), ("indented JSON", json.dumps(wrapped, indent=2))):
+            with self.subTest(form=name, wrapped=True):
+                self.setUp_calls()
+                argv = ["api", comments, "--input", self.file("wrapped.json", payload)]
+                self.assert_refused(self.run_gh(argv), "--input wrapped.json .items[0]", f"{first}\\n{rest}", line=1)
+
+    def test_a_literal_backslash_in_a_value_is_read_as_written(self) -> None:
+        # GitHub stores a body's `\u0070` as those six characters, and so a JSON body's `\\u0070`: neither is the term.
+        spelled = "See " + TEST_TERMS[1].replace("p", "\\u0070", 1) + " soon."
+        comments = f"repos/{PUBLIC}/issues/1/comments"
+        for name, argv in (("--body", ["issue", "comment", "1", "-R", PUBLIC, "--body", spelled]),
+                           ("-f", ["api", comments, "-f", f"body={spelled}"]),
+                           ("--input JSON", ["api", comments, "--input", self.file("lit.json", json.dumps({"body": spelled}))])):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_sent(self.run_gh(argv), argv)
+        # Control: a JSON escape in an --input body is the letter GitHub stores.
+        escaped = json.dumps({"body": f"See {TEST_TERMS[1]} soon."}).replace("p", "\\u0070", 1)
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["api", comments, "--input", self.file("esc.json", escaped)]), "--input esc.json .body",
+                            TEST_TERMS[1], line=1)
+
+    def test_an_escape_inside_a_graphql_string_is_read_as_the_letter_it_spells(self) -> None:
+        # dispatch://BET-727: a GraphQL string decodes its own \u escape, inside the JSON string that carries the
+        # document, so GitHub stores the term.
+        literal = TEST_TERMS[1].replace("p", "\\u0070", 1)
+        mutation = 'mutation { addComment(input: {subjectId: "I_1", body: "See %s soon."}) { clientMutationId } }' % literal
+        payload = json.dumps({"query": mutation})
+        for name, argv, stdin, field in (
+                ("--input FILE", ["api", "graphql", "--input", self.file("bet.json", payload)], b"",
+                 "--input bet.json .query string 2"),
+                ("--input -", ["api", "graphql", "--input", "-"], payload.encode(), "--input - (standard input) .query string 2"),
+                ("-f query=", ["api", "graphql", "-f", f"query={mutation}"], b"", "--raw-field query string 2")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv, stdin), field, TEST_TERMS[1], line=1)
+        # A block string, its common indentation removed, and a variable are values too.
+        block = json.dumps({"query": 'mutation { addComment(input: {subjectId: "I_1", body: """\n    See\n    %s\n  """}) '
+                                     "{ clientMutationId } }" % TEXT.strip()})
+        self.setUp_calls()
+        line = self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("block.json", block)]),
+                                   "--input block.json .query string 2", line=2)
+        self.assertEqual(line, TEXT.strip())
+        variables = json.dumps({"query": 'mutation($b: String!) { addComment(input: {subjectId: "I_1", body: $b}) '
+                                         "{ clientMutationId } }", "variables": {"b": TEXT}})
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("var.json", variables)]),
+                            "--input var.json .variables.b", line=1)
+        # A document that does not parse (its string never ends) is read as before: as written and with its escapes
+        # decoded.
+        broken = json.dumps({"query": 'mutation { addComment(input: {subjectId: "I_1", body: "See %s soon.) }' % literal})
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", self.file("broken.json", broken)]),
+                            "--input broken.json .query (escapes decoded)", TEST_TERMS[1])
+        # Control: a clean request with an escape in a value goes out, its bytes unchanged.
+        clean = json.dumps({"query": mutation.replace(literal, "caf\\u00e9")}).encode()
+        argv = ["api", "graphql", "--input", "-"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv, clean), argv, clean)
+
+    def test_a_release_asset_is_read_as_the_bytes_gh_uploads(self) -> None:
+        # Found by the review of dispatch://INFRA-4383: GitHub stores a release asset as the bytes of the upload, and
+        # never decodes them. Read as JSON, the asset's `\u002f` became the `/` of a token the repository allows, which
+        # the bytes do not hold, and the asset went out with the scoped term in it. An allowed token counts only where
+        # the bytes gh sends hold it.
+        (repository, (token, _)), = ALLOWED_TEST_TOKENS.items()
+        self.answer(repository, "public")
+        uploads = f"https://uploads.github.com/repos/{repository}/releases/7/assets?name=asset"
+
+        def upload(name: str, payload: str, endpoint: str = uploads) -> list[str]:
+            return ["api", "-X", "POST", "-H", "Content-Type: application/octet-stream", "--input", self.file(name, payload),
+                    endpoint]
+
+        escaped = json.dumps({"x": token}).replace("/", "\\u002f")
+        for name, argv in (("uploads.github.com", upload("escaped.json", escaped)),
+                           ("a release's assets path", upload("escaped.json", escaped, f"repos/{repository}/releases/7/assets"))):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(argv), "--input escaped.json", SCOPED, f"the {SCOPE} list", line=1)
+        # Control: the allowed token as the bytes hold it goes out, those bytes unchanged.
+        argv = upload("allowed.json", json.dumps({"x": token}))
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    def test_a_graphql_comment_is_not_read_and_a_document_that_does_not_parse_is_read_both_ways(self) -> None:
+        # GitHub stores a document's strings and variables; nobody stores its comments.
+        commented = 'mutation { # %s\n addComment(input: {subjectId: "I_1", body: "x"}) { clientMutationId } }' % TEXT.strip()
+        argv = ["api", "graphql", "-f", f"query={commented}"]
+        self.assert_sent(self.run_gh(argv), argv)
+        # A document that does not parse (its braces never close) is read as before, as written: the comment counts.
+        self.setUp_calls()
+        self.assert_refused(self.run_gh(["api", "graphql", "-f", f"query={commented[:-2]}"]), "--raw-field query", line=1)
+        # And in an --input body, its `.query`.
+        self.setUp_calls()
+        payload = self.file("open.json", json.dumps({"query": commented[:-2]}))
+        self.assert_refused(self.run_gh(["api", "graphql", "--input", payload]), "--input open.json .query", line=1)
+        # A document whose brackets match but whose grammar does not (found by the review of dispatch://INFRA-4383):
+        # a number where a field's name goes, and an argument with no `:`.
+        for name, document, line in (
+                ("a number for a field", "mutation { 123 # %s\n}" % TEXT.strip(), 1),
+                ("an argument with no colon", 'mutation {\n  addComment(input {body: "clean"}) { clientMutationId }\n  # %s\n}'
+                 % TEXT.strip(), 3),
+                # A surrogate GraphQL rejects: alone, or as a code point in braces.
+                ("an unpaired surrogate", 'mutation { a(b: "\\uD800") # %s\n}' % TEXT.strip(), 1),
+                ("a lone low surrogate", 'mutation { a(b: "\\uDC00") # %s\n}' % TEXT.strip(), 1),
+                ("a surrogate in braces", 'mutation { a(b: "\\u{D800}") # %s\n}' % TEXT.strip(), 1)):
+            with self.subTest(document=name):
+                self.setUp_calls()
+                self.assert_refused(self.run_gh(["api", "graphql", "-f", f"query={document}"]), "--raw-field query",
+                                    line=line)
+        # Control: a surrogate pair is one letter, and the document parses, so its comment is not read.
+        paired = 'mutation { a(b: "\\uD83D\\uDE00") # %s\n}' % TEXT.strip()
+        argv = ["api", "graphql", "-f", f"query={paired}"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
+    # --- what a refusal shows (dispatch://INFRA-4383, R2) -----------------------------------------------------------
+
+    def test_a_refusal_shows_the_term_and_a_bounded_line(self) -> None:
+        body = "a" * 500 + f" {CANARY.upper()} " + "b" * 500 + "\nsecond line\n"
+        line = self.assert_refused(self.run_gh(["issue", "comment", "1", "-R", PUBLIC, "--body", body]), "--body", line=1)
+        self.assertTrue(line.startswith("…a") and line.endswith("b…"), line)
+        self.assertLess(len(line), 250, line)
+        self.assertNotIn("second line", line)
+
+    def test_in_an_agent_session_a_refused_line_is_not_read_as_github_s_answer(self) -> None:
+        # The outer pass reads the call's stderr for GitHub's refusal of the App and for a spent rate limit. A refusal
+        # before gh ran prints the caller's own line, which may say anything.
+        body = f"Fixes the HTTP 403 and API rate limit exceeded answers for {CANARY.upper()}.\n"
+        refused = self.run_gh(["issue", "comment", "1", "-R", PUBLIC, "--body", body], env=self.agent())
+        self.assert_refused(refused, "--body", line=1)
+        stderr = refused.stderr.decode("utf-8", "replace")
+        self.assertNotIn("REFUSED by GitHub", stderr)
+        self.assertNotIn("RATE LIMITED", stderr)
+
     # --- what the check does not touch --------------------------------------------------------------------------
 
     def test_gh_api_with_no_body_field_passes_untouched(self) -> None:
@@ -729,11 +914,11 @@ class GhLeakTerms(unittest.TestCase):
         (self.work / path).write_text(CLEAN, encoding="utf-8")
         argv = ["pr", "comment", "11", "-R", PUBLIC, "--body-file", path]
         self.assert_sent(self.run_gh(argv), argv)
-        # Control: when the file holds the term, the refusal names the file with the term masked.
+        # Control: when the file holds the term, the refusal names the file as its path is written.
         (self.work / path).write_text(TEXT, encoding="utf-8")
         self.setUp_calls()
         refused = self.run_gh(argv)
-        self.assert_refused(refused, "--body-file notes/<listed term>.md")
+        self.assert_refused(refused, f"--body-file notes/{CANARY}.md")
 
     # --- an agent session: the public text gate and this check read one stdin buffer -------------------------------
 

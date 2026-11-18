@@ -126,7 +126,7 @@ class JjInATestPane(MovedHome):
         (repo / "leak.txt").write_text("zorbleplex\n", encoding="utf-8")
         leak = self.launch(["jj", "commit", "-m", "a commit with a term"], cwd=repo, env=env)
         self.assertNotEqual(leak.returncode, 0, leak.stderr)
-        self.assertIn("listed leak term", leak.stderr)
+        self.assertIn('leak terms: leak.txt:1: "zorbleplex" (the global list), in: zorbleplex\n', leak.stderr)
         # A jj template's single-quoted string has no escapes; a double-quoted one reads "\n" as a newline.
         log = self.launch(["jj", "log", "--no-graph", "-r", "::@", "-T", 'description.first_line() ++ "\\n"'], cwd=repo, env=env)
         self.assertEqual(log.stdout.split("\n").count("a clean commit"), 1, log.stdout)
@@ -152,7 +152,7 @@ class GitInATestPane(MovedHome):
         self.launch(["git", "add", "leak.txt"], cwd=repo, env=env)
         leak = self.launch(["git", "commit", "-q", "-m", "a commit with a term"], cwd=repo, env=env)
         self.assertNotEqual(leak.returncode, 0, leak.stderr)
-        self.assertIn("listed leak term", leak.stderr)
+        self.assertIn('leak terms: leak.txt:1: "zorbleplex" (the global list), in: zorbleplex\n', leak.stderr)
         log = self.launch(["git", "log", "--format=%s"], cwd=repo, env=env)
         self.assertEqual(log.stdout, "a clean commit\n")
 

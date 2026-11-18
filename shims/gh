@@ -3,6 +3,10 @@
 # Docs: knives repo, docs/superpowers/specs/2026-08-05-release-correctness-and-knives-gh-design.md
 # KNIVES_GH_BYPASS=1 skips knives entirely (emergency hatch if knives gh misbehaves).
 set -euo pipefail
+# The mark the outermost pass of an agent session gives its inner passes (GH_SHIM_REACHED_GH, below), held in this
+# process only: a gh call the checks make themselves (a visibility read) runs this shim again and must not set it.
+_reached_mark="${GH_SHIM_REACHED_GH:-}"
+unset GH_SHIM_REACHED_GH
 
 # Every agent session on this machine reaches GitHub through one App
 # installation, so they share one primary rate limit; it reached zero four
@@ -703,11 +707,15 @@ if agent_context; then
     # approve your own pull request", "Resource not accessible by integration")
     # reads to an agent like a missing credential, and an agent that goes looking
     # for another one finds the user's. The refusal below names the call, the
-    # identity it ran as and the route.
+    # identity it ran as and the route. Only gh's own answer can say that GitHub refused the call or that a rate
+    # limit is spent, so the inner pass writes _reached just before it hands the call to gh: a refusal before gh ran
+    # (the leak checks) prints the caller's own text, which may say anything, "HTTP 403" included (dispatch://INFRA-4383).
+    # Both files live in one private directory, so a pass that has the copy always has the mark too.
     if [[ -z "${GH_SHIM_INNER:-}" && -z "${GH_READ_CACHE_BYPASS:-}" ]] \
-        && _err="$(mktemp "${TMPDIR:-/tmp}/gh-shim-stderr.XXXXXX" 2> /dev/null)"; then
+        && _err_dir="$(mktemp -d "${TMPDIR:-/tmp}/gh-shim-stderr.XXXXXX" 2> /dev/null)"; then
+        _err="$_err_dir/stderr" _reached="$_err_dir/reached"
         set +e
-        { GH_SHIM_INNER=1 "$0" "$@" 2>&1 >&3 3>&- | tee "$_err" >&2; } 3>&1
+        { GH_SHIM_INNER=1 GH_SHIM_REACHED_GH="$_reached" "$0" "$@" 2>&1 >&3 3>&- | tee "$_err" >&2; } 3>&1
         _rc=${PIPESTATUS[0]}
         set -e
         if [[ -n "$_approved_log" ]]; then
@@ -722,8 +730,10 @@ if agent_context; then
             # Not routed: refused before GitHub by scripts/gh-routed-only (exit 4), or
             # knives' own no-target line; neither is GitHub refusing the App.
             grep -q '^gh shim: NOT ROUTED\|^knives gh: no target repository' "$_err" && _unrouted=1
-            ((!_unrouted)) && grep -qiE "$GH_SHIM_RATE_LIMITED" "$_err" && _limited=1
-            ((!_unrouted && !_limited)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
+            if [[ -s "$_reached" ]]; then
+                ((!_unrouted)) && grep -qiE "$GH_SHIM_RATE_LIMITED" "$_err" && _limited=1
+                ((!_unrouted && !_limited)) && grep -qiE "$GH_SHIM_REFUSED_BY_GITHUB" "$_err" && _refused=1
+            fi
         fi
         ((_rc == 4 && _unrouted)) && { _gh_call_log unrouted-refused "$@" || true; }
         if ((_limited || _refused)); then
@@ -734,10 +744,12 @@ if agent_context; then
                 ( gh_shim_refused_by_github "$_rc" "$_err" "$@" )
             fi
             set -e
-            rm -f "$_err"
+            rm -f "$_err" "$_reached"
+            rmdir "$_err_dir" 2> /dev/null || true
             exit "$_rc"
         fi
-        rm -f "$_err"
+        rm -f "$_err" "$_reached"
+        rmdir "$_err_dir" 2> /dev/null || true
         exit "$_rc"
     fi
     # An inherited GH_TOKEN wins over everything below: knives skips minting and
@@ -778,7 +790,8 @@ if agent_context; then
         fi
         # GH_READ_CACHE_PARENT: the cache ends with this process's parent, and a
         # parent that died before it could ask the kernel shows as another pid.
-        GH_READ_CACHE_GH="$_self" GH_READ_CACHE_PARENT="$PPID" exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
+        GH_SHIM_REACHED_GH="$_reached_mark" GH_READ_CACHE_GH="$_self" GH_READ_CACHE_PARENT="$PPID" \
+            exec "$_dotfiles/scripts/gh-read-cache" -- "$@"
     fi
     # A standalone docs-only pull request is refused where docs are batched. The gate reads the whole command line and
     # finds `pr create` (or `pr new`) as cobra does, past any option before either word; until 2026-11-17 this matched
@@ -1043,6 +1056,11 @@ real_gh() {
 if ! real_gh; then
     echo "gh shim: no real gh found on PATH ($PATH), and $_pinned_searched" >&2
     exit 127
+fi
+# The call reaches gh now: the outermost pass of an agent session reads its stderr for GitHub refusing it, or a spent
+# rate limit, only after this mark (_reached_mark, which that pass names for its inner passes).
+if [[ -n "$_reached_mark" && -n "${GH_SHIM_INNER:-}${GH_READ_CACHE_BYPASS:-}" ]]; then
+    printf 1 > "$_reached_mark" 2> /dev/null || true
 fi
 if [[ -z "${KNIVES_GH_BYPASS:-}" ]] && command -v knives > /dev/null 2>&1; then
     # Backstop: a resolution bug must fail loudly here, never fork-bomb the

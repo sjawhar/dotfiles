@@ -109,6 +109,24 @@ def leaked_terms(text: str | bytes) -> list[str]:
     return [term for term, pattern in zip(ALL_TEST_TERMS, TERM_PATTERNS) if pattern.search(folded)]
 
 
+# A refusal line of the scanner after its `leak terms: ` prefix (dispatch://INFRA-4383, R2): the place, the text that
+# matched as written (C-escaped), the list that holds it, and the line of the text it is on, which a place that is the
+# matched name itself (a path, a ref, a tag's name) does not repeat.
+REFUSAL_TAIL = re.compile(r'"(?P<matched>.*?)" \((?P<list>the .*? list)\)(?:, in: (?P<line>.*))?')
+REFUSAL_LINE = re.compile(r"leak terms: (?P<place>.*?): " + REFUSAL_TAIL.pattern)
+
+
+def unescaped(shown: str) -> str:
+    """A refusal's C-escaped text with its line breaks and tabs back."""
+    return shown.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+
+
+def refusal_places(stderr: str, prefix: str = "") -> list[str]:
+    """The place of each refusal line of STDERR that starts with PREFIX, in order."""
+    return [found["place"] for line in stderr.splitlines()
+            if line.startswith(prefix) and (found := REFUSAL_LINE.fullmatch(line[len(prefix):]))]
+
+
 def write_executable(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -229,6 +247,22 @@ class LeakTestCase(unittest.TestCase):
             for text in texts:
                 if text:
                     self.assertEqual(leaked_terms(text), [], "a test term reached the output")
+
+    def assert_refusal(self, stderr: str, place: str, matched: str | None = None, prefix: str = "") -> str:
+        """A line of STDERR, after PREFIX, that names PLACE and shows the text that matched as written (MATCHED, else a
+        test term by the scanner's rule), the list that holds it, and the line it is on, which holds that text
+        (dispatch://INFRA-4383, R2); returns the line."""
+        start = f"{prefix}leak terms: {place}: "
+        for line in stderr.splitlines():
+            found = REFUSAL_TAIL.fullmatch(line[len(start):]) if line.startswith(start) else None
+            if found is None or matched is not None and found["matched"] != matched:
+                continue
+            if matched is None:
+                self.assertNotEqual(leaked_terms(unescaped(found["matched"])), [], line)
+            if found["line"] is not None:
+                self.assertIn(found["matched"], found["line"])
+            return line
+        self.fail(f"no refusal of {place!r} shows {matched or 'a test term'}: {stderr}")
 
     def assert_no_key_material(self, result: subprocess.CompletedProcess) -> None:
         output = (result.stdout or "") + (result.stderr or "")
@@ -473,12 +507,13 @@ class ScanModes(LeakTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
-    def assert_found(self, result: subprocess.CompletedProcess[str], place: str) -> None:
+    def assert_found(self, result: subprocess.CompletedProcess[str], place: str, matched: str | None = None) -> str:
+        """Exit 3 and a refusal of PLACE that shows the text that matched (assert_refusal); returns that line."""
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn(f"leak terms: {place}: listed leak term", result.stderr)
+        line = self.assert_refusal(result.stderr, place, matched)
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assert_hidden(result)
+        return line
 
     def test_hidden_term_detector_matches_as_the_scanner_does(self) -> None:
         # B7: an echo of the matched text, in another case, with another run of spaces, or wrapped inside a
@@ -504,7 +539,9 @@ class ScanModes(LeakTestCase):
             return (f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
                     f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines))
 
-        self.assert_found(self.check("message", "subject\n\nSee Quillfeather\nLane 9 soon.\n"), "commit message line 3")
+        line = self.assert_found(self.check("message", "subject\n\nSee Quillfeather\nLane 9 soon.\n"), "commit message line 3")
+        self.assertEqual(line, 'leak terms: commit message line 3: "Quillfeather\\nLane 9" (the global list), '
+                               "in: See Quillfeather\\nLane 9 soon.")
         # Control: a blank line between the words ends the paragraph.
         result = self.check("message", "subject\n\nSee Quillfeather\n\nLane 9 soon.\n")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -518,16 +555,12 @@ class ScanModes(LeakTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_found(self.check("diff", diff("notes.py", "# See Quillfeather Lane 9 soon.")), "notes.py:1")
 
-    def test_scanner_masks_overlapping_path_terms(self) -> None:
+    def test_scanner_shows_each_overlapping_path_term(self) -> None:
         terms = ("alpha beta", "beta gamma")
         matcher = scanner_module().TermMatcher(terms)
         self.assertEqual(matcher.spans("notes/alpha beta gamma.txt"), [
             scanner_module().Span(6, 16), scanner_module().Span(12, 22)
         ])
-        self.assertEqual(
-            scanner_module().mask_path("notes/alpha beta gamma.txt", matcher.spans("notes/alpha beta gamma.txt")),
-            "notes/<listed term>.txt",
-        )
         listed = encrypt_yaml("terms: |\n  alpha beta\n  beta gamma\n")
         diff = (
             "diff --git a/notes/alpha beta gamma.txt b/notes/alpha beta gamma.txt\n"
@@ -539,9 +572,37 @@ class ScanModes(LeakTestCase):
         )
         result = self.check("diff", diff, env={**self.env, "DOTFILES_LEAK_TERMS_FILE": str(listed)})
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn("notes/<listed term>.txt", result.stderr)
+        # The path is the place, so each match names it as written and shows no line besides.
         for term in terms:
-            self.assertNotIn(term, result.stderr)
+            self.assertIn(f'leak terms: notes/alpha beta gamma.txt: "{term}" (the global list)\n', result.stderr)
+
+    def test_a_refusal_shows_the_text_that_matched_its_list_and_its_line(self) -> None:
+        # dispatch://INFRA-4383, R2: the caller wrote the text, so the refusal shows what matched and where.
+        def diff(path: str, *lines: str) -> str:
+            return (f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+                    f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines))
+
+        self.assertEqual(self.assert_found(self.check("diff", diff("run.py", "x = 1", "# see ZORBLEPLEX here")), "run.py:2"),
+                         'leak terms: run.py:2: "ZORBLEPLEX" (the global list), in: # see ZORBLEPLEX here')
+        self.assertEqual(self.assert_found(self.check("message", "fix\tquillfeather  lane 9\n"), "commit message line 1"),
+                         'leak terms: commit message line 1: "quillfeather  lane 9" (the global list), '
+                         "in: fix\\tquillfeather  lane 9")
+        # A long line is cut to a bounded window on each side of the match, each cut marked.
+        line = self.assert_found(self.check("diff", diff("min.js", "a" * 400 + "vintrapolis-canary-7" + "b" * 400)),
+                                 "min.js:1", "vintrapolis-canary-7")
+        shown = line.partition(", in: ")[2]
+        self.assertTrue(shown.startswith("…a") and shown.endswith("b…"), shown)
+        self.assertLess(len(shown), 200, shown)
+        # A match is bounded too: a run of 10,000 spaces inside a term of two words prints both words, not the run.
+        result = self.check("diff", diff("gap.py", "x Quillfeather" + " " * 10_000 + "Lane 9 y"))
+        self.assertEqual(result.returncode, 3, result.stderr[:2000])
+        (line,) = [line for line in result.stderr.splitlines() if line.startswith("leak terms: gap.py:1: ")]
+        self.assertLess(len(line), 600, line[:2000])
+        matched = REFUSAL_LINE.fullmatch(line)
+        assert matched is not None, line[:2000]
+        for part in ("Quillfeather", "Lane 9", "…"):
+            self.assertIn(part, matched["matched"])
+            self.assertIn(part, matched["line"])
 
     def test_scanner_refuses_an_unknown_message_encoding(self) -> None:
         result = self.check("message", "clean\n", "--encoding", "unknown-test-encoding")
@@ -616,7 +677,7 @@ index 0000000..1111111 100644
         )
         self.assertIn('"a/notes/', diff)
         result = self.check("diff", diff)
-        self.assert_found(result, 'notes/<listed term>"file.txt')
+        self.assert_found(result, 'notes/zorbleplex"file.txt', "zorbleplex")
 
     def test_scanner_reads_real_paths_that_contain_the_header_separator(self) -> None:
         repository = self.root / "ambiguous-path"
@@ -639,9 +700,8 @@ index 0000000..1111111 100644
             self.assertIn("diff --git a/dir b/notes.txt b/dir b/notes.txt", diff)
             result = self.check("diff", diff)
             self.assertEqual(result.returncode, 3, result.stderr)
-            self.assertIn("leak terms: dir b/notes.txt:1: listed leak term", result.stderr)
-            self.assertIn("leak terms: x b/<listed term>.txt: listed leak term", result.stderr)
-            self.assert_hidden(result)
+            self.assert_refusal(result.stderr, "dir b/notes.txt:1", "Quillfeather Lane 9")
+            self.assert_refusal(result.stderr, "x b/zorbleplex.txt", "zorbleplex")
 
     def test_scanner_reads_result_paths_but_not_deleted_or_renamed_away_paths(self) -> None:
         deleted = """diff --git a/zorbleplex.txt b/zorbleplex.txt
@@ -666,7 +726,7 @@ rename to zorbleplex.txt
             result = self.check("diff", diff)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assert_hidden(result)
-        self.assert_found(self.check("diff", renamed_to), "<listed term>.txt")
+        self.assert_found(self.check("diff", renamed_to), "zorbleplex.txt", "zorbleplex")
 
     def test_scanner_reads_every_extended_header_as_metadata(self) -> None:
         # git's extended header lines between `diff --git` and the hunk: a mode change (git and jj print `old mode` and
@@ -687,7 +747,7 @@ rename to zorbleplex.txt
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assert_hidden(result)
         for label, text, place in (
-            ("mode-only", diff("zorbleplex.sh", mode), "<listed term>.sh"),
+            ("mode-only", diff("zorbleplex.sh", mode), "zorbleplex.sh"),
             ("mode-and-content", diff("run.sh", mode, added.format("Quillfeather Lane 9")), "run.sh:2"),
             ("rewrite", diff("run.sh", "", rewrite.format("Quillfeather Lane 9")), "run.sh:1"),
         ):
@@ -703,7 +763,7 @@ GIT binary patch
 literal 3
 Quillfeather Lane 9
 """
-        self.assert_found(self.check("diff", binary_path), "<listed term>.bin")
+        self.assert_found(self.check("diff", binary_path), "zorbleplex.bin", "zorbleplex")
         result = self.check("diff", binary_payload)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_hidden(result)
@@ -718,7 +778,7 @@ Quillfeather Lane 9
         generated = self.ok([real_jj(), "--no-pager", "--color=never", "diff", "--git", "-r", "@"], repository)
         self.assertIn("diff --git", generated)
         result = self.check("diff", generated)
-        self.assert_found(result, 'raw-"\\t\\\\\\n<listed term>.txt')
+        self.assert_found(result, 'raw-"\\t\\\\\\nzorbleplex.txt', "zorbleplex")
 
     def test_scanner_refuses_combined_diff_text(self) -> None:
         # The scanner reads no combined diff: Git's is wrong past 32 parents (scripts/leak-terms-check, above
@@ -1021,10 +1081,9 @@ index 0000000,0000000,0000000..1111111
             timeout=10,
         )
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("leak terms: description of 222222222222 line 1: listed leak term", result.stderr)
+        self.assert_refusal(result.stderr, "description of 222222222222 line 1", "Quillfeather Lane 9")
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assert_hidden(result)
 
     def test_jj_header_marker_is_first_in_the_first_512_bytes(self) -> None:
         header = (ROOT / "shims" / "jj").read_bytes()[:512].decode("utf-8")
@@ -1183,8 +1242,7 @@ index 0000000,0000000,0000000..1111111
             timeout=10,
         )
         self.assertEqual(single_result.returncode, 1, single_result.stderr)
-        self.assertIn("commit message line 1: listed leak term", single_result.stderr)
-        self.assert_hidden(single_result)
+        self.assert_refusal(single_result.stderr, "commit message line 1", "Quillfeather Lane 9")
 
         bulk = self.root / "bulk.jjdescription"
         bulk.write_text("JJ: describe Quillfeather Lane 9 -------\nclean\n", encoding="utf-8")
@@ -1471,10 +1529,9 @@ class GitLeaks(LeakTestCase):
         before = self.head(repository, agent)
         result = self.git_run(repository, *arguments, agent=agent, extra=extra)
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"leak terms: {place}: listed leak term", result.stderr)
+        self.assert_refusal(result.stderr, place)
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
         self.assertEqual(self.head(repository, agent), before)
-        self.assert_hidden(result)
 
     def assert_clean(self, repository: Path, agent: bool, *arguments: str,
                      extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1499,7 +1556,7 @@ class GitLeaks(LeakTestCase):
             with self.subTest(agent=agent, case="path"):
                 repository = self.repository(agent)
                 self.stage(repository, "notes/zorbleplex.txt", "clean\n", agent)
-                self.assert_refused(repository, agent, "notes/<listed term>.txt", "commit", "-m", "blocked")
+                self.assert_refused(repository, agent, "notes/zorbleplex.txt", "commit", "-m", "blocked")
                 self.stage(repository, "notes/clean.txt", "clean\n", agent)
                 removed = self.git_run(repository, "rm", "--cached", "-q", "notes/zorbleplex.txt", agent=agent)
                 self.assertEqual(removed.returncode, 0, removed.stderr)
@@ -1787,7 +1844,7 @@ class GitLeaks(LeakTestCase):
                     configured = self.git_run(repository, "config", "diff.ignoreSubmodules", "all", agent=agent)
                     self.assertEqual(configured.returncode, 0, configured.stderr)
                     if refused:
-                        self.assert_refused(repository, agent, "<listed term>", "commit", "-m", "clean")
+                        self.assert_refused(repository, agent, "zorbleplex", "commit", "-m", "clean")
                     else:
                         self.assert_clean(repository, agent, "commit", "-m", "clean")
 
@@ -1954,9 +2011,9 @@ class GitLeaks(LeakTestCase):
                 )
                 stderr = result.stderr.decode("utf-8", errors="surrogateescape")
                 self.assertNotEqual(result.returncode, 0, stderr)
-                self.assertIn("leak terms: commit message line 1: listed leak term", stderr)
+                # The message is read in its own encoding, so the refusal shows the term as written.
+                self.assert_refusal(stderr, "commit message line 1", term)
                 self.assertEqual(self.head(repository, agent), before)
-                self.assertNotIn(term, stderr)
 
     def test_git_message_explicit_default_cleanup_beats_configuration(self) -> None:
         term = "Quillfeather Lane 9"
@@ -2052,10 +2109,9 @@ class GitLeaks(LeakTestCase):
                     env=self.environment(agent, GIT_EDITOR="true"),
                 )
                 self.assertNotEqual(result.returncode, 0, result.stderr)
-                self.assertIn("leak terms: commit message line 4: listed leak term", result.stderr)
+                self.assert_refusal(result.stderr, "commit message line 4", "Quillfeather Lane 9")
                 self.assertEqual(self.head(repository, agent), before)
                 self.assertEqual(self.comment_char_files(repository), [])
-                self.assert_hidden(result)
 
     def test_git_message_auto_comment_char_reads_every_cut_line_git_wrote(self) -> None:
         # With --cleanup=scissors and -v git 2.43 writes two cut lines, both in its character; a caller's cut line in
@@ -2270,10 +2326,9 @@ class JjLeaks(LeakTestCase):
         expected = self.expected_state(repository, agent)
         result = self.jj(repository, *arguments, agent=agent, input=input, extra=extra)
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"leak terms: {place}: listed leak term", result.stderr)
+        self.assert_refusal(result.stderr, place)
         self.assertIn("sops edit leak-terms.sops.yaml", result.stderr)
         self.assertEqual(self.state(repository, agent), expected)
-        self.assert_hidden(result)
         return result
 
     def assert_clean(self, repository: Path, agent: bool, *arguments: str, input: str | None = None,
@@ -2381,7 +2436,7 @@ class JjLeaks(LeakTestCase):
             with self.subTest(agent=agent, case="path"):
                 repository = self.repository(agent)
                 self.write(repository, "zorbleplex.txt", "clean\n")
-                self.assert_refused(repository, agent, "<listed term>.txt", "commit", "-m", "ok")
+                self.assert_refused(repository, agent, "zorbleplex.txt", "commit", "-m", "ok")
                 clean = self.repository(agent)
                 self.write(clean, "clean-name.txt", "clean\n")
                 self.assert_clean(clean, agent, "commit", "-m", "ok")
@@ -2726,9 +2781,8 @@ class JjLeaks(LeakTestCase):
                     arguments = (*location, "describe") if before_command else ("describe", *location)
                     result = self.jj(self.root, *arguments, "-m", "Quillfeather Lane 9", agent=agent)
                     self.assertNotEqual(result.returncode, 0, result.stderr)
-                    self.assertIn("leak terms: commit message line 1: listed leak term", result.stderr)
+                    self.assert_refusal(result.stderr, "commit message line 1", "Quillfeather Lane 9")
                     self.assertEqual(self.state(repository, agent), expected)
-                    self.assert_hidden(result)
                     clean = self.repository(agent)
                     self.write(clean, "clean.txt", "clean\n")
                     location = ("-R", str(clean))
@@ -3259,19 +3313,19 @@ class OutgoingLeaks(SinkRepositoryCase):
         return len(self.public_log.read_text(encoding="utf-8").splitlines()) if self.public_log.exists() else 0
 
     def assert_term_refusal(self, result: subprocess.CompletedProcess[str], commit: str, place: str, url: str,
-                            shim: str = "git") -> None:
+                            shim: str = "git", matched: str | None = None) -> None:
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"error: leak terms: commit {commit[:12]} {place}: listed leak term", result.stderr)
+        self.assert_refusal(result.stderr, f"commit {commit[:12]} {place}", matched, prefix="error: ")
         self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
         self.assertFalse(self.received(commit, url), result.stderr)
-        self.assert_hidden(result)
 
-    def assert_push_refused(self, push, commit: str, place: str, url: str, shim: str = "git") -> subprocess.CompletedProcess[str]:
-        """PUSH() is refused for the term at PLACE of COMMIT, and the sink of URL keeps exactly the refs and objects
-        it had."""
+    def assert_push_refused(self, push, commit: str, place: str, url: str, shim: str = "git",
+                            matched: str | None = None) -> subprocess.CompletedProcess[str]:
+        """PUSH() is refused for the term at PLACE of COMMIT, showing MATCHED (else a test term), and the sink of URL
+        keeps exactly the refs and objects it had."""
         before = self.sink_state(url)
         result = push()
-        self.assert_term_refusal(result, commit, place, url, shim)
+        self.assert_term_refusal(result, commit, place, url, shim, matched)
         self.assertEqual(self.sink_state(url), before, "a refused push changed the sink")
         return result
 
@@ -3610,13 +3664,14 @@ class OutgoingLeaks(SinkRepositoryCase):
         term_file = encrypt_yaml(f"terms: |\n  {term}\n")
         commit = self.commit("encoding.txt", "clean", term)
         self.real("config", "i18n.logOutputEncoding", "ISO-8859-1")
-        result = self.assert_push_refused(
+        # The message is read as UTF-8, so the refusal shows the term as written.
+        self.assert_push_refused(
             lambda: self.git_push("origin", commit, "encoding", self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
             commit,
             "message line 1",
             self.public_url,
+            matched=term,
         )
-        self.assertNotIn("Caf", result.stderr)
 
     def test_push_agent_guarded_checkout_keeps_its_public_check_for_private_url(self) -> None:
         clean = self.commit("private-direct-clean.txt", "clean", "clean")
@@ -3902,7 +3957,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                     self.assert_pushed(pushed, url, *commits)
 
     def test_push_refuses_a_term_only_in_a_changed_path(self) -> None:
-        # (11) the only test term is in the path of a changed file, shown as <listed term>.txt.
+        # (11) the only test term is in the path of a changed file, which the refusal names as written.
         self.init_jj()
 
         def push(kind: str, commit: str, ref: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -3916,7 +3971,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                     commit = self.commit(f"{directory}/zorbleplex.txt", "clean", "clean", parent=self.base)
                     ref = self.unique("refused")
                     self.assert_push_refused(
-                        lambda: push(kind, commit, ref, environment), commit, f"{directory}/<listed term>.txt", url, kind
+                        lambda: push(kind, commit, ref, environment), commit, f"{directory}/zorbleplex.txt", url, kind
                     )
                     self.set_url(self.private_url)
                     self.assert_pushed(push(kind, commit, self.unique("private"), environment), self.private_url, commit)
@@ -4191,33 +4246,33 @@ class OutgoingLeaks(SinkRepositoryCase):
         self.set_url(url)
         self.real("push", "--no-verify", "origin", f"{object_id}:{ref}")
 
-    def assert_tag_refused(self, push, shown: str, url: str, shim: str, *absent: str) -> subprocess.CompletedProcess[str]:
-        """PUSH() is refused at line 2 of the message of the tag shown as SHOWN, the sink of URL keeps exactly the
-        refs and objects it had, and holds none of ABSENT."""
+    def assert_tag_refused(self, push, shown: str, url: str, shim: str, *absent: str,
+                           matched: str | None = None) -> subprocess.CompletedProcess[str]:
+        """PUSH() is refused at line 2 of the message of the tag shown as SHOWN, showing MATCHED (else a test term),
+        the sink of URL keeps exactly the refs and objects it had, and holds none of ABSENT."""
         before = self.sink_state(url)
         result = push()
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"error: leak terms: tag {shown} message line 2: listed leak term", result.stderr)
+        self.assert_refusal(result.stderr, f"tag {shown} message line 2", matched, prefix="error: ")
         self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
         self.assertEqual(self.sink_state(url), before, "a refused push changed the sink")
         for object_id in absent:
             self.assertFalse(self.sink_holds(url, object_id), result.stderr)
-        self.assert_hidden(result)
         return result
 
     def assert_object_refused(
-        self, push, place: str, url: str, *absent: str, shim: str = "git"
+        self, push, place: str, url: str, *absent: str, shim: str = "git", matched: str | None = None
     ) -> subprocess.CompletedProcess[str]:
-        """PUSH() is refused for a non-commit object or ref name at PLACE, and changes nothing in the sink."""
+        """PUSH() is refused for a non-commit object or ref name at PLACE, showing MATCHED (else a test term), and
+        changes nothing in the sink."""
         before = self.sink_state(url)
         result = push()
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"error: leak terms: {place}: listed leak term", result.stderr)
+        self.assert_refusal(result.stderr, place, matched, prefix="error: ")
         self.assertIn(f"error: {shim} shim: this push to {url} holds a listed leak term. Nothing was pushed.", result.stderr)
         self.assertEqual(self.sink_state(url), before, "a refused push changed the sink")
         for object_id in absent:
             self.assertFalse(self.sink_holds(url, object_id), result.stderr)
-        self.assert_hidden(result)
         return result
 
     def assert_objects_pushed(self, result: subprocess.CompletedProcess[str], url: str, *objects: str) -> None:
@@ -4281,13 +4336,13 @@ class OutgoingLeaks(SinkRepositoryCase):
                     push = (lambda: self.git_push_ref(f"refs/tags/{outer}", f"refs/tags/{outer}", environment)) if kind == "git" \
                         else (lambda: self.jj_push_tag(outer, environment))
                     self.assert_tag_refused(push, inner, url, "git" if kind == "git" else "jj", outer_tag, inner_tag, commit)
-        # (d) a tag whose name is a term: the name is masked.
+        # (d) a tag whose name is a term: the name is shown as written.
         for agent, environment in self.callers():
             with self.subTest(case="d", agent=agent):
                 self.set_url(self.public_url)
                 _, tag, commit = self.annotated_tag("", leaky, name=TEST_TERMS[1])
                 self.assert_tag_refused(lambda: self.git_push_ref(f"refs/tags/{TEST_TERMS[1]}", f"refs/tags/{TEST_TERMS[1]}", environment),
-                                        "<listed term>", self.public_url, "git", tag, commit)
+                                        TEST_TERMS[1], self.public_url, "git", tag, commit)
                 self.real("tag", "-d", TEST_TERMS[1])
         # Controls that go on. Every leaky tag above stays local, and each push below names its refs.
         for agent, environment in self.callers():
@@ -4380,9 +4435,9 @@ class OutgoingLeaks(SinkRepositoryCase):
             (leaky_tree, "nested/leaky.txt:2", (leaky_tree, nested_tree, leaky_blob)),
             (f"refs/tags/{tree_lightweight}", "nested/leaky.txt:2", (leaky_tree, nested_tree, leaky_blob)),
             (f"refs/tags/{tree_annotated}", "nested/leaky.txt:2", (tree_tag, leaky_tree, nested_tree, leaky_blob)),
-            (named_tree, "<listed term>.txt", (named_tree, clean_blob)),
-            (f"refs/tags/{named_lightweight}", "<listed term>.txt", (named_tree, clean_blob)),
-            (f"refs/tags/{named_annotated}", "<listed term>.txt", (named_tag, named_tree, clean_blob)),
+            (named_tree, f"{TEST_TERMS[1]}.txt", (named_tree, clean_blob)),
+            (f"refs/tags/{named_lightweight}", f"{TEST_TERMS[1]}.txt", (named_tree, clean_blob)),
+            (f"refs/tags/{named_annotated}", f"{TEST_TERMS[1]}.txt", (named_tag, named_tree, clean_blob)),
         )
         for agent, environment, url in self.combinations():
             for source, place, absent in objects:
@@ -4409,7 +4464,7 @@ class OutgoingLeaks(SinkRepositoryCase):
 
         clean_blob = make(["hash-object", "-w", "--stdin"], "clean\n")
         first_blob = make(["hash-object", "-w", "--stdin"], "first\n")
-        # A term in this file's text too: its line finding must show the folder's name masked.
+        # A term in this file's text too: its line finding names the folder as written.
         second_blob = make(["hash-object", "-w", "--stdin"], f"{TEST_TERMS[0]}\n")
         empty_tree = make(["mktree"], "")
         empty_named_tree = make(["mktree"], f"040000 tree {empty_tree}\t{TEST_TERMS[1]}\n")
@@ -4438,10 +4493,11 @@ class OutgoingLeaks(SinkRepositoryCase):
                     self.set_url(destination)
                     # The places a commit adding the same files would get: each file under the term-named folder, and
                     # the empty folder's own path, which no commit diff can show.
+                    folder_name = f"prefix/{TEST_TERMS[1]}"
                     places = (
-                        ("prefix/<listed term>",)
+                        (folder_name,)
                         if folder == empty_folder
-                        else ("prefix/<listed term>/first.txt", "prefix/<listed term>/second.txt", "prefix/<listed term>/second.txt:1")
+                        else (f"{folder_name}/first.txt", f"{folder_name}/second.txt", f"{folder_name}/second.txt:1")
                     )
                     result = self.assert_object_refused(
                         lambda: self.git_push_ref(folder, f"refs/tags/{self.unique('folder')}", environment),
@@ -4449,10 +4505,9 @@ class OutgoingLeaks(SinkRepositoryCase):
                         destination,
                         *absent,
                     )
-                    shown = [line for line in result.stderr.splitlines() if line.endswith(": listed leak term")]
-                    self.assertEqual(shown, [f"error: leak terms: {place}: listed leak term" for place in places], result.stderr)
+                    self.assertEqual(refusal_places(result.stderr, "error: "), list(places), result.stderr)
 
-    def test_push_masks_a_folder_path_in_text_findings(self) -> None:
+    def test_push_names_a_folder_path_in_text_findings_as_written(self) -> None:
         def make(arguments: list[str], source: str) -> str:
             result = self.launch(["/usr/bin/git", *arguments], cwd=self.repo, env=self.person, input=source)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -4469,14 +4524,15 @@ class OutgoingLeaks(SinkRepositoryCase):
                 )
                 self.set_url(destination)
                 result = self.assert_object_refused(
-                    lambda: self.git_push_ref(tree, f"refs/tags/{self.unique('masked-folder')}", environment),
-                    "<listed term>.txt",
+                    lambda: self.git_push_ref(tree, f"refs/tags/{self.unique('named-folder')}", environment),
+                    f"{TEST_TERMS[1]}.txt",
                     destination,
                     tree,
                     blob,
                 )
-                self.assertIn("error: leak terms: <listed term>.txt: listed leak term", result.stderr)
-                self.assertIn("error: leak terms: <listed term>.txt:1: listed leak term", result.stderr)
+                self.assertEqual(refusal_places(result.stderr, "error: "), [f"{TEST_TERMS[1]}.txt", f"{TEST_TERMS[1]}.txt:1"],
+                                 result.stderr)
+                self.assert_refusal(result.stderr, f"{TEST_TERMS[1]}.txt:1", TEST_TERMS[0], prefix="error: ")
 
     def test_push_refuses_a_term_that_spans_folder_levels(self) -> None:
         # A listed term holding `/` matches a folder object's path across levels: `alpha/omega` in `alpha/omega/x.txt`.
@@ -4504,19 +4560,15 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.set_url(destination)
                 result = self.assert_object_refused(
                     lambda: self.git_push_ref(top, f"refs/tags/{self.unique('slash-term')}", environment | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
-                    "<listed term>/x.txt",
+                    "alpha/omega/x.txt",
                     destination,
                     top,
                     alpha,
                     omega,
+                    matched=term,
                 )
-                shown = [line for line in result.stderr.splitlines() if line.endswith(": listed leak term")]
-                self.assertEqual(
-                    shown,
-                    ["error: leak terms: <listed term>/x.txt: listed leak term", "error: leak terms: <listed term>/y.txt: listed leak term"],
-                    result.stderr,
-                )
-                self.assertNotIn(term, result.stdout + result.stderr)
+                self.assertEqual(refusal_places(result.stderr, "error: "), ["alpha/omega/x.txt", "alpha/omega/y.txt"],
+                                 result.stderr)
 
     def make_tree(self, files: Sequence[str], empty_folders: Sequence[str] = ()) -> str:
         """A folder object made by the real git: each of FILES holding `x`, and each of EMPTY_FOLDERS empty."""
@@ -4547,9 +4599,9 @@ class OutgoingLeaks(SinkRepositoryCase):
     def test_push_folder_check_names_the_places_the_commit_check_names(self) -> None:
         # A generated grid: every term against every tree. For each pair, a commit that adds the tree's files (the
         # commit check reads its diff paths) and the tree's folder object pushed alone, empty folders included (the
-        # folder check reads its entries). Both refuse or both pass, and the folder push names the same masked
-        # places as the commit push; the one allowed extra is one place per match in an empty folder's path, which no
-        # commit diff can show. Each push goes to a fresh public destination, so nothing is held.
+        # folder check reads its entries). Both refuse or both pass, and the folder push names the same places, with
+        # the same matched text, as the commit push; the one allowed extra is one place per match in an empty folder's
+        # path, which no commit diff can show. Each push goes to a fresh public destination, so nothing is held.
         terms = ("foo/", "foo/bar/", "/", "a/b", "/bar", "zorble plex", TEST_TERMS[1], "qqq-clean")
         trees = {
             "nested": (("foo/bar/x.txt", "foo/bar/y.txt", "foo/z.txt"), ()),
@@ -4560,10 +4612,15 @@ class OutgoingLeaks(SinkRepositoryCase):
             "term-files": ((f"{TEST_TERMS[1]}.txt", "zorble plex.txt", "deep/zorble  plex/x.txt"), ()),
             "empty-folders": (("keep/x.txt",), (f"prefix/{TEST_TERMS[1]}", "foo", "a/b", "q/bar/inner")),
         }
-        prefix = re.compile(r"^error: leak terms: (?:commit [0-9a-f]{12} )?(.*): listed leak term$")
 
-        def places(result: subprocess.CompletedProcess[str]) -> list[str]:
-            return sorted(match.group(1) for line in result.stderr.splitlines() if (match := prefix.match(line)))
+        def places(result: subprocess.CompletedProcess[str]) -> list[tuple[str, str]]:
+            """Each refusal's place, without the commit a commit check names, and the text that matched."""
+            found = []
+            for line in result.stderr.splitlines():
+                matched = REFUSAL_LINE.fullmatch(line.removeprefix("error: ")) if line.startswith("error: ") else None
+                if matched:
+                    found.append((re.sub(r"^commit [0-9a-f]{12} ", "", matched["place"]), matched["matched"]))
+            return sorted(found)
 
         def pattern(term: str) -> re.Pattern[str]:
             # The match rule: a space in a term matches a run of spaces or tabs; case does not matter (the grid's
@@ -4585,18 +4642,16 @@ class OutgoingLeaks(SinkRepositoryCase):
                         self.set_url(url)
                         ref = f"refs/heads/{self.unique('grid')}" if kind == "commit" else f"refs/tags/{self.unique('grid')}"
                         results[kind] = self.git_push_ref(source, ref, environment)
-                        if term != "/":
-                            self.assertNotIn(term.casefold(), (results[kind].stdout + results[kind].stderr).casefold())
                     commit_places, folder_places = places(results["commit"]), places(results["folder"])
                     extra = list(folder_places)
                     for place in commit_places:
                         self.assertIn(place, extra, f"the commit check names {place}; the folder check names {folder_places}")
                         extra.remove(place)
-                    # An empty folder's path, masked, once per match: the one place a commit diff cannot show.
+                    # An empty folder's path, once per match: the one place a commit diff cannot show.
                     expected_extra = sorted(
-                        pattern(term).sub("<listed term>", folder_path)
+                        (folder_path, found.group(0))
                         for folder_path in empty_folders
-                        for _ in pattern(term).finditer(folder_path)
+                        for found in pattern(term).finditer(folder_path)
                     )
                     self.assertEqual(sorted(extra), expected_extra, f"folder places {folder_places}, commit places {commit_places}")
                     refused = (results["commit"].returncode != 0, results["folder"].returncode != 0)
@@ -4616,9 +4671,9 @@ class OutgoingLeaks(SinkRepositoryCase):
         url = self.fresh_public_url()
         self.set_url(url)
         result = self.assert_object_refused(
-            lambda: self.git_push_ref(tree, f"refs/tags/{self.unique('empty-folder')}", environment), "<listed term>", url, tree
+            lambda: self.git_push_ref(tree, f"refs/tags/{self.unique('empty-folder')}", environment), TEST_TERMS[1], url, tree
         )
-        self.assertEqual(result.stderr.count(": listed leak term"), 1, result.stderr)
+        self.assertEqual(refusal_places(result.stderr, "error: "), [TEST_TERMS[1]], result.stderr)
 
     def test_push_allows_a_file_object_a_held_commit_already_has(self) -> None:
         path = f"{self.unique('held-file')}.txt"
@@ -4647,7 +4702,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.set_url(destination)
                 self.assert_object_refused(
                     lambda: self.git_push_ref("HEAD", f"refs/heads/{name}", environment),
-                    "ref <listed term>",
+                    f"ref {name}",
                     destination,
                 )
             with self.subTest(kind="jj", agent=agent, url=url):
@@ -4659,7 +4714,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.set_url(destination)
                 self.assert_object_refused(
                     lambda: self.jj_push(self.base, name, environment),
-                    "ref <listed term>",
+                    f"ref {name}",
                     destination,
                     shim="jj",
                 )
@@ -4672,7 +4727,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                 self.set_url(destination)
                 self.assert_object_refused(
                     lambda: self.git_push_ref(f"refs/tags/{name}", f"refs/tags/{name}", environment),
-                    "ref <listed term>",
+                    f"ref {name}",
                     destination,
                 )
                 self.assertFalse(self.sink_holds(destination, tag))
@@ -4700,10 +4755,7 @@ class OutgoingLeaks(SinkRepositoryCase):
                     f"{path}:1",
                     url,
                 )
-                self.assertEqual(
-                    [line for line in result.stderr.splitlines() if line.endswith(": listed leak term")],
-                    [f"error: leak terms: commit {commit[:12]} {path}:1: listed leak term"],
-                )
+                self.assertEqual(refusal_places(result.stderr, "error: "), [f"commit {commit[:12]} {path}:1"], result.stderr)
 
     def test_push_allows_clean_objects_and_nonpublishing_or_held_controls(self) -> None:
         # (14 controls) Clean direct objects and names go on; a deletion reads no list; a held commit is not outgoing.
@@ -4776,8 +4828,8 @@ class OutgoingLeaks(SinkRepositoryCase):
                         if kind == "git"
                         else (lambda: self.jj_push_tag(name, custom_environment))
                     )
-                    result = self.assert_tag_refused(push, name, self.public_url, kind, tag, commit)
-                    self.assertNotIn(term, result.stdout + result.stderr)
+                    result = self.assert_tag_refused(push, name, self.public_url, kind, tag, commit, matched=term)
+                    self.assertIn(f'"{term}"', result.stderr)
 
         name, tag, commit = self.latin1_annotated_tag("latin1-unset", message)
         self.real("config", "--unset", "i18n.commitEncoding")
@@ -4865,13 +4917,13 @@ class OutgoingLeaks(SinkRepositoryCase):
         self.assertNotIn(b"\nencoding ", raw.stdout)
         self.assertIn(term.encode("latin-1"), raw.stdout)
         self.real("config", "i18n.commitEncoding", "ISO-8859-1")
-        result = self.assert_push_refused(
+        self.assert_push_refused(
             lambda: self.git_push("origin", commit, self.unique("latin1-commit"), self.person | {"DOTFILES_LEAK_TERMS_FILE": str(term_file)}),
             commit,
             "message line 2",
             self.public_url,
+            matched=term,
         )
-        self.assertNotIn(term, result.stdout + result.stderr)
 
     def test_jj_push_hides_a_tag_name_from_a_plan_mismatch(self) -> None:
         workspace = self.root / "noncolocated"
@@ -5186,7 +5238,8 @@ class OutgoingLeaks(SinkRepositoryCase):
 
 
 class SecrecyTrace(SinkRepositoryCase):
-    """Trace refusals so that a listed term never reaches a persistent surface."""
+    """Trace refusals so that a listed term never reaches a persistent surface, and a refusal's output shows only the
+    term its text holds."""
 
     identity = "Hidden Test"
 
@@ -5228,16 +5281,19 @@ class SecrecyTrace(SinkRepositoryCase):
         self.assertEqual(len(captured), 1, "strace capture was not read")
         return result, captured[0]
 
-    def assert_refusal(
+    def assert_traced_refusal(
         self, result: subprocess.CompletedProcess[bytes], capture: bytes, allowed_files: set[str] | None = None
     ) -> dict[str, bytes]:
-        """The traced refusal shows and writes no test term, by the scanner's matching rule: not in its output, an
-        argv, or any regular file but ALLOWED_FILES, which may hold the person's own message but not the canary."""
+        """The traced refusal shows the term the text holds and no other term of the list, by the scanner's matching
+        rule (dispatch://INFRA-4383, R2): its output holds TEST_TERMS[0], which every text here holds, and no other test
+        term; no argv holds a test term; and no regular file does but ALLOWED_FILES, which may hold the person's own
+        message but not the canary, a term no text holds."""
         allowed_files = allowed_files or set()
         canary = TEST_TERMS[-1]
         self.assertNotEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
-        self.assertIn(b"listed leak term", result.stderr.lower())
-        self.assert_hidden(result.stdout, result.stderr)
+        self.assertIn(TEST_TERMS[0], leaked_terms(result.stderr))
+        for stream in (result.stdout, result.stderr):
+            self.assertLessEqual(set(leaked_terms(stream)), {TEST_TERMS[0]}, "a term the text does not hold reached the output")
         argv, writes = parse_strace(capture)
         for values in argv:
             self.assertEqual(leaked_terms(b"\0".join(values)), [], values)
@@ -5316,14 +5372,14 @@ class SecrecyTrace(SinkRepositoryCase):
         (self.repo / "git-content.txt").write_text(TEST_TERMS[0] + "\n", encoding="utf-8")
         self.real_git("add", "git-content.txt")
         result, capture = self.traced(["git", "commit", "-m", "ok"])
-        self.assert_refusal(result, capture)
+        self.assert_traced_refusal(result, capture)
         self.assert_no_canary()
 
     def test_hidden_jj_commit(self) -> None:
         self.initialize_jj()
         (self.repo / "jj-content.txt").write_text(TEST_TERMS[0] + "\n", encoding="utf-8")
         result, capture = self.traced(["jj", "commit", "-m", "ok"])
-        self.assert_refusal(result, capture)
+        self.assert_traced_refusal(result, capture)
         self.assert_no_canary()
 
     def test_hidden_jj_describe_editor(self) -> None:
@@ -5342,7 +5398,7 @@ class SecrecyTrace(SinkRepositoryCase):
         editor.chmod(0o755)
         result, capture = self.traced(["jj", "describe"], environment=self.person | {"JJ_EDITOR": str(editor)})
         description_file = description.read_text(encoding="utf-8")
-        writes = self.assert_refusal(result, capture, {description_file})
+        writes = self.assert_traced_refusal(result, capture, {description_file})
         self.assertIn(description_file, writes)
         self.assertIn(TEST_TERMS[0].encode(), writes[description_file])
         self.assert_no_canary()
@@ -5350,14 +5406,14 @@ class SecrecyTrace(SinkRepositoryCase):
     def test_hidden_git_push(self) -> None:
         commit = self.leaky_commit("git-push-content.txt")
         result, capture = self.traced(["git", "push", "origin", f"{commit}:refs/heads/hidden-git"])
-        self.assert_refusal(result, capture)
+        self.assert_traced_refusal(result, capture)
         self.assert_no_canary()
 
     def test_hidden_git_push_annotated_tag(self) -> None:
         # An annotated tag on a clean commit whose message alone holds the term.
         self.real_git("tag", "-a", "hidden-tag", "-m", f"clean\n{TEST_TERMS[0]}")
         result, capture = self.traced(["git", "push", "origin", "refs/tags/hidden-tag"])
-        self.assert_refusal(result, capture)
+        self.assert_traced_refusal(result, capture)
         self.assertIn(b"tag hidden-tag message line 2", result.stderr)
         self.assert_no_canary()
 
@@ -5372,7 +5428,7 @@ class SecrecyTrace(SinkRepositoryCase):
             ["jj", "git", "push", "--bookmark", "hidden-jj"],
             environment=self.person | {"DOTFILES_JJ_NO_LEAK_CHECK": "1"},
         )
-        self.assert_refusal(result, capture)
+        self.assert_traced_refusal(result, capture)
         self.assert_no_canary()
 
     def test_hidden_canary_search_finds_a_seeded_object_and_file(self) -> None:
@@ -5391,13 +5447,14 @@ class SecrecyTrace(SinkRepositoryCase):
         self.assertEqual(self.canary_hits(), [f"file {planted}", f"object {git_directory}"])
 
     def test_hidden_refusal_audit_catches_an_echo_in_another_case_and_spacing(self) -> None:
-        # B7: the audit matches as the scanner does, so a refusal that echoes `quillfeather   LANE 9` to its output,
-        # a file or an argv fails it; the same refusal without the echo passes.
+        # B7: the audit matches as the scanner does, so a refusal that echoes the canary, a term its text does not
+        # hold, to its output in another case, or a term to a file or an argv, fails it; the same refusal without the
+        # echo passes.
         target = self.tmpdir / "echo-target"
         script = write_executable(
             self.root / "echoing-refusal.sh",
             "#!/bin/sh\n"
-            "printf 'leak terms: listed leak term\\n' >&2\n"
+            "printf 'leak terms: commit message line 1: \"Quillfeather Lane 9\" (the global list), in: Quillfeather Lane 9\\n' >&2\n"
             "case \"$MODE\" in\n"
             "    output) printf 'echo: %s\\n' \"$ECHOED\" >&2 ;;\n"
             f"    file) printf '%s\\n' \"$ECHOED\" > {shlex.quote(str(target))}; rm -f -- {shlex.quote(str(target))} ;;\n"
@@ -5405,15 +5462,13 @@ class SecrecyTrace(SinkRepositoryCase):
             "esac\n"
             "exit 1\n",
         )
-        for mode in ("output", "file", "argv"):
+        for mode, echoed in (("output", TEST_TERMS[-1].upper()), ("file", "quillfeather   LANE 9"), ("argv", "quillfeather   LANE 9")):
             with self.subTest(mode=mode):
-                result, capture = self.traced(
-                    [str(script)], environment=self.person | {"MODE": mode, "ECHOED": "quillfeather   LANE 9"}
-                )
+                result, capture = self.traced([str(script)], environment=self.person | {"MODE": mode, "ECHOED": echoed})
                 with self.assertRaises(AssertionError):
-                    self.assert_refusal(result, capture)
+                    self.assert_traced_refusal(result, capture)
         result, capture = self.traced([str(script)], environment=self.person | {"MODE": "none", "ECHOED": ""})
-        self.assert_refusal(result, capture)
+        self.assert_traced_refusal(result, capture)
 
     def test_hidden_negative_control_finds_file_writes_and_argv(self) -> None:
         script, canary_file, term_file = self.control_writer()

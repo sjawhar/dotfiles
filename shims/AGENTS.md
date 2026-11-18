@@ -83,7 +83,10 @@ behavior before handing the call to the real one. One file is data: `person-name
   for the reset rather than look for another credential. The shim does not retry; gh itself
   does not either, so the call fails in seconds (measured 2026-11-03: 3.5 s through the shim,
   0.2 s for gh alone). Until 2026-11-03 the block named only core and graphql, so a spent
-  search budget read as core with thousands left. Outside an agent
+  search budget read as core with thousands left. Both blocks read the call's stderr only when the
+  call reached gh, which its inner pass marks just before it hands the call over: a refusal before gh
+  ran (the public text gate, the leak-term check) prints the caller's own text, which may say
+  `HTTP 403` (dispatch://INFRA-4383). Outside an agent
   session, `gh auth git-credential` (git's helper in `~/.gitconfig`) goes to the user's login,
   except where the machine's own git config file, `~/.config/git/config` (not the shared
   `~/.gitconfig`, not a repository's), names `gh-app.host-profile` (a machine with no person's
@@ -118,8 +121,8 @@ behavior before handing the call to the real one. One file is data: `person-name
   `forbidden` lists of knives's fork registry, all read by the one matcher ("Leak-term list"
   below), refuse a term in a title, a body, a comment, a review, release notes or an API field
   before gh sends it, with exit 2 and one line per match naming the command, the target, the field
-  and line, and the term's number in its list (`listed leak term 3`, `… 14 of cybermonklabs/*`,
-  `… 15 of knives oh-my-pi`), never the term. On 2026-11-17 an agent's `gh pr edit` put a listed
+  and the line in it, the text that matched as it is written, the list that holds the term and the
+  line it is on ("Leak-term list" below). On 2026-11-17 an agent's `gh pr edit` put a listed
   term into a public pull request's body, and the fork's pull-request bodies took terms of the
   registry's oh-my-pi list; GitHub keeps every body revision in the edit history, which only an
   admin can delete, so refusing before the post is the only fix (dispatch://INFRA-4102). The
@@ -136,11 +139,31 @@ behavior before handing the call to the real one. One file is data: `person-name
   `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`),
   and for a file gh reads (`--body-file`,
   `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's files) what the
-  file holds, never its path. Each text is read as GitHub renders prose, a paragraph at a time (as
-  a commit message is, "Leak-term list" below), so a term of several words that a wrapped line or a
-  no-break space splits is the term on the page. Each is read as written and, when it
-  holds a backslash, with its JSON escapes decoded as well, since Python's `json.dump` writes each
-  letter outside ASCII as a `\u` escape. A file that is the call's stdin while that is a pipe or a
+  file holds, never its path. Each body is read as its endpoint stores it, and each value on its own,
+  so two values never make one match (dispatch://INFRA-4383). A release asset's body (`gh release
+  upload`, or `gh api` to a `repos/O/R/releases/N/assets` path or to an address on
+  uploads.github.com) is its bytes, read as written and never as JSON, since GitHub stores them so:
+  read as JSON, an asset's `\u002f` once decoded into the `/` of a token its repository allows and
+  sent the scoped term inside it. A body that parses as JSON (`--input`, `workflow run --json`) is
+  read as each string and member name, decoded, by its JSON path (`--input body.json
+  .comments[0].body line 3`); a field's key is read apart from its value; and a GraphQL document
+  that parses (the `query` field of `gh api graphql`, or a JSON body's `.query`, read by the spec's
+  grammar of an executable document: operations, fragments, selections, arguments, values and
+  directives, every string closed and no control character) is read as each of its strings, decoded
+  by GraphQL's rules, block strings included
+  (`--raw-field query string 2`), so a `\u` escape in a GraphQL string inside JSON is the letter
+  GitHub stores (dispatch://BET-727), while a comment, which nobody stores, is not read. Every other
+  text is read as written: a body's `\u0041` is those six characters on the page. A body that does
+  not parse as JSON, and a document that does not parse, are read both ways, as written and, when
+  they hold a backslash, with their JSON escapes decoded: the check cannot tell what GitHub stores
+  there, and a refusal across two values beats a miss. An allowed token ("Leak-term list" below)
+  counts only where the text each reading reads holds it, so a decode the endpoint does not make
+  cannot make one: an asset's bytes are never decoded, and in a body read both ways the as-written
+  reading keeps its own matches.
+  Within a value, the text is read as GitHub renders prose, a
+  paragraph at a time (as a commit message is, "Leak-term list" below), so a term of several words
+  that a wrapped line or a no-break space splits is the term on the page. A file that is the call's
+  stdin while that is a pipe or a
   terminal (`/dev/stdin`, `/dev/fd/0`) is read from the stdin buffer, as `-` is; any other pipe, a
   socket or a device but `/dev/null` is not read at all, since reading a pipe takes the text gh
   reads after the check (until 2026-11-17 a `--body-file <(…)` went out empty), so such a text is
@@ -924,21 +947,59 @@ test pane's `<bin>:/usr/local/bin:/usr/bin:/bin`), it runs that pinned version f
 dirs as "A moved HOME" below reads them, and its refusal names each dir it searched. A sops that exits with any status but
 0 or 128 is named in the refusal with its status.
 
-The `diff`, `message` and `push` modes print one stderr line per match with a place and
-`listed leak term`, never the matching text, then name how to remove it. They exit 0 when clean,
-3 on a match, 2 when the list cannot be read and 4 when the text to scan cannot be read;
-`jj-editor` returns a nonzero status to stop jj after a match or other failure. Every shim treats
-any nonzero scan result as a refusal. A missing list or sops, an undecryptable or invalid list, an
-empty list, a malformed diff or an unreadable push advertisement therefore fails closed.
+Every mode prints one stderr line per match that names the place (a file and its line, a message
+and its line, a commit, a tag, a ref, or a gh call's field, the value's path in it and the line in
+that value), the text that matched as it is written, the list that holds the term, and the line it
+is on, then says how to remove it (dispatch://INFRA-4383):
+`leak terms: notes.md:3: "Quillfeather Lane 9" (the global list), in: see Quillfeather Lane 9 there`.
+The list is `the global list` (`terms`), `the <pattern> list` (a `scoped` block) or `the knives
+<entry> list` (the registry's), so the advice to drop a term that is not private names the right
+file. A place that is the matched name itself (a path, a ref, a tag's name) shows no line. The
+text and its line are C-escaped, so each refusal is one line (a term a wrapped line splits shows as
+`Quillfeather\nLane 9`). The line is cut to 80 characters on each side of the match, and the match
+to its first and last 80 characters (a term whose words a long run of spaces parts), each cut
+marked `…`. Until 2026-11-17 a refusal named the place only, with `listed leak term` (in gh mode,
+the term's number in a list the caller cannot decrypt), so the agent that wrote the text could not
+tell what to change. The caller wrote that text, so showing it copies nothing to a new place.
+
+The `diff`, `staged`, `message` and `push` modes exit 0 when clean, 3 on a match, 2 when the list
+cannot be read and 4 when the text to scan cannot be read; `jj-editor` returns a nonzero status to
+stop jj after a match or other failure. Every shim treats any nonzero scan result as a refusal. A
+missing list or sops, an undecryptable or invalid list, an empty list, a malformed diff or an
+unreadable push advertisement therefore fails closed.
 
 The `gh` mode (`leak-terms-check gh -- <gh argv>`, the text a gh call sends; `gh` above) prints
-`leak terms: gh <command> to <target>: <field> line <n>: listed leak term <k>` for each match:
-`<k>` is the term's place in its list, counting neither blank lines nor `#` lines, followed by
-`of <pattern>` for a scoped list and `of knives <entry>` for the registry's (whose list counts
-repos.toml's terms, then repos.local.toml's), which tells the list's owner which term it is and
-nobody else anything. It exits 3 on a match, 2 when the list cannot be read and 4 when a file the
-call names cannot be read, each only for a call that can reach something not confirmed private,
-and 7 to ask for the call's stdin; `shims/gh` exits 2 on any of those but 7.
+`leak terms: gh <command> to <target>: <field> line <n>: "<text>" (<list>), in: <line>` for each
+match. It exits 3 on a match, 2 when the list cannot be read and 4 when a file the call names
+cannot be read, each only for a call that can reach something not confirmed private, and 7 to ask
+for the call's stdin; `shims/gh` exits 2 on any of those but 7.
+
+Every place a refusal reaches is the caller's own, so each shows the text (dispatch://INFRA-4383,
+R3):
+
+- The stderr of the command that ran the check, which is a person's terminal or an agent's own
+  session: `shims/gh` (the check writes to the shim's stderr), the `git-hooks/hook` pre-commit and
+  commit-msg checks that `shims/git` installs, `jj-push-hooks/pre-push` (each line prefixed
+  `error: `), and `shims/jj`'s commit, describe and new checks and its push gate (each push line
+  prefixed `error: `).
+- For a push jj runs, `shims/git` (`jj_push_gate`) passes git's stderr, the pre-push hook's
+  refusal in it, through an `awk` filter that drops git's own `failed to push some refs` line
+  after the gate's refusal, and writes the rest to its own stderr, which jj shows, under `--quiet`
+  too; that is the jj caller's terminal or session.
+- `shims/gh`'s outermost pass in an agent session copies the call's stderr into a private
+  temporary directory (`mktemp -d` under `TMPDIR`, removed when the call ends) only to find GitHub's
+  refusal of the call or a spent rate limit (`gh` above); it prints none of that copy, and reads it
+  only when the call reached gh.
+- No log: the gh call log under the read cache's root records each call's argv, not its stderr,
+  and the read cache stores a call's stderr only for a call that succeeded (exit 0, or 8 with no
+  stderr), never for a refusal.
+- No CI: neither workflow of this public repository (`.github/workflows/envoy-typecheck.yml`,
+  `.github/workflows/omp-extensions-test.yml`) runs these tests or the check, and Legion does not
+  run it (its pods run the shared public leak check, whose refusals are that check's own).
+
+A refusal that would reach a public place must show the kind of each match (`<term>`) in place of
+its text; none does. A refusal pasted into a gh post bound for a repository not confirmed private
+is refused by the gh mode itself.
 
 A machine whose age key is not a recipient refuses commits, guarded pushes and gh text bound for a
 repository not confirmed private. Add that key above the YubiKey line of `.sops.yaml`, then run
