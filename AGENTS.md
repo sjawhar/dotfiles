@@ -124,7 +124,7 @@ Git needs configuring even though day-to-day work is all jj: agent worktrees und
 
 `jj-allowed-signers` lists every identity as a principal on every key, so a commit verifies under any of them.
 
-`git-identity nr` is opt-in, for a checkout whose commits must carry no personal address: a fork whose own forbidden-term list holds the default address, such as knives' oh-my-pi list, refuses a commit made with it at a release cut. Set it in your own workspace of such a repo before committing there; it changes no default. The noreply address is listed in `jj-allowed-signers` like the others.
+`git-identity nr` is opt-in, for a checkout whose commits must carry no personal address: a fork whose own forbidden-term list holds the default address, such as knives' oh-my-pi list, refuses a commit made with it at a release cut. Set it in your own workspace of such a repo before committing there; it changes no default, and it is scoped to that workspace: jj with `--workspace`, and git only where `extensions.worktreeConfig` keeps it per worktree, since knives' workspaces of one fork share the jj repo config and the canonical checkout's git config. The noreply address is listed in `jj-allowed-signers` like the others.
 
 Within a repo the two tools must **agree**. jj's `behavior = "own"` signs a commit only when its author email matches jj's configured `user.email`, and on mismatch it *drops* the signature when rewriting rather than preserving it. That is why the defaults are aligned rather than left to differ per tool: a git-authored commit under one identity would lose its signature the first time jj rewrote it under the other — which is what happens when an agent's commit gets rebased into a jj repo.
 
