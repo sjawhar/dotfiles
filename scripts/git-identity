@@ -14,16 +14,23 @@
 #   git-identity tl|trajectory   use sami@trajectorylabs.net for this repo
 #   git-identity cm|cybermonk    use sami@thecybermonk.com for this repo
 #   git-identity th|theorem      use sami@theorem.dev for this repo
+#   git-identity nr|noreply      use sjawhar@users.noreply.github.com for this repo
 #
 # sjawhar/legion (sami@thecybermonk.com) and every theorem-labs repository
 # (sami@theorem.dev) need none of these: they get their identity by rule in every
 # clone (.gitconfig matches the remote URL, .jjconfig.toml the jj checkouts' paths).
+#
+# noreply is opt-in, for a checkout whose commits must carry no personal address:
+# a fork whose own forbidden-term list holds the default address (knives'
+# oh-my-pi list does), so a commit made with it is refused at a release cut.
+# Set it in your own workspace of such a repo before you commit there.
 set -euo pipefail
 
 NAME="Sami Jawhar"
 TL_EMAIL="sami@trajectorylabs.net"
 CM_EMAIL="sami@thecybermonk.com"
 TH_EMAIL="sami@theorem.dev"
+NR_EMAIL="sjawhar@users.noreply.github.com"
 
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git repo" >&2; exit 1; }
 in_jj() { jj root >/dev/null 2>&1; }
@@ -35,7 +42,7 @@ show() {
     if in_jj; then
         j=$(jj config get user.email 2>/dev/null || echo "(unset)")
         echo "jj:  ${j}"
-        [ "$g" = "$j" ] || echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm|th" >&2
+        [ "$g" = "$j" ] || echo "MISMATCH — jj will drop signatures on rewrite. Run: git-identity tl|cm|th|nr" >&2
     else
         echo "jj:  (not a jj repo)"
     fi
@@ -46,12 +53,13 @@ case "${1-}" in
     tl | trajectory | trajectorylabs) EMAIL="$TL_EMAIL" ;;
     cm | cybermonk | thecybermonk) EMAIL="$CM_EMAIL" ;;
     th | theorem) EMAIL="$TH_EMAIL" ;;
+    nr | noreply) EMAIL="$NR_EMAIL" ;;
     -h | --help)
-        sed -n '2,20p' "$0" | sed 's/^# \?//'
+        sed -n '2,26p' "$0" | sed 's/^# \?//'
         exit 0
         ;;
     *)
-        echo "unknown identity: $1 (want tl, cm or th)" >&2
+        echo "unknown identity: $1 (want tl, cm, th or nr)" >&2
         exit 1
         ;;
 esac
