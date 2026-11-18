@@ -168,7 +168,12 @@ class ShimHandsTheGateEveryPullRequest(unittest.TestCase):
         self.gh = dotfiles / "shims" / "gh"
         self.env = {
             **{k: v for k, v in os.environ.items() if not k.startswith(("GIT_CONFIG_", "GH_", "PUBLIC_LEAK_CHECK"))},
-            "PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
+            # The shim takes no gh above its own PATH entry (shims/AGENTS.md, "Adding to a shim"), so this checkout's
+            # shims/, which a run inside the checkout has on PATH, is left out: the shim runs from outside PATH and
+            # takes the fake gh first.
+            "PATH": os.pathsep.join([str(bin_dir), *(entry for entry in os.environ["PATH"].split(os.pathsep)
+                                                     if Path(entry).resolve() != self.gh.parent.resolve())]),
+            "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_CACHE_HOME": str(root / "cache"), "TMPDIR": str(root), "DOTFILES_DIR": str(fake),
             "OMP_SESSION_ID": "01a0fa64-b3a5-7415-b143-c2a338b5da8b", "PUBLIC_LEAK_CHECK": "/bin/true",
             "KNIVES_GH_BYPASS": "1", "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0",
