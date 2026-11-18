@@ -26,7 +26,14 @@ What one run does:
   4. Refuse when the commits to take change an exception file that is modified here. (`git merge
      --ff-only` keeps a modified file that the merge does not touch, and refuses one it does.)
   5. `git merge --ff-only origin/main`.
-  6. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
+  6. On every run that leaves HEAD at origin/main (in git mode, with no uncommitted change), after
+     any fast-forward or jj move: `scripts/knives-registry-render --if-changed`. It renders
+     knives/repos.toml into ~/.config/knives/repos.toml unless the copy is a plain file and the
+     sha256 the step recorded at its last render is the file's, so a merged change to the
+     registry reaches this machine with no person's command. A failed render is a condition and
+     stops nothing: the tools step still runs. A checkout older than the step (no
+     scripts/knives-registry-render or no knives/repos.toml) skips it.
+  7. After a fast-forward or marketplace-lock recovery, and on later runs until it passes at HEAD:
      `mise install`, `bun install --frozen-lockfile` in omp/plugins, marketplace catalog refresh and
      upgrade for registered marketplace plugins below the lowest version their committed lock entries
      require (a best-effort lock restore afterward). A plugin at or above its entry gets no upgrade or
@@ -38,7 +45,7 @@ What one run does:
      `mise install` holds `$MISE_DATA_DIR/.dotfiles-install.lock` (waiting for it at most
      --mise-timeout), the lock dotfiles-sync's tools step and agent-session hold too, so installs
      on one MISE_DATA_DIR never run side by side and a launch waits for a running install.
-  7. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
+  8. Every run, whatever the checkout's state: one pass of the leak check's hook sweep
      (sweep-hooks.sh of the leak-check tag, in ~/.local/share/public-leak-check-hooks, which
      devbox/sami-devbox-provision's step prepush installs) over its fast roots, under
      --sweep-timeout; at most once per --slow-sweep-interval, and not in a run whose tools step
@@ -52,10 +59,11 @@ What one run does:
      checkout it cannot hook, a checkout it deferred to a later pass (its cap on GitHub visibility
      lookups, dispatch://BET-706), a pass that does not end within its timeout, a pass that could
      not run for lack of time, or a missing sweep is a condition.
-  8. Say each new condition once, all of one run's in one message; say it again once after
+  9. Say each new condition once, all of one run's in one message; say it again once after
      --escalate if it still holds; say when it clears.
-     When HEAD is at origin/main and only tools/hooks remain open, say a post-update step failed,
-     not that the checkout failed to follow. Any open follow failure keeps the not-following headline.
+     When HEAD is at origin/main and only tools/registry/hooks remain open, say a post-update step
+     failed, not that the checkout failed to follow. Any open follow failure keeps the
+     not-following headline.
 
 In git mode, it never stashes, resets, rebases or abandons. In jj mode, dotfiles-sync rebases
 `@` and abandons commits that main already has. dotfiles-follow never describes, commits or pushes.
@@ -115,10 +123,11 @@ HEADLINE = {
     "kept-file": "MAIN CHANGES A KEPT FILE",
     "merge": "FAST-FORWARD FAILED",
     "tools": "TOOLS NOT INSTALLED",
+    "registry": "KNIVES REGISTRY NOT WRITTEN",
     "hooks": "PRE-PUSH HOOK NOT INSTALLED",
 }
 KINDS = tuple(HEADLINE)
-POST_FOLLOW_KINDS = {"tools", "hooks"}
+POST_FOLLOW_KINDS = {"tools", "registry", "hooks"}
 # A tracked exception file may differ from its commit in the work tree or the index; any other
 # status of it (deleted, renamed, in conflict) is a change like any other.
 KEPT_STATUSES = {" M", "M ", "MM"}
@@ -913,6 +922,50 @@ def run_tools_step(
         data["tools_ok_head"] = head
 
 
+def path_identity(path: Path) -> tuple[int, int] | None:
+    """(inode, mtime in ns) of the entry at PATH itself, or None when there is none."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
+
+
+def run_registry_step(
+    repo: Path, options: argparse.Namespace, found: dict[str, str], judged: set[str], facts: dict,
+) -> None:
+    """Render knives/repos.toml into this machine's copy, ~/.config/knives/repos.toml, at HEAD
+    (scripts/knives-registry-render --if-changed), shared by git mode and jj mode.
+
+    A merge that changed knives/repos.toml used to reach the copy only when someone re-ran
+    install.sh. The render writes only when the file changed since its last render (it records
+    the sha256 it rendered beside the copy), so every run at HEAD runs it, whatever the tools step
+    does: the first run of this code, on a checkout already at HEAD whose tools passed, renders
+    once, and a later run renders exactly when the file changed since, by any route. A checkout
+    older than the step has nothing to render. The run's footer names a write of the copy, judged
+    by the copy's inode and mtime before and after the render."""
+    judged.add("registry")
+    render = repo / "scripts/knives-registry-render"
+    if not render.exists() or not (repo / "knives/repos.toml").exists():
+        return
+    copy = Path.home() / ".config/knives/repos.toml"
+    before = path_identity(copy)
+    code, out = run_step([str(render), "--if-changed"], repo, options.check_timeout)
+    written = path_identity(copy) != before
+    if written:
+        facts["registry_written"] = True
+    if code != 0:
+        # A render stopped after it replaced the copy (before its sha256 record) did write it.
+        held = "was replaced before the render failed" if written else "keeps what it held"
+        found["registry"] = (
+            f"`scripts/knives-registry-render --if-changed` in {display_path(repo)} exited {code}:\n{tail(out)}"
+            f"\n  {display_path(copy)} {held}. The next run tries again."
+        )
+        return
+    for line in out.strip().splitlines():
+        log(f"registry: {line}")
+
+
 def restore_marketplace_lock(
     repo: Path,
     state: State,
@@ -953,7 +1006,9 @@ def assess_jj_and_follow(
     data = state.data
     display = display_path(repo)
     found: dict[str, str] = {}
-    judged = set(KINDS) - {"tools", "hooks"}
+    # The post-update conditions are judged only by their own steps, which run at main: an early
+    # return below (a refused or failed sync) must not clear one that is still open.
+    judged = set(KINDS) - POST_FOLLOW_KINDS
     facts: dict = {"fast_forwarded": False}
     home_repo = (Path.home() / ".dotfiles").resolve()
     if repo.resolve() != home_repo:
@@ -1022,6 +1077,8 @@ def assess_jj_and_follow(
     facts["fast_forwarded"] = head != before
     if facts["fast_forwarded"]:
         log(f"moved colocated jj checkout {display} from {short(before)} to {short(head)}")
+    # The registry render runs on every run at main; it writes only when knives/repos.toml changed.
+    run_registry_step(repo, options, found, judged, facts)
     if data.get("tools_ok_head") != head:
         run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
@@ -1163,11 +1220,13 @@ def assess_and_follow(
                 log(f"fast-forwarded {display} from {short(head)} to {short(facts['head'])}: {behind} commit(s)")
                 head = facts["head"]
 
-    # The tools step runs after a fast-forward, and again on each run until it passes at HEAD.
-    if head == target and "dirty" not in found and (
-        facts["fast_forwarded"] or data.get("tools_ok_head") != head
-    ):
-        run_tools_step(repo, options, state, deadline, head, found, judged, facts)
+    # At HEAD with nothing uncommitted: the registry render on every run (it writes only when
+    # knives/repos.toml changed since its last render), then the tools step after a fast-forward,
+    # and again on each run until it passes at HEAD.
+    if head == target and "dirty" not in found:
+        run_registry_step(repo, options, found, judged, facts)
+        if facts["fast_forwarded"] or data.get("tools_ok_head") != head:
+            run_tools_step(repo, options, state, deadline, head, found, judged, facts)
     return found, judged, facts
 
 
@@ -1261,15 +1320,16 @@ def run_once(options: argparse.Namespace) -> int:
         return "\n\n".join(f"{HEADLINE[kind]}: {why}" for kind, why in chosen.items())
 
     messages: list[str] = []
-    changed = (
-        f"It fast-forwarded the checkout to {short(facts.get('head', ''))} and changed nothing else"
-        if facts["fast_forwarded"]
-        else "It changed nothing in the checkout"
-    )
+    # One sentence of what the run did, each clause true: "It A", "It A and B", "It A, B and C".
+    moved = f"fast-forwarded the checkout to {short(facts.get('head', ''))}"
+    wrote = ["wrote ~/.config/knives/repos.toml from knives/repos.toml"] if facts.get("registry_written") else []
     if facts.get("restored_marketplace_lock"):
-        changed = "It restored the follow-managed marketplace lock to HEAD"
-        if facts["fast_forwarded"]:
-            changed += f" and fast-forwarded the checkout to {short(facts.get('head', ''))}"
+        did = ["restored the follow-managed marketplace lock to HEAD", *([moved] if facts["fast_forwarded"] else []), *wrote]
+    elif facts["fast_forwarded"]:
+        did = [moved, *wrote, "changed nothing else"]
+    else:
+        did = ["changed nothing in the checkout", *wrote]
+    changed = "It " + (f"{', '.join(did[:-1])} and {did[-1]}" if len(did) > 1 else did[0])
     footer = (
         f"From dotfiles-follow on {host} (scripts/dotfiles-follow.md). {changed}:"
         " in git mode it never stashes, resets, rebases or abandons. In jj mode dotfiles-sync"

@@ -1163,5 +1163,223 @@ class TargetBytes(Harness):
         self.assertIn("lockfile is frozen", messages[0])
 
 
+# A small knives registry. The render rewrites the oh-my-pi table's workspaces line to this
+# machine's path and copies every other line as it is, the hawk table's workspaces included.
+OMP_WORKSPACES = 'workspaces = "~/.worktrees/oh-my-pi"'
+REGISTRY_V1 = f"""[repos.hawk]
+upstream = "https://example.com/hawk"
+workspaces = "~/.worktrees/hawk"
+
+[repos.oh-my-pi]
+upstream = "https://example.com/oh-my-pi"
+release_branch = "sami"
+{OMP_WORKSPACES}
+"""
+REGISTRY_V2 = REGISTRY_V1.replace('release_branch = "sami"', 'release_branch = "sami-2"')
+
+
+def add_registry_render(upstream: Path) -> None:
+    """Put the real scripts/knives-registry-render (its mode kept) and the installers/lib.sh it
+    sources into UPSTREAM; the caller commits them."""
+    for name in ("scripts/knives-registry-render", "installers/lib.sh"):
+        (upstream / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(DOTFILES / name, upstream / name)
+
+
+class RegistryCopy:
+    """$HOME/.config/knives as the render must leave it, worked out here, never by running the
+    render. Mixed into a Harness."""
+
+    home: Path
+
+    @property
+    def copy(self) -> Path:
+        return self.home / ".config/knives/repos.toml"
+
+    @property
+    def record(self) -> Path:
+        return self.home / ".config/knives/repos.toml.source-sha256"
+
+    def rendered(self, source: str) -> str:
+        """SOURCE with the oh-my-pi workspaces line set to this machine's path: the big disk's
+        directory, named for the home, where there is one, else ~/.worktrees/oh-my-pi in full."""
+        nvme = Path("/mnt/nvme") / self.home.name
+        where = f"{nvme}/omp-worktrees/branches" if nvme.is_dir() else f"{self.home}/.worktrees/oh-my-pi"
+        return "".join(
+            f'workspaces = "{where}"\n' if line == OMP_WORKSPACES + "\n" else line
+            for line in source.splitlines(keepends=True)
+        )
+
+    @staticmethod
+    def identity(path: Path) -> tuple[int, int]:
+        """(inode, mtime in ns): a file replaced or rewritten gets another."""
+        st = path.stat()
+        return st.st_ino, st.st_mtime_ns
+
+    def assert_copy_renders(self, source: str) -> None:
+        self.assertNotIn(OMP_WORKSPACES, self.rendered(source))
+        self.assertEqual(self.copy.read_text(), self.rendered(source))
+        self.assertEqual(self.record.read_text(), hashlib.sha256(source.encode()).hexdigest() + "\n")
+
+
+class KnivesRegistry(RegistryCopy, Harness):
+    """A dev box's copy of the knives registry, ~/.config/knives/repos.toml, follows the committed
+    knives/repos.toml with no person's command (dispatch://INFRA-3365, R5): every run at HEAD runs
+    the real scripts/knives-registry-render --if-changed after any fast-forward."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        add_registry_render(self.upstream)
+        self.commit_upstream("knives registry", **{"knives/repos.toml": REGISTRY_V1})
+        self.sh("git", "pull", "-q", "--ff-only", cwd=self.repo)
+
+    def installs(self) -> int:
+        """How many times the tools step ran `mise install`."""
+        return self.fake_log.read_text().split("\n").count("install") if self.fake_log.exists() else 0
+
+    def first_render(self) -> None:
+        """A run that renders the registry the clone holds, with no sha256 record yet."""
+        self.assertFalse(self.copy.exists())
+        self.assertEqual(self.run_follow(), [])
+        self.assert_copy_renders(REGISTRY_V1)
+
+    def pull_registry_v2(self) -> str:
+        return self.commit_upstream("knives: a new oh-my-pi release branch", **{"knives/repos.toml": REGISTRY_V2})
+
+    def test_a_pull_that_changes_the_registry_writes_the_copy_in_the_fast_forward_run(self) -> None:
+        self.first_render()
+        before = self.identity(self.copy)
+        new = self.pull_registry_v2()
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            messages = self.run_follow(now=1_000_600.0)
+        lines = [call.args[0] for call in logged.call_args_list]
+        self.assertEqual(messages, [])
+        self.assertEqual(self.head(), new)
+        self.assert_copy_renders(REGISTRY_V2)
+        self.assertNotEqual(self.identity(self.copy), before)
+        sha = hashlib.sha256(REGISTRY_V2.encode()).hexdigest()
+        wrote = f"registry: knives-registry-render: wrote ~/.config/knives/repos.toml from knives/repos.toml (sha256 {sha[:12]})"
+        self.assertIn(wrote, lines)
+        # The fast-forward comes first, then the render, then the tools step.
+        fast_forward = next(i for i, line in enumerate(lines) if line.startswith("fast-forwarded "))
+        tools = next(i for i, line in enumerate(lines) if line.startswith("tools: "))
+        self.assertLess(fast_forward, lines.index(wrote))
+        self.assertLess(lines.index(wrote), tools)
+        self.assertEqual(self.installs(), 2)
+
+    def test_the_next_run_writes_nothing(self) -> None:
+        self.first_render()
+        self.pull_registry_v2()
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assert_copy_renders(REGISTRY_V2)
+        written = (self.identity(self.copy), self.identity(self.record))
+        with unittest.mock.patch.object(FOLLOW, "log", wraps=FOLLOW.log) as logged:
+            self.assertEqual(self.run_follow(now=1_001_200.0), [])
+        self.assertEqual((self.identity(self.copy), self.identity(self.record)), written)
+        rendered = [call.args[0] for call in logged.call_args_list if call.args[0].startswith("registry: ")]
+        self.assertEqual(len(rendered), 1)
+        self.assertIn("~/.config/knives/repos.toml unchanged:", rendered[0])
+        self.assertTrue(rendered[0].endswith("; wrote nothing"), rendered[0])
+
+    def test_a_pull_that_changes_another_file_leaves_a_hand_edited_copy_as_it_is(self) -> None:
+        self.first_render()
+        self.copy.write_text(self.rendered(REGISTRY_V1) + "# a hand edit\n")
+        edited = (self.copy.read_text(), self.identity(self.copy))
+        new = self.commit_upstream("change a tool", scripts__tool="v2\n")
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assertEqual(self.head(), new)
+        self.assertEqual((self.copy.read_text(), self.identity(self.copy)), edited)
+
+    def test_a_pull_that_changes_the_registry_replaces_a_hand_edited_copy(self) -> None:
+        self.first_render()
+        self.copy.write_text(self.rendered(REGISTRY_V1) + "# a hand edit\n")
+        new = self.pull_registry_v2()
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assertEqual(self.head(), new)
+        self.assert_copy_renders(REGISTRY_V2)
+
+    def test_the_first_run_of_this_code_at_head_renders_once_and_skips_the_tools_step(self) -> None:
+        # The timer run that pulled this change was the old dotfiles-follow: the checkout is at
+        # HEAD, its tools passed there, and the copy holds what install.sh wrote, with no record.
+        self.tools_passed(slow_sweep_at=999_000.0)
+        self.copy.parent.mkdir(parents=True)
+        self.copy.write_text("# what install.sh wrote from an older knives/repos.toml\n")
+        self.assertFalse(self.record.exists())
+        self.assertEqual(self.run_follow(), [])
+        self.assert_copy_renders(REGISTRY_V1)
+        self.assertEqual(self.installs(), 0)
+        written = (self.identity(self.copy), self.identity(self.record))
+        self.assertEqual(self.run_follow(now=1_000_600.0), [])
+        self.assertEqual((self.identity(self.copy), self.identity(self.record)), written)
+        self.assertEqual(self.installs(), 0)
+
+    def test_a_render_that_cannot_write_stops_nothing_is_said_once_and_clears(self) -> None:
+        self.first_render()
+        old = self.copy.read_text()
+        new = self.pull_registry_v2()
+        knives = self.copy.parent
+        knives.chmod(0o555)
+        try:
+            messages = self.run_follow(now=1_000_600.0)
+        finally:
+            knives.chmod(0o755)
+        print(f"\n===== read-only ~/.config/knives: {len(messages)} message(s)", file=sys.stderr)
+        for text in messages:
+            print(text, file=sys.stderr)
+        self.assertEqual(self.head(), new, "the fast-forward went on")
+        self.assertEqual(self.installs(), 2, "the tools step ran after the fast-forward")
+        self.assertEqual(self.copy.read_text(), old)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("is on main, but a post-update step failed", messages[0].splitlines()[0])
+        self.assertIn(
+            "KNIVES REGISTRY NOT WRITTEN: `scripts/knives-registry-render --if-changed` in ~/.dotfiles exited 1:",
+            messages[0],
+        )
+        # mktemp quotes the template as the locale does ('...' or ‘...’): only the words are checked.
+        failure = next((line for line in messages[0].splitlines() if "mktemp: failed to create file via template" in line), "")
+        self.assertIn(f"{self.copy}.XXXXXX", failure)
+        self.assertTrue(failure.endswith(": Permission denied"), failure)
+        self.assertIn("~/.config/knives/repos.toml keeps what it held. The next run tries again.", messages[0])
+        self.assertNotIn("TOOLS NOT INSTALLED", messages[0])
+        # Nothing was written, and the footer says so.
+        self.assertIn(f"It fast-forwarded the checkout to {new[:12]} and changed nothing else:", messages[0])
+        self.assertEqual(self.state_data()["last_outcome"], "registry")
+        cleared = self.run_follow(now=1_001_200.0)
+        self.assert_copy_renders(REGISTRY_V2)
+        self.assertEqual(len(cleared), 1)
+        self.assertIn("DOTFILES FOLLOWING MAIN AGAIN", cleared[0])
+        self.assertIn("KNIVES REGISTRY NOT WRITTEN cleared", cleared[0])
+        self.assertEqual(self.state_data()["last_outcome"], "ok")
+        self.assertEqual(self.installs(), 2)
+
+    def test_the_footer_names_the_write_in_a_fast_forward_run(self) -> None:
+        # The render writes the copy and the tools step fails in the same run: the one message says both.
+        self.first_render()
+        new = self.pull_registry_v2()
+        os.environ["FAKE_MISE_RC"] = "1"
+        messages = self.run_follow(now=1_000_600.0)
+        self.assert_copy_renders(REGISTRY_V2)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("TOOLS NOT INSTALLED", messages[0])
+        self.assertIn(
+            f"It fast-forwarded the checkout to {new[:12]}, wrote ~/.config/knives/repos.toml from knives/repos.toml"
+            " and changed nothing else:",
+            messages[0],
+        )
+
+    def test_the_footer_names_the_write_in_a_run_that_does_not_move(self) -> None:
+        # The first run of this code renders, and its hook sweep fails in the same run.
+        self.tools_passed(slow_sweep_at=999_000.0)
+        os.environ["FAKE_SWEEP"] = "failed"
+        messages = self.run_follow()
+        self.assert_copy_renders(REGISTRY_V1)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("PRE-PUSH HOOK NOT INSTALLED", messages[0])
+        self.assertIn(
+            "It changed nothing in the checkout and wrote ~/.config/knives/repos.toml from knives/repos.toml:",
+            messages[0],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
