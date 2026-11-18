@@ -33,5 +33,5 @@ Steps 2/4/6 (including their references): use a fresh agent that did not write t
 
 ## After the PR exists
 
-- Hand off to `landing-a-pr` at once: it owns the `ce-babysit-pr` watch and auto-merge, and a PR nobody watches stalls. Do not run one `gh pr view` and leave. A PR that adds or changes a database migration is merged by hand, not by auto-merge.
+- Hand off to `landing-a-pr` at once: it owns the `ce-babysit-pr` watch and auto-merge, and a PR nobody watches stalls. Do not run one `gh pr view` and leave. A PR that adds or changes a database migration is merged by hand, not by auto-merge, in a repository with no merge-time migration check (`landing-a-pr`'s repo merge rules, "Database migrations"); a merge queue whose merge group runs the migration check, as cybermonklabs/legion's does, is such a check.
 - Before you say done or merge-ready, restate the original goal and point to the step 4 evidence for it.
