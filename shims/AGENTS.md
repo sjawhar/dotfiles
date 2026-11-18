@@ -655,13 +655,17 @@ behavior before handing the call to the real one. One file is data: `person-name
   else in the box is touched. A unit property a box has no unit to carry (`OOMPolicy`,
   `Description`, …) is named on stderr and the run goes on; **a resource limit it cannot apply, or
   an option it cannot honour, is refused before anything runs**, because a capped run that
-  silently loses its cap is the failure it exists to prevent. The move into the cgroup is made
+  silently loses its cap is the failure it exists to prevent. A cgroup a detached process keeps
+  is removed by a later run once it is empty and the run that made it has ended (that run's pid,
+  in the cgroup's name, no longer runs), so a concurrent run's fresh, still-empty cgroup is never
+  swept (dispatch://INFRA-4383). The move into the cgroup is made
   with `sudo` (cgroup v2 asks the mover for write access to the common ancestor's `cgroup.procs`,
   and the box's root cgroup is root-owned); the command itself still runs as the session user. On
   the host, and for any call that is not `--user --scope`, it execs the first real `systemd-run`
   past its own PATH entry. `shims/tests/test_systemd_run_box.py` drives the whole shim against a
-  cgroup tree in a temp dir (`AGENTBOX_CGROUP_ROOT`), and its last two cases run against
-  `/sys/fs/cgroup` where the machine delegates one.
+  cgroup tree in a temp dir (`AGENTBOX_CGROUP_ROOT`), and its `RealCgroup` cases run it where sudo
+  without a password reaches `/sys/fs/cgroup`, each in a cgroup of its own there, so they read
+  only what they made and run in parallel.
 - **`secrets`** refuses every agent request for a human-tier key
   (exit 77), and names the broker command (`secret-run`) or, in a session the broker does not
   serve, `secret-run --register`, which registers that one command, and the `omp --resume` line

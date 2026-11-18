@@ -180,6 +180,7 @@ done
 # v2's "no internal processes" rule, whatever else the box runs.
 [ -d "$CGROUP_ROOT" ] || die "no cgroup tree at $CGROUP_ROOT: this box cannot cap a run. Nothing ran"
 name="${unit%.scope}"
+# The pid in the name is this shim's, which holds the cgroup until it ends: the sweep reads it.
 [ -n "$name" ] || name="agentbox-run-$$-${RANDOM}"
 scope="$CGROUP_ROOT/$name.scope"
 [ ! -e "$scope" ] || die "$scope already exists: another run holds that name. Nothing ran"
@@ -208,14 +209,26 @@ fi
 # A cgroup an earlier run made and left behind: its command detached a process that outlived it,
 # so the directory could not be removed (systemd's own scope lives on in that case too, but its
 # manager removes it when the last process goes, and a box has no manager to do that). Each run
-# removes the EMPTY ones its predecessors left, before it makes its own, which costs one readdir
+# removes the EMPTY ones whose run has ended, before it makes its own, which costs one readdir
 # and never touches a cgroup that still holds a process or one a run named with --unit.
+# A run's own cgroup is empty too, from its mkdir until its command is moved in, so emptiness
+# alone does not say a run ended: a sweep that read only that removed a concurrent run's fresh
+# cgroup, and that run died with "Nothing ran" (dispatch://INFRA-4383). The name says who made
+# it (agentbox-run-<pid>-<n>), and while that pid runs the cgroup is not swept. A pid reused
+# since its run ended only keeps that empty cgroup until the new process ends, so the reuse can
+# delay a sweep but never remove a live run's cgroup. cgroup.procs is read, not sized: cgroupfs
+# gives every control file a size of 0, whatever it holds.
 sweep_left_behind() {
-    local dir
+    local dir maker held
     for dir in "$CGROUP_ROOT"/agentbox-run-*.scope; do
         [ -d "$dir" ] || continue
         [ "$dir" = "$scope" ] && continue
-        [ -s "$dir/cgroup.procs" ] && continue
+        maker="${dir##*/agentbox-run-}"
+        maker="${maker%%-*}"
+        [[ "$maker" =~ ^[0-9]+$ ]] && [ -e "/proc/$maker" ] && continue
+        held=""
+        read -r held 2>/dev/null < "$dir/cgroup.procs"
+        [ -n "$held" ] && continue
         rmdir "$dir" 2>/dev/null || { [ -n "$sudo" ] && $sudo rmdir "$dir" 2>/dev/null; } || true
     done
 }

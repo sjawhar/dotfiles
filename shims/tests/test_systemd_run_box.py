@@ -10,14 +10,15 @@ Technique: the shim is driven against a cgroup TREE IN A TEMP DIR (AGENTBOX_CGRO
 holds the same files a delegated cgroup v2 root holds, so each case reads what the shim wrote
 and what it removed on any machine, with no root and no real cgroups. `sudo` is a stub that
 runs what it is given, since a writable tree needs none. A stub `systemd-run` after the shims
-dir on PATH records the calls that must pass through. One case at the end, skipped unless this
-machine really delegates its cgroup tree, runs the whole thing against /sys/fs/cgroup and
-checks the kernel enforces the cap it wrote.
+dir on PATH records the calls that must pass through. The cases at the end, skipped unless sudo
+without a password reaches /sys/fs/cgroup (an agent box, or a host that grants it), run the whole
+thing in a real cgroup of their own there and check the kernel enforces the cap it wrote.
 """
 
 from __future__ import annotations
 
 import os
+import select
 import shutil
 import stat
 import subprocess
@@ -50,6 +51,33 @@ def write_stub(directory: Path, name: str, body: str) -> Path:
     path.write_text(f"#!/bin/bash\n{body}\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return path
+
+
+# A hook on the first run's PATH prints this line and then waits for one line on its stdin.
+HOOK_HOLDS = ["echo made", "read -r _"]
+
+
+def race_a_sweep(case: unittest.TestCase, env: dict, second, scopes) -> None:
+    """Two capped runs at once, the first held by its hook just after its cgroup exists and before
+    its command is moved in, so that cgroup is empty; `second` runs whole meanwhile, its sweep
+    included. Then the first goes on, and must finish: its cgroup was not swept from under it."""
+    first = subprocess.Popen(
+        [str(SHIM), "--user", "--scope", "-q", "-p", "MemoryMax=64M", "--", "echo", "first ran"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    case.addCleanup(first.kill)
+    ready, _, _ = select.select([first.stdout], [], [], TIMEOUT)
+    case.assertTrue(ready, "the first run never made its cgroup")
+    case.assertEqual(first.stdout.readline(), "made\n")
+    held = scopes()
+    case.assertEqual(len(held), 1, held)
+    ran = second()
+    case.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+    kept = held[0].is_dir()
+    out, err = first.communicate("go\n", timeout=TIMEOUT)
+    case.assertEqual(first.returncode, 0, f"the first run did not finish: {out}{err}")
+    case.assertIn("first ran", out)
+    case.assertTrue(kept, "the second run swept the cgroup of a run still going")
+    case.assertEqual(scopes(), [], "the first run's cgroup was left behind")
 
 
 class FakeTree(unittest.TestCase):
@@ -100,7 +128,7 @@ class FakeTree(unittest.TestCase):
             'exec /bin/rmdir "$@"',
         ]))
 
-    def run_shim(self, *argv: str, env: dict | None = None, input_text: str = "") -> subprocess.CompletedProcess:
+    def environ(self, env: dict | None = None) -> dict:
         environ = {
             **os.environ,
             "AGENTBOX_BOX": "agentbox-0123456789ab",
@@ -109,8 +137,11 @@ class FakeTree(unittest.TestCase):
             "PATH": f"{self.stubs}:{SHIM.parent}:{self.after}:{os.environ.get('PATH', '')}",
         }
         environ.update(env or {})
+        return environ
+
+    def run_shim(self, *argv: str, env: dict | None = None, input_text: str = "") -> subprocess.CompletedProcess:
         return subprocess.run([str(SHIM), *argv], capture_output=True, text=True,
-                              env=environ, input=input_text, timeout=TIMEOUT, cwd=self.root)
+                              env=self.environ(env), input=input_text, timeout=TIMEOUT, cwd=self.root)
 
     def scopes(self) -> list[Path]:
         return [p for p in self.cgroup.iterdir() if p.is_dir()]
@@ -193,13 +224,16 @@ class FakeTree(unittest.TestCase):
 
     def test_a_cgroup_a_detached_process_held_is_named_and_the_next_run_removes_it(self) -> None:
         """A command that leaves a process behind keeps its cgroup, as a scope does on the host.
-        No manager removes it in a box, so the next run here sweeps the empty ones."""
-        held = self.cgroup / "agentbox-run-999-1.scope"
+        No manager removes it in a box, so the next run here sweeps the empty ones whose run has
+        ended: the pid in each name is that of the run that made it, and this one no longer runs."""
+        ended = subprocess.Popen(["true"])
+        ended.wait()
+        held = self.cgroup / f"agentbox-run-{ended.pid}-1.scope"
         held.mkdir()
         for name, value in CGROUP_FILES.items():
             (held / name).write_text(value, encoding="utf-8")
         (held / "cgroup.procs").write_text("4242\n", encoding="utf-8")  # still running
-        empty = self.cgroup / "agentbox-run-999-2.scope"
+        empty = self.cgroup / f"agentbox-run-{ended.pid}-2.scope"
         empty.mkdir()
         for name, value in CGROUP_FILES.items():
             (empty / name).write_text(value, encoding="utf-8")
@@ -210,6 +244,16 @@ class FakeTree(unittest.TestCase):
         self.assertTrue(held.is_dir(), "a cgroup still holding a process was removed")
         self.assertFalse(empty.exists(), "an empty cgroup an earlier run left was not swept")
         self.assertTrue(named.is_dir(), "a cgroup this shim did not name was removed")
+
+    def test_a_run_still_going_keeps_its_empty_cgroup_when_another_run_sweeps(self) -> None:
+        """A run's cgroup is empty from its mkdir until its command is moved in. A second run that
+        starts in that window sweeps the empty cgroups of runs that have ended, and the first
+        run's is not one of them: it is held at its mkdir here, alive, while the second runs."""
+        gated = write_stub(self.root / "gated", "mkdir",
+                           "\n".join([f'"{self.stubs / "mkdir"}" "$@" || exit $?', *HOOK_HOLDS]))
+        race_a_sweep(self, self.environ({"PATH": f"{gated.parent}:{self.environ()['PATH']}"}),
+                     lambda: self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=1G", "--", "true"),
+                     self.scopes)
 
     def test_the_command_s_exit_status_and_streams_are_the_caller_s(self) -> None:
         run = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=1G", "--",
@@ -282,17 +326,84 @@ class FakeTree(unittest.TestCase):
         self.assertTrue((self.cgroup / "taken.scope").is_dir(), "it removed another run's cgroup")
 
 
+def sudo(*argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["sudo", "-n", *argv], capture_output=True, text=True, timeout=TIMEOUT)
+
+
+def wait_until_empty(cgroup: Path, timeout: float = TIMEOUT) -> bool:
+    """True once the kernel says no process runs in `cgroup` or below it, False at the timeout.
+    cgroup.events is read again each time the kernel signals it changed (POLLPRI), as
+    cgroup-v2.rst documents: no polling interval to guess."""
+    deadline = time.monotonic() + timeout
+    with open(cgroup / "cgroup.events", "rb", buffering=0) as events:
+        poller = select.poll()
+        poller.register(events, select.POLLPRI)
+        while True:
+            events.seek(0)
+            if b"populated 0" in events.read():
+                return True
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            poller.poll(left * 1000)
+
+
 @unittest.skipUnless(
     os.path.isdir("/sys/fs/cgroup") and shutil.which("sudo") is not None
     and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0,
-    "needs a delegated cgroup tree and sudo without a password (an agent box)",
+    "needs a cgroup v2 tree at /sys/fs/cgroup and sudo without a password (an agent box, or a host that grants it)",
 )
 class RealCgroup(unittest.TestCase):
-    """The kernel enforces what the shim wrote. Only in a box; skipped anywhere else."""
+    """The kernel enforces what the shim wrote, in a real cgroup tree.
 
-    def run_shim(self, *argv: str) -> subprocess.CompletedProcess:
+    /sys/fs/cgroup is the machine's, and every other run of the shim on it (another case of this
+    class under `pytest -n`, a session's capped build in a box) makes and leaves agentbox-run-*
+    cgroups there: a case that read the whole tree failed on theirs (dispatch://INFRA-4383). So
+    each case gives the shim a cgroup of its own as its root (AGENTBOX_CGROUP_ROOT) and reads only
+    that. Root makes it, as root owns a box's own root, so the shim takes the sudo path it takes
+    in a box. Its name is no agentbox-run-* one, which no run's sweep would therefore touch."""
+
+    def setUp(self) -> None:
+        self.root = Path("/sys/fs/cgroup") / f"agentbox-test-{os.getpid()}-{os.urandom(4).hex()}"
+        made = sudo("mkdir", str(self.root))
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.addCleanup(self.remove_root)
+
+    def remove_root(self) -> None:
+        """Ends whatever a case left running in its cgroup, then removes the cgroup."""
+        sudo("sh", "-c", f"printf 1 > '{self.root}/cgroup.kill'")
+        self.assertTrue(wait_until_empty(self.root), f"processes still run in {self.root}")
+        for child in self.scopes():
+            sudo("rmdir", str(child))
+        removed = sudo("rmdir", str(self.root))
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+
+    def scopes(self) -> list[Path]:
+        return [p for p in self.root.iterdir() if p.is_dir()]
+
+    def environ(self, env: dict | None = None) -> dict:
+        return {**os.environ, "AGENTBOX_BOX": os.environ.get("AGENTBOX_BOX", "agentbox-test"),
+                "AGENTBOX_CGROUP_ROOT": str(self.root), **(env or {})}
+
+    def run_shim(self, *argv: str, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run([str(SHIM), *argv], capture_output=True, text=True, timeout=TIMEOUT,
-                              env={**os.environ, "AGENTBOX_BOX": os.environ.get("AGENTBOX_BOX", "agentbox-test")})
+                              env=self.environ(env))
+
+    def test_a_run_whose_command_is_not_in_yet_keeps_its_cgroup_while_another_run_sweeps(self) -> None:
+        """The race on the kernel's own cgroups: the first run is held just after root made its
+        cgroup, the second sweeps meanwhile. cgroupfs sizes cgroup.procs at 0 bytes whatever it
+        holds, and the empty cgroup of a run whose command is not in yet looks exactly like one an
+        ended run left, so only the maker's pid in the name tells them apart."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gated = write_stub(Path(tmp.name), "sudo", "\n".join([
+            f'"{shutil.which("sudo")}" "$@" || exit $?',
+            '[ "${2-}" = mkdir ] || exit 0',  # the shim runs `sudo -n mkdir <its cgroup>`
+            *HOOK_HOLDS,
+        ]))
+        race_a_sweep(self, self.environ({"PATH": f"{gated.parent}:{os.environ.get('PATH', '')}"}),
+                     lambda: self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=64M", "--", "true"),
+                     self.scopes)
 
     def test_a_run_past_its_memory_cap_is_killed_by_the_kernel(self) -> None:
         run = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0",
@@ -305,27 +416,48 @@ class RealCgroup(unittest.TestCase):
 
     def test_a_process_the_command_leaves_behind_keeps_its_cgroup_and_the_next_run_sweeps_it(self) -> None:
         """The kernel refuses to remove a cgroup that still holds a process, as it does a
-        scope's on the host; there no manager removes it afterwards, so the next run does."""
+        scope's on the host; there no manager removes it afterwards, so the next run does once the
+        process has ended. cgroupfs gives cgroup.procs a size of 0 whatever it holds, so the sweep
+        reads it: a run while the process lives does not even try to remove that cgroup."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        release = Path(tmp.name) / "release"
+        os.mkfifo(release)
+        # Its stdio is not the run's pipes, so the run's output ends when the shim does.
         run = self.run_shim("--user", "--scope", "-p", "MemoryMax=256M", "--",
-                            "bash", "-c", "(sleep 12 &); echo parent done")
+                            "bash", "-c", f'(read -r _ < "{release}" &) >/dev/null 2>&1; echo parent done')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("parent done", run.stdout)
         self.assertIn("still run in it", run.stderr)
-        left = list(Path("/sys/fs/cgroup").glob("agentbox-run-*.scope"))
+        left = self.scopes()
         self.assertEqual(len(left), 1, f"the detached process's cgroup is gone: {left}")
-        self.addCleanup(subprocess.run, ["sudo", "-n", "rmdir", str(left[0])], capture_output=True)
-        time.sleep(13)  # the detached process ends; the cgroup is then empty and sweepable
+        calls = Path(tmp.name) / "SUDO_CALLS"
+        logging = write_stub(Path(tmp.name) / "stubs", "sudo",
+                             f'printf "%s\\n" "$*" >>"{calls}"\nexec "{shutil.which("sudo")}" "$@"')
+        during = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=64M", "--", "true",
+                               env={"PATH": f"{logging.parent}:{os.environ.get('PATH', '')}"})
+        self.assertEqual(during.returncode, 0, during.stdout + during.stderr)
+        self.assertTrue(left[0].is_dir(), "a cgroup still holding a process was removed")
+        said = calls.read_text(encoding="utf-8")
+        self.assertIn(f"mkdir {self.root}/agentbox-run-", said, "the run's sudo calls were not seen")
+        self.assertNotIn(f"rmdir {left[0]}", said, "the sweep tried to remove a cgroup still holding a process")
+        # The detached process ends when it reads a line; its cgroup is then empty and sweepable.
+        writer = os.open(release, os.O_WRONLY | os.O_NONBLOCK)  # ENXIO: the process is gone already
+        os.write(writer, b"go\n")
+        os.close(writer)
+        self.assertTrue(wait_until_empty(left[0]), "the detached process never ended")
         after = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=64M", "--", "true")
         self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
         self.assertFalse(left[0].exists(), "the next run did not sweep the empty cgroup")
 
     def test_a_run_inside_the_cap_finishes_and_leaves_no_cgroup(self) -> None:
         run = self.run_shim("--user", "--scope", "-q", "-p", "MemoryMax=512M", "--",
-                            sys.executable, "-c", "print(len(bytearray(8 * 1024 * 1024)))")
+                            sys.executable, "-c",
+                            "print(len(bytearray(8 * 1024 * 1024))); print(open('/proc/self/cgroup').read())")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("8388608", run.stdout)
-        left = [p for p in Path("/sys/fs/cgroup").glob("agentbox-run-*.scope")]
-        self.assertEqual(left, [], f"cgroups left behind: {left}")
+        self.assertIn(f"/{self.root.name}/agentbox-run-", run.stdout, "the run was not in this case's cgroup")
+        self.assertEqual(self.scopes(), [], "the run's cgroup was left behind")
 
 
 if __name__ == "__main__":
