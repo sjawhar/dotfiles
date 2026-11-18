@@ -1219,7 +1219,15 @@ re-entry in another pid below the hand-off that carries the same call (`gh_shim_
 the digest of its citation and argv): a wrapper that runs the shim as its real gh may start it
 as a child, as `legion gh` does, and a shim run by a path outside PATH still takes the first gh
 from the top, so a pid alone never sees that loop. Any other call below the real gh, such as the
-git credential helper gh runs, skips nothing.
+git credential helper gh runs, skips nothing. Where no digest can be made (no `sha256sum` on
+PATH: the marker then holds `-`) or a wrapper changes the argv on each pass, the same call cannot
+be told, and the marker's hop count holds the guard: bash counts every hand-off to a gh in the
+chain of processes, with no outside tool, and the shim refuses the hand-off after the eighth
+(`_max_hops`) with exit 127 and one line naming PATH. The deepest chain that is no loop has about
+four (knives' hand-off, its own gh query, the git credential helper gh runs, a hook's gh). Until
+the hop count, a wrapper above a shim run by its path, with only that wrapper and a real gh on
+PATH, looped (97 wrapper passes and no call to the real gh before a capped review run killed it at
+101 processes).
 
 A shim that finds its real binary by a marker in its first 512 bytes must keep that marker in its
 header: `git-worktree-shim` for `shims/git` and `jj-lock-shim` for `shims/jj`. On 2026-11-12 a

@@ -1020,16 +1020,29 @@ mise_pinned() {
 # legion.test gh "$@"`) first on PATH and gave `legion gh` this shim, by its path, as the real gh,
 # which `legion gh` starts as a child: the shim took the wrapper for the real gh, and the chain of
 # wrapper, `legion gh` and shim grew about 2,000 processes deep (4,275 processes) until the user's
-# memory limit stopped it and two sessions' workers died. DOTFILES_GH_SHIM ("<pid> <call>
-# <gh>:<gh>…") names every gh this shim has handed the call to, the pid that handed it, and the
-# call (gh_shim_call_digest), `-` where the only gh it names is the pinned install, which is gh
-# itself and hands nothing back. A pass in that pid, or one below it given the same call, is that
-# call coming back: the lookup skips each gh named (and every path to the same file), taking the
-# next one, then the pinned install, or failing with exit 127 and one line naming PATH, instead of
-# looping. Any other call below the real gh (the git credential helper gh runs, knives' own
+# memory limit stopped it and two sessions' workers died. DOTFILES_GH_SHIM ("<pid> <hops> <call>
+# <gh>:<gh>…") names every gh this shim has handed the call to, the pid that handed it, how many
+# hand-offs to a gh the chain of processes above it has made, and the call (gh_shim_call_digest),
+# `-` where the only gh it names is the pinned install, which is gh itself and hands nothing back,
+# or where no digest could be made. A pass in that pid, or one below it given the same call, is
+# that call coming back: the lookup skips each gh named (and every path to the same file), taking
+# the next one, then the pinned install, or failing with exit 127 and one line naming PATH, instead
+# of looping. Any other call below the real gh (the git credential helper gh runs, knives' own
 # queries) is another call, and the marker skips nothing for it.
+# The hop count is the guard where that skip cannot see the call: with no sha256sum on PATH there
+# is no digest, and a wrapper that changes the argv on each pass makes a new call each time. Bash
+# keeps the count itself, so it holds whatever tool is missing: the hand-off past _max_hops is
+# refused with exit 127 and one line. The deepest chain that is no loop has about four (knives'
+# hand-off, its own gh query, the git credential helper the real gh runs, a hook's gh); 8 leaves
+# room for that and stops a loop at nine wrapper passes.
+_max_hops=8
 _handed="" _call=""
-read -r _marker_pid _marker_call _marker_handed <<< "${DOTFILES_GH_SHIM:-}"
+read -r _marker_pid _marker_hops _marker_call _marker_handed <<< "${DOTFILES_GH_SHIM:-}"
+[[ "$_marker_hops" =~ ^[0-9]{1,4}$ ]] && _marker_hops=$((10#$_marker_hops)) || _marker_hops=0
+if ((_marker_hops >= _max_hops)); then
+    echo "gh shim: refusing: this chain of processes already handed a call to a gh $_marker_hops times through this shim (DOTFILES_GH_SHIM, at most $_max_hops), so a gh on PATH ($PATH) keeps handing calls back to it${_marker_handed:+; the last pass handed one to ${_marker_handed//:/, }}" >&2
+    exit 127
+fi
 if [[ "$_marker_pid" == "$$" ]]; then
     _handed="$_marker_handed"
 elif [[ -n "$_marker_call" && "$_marker_call" != - ]]; then
@@ -1105,7 +1118,7 @@ if [[ -z "$_call" && ( -z "$_real_pinned" || "$_handed" != "$_real" ) ]]; then
     gh_shim_call_digest "$@"
     _call="$_digest"
 fi
-export DOTFILES_GH_SHIM="$$ ${_call:--} $_handed"
+export DOTFILES_GH_SHIM="$$ $((_marker_hops + 1)) ${_call:--} $_handed"
 # The call reaches gh now: the outermost pass of an agent session reads its stderr for GitHub refusing it, or a spent
 # rate limit, only after this mark (_reached_mark, which that pass names for its inner passes).
 if [[ -n "$_reached_mark" && -n "${GH_SHIM_INNER:-}${GH_READ_CACHE_BYPASS:-}" ]]; then
