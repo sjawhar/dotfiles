@@ -1014,13 +1014,48 @@ mise_pinned() {
     return 1
 }
 
-# real_gh: sets _real to the gh this shim hands the call to.
-# Content decides what is "real", never the path: any candidate carrying the
-# knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string
-# skip broke whenever HOME or DOTFILES_DIR spelled this shim's directory
-# differently from PATH, and knives gh re-entered this shim in an unbounded
-# fork chain (2026-08-27, ~300k processes). Mirrors real_gh() in knives
-# src/commands/gh.rs. A variable, not output, so no subshell is forked.
+# A gh this shim hands the call to can hand it straight back. mise's shim does, in the same pid,
+# when mise has no gh version for the directory; a wrapper does when it runs this shim as its own
+# real gh. On 2026-11-18 a test of cybermonklabs/legion put a pane's `gh` wrapper (`exec
+# legion.test gh "$@"`) first on PATH and gave `legion gh` this shim, by its path, as the real gh,
+# which `legion gh` starts as a child: the shim took the wrapper for the real gh, and the chain of
+# wrapper, `legion gh` and shim grew about 2,000 processes deep (4,275 processes) until the user's
+# memory limit stopped it and two sessions' workers died. DOTFILES_GH_SHIM ("<pid> <call>
+# <gh>:<gh>…") names every gh this shim has handed the call to, the pid that handed it, and the
+# call (gh_shim_call_digest), `-` where the only gh it names is the pinned install, which is gh
+# itself and hands nothing back. A pass in that pid, or one below it given the same call, is that
+# call coming back: the lookup skips each gh named (and every path to the same file), taking the
+# next one, then the pinned install, or failing with exit 127 and one line naming PATH, instead of
+# looping. Any other call below the real gh (the git credential helper gh runs, knives' own
+# queries) is another call, and the marker skips nothing for it.
+_handed="" _call=""
+read -r _marker_pid _marker_call _marker_handed <<< "${DOTFILES_GH_SHIM:-}"
+if [[ "$_marker_pid" == "$$" ]]; then
+    _handed="$_marker_handed"
+elif [[ -n "$_marker_call" && "$_marker_call" != - ]]; then
+    gh_shim_call_digest "$@"
+    _call="$_digest"
+    [[ "$_call" != "$_marker_call" ]] || _handed="$_marker_handed"
+fi
+# handed_back GH: whether GH, or any path to the same file, is a gh this call was handed to.
+handed_back() {
+    local IFS=':'
+    local gh
+    for gh in $_handed; do
+        [[ -n "$gh" && "$1" -ef "$gh" ]] && return 0
+    done
+    return 1
+}
+
+# real_gh: sets _real to the gh this shim hands the call to, and _real_pinned when that is the
+# pinned install: the first gh past this shim's own PATH entry (the first entry whose gh is this
+# file, through a link too), or, when the shim was run by a path outside PATH, the first from the
+# top. A gh above the shim's entry is never taken: one there can be a wrapper that runs this shim
+# again (above). Content decides what is a copy of this shim, never the path: any candidate
+# carrying the knives-gh-shim marker in its first 512 bytes is a shim. The old dir-string skip
+# broke whenever HOME or DOTFILES_DIR spelled this shim's directory differently from PATH, and
+# knives gh re-entered this shim in an unbounded fork chain (2026-08-27, ~300k processes). A gh
+# that handed the call back is skipped too. A variable, not output, so no subshell is forked.
 # mise's own shim gives way to the gh pinned exactly in mise's global config,
 # straight from its install dir, as shims/knives runs knives: mise's shim is
 # mise itself, which reads its config, then execs that gh, one more process on
@@ -1030,33 +1065,47 @@ mise_pinned() {
 # the pinned install.
 real_gh() {
     local IFS=':'
-    local dir candidate header
-    _real=""
-    for dir in $PATH; do
-        candidate="$dir/gh"
-        [[ -f "$candidate" && -x "$candidate" ]] || continue
-        # Pure bash on purpose: this must work on a PATH too broken to find
-        # head or grep. read stops at the first NUL, so an ELF gh yields a
-        # short marker-free header and is accepted.
-        header=""
-        IFS= read -r -n 512 -d '' header < "$candidate" || true
-        [[ "$header" == *knives-gh-shim* ]] && continue
-        _real="$candidate"
-        if is_mise_shim "$candidate" && mise_pinned gh gh; then
-            _real="$_pinned"
-        fi
-        return 0
+    local pass dir candidate header own=""
+    _real="" _real_pinned=""
+    for pass in past-own-entry from-top; do
+        for dir in $PATH; do
+            candidate="$dir/gh"
+            if [[ "$pass" == past-own-entry && -z "$own" ]]; then
+                [[ "$candidate" -ef "${BASH_SOURCE[0]}" ]] && own=1
+                continue
+            fi
+            [[ -f "$candidate" && -x "$candidate" ]] || continue
+            # Pure bash on purpose: this must work on a PATH too broken to find
+            # head or grep. read stops at the first NUL, so an ELF gh yields a
+            # short marker-free header and is accepted.
+            header=""
+            IFS= read -r -n 512 -d '' header < "$candidate" || true
+            [[ "$header" == *knives-gh-shim* ]] && continue
+            handed_back "$candidate" && continue
+            _real="$candidate"
+            if is_mise_shim "$candidate" && mise_pinned gh gh && ! handed_back "$_pinned"; then
+                _real="$_pinned" _real_pinned=1
+            fi
+            return 0
+        done
+        [[ -z "$own" ]] || break
     done
-    mise_pinned gh gh && _real="$_pinned"
+    mise_pinned gh gh && ! handed_back "$_pinned" && _real="$_pinned" _real_pinned=1
 }
 
 # Resolve the real gh FIRST and refuse to proceed without it (a bare `gh`
 # fallback would re-enter this shim and recurse), and honor the bypass before
 # involving knives at all.
 if ! real_gh; then
-    echo "gh shim: no real gh found on PATH ($PATH), and $_pinned_searched" >&2
+    echo "gh shim: no real gh found on PATH ($PATH), and ${_pinned_searched:-the pinned install handed the call back}${_handed:+; ${_handed//:/, } handed the call back to this shim}" >&2
     exit 127
 fi
+_handed="${_handed:+$_handed:}$_real"
+if [[ -z "$_call" && ( -z "$_real_pinned" || "$_handed" != "$_real" ) ]]; then
+    gh_shim_call_digest "$@"
+    _call="$_digest"
+fi
+export DOTFILES_GH_SHIM="$$ ${_call:--} $_handed"
 # The call reaches gh now: the outermost pass of an agent session reads its stderr for GitHub refusing it, or a spent
 # rate limit, only after this mark (_reached_mark, which that pass names for its inner passes).
 if [[ -n "$_reached_mark" && -n "${GH_SHIM_INNER:-}${GH_READ_CACHE_BYPASS:-}" ]]; then

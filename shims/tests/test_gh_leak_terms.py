@@ -106,7 +106,11 @@ class GhLeakTerms(unittest.TestCase):
         self.env = {
             **inherited,
             **fixture_environment(),
-            "PATH": os.pathsep.join([str(self.bin), os.environ["PATH"]]),
+            # The shim takes no gh above its own PATH entry (shims/AGENTS.md, "Adding to a shim"), so this checkout's
+            # shims/, which a run inside the checkout has on PATH, is left out: the shim runs from outside PATH and
+            # takes the fake gh first.
+            "PATH": os.pathsep.join([str(self.bin), *(entry for entry in os.environ["PATH"].split(os.pathsep)
+                                                      if Path(entry).resolve() != SHIMS.resolve())]),
             "HOME": str(self.tmp / "home"),
             "XDG_CONFIG_HOME": str(self.tmp / "config"),
             "XDG_CACHE_HOME": str(self.tmp / "cache"),

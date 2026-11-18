@@ -243,10 +243,15 @@ behavior before handing the call to the real one. One file is data: `person-name
   a process group of its own, which a TERM, HUP or INT to the cache ends whole (the shim, knives,
   gh and the leak check under it). Before 2026-11-03 a `timeout` that killed the shim left the
   cache running as a child of pid 1, a GraphQL read still going 2.5 min later.
-  The real gh is the first gh past this dir on PATH. When that is mise's own shim, the gh pinned
+  The real gh is the first gh past the shim's own PATH entry (the first entry whose `gh` is this
+  file, through a link too), or, when the shim runs by a path outside PATH, the first from the top;
+  a copy of the shim (its `knives-gh-shim` marker) is never the real gh, and a gh above the shim's
+  entry is never taken. Until 2026-11-18 it was the first from the top, and a wrapper put above the
+  shim that ran it again was taken for the real gh (`DOTFILES_GH_SHIM`, "Adding to a shim" below).
+  When that gh is mise's own shim, the gh pinned
   exactly in mise's global config runs straight from its install dir, as `shims/knives` runs
   knives: mise's shim is one more process per call, and under load mise hung for minutes
-  (2026-11-03). mise's shim runs only when that install is missing. With no gh on PATH at all the
+  (2026-11-03). mise's shim runs only when that install is missing. With no such gh on PATH the
   pinned install runs too, found without HOME ("A moved HOME" below), and with neither the shim
   names PATH, the configuration and the install dirs it read (`shims/tests/test_gh_mise_pin.py`).
   A `gh api` call for a job's log (`…actions/jobs/<id>/logs`) gets
@@ -1187,14 +1192,20 @@ to protect: a lock the shim adds can collide with a caller's own lock, and a loo
 pass-through wrapper that hands the call straight back to the shim. A shim that resolves its
 real binary takes the first match past its own PATH entry, never the first from the top, and
 a pass-through wrapper hands the next binary the PATH tail past its own entry, so nothing
-below it can find the wrapper again. `shims/gh` still searches from the top, which is safe
-only while nothing puts a gh wrapper above it. `shims/gcloud` does too, under the same
-condition, and its routing tests depend on it: they put a stub `gcloud` above this dir and
-expect the shim to hand the call to the stub. It skips a copy of itself (same bytes, or its
-marker line), since two copies on PATH called each other until an agent box's 8192 processes
-were used up on 2026-11-03 (`GcloudShimCopiesOnPath`). `shims/jj` and `shims/tmux` also search
-from the top, and hand the binary they find the whole PATH: jj's own `git` calls must still reach
-`shims/git`, and a tmux server started through the shim gives its PATH to every pane. The first
+below it can find the wrapper again. `shims/gh` searched from the top until 2026-11-18, when a
+test of cybermonklabs/legion put its pane's `gh` wrapper above the shim and gave `legion gh` the
+shim, by its path, as its real gh: the shim took the wrapper for the real gh, and the chain of
+wrapper, `legion gh` and shim grew about 2,000 processes deep (4,275 processes) until the user's
+memory scope reached its ceiling and two workers died. It now takes the first gh past its own
+entry, and the first from the top only when it runs by a path outside PATH
+(`shims/tests/test_gh_wrapper_loop.py`). `shims/gcloud` still searches from the top, which is
+safe only while nothing puts a gcloud wrapper above it, and its routing tests depend on it: they
+put a stub `gcloud` above this dir and expect the shim to hand the call to the stub. It skips a
+copy of itself (same bytes, or its marker line), since two copies on PATH called each other
+until an agent box's 8192 processes were used up on 2026-11-03 (`GcloudShimCopiesOnPath`).
+`shims/jj` and `shims/tmux` search from the top too, and hand the binary they find the whole
+PATH: jj's own `git` calls must still reach `shims/git`, and a tmux server started through the
+shim gives its PATH to every pane. The first
 jj or tmux they find is usually mise's shim. In its place they run the install of the exact
 version mise's global configuration pins, found without HOME, and past PATH they run that install
 too ("A moved HOME" below). Where it is missing they run mise's shim, which hands the call back to
@@ -1203,7 +1214,12 @@ the first one on PATH whenever mise has no version of it for the directory (a re
 name every binary the shim has handed the call to in that pid, and a re-entry in the same pid
 skips each one (and every path to the same file), taking the next one on PATH, then the pinned
 install, or failing with exit 127 and one line naming PATH, the configuration and the install
-dirs it read, instead of looping.
+dirs it read, instead of looping. `DOTFILES_GH_SHIM` does the same for gh, and also counts a
+re-entry in another pid below the hand-off that carries the same call (`gh_shim_call_digest`,
+the digest of its citation and argv): a wrapper that runs the shim as its real gh may start it
+as a child, as `legion gh` does, and a shim run by a path outside PATH still takes the first gh
+from the top, so a pid alone never sees that loop. Any other call below the real gh, such as the
+git credential helper gh runs, skips nothing.
 
 A shim that finds its real binary by a marker in its first 512 bytes must keep that marker in its
 header: `git-worktree-shim` for `shims/git` and `jj-lock-shim` for `shims/jj`. On 2026-11-12 a
