@@ -216,7 +216,9 @@ fi
 # cgroup, and that run died with "Nothing ran" (dispatch://INFRA-4383). The name says who made
 # it (agentbox-run-<pid>-<n>), and while that pid runs the cgroup is not swept. A pid reused
 # since its run ended only keeps that empty cgroup until the new process ends, so the reuse can
-# delay a sweep but never remove a live run's cgroup. cgroup.procs is read, not sized: cgroupfs
+# delay a sweep but never remove a live run's cgroup. The pid is read in this run's own pid
+# namespace, which every run in one box shares, so a run in another pid namespace that sees the
+# same cgroup tree is not told apart from an ended one. cgroup.procs is read, not sized: cgroupfs
 # gives every control file a size of 0, whatever it holds.
 sweep_left_behind() {
     local dir maker held

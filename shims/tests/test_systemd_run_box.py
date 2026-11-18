@@ -27,8 +27,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SHIM = Path(__file__).resolve().parents[1] / "systemd-run"
+CGROUPS = Path("/sys/fs/cgroup")
 TIMEOUT = 60
 # Every file a delegated cgroup v2 directory offers that this shim writes.
 CGROUP_FILES = {
@@ -348,6 +350,51 @@ def wait_until_empty(cgroup: Path, timeout: float = TIMEOUT) -> bool:
             poller.poll(left * 1000)
 
 
+def remove_cgroup(cgroup: Path) -> bool:
+    """Ends every process in `cgroup` and below it, then removes the cgroups in it and itself."""
+    try:
+        sudo("sh", "-c", f"printf 1 > '{cgroup}/cgroup.kill'")
+        if not wait_until_empty(cgroup):
+            return False
+        for child in [p for p in cgroup.iterdir() if p.is_dir()]:
+            sudo("rmdir", str(child))
+    except FileNotFoundError:  # gone already: another case's setup swept it
+        pass
+    sudo("rmdir", str(cgroup))
+    return not cgroup.exists()
+
+
+def maker_runs(cgroup: Path, prefix: str) -> bool:
+    """Whether the process whose pid the cgroup's name carries after `prefix` still runs."""
+    maker = cgroup.name[len(prefix):].split("-", 1)[0]
+    return maker.isdigit() and Path("/proc", maker).exists()
+
+
+def holds_a_process(cgroup: Path) -> bool:
+    """Read, not sized: cgroupfs gives every control file a size of 0, whatever it holds."""
+    return (cgroup / "cgroup.procs").read_text(encoding="utf-8").strip() != ""
+
+
+def sweep_ended_cases() -> None:
+    """Removes the cgroup a case killed before its cleanup left (SIGKILL, a timeout), and the run
+    cgroups in it, by the rule of the shim's own sweep: only when none of them holds a process and
+    the pid in each name, the case's and every run's, runs no more. A reused pid only keeps a cgroup
+    until that process ends. The pids are read in this process's own pid namespace, so a case or a
+    run in another pid namespace that sees this same cgroup tree is not told apart from a dead one."""
+    for case in CGROUPS.glob("agentbox-test-*"):
+        try:
+            if not case.is_dir() or maker_runs(case, "agentbox-test-") or holds_a_process(case):
+                continue
+            runs = [p for p in case.iterdir() if p.is_dir()]
+            if any(maker_runs(run, "agentbox-run-") or holds_a_process(run) for run in runs):
+                continue
+        except FileNotFoundError:  # another case's setup, under `pytest -n`, removed it meanwhile
+            continue
+        for run in runs:
+            sudo("rmdir", str(run))
+        sudo("rmdir", str(case))
+
+
 @unittest.skipUnless(
     os.path.isdir("/sys/fs/cgroup") and shutil.which("sudo") is not None
     and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0,
@@ -361,25 +408,88 @@ class RealCgroup(unittest.TestCase):
     cgroups there: a case that read the whole tree failed on theirs (dispatch://INFRA-4383). So
     each case gives the shim a cgroup of its own as its root (AGENTBOX_CGROUP_ROOT) and reads only
     that. Root makes it, as root owns a box's own root, so the shim takes the sudo path it takes
-    in a box. Its name is no agentbox-run-* one, which no run's sweep would therefore touch."""
+    in a box. Its name is no agentbox-run-* one, which no run's sweep would therefore touch; it
+    carries this process's pid instead, which the next case's setup reads (sweep_ended_cases)."""
 
     def setUp(self) -> None:
-        self.root = Path("/sys/fs/cgroup") / f"agentbox-test-{os.getpid()}-{os.urandom(4).hex()}"
+        sweep_ended_cases()
+        self.root = CGROUPS / f"agentbox-test-{os.getpid()}-{os.urandom(4).hex()}"
         made = sudo("mkdir", str(self.root))
         self.assertEqual(made.returncode, 0, made.stderr)
         self.addCleanup(self.remove_root)
 
     def remove_root(self) -> None:
         """Ends whatever a case left running in its cgroup, then removes the cgroup."""
-        sudo("sh", "-c", f"printf 1 > '{self.root}/cgroup.kill'")
-        self.assertTrue(wait_until_empty(self.root), f"processes still run in {self.root}")
-        for child in self.scopes():
-            sudo("rmdir", str(child))
-        removed = sudo("rmdir", str(self.root))
-        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertTrue(remove_cgroup(self.root), f"{self.root} is still there")
 
     def scopes(self) -> list[Path]:
         return [p for p in self.root.iterdir() if p.is_dir()]
+
+    # ── the cgroups of cases that died ──────────────────────────────────────────────────────
+    def process(self) -> subprocess.Popen:
+        """A process of this case's own, which ends at end(). It stands in for a case or a run
+        while its cgroup is built, so no other case's setup sweeps that cgroup half built."""
+        proc = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+        self.addCleanup(self.end, proc)
+        return proc
+
+    @staticmethod
+    def end(proc: subprocess.Popen) -> None:
+        if proc.stdin is not None and not proc.stdin.closed:
+            proc.stdin.close()  # cat ends at EOF: no signal
+        proc.wait(timeout=TIMEOUT)
+
+    def plant(self, maker: int, *runs: int) -> Path:
+        """A case's cgroup as a case of process `maker` leaves it, with a run cgroup in it for
+        each pid of `runs`, all empty. Removed at the end, if a setup has not removed it."""
+        planted = CGROUPS / f"agentbox-test-{maker}-{os.urandom(4).hex()}"
+        made = sudo("mkdir", str(planted))
+        self.assertEqual(made.returncode, 0, made.stderr)
+        self.addCleanup(remove_cgroup, planted)
+        for n, run in enumerate(runs):
+            made = sudo("mkdir", str(planted / f"agentbox-run-{run}-{n}.scope"))
+            self.assertEqual(made.returncode, 0, made.stderr)
+        return planted
+
+    def next_case(self) -> list[tuple]:
+        """Runs another case's setup, as the next case of this class runs it, and returns the
+        sudo calls it made."""
+        other = RealCgroup(self._testMethodName)
+        with mock.patch.object(sys.modules[__name__], "sudo", wraps=sudo) as calls:
+            other.setUp()
+        self.addCleanup(other.doCleanups)
+        return [call.args for call in calls.call_args_list]
+
+    def test_the_empty_cgroup_a_killed_case_left_is_removed_by_the_next_case(self) -> None:
+        """A case killed before its cleanup ran (SIGKILL, a timeout) leaves its cgroup and the
+        cgroup of the run it was making in it; nothing else ever removes them."""
+        killed = self.process()
+        planted = self.plant(killed.pid, killed.pid)
+        self.end(killed)
+        self.next_case()
+        self.assertFalse(planted.exists(), "the cgroup of a case that died was left behind")
+
+    def test_the_cgroup_of_a_case_still_running_is_kept(self) -> None:
+        planted = self.plant(os.getpid())
+        calls = self.next_case()
+        self.assertTrue(planted.is_dir(), "a setup removed the cgroup of a case still running")
+        self.assertNotIn(("rmdir", str(planted)), calls, "a setup tried to remove a running case's cgroup")
+
+    def test_a_dead_case_s_cgroup_that_is_not_empty_is_kept(self) -> None:
+        """A process in it, or a run in it whose shim still runs (a run's cgroup is empty until
+        its command is moved in): either keeps it, and nothing in it is touched."""
+        killed = self.process()
+        held = self.plant(killed.pid)
+        holder = self.process()  # ended before its cgroup is removed: cleanups run last first
+        moved = sudo("sh", "-c", f"printf %s {holder.pid} > '{held}/cgroup.procs'")
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        going = self.plant(killed.pid, os.getpid())
+        planted = [held, going, *[p for p in going.iterdir() if p.is_dir()]]
+        self.end(killed)
+        calls = self.next_case()
+        for cgroup in planted:
+            self.assertTrue(cgroup.is_dir(), f"a setup removed {cgroup}")
+            self.assertNotIn(("rmdir", str(cgroup)), calls, f"a setup tried to remove {cgroup}")
 
     def environ(self, env: dict | None = None) -> dict:
         return {**os.environ, "AGENTBOX_BOX": os.environ.get("AGENTBOX_BOX", "agentbox-test"),
