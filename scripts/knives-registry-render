@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Render the committed knives registry, knives/repos.toml, into this machine's copy,
+# ~/.config/knives/repos.toml, and record the sha256 of the source it rendered in
+# ~/.config/knives/repos.toml.source-sha256. A merge that changed knives/repos.toml used to reach
+# a machine's copy only when someone re-ran install.sh. Three callers run this step:
+# installers/knives.sh with no flag, so an install always replaces a hand-edited copy, and
+# scripts/dotfiles-follow and scripts/dotfiles-sync's tools step with --if-changed, which writes
+# nothing while the copy is a plain file and the source's sha256 is the recorded one.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../installers/lib.sh"
+
+if_changed=false
+if [[ $# -eq 1 && $1 == --if-changed ]]; then
+    if_changed=true
+elif [[ $# -ne 0 ]]; then
+    echo "usage: knives-registry-render [--if-changed]" >&2
+    exit 2
+fi
+
+source_file="${DOTFILES_DIR}/knives/repos.toml"
+registry="$HOME/.config/knives/repos.toml"
+record="${registry}.source-sha256"
+shown='~/.config/knives/repos.toml'
+mkdir -p "$HOME/.config/knives"
+# Hashed before the render: a source that changes during the run then differs from the record,
+# so the next run renders it again.
+sha="$(sha256sum <"$source_file")"
+sha="${sha%% *}"
+short="${sha:0:12}"
+
+plain_copy() { [[ -f "$registry" && ! -L "$registry" ]]; }
+# The record holds exactly the sha256 and a newline.
+record_holds_sha() { [[ -f "$record" ]] && printf '%s\n' "$sha" | cmp -s - "$record"; }
+
+if $if_changed && plain_copy && record_holds_sha; then
+    echo "knives-registry-render: $shown unchanged: knives/repos.toml has sha256 $short, as at the last render; wrote nothing"
+    exit 0
+fi
+
+rendered="" record_tmp=""
+trap 'rm -f -- ${rendered:+"$rendered"} ${record_tmp:+"$record_tmp"}' EXIT
+# The registry is rendered, not linked: a committed file names no machine's path, and oh-my-pi's
+# worktrees belong on the big local disk where the machine has one (the branches there are large
+# and rebuilt often). Everything else in the file is copied byte for byte.
+worktrees="$HOME/.worktrees/oh-my-pi"
+# The big disk's directory is named for the home it belongs to, not for the login name.
+nvme="/mnt/nvme/$(basename "$HOME")"
+[[ -d "$nvme" ]] && worktrees="$nvme/omp-worktrees/branches"
+rendered="$(mktemp "${registry}.XXXXXX")"
+sed "s#^workspaces = \"~/.worktrees/oh-my-pi\"\$#workspaces = \"${worktrees}\"#" \
+    "$source_file" > "$rendered"
+if plain_copy && cmp -s "$rendered" "$registry"; then
+    did="$shown already held the render of knives/repos.toml (sha256 $short); wrote nothing to it"
+else
+    chmod 644 "$rendered"
+    mv -f "$rendered" "$registry"
+    rendered=""
+    did="wrote $shown from knives/repos.toml (sha256 $short)"
+fi
+
+# The record is written after the copy: a run stopped between the two leaves the old record, so
+# the next --if-changed run renders again.
+if ! record_holds_sha; then
+    record_tmp="$(mktemp "${record}.XXXXXX")"
+    printf '%s\n' "$sha" > "$record_tmp"
+    chmod 644 "$record_tmp"
+    mv -f "$record_tmp" "$record"
+    record_tmp=""
+fi
+echo "knives-registry-render: $did"

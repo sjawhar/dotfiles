@@ -12,11 +12,13 @@ always finds the lock held (it happens on its own in about two installs of five)
 
 Runs against the knives in KNIVES_BIN, else the pinned one mise resolves (never the
 shims/knives wrapper), and is skipped when that knives has no `knives ledger`. Two more
-tests pin the link to the registry's private part (repos.local.toml from the .secrets clone).
+tests pin the link to the registry's private part (repos.local.toml from the .secrets clone),
+and one the copy of repos.toml the installer renders through scripts/knives-registry-render.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -30,6 +32,7 @@ from pathlib import Path
 DOTFILES = Path(__file__).resolve().parents[2]
 INSTALLER = DOTFILES / "installers" / "knives.sh"
 LIB = DOTFILES / "installers" / "lib.sh"
+RENDER = DOTFILES / "scripts" / "knives-registry-render"
 LEDGER_URL = "https://github.com/trajectory-labs-pbc/knives-ledger"
 HOSTNAME = "installer-test"
 # The installer names a machine `<hostname -s>-<first 8 hex of /etc/machine-id>`.
@@ -95,16 +98,27 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.config = self.home / ".config" / "knives"
         self.remote = self.root / "ledger.git"
         stubs = self.root / "bin"
-        for d in (self.dotfiles / "installers", self.dotfiles / "knives", self.config, stubs):
+        for d in (self.dotfiles / "installers", self.dotfiles / "knives", self.dotfiles / "scripts", self.config, stubs):
             d.mkdir(parents=True)
         for source in (INSTALLER, LIB):
             (self.dotfiles / "installers" / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        # The installer runs the render step; write_text drops the mode, so set it again.
+        render = self.dotfiles / "scripts" / RENDER.name
+        render.write_text(RENDER.read_text(encoding="utf-8"), encoding="utf-8")
+        render.chmod(0o755)
         (self.dotfiles / "knives" / "repos.toml").write_text(
             '[repos.smoke]\nupstream = "https://github.com/sjawhar/legion-smoke"\n'
             'origin = "https://github.com/sjawhar/legion-smoke-installer-test"\n'
             'ledger = "trajectory-labs-pbc/knives-ledger"\n',
             encoding="utf-8",
         )
+        # The omp table carries oh-my-pi's workspaces line, which the render rewrites.
+        with (self.dotfiles / "knives" / "repos.toml").open("a", encoding="utf-8") as registry:
+            registry.write(
+                '\n[repos.omp]\nupstream = "https://github.com/sjawhar/legion-smoke-omp"\n'
+                'origin = "https://github.com/sjawhar/legion-smoke-omp-installer-test"\n'
+                'workspaces = "~/.worktrees/oh-my-pi"\n'
+            )
         # An existing knives user: one statement an older knives kept in state.json.
         (self.config / "state.json").write_text('{"tracked_pulls": {"smoke/feat/x": 544}}', encoding="utf-8")
         (self.home / ".gitconfig").write_text(f'[url "{self.remote}"]\n\tinsteadOf = {LEDGER_URL}\n', encoding="utf-8")
@@ -266,6 +280,41 @@ class KnivesInstallerMigratedPush(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.config / "repos.local.toml").is_symlink())
         self.assertFalse((self.config / "repos.local.toml").exists())
+
+    def test_an_install_renders_the_registry_and_an_unchanged_source_rewrites_nothing(self) -> None:
+        # Given: a new machine, and a committed registry with oh-my-pi's workspaces line.
+        (self.config / "state.json").unlink()
+        source = (self.dotfiles / "knives" / "repos.toml").read_bytes()
+        # The machine's worktree directory: the big disk's, named for the home, where it exists.
+        nvme = Path("/mnt/nvme") / self.home.name
+        worktrees = nvme / "omp-worktrees" / "branches" if nvme.is_dir() else self.home / ".worktrees" / "oh-my-pi"
+        expected = source.replace(
+            b'\nworkspaces = "~/.worktrees/oh-my-pi"\n', f'\nworkspaces = "{worktrees}"\n'.encode()
+        )
+        self.assertNotEqual(expected, source)
+
+        # When: the installer joins it.
+        result = self.install()
+
+        # Then: the copy is the render, and the record holds the sha256 of the source it rendered.
+        copy = self.config / "repos.toml"
+        record = self.config / "repos.toml.source-sha256"
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(copy.is_symlink())
+        self.assertEqual(copy.read_bytes(), expected)
+        self.assertEqual(record.read_text(encoding="utf-8").strip(), hashlib.sha256(source).hexdigest())
+
+        # When: the render step runs again with --if-changed, as a pull runs it.
+        before = [(p.stat().st_ino, p.stat().st_mtime_ns) for p in (copy, record)]
+        again = subprocess.run(
+            [str(self.dotfiles / "scripts" / "knives-registry-render"), "--if-changed"],
+            capture_output=True, text=True, env={**self.env, "DOTFILES_DIR": str(self.dotfiles)}, check=False,
+        )
+
+        # Then: it succeeds and writes neither file.
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("unchanged", again.stdout)
+        self.assertEqual([(p.stat().st_ino, p.stat().st_mtime_ns) for p in (copy, record)], before)
 
 
 if __name__ == "__main__":
