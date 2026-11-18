@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 # dotfiles-publish <commit>: put one of your commits of the ~/.dotfiles jj checkout on origin's
-# main. It fetches, rebases <commit> and its descendants (the working copy among them) onto
-# main@origin, and pushes <commit> to main as a fast-forward. A push that loses a race to another
-# session's push fetches and tries again.
+# main, through a pull request. It fetches, rebases <commit> and its descendants (the working copy
+# among them) onto main@origin, pushes <commit> to the branch dotfiles-publish/<change id>, opens a
+# pull request of that branch into main (or reuses the open one), and squash-merges it pinned to
+# that exact commit. A branch push or a merge that loses a race to another session's publish
+# fetches and tries again.
+#
+# main takes no direct push: every change reaches it as a pull request, so that one that changes a
+# file CODEOWNERS on main gives an owner (every AGENTS.md, CLAUDE.md, SKILL.md and skills/ file)
+# waits for that owner's review. So a commit that changes such a file is not merged: the run opens
+# the pull request, names the files and their owners, and exits 3 with nothing merged. Run it again
+# once the owner has approved, and it merges. GitHub's own refusal to merge (a branch rule) also
+# exits 3, with the pull request left open.
+#
+# A squash merge makes a new commit on main, with <commit>'s tree on main's parent. When main did
+# not move under the pull request, that tree is <commit>'s own, and the run moves <commit>'s
+# descendants onto main's new commit and abandons <commit>: no file on disk changes. When main
+# moved, the squash holds newer files than <commit>, and the run moves the checkout with
+# `dotfiles-sync --here`, which abandons <commit> (main has its change under another commit id)
+# and refuses, leaving every file on disk as it was, a move that would conflict.
 #
 # The checkout is production: every session and user unit reads its files. A rebase that
 # conflicts writes jj's conflict markers into the working copy, and on 2026-11-02 at
@@ -31,7 +47,8 @@
 #     nothing is pushed. Any other case is refused, abandons nothing and pushes nothing: on
 #     2026-11-03 two `jj commit` runs raced and gave two sessions' different work one change id.
 # A refused or partial run leaves every file on disk as it was, and leaves no duplicate behind:
-# every copy this run makes and does not push is abandoned on any exit, with --ignore-immutable,
+# every copy this run makes is abandoned on any exit, the one it merged too (main holds that one as
+# the squash, under another commit id), with --ignore-immutable,
 # since a copy carries its original's description and so its session's trailer. On 2026-11-02 at
 # 19:41-19:42Z three runs of one session copied another session's two commits above its own, were
 # refused the plain abandon of those copies, stopped there, and left 14 commits behind.
@@ -52,6 +69,8 @@
 set -euo pipefail
 
 TRIES="${DOTFILES_PUBLISH_TRIES:-3}"
+# The exit status of a run whose pull request waits for a review (or for another branch rule).
+WAITS=3
 
 die() { echo "dotfiles-publish: $*" >&2; exit 1; }
 
@@ -171,6 +190,70 @@ owned() {
         | sed 's/ ()//g; s/ $//'
 }
 
+# The repository origin names, as owner/name for gh; an origin that is not on GitHub (a test's
+# local path) goes to gh as it is.
+slug="$(git remote get-url origin)"
+slug="${slug%.git}"
+slug="${slug#https://github.com/}"
+slug="${slug#git@github.com:}"
+# One branch per change: a run again (after a review, or a refused merge) moves the same branch,
+# so its open pull request follows the change.
+branch="dotfiles-publish/${change:0:12}"
+
+# owned_paths <commit>: each path <commit> changes that CODEOWNERS on main@origin gives an owner,
+# one per line as `<path><TAB><owners>`. The file is read where GitHub reads it (.github/, the
+# root, docs/: the first that exists) and matched with git's own gitignore engine, whose pattern
+# rules CODEOWNERS shares, the last matching line winning. A line with no owner takes its paths
+# back from the owners of lines above it, as on GitHub. The match runs in an empty repository of
+# its own, so no .gitignore or exclude file of this checkout takes part.
+owned_paths() {
+    local commit="$1" main_id file text="" scratch n=0 line pattern owners source num pat path
+    local -a by_line=()
+    main_id="$(jj log -r main@origin --no-graph -T 'commit_id')"
+    for file in .github/CODEOWNERS CODEOWNERS docs/CODEOWNERS; do
+        text="$(git show "$main_id:$file" 2>/dev/null)" && break
+        text=""
+    done
+    [[ -n "$text" ]] || return 0
+    scratch="$(mktemp -d)"
+    git init --quiet "$scratch/match"
+    : > "$scratch/patterns"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        read -r pattern owners <<< "$line" || true
+        [[ -n "$pattern" ]] || continue
+        n=$((n + 1))
+        if [[ -n "$owners" ]]; then printf '%s\n' "$pattern"; else printf '!%s\n' "$pattern"; fi >> "$scratch/patterns"
+        by_line[n]="$owners"
+    done <<< "$text"
+    # -z on both sides: `<source> NUL <line> NUL <pattern> NUL <path> NUL` per match, whatever a
+    # path holds. check-ignore exits 1 when nothing matched.
+    while IFS= read -r -d '' source && IFS= read -r -d '' num && IFS= read -r -d '' pat && IFS= read -r -d '' path; do
+        [[ -n "$source" && "$pat" != '!'* ]] || continue
+        printf '%s\t%s\n' "$path" "${by_line[num]}"
+    done < <(git diff -z --name-only --no-renames "$commit^" "$commit" \
+        | { git -C "$scratch/match" -c core.excludesFile="$scratch/patterns" check-ignore -z --no-index --verbose --stdin || true; })
+    rm -rf "$scratch"
+}
+
+# approved <pull request> <owned paths>: GitHub reads the pull request as approved, or each owned
+# path has, among its owners, a user whose latest review of the pull request approves it. A path
+# owned only by a team counts as approved only through GitHub's own reading.
+approved() {
+    local decision approvers path owners o ok
+    decision="$(gh pr view "$1" -R "$slug" --json reviewDecision --jq '.reviewDecision // ""')" || return 1
+    [[ "$decision" != APPROVED ]] || return 0
+    approvers=" $(gh pr view "$1" -R "$slug" --json latestReviews \
+        --jq '[.latestReviews[]? | select(.state == "APPROVED") | .author.login] | join(" ")') " || return 1
+    while IFS=$'\t' read -r path owners; do
+        ok=""
+        for o in $owners; do
+            [[ "$o" == @* && "$o" != */* && "$approvers" == *" ${o#@} "* ]] && ok=1
+        done
+        [[ -n "$ok" ]] || return 1
+    done <<< "$2"
+}
+
 attempt=0
 while :; do
     attempt=$((attempt + 1))
@@ -252,14 +335,88 @@ while :; do
             fi
         fi
     fi
-    if err="$(git push --quiet origin "$push:refs/heads/main" 2>&1)"; then
-        copies=""
-        echo "dotfiles-publish: main is $push"
+    if [[ "$(jj log -r "$push" --no-graph -T 'empty')" == true ]]; then
+        # main has the change already, under another commit id: an earlier run's squash merge, or
+        # its pull request merged by hand. The rebase left the commit empty, so abandoning it moves
+        # nothing on disk.
+        [[ "$push" == "$copies" ]] || jj abandon --quiet "$push"
+        echo "dotfiles-publish: main@origin already has $rev's change, under another commit id; nothing to publish"
         exit 0
     fi
-    # A copy that lost the race is made again from the new main. A rebased <commit> stays: the
-    # next try rebases it again.
-    drop_copies
-    (( attempt < TRIES )) || die "push refused $attempt times; the last answer: $err"
-    echo "dotfiles-publish: push refused (another session pushed first?); fetching and trying again" >&2
+    title="$(jj log -r "$push" --no-graph -T 'description.first_line()')"
+    body="$(jj log -r "$push" --no-graph -T 'description' | sed '1d' | sed '/./,$!d')"
+    # The branch is a bookmark of this checkout, pushed by jj so that it is tracked on origin: an
+    # untracked remote bookmark (a plain `git push` makes one) would make the commit it names one
+    # that no jj here may rewrite. A run again moves it, whichever way the rebase took the commit.
+    if ! err="$(jj bookmark set --quiet --allow-backwards "$branch" -r "$push" 2>&1 \
+        && jj git push --remote origin --bookmark "$branch" 2>&1)"; then
+        # A copy that lost the race is made again from the new main. A rebased <commit> stays: the
+        # next try rebases it again.
+        drop_copies
+        (( attempt < TRIES )) || die "push refused $attempt times; the last answer: $err"
+        echo "dotfiles-publish: push refused (another session pushed first?) on $branch; fetching and trying again" >&2
+        continue
+    fi
+    pr="$(gh pr view "$branch" -R "$slug" --json url,state --jq 'select(.state == "OPEN") | .url' 2>/dev/null)" || pr=""
+    if [[ -z "$pr" ]]; then
+        gh pr create -R "$slug" --base main --head "$branch" --title "$title" \
+            --body "${body:-$title}"$'\n\n'"Published with scripts/dotfiles-publish." > /dev/null \
+            || die "could not open a pull request of $branch into main; the branch holds $push, and main is as it was"
+        pr="$(gh pr view "$branch" -R "$slug" --json url --jq .url)" \
+            || die "opened a pull request of $branch into main but could not read it back; run this again"
+    fi
+    owned="$(owned_paths "$push")"
+    if [[ -n "$owned" ]] && ! approved "$pr" "$owned"; then
+        {
+            echo "dotfiles-publish: $rev changes files that CODEOWNERS on main gives an owner, so it waits for that owner's review:"
+            while IFS=$'\t' read -r path owners; do echo "  $path: $owners"; done <<< "$owned"
+            echo "  Pull request: $pr. Nothing was merged, and main is as it was. Once the owner approves it, run dotfiles-publish $rev again to merge it."
+        } >&2
+        exit "$WAITS"
+    fi
+    if ! err="$(gh pr merge "$pr" -R "$slug" --squash --match-head-commit "$push" --subject "$title" --body "$body" 2>&1)"; then
+        # GitHub says why only in prose; its merge state says whether a rule holds the pull request
+        # (BLOCKED), which no try again changes, or main moved under it.
+        state="$(gh pr view "$pr" -R "$slug" --json mergeStateStatus --jq .mergeStateStatus 2>/dev/null)" || state=""
+        if [[ "$state" == BLOCKED ]]; then
+            echo "dotfiles-publish: GitHub refused to merge $pr, which a rule of main holds: $err. It stays open; nothing was merged, and main is as it was." >&2
+            exit "$WAITS"
+        fi
+        drop_copies
+        (( attempt < TRIES )) || die "merge refused $attempt times; the last answer: $err"
+        echo "dotfiles-publish: merge of $pr refused (main moved under it?); fetching and trying again" >&2
+        # GitHub can still be computing the pull request's mergeability against the new main.
+        sleep "${DOTFILES_PUBLISH_RETRY_SLEEP:-3}"
+        continue
+    fi
+    jj git fetch --quiet
+    main_id="$(jj log -r main@origin --no-graph -T 'commit_id')"
+    { jj bookmark delete --quiet "$branch" && jj git push --remote origin --bookmark "$branch"; } > /dev/null 2>&1 \
+        || echo "dotfiles-publish: could not delete the branch $branch on origin; delete it by hand" >&2
+    if [[ "$push" == "$copies" ]]; then
+        # The exit drops the copy: main holds it as the squash.
+        echo "dotfiles-publish: main is $main_id (pull request $pr, the squash of a copy of $rev). $next"
+    elif [[ "$(git rev-parse "$main_id^{tree}")" == "$(git rev-parse "$push^{tree}")" \
+        && "$(git rev-parse "$main_id^")" == "$(git rev-parse "$push^")" ]]; then
+        # The squash is <commit>'s tree on <commit>'s parent: moving what is above <commit> onto it
+        # and abandoning <commit>, now empty, changes no file.
+        jj rebase --quiet -s "$push" -d main@origin
+        push="$(current)"
+        [[ "$(jj log -r "$push" --no-graph -T 'empty')" != true ]] || jj abandon --quiet "$push"
+        echo "dotfiles-publish: main is $main_id (pull request $pr, the squash of $push)"
+    else
+        # Another session's change landed under the pull request, so the squash holds newer files
+        # than <commit>. dotfiles-sync moves the working copy onto main as it does after any such
+        # publish: it abandons <commit>, whose change main has under another commit id, and it
+        # refuses, with every file on disk as it was, when the move would conflict.
+        echo "dotfiles-publish: main is $main_id (pull request $pr): main moved under the pull request, so its squash holds newer files than $push; moving the checkout onto it with dotfiles-sync"
+        # dotfiles-sync --here moves ~/.dotfiles alone, so a checkout elsewhere (DOTFILES_DIR) is told.
+        if [[ "$PWD" -ef "$HOME/.dotfiles" ]]; then
+            "$tools" --here "" \
+                || echo "dotfiles-publish: the publish is done, but dotfiles-sync did not move the checkout (above); run \`dotfiles-sync local\` once that is resolved" >&2
+        else
+            echo "dotfiles-publish: $PWD is not ~/.dotfiles, which dotfiles-sync moves; move this checkout onto main@origin yourself" >&2
+        fi
+    fi
+    exit 0
 done
