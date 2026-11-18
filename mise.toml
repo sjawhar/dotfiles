@@ -80,10 +80,24 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # upgrade.auto_prune=false below keeps replaced versions installed - live sessions still exec
 # them for hub/worker spawns.
 #
-# v18.18.6-sami.20261110-032522 advances all 46 release members onto upstream main and carries
-# the fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
-# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset is
-# smoke-tested: `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`.
+# v18.18.6-sami.20261117-053702 (commit 7ae9bc73) adds the fix for the subagent progress probe
+# (dispatch://INFRA-4027, cybermonklabs/oh-my-pi#14): a probe goes out only when at least 95% of
+# its prompt is in the agent's prompt cache, the agent's tools and thinking level are unchanged,
+# and the cache entry has more than 30 s of its lifetime left; and a side request (/btw, a probe)
+# now carries its parent's session id, so a gateway serves it from the parent's cache. Both checks
+# of INFRA-4027 pass on this linux-x64 asset against v18.18.6-sami.20261117-013345: 10 of 10
+# probes read at least 95% from the cache, where the control had 5 of 8 gateway Claude probes
+# under 95% (lowest 41.3%). task.completionProbe stays false in omp/config.yml, although Sami said
+# on 2026-11-17 to turn the probe on (dispatch://INFRA-4027/ask/32dc7c33-b1bd-49aa-9048-dd941ecb2b63):
+# the comment at that key says why. Since 11-10 the release also carries RPC startup
+# dispatch (#19126: a command sent after `ready` is answered while startup still runs) and a pause
+# after a failed Hindsight auto-recall (hindsight.recallCooldownMs), and it still carries the
+# 11-10 fix for the memory leak that was killing long-running sessions (447.6 -> 145.7 KiB per
+# model call, 67.5%, measured in the binary; dispatch://INFRA-1876). The linux-x64 asset (sha256
+# 642dab6d0b95abf2daaf2b207aeff0bd2c0d72715a0b2c6a1149100f1d774aba) is smoke-tested:
+# `omp --version` gives omp/18.18.6 and `omp --smoke-test` gives `smoke-test: ok`. packages/mnemopi
+# is unchanged since the 11-10 release, so "npm:@oh-my-pi/pi-mnemopi" below stays 18.18.6.
+# Release: https://github.com/cybermonklabs/oh-my-pi/releases/tag/v18.18.6-sami.20261117-053702
 #
 # There is NO macOS split here, and do not add one. A darwin-arm64 asset is published but was
 # cross-built on Linux and has never been executed. On 2026-11-10 this file briefly held macOS
@@ -100,8 +114,10 @@ _.path = ['{{ env.DOTFILES_DIR | default(value=env.HOME ~ "/.dotfiles") }}/shims
 # 11-10 push of the sami branch (which sami-build.yml triggers on) created no run. The only field
 # nobody here can read is orgs/cybermonklabs/actions/permissions (403, needs admin:org), and an
 # org-level policy or spending limit fits every observation. Check the ORG settings page, not the
-# repository's Actions tab.
-"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261110-032522"
+# repository's Actions tab. Still so on 2026-11-17: no run exists for commit 7ae9bc73, the
+# repository's newest runs sit `queued`, and the release notes of v18.18.6-sami.20261117-053702 say
+# it was built by hand in the same way.
+"github:sjawhar/oh-my-pi" = "18.18.6-sami.20261117-053702"
 # secrets moved into sjawhar/forward (consolidation): see the `secrets` entry
 # in [tool_alias] and [tools.secrets] below — the alias is what selects the
 # broker asset and gives it its own install dir alongside forward's.
@@ -275,11 +291,11 @@ platforms.linux-x64 = { asset_pattern = "secrets-x86_64-unknown-linux-gnu.tar.gz
 # GitHub recorded at upload; bump them with the version
 # (gh api repos/cybermonklabs/legion/releases/tags/<tag> --jq '.assets[] | .name, .digest').
 [tools.agent-secrets]
-version = "legion-envoy-v30.21.1"  # This is the first release with INFRA-3648 (merge 35d0212bb3eba3e131c3ad04461e7ca915e5b57f). The helper answers `enroll --helper`, `unenroll --helper` and the machine login call with the broker's outcome. When the broker possibly got the request and its answer did not come back, the helper answers that the outcome is not known: ENROLL_OUTCOME_UNKNOWN or UNENROLL_OUTCOME_UNKNOWN, and for the login LOGIN_FAILED with an error that says so. `scripts/agentbox` reads the client's ENROLL_FAILED and DRAINING codes at each enroll call (enroll_attempts) as the only known enroll failures, and UNENROLL_FAILED (unenroll_revoke) as the only known unenroll failure. It reads every other failure as an outcome that is not known. Before a later bump, make sure that these three codes still have that meaning. Earlier reasons that still apply: INFRA-3666 (merge df57176f7203463733cca417caf502d23ff60fa9), with which every `agent-secrets secret` form uses the credential its environment gives it; the secrets broker's airlock (merge 46c4162b, INFRA-1352; INFRA-1355, INFRA-3012); and the GitHub App narrowing fix f3960fa2d181, which `agent-secrets --help` shows as `--github-token`. The helper itself moves to a new version only when it restarts.
-platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:e90ffa425956d24dbb0fe842da66e28c28737b04b2c097037bee21c9ad438640" }
-platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:19cb9d80f1cf3ff906168758ab73a4577e0b04668e985cf9646fb80b4e45f3eb" }
-platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:79b83fcefacffd9f4ba770c9a66e58882a77abf9119807a7be8db462674ca510" }
-platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:643d6f642a185f4b959375a9c9c5da64a37770fe8740170ccacb501d192bc698" }
+version = "legion-envoy-v30.43.0"  # This is the first release with INFRA-3845 (merge bb4b0c95e0f877b35c3eb9b867d4c964ce79739b): `agent-secrets NAME -- command` takes its broker identity from the first of four sources that has one, a launcher's key directory, the person's own `agent-secrets login`, the helper for a process inside a session it registered, and the machine's own cloud identity found with no setting (which the broker offers only once it answers an exchange audience in GET /v1/settings), so it works in a process the helper never saw; a source with nothing for the caller is skipped, one present but broken and a broker refusal stop the command, and when no source has an identity the client exits 1 where it exited 2. `agent-secrets identity` keeps its exit codes (0 with an identity on disk or a helper session, 1 without, 2 on a usage error) and reads no sign-in and no machine cache, so scripts/secret-run's choice is unchanged. It also holds INFRA-3823 (merge f35483e5103e688559150dd07b59459c27951926) and INFRA-3844 (merge 467e5371b5f2d65dc207b13d5655c49b163af88c): `agent-secrets secret create` refuses before it asks, and every `agent-secrets secret` form takes its store credential from the environment, with no --profile flag. Earlier reasons that still apply: INFRA-3648 (merge 35d0212bb3eba3e131c3ad04461e7ca915e5b57f), with which the helper answers `enroll --helper`, `unenroll --helper` and the machine login call with the broker's outcome, and answers that the outcome is not known (ENROLL_OUTCOME_UNKNOWN, UNENROLL_OUTCOME_UNKNOWN, or LOGIN_FAILED with an error that says so) when the broker possibly got the request and its answer did not come back. `scripts/agentbox` reads the client's ENROLL_FAILED and DRAINING codes at each enroll call (enroll_attempts) as the only known enroll failures, and UNENROLL_FAILED (unenroll_revoke) as the only known unenroll failure. It reads every other failure as an outcome that is not known. No line that names one of these codes changed between legion-envoy-v30.21.1 and this release (packages/envoy/internal/broker/helper/protocol.go, cmd/agent-secrets, internal/brokerclient). Before a later bump, make sure that these three codes still have that meaning. Also INFRA-3666 (merge df57176f7203463733cca417caf502d23ff60fa9), the secrets broker's airlock (merge 46c4162b, INFRA-1352; INFRA-1355, INFRA-3012), and the GitHub App narrowing fix f3960fa2d181, which `agent-secrets --help` shows as `--github-token`. The helper itself moves to a new version only when it restarts.
+platforms.linux-x64   = { asset_pattern = "agent-secrets-amd64.tar.gz", checksum = "sha256:bf9ae2c5da40e951fffb909b888623bdb48a39acf204cc83a3c45f6f20974cac" }
+platforms.linux-arm64 = { asset_pattern = "agent-secrets-arm64.tar.gz", checksum = "sha256:593e6b45b00b85887db4cc116f397c801b967ee1823a5e282d0d11693753eaf6" }
+platforms.macos-x64   = { asset_pattern = "agent-secrets-darwin-amd64.tar.gz", checksum = "sha256:de0d0c414c8db727856aa08e91815a37ee197b5f82e43fee5e808ef3180dfa73" }
+platforms.macos-arm64 = { asset_pattern = "agent-secrets-darwin-arm64.tar.gz", checksum = "sha256:a235f652488df829676504e6a03471d0d6e8bd8040fafe377273372c92f2c474" }
 
 # Gmail triage CLI + TUI (agents use --json; humans get the bubbletea TUI).
 [tools."github:sjawhar/mailbox"]

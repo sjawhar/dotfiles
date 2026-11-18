@@ -507,9 +507,8 @@ agent_context() {
 # $AGENT_SESSION_SCRATCH/gcloud: the session's own scratch directory (scripts/agent-session;
 # devbox/session-scratch-reap removes it when the session ends), seeded from ~/.config/gcloud at the
 # session's first call by scripts/gcloud-session-config. An agentbox session has no such scratch;
-# its copy is at ${TMPDIR:-/tmp}/agentbox-gcloud-session/gcloud, the box's own /tmp (a loop disk at
-# /mnt/nvme/<user>/agentbox/disks/<box>.img on the host, gone with the box), seeded from the
-# host's ~/.config/gcloud that the box binds: boxes were 76 of about 120 processes still writing
+# its copy is at $XDG_RUNTIME_DIR/gcloud-session/<the session its marker names>/gcloud, seeded from
+# the host's ~/.config/gcloud that the box binds: boxes were 76 of about 120 processes still writing
 # that directory after the session copies went live (10:30Z). It is left alone when the caller set
 # CLOUDSDK_CONFIG (the Linux eval lane gives each attempt its own) and where no copy can be made
 # (the call then runs on ~/.config/gcloud as before). A command whose change must outlive the session (a
@@ -546,26 +545,52 @@ persists_config_change() {
     esac
     return 1
 }
+# private_dir DIR [create]: DIR is a directory of the caller's own that nobody else can reach: no symlink, owned by
+# the caller, mode 0700, as shims/tmux asks of its runtime directory. With create, a missing DIR is made first.
+private_dir() {
+    if [[ -n "${2:-}" && ! -e "$1" && ! -L "$1" ]]; then
+        mkdir -m 0700 -- "$1" 2> /dev/null || true
+    fi
+    [[ -d "$1" && ! -L "$1" && -O "$1" && "$(stat -c %a -- "$1" 2> /dev/null)" == 700 ]]
+}
 use_session_config() { # ARGV
     agent_context || return 0
     [[ -z "${CLOUDSDK_CONFIG:-}" ]] || return 0
-    local scratch="${AGENT_SESSION_SCRATCH:-}" target origin
+    local scratch="${AGENT_SESSION_SCRATCH:-}" target origin copied key runtime="${XDG_RUNTIME_DIR:-}"
     if [[ -z "$scratch" && -n "${AGENTBOX_BOX:-}${AGENTBOX_SESSION:-}" ]]; then
-        scratch="${TMPDIR:-/tmp}/agentbox-gcloud-session"
-        [[ -d "$scratch" ]] || mkdir -m 0700 -- "$scratch" 2> /dev/null || return 0
+        # An agentbox session has no scratch of its own, so its copy goes in the user's runtime directory, in a
+        # directory of the session its marker names: nobody else reaches it, and no other session of this user
+        # shares it. Until 2026-11-17 it was ${TMPDIR:-/tmp}/agentbox-gcloud-session, private inside a box, whose /tmp
+        # is its own, but on the host (a pane the tmux relay starts with a box's marker, a test) one fixed name in the
+        # shared /tmp, used by whoever made it first. With no private runtime directory there is no copy.
+        key="${AGENTBOX_SESSION:-${AGENTBOX_BOX:-}}"
+        key="${key//[^A-Za-z0-9._-]/_}"
+        [[ -n "$runtime" && "$key" != . && "$key" != .. ]] || return 0
+        private_dir "$runtime" && private_dir "$runtime/gcloud-session" create || return 0
+        scratch="$runtime/gcloud-session/$key"
+        private_dir "$scratch" create || return 0
     fi
-    [[ -n "$scratch" && -d "$scratch" && ! -L "$scratch" && -O "$scratch" ]] || return 0
+    [[ -n "$scratch" ]] && private_dir "$scratch" || return 0
     target="$scratch/gcloud"
     if persists_config_change "$@"; then
         [[ -e "$target" ]] && { mv -f -- "$target" "$target.replaced.$$" 2> /dev/null || true; }
         return 0
     fi
+    resolve_user_home 2> /dev/null || return 0
+    origin="${GCLOUD_USER_HOME}/.config/gcloud"
     if [[ ! -f "$target/$GCLOUD_SESSION_COPIED" ]]; then
-        resolve_user_home 2> /dev/null || return 0
-        origin="${GCLOUD_USER_HOME}/.config/gcloud"
         "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../scripts/gcloud-session-config" "$origin" "$target" \
             > /dev/null 2>&1 || return 0
     fi
+    # A copy serves only the configuration directory it was made from, which its marker names. The scratch is shared
+    # by whatever shares the session's scratch or marker (a child with a HOME of its own, a test with a fake one), and
+    # the first call publishes its copy for all of them. Until 2026-11-17 any copy was taken: under the agentbox marker
+    # with no TMPDIR, gcloud tests that ran in parallel read /tmp/agentbox-gcloud-session/gcloud, which another test's
+    # HOME had made, and judged a person's login by a configuration directory that was not the caller's. A copy of
+    # another directory leaves this call on its own, as one that cannot be copied does.
+    copied=""
+    IFS= read -r copied < "$target/$GCLOUD_SESSION_COPIED" 2> /dev/null || true
+    [[ "$copied" == "$origin" ]] || return 0
     export CLOUDSDK_CONFIG="$target"
 }
 
@@ -1620,7 +1645,7 @@ main() {
             exit 1
         fi
     elif ((GCLOUD_READING_KINDS == 2)) && adc_is_box_identity; then
-        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which agent-secrets and gcloud use." >&2
+        echo "gcloud shim: refusing auth application-default ${GCLOUD_COMMAND_WORDS[2]}: this box's Application Default Credentials are its own identity and stay so; sign in as yourself with gcloud auth login, which goes to the ${USER_LOGIN_CONFIGURATION} configuration, and, in your own shell, store a secret with CLOUDSDK_ACTIVE_CONFIG_NAME=${USER_LOGIN_CONFIGURATION} agent-secrets secret create NAME." >&2
         exit 1
     fi
 

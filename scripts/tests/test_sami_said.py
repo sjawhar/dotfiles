@@ -543,14 +543,17 @@ class FakeDispatch(http.server.BaseHTTPRequestHandler):
     pongs: list[bytes] = []  # every pong's payload
     faults: list[str] = []  # what the client sent against RFC 6455 or the live socket's frames
     # How the live socket's event feed behaves, as Dispatch's can: None; "pause" (no event for
-    # PAUSE_S after every CHUNK events while more remain, only pings and heartbeat frames, as a slow
-    # catch-up page is); "ended" (an ended frame (behind) there, as when the feed falls behind);
-    # "close" (close 4001 there, as at the socket's age); "dead" (close 1012 right after every
-    # events_start, as a restart loop does); "missing" (GET /ws/live answers 404, as a Dispatch
-    # before the live socket does); "refuse" (an error frame answers the subscribe); "no-head"
-    # (no issue was updated recently, so the read has no head to aim at).
+    # PAUSE_S after each event of BREAK_AFTER while more remain, only pings and heartbeat frames, as
+    # a slow catch-up page is); "ended" (an ended frame (behind) there, as when the feed falls
+    # behind); "close" (close 4001 there, as at the socket's age); "dead" (close 1012 right after
+    # every events_start, as a restart loop does); "missing" (GET /ws/live answers 404, as a
+    # Dispatch before the live socket does); "refuse" (an error frame answers the subscribe);
+    # "no-head" (no issue was updated recently, so the read has no head to aim at).
     mode: str | None = None
-    CHUNK = 4
+    # Where a feed breaks: inside the window's own rows, whatever id the read resumes from. Every
+    # fourth event broke it while the read began at 199; since 9f625a82 it begins at the head less
+    # sami-said's replay tail (110 here), and 24 breaks of PAUSE_S each outran the run's limit.
+    BREAK_AFTER = frozenset({303, 307})
     PAUSE_S = 4.0
 
     def log_message(self, *args):
@@ -653,7 +656,7 @@ class FakeDispatch(http.server.BaseHTTPRequestHandler):
                 self.ws_send(0x0, frame[20:])
             else:
                 self.ws_send(0x1, frame)
-            if n % self.CHUNK == 0 and n < len(backlog):
+            if e["id"] in self.BREAK_AFTER and n < len(backlog):
                 if self.mode == "ended":
                     self.send_frame({"type": "ended", "sub": sub["sub"], "reason": "behind"})
                     return self.drain()
@@ -802,7 +805,7 @@ class DispatchFeedFaults(unittest.TestCase):
         return [(r["source"], r["text"]) for r in found if r["source"].startswith("DISPATCH")]
 
     def resumes(self) -> list[str]:
-        """The `since` of every subscribe, the binary search's probes first, then the read's."""
+        """The `since` of every subscribe, in order: the read's first, then each resume."""
         return [s["resume"]["since"] for s in FakeDispatch.subscribes]
 
     def test_a_subscription_silent_partway_is_resumed(self):
@@ -831,7 +834,9 @@ class DispatchFeedFaults(unittest.TestCase):
         done, found = self.run_with(None, FakeDispatch.events[:-1] + [last])
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
-        self.assertEqual(self.resumes()[-1], "199")  # one subscription read it all
+        # One subscription read it all, from the head less sami-said's replay tail
+        # (LIVE_REPLAY_SAFE, 200): 310 - 200.
+        self.assertEqual(self.resumes(), ["110"])
 
     def test_with_no_head_silence_ends_the_read(self):
         # No issue updated recently: no head to search below, so the read starts at the log's start,
@@ -840,6 +845,16 @@ class DispatchFeedFaults(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.dispatch_rows(found), DISPATCH_ROWS)
         self.assertEqual(self.resumes(), ["0"])
+
+    def test_a_long_log_whose_tail_starts_inside_the_window_fails_loudly(self):
+        # Longer than the tail, so the read resumes inside the log, and every event it gets is in
+        # the window: what came before the tail is not read, and the run must say so.
+        events = [event(i, at(10 + i * 0.01), "comment.created", {"id": f"c-{i}", "body": f"event {i}"})
+                  for i in range(1, 312)]
+        done, found = self.run_with(None, events)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(self.dispatch_rows(found), [])
+        self.assertIn("the Dispatch live socket's replay reached back only to", done.stderr)
 
     def test_the_log_first_event_is_read_when_it_is_in_the_window(self):
         events = [event(1, at(10), "comment.created", {"id": "c-first", "body": "the log's first event"}),

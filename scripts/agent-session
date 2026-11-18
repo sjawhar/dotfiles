@@ -17,10 +17,10 @@
 #     none, and the libraries take the VM's account from the metadata server;
 #   - gives the session a TMPDIR of its own on the big disk and points the uv, cargo and Go
 #     caches there, on a machine that has one (below); on one that has not, nothing changes;
-#   - points omp's session-store fallback ledger at the durable disk, which the host and every
-#     agent box share, so one file holds the whole machine's fallbacks (below);
 #   - exports the model-spend telemetry variables when this machine holds the collector's token (below);
 #   - refuses to resume an omp session that `agentbox move --to` moved off this machine (below);
+#   - names omp/config.probe.yml, which turns the subagent progress probe on, in an omp session's
+#     PI_CONFIG_FILES only when the omp it runs is a release that holds the probe's fix (below);
 #   - execs the first <agent> on PATH that is not a wrapper, through scripts/agent-secrets-session.
 #     A wrapper is a file whose real path is in a shims/ directory (shims/omp, another checkout's
 #     copy of it) or mise's own shims dir, which falls back to PATH when mise has no version for
@@ -264,32 +264,6 @@ if [[ -d "$nvme_home" ]]; then
     unset shared_gotmp
 fi
 
-# The fallback ledger of omp's Postgres session store (dispatch://INFRA-1192). Under
-# `session.storage: sql` a session that cannot read the connection file or reach the database
-# goes on using its file transcript and appends one line saying why; a warning nobody counts
-# lets a broken connection file degrade a fleet quietly. omp's default for that ledger is
-# `<agentDir>/session-sql-fallbacks.jsonl`, which inside an agent box is the box's own
-# filesystem: it dies with the box and the host's reading never sees it, which defeats the
-# count. `/mnt/durable/<host-user>` is bound into every box at its own path (scripts/agentbox),
-# so a line written inside a box is read on the host, and one file holds the whole machine.
-# `scripts/omp-session-fallbacks` is the reading.
-#
-# The host's user is not the box's — a box runs as `ubuntu` with the host's home — so the
-# directory comes from the one the launcher passed in (AGENTBOX_DURABLE; `none` when the host
-# has no durable disk), else this user's own, and no absolute path is committed. A caller's
-# value wins, and a machine without the directory keeps omp's own default.
-durable_home="${AGENTBOX_DURABLE:-/mnt/durable/${USER:-$(id -un)}}"
-if [[ -z "${OMP_SESSION_SQL_FALLBACK_LEDGER:-}" && "$durable_home" == /* && -d "$durable_home" ]]; then
-    ledger_dir="$durable_home/omp-session-sql"
-    if mkdir -p -m 700 "$ledger_dir" 2>/dev/null && [[ -w "$ledger_dir" ]]; then
-        export OMP_SESSION_SQL_FALLBACK_LEDGER="$ledger_dir/fallbacks.jsonl"
-    else
-        echo "agent-session: cannot write $ledger_dir, where a session-store fallback is recorded; omp keeps its own default, which the host's reading never sees" >&2
-    fi
-    unset ledger_dir
-fi
-unset durable_home
-
 prog=""
 if [[ "$agent" == */* ]]; then
     prog="$agent"
@@ -411,6 +385,44 @@ else
             rm -f "$out"
         fi
     fi
+fi
+
+# The subagent progress probe (task.completionProbe) is on only in a session whose omp holds its
+# fix (dispatch://INFRA-4027): omp/config.probe.yml, which sets it true, is named in the list only
+# when the binary about to run is a release stamped 20261117-053702 or later. omp/config.yml keeps
+# it false, because a running session watches every file its list names and reads the key at each
+# subagent start, so true there turns the unfixed probe on in each session of an older release; an
+# older session's list, fixed when it started, never names this file. The stamp is read from the
+# version directory of the binary's real path (<installs>/<tool>/18.18.6-sami.YYYYMMDD-HHMMSS/bin/omp),
+# since `omp --version` prints none. A version with no stamp (a local build, an upstream release),
+# or in any other shape, gets no file, so a roll-back of the pin to an older release turns the
+# probe off for new sessions with no second edit. The file goes right after omp/config.yml, so the
+# machine's config.local.yml (a named profile's local file) and a caller's own overlays, which
+# shims/omp puts after config.yml and which win over earlier entries, can still turn the probe off.
+# A list that does not name omp/config.yml is left without it. An entry the list already carried (a
+# launch from a session whose list names it) is dropped first, so an older release never gets it.
+omp_probe_overlay() { # omp_probe_overlay PROG: PI_CONFIG_FILES, with the probe's file where PROG holds the fix
+    local real version entry probe="$DOTFILES_DIR/omp/config.probe.yml" fixed=""
+    local -a entries=() kept=()
+    [[ -n "${PI_CONFIG_FILES:-}" ]] || return 0
+    real="$(realpath -- "$1" 2>/dev/null)" || real=""
+    version="${real%/bin/omp}"
+    version="${version##*/}"
+    if [[ "$real" == */bin/omp && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-sami\.([0-9]{8})-([0-9]{6})$ ]] \
+        && (( 10#${BASH_REMATCH[1]}${BASH_REMATCH[2]} >= 20261117053702 )) && [[ -f "$probe" ]]; then
+        fixed=1
+    fi
+    IFS=: read -ra entries <<<"$PI_CONFIG_FILES"
+    for entry in "${entries[@]}"; do
+        [[ "$entry" == */omp/config.probe.yml ]] && continue
+        kept+=("$entry")
+        [[ -n "$fixed" && "$entry" == "$DOTFILES_DIR/omp/config.yml" ]] && kept+=("$probe")
+    done
+    local IFS=:
+    export PI_CONFIG_FILES="${kept[*]}"
+}
+if [[ "${agent##*/}" == omp ]]; then
+    omp_probe_overlay "$prog"
 fi
 
 # Model spend (dispatch://INFRA-165): scripts/agent-spend-env.sh, shared with shims/claude and shims/codex, says

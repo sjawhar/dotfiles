@@ -99,8 +99,8 @@ class Socket(Client):
 
 
 @pytest.fixture
-def served(dash, tmp_path):
-    path = tmp_path / "page.sock"
+def served(dash, socket_dir):
+    path = socket_dir / "page.sock"
     srv = server._UnixHTTPServer(str(path), server.make_handler(dash, proxy_uid=os.getuid()))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield path

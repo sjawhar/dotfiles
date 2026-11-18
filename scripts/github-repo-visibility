@@ -88,4 +88,17 @@ fi
 # SIGKILL bounds the whole process group even when a child ignores TERM or holds stdout.
 gh="${BASH_SOURCE[0]%/*}/../shims/gh"
 value="$(GH_HOST=github.com PUBLIC_LEAK_CHECK_VISIBILITY_READ="$slug" timeout -s KILL 5 "$gh" api "repos/$slug" --jq .visibility </dev/null 2>/dev/null)" || value=""
-case "$value" in public | private | internal) printf '%s\n' "$value" ;; *) echo unknown ;; esac
+case "$value" in
+    public | private | internal)
+        # The answer goes into the same cache for the next read, as the leak check writes it (public_leak_check.py
+        # vis_of): the word alone, its time the file's, written whole and renamed into place. A cache that cannot be
+        # written changes nothing but the next read's cost.
+        if mkdir -p -- "${cache%/*}" 2>/dev/null && printf '%s' "$value" > "$cache.$$" 2>/dev/null; then
+            mv -f -- "$cache.$$" "$cache" 2>/dev/null || rm -f -- "$cache.$$" 2>/dev/null || true
+        else
+            rm -f -- "$cache.$$" 2>/dev/null || true
+        fi
+        printf '%s\n' "$value"
+        ;;
+    *) echo unknown ;;
+esac

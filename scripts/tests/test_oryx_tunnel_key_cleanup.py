@@ -533,7 +533,10 @@ class OryxTunnelKeyCleanup(unittest.TestCase):
                             f"expected one failure and no errors, got failures={result.failures!r} errors={result.errors!r}"
                         )
                     elif "added.returncode" not in result.failures[0][1]:
-                        failures.append("in-process failure did not contain added.returncode")
+                        # The run failed before the ssh-add it was given to fail: say where, or the
+                        # line names no cause (one full run on sami-devbox, 2026-11-16, passed alone).
+                        failures.append("in-process failure did not contain added.returncode; it was:\n"
+                                        + result.failures[0][1][-1500:])
                 failures.extend(
                     self._post_run_failures(
                         initial_children, previous_handlers, previous_subreaper

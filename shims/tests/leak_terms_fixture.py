@@ -11,6 +11,17 @@ from pathlib import Path
 
 
 TEST_TERMS = ("Quillfeather Lane 9", "zorbleplex", "vintrapolis-canary-7")
+# A term listed for one set of repositories only (the list's `scoped` map): a push or gh text bound for a public
+# repository the pattern matches refuses it, and one bound for any other repository does not.
+SCOPED_TEST_TERMS = {"cybermonklabs/*": ("brindlewort-scoped-5",)}
+# The forbidden list of knives's fork registry entry oh-my-pi: a gh text bound for a public repository named oh-my-pi
+# refuses them, whatever its owner, and one bound for any other repository does not.
+REGISTRY_TEST_TERMS = {"oh-my-pi": ("knurlwick-registry-1", "plumbago-registry-2")}
+# Tokens that hold the scoped term and are allowed in one repository (the list's `allowed` map): a third-party npm
+# package as written and as a JavaScript regular expression escapes its slash.
+ALLOWED_TEST_TOKENS = {
+    "cybermonklabs/oh-my-pi": ("@brindlewort-scoped-5/mcp-server-browser", "@brindlewort-scoped-5\\/mcp-server-browser"),
+}
 
 
 def _run_age_keygen(destination: Path) -> None:
@@ -88,8 +99,28 @@ def real_sops() -> str:
 
 
 @lru_cache(maxsize=1)
+def sops_directory() -> str:
+    """A directory holding only `sops`, linked to the binary this run's sops resolves to (past a mise shim, which reads
+    the caller's home)."""
+    directory = Path(fixture_environment()["DOTFILES_LEAK_TERMS_FILE"]).parent / "sops-bin"
+    directory.mkdir(exist_ok=True)
+    link = directory / "sops"
+    if not link.exists():
+        link.symlink_to(real_sops())
+    return str(directory)
+
+
+def leak_check_environment(path: str) -> dict[str, str]:
+    """For an environment a test builds from nothing, with PATH PATH: fixture_environment()'s four variables (the
+    list, its key, sops's home and the knives registry), and PATH with sops_directory() last, which every gh write,
+    commit and push through the shims needs to read the list."""
+    return {**fixture_environment(), "PATH": os.pathsep.join([path, sops_directory()])}
+
+
+@lru_cache(maxsize=1)
 def fixture_environment() -> dict[str, str]:
-    """Build the encrypted list once for this Python process and clean it at exit."""
+    """Build the encrypted list, and a knives registry whose oh-my-pi entry forbids REGISTRY_TEST_TERMS (one in
+    repos.toml, one in the private repos.local.toml), once for this Python process, and clean them at exit."""
     root = Path(tempfile.mkdtemp(prefix="leak-terms-"))
     atexit.register(shutil.rmtree, root, ignore_errors=True)
     key_file = root / "age-key.txt"
@@ -98,10 +129,29 @@ def fixture_environment() -> dict[str, str]:
     sops_home.mkdir()
 
     plaintext = "terms: |\n  # test comment\n" + "".join(f"  {term}\n" for term in TEST_TERMS)
+    plaintext += "scoped:\n" + "".join(
+        f'  "{pattern}": |\n' + "".join(f"    {term}\n" for term in terms) for pattern, terms in SCOPED_TEST_TERMS.items()
+    )
+    plaintext += "allowed:\n" + "".join(
+        f'  "{pattern}": |\n    # a third-party npm package that holds the scoped term\n'
+        + "".join(f"    {token}\n" for token in tokens)
+        for pattern, tokens in ALLOWED_TEST_TOKENS.items()
+    )
     term_file = root / "leak-terms.sops.yaml"
     term_file.write_bytes(_encrypt_yaml(plaintext, _recipient(key_file)))
+    knives = root / "knives"
+    knives.mkdir()
+    public, private = REGISTRY_TEST_TERMS["oh-my-pi"]
+    (knives / "repos.toml").write_text(
+        '[repos.oh-my-pi]\nupstream = "https://github.com/upstream-fixture/oh-my-pi"\n'
+        f'origin = "https://github.com/sjawhar/oh-my-pi"\nforbidden = ["{public}"]\n\n'
+        '[repos.unlisted]\nupstream = "https://github.com/upstream-fixture/unlisted"\n',
+        encoding="utf-8",
+    )
+    (knives / "repos.local.toml").write_text(f'[repos.oh-my-pi]\nforbidden = ["{private}"]\n', encoding="utf-8")
     return {
         "DOTFILES_LEAK_TERMS_FILE": str(term_file),
         "SOPS_AGE_KEY_FILE": str(key_file),
         "DOTFILES_LEAK_TERMS_SOPS_HOME": str(sops_home),
+        "DOTFILES_LEAK_TERMS_KNIVES_DIR": str(knives),
     }

@@ -126,7 +126,7 @@ class JjInATestPane(MovedHome):
         (repo / "leak.txt").write_text("zorbleplex\n", encoding="utf-8")
         leak = self.launch(["jj", "commit", "-m", "a commit with a term"], cwd=repo, env=env)
         self.assertNotEqual(leak.returncode, 0, leak.stderr)
-        self.assertIn("listed leak term", leak.stderr)
+        self.assertIn('leak terms: leak.txt:1: "zorbleplex" (the global list), in: zorbleplex\n', leak.stderr)
         # A jj template's single-quoted string has no escapes; a double-quoted one reads "\n" as a newline.
         log = self.launch(["jj", "log", "--no-graph", "-r", "::@", "-T", 'description.first_line() ++ "\\n"'], cwd=repo, env=env)
         self.assertEqual(log.stdout.split("\n").count("a clean commit"), 1, log.stdout)
@@ -152,7 +152,7 @@ class GitInATestPane(MovedHome):
         self.launch(["git", "add", "leak.txt"], cwd=repo, env=env)
         leak = self.launch(["git", "commit", "-q", "-m", "a commit with a term"], cwd=repo, env=env)
         self.assertNotEqual(leak.returncode, 0, leak.stderr)
-        self.assertIn("listed leak term", leak.stderr)
+        self.assertIn('leak terms: leak.txt:1: "zorbleplex" (the global list), in: zorbleplex\n', leak.stderr)
         log = self.launch(["git", "log", "--format=%s"], cwd=repo, env=env)
         self.assertEqual(log.stdout, "a clean commit\n")
 
@@ -220,6 +220,30 @@ class JjFixtureCheckout(MovedHome):
         self.assertEqual(len(lines), 1, result.stderr)
         self.assertIn("jj shim: no real jj found on PATH", lines[0])
         self.assertIn(f"no exact version of github:sjawhar/jj pinned in {self.dotfiles / 'mise.toml'}", lines[0])
+
+
+class CheckoutWithoutMise(MovedHome):
+    """A dotfiles checkout other than the installed one, a copy or a worktree, has no bin/mise, since bin/ is not
+    committed: a shim there runs the mise that the shims in mise's data dir link to. Until 2026-11-17 it ran
+    <checkout>/bin/mise, so in a clean clone every case of SiblingShimsInATestPane that asks mise exited 127."""
+
+    def test_a_shim_runs_the_mise_a_data_dirs_shims_link_to(self) -> None:
+        if shutil.which("mise", path=SYSTEM_PATH):
+            self.skipTest(f"a mise on {SYSTEM_PATH} answers before the checkout's")
+        checkout = self.root / "dotfiles"
+        (checkout / "shims").mkdir(parents=True)
+        shutil.copy2(SHIMS / "pyright", checkout / "shims" / "pyright")
+        stub = self.root / "machine" / "mise"
+        stub.parent.mkdir()
+        stub.write_text('#!/bin/sh\necho "STUB mise $*"\n', encoding="utf-8")
+        stub.chmod(0o755)
+        data = self.root / "mise-data"
+        (data / "shims").mkdir(parents=True)
+        (data / "shims" / "basedpyright").symlink_to(stub)
+        env = self.pane(checkout / "shims" / "pyright", "pyright", MISE_DATA_DIR=str(data))
+        result = self.launch(["pyright", "--version"], cwd=self.root, env=env)
+        self.assertEqual((result.returncode, result.stdout), (0, "STUB mise exec npm:basedpyright -- basedpyright --version\n"),
+                         result.stderr)
 
 
 def mise_which(binary: str) -> Path:

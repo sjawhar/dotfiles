@@ -47,6 +47,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,17 @@ class ReaperScenarioTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.base = Path(tempfile.mkdtemp(prefix="reaper-t-", dir="/tmp"))
+        # Every apply checks borrowed object stores by walking the canonical-checkout root, the
+        # worktrees root and the agentbox box trees. Those are this test's, empty: on sami-devbox
+        # the host's own (every lane's checkout under ~/src, every box's tree) took each apply past
+        # the 300 s limit (3 errors). $HOME stays the caller's: jj reads its config from there.
+        environment = unittest.mock.patch.dict(os.environ, {
+            "AGENT_WORKSPACE_SRC": str(self.base / "no-src"),
+            "AGENT_WORKSPACE_ROOT": str(self.base / "no-worktrees"),
+            "AGENTBOX_BOXES": str(self.base / "no-boxes"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)  # scratch cleanup only
@@ -1029,6 +1041,21 @@ class BorrowerScanTest(unittest.TestCase):
     def setUp(self) -> None:
         self.base = Path(tempfile.mkdtemp(prefix="dh-borrow-", dir="/tmp"))
         self.ledger = self.base / "ledger.jsonl"
+        # The walk's other roots are this test's too: a home holding a ~/src and a cache, and no
+        # box tree. The scope always adds $HOME's checkout roots and /mnt/nvme/<user>/agentbox/
+        # boxes, so on sami-devbox each scan walked the host's ~/src and every box's tree (the
+        # file took 89 minutes) and counted the host's records: 1,552 stale where this test made 1.
+        self.home = self.base / "home"
+        (self.home / "src").mkdir(parents=True)
+        (self.home / ".cache").mkdir()
+        environment = unittest.mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("AGENT_WORKSPACE_SRC", "AGENT_WORKSPACE_ROOT"):
+            os.environ.pop(name, None)
+        original = disk_hygiene._nvme_boxes_root
+        disk_hygiene._nvme_boxes_root = lambda: self.base / "no-nvme-boxes"
+        self.addCleanup(setattr, disk_hygiene, "_nvme_boxes_root", original)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)

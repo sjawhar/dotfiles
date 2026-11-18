@@ -81,8 +81,10 @@ A child that is a **symlink** is not followed by default and is counted at the e
 point at `/mnt/nvme`, so they are not the disk this failure was about. `--follow-symlinks`
 includes them.
 
-The duplication number needs `numpy` (present in this box's `python3`). Without it the check
-still lists every clone and still exits 1; it says that the duplication was not measured.
+The duplication number needs `numpy`, which the script's own `# /// script` header gives it: it
+runs under `uv run --script`. The machine's `python3` has none (sami-devbox's mise Python, for
+one), so run by that python directly the check still lists every clone and still exits 1, and
+says that the duplication was not measured.
 
 ## What it reports, and what it does not decide
 

@@ -96,7 +96,8 @@ class OmpSessionLive(unittest.TestCase):
         return stubs
 
     def live(self, target: str, path: Path | None = None) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "OMP_SESSION_LIVE_PROC": str(self.proc)}
+        # The run base is the fixture's, never the host's own boxes' session files.
+        env = {**os.environ, "OMP_SESSION_LIVE_PROC": str(self.proc), "AGENTBOX_RUN_BASE": str(self.root / "run")}
         if path:
             env["PATH"] = f"{path}:{env['PATH']}"
         return subprocess.run([str(LIVE), target], env=env, capture_output=True, text=True, timeout=60, check=False)
@@ -281,6 +282,92 @@ class OmpSessionLive(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(f"session {self.transcript} is running already on this machine (400:", result.stderr)
         self.assertFalse((self.root / "DOCKER").exists())
+
+    def test_session_live_names_a_boxed_session(self) -> None:
+        """A box started after dispatch://INFRA-1720 names its session in its session file,
+        whatever its command line names: a fresh `-- omp` box's command line names no id, so this
+        script called a live boxed session dead (dispatch://INFRA-1890), and every resume path
+        that asks it could start the session a second time. It prints the HOST's pid of that omp,
+        found through the box's cgroup and NSpid, and counts only a box that runs: the session
+        file of a box whose container is gone names nobody."""
+        box_name = "agentbox-0123456789ab"
+        self.omp(900, ["omp"])
+        self.box(900, 42)
+        # The box's own /proc answers nothing: the omp holds no transcript a reader could see.
+        shutil.rmtree(self.root / "box-proc")
+        run_user = self.root / "run" / box_name / "run-user"
+        run_user.mkdir(parents=True)
+        (run_user / "agentbox-session").write_text(
+            f"version=1\npid=42\nsession={SID}\nfile={self.transcript}\n", encoding="utf-8")
+        stubs = self.root / "stubs"
+        running = self.root / "RUNNING"
+        running.touch()
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect && -e "{running}" ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo true ;; *.Id*) echo {BOX} ;; esac')
+        for target in (SID, SID[:13], str(self.transcript)):
+            with self.subTest(target=target):
+                result = self.live(target, stubs)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, f"900\tthe session file of box {box_name} names {SID}\n")
+        # Another session, and a copy of the transcript, are not it.
+        for target in (OTHER, str(self.copy)):
+            with self.subTest(target=target):
+                result = self.live(target, stubs)
+                self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+        # The omp the file names is not the box's omp (pid 41 in the box): nothing to point at.
+        (run_user / "agentbox-session").write_text(
+            f"version=1\npid=41\nsession={SID}\nfile={self.transcript}\n", encoding="utf-8")
+        result = self.live(SID, stubs)
+        self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+        # A box that does not run.
+        (run_user / "agentbox-session").write_text(
+            f"version=1\npid=42\nsession={SID}\nfile={self.transcript}\n", encoding="utf-8")
+        running.unlink()
+        result = self.live(SID, stubs)
+        self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+        # An exited box, whose container docker still knows: no running process's cgroup names its
+        # id. Another box's omp (pid 900, in the cgroup of container BOX) has the same pid in its
+        # box, 42, and is not the omp this file names.
+        running.touch()
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo false ;; *.Id*) echo {"e" * 64} ;; esac')
+        result = self.live(SID, stubs)
+        self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect && -e "{running}" ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo true ;; *.Id*) echo {BOX} ;; esac')
+        # A command line that names the session is still its own route, as today.
+        running.touch()
+        self.omp(901, ["omp", "--resume", SID])
+        result = self.live(SID, stubs)
+        self.assertIn(f"901\tits command line names {SID}", result.stdout)
+        self.assertIn(f"900\tthe session file of box {box_name} names {SID}", result.stdout)
+
+    def test_a_boxed_session_whose_transcript_was_deleted_is_still_live(self) -> None:
+        """The descriptor of a transcript deleted under its omp reads `<path> (deleted)`, so no
+        reading by open transcript sees that omp (devbox-offbox-act's two scans match
+        `-lname '*.jsonl'`). A boxed session is still live here by its box's session file, which
+        names the session whatever became of the transcript, and devbox-offbox-act's `live` asks
+        this script for every id: the watch does not restart a boxed session for a deleted
+        transcript."""
+        box_name = "agentbox-0123456789ab"
+        self.omp(900, ["omp"])
+        self.box(900, 42)
+        shutil.rmtree(self.root / "box-proc")
+        run_user = self.root / "run" / box_name / "run-user"
+        run_user.mkdir(parents=True)
+        (run_user / "agentbox-session").write_text(
+            f"version=1\npid=42\nsession={SID}\nfile={self.transcript}\n", encoding="utf-8")
+        self.transcript.unlink()
+        stubs = self.root / "stubs"
+        executable(stubs / "docker", f'echo "$*" >>"{self.root}/DOCKER"\n'
+                                     f'[[ "$1" == inspect ]] || exit 1\n'
+                                     f'case "$*" in *.State.Running*) echo true ;; *.Id*) echo {BOX} ;; esac')
+        result = self.live(SID, stubs)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, f"900\tthe session file of box {box_name} names {SID}\n")
 
 
 if __name__ == "__main__":

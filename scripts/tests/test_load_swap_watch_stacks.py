@@ -254,7 +254,12 @@ class CaptureShape(unittest.TestCase):
         options = WATCH.parse_args([])
         finding = WATCH.umount_finding(now, options)
         items = [{"kind": "umount", "event": "alert", "finding": finding, "incident": {"opened_at": now["at"] - 1980}}]
-        taken = capture(workers=[{"pid": 77, "comm": "kworker/5:2+inode_switch_wbs", "state": "R", "named": True,
+        # The capture holds the hung umount the sample names, as a capture taken while it hangs
+        # does: since f301693f the reset line goes out only when the capture found a task in D
+        # state, and a capture with none (this fixture's, until then) asks for no reset.
+        taken = capture(tasks=[{"pid": 4242, "comm": "umount", "wchan": "wait_for_completion",
+                                "blocked": 1980.0, "stack": OTHER_STACK}],
+                        workers=[{"pid": 77, "comm": "kworker/5:2+inode_switch_wbs", "state": "R", "named": True,
                                   "busy": True, "cpu_seconds": 5901.0, "stack": SCAN_STACK}])
         message = WATCH.compose_message(items, now, options, None, "/tmp/report.txt", now["at"], "sami-devbox", taken)
         self.assertIn(f"Stack evidence in the report: {WATCH.HALF_SHORT['scanning']}.", message)

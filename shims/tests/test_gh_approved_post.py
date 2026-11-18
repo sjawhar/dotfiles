@@ -24,6 +24,8 @@ import unittest
 from functools import lru_cache
 from pathlib import Path
 
+from leak_terms_fixture import leak_check_environment
+
 SHIMS = Path(__file__).parents[1]
 DOTFILES = SHIMS.parent
 ASK = "dispatch://OSSV-1/ask/a7d1ac41-45c4-4504-a985-7c92998d2158"
@@ -210,10 +212,11 @@ class ShimHarness(unittest.TestCase):
     def run_gh(self, argv, cite=True, **extra):
         env = {
             "HOME": str(self.tmp), "USER": os.environ.get("USER", "u"), "LANG": "C.UTF-8",
-            "PATH": os.pathsep.join([str(self.front), str(SHIMS), str(self.bin), "/usr/bin", "/bin"]),
             "TMPDIR": str(self.tmp), "DOTFILES_DIR": str(DOTFILES), "OMP_SESSION_ID": "sess-1",
             "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0", "GH_READ_CACHE_DIR": str(self.cache),
             "PUBLIC_LEAK_CHECK": "/bin/true",
+            # The leak-term check reads every write's text (shims/AGENTS.md, "Leak-term list").
+            **leak_check_environment(os.pathsep.join([str(self.front), str(SHIMS), str(self.bin), "/usr/bin", "/bin"])),
         }
         if cite:
             env["GH_SHIM_APPROVAL"] = ASK

@@ -1,8 +1,11 @@
 #!/bin/bash
-# docs-pr-gate: refuse a standalone docs-only pull request in a repo that batches
-# its documentation. shims/gh runs it for `gh pr create` in agent sessions and
-# passes the arguments that follow `pr create`. Exit 0 lets gh proceed; exit 1
-# refuses and says where the change goes instead.
+# docs-pr-gate <gh argv…>: refuse a standalone docs-only pull request in a repo that batches
+# its documentation. shims/gh runs it for a call in agent sessions that may be `gh pr create`
+# (or its alias `pr new`) and passes the whole command line; the gate finds the command and its
+# verb as cobra finds them, past any option before either word (`gh -R o/r pr create`), and any
+# other call exits 0. Exit 0 lets gh proceed; exit 1 refuses and says where the change goes
+# instead. Until 2026-11-17 the shim matched only `pr` and `create` as its first two arguments, so
+# `gh -R o/r pr create` was never gated.
 #
 # The rule (Sami, AGENTC-847): documentation rides in the pull request that
 # caused it, or in one batched pull request per topic per day. The batch is a
@@ -12,17 +15,78 @@ set -euo pipefail
 
 ENFORCED_REPOS=" trajectory-labs-pbc/agent-c "
 BATCH_RE='^docs-batch/[a-z0-9][a-z0-9-]*/([0-9]{4}-[0-9]{2}-[0-9]{2})$'
+# The options of `gh pr create` that take a value (`gh pr create --help`, gh 2.98.0), so a value is
+# never read as an option or a command word.
+VALUE_OPTIONS=" -a --assignee -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p --project --recover -r --reviewer -T --template -t --title -R --repo "
 
+# The command and its verb, found as cobra finds them (shims/gh's gh_shim_is_write): an option
+# written apart from any value, but --help and --version, takes the next word as its value.
+group="" verb="" skip=0
+for a in "$@"; do
+    if ((skip)); then
+        skip=0
+        continue
+    fi
+    case "$a" in
+        --) break ;;
+        --help | --version | -*=*) ;;
+        --* | -?) skip=1 ;;
+        -*) ;;
+        *)
+            if [[ -z "$group" ]]; then
+                group="$a"
+            else
+                verb="$a"
+                break
+            fi
+            ;;
+    esac
+done
+[[ "$group" == pr && ( "$verb" == create || "$verb" == new ) ]] || exit 0
+
+# -R/--repo, -H/--head and -B/--base, read as gh's flag parser (pflag) reads them: `--name value`,
+# `--name=value`, `-Xvalue`, `-X=value`, and a value option at the end of a cluster of flags.
 repo="" head="" base=""
-while (($#)); do
+take() {
     case "$1" in
-        -R | --repo) repo="${2:-}"; shift; (($#)) && shift ;;
-        --repo=*) repo="${1#*=}"; shift ;;
-        -H | --head) head="${2:-}"; shift; (($#)) && shift ;;
-        --head=*) head="${1#*=}"; shift ;;
-        -B | --base) base="${2:-}"; shift; (($#)) && shift ;;
-        --base=*) base="${1#*=}"; shift ;;
-        *) shift ;;
+        -R | --repo) repo="$2" ;;
+        -H | --head) head="$2" ;;
+        -B | --base) base="$2" ;;
+    esac
+}
+args=("$@")
+i=0
+while ((i < ${#args[@]})); do
+    a="${args[i]}"
+    i=$((i + 1))
+    case "$a" in
+        --) break ;;
+        --*=*) take "${a%%=*}" "${a#*=}" ;;
+        --*)
+            if [[ "$VALUE_OPTIONS" == *" $a "* ]]; then
+                take "$a" "${args[i]:-}"
+                i=$((i + 1))
+            fi
+            ;;
+        -?*)
+            letters="${a#-}"
+            while [[ -n "$letters" ]]; do
+                name="-${letters:0:1}" rest="${letters:1}"
+                if [[ ${#rest} -gt 1 && "${rest:0:1}" == "=" ]]; then
+                    take "$name" "${rest:1}"
+                    break
+                fi
+                if [[ "$VALUE_OPTIONS" == *" $name "* ]]; then
+                    if [[ -z "$rest" ]]; then
+                        rest="${args[i]:-}"
+                        i=$((i + 1))
+                    fi
+                    take "$name" "$rest"
+                    break
+                fi
+                letters="$rest"
+            done
+            ;;
     esac
 done
 

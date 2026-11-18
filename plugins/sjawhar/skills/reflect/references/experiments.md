@@ -2,7 +2,7 @@
 
 Read this when a harness feature ran behind a per-session gate in the window, and the run has to say whether it helped. It is a separate measurement from the findings: it compares sessions with the feature on against sessions with it off, and says nothing about any one failure.
 
-1. Read `~/.dotfiles/omp/extensions/experiments/gates.json` for the features set to `random` in the window, which gave each session the feature on or off by chance. A feature that was on for every session cannot be measured here.
+1. Read the gates `~/.dotfiles/omp/extensions/experiments/gates.json` held during the window (`git log -p` over the window), for the features set to `random` then, which gave each session the feature on or off by chance; each session's `experiments` entry records its draw. No committed gate has been `random` since 2026-11-17 (Sami: "randomized experiments can be done using historical data and don't need to affect my live runs", dispatch://INFRA-3189/comment/13cf9d76-5a50-4ab3-83ca-d3fd13997925), so a later window measures nothing new. A feature that was on for every session cannot be measured here.
 2. Label Sami's turns with Jev (the typesafe-ai classifier `scripts/jev-turn-label.py` calls), and send the turns it leaves unlabelled to the strong model. The exact commands are in that script's module docstring:
    - in an eval Python cell, `%load scripts/experiments-readout.py` and run `dump_turns_for_jev` over the session directories of sami-rocqperf and sami-leanperf and the window's message file;
    - in bash, run `scripts/jev-turn-label.py` with its API key from the secrets broker (`skill://using-secrets`) on those turns;

@@ -6,7 +6,8 @@ is validateReason (sjawhar/legion packages/envoy/internal/broker/record/record.g
 runes, none of category Cc, Cf, Cs, Co, Zl or Zp. The cases cover the session sources (omp's
 variables and transcript, Envoy, Claude Code, none), what of a command may appear (its first words
 and the ids it targets, never a flag's value or anything that looks like a credential), and the
-length caps of each part and of the whole.
+length rule: the session, the command and the host are never cut, only the why shortens, and the
+builder refuses (exit 3) when the first three alone leave no room for it.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+
+# sami-devbox's own name, 54 runes: until 2026-11-17 the host's 32-rune cap cut it on every card.
+LONG_HOST = "sami-devbox.us-west4-a.c.theorem-agent-infra.internal"
 
 SCRIPT = Path(__file__).resolve().parents[1] / "secret-run-reason"
 LOADER = importlib.machinery.SourceFileLoader("secret_run_reason", str(SCRIPT))
@@ -203,17 +206,18 @@ class Command(Base):
             with self.subTest(word=word):
                 self.assertEqual(self.runs(["echo", word, "after"]), "echo +2 args")
 
-    def test_words_are_capped_and_paths_shortened(self) -> None:
+    def test_words_are_kept_whole(self) -> None:
         self.assertEqual(self.runs(["printenv", "GITHUB_APP_SJAWHAR"]), "printenv GITHUB_APP_SJAWHAR")
         self.assertEqual(self.runs(["mailbox", "__mint", "--env", "GWS_THEOREM_READ_OAUTH"]), "mailbox __mint +2 args")
         long_path = "/home/u/" + "deep/" * 10 + "script.py"
-        self.assertEqual(self.runs(["python3", long_path]), "python3 …/script.py")
+        self.assertEqual(self.runs(["python3", long_path]), f"python3 {long_path}")
         self.assertEqual(self.runs(["a", "b", "c", "d", "e"]), "a b c d +1 args")
 
-    def test_runs_is_capped(self) -> None:
-        runs = self.runs(["x", *(f"w{n:038d}" for n in range(3)), *(f"--params={{\"id{n}Id\":\"{n:050d}\"}}" for n in range(3))])
-        self.assertLessEqual(len(runs), REASON.RUNS_MAX)
-        self.assertTrue(runs.endswith("…"), runs)
+    def test_a_long_command_is_never_cut(self) -> None:
+        words = [f"w{n:038d}" for n in range(3)]
+        ids = [f"{n:050d}" for n in range(3)]
+        runs = self.runs(["x", *words, *(f'--params={{"id{n}Id":"{ids[n]}"}}' for n in range(3))])
+        self.assertEqual(runs, " ".join(["x", *words, *(f"id{n}Id={ids[n]}" for n in range(3)), "+3 args"]))
 
 
 class Text(Base):
@@ -238,41 +242,65 @@ class Text(Base):
         self.assertTrue(self.build(caller="", SECRET_RUN_REASON="retitle tabs")[1].startswith("retitle tabs |"))
         self.assertTrue(self.build(caller="")[1].startswith("no reason given |"))
 
-    def test_every_part_is_capped_and_the_whole_fits_the_broker(self) -> None:
-        self.transcript(title="T" * 300 + "\u200d" * 50)
-        long_subagent = self.subagent("S" * 200)
+    def test_the_session_command_and_host_are_never_cut_and_only_the_why_shortens(self) -> None:
+        # Each of these was cut until 2026-11-17: the command past 100 runes and the host past 32.
+        title = "T" * 40
+        self.transcript(title=title)
+        subagent = "S" * 20
+        words = ["w" * 30 for _ in range(3)]
+        command = ["cmd", *words, "--params", json.dumps({"fileId": "v" * 40})]
         export, text = REASON.build(
             "why " * 200,
-            ["cmd", *("w" * 60 for _ in range(3)), "--params", json.dumps({f"k{n}Id": "v" * 120 for n in range(5)})],
-            {"HOME": str(self.home), "PI_SESSION_FILE": str(long_subagent), "SECRET_RUN_REASON": "more " * 200},
+            command,
+            {"HOME": str(self.home), "PI_SESSION_FILE": str(self.subagent(subagent)), "SECRET_RUN_REASON": "more " * 200},
             4194304,
-            host="h" * 200,
+            host=LONG_HOST,
             cwd="/x",
         )
         self.assertEqual(export, SESSION)
         self.assertTrue(broker_accepts(text), len(text))
+        self.assertEqual(len(text), REASON.MAX_REASON)
         why, session, runs, host = text.split(" | ")
-        self.assertEqual(len(why), REASON.WHY_MAX)
-        self.assertTrue(session.startswith(f'session: omp {SESSION} "{"T" * (REASON.TITLE_MAX - 1)}…" subagent '))
-        self.assertIn("S" * (REASON.SUBAGENT_MAX - 1) + "…", session)
-        self.assertLessEqual(len(runs), len("runs: ") + REASON.RUNS_MAX)
-        self.assertEqual(host, f"host: {'h' * (REASON.HOST_MAX - 1)}… pid 4194304")
+        self.assertTrue(why.startswith("why why"), why)
+        self.assertTrue(why.endswith("…"), why)
+        self.assertEqual(session, f'session: omp {SESSION} "{title}" subagent {subagent}')
+        self.assertEqual(runs, f"runs: cmd {' '.join(words)} fileId={'v' * 40} +2 args")
+        self.assertEqual(host, f"host: {LONG_HOST} pid 4194304")
+
+    def test_a_long_host_shows_whole(self) -> None:
+        """The broker request that named this host on 2026-11-17 cut it to 32 runes."""
+        _, text = REASON.build("gws theorem modify", None, {"HOME": str(self.home), "OMP_SESSION_ID": SESSION}, 4242,
+                               host=LONG_HOST, cwd="/x")
+        self.assertTrue(broker_accepts(text), text)
+        self.assertTrue(text.endswith(f"| host: {LONG_HOST} pid 4242"), text)
+
+    def test_identifying_parts_that_alone_do_not_fit_are_refused_never_cut(self) -> None:
+        self.transcript(title="T" * 400)
+        with self.assertRaises(REASON.TooLong) as refused:
+            REASON.build("why", None, {"HOME": str(self.home), "OMP_SESSION_ID": SESSION}, 4242, host="devbox", cwd="/x")
+        self.assertIn("none of them is cut", str(refused.exception))
+        self.assertIn("T" * 400, str(refused.exception))
+
+    def test_the_why_shrinks_to_one_rune_before_anything_else_gives_way(self) -> None:
+        # The session part takes exactly the room that leaves one rune for the why.
+        fixed = f" | session: omp {SESSION} \"\" | runs: request only, no command | host: devbox pid 4242"
+        self.transcript(title="T" * (REASON.MAX_REASON - 1 - len(fixed)))
+        _, text = REASON.build("why", None, {"HOME": str(self.home), "OMP_SESSION_ID": SESSION}, 4242, host="devbox", cwd="/x")
+        self.assertEqual(len(text), REASON.MAX_REASON)
+        self.assertTrue(text.startswith("… | session: "), text[:20])
 
     def test_the_caller_reason_gives_way_so_session_command_and_pid_show(self) -> None:
-        """The caps keep the worst case under 400 runes; were a part to grow past them, the
-        caller's words shrink, never the session, the command or the pid."""
-        command = ["cmd", *(f"--params={{\"k{n}Id\":\"{'v' * 100}\"}}" for n in range(3))]
-        with patch.object(REASON, "RUNS_MAX", 250):
-            _, text = self.build(caller="why " * 200, command=command, OMP_SESSION_ID=SESSION)
+        command = ["cmd", *(f"--params={{\"k{n}Id\":\"{'v' * 60}\"}}" for n in range(3))]
+        _, text = self.build(caller="why " * 200, command=command, OMP_SESSION_ID=SESSION)
         why, _, runs, host = text.split(" | ")
-        self.assertLess(len(why), REASON.WHY_MAX)
+        self.assertEqual(len(text), REASON.MAX_REASON)
         self.assertTrue(why.endswith("…"), why)
-        self.assertIn("k2Id=", runs)
+        self.assertIn(f"k2Id={'v' * 60}", runs)
         self.assertEqual(host, "host: devbox pid 4242")
 
-    def test_a_reason_over_the_limit_is_cut_at_400(self) -> None:
-        self.assertEqual(len(REASON.clip("x" * 500, REASON.MAX_REASON)), 400)
-        self.assertEqual(REASON.clip_left("/a/very/long/path", 8), "…ng/path")
+    def test_clip_ends_in_an_ellipsis(self) -> None:
+        self.assertEqual(REASON.clip("x" * 500, 400), "x" * 399 + "…")
+        self.assertEqual(REASON.clip("short", 400), "short")
 
 
 class Cli(unittest.TestCase):
@@ -293,6 +321,14 @@ class Cli(unittest.TestCase):
         export, reason, rest = result.stdout.split("\n")
         self.assertEqual((export, rest), (SESSION, ""))
         self.assertRegex(reason, rf"^x \| session: omp {SESSION} \| runs: printenv KEY \| host: \S+ pid 77$")
+
+    def test_identifying_parts_that_do_not_fit_exit_3_and_print_no_reason(self) -> None:
+        session = "s" * 400
+        result = self.run_script("--pid", "77", "--reason", "x", "--", "printenv", "KEY", OMP_SESSION_ID=session)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("secret-run-reason: the session, the command and the host are", result.stderr)
+        self.assertIn(f"session: omp {session} |", result.stderr)
 
     def test_usage_errors_exit_2(self) -> None:
         for args in (("--pid",), ("--pid", "x"), ("--bogus",), ("--reason",)):

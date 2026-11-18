@@ -85,7 +85,9 @@ def wait_until(test: Callable[[], bool], seconds: float) -> None:
 # answers false until its STUB_RUNNING_AFTER'th call when that is set, as a box does while it is
 # still starting. keygen writes a key of its own each time, and a thumbprint of its own after the
 # first. `ps -a --filter name=^<box>$` names the box while its name is in $STUB_LIVE_BOXES. With
-# STUB_PS_FAIL set, `ps` exits 1 with no output, as when docker cannot be asked.
+# STUB_PS_FAIL set, `ps` exits 1 with no output, as when docker cannot be asked. With STUB_SID set,
+# the box's omp reports that session as the box starts: `run` writes the session file
+# (session-env.ts's `agentbox-session`) into the box's runtime dir, where box_session_id reads it.
 DOCKER_STUB = rf"""
 echo "docker $*" >>"$STUB_CALLS"
 keydir() {{ echo "$STUB_RUN_BASE/$1/$STUB_KEYDIR_REL"; }}
@@ -101,6 +103,8 @@ case "$*" in
         while [[ "$1" != --name ]]; do shift; done
         if [[ -e "$(keydir "$2")/enrollment.pending" ]]; then m=yes; else m=no; fi
         echo "run $2 marker=$m" >>"$STUB_CALLS"
+        [[ -z "${{STUB_SID:-}}" ]] || printf 'version=1\npid=7\nsession=%s\nfile=/x.jsonl\n' "$STUB_SID" \
+            >"$STUB_RUN_BASE/$2/run-user/agentbox-session"
         if [[ -z "${{STUB_RUN_UNTIL:-}}" ]]; then /bin/sleep 1; exit 0; fi
         for _ in $(seq 600); do
             grep -qF "$STUB_RUN_UNTIL" "$(keydir "$2")/renew.log" 2>/dev/null && break
@@ -140,9 +144,6 @@ case "$*" in
             fail) echo "keygen: no /run/user dir" >&2; exit 1 ;;
             empty) ;;
         esac ;;
-    *"pgrep -x omp"*)
-        echo "sid-probe marker-mtime=$(stat -c %Y "$(keydir "$2")/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"
-        echo "${{STUB_SID:-}}" ;;
     "ps "*)
         [[ -z "${{STUB_PS_FAIL:-}}" ]] || exit 1
         name="${{4#name=^}}"
@@ -338,6 +339,9 @@ class EnrollFixture(unittest.TestCase):
         # re-enrollment does while the renew loop waits. STUB_REAL_SLEEP makes it a real sleep.
         # With STUB_GRACE_UNTIL set, the unenroll waiter's grace (a sleep of
         # $AGENTBOX_UNENROLL_GRACE, 180 by default) lasts until that file exists (60 s at most).
+        # Each sleep logs the marker's mtime as the pass before it left it (`marker-at-sleep`), and
+        # the STUB_SESSION_AT'th sleep writes box1's session file naming STUB_SESSION_ID, as the
+        # box's omp does a few seconds into its start (session-env.ts).
         write_stub(
             self.stub_dir,
             "sleep",
@@ -345,9 +349,13 @@ class EnrollFixture(unittest.TestCase):
             '[[ -z "${STUB_REAL_SLEEP:-}" ]] || exec /bin/sleep "$@"\n'
             '[[ -z "${STUB_GRACE_UNTIL:-}" || "$*" != "${AGENTBOX_UNENROLL_GRACE:-180}" ]]'
             ' || for _ in $(seq 600); do [[ -e "$STUB_GRACE_UNTIL" ]] && break; /bin/sleep 0.1; done\n'
+            'echo "marker-at-sleep mtime=$(stat -c %Y "$STUB_KEYDIR/enrollment.pending" 2>/dev/null || echo none)" >>"$STUB_CALLS"\n'
             '[[ -e "$STUB_KEYDIR/enrollment.pending" ]] && touch -h -d "-1000 seconds" "$STUB_KEYDIR/enrollment.pending"\n'
             '[[ -z "${STUB_NEW_ID_AT:-}" ]] || (( $(grep -c "^sleep " "$STUB_CALLS") != STUB_NEW_ID_AT ))'
             ' || echo enr-new >"$STUB_KEYDIR/enrollment"\n'
+            '[[ -z "${STUB_SESSION_AT:-}" ]] || (( $(grep -c "^sleep " "$STUB_CALLS") != STUB_SESSION_AT ))'
+            ' || printf "version=1\\npid=7\\nsession=%s\\nfile=/x.jsonl\\n" "$STUB_SESSION_ID"'
+            ' >"$STUB_RUN_BASE/box1/run-user/agentbox-session"\n'
             "exit 0",
         )
         write_stub(self.stub_dir, "docker", DOCKER_STUB)
@@ -406,7 +414,7 @@ class EnrollFixture(unittest.TestCase):
             "STUB_KEYDIR_REL": keydir_in_box_dir(),
             "STUB_RUN_BASE": str(self.run_base),
             # The run dir again, for a process that runs scripts/agentbox itself rather than
-            # sourcing it: the unenroll waiter's `session-live-box`.
+            # sourcing it, so that it too works in this tree.
             "AGENTBOX_RUN_BASE": str(self.run_base),
             "STUB_THUMBPRINT": THUMBPRINT,
             "STUB_BROKER": str(self.broker),
@@ -1307,7 +1315,7 @@ class OpenAttempts(EnrollFixture):
     def assert_test_2_not_read(self, status: int) -> None:
         """The waiter made no learn call and no unenroll call after the close, the session's key
         dir is still there, and unenroll.log holds one line: test 2 could not be read, with the
-        status of session-live-box and its empty output, and enr-1 and the open entry left
+        status of session_live_box and its empty output, and enr-1 and the open entry left
         alone."""
         self.assertEqual(self.learn_calls(), [])
         self.assertEqual(self.revokes_after_close(), [])
@@ -1315,39 +1323,160 @@ class OpenAttempts(EnrollFixture):
         self.assertEqual(
             self.unenroll_log(),
             [
-                f"box1: session sid-1: test 2 could not be read (session-live-box exited {status} and"
+                f"box1: session sid-1: test 2 could not be read (session_live_box returned {status} and"
                 " printed ''), so an enrollment that no box renews ends with its lease (15 min);"
                 f" enrollment enr-1 left alone, and the enrollment of each open attempt: {self.SESSION_OPEN}"
             ],
         )
 
     def test_a_waiter_that_cannot_ask_docker_leaves_the_enrollments_alone(self) -> None:
-        """`docker ps` fails from the close on, so at the waiter's wake session-live-box cannot
-        tell whether box2 has a container. It exits 2 with no output, and the waiter does not
+        """`docker ps` fails from the close on, so at the waiter's wake session_live_box cannot
+        tell whether box2 has a container. It returns 2 with no output, and the waiter does not
         read that as "no other box is live"."""
         self.close_while_test_2_cannot_be_read("export STUB_PS_FAIL=1")
         self.assert_test_2_not_read(2)
 
-    def self_that_only(self, body: str) -> str:
-        """The step that makes the waiter's SELF a script that only runs `body`: DOTFILES_DIR names
-        a dir whose scripts/agentbox is that script, and unenroll_box gives that file to the waiter
-        as SELF."""
-        scripts = self.root / "dotfiles-stub" / "scripts"
-        scripts.mkdir(parents=True)
-        write_stub(scripts, "agentbox", body)
-        return f'DOTFILES_DIR="{scripts.parent}"'
+    def live_box_that_only(self, body: str) -> str:
+        """The step that makes the waiter's test 2 a session_live_box that only runs `body`: the
+        close gives the waiter the functions as they are defined at the close (unenroll_fns)."""
+        return f"session_live_box() {{ {body}; }}"
 
     def test_a_session_live_box_with_no_answer_leaves_the_enrollments_alone(self) -> None:
-        """The waiter's session-live-box exits 0 with no output, as this script can when a publish
-        replaces it during the read."""
-        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 0"))
+        """The waiter's session_live_box returns 0 with no output. Status 0 is the answer "live"
+        only with a box's name."""
+        self.close_while_test_2_cannot_be_read(self.live_box_that_only("return 0"))
         self.assert_test_2_not_read(0)
 
     def test_a_session_live_box_that_ends_before_it_looks_leaves_the_enrollments_alone(self) -> None:
-        """The waiter's session-live-box exits 1 with no output, as this script does when a
-        command ends it under set -e before it looks. Status 1 alone is not the answer `none`."""
-        self.close_while_test_2_cannot_be_read(self.self_that_only("exit 1"))
+        """The waiter's session_live_box returns 1 with no output. Status 1 alone is not the answer
+        `none`."""
+        self.close_while_test_2_cannot_be_read(self.live_box_that_only("return 1"))
         self.assert_test_2_not_read(1)
+
+    def close_and_remove_the_checkout(self, steps: str, **stubs: str) -> None:
+        """`steps`, then the close of box1 by a launcher that runs from a checkout of its own
+        (DOTFILES_DIR names a copy of scripts/agentbox and agent-secrets/), as a tester's real-box
+        run starts its boxes (`DOTFILES_DIR=<clone> <clone>/scripts/agentbox new`). During the
+        waiter's grace (STUB_GRACE_UNTIL, 180 s) the checkout is removed, as that run's cleanup
+        removes its clones once its boxes have closed."""
+        checkout = self.root / "checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copy2(AGENTBOX, checkout / "scripts" / "agentbox")
+        shutil.copytree(DOTFILES / "agent-secrets", checkout / "agent-secrets")
+        grace_over = self.run_base / "grace-over"
+        self.close(
+            f'DOTFILES_DIR="{checkout}"\n{steps}',
+            after=f'rm -rf -- "{checkout}"\n: >"{grace_over}"',
+            AGENTBOX_UNENROLL_GRACE="180",
+            STUB_GRACE_UNTIL=str(grace_over),
+            **stubs,
+        )
+        self.assertFalse(checkout.exists())
+
+    def test_a_waiter_whose_checkout_is_removed_in_the_grace_ends_the_enrollment(self) -> None:
+        """box1 enrolls for session sid-1 and records enr-1, and no other box of the session is in
+        the run dir. close_and_remove_the_checkout. Test 2 still answers `none`, from the text the
+        waiter carries: one unenroll call, of enr-1, the session's key dir removed, and the two
+        lines of a session that did not come back. A waiter that ran <checkout>/scripts/agentbox
+        at its wake found no file there, so it got status 127 and logged that test 2 could not be
+        read (8 such lines on sami-devbox on 2026-11-16 and 2026-11-17, each after a real-box run
+        removed its clones)."""
+        self.close_and_remove_the_checkout("enroll_box box1 sid-1", STUB_ENROLL="broker")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+        self.assertFalse((self.run_base / "session-keys" / "sid-1").exists())
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment enr-1",
+                "box1: enrollment enr-1 (recorded) revoked",
+            ],
+        )
+
+    def test_a_waiter_whose_checkout_is_removed_in_the_grace_finds_the_live_box(self) -> None:
+        """As the row above, but box2's run dir records sid-1 and its container is there
+        (STUB_LIVE_BOXES). Test 2 names box2: no unenroll call, the session's key dir kept, and one
+        line that says the session is live in box2."""
+        box2 = self.run_base / "box2"
+        box2.mkdir()
+        (box2 / "enrollment-session").write_text("sid-1\n")
+        self.close_and_remove_the_checkout("enroll_box box1 sid-1", STUB_ENROLL="broker", STUB_LIVE_BOXES="box2")
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((self.run_base / "session-keys" / "sid-1").exists())
+        self.assertEqual(
+            self.unenroll_log(), ["box1: session sid-1 is live in box box2; enrollment enr-1 left alone"]
+        )
+
+    UUID = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+
+    def session_file(self, box: str, sid: str) -> None:
+        run_user = self.run_base / box / "run-user"
+        run_user.mkdir(parents=True, exist_ok=True)
+        (run_user / "agentbox-session").write_text(f"version=1\npid=7\nsession={sid}\nfile=/x.jsonl\n")
+
+    def test_a_waiter_whose_checkout_is_removed_in_the_grace_finds_a_box_by_its_session_file(self) -> None:
+        """As the row above, but box2 has no enrollment-session yet, only its omp's session file
+        naming the session, as a box that is still enrolling has (dispatch://INFRA-1720). The
+        waiter reads that file through box_session_read, box_file_lines and box_run_user, all from
+        the text it carries: when any of them is not carried it fails with status 127 there, box2
+        reads as no box, and the waiter ends the live box's enrollment."""
+        self.session_file("box2", self.UUID)
+        self.close_and_remove_the_checkout(f"enroll_box box1 {self.UUID}", STUB_ENROLL="broker",
+                                           STUB_LIVE_BOXES="box2")
+        self.assertEqual(self.revokes_after_close(), [])
+        self.assertTrue((self.run_base / "session-keys" / self.UUID).exists())
+        self.assertEqual(
+            self.unenroll_log(), [f"box1: session {self.UUID} is live in box box2; enrollment enr-1 left alone"]
+        )
+
+    def test_a_waiter_takes_from_a_session_file_only_a_session_id(self) -> None:
+        """box2's session file names `sid-1`, which is no session id: the host takes from a box's
+        session file only a UUID (BOX_SID_RE), since the box can write anything there. The waiter
+        reads that pattern from the text it carries; a waiter that did not carry it tested the
+        name against an empty pattern, which every string matches, and took box2 for the
+        session's live box."""
+        self.session_file("box2", "sid-1")
+        self.close_and_remove_the_checkout("enroll_box box1 sid-1", STUB_ENROLL="broker", STUB_LIVE_BOXES="box2")
+        self.assertEqual(self.revokes_after_close(), ["unenroll --helper --enrollment enr-1"])
+        self.assertEqual(
+            self.unenroll_log(),
+            [
+                "box1: session sid-1 did not come back; ending enrollment enr-1",
+                "box1: enrollment enr-1 (recorded) revoked",
+            ],
+        )
+
+    def test_the_waiter_text_calls_no_function_it_does_not_carry(self) -> None:
+        """A detached process of the close has only the text unenroll_fns gives it. A function of
+        this script that the text calls and does not hold fails there with status 127, and in a
+        test of session_live_box such as `if <function> …` that reads as a box it did not see. So
+        each function `declare -F` lists once the script is sourced is either defined in the text
+        or not named in it.
+
+        The same holds for the script's globals: one the text reads and does not set is empty
+        there. session_live_box reads a box's session file through box_session_read, whose test of
+        the id is `=~ $BOX_SID_RE`, and against an empty pattern every string matches: a box whose
+        session file names any session would read as the session's live box. So each variable the
+        script sets as it loads (`compgen -v` after sourcing, less the shell's own and the
+        environment's) that the text reads as `$NAME` or `${NAME` is set in the text: declared
+        there by `declare -p` output, assigned (`NAME=`), or a local of one of its functions."""
+        result = self.bash("declare -F\necho ---\ncompgen -v\necho ---\nunenroll_fns")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed, sourced_vars, text = result.stdout.split("\n---\n", 2)
+        names = {line.split()[-1] for line in listed.splitlines()}
+        carried = set(re.findall(r"^(\S+) \(\)\s*$", text, re.M))
+        self.assertIn("session_live_box", carried)
+        named = {name for name in names if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text)}
+        self.assertEqual(named - carried, set())
+
+        own = subprocess.run(["bash", "-c", "compgen -v"], capture_output=True, text=True, check=True,
+                             env=self.bash_env()).stdout.split()
+        script_globals = set(sourced_vars.split()) - set(own)
+        read = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", text))
+        locals_ = {word.split("=", 1)[0] for line in re.findall(r"^\s*local\s+(.*)$", text, re.M)
+                   for word in line.split() if not word.startswith("-")}
+        assigned = set(re.findall(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)=", text))
+        self.assertIn("BOX_SID_RE", read & script_globals, "the check must see what box_session_read reads")
+        self.assertEqual((read & script_globals) - locals_ - assigned, set())
 
     def test_a_session_that_came_back_keeps_the_open_enrollment(self) -> None:
         """Each enroll call of box1 for session sid-1 ends with its outcome not known, and after
@@ -1429,12 +1558,9 @@ class OpenAttempts(EnrollFixture):
 
     def waiter(self, skd: Path, owner: str, closed: str) -> list[str]:
         """unenroll_session_wait called directly, with a grace of 0 s, for box1 of session sid-1:
-        SKD `skd`, OWNER `owner`, EID enr-1, SELF this script (which answers `none`: no other box
-        is in the run dir) and CLOSED `closed`. Returns its lines without their UTC time."""
-        result = self.bash(
-            f'unenroll_session_wait 0 "$RUN_BASE" "{skd}" box1 sid-1 "{owner}" enr-1'
-            f' "$DOTFILES_DIR/scripts/agentbox" "{closed}"'
-        )
+        SKD `skd`, OWNER `owner`, EID enr-1 and CLOSED `closed`. Test 2 answers `none`: no other
+        box is in the run dir. Returns its lines without their UTC time."""
+        result = self.bash(f'unenroll_session_wait 0 "$RUN_BASE" "{skd}" box1 sid-1 "{owner}" enr-1 "{closed}"')
         self.assertEqual(result.returncode, 0, result.stderr)
         return [m.group(1) if (m := self.TIMED.fullmatch(line)) else line for line in result.stdout.splitlines()]
 
@@ -1632,15 +1758,22 @@ class OpenAttempts(EnrollFixture):
 class EnrollWhenUp(EnrollFixture):
     """`agentbox new`'s enrollment of a box that is starting, against a real child process."""
 
+    SID = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+
     def when_up(
-        self, cmd: str, child: str = "/bin/sleep 30 &", **stubs: str
+        self, cmd: str, child: str = "/bin/sleep 30 &", body: str = "", **stubs: str
     ) -> subprocess.CompletedProcess[str]:
         return self.bash(
-            f"{child}\nchild=$!\n"
+            f"{body}{child}\nchild=$!\n"
             f'if enroll_when_up box1 "$child" {cmd}; then echo rc=0; else echo "rc=$?"; fi\n'
             'kill "$child" 2>/dev/null || true',
             **stubs,
         )
+
+    def report_session(self, sid: str) -> None:
+        """box1's omp names its session in its session file (session-env.ts)."""
+        (self.hostdir / "run-user" / "agentbox-session").write_text(
+            f"version=1\npid=7\nsession={sid}\nfile=/x.jsonl\n", encoding="utf-8")
 
     def test_any_other_command_enrolls_at_once_and_renews(self) -> None:
         result = self.when_up("bash")
@@ -1652,10 +1785,56 @@ class EnrollWhenUp(EnrollFixture):
         self.assertEqual(len(self.calls_matching("docker exec -d ")), 1)
 
     def test_omp_enrolls_with_its_session_id(self) -> None:
-        result = self.when_up("omp", STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd")
+        self.report_session(self.SID)
+        result = self.when_up("omp")
         self.assertIn("rc=0", result.stdout, result.stderr)
         (enroll,) = self.calls_matching("enroll ")
-        self.assertIn("--session-id 0192f3a4-5b6c-7d8e-9f01-23456789abcd", enroll)
+        self.assertIn(f"--session-id {self.SID}", enroll)
+
+    def test_enroll_uses_the_reported_session_within_120s(self) -> None:
+        """A fresh `-- omp` box has no transcript until its first reply, so before
+        dispatch://INFRA-1720 its launcher found no id and enrolled it under the box's name (two
+        boxes on 2026-11-14, dispatch://INFRA-3462/comment/7b61823d). Its omp now writes the
+        session file a few seconds into its start, and the launcher waits for that file: the
+        enrollment comes after the file and carries its id, and the host asks the box nothing."""
+        result = self.when_up("omp", STUB_SESSION_AT="3", STUB_SESSION_ID=self.SID)
+        self.assertIn("rc=0", result.stdout, result.stderr)
+        calls = self.calls.read_text().splitlines()
+        sleeps = [i for i, c in enumerate(calls) if c.startswith("sleep ")]
+        (enroll,) = [i for i, c in enumerate(calls) if c.startswith("enroll ")]
+        self.assertGreaterEqual(len(sleeps), 3, calls)
+        self.assertGreater(enroll, sleeps[2], "the launcher enrolled before the session file came")
+        self.assertIn(f"--session-id {self.SID}", calls[enroll])
+        self.assertEqual([c for c in calls if c.startswith("docker exec ") and " -d " not in c], [],
+                         "the session comes from the file, not from the box")
+        # The 120 s, by bash's own clock: the n-th `sleep` here sets it to n × 59 s and logs it. A
+        # session file that comes at 118 s is still waited for; with none, the box enrolls under its
+        # name at the first pass past 120 s and at no earlier one. A deadline of 10 s or 600 s fails.
+        # The ticks are absolute, not added to SECONDS: under load bash's clock read 1 when the wait
+        # began, its deadline was 121, and a tick of 120 was waited past (`[60, 120, 179]`,
+        # 2026-11-17). The clock starts at 1 here so that case is the one every run checks.
+        session = self.hostdir / "run-user" / "agentbox-session"
+        clock = self.root / "CLOCK"
+        for name, arrives in (("a file at 118 s", True), ("no file", False)):
+            with self.subTest(name):
+                self.reset_box()
+                clock.unlink(missing_ok=True)
+                write = (f'(( SECONDS >= 118 )) && printf "version=1\\npid=7\\nsession={self.SID}\\nfile=/x.jsonl\\n"'
+                         f' >"{session}"; ') if arrives else ""
+                tick = (f'sleep() {{ local n=1; [[ -f "{clock}" ]] && n=$(( $(wc -l <"{clock}") + 1 )); '
+                        f'SECONDS=$((n * 59)); echo "$SECONDS" >>"{clock}"; {write}return 0; }}\n')
+                result = self.when_up("omp", body="SECONDS=1\n" + tick)
+                self.assertIn("rc=0", result.stdout, result.stderr)
+                (enroll_line,) = self.calls_matching("enroll ")
+                ticks = [int(t) for t in clock.read_text().split()]
+                if arrives:
+                    self.assertIn(f"--session-id {self.SID}", enroll_line)
+                else:
+                    self.assertNotIn("--session-id", enroll_line)
+                    self.assertIn("--runtime-id box1", enroll_line)
+                    self.assertGreaterEqual(len(ticks), 2, ticks)
+                    self.assertLess(ticks[-2], 120, ticks)
+                    self.assertGreaterEqual(ticks[-1], 120, ticks)
 
     def test_a_box_that_never_runs_ends_without_identity(self) -> None:
         result = self.when_up("omp", child="/bin/true &\nwait", STUB_RUNNING="false")
@@ -1675,23 +1854,24 @@ class EnrollWhenUp(EnrollFixture):
         The launcher stands in for one that lives longer than the wait: 400 passes of the loop
         fork a stub `docker` each, which on a loaded host takes longer than 30 s, and a child
         that ends first makes the launcher give up instead (the test below that one)."""
+        self.report_session(self.SID)
         result = self.when_up(
             "omp",
             child="/bin/sleep 300 &",
             STUB_RUNNING_AFTER="400",
-            STUB_SID="0192f3a4-5b6c-7d8e-9f01-23456789abcd",
         )
         self.assertIn("rc=0", result.stdout, result.stderr)
         self.assertEqual(self.files(), {"key.pem", "enrollment"})
         self.assertGreaterEqual(len(self.calls_matching("docker inspect")), 400)
         (enroll,) = self.calls_matching("enroll ")
-        self.assertIn("--session-id 0192f3a4-5b6c-7d8e-9f01-23456789abcd", enroll)
+        self.assertIn(f"--session-id {self.SID}", enroll)
 
     def test_the_marker_stays_fresh_while_it_waits(self) -> None:
-        """Each pass of the wait renews the marker; each sleep ages it past 160 s."""
+        """Each pass of the wait renews the marker; each sleep ages it past 160 s, after it logs
+        the mtime the pass left."""
         started = time.time()
         self.when_up("omp", child="/bin/sleep 1 &")
-        probes = self.calls_matching("sid-probe ")
+        probes = self.calls_matching("marker-at-sleep ")
         self.assertGreater(len(probes), 1)
         for probe in probes:
             self.assertGreaterEqual(int(probe.rsplit("=", 1)[1]), int(started) - 1, probe)
@@ -2113,6 +2293,7 @@ class CmdNew(EnrollFixture):
         'mount_args() { mkdir -p "$(box_keydir "$1")" "$RUN_BASE/$1/run-user/agent-secrets"; }\n'
         "session_env() { :; }; clone_checkout() { :; }\n"
         'close_box() { echo "close_box $1 revokes=$(cat "$RUN_BASE/$1/enrollment-id" 2>/dev/null)" >>"$STUB_CALLS"; }\n'
+        "collect_start() { :; }\n"
     )
     SID = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
 

@@ -26,6 +26,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from leak_terms_fixture import fixture_environment, sops_directory
+
 SHIMS = Path(__file__).parents[1]
 DOTFILES = SHIMS.parent
 GH_SHIM = SHIMS / "gh"
@@ -159,11 +161,16 @@ class UserLogin(unittest.TestCase):
             "TMPDIR": str(self.tmp), "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1",
             "GH_READ_CACHE": "0", "GH_READ_CACHE_LOG": "0", "PUBLIC_LEAK_CHECK": "/bin/true",
             "DOTFILES_DIR": str(DOTFILES),
+            # The leak-term check reads every write's text (shims/AGENTS.md, "Leak-term list"): the list here, and
+            # sops last on each PATH below.
+            **fixture_environment(),
         }
         self.agent = {"PI_SESSION_FILE": str(self.tmp / "session.jsonl")}
         # The 00:07Z eval kernel's order: mise's gh first, shims/ after it.
-        self.kernel_path = os.pathsep.join([str(self.gh.parent), str(SHIMS), str(self.bin), "/usr/bin", "/bin"])
-        self.shim_path = os.pathsep.join([str(SHIMS), str(self.gh.parent), str(self.bin), "/usr/bin", "/bin"])
+        self.kernel_path = os.pathsep.join([str(self.gh.parent), str(SHIMS), str(self.bin), "/usr/bin", "/bin",
+                                            sops_directory()])
+        self.shim_path = os.pathsep.join([str(SHIMS), str(self.gh.parent), str(self.bin), "/usr/bin", "/bin",
+                                          sops_directory()])
 
     def tearDown(self):
         self.server.shutdown()
