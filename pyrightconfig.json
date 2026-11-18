@@ -1,0 +1,9 @@
+{
+  // shims/tests has no __init__.py, so pytest (its default "prepend" import mode) puts that directory on sys.path,
+  // and its tests import their sibling modules by name (`from leak_terms_fixture import ...`). Two of them also put
+  // scripts/tests on sys.path, for gce_metadata_stub.py. Give basedpyright the same two paths for those files, so it
+  // resolves those imports as pytest does and stops reading them as implicit relative imports.
+  "executionEnvironments": [
+    {"root": "shims/tests", "extraPaths": ["shims/tests", "scripts/tests"]}
+  ]
+}
