@@ -49,7 +49,7 @@ Read the guide of each directory you change:
 
 - `~/.dotfiles` is production: every session and systemd user unit on the machine reads its files, so an edit is live when it is saved, before any commit. Test a change to a shim or a script from a copy outside the checkout, and save it here only when it is ready.
 - Write a shim atomically: a temporary file in the same directory, then `mv` over the path. A shim truncated in place is, for a moment, an empty executable that exits 0 and does nothing.
-- A tool that copies a script to its own path checks the copy against its intended source (`cmp`) afterwards: a complete copy of the wrong file passes every other check. A file byte-identical to another tracked file is that corruption; restore it from `git show HEAD:<path>`, not by hand. A file that only differs from `HEAD` is someone's edit.
+- A tool that copies a script to its own path checks the copy against its intended source (`cmp`) afterwards: a complete copy of the wrong file passes every other check. A file byte-identical to another tracked file is that corruption; restore it from `git show HEAD:<path>`, not by hand. A file that only differs from `HEAD` is someone's edit: leave it alone and report it to its owner.
 - The checkout always holds other sessions' uncommitted work. Do not stash, reset, check out or move it aside, or make a separate worktree to get around it; commit only your own paths.
 - When you change something Sami uses (his skills, omp, the shims), tell him what the change will do, then what it did.
 

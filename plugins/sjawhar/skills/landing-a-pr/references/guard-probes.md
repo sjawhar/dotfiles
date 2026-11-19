@@ -1,6 +1,6 @@
-# Mutation and guard probes
+# Proof design: mutations, fixtures and guards
 
-Read before you claim a mutation result, test coverage, or that a guard is safe after you add, widen, relax, tighten or move it.
+Read before you claim coverage, independence, a guard's safety, no regression or "cannot happen".
 
 - Name the test and exact assertion a mutation must violate; otherwise a probe can mutate a neighboring guard.
 - Mutate the decision in a scratch copy, run the real consumer, and require the predicted red. Check from inside the run that the copy loaded (`module.__file__` or a head-unique output): an editable install can load the unchanged tree. A setup crash is not a kill.
@@ -10,7 +10,7 @@ Read before you claim a mutation result, test coverage, or that a guard is safe 
 - Build fixtures with the real constructor, above all where the contract compares identity (`is`, the same instance), and check copying and memoization. Use the shared constant for fixture paths the consumer reads, and prove the real reader finds the fixture.
 - An expected value derived from the same constant proves shape only. Where an external consumer hard-codes the value, check it at that layer.
 - Plant a defect where the guard might not look (nested or new paths, aliases, other scopes), and require a red. A widened guard also needs a probe in the old region.
-- A text pattern over free-form traffic finds some cases, never all: replay it and read its false refusals and misses by hand. Give a "within N lines" window an explicit N and test both edges.
+- A text pattern over free-form traffic finds some cases, never all: replay it and read its false refusals and misses by hand. Give any "within N lines/characters" window an explicit N and test both edges.
 - A failure that does not match the signature you wrote before the run is a possible new defect, not a refusal.
 - Relaxing a guard: name the newly accepted case, and reproduce it and the still-refused boundary with the IDs (user, session, request) of the event judged, not current state. Tightening: measure the legitimate ordering it now refuses, including a stall shorter than a new timeout, and keep the per-call allowance apart from the total budget.
 - An exemption set and the sweep of its complement are coupled: probe what exempt members do. A change that adds a capability rechecks each precondition that held only because it was missing.

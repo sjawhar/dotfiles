@@ -29,7 +29,7 @@ Read `references/repo-merge-rules.md` before you change an enabled auto-merge, m
 - In a stack, watch only the lowest unmerged PR, one babysitter per stack. Do not restack, reorder, split or rewrite it; ask the stack's owner.
 - Every change to what runs (application, infrastructure, tasks, agents, harnesses, and skills or docs that agents or users execute) needs `opening-a-pr`'s step 4 proof at the current head. Only prose that nothing executes has no scenario.
 
-Read `references/proof-and-claims.md` before you certify proof, claim coverage, no regression or "cannot happen", prove a change that deploys, or bump a fork pin, and `references/guard-probes.md` before you claim a mutation result or a guard's safety. Read `references/history-and-pushes.md` before you resolve a conflict, integrate a base, push to a reviewed head, or change a stack.
+Before you claim coverage, a guard, no regression or "cannot happen", read `references/proof-and-claims.md` and `references/guard-probes.md`; read the first also before you certify proof, prove a change that deploys, or bump a fork pin. Read `references/history-and-pushes.md` before you resolve a conflict, integrate a base, push to a reviewed head, or change a stack.
 
 ## 2. Start the babysitter
 
