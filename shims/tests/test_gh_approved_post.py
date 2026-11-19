@@ -37,19 +37,27 @@ BODY = "Since #11714, `-fsanitize=array-bounds` does not check trailing arrays.\
 # and hands that on, so a file changed after the check is not what gh posts.
 BODY_COPY = "<the shim's private copy of the body file>"
 VALUE_FLAGS = ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file", "--head", "-B", "--base")
+# A `gh api` reply's body file is a field value, `-F body=@<file>`, and the copy takes the file's
+# place after the `@`.
+API_VALUE_FLAGS = ("-X", "-F", "-f")
 
 
 def as_posted(argv: list[str]) -> list[str]:
     """ARGV as knives and gh get it for a cited post: each body file given as BODY_COPY."""
+    api = argv[:1] == ["api"]
     posted, flag = [], ""
     for arg in argv:
         if flag:
-            posted.append(BODY_COPY if flag in ("-F", "--body-file") and arg != "-" else arg)
+            if api:
+                copied = flag == "-F" and arg.startswith("body=@") and arg != "body=@-"
+                posted.append("body=@" + BODY_COPY if copied else arg)
+            else:
+                posted.append(BODY_COPY if flag in ("-F", "--body-file") and arg != "-" else arg)
             flag = ""
-        elif arg in VALUE_FLAGS:
+        elif arg in (API_VALUE_FLAGS if api else VALUE_FLAGS):
             posted.append(arg)
             flag = arg
-        elif arg.startswith("--body-file="):
+        elif not api and arg.startswith("--body-file="):
             posted.append("--body-file=" + BODY_COPY)
         else:
             posted.append(arg)
@@ -266,7 +274,10 @@ class ShimHarness(unittest.TestCase):
         def shown(arg: str) -> str:
             if arg.startswith(copies):
                 return BODY_COPY
-            return "--body-file=" + BODY_COPY if arg.startswith("--body-file=" + copies) else arg
+            for prefix in ("--body-file=", "body=@"):
+                if arg.startswith(prefix + copies):
+                    return prefix + BODY_COPY
+            return arg
 
         return [[shown(arg) for arg in path.read_bytes().decode().split("\0")[:-1]] for path in self.sent.iterdir()]
 
@@ -848,6 +859,20 @@ class KindOfPost(ShimHarness):
                     f"`gh {argv[0]} {argv[1]}` on rocq-prover/rocq",
                     call=" ".join(argv[:3]))
 
+    def test_his_rocq_answer_approves_no_thread_reply_and_no_body_edit(self):
+        # The Oh My Pi entry lists these two; this entry does not, so they stay refused here.
+        for argv, shown in (
+            (["pr", "edit", "22644", "-R", "rocq-prover/rocq", "--body-file", str(self.rocq_body)],
+             "a body edit (`gh pr edit <n> -R <owner>/<repo> --body-file <file>`)"),
+            (["api", "-X", "POST", "repos/rocq-prover/rocq/pulls/22644/comments/1/replies",
+              "-F", f"body=@{self.rocq_body}"], "a review-thread reply"),
+        ):
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                self.assert_refused(self.post(argv),
+                                    f"his answer approves {APPROVES}, and no other post; this call is {shown}",
+                                    call=" ".join(argv[:3]))
+
     # R4: a repository the answer does not name is refused, and the refusal names what it approves.
 
     def test_a_repository_his_answer_does_not_name_is_refused_naming_what_it_approves(self):
@@ -1169,8 +1194,9 @@ OMP_OPTION = "Person for every outside message"
 # "Oh My Pie", never as can1357/oh-my-pi; KIND_APPROVALS makes that reading.
 OMP_ANSWER = ("Until we get this under control, I need to approve every message, except for messages to "
               "Oh My Pie; those can go out, or I guess those are the only ones.")
-OMP_APPROVES = ("`gh issue create`, `gh pr create`, `gh issue comment` and `gh pr comment` on "
-                "can1357/oh-my-pi")
+OMP_APPROVES = ("`gh issue create`, `gh pr create`, `gh issue comment`, `gh pr comment`, a body edit (`gh pr edit "
+                "<n> -R <owner>/<repo> --body-file <file>`) and a review-thread reply (`gh api -X POST "
+                "repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies`) on can1357/oh-my-pi")
 OMP_BODY = "The retry path calls the same cooldown function, so the fix covers it.\n"
 OMP_SHA = hashlib.sha256(OMP_BODY.encode()).hexdigest()
 
@@ -1196,8 +1222,9 @@ def omp_ask_text(selected=OMP_OPTION, text=OMP_ANSWER, ref=OMP_ASK, question=Non
 
 class OhMyPi(ShimHarness):
     """His answer on dispatch://OSSV-142/ask/9a66d8e5 exempts messages to Oh My Pi from his approval.
-    KIND_APPROVALS reads it as the four post verbs on can1357/oh-my-pi, each with a fresh reviewer's
-    verdict on the exact bytes, as every kind of post needs."""
+    KIND_APPROVALS reads it as the four post verbs on can1357/oh-my-pi, a pull request's body edit and
+    a reply in a review thread, each with a fresh reviewer's verdict on the exact bytes, as every kind
+    of post needs."""
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
@@ -1225,6 +1252,14 @@ class OhMyPi(ShimHarness):
     def post(self, argv, verdict: str | None = VERDICT, ask=OMP_ASK, **extra):
         return self.run_gh(argv, cite=False, GH_SHIM_APPROVAL=ask, GH_SHIM_VERDICT=verdict, **extra)
 
+    def reply(self, *extra, repo="can1357/oh-my-pi", body=None):
+        """A reply in a review thread, as measured refused at 13:43Z on 2026-11-19 before it was listed."""
+        return ["api", "-X", "POST", f"repos/{repo}/pulls/19682/comments/4616490897/replies",
+                "-F", f"body=@{body or self.omp_body}", *extra]
+
+    def edit(self, *extra, repo="can1357/oh-my-pi", target="19682", body=None):
+        return ["pr", "edit", target, "-R", repo, "--body-file", str(body or self.omp_body), *extra]
+
     def posts(self, repo="can1357/oh-my-pi"):
         body = str(self.omp_body)
         return (
@@ -1233,6 +1268,8 @@ class OhMyPi(ShimHarness):
              "--head", "cybermonklabs:fix/recall-cooldown", "--base", "main"],
             ["issue", "comment", f"https://github.com/{repo}/issues/1234", "--body-file", body],
             ["pr", "comment", "1235", "-R", repo, "--body-file", body],
+            self.edit(repo=repo),
+            self.reply(repo=repo),
         )
 
     def assert_refused(self, result, why, call, ask=OMP_ASK):
@@ -1300,6 +1337,148 @@ class OhMyPi(ShimHarness):
         self.assert_refused(self.post(argv), "his answer does not say 'except for messages to Oh My Pie",
                             call=" ".join(argv[:3]))
 
+    # A reply in a review thread and a pull request's body edit: messages to Oh My Pi too. Until they
+    # were listed the gate refused both (measured at 13:43Z on 2026-11-19: "a cited post is `gh issue
+    # create`, ...; this call is `gh api -X`").
+
+    def test_a_thread_reply_and_a_body_edit_go_out_with_a_body_file(self):
+        path = "repos/can1357/oh-my-pi/pulls/19682/comments/4616490897/replies"
+        for argv in (
+            self.reply(),
+            # The method after the field, and the repository in another letter case, as GitHub reads it.
+            ["api", path.replace("can1357/oh-my-pi", "Can1357/Oh-My-Pi"), "-F", f"body=@{self.omp_body}",
+             "-X", "POST"],
+            self.edit(),
+            ["pr", "edit", "19682", "--repo", "can1357/oh-my-pi", f"--body-file={self.omp_body}"],
+        ):
+            with self.subTest(argv=argv):
+                self.fresh_log()
+                result = self.post(argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.routed()[-1], " ".join(as_posted(argv)))
+                allowed = self.log()[0]
+                self.assertEqual((allowed["verdict"], allowed["approves"], allowed["review"], allowed["body_sha256"]),
+                                 ("allowed", OMP_APPROVES, VERDICT, OMP_SHA))
+                self.assertEqual((allowed["repo"].lower(), allowed["body"]), ("can1357/oh-my-pi", OMP_BODY))
+
+    def test_a_thread_reply_takes_an_inline_body(self):
+        text = "Fixed in the retry path too."
+        sha = hashlib.sha256(text.encode()).hexdigest()
+        (self.fixtures / "verdict.txt").write_text(verdict_text(sha=sha, title=None))
+        argv = ["api", "-X", "POST", "repos/can1357/oh-my-pi/pulls/19682/comments/4616490897/replies",
+                "-f", f"body={text}"]
+        result = self.post(argv)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.routed()[-1], " ".join(argv))
+        self.assertEqual(self.log()[0]["body_sha256"], sha)
+        self.fresh_log()
+        self.calls.unlink()
+        argv[-1] += "!"
+        self.assert_refused(self.post(argv), f"approves the text with SHA-256 {sha}", call="api -X POST")
+
+    def test_neighbours_of_a_thread_reply_are_refused(self):
+        path = "repos/can1357/oh-my-pi/pulls/19682/comments/4616490897/replies"
+        body = f"body=@{self.omp_body}"
+        endpoint = "a cited `gh api` call is a review-thread reply"
+        method = "names its method as `-X POST`"
+        for argv, why in (
+            # Another endpoint: a new review comment, an issue comment, a query, a placeholder, GraphQL,
+            # a number in digits that are not ASCII, and another spelling of the path.
+            (["api", "-X", "POST", "repos/can1357/oh-my-pi/pulls/19682/comments", "-F", body], endpoint),
+            (["api", "-X", "POST", "repos/can1357/oh-my-pi/issues/19682/comments", "-F", body], endpoint),
+            (["api", "-X", "POST", path + "?per_page=1", "-F", body], endpoint),
+            (["api", "-X", "POST", "repos/{owner}/{repo}/pulls/19682/comments/4616490897/replies", "-F", body],
+             endpoint),
+            (["api", "-X", "POST", "repos/can1357/oh-my-pi/pulls/x/comments/4616490897/replies", "-F", body],
+             endpoint),
+            (["api", "-X", "POST", "repos/can1357/oh-my-pi/pulls/١/comments/4616490897/replies", "-F", body],
+             endpoint),
+            (["api", "-X", "POST", "graphql", "-F", body], endpoint),
+            (["api", "-X", "POST", "/" + path, "-F", body], endpoint),
+            # Another method, or none.
+            (["api", "-X", "PATCH", path, "-F", body], method),
+            (["api", "-X", "DELETE", path, "-F", body], method),
+            (["api", "-X", "post", path, "-F", body], method),
+            (["api", path, "-F", body], method),
+            # Another field, the body twice, or none.
+            (self.reply("-f", "in_reply_to=4616490897"), "the field `in_reply_to=4616490897` is not the body"),
+            (self.reply("-F", "commit_id=abc"), "the field `commit_id=abc` is not the body"),
+            (self.reply("-f", "body=More text."), "pass the body once"),
+            (["api", "-X", "POST", path], "the body is empty"),
+            # Another flag, or another spelling of an allowed one.
+            (self.reply("-H", "Accept: application/vnd.github+json"), "`-H` is not checked"),
+            (["api", "-X", "POST", path, "--input", str(self.omp_body)], "`--input` is not checked"),
+            (self.reply("--hostname", "example.com"), "`--hostname` is not checked"),
+            (self.reply("--jq", ".id"), "`--jq` is not checked"),
+            (["api", "--method", "POST", path, "-F", body], "`--method` is not checked"),
+            (["api", "-X", "POST", path, "--field", body], "`--field` is not checked"),
+            (["api", "-X", "POST", path, "--raw-field", "body=Thanks."], "`--raw-field` is not checked"),
+            (["api", "-XPOST", path, "-F", body], "`-XPOST` is not checked"),
+            (["api", "-X", "POST", path, "-fbody=Thanks."], "`-fbody=Thanks.` is not checked"),
+            # A body gh would not send as the bytes the verdict names.
+            (["api", "-X", "POST", path, "-F", "body=@-"], "the body comes from stdin"),
+            (["api", "-X", "POST", path, "-F", "body=Thanks."], "gh reads the body from a file only as `body=@<file>`"),
+        ):
+            with self.subTest(argv=argv[1:], why=why):
+                self.fresh_log()
+                self.assert_refused(self.post(argv), why, call=" ".join(argv[:3]))
+
+    def test_neighbours_of_a_body_edit_are_refused(self):
+        by_number = "names the pull request it edits by its number"
+        for argv, why in (
+            (self.edit("--title", "A new title"), "`--title` is not checked"),
+            (self.edit("-t", "A new title"), "`-t` is not checked"),
+            (self.edit("--add-label", "bug"), "`--add-label` is not checked"),
+            (self.edit("--add-reviewer", "someone"), "`--add-reviewer` is not checked"),
+            (self.edit("-B", "next"), "`-B` is not checked"),
+            (self.edit("-b", "More text."), "`-b` is not checked"),
+            (["pr", "edit", "19682", "-R", "can1357/oh-my-pi", "-F", str(self.omp_body)], "`-F` is not checked"),
+            (["pr", "edit", "19682", "-R", "can1357/oh-my-pi", "--body", "Text."], "`--body` is not checked"),
+            # A target gh could read as a branch, or no number.
+            (self.edit(target="fix/recall-cooldown"), by_number),
+            (self.edit(target="https://github.com/can1357/oh-my-pi/pull/19682"), by_number),
+            (self.edit(target="#19682"), by_number),
+            (self.edit(target="019682"), by_number),
+            (self.edit(target="١٩٦٨٢"), by_number),
+            (self.edit(target="9" * 19), by_number),
+            (["pr", "edit", "-R", "can1357/oh-my-pi", "--body-file", str(self.omp_body)], by_number),
+            # Another repository.
+            (self.edit(repo="rocq-prover/rocq"), f"his answer approves {OMP_APPROVES}, and no other post"),
+            (self.edit(repo="o/r"), f"his answer approves {OMP_APPROVES}, and no other post"),
+        ):
+            with self.subTest(argv=argv[2:], why=why):
+                self.fresh_log()
+                # The refusal quotes a target such as `#19682` the way a shell would, so match the verb.
+                self.assert_refused(self.post(argv), why, call="pr edit")
+
+    def test_a_reply_to_another_repository_is_refused(self):
+        for repo in ("rocq-prover/rocq", "o/r"):
+            with self.subTest(repo=repo):
+                self.fresh_log()
+                self.assert_refused(self.post(self.reply(repo=repo)),
+                                    f"his answer approves {OMP_APPROVES}, and no other post; this call is a "
+                                    f"review-thread reply", call="api -X POST")
+
+    def test_a_body_one_byte_off_the_verdict_is_refused(self):
+        off = self.tmp / "off.md"
+        off.write_text(OMP_BODY.replace("fix", "fiz"))
+        sha = hashlib.sha256(off.read_bytes()).hexdigest()
+        for argv in (self.reply(body=off), self.edit(body=off)):
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                self.assert_refused(self.post(argv),
+                                    f"approves the text with SHA-256 {OMP_SHA}, and this body's is {sha}",
+                                    call=" ".join(argv[:3]))
+
+    def test_an_ask_not_in_the_list_cannot_cite_a_reply_or_an_edit(self):
+        # A word-for-word ask approves the four verbs only, whatever its draft holds.
+        for argv in (self.reply(), self.edit()):
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                self.assert_refused(self.post(argv, ask=OTHER_ASK),
+                                    "goes out only under an ask KIND_APPROVALS lists with it",
+                                    call=" ".join(argv[:3]), ask=OTHER_ASK)
+
 
 class OhMyPiOnTheUpstreamToken(OhMyPi):
     """can1357 has no App installation, so every case runs again on the upstream token, the real
@@ -1318,6 +1497,38 @@ class OhMyPiOnTheUpstreamToken(OhMyPi):
                 result = self.post(argv)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.sent_calls(), [["upstream-route", *as_posted(argv)]])
+
+    def test_a_reply_and_an_edit_reach_gh_through_the_read_cache(self):
+        # The cache is on in every session; its re-entry is one more pass of the same call.
+        for argv in (self.reply(), self.edit()):
+            with self.subTest(verb=argv[:2]):
+                self.fresh_log()
+                for sent in self.sent.iterdir():
+                    sent.unlink()
+                result = self.post(argv, GH_READ_CACHE=None)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.sent_calls(), [["upstream-route", *as_posted(argv)]])
+                records = self.log()
+                self.assertEqual((records[0]["verdict"], records[1]["ev"], records[1]["rc"]), ("allowed", "result", 0))
+
+    def test_a_reply_body_file_swapped_after_the_check_is_not_what_gh_posts(self):
+        # gh reads `-F body=@<file>` itself; this dispatch stub replaces the file while the gate reads
+        # the ask, so gh must get the shim's private copy of the bytes the gate checked.
+        swap = f'if [ "$1 $3" = "read {OMP_ASK}" ]; then printf "Text no reviewer saw.\\n" > {self.omp_body}; fi\n'
+        stub = (self.front / "dispatch").read_text().split("\n", 1)[1]
+        executable(self.front / "dispatch", swap + stub)
+        got = self.tmp / "gh-got"
+        got.mkdir()
+        executable(self.bin / "gh",
+                   'for a in "$@"; do\n'
+                   f'  case "$a" in body=@*) cat "${{a#body=@}}" > {got}/body ;; esac\n'
+                   'done\n'
+                   'echo https://github.com/o/upstream/issues/12')
+        result = self.post(self.reply())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.omp_body.read_text(), "Text no reviewer saw.\n", "the control: the swap happened")
+        self.assertEqual((got / "body").read_text(), OMP_BODY)
+        self.assertEqual(list((self.cache / "bodies").glob("*")), [], "the private copy outlived the call")
 
 
 if __name__ == "__main__":

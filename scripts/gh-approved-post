@@ -11,12 +11,19 @@ His rule (CLAUDE.md): anything that commits him outside the company is drafted, 
 then sent; his answer to the draft is the permission to send it. On 2026-11-02 he answered
 dispatch://OSSV-232/ask/a7d1ac41-45c4-4504-a985-7c92998d2158 "Post it" and the post still did
 not go out. The call passes only when all of these hold:
-  - the call is `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`, with the
-    repository named (-R/--repo, or a GitHub URL as the comment target), the title in -t/--title
-    and the body in one of -b/--body or -F/--body-file <file>, a pull request's head in --head
-    (not -H, which knives does not read) as <owner>:<branch> where the owner is one of
-    APPROVER_FORK_OWNERS (his own forks) and its base, if named, in -B/--base, and no other flag, so
-    what is checked is all that is posted;
+  - the call has one of these shapes, with no other flag, so what is checked is all that is posted:
+    - `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`, with the
+      repository named (-R/--repo, or a GitHub URL as the comment target), the title in -t/--title
+      (an issue or a pull request it creates only) and the body in one of -b/--body or
+      -F/--body-file <file>, and for `gh pr create` its head in --head (not -H, which knives does
+      not read) as <owner>:<branch> where the owner is one of APPROVER_FORK_OWNERS (his own forks)
+      and its base, if named, in -B/--base;
+    - only under an ask KIND_APPROVALS lists with it, a pull request's body edit, exactly
+      `gh pr edit <n> -R <owner>/<repo> --body-file <file>` (-R or --repo; <n> a number, so gh
+      never reads it as a branch), which replaces the body whole and changes nothing else;
+    - only under an ask KIND_APPROVALS lists with it, a reply in a review thread, exactly `gh api
+      -X POST repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies -F body=@<file>` or the same
+      with `-f body=<text>`, the repository read from the path;
   - the ask exists, is answered by APPROVER, and its one selected option approves (its label
     starts with an approving word and is not a "do not" option);
   - the draft, in the version of the ask's document that first shows the answer (else in the
@@ -29,7 +36,7 @@ not go out. The call passes only when all of these hold:
     names the entry's repository, the call is one of the entry's verbs on that
     repository, and GH_SHIM_VERDICT names the fresh reviewer's verdict on record, a Dispatch
     comment whose first line is `VERDICT: APPROVE at sha256:<SHA-256 of the body as posted>`, with
-    a `Title: <title>` line for an issue or a pull request, written by a session that is none of
+    a `Title: <title>` line for a new issue or pull request, written by a session that is none of
     this call's (SESSION_VARS). A subagent of the posting session writes to Dispatch as that
     session, so its verdict is refused: the reviewer is another session, such as a Legion
     reviewer. An ask that is not listed approves only the text it showed him.
@@ -72,17 +79,34 @@ def approves(option: str) -> bool:
     return any(APPROVING.match(clause) for clause in CLAUSES.split(option) if clause)
 
 
-VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment"), ("pr", "create")}
+VERBS = {("issue", "create"), ("issue", "comment"), ("pr", "comment"), ("pr", "create"), ("pr", "edit")}
 CREATES = {"issue create", "pr create"}
+# The verbs that only an ask KIND_APPROVALS lists with them can approve: an ask that showed him a
+# draft approves the four others alone. "api reply" is a reply in a review thread, the one `gh api`
+# call a citation takes (parse_reply).
+KIND_ONLY = {"pr edit", "api reply"}
+# How a refusal or the log names a verb: its gh command, and a KIND_ONLY verb by the one shape it takes.
+VERB_TEXT = {
+    "pr edit": "a body edit (`gh pr edit <n> -R <owner>/<repo> --body-file <file>`)",
+    "api reply": "a review-thread reply (`gh api -X POST repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies`)",
+}
 # A pattern that must match a whole value ends in `\Z`, never `$`: Python's `$` also matches before
 # a final newline, so `o/upstream\n` passed as a repository.
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+")
+# A number, never one gh would read as a branch: gh (pr/shared/finder.go) takes a selector that
+# strconv.Atoi refuses for a branch name, so digits are ASCII and at most 18 of them fit an int64.
+PR_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,17}\Z")
+REPLY_RE = re.compile(r"^repos/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pulls/[0-9]+/comments/[0-9]+/replies\Z")
 BRANCH = r"[^\s:~^?*\[\\]+"
 HEAD_RE = re.compile(rf"^([A-Za-z0-9-]+):({BRANCH})\Z")
 BASE_RE = re.compile(rf"^{BRANCH}\Z")
 POST_FLAGS = ("-R", "--repo", "-t", "--title", "-b", "--body", "-F", "--body-file")
 PR_FLAGS = ("--head", "-B", "--base")
+# A body edit's only flags: the repository and the body file.
+EDIT_FLAGS = ("-R", "--repo", "--body-file")
+# gh api's flags a reply takes: the method, and one body field.
+API_FLAGS = ("-X", "-F", "-f")
 # Asks whose answer approves a KIND of post, with no fixed text (dispatch://INFRA-3412), by ask id:
 # the repository and the verbs the answer is read as approving, the option he selected, the name the
 # ask or his answer gives the repository (`names`, else `repo`), and the answer's own words that say
@@ -105,12 +129,14 @@ KIND_APPROVALS = {
     },
     # dispatch://OSSV-142/ask/9a66d8e5-92ad-429b-8568-1af4d7ad5a53, answered 2026-10-27T17:55Z: "I need
     # to approve every message, except for messages to Oh My Pie; those can go out". Oh My Pi is
-    # can1357/oh-my-pi, and every post of an agent there is one of the four verbs.
+    # can1357/oh-my-pi, and every post of an agent there is one of the four verbs, a body edit of a
+    # pull request or a reply in a review thread: the last two are messages to it as well, and until
+    # they were listed the gate refused a thread reply there for its verb alone (2026-11-19 13:43Z).
     "9a66d8e5-92ad-429b-8568-1af4d7ad5a53": {
         "repo": "can1357/oh-my-pi",
         "names": "Oh My Pie",
         "option": "Person for every outside message",
-        "verbs": ("issue create", "pr create", "issue comment", "pr comment"),
+        "verbs": ("issue create", "pr create", "issue comment", "pr comment", "pr edit", "api reply"),
         "words": ("except for messages to Oh My Pie; those can go out",),
     },
 }
@@ -133,15 +159,99 @@ class KindRefused(Refused):
         self.approves = approves
 
 
+def shown(verb: str) -> str:
+    return VERB_TEXT.get(verb, f"`gh {verb}`")
+
+
+def read_body(call: dict, path: str, how: str) -> None:
+    """The body file at PATH into CALL: the SHA-256 of the bytes gh posts, and the text. HOW says how
+    to pass a file instead of stdin."""
+    if path == "-":
+        raise Refused(f"the body comes from stdin; pass it in a file ({how}).")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        raise Refused(f"cannot read the body file {path}: {e.strerror}.") from None
+    # The SHA-256 of the bytes gh posts; the body as a text file reads it, newlines and all.
+    call["sha256"] = hashlib.sha256(raw).hexdigest()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise Refused(f"the body file {path} is not UTF-8 text (byte {e.start}).") from None
+    call["body"] = text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def parse_reply(rest: list[str]) -> dict:
+    """REST, a `gh api` call's arguments after `api`, as a reply in a review thread, the one `gh api`
+    call a citation takes: `-X POST repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies` and one
+    `body` field. gh reads `-F body=@<file>` as the file's bytes and sends `-f body=<text>` as it is;
+    any other -F value it may turn into a number, a boolean or a placeholder's value (`gh api --help`,
+    api/fields.go), so only `@<file>` is taken there. Each flag is written apart from its value, as
+    the shim's private copy of the body file reads it (gh_shim_private_body)."""
+    call = {"verb": "api reply", "repo": "", "title": None, "body": None, "sha256": "", "target": "",
+            "head": "", "base": None}
+    takes = "a cited review-thread reply takes only -X POST and one body field, -F body=@<file> or -f body=<text>"
+    method, endpoint, bodies = None, None, 0
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg in API_FLAGS:
+            if i + 1 >= len(rest):
+                raise Refused(f"`{arg}` has no value.")
+            i += 1
+            value = rest[i]
+            if arg == "-X":
+                method = value
+            else:
+                key, sep, field = value.partition("=")
+                if key != "body" or not sep:
+                    raise Refused(f"the field `{value}` is not the body; {takes}.")
+                bodies += 1
+                if arg == "-f":
+                    call["body"] = field
+                    call["sha256"] = hashlib.sha256(field.encode()).hexdigest()
+                elif field.startswith("@"):
+                    read_body(call, field[1:], "-F body=@<file>")
+                else:
+                    raise Refused("with -F, gh reads the body from a file only as `body=@<file>`, and may turn "
+                                  "another value into a number, a boolean or a placeholder's value; pass text "
+                                  "with -f body=<text>.")
+        elif arg.startswith("-"):
+            raise Refused(f"`{arg}` is not checked against the verdict; {takes}.")
+        elif endpoint is None:
+            endpoint = arg
+        else:
+            raise Refused(f"unexpected argument `{arg}`.")
+        i += 1
+    if bodies > 1:
+        raise Refused("pass the body once, in one -F body=@<file> or -f body=<text>.")
+    reply = REPLY_RE.match(endpoint or "")
+    if not reply:
+        raise Refused("a cited `gh api` call is a review-thread reply, `gh api -X POST "
+                      "repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies`; this call's endpoint is "
+                      f"{endpoint or 'not given'!r}.")
+    if method != "POST":
+        raise Refused(f"a cited review-thread reply names its method as `-X POST`; this call's is "
+                      f"{method or 'not given'!r}.")
+    call["repo"], call["target"] = reply.group(1), endpoint
+    if not call["body"] or not call["body"].strip():
+        raise Refused("the body is empty; pass it with -F body=@<file> or -f body=<text>.")
+    return call
+
+
 def parse_call(argv: list[str]) -> dict:
+    if argv[:1] == ["api"]:
+        return parse_reply(argv[1:])
     if len(argv) < 2 or (argv[0], argv[1]) not in VERBS:
         raise Refused(
-            "a cited post is `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`; "
+            "a cited post is `gh issue create`, `gh issue comment`, `gh pr comment` or `gh pr create`, or, "
+            f"under an ask KIND_APPROVALS lists with it, {shown('pr edit')} or {shown('api reply')}; "
             f"this call is `gh {' '.join(argv[:2])}`."
         )
     call = {"verb": f"{argv[0]} {argv[1]}", "repo": "", "title": None, "body": None, "sha256": "",
             "target": "", "head": "", "base": None}
-    flags = POST_FLAGS + (PR_FLAGS if call["verb"] == "pr create" else ())
+    flags = {"pr create": POST_FLAGS + PR_FLAGS, "pr edit": EDIT_FLAGS}.get(call["verb"], POST_FLAGS)
     rest = argv[2:]
     bodies = set()
     i = 0
@@ -176,26 +286,12 @@ def parse_call(argv: list[str]) -> dict:
                 call["base"] = value
             else:
                 bodies.add("--body-file")
-                if value == "-":
-                    raise Refused("the body comes from stdin; pass it in a file (--body-file <file>).")
-                try:
-                    with open(value, "rb") as f:
-                        raw = f.read()
-                except OSError as e:
-                    raise Refused(f"cannot read the body file {value}: {e.strerror}.") from None
-                # The SHA-256 of the bytes gh posts; the body as a text file reads it, newlines and all.
-                call["sha256"] = hashlib.sha256(raw).hexdigest()
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError as e:
-                    raise Refused(f"the body file {value} is not UTF-8 text (byte {e.start}).") from None
-                call["body"] = text.replace("\r\n", "\n").replace("\r", "\n")
+                read_body(call, value, "--body-file <file>")
         elif arg.startswith("-"):
-            raise Refused(
-                f"`{arg}` is not checked against the approved draft; a cited post takes only "
-                "-R/--repo, -t/--title, -b/--body and -F/--body-file, and a pull request also "
-                "--head and -B/--base."
-            )
+            takes = ("a cited body edit takes only -R/--repo and --body-file" if call["verb"] == "pr edit" else
+                     "a cited post takes only -R/--repo, -t/--title, -b/--body and -F/--body-file, and a new "
+                     "pull request also --head and -B/--base")
+            raise Refused(f"`{arg}` is not checked against the approved draft; {takes}.")
         elif call["verb"] not in CREATES and not call["target"]:
             call["target"] = arg
         else:
@@ -216,6 +312,9 @@ def parse_call(argv: list[str]) -> dict:
     if call["verb"] in CREATES and not call["title"]:
         what = "an issue" if call["verb"] == "issue create" else "a pull request"
         raise Refused(f"{what} needs its title in -t/--title.")
+    if call["verb"] == "pr edit" and not PR_NUMBER_RE.match(call["target"]):
+        raise Refused(f"`gh pr edit` names the pull request it edits by its number; this call names "
+                      f"{call['target'] or 'none'!r}.")
     if call["verb"] not in CREATES and not call["target"]:
         raise Refused(f"`gh {call['verb']}` needs the number or URL it comments on.")
     if call["verb"] not in CREATES and call["title"] is not None:
@@ -237,7 +336,8 @@ def parse_call(argv: list[str]) -> dict:
         if call["base"] is not None and not BASE_RE.match(call["base"]):
             raise Refused(f"the base {call['base']!r} is not a branch name.")
     if not call["body"] or not call["body"].strip():
-        raise Refused("the body is empty; pass it with -b/--body or -F/--body-file.")
+        how = "--body-file" if call["verb"] == "pr edit" else "-b/--body or -F/--body-file"
+        raise Refused(f"the body is empty; pass it with {how}.")
     return call
 
 
@@ -336,7 +436,7 @@ def listed(ref: str) -> list[str]:
 
 
 def approves_text(kind: dict) -> str:
-    verbs = [f"`gh {verb}`" for verb in kind["verbs"]]
+    verbs = [shown(verb) for verb in kind["verbs"]]
     listed_verbs = verbs[0] if len(verbs) == 1 else ", ".join(verbs[:-1]) + " and " + verbs[-1]
     return f"{listed_verbs} on {kind['repo']}"
 
@@ -359,8 +459,8 @@ def check_kind(ask: dict, kind: dict, call: dict) -> dict:
             raise Refused(f"neither the ask nor its answer names {names}, the repository KIND_APPROVALS "
                           "reads his answer as approving.")
         if call["repo"].lower() != kind["repo"].lower() or call["verb"] not in kind["verbs"]:
-            raise Refused(f"his answer approves {approves}, and no other post; this call is `gh {call['verb']}` "
-                          f"on {call['repo']}.")
+            raise Refused(f"his answer approves {approves}, and no other post; this call is "
+                          f"{shown(call['verb'])} on {call['repo']}.")
         review, reviewer = check_verdict(call)
     except Refused as e:
         raise KindRefused(str(e), approves) from None
@@ -420,6 +520,15 @@ def check_verdict(call: dict) -> tuple[str, str]:
 def check(ref: str, call: dict) -> dict:
     if not re.match(r"^dispatch://[A-Z][A-Z0-9]*-\d+/ask/[0-9a-f-]{8,}\Z", ref):
         raise Refused(f"GH_SHIM_APPROVAL={ref!r} is not a Dispatch ask reference (dispatch://KEY/ask/<id>).")
+    # The entry comes from the citation, and Dispatch's own ask id must be that entry's.
+    kind_ids = listed(ref)
+    if call["verb"] in KIND_ONLY and not kind_ids:
+        lists = ", ".join(f"{ask_id} ({kind['repo']})" for ask_id, kind in KIND_APPROVALS.items()
+                          if call["verb"] in kind["verbs"])
+        raise Refused(f"{shown(call['verb'])} goes out only under an ask KIND_APPROVALS lists with it ({lists}), "
+                      f"after a fresh reviewer's verdict; {ref} is not such an ask, and an ask that shows him a "
+                      "draft approves `gh issue create`, `gh issue comment`, `gh pr comment` and `gh pr create` "
+                      "only.")
     ask = parse_ask(dispatch("read", "--ref", ref))
     record = {"answered_by": ask["by"], "selected": ask["selected"], "answer_text": ask["text"]}
     if ask["state"] != "answered":
@@ -428,8 +537,6 @@ def check(ref: str, call: dict) -> dict:
         raise Refused(f"the ask was answered by {ask['by'] or 'nobody'}, not {APPROVER}.")
     if ask["selected"] not in ask["options"]:
         raise Refused(f"the answer selects {ask['selected']!r}, which is not exactly one of the ask's options.")
-    # The entry comes from the citation, and Dispatch's own ask id must be that entry's.
-    kind_ids = listed(ref)
     if kind_ids and ask["id"] not in kind_ids:
         raise Refused("Dispatch's ask id does not match the cited kind approval.")
     kind = KIND_APPROVALS.get(ask["id"]) if kind_ids else None
@@ -510,8 +617,8 @@ def main() -> int:
                 f"{ref} approves a kind of post with no fixed text ({approved}), each one after a fresh "
                 f"reviewer's verdict: a Dispatch comment by a session that did not write the text (not a "
                 f"subagent of this session, which writes as this session), whose first line is `VERDICT: "
-                f"APPROVE at sha256:<SHA-256 of the body as posted>`, with a `Title: <title>` line for an "
-                f"issue or a pull request, named in GH_SHIM_VERDICT (shims/AGENTS.md). A text that "
+                f"APPROVE at sha256:<SHA-256 of the body as posted>`, with a `Title: <title>` line for a "
+                f"new issue or pull request, named in GH_SHIM_VERDICT (shims/AGENTS.md). A text that "
                 f"changes goes back to a reviewer, not to him in a new ask"
             )
         else:

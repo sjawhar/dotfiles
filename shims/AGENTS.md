@@ -54,16 +54,28 @@ behavior before handing the call to the real one. One file is data: `person-name
   anything going to the Rock repo") is `gh issue create` and `gh pr create` on `rocq-prover/rocq`,
   and dispatch://OSSV-142/ask/9a66d8e5-92ad-429b-8568-1af4d7ad5a53 ("except for messages to Oh My
   Pie; those can go out", under the option "Person for every outside message", which approves
-  nothing by itself) is all four verbs on `can1357/oh-my-pi`. A program cannot read "the Rock
-  repo" or "Oh My Pie" as a repository, so each
+  nothing by itself) is all four verbs on `can1357/oh-my-pi` and two more shapes, which only a
+  listed ask that names them approves (an ask that shows him a draft never does), each exactly as
+  written here with no other flag or field, and neither requires a `Title:` line in its verdict:
+  - a pull request's body edit, `gh pr edit <n> -R can1357/oh-my-pi --body-file <file>` (`--repo`
+    for `-R`; `<n>` a number of ASCII digits, so gh never reads it as a branch), which replaces the
+    body whole and changes nothing else;
+  - a reply in a review thread, `gh api -X POST repos/can1357/oh-my-pi/pulls/<n>/comments/<id>/replies
+    -F body=@<file>`, or the same with `-f body=<text>`, the repository read from the path; with
+    `-F` only `body=@<file>`, since gh may turn another `-F` value into a number, a boolean or a
+    placeholder's value, and each flag apart from its value (`-X POST`, never `-XPOST`).
+
+  Until they were listed the gate refused such a reply for its verb alone (2026-11-19 13:43Z). A
+  program cannot read "the Rock repo" or "Oh My Pie" as a repository, so each
   entry is a reviewed change to the script. The entry is chosen by the cited id (or a short id of
   it), never by Dispatch's text, and Dispatch's own ask id must be the entry's. A citation of a
   listed ask passes for those verbs on that repository only, and every refusal of it names what the
   answer approves. It needs no draft;
   it needs `GH_SHIM_VERDICT=dispatch://<KEY>/comment/<id>`, the fresh reviewer's verdict on record
   (his three steps end in that reviewer's cut): a Dispatch comment whose first line is exactly
-  `VERDICT: APPROVE at sha256:<sha256sum of the body file>` (of a `--body`, its UTF-8 bytes), with
-  a `Title: <title>` line for an issue or a pull request, written by a session that is none of the
+  `VERDICT: APPROVE at sha256:<sha256sum of the body file>` (of a `--body` or a reply's
+  `-f body=<text>`, the text's UTF-8 bytes), with
+  a `Title: <title>` line for a new issue or pull request, written by a session that is none of the
   call's (`OMP_SESSION_ID`, `DISPATCH_SESSION_ID`, `PI_SESSION_ID`, `ENVOY_SESSION_ID`, compared
   without letter case). A subagent of the posting session writes to Dispatch as that session, so
   its verdict is refused: the reviewer is another session, such as a Legion reviewer. A text that
@@ -72,9 +84,12 @@ behavior before handing the call to the real one. One file is data: `person-name
   `- Reference:` line and the blocks it lists under the answer, which other sessions wrote, and
   an ask whose `dispatch read` holds more than one `Ask id:` line is refused: a question or a
   reply that holds an answer block cannot stand in for his answer. The shim copies a cited post's
-  body file (`-F`/`--body-file`) once, before the check, into a private file under the read cache
-  root's `bodies/` (directory 0700, file 0600), and the gate checks that copy and gh posts it, so a
-  file changed after the check is not what goes out. The copy goes when the call ends; one left by
+  body file (`-F`/`--body-file`, or a reply's `-F body=@<file>`) once, before the check, into a
+  private file under the read cache root's `bodies/` (directory 0700, file 0600), and the gate
+  checks that copy and gh posts it, so a file changed after the check is not what goes out. A file
+  that is not readable when the shim copies it is passed on as it is and not copied, so a file that
+  becomes readable between that copy and the check is checked and posted in place. The copy goes
+  when the call ends; one left by
   a pass that ran gh in place goes at the next cited post an hour on. In an agent session a write
   to an owner without the App, which would go out on his upstream token, is refused without such a
   citation (dispatch://INFRA-2006, `shims/tests/test_gh_fallback_write_gate.py`). The citation

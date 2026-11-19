@@ -220,34 +220,41 @@ gh_shim_call_digest() {
     _digest="$(printf '%s\0' "${GH_SHIM_APPROVAL:-}" "$@" | sha256sum 2> /dev/null)" || _digest=""
     _digest="${_digest%% *}"
 }
-# gh_shim_private_body DIR ARGV…: a cited post's body file (-F/--body-file), copied once into a
-# private file in a new directory under DIR; _posted is ARGV with the copy in the file's place, and
-# _body_copy that directory (empty when ARGV names no readable file). The gate checks the copy and
-# gh posts it, so a file changed after the check is not what goes out (dispatch://INFRA-3412). The
-# flags that take a value are the gate's own, so a value that reads like a flag stays a value. A
-# directory over an hour old is one that a pass running gh in place left, and goes.
+# gh_shim_private_body DIR ARGV…: a cited post's body file (-F/--body-file, or a `gh api` reply's
+# -F body=@<file>), copied once into a private file in a new directory under DIR; _posted is ARGV
+# with the copy in the file's place, and _body_copy that directory (empty when ARGV names no
+# readable file). The gate checks the copy and gh posts it, so a file changed after the check is not
+# what goes out (dispatch://INFRA-3412). The flags that take a value are the gate's own (for `gh api`,
+# -X, -F and -f), so a value that reads like a flag stays a value. A directory over an hour old is
+# one that a pass running gh in place left, and goes.
 gh_shim_private_body() {
-    local dir="$1" flag="" arg file copy
+    local dir="$1" flag="" arg file prefix copy api=0
     shift
     _posted=() _body_copy=""
+    [[ "${1:-}" != api ]] || api=1
     find "$dir" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf -- {} + 2> /dev/null || true
     for arg in "$@"; do
-        file=""
+        file="" prefix=""
         if [[ -n "$flag" ]]; then
-            [[ "$flag" == -F || "$flag" == --body-file ]] && file="$arg"
+            if ((api)); then
+                [[ "$flag" == -F && "$arg" == body=@* ]] && prefix="body=@" file="${arg#body=@}"
+            else
+                [[ "$flag" == -F || "$flag" == --body-file ]] && file="$arg"
+            fi
             flag=""
+        elif ((api)); then
+            case "$arg" in -X | -F | -f) flag="$arg" ;; esac
         else
             case "$arg" in
                 -R | --repo | -t | --title | -b | --body | -F | --body-file | --head | -B | --base) flag="$arg" ;;
-                --body-file=*) file="${arg#--body-file=}" ;;
+                --body-file=*) prefix="--body-file=" file="${arg#--body-file=}" ;;
             esac
         fi
         if [[ -n "$file" && "$file" != - && -r "$file" && ! -d "$file" ]]; then
             [[ -n "$_body_copy" ]] || _body_copy="$(mktemp -d "$dir/post.XXXXXX")" || return 1
             copy="$_body_copy/body.${#_posted[@]}"
             (umask 077 && cat -- "$file" > "$copy") || return 1
-            [[ "$arg" == --body-file=* ]] && copy="--body-file=$copy"
-            _posted+=("$copy")
+            _posted+=("$prefix$copy")
         else
             _posted+=("$arg")
         fi
