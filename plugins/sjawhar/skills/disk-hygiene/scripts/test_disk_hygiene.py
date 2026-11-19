@@ -373,7 +373,11 @@ class ReaperScenarioTest(unittest.TestCase):
         repo = self.make_jj_repo()
         ws = self.add_ws(repo, "w19")
         env, registry = self.fake_knives()
-        holder = subprocess.Popen(["sleep", "60"], cwd=str(ws))
+        # 1800 s, not 60 (s25 holds 900 s for the same reason): on a loaded box the `protected` run
+        # alone can outlast 60 s, and a holder that exits before /proc is read fails this test on a
+        # dead process. The three runs below are each bounded by sh's 300 s timeout, so 1800 s outlives
+        # them; `finally` stops the holder.
+        holder = subprocess.Popen(["sleep", "1800"], cwd=str(ws))
         try:
             doc, protected_path = self.generate_protected(env, registry)
             self.assertIn(str(ws), doc["anchors"], "live cwd missing from generated anchors")

@@ -196,8 +196,9 @@ fi
 # not interactive, which is why they are set here, for the agent and everything it runs.
 #
 # A caller's value always wins, and a machine without the directory keeps the home defaults (a
-# laptop). An agent box sets its own cache variables (session_env in scripts/agentbox), which win; it
-# has the directory only as the parent of a path it was given under it, and then this block runs there too.
+# laptop). An agent box sets its own cache variables (session_env in scripts/agentbox), which win. It
+# has the directory only as the root-owned parent of a path it was given under it, so this block runs
+# there but every mkdir in it fails, and CARGO_HOME, TMPDIR and GOTMPDIR stay as the box had them.
 #
 # TMPDIR is per session and removed when the session ends: the directory is named for this
 # shell's pid, which is the agent's own pid (every hop from here is an exec), and
