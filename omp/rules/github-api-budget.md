@@ -17,4 +17,3 @@ Before a script makes more than about 500 calls:
 - Store each answer on disk and read the store before you fetch. A finished run attempt (`actions/runs/<id>/attempts/<n>/jobs`), a merged pull request and a commit do not change, so fetch each one once, ever. Look for an earlier sweep's store under `/mnt/nvme/<user>/tmp` and `/mnt/nvme/<user>/scratch` first.
 - Use one GraphQL query for many objects (25 pull requests per query, with aliases) in place of one REST call each. GraphQL has a budget of its own.
 - Run at most 4 calls in parallel.
-- Do not set `GH_READ_CACHE=0` for a sweep: the read cache answers repeated reads with no request.
