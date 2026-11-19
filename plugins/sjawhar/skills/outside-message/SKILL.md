@@ -14,7 +14,7 @@ Sami approves every outside message by default ([OSSV-142 ask 9a66d8e5](https://
 **Oh My Pi (`can1357/oh-my-pi`) is a standing exception: messages to it need neither his approval nor the steps below.** His words: "except for messages to Oh My Pie; those can go out, or I guess those are the only ones. Otherwise, every outside message needs to go through a three-step process" ([OSSV-142 ask 9a66d8e5](https://dispatch.tail12ec1c.ts.net/issues/OSSV-142/asks/9a66d8e5-92ad-429b-8568-1af4d7ad5a53), 2026-10-27); the "otherwise" puts the process on the other messages only. This covers both kinds of thread above, on our pull requests and on contributors'. **In an agent session `gh` refuses the post without a cited ask**: can1357 has no GitHub App installation, so `shims/gh` sends a write there only with `GH_SHIM_APPROVAL` citing this ask and `GH_SHIM_VERDICT` naming a fresh reviewer's verdict on the SHA-256 of the exact bytes posted. Two things still hold:
 
 - **The public leak check still runs** (`check-public-text`). It is the standing rule for anything published, not part of his process, and these comments are public.
-- **A fresh cut is recommended, not required**: a session that did not write the text removes what a reader does not need. Do not make it a gate.
+- **A fresh cut is recommended, not required**: a session that did not write the text removes what a reader does not need. The verdict the shim checks (above) is the one gate; add no other.
 
 The packaged sibling, `pi-envoy/outside-message`, states this rule generically for any operator ("a project the operator has excluded by name"); the project name lives here on purpose, not by drift.
 
