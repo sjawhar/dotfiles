@@ -459,6 +459,25 @@ class GhLeakTerms(unittest.TestCase):
                 self.setUp_calls()
                 self.assert_refused(self.run_gh(argv, env=env), field, "INFRA-", YGO_LIST, line=1)
 
+    def test_the_name_of_a_repository_the_call_makes_public_is_read(self) -> None:
+        # Given a private repository whose name holds a listed term: `repo edit --visibility public` publishes that
+        # name, so the name is text the call sends, however the argument names the repository. The name of a
+        # repository that is public already is not (dispatch://INFRA-3365, tester round 2).
+        repo = f"o/notes-{CANARY}"
+        self.answer(repo, "private")
+        for name, argument in (("OWNER/REPO", repo), ("URL", f"https://github.com/{repo}")):
+            with self.subTest(form=name):
+                self.setUp_calls()
+                refused = self.run_gh(["repo", "edit", argument, "--visibility", "public",
+                                       "--accept-visibility-change-consequences"])
+                self.assert_refused(refused, "argument 1", CANARY, line=1)
+        # Control: the same repository, public already, edited with a clean description: its name is public, and the
+        # call goes out.
+        self.answer(repo, "public")
+        argv = ["repo", "edit", repo, "--description", "notes"]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     def test_a_graphql_mutation_is_judged_by_the_repositories_of_its_nodes(self) -> None:
         term = REGISTRY_TEST_TERMS["oh-my-pi"][0]
         self.answer("cybermonklabs/oh-my-pi", "public")
