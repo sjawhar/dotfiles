@@ -166,12 +166,22 @@ behavior before handing the call to the real one. One file is data: `person-name
   (`GH_TEXT_COMMANDS`; `shims/tests/test_gh_leak_terms.py` fails when the installed gh's options
   differ), and scans every argument and option value but those gh keeps to itself (the `--jq`,
   `--template` and `--cache` of `gh api`, the `--jq`, `--template` and `--format` of `gh project`)
-  and the repository the call goes to (`-R`/`--repo`, `--branch-repo`), and for a file gh reads
-  (`--body-file`, `--notes-file`, `--from-file`, `--recover`, `--input`, `-F key=@file`, a gist's
-  files) what the file holds, never its path. The repository is the call's address, not text sent
-  to it, and the check refuses only for one read as public, whose name is then public already;
-  until 2026-11-19 it was read, and every write to a public repository whose own name holds a
-  listed term was refused (theorem-labs/ygo under the knives ygo-fork list, dispatch://INFRA-3365).
+  and the part that names the repository the call goes to (`-R`/`--repo`, `--branch-repo`, the
+  `repos/O/R` at the start of a `gh api` endpoint, the `https://github.com/O/R` at the start of the
+  URL of a pull request, issue or discussion that a `pr`, `issue` or `discussion` command acts on,
+  and the repository argument of `gh repo edit` and `gh repo fork`, by name or URL; never the name
+  `gh repo create` gives), and for a file gh reads (`--body-file`, `--notes-file`, `--from-file`,
+  `--recover`, `--input`, `-F key=@file`, a gist's files) what the file holds, never its path. The
+  repository is the call's address, not text sent to it, and the check refuses only for one read
+  as public, whose name is then public already; the rest of an endpoint or a URL is read, such as
+  the path of the file a PUT to `repos/O/R/contents/…` makes. Until 2026-11-19 the repository was
+  read, and every write to a public repository whose own name holds a listed term was refused
+  (theorem-labs/ygo under the knives ygo-fork list, dispatch://INFRA-3365). Which arguments name
+  the repository comes from each command's usage in `gh <command> --help`
+  (`GH_REPOSITORY_ARGUMENT`, `GH_URL_ARGUMENT`; the same test fails when they differ). A URL in any
+  other argument, such as the description `gh agent-task create` sends, is text read whole, and
+  names no repository: until 2026-11-19 it was read as where the call goes, so a description that
+  began with a private repository's URL went to a public checkout's repository unread.
   Each body is read as its endpoint stores it, and each value on its own,
   so two values never make one match (dispatch://INFRA-4383). A release asset's body (`gh release
   upload`, or `gh api` to a `repos/O/R/releases/N/assets` path or to an address on

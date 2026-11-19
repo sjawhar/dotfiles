@@ -2332,6 +2332,24 @@ GH_LOCAL_OPTIONS = frozenset((("api", "--jq"), ("api", "--template"), ("api", "-
 # Options that name the repository a call goes to, which gh_reach reads as its targets: the call's address, and no text
 # it sends there (gh_texts).
 GH_REPOSITORY_OPTIONS = ("--repo", "--branch-repo")
+# The commands whose first argument is the repository the call goes to, as the usage of gh 2.98.0 names it
+# (`gh repo edit [<repository>]`, `gh repo fork [<repository>]`), by OWNER/REPO or by its URL; read so by
+# gh_argument_repository for gh_reach and gh_texts both. Not `repo create [<name>]`, whose name a public create
+# publishes, nor `repo rename [<new-name>]`. shims/tests/test_gh_leak_terms.py compares it with the usage the gh on
+# PATH prints.
+GH_REPOSITORY_ARGUMENT = frozenset((("repo", "edit"), ("repo", "fork")))
+# The commands whose arguments the usage of gh 2.98.0 names by URL (`<url>`, `<urls>`, `<discussion-url>`,
+# `<comment-url>`, as in `gh pr comment [<number> | <url> | <branch>]` and `gh issue edit {<numbers> | <urls>}`): an
+# argument of one that GH_REPOSITORY_URL matches names the repository the call goes to (gh_argument_repository). A URL
+# in an argument of any other command is text, such as the description `agent-task create` sends; until 2026-11-19 it
+# too was read as where the call goes, so such a description that began with a private repository's URL went from a
+# public checkout unread. A gist's URL names a gist, which has no repository. shims/tests/test_gh_leak_terms.py
+# compares it with the usage the gh on PATH prints.
+GH_URL_ARGUMENT = frozenset((
+    ("pr", "edit"), ("pr", "comment"), ("pr", "review"), ("pr", "merge"), ("pr", "close"), ("pr", "reopen"),
+    ("pr", "revert"), ("issue", "edit"), ("issue", "comment"), ("issue", "close"), ("issue", "reopen"),
+    ("issue", "develop"), ("discussion", "edit"), ("discussion", "comment"), ("gist", "edit"), ("gist", "rename"),
+))
 GH_API_REPOSITORY = re.compile(r"^/?repos/([^/?#{}]+)/([^/?#{}]+)")
 GH_GRAPHQL_MUTATION = re.compile(r"\bmutation\b")
 JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
@@ -2527,8 +2545,33 @@ def gh_walk(arguments: Sequence[str], options: Mapping[str, bool]) -> list[tuple
     return read
 
 
-def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhText]:
-    """The text gh sends for its positional argument NUMBER: the word itself, or for a file, its name and what it holds."""
+def gh_argument_repository(group: str, sub: str, number: int, value: str, endpoint: str) -> tuple[str, str, str] | None:
+    """(the repository, its URL, the rest of the argument) when positional argument NUMBER, VALUE, names the repository
+    the call goes to: by the `repos/O/R` that starts a `gh api` endpoint, read in ENDPOINT as gh_api_endpoint reads it;
+    by the `https://github.com/O/R` that starts a URL, its user and port included (GH_REPOSITORY_URL), in an argument of
+    a GH_URL_ARGUMENT command or in the repository argument of a GH_REPOSITORY_ARGUMENT one; or as that repository
+    argument written OWNER/REPO, with no rest. gh_reach reads that repository as a target and gh_argument_texts reads
+    only the rest, so both read the same part. None for any other argument, a URL in one included, and for each
+    argument of a gist, which has no repository (the later arguments of `gist rename` are the file names it sends)."""
+    if group == "gist":
+        return None
+    if group == "api" and number == 1:
+        named = GH_API_REPOSITORY.match(endpoint)
+        if named:
+            return f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", endpoint[named.end():]
+    repository_argument = (group, sub) in GH_REPOSITORY_ARGUMENT and number == 1
+    named = GH_REPOSITORY_URL.match(value) if repository_argument or (group, sub) in GH_URL_ARGUMENT else None
+    if named:
+        return f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", value[named.end():]
+    if repository_argument:
+        return value, gh_repository_url(value), ""
+    return None
+
+
+def gh_argument_texts(group: str, sub: str, number: int, value: str, endpoint: str) -> list[GhText]:
+    """The text gh sends for its positional argument NUMBER: the word itself, but for one that names the repository the
+    call goes to only what follows that part (gh_argument_repository; ENDPOINT is a `gh api` call's endpoint), and for a
+    file, its name and what it holds."""
     option = f"argument {number}"
     if (group, sub) == ("gist", "create"):
         if value == "-":
@@ -2543,20 +2586,30 @@ def gh_argument_texts(group: str, sub: str, number: int, value: str) -> list[GhT
         # An asset: gh sends its file name and the label after a `#`. Its content is a build output, not text.
         path, _, label = value.partition("#")
         return [GhText(f"{option} name", text=os.path.basename(path)), GhText(f"{option} label", text=label)]
+    named = gh_argument_repository(group, sub, number, value, endpoint)
+    if named is not None:
+        # The part that names the repository the call goes to is its address, not text sent there, as the value of -R
+        # is (gh_texts), and the check refuses only for a repository read as public, whose name is then public already.
+        # The rest is read, such as the path of the file a PUT to `repos/O/R/contents/…` makes. Until 2026-11-19 the
+        # whole argument was read, and a comment on a pull request of theorem-labs/ygo named by its URL was refused for
+        # that repository's own name (dispatch://INFRA-3365).
+        _, _, rest = named
+        return [GhText(option, text=rest)] if rest else []
     return [GhText(option, text=value)]
 
 
-def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]) -> list[GhText]:
+def gh_texts(group: str, sub: str, read: Sequence[tuple[str | None, str | None]], endpoint: str) -> list[GhText]:
     """Every text the call sends: each argument and option value but those gh keeps to itself (GH_LOCAL_OPTIONS) and
-    the repository the call goes to (GH_REPOSITORY_OPTIONS), and for a file gh reads, what the file holds; a field's
-    key and its value are two texts, as GitHub stores them."""
+    the repository the call goes to (GH_REPOSITORY_OPTIONS, and the part of an argument gh_argument_repository reads;
+    ENDPOINT is a `gh api` call's endpoint), and for a file gh reads, what the file holds; a field's key and its value
+    are two texts, as GitHub stores them."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
     texts: list[GhText] = []
     number = 0
     for option, value in read:
         if option is None:
             number += 1
-            texts += gh_argument_texts(group, sub, number, value or "")
+            texts += gh_argument_texts(group, sub, number, value or "", endpoint)
             continue
         name = long.get(option, option)
         if (group, name) in GH_LOCAL_OPTIONS:
@@ -3238,7 +3291,7 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
     target with no repository: a gist (anyone with its address reads it), a project, another host, a GraphQL mutation
     whose nodes cannot all be read."""
     long = gh_long_names(GH_TEXT_COMMANDS[(group, sub)])
-    host = (environment.get("GH_HOST") or "github.com").lower()
+    host, endpoint = (environment.get("GH_HOST") or "github.com").lower(), ""
     if group == "api":
         host, endpoint = gh_api_endpoint(read, environment)
     if host != "github.com":
@@ -3265,18 +3318,15 @@ def gh_reach(group: str, sub: str, read: Sequence[tuple[str | None, str | None]]
         for value in values.get(name, []):
             if value:
                 targets.append((value, gh_repository_url(value), True))
-    for value in positionals:
-        named = GH_REPOSITORY_URL.match(value)
-        if named:
-            targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
-    # A fork is as visible as the repository it forks, so its new name (--fork-name) goes where that one is.
-    if (group, sub) in (("repo", "edit"), ("repo", "fork")) and positionals and not GH_REPOSITORY_URL.match(positionals[0]):
-        targets.append((positionals[0], gh_repository_url(positionals[0]), True))
+    # Each argument that names a repository (gh_argument_repository). A fork is as visible as the repository it forks,
+    # so its new name (--fork-name) goes where that one is.
+    for number, value in enumerate(positionals, 1):
+        named = gh_argument_repository(group, sub, number, value, endpoint)
+        if named is not None:
+            repository, url, _ = named
+            targets.append((repository, url, True))
     base = True
     if group == "api":
-        named = GH_API_REPOSITORY.match(endpoint)
-        if named:
-            targets.append((f"{named[1]}/{named[2]}", f"https://github.com/{named[1]}/{named[2]}", True))
         if endpoint == "graphql" and not targets:
             # A mutation names what it changes by node id, and each id gh can read gives its repository; it can also
             # name a repository by name (createCommitOnBranch), or make one. Every such repository is a target: until
@@ -3338,9 +3388,10 @@ def gh_check(arguments: Sequence[str]) -> int:
         return 0
     # A release asset's body is its bytes: never read as JSON (gh_is_upload).
     upload = gh_is_upload(group, sub, read, environment)
+    endpoint = gh_api_endpoint(read, environment)[1] if group == "api" else ""
     texts = [replace(piece, path="-" if piece.path not in (None, "-") and gh_is_stdin(piece.path) else piece.path,
                      json_body=piece.json_body and not upload)
-             for piece in gh_texts(group, sub, read)]
+             for piece in gh_texts(group, sub, read, endpoint)]
     stdin: str | None = None
     if any(piece.path == "-" for piece in texts):
         pointer = environment.get(GH_STDIN)
@@ -3354,7 +3405,6 @@ def gh_check(arguments: Sequence[str]) -> int:
     local_contents, local_unreadable = gh_local_texts(group, sub, read)
     contents += local_contents
     unreadable += local_unreadable
-    endpoint = gh_api_endpoint(read, environment)[1] if group == "api" else ""
     if group == "api" and read and not unreadable:
         # GitHub reads an --input payload as JSON, so `\u006dutation` there is the keyword too: the decoded view counts.
         if endpoint == "graphql" and not any(GH_GRAPHQL_MUTATION.search(view) for _, text in contents

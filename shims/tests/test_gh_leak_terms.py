@@ -651,6 +651,28 @@ class GhLeakTerms(unittest.TestCase):
         self.setUp_calls()
         self.assert_sent(self.run_gh(argv), argv)
 
+    def test_a_url_in_an_argument_that_is_text_names_no_repository(self) -> None:
+        # `agent-task create` sends a task's description to the checkout's repository, here a public one, however the
+        # description begins. Until 2026-11-19 one that began with a private repository's URL was read as going there,
+        # and the term after the URL went out unread (dispatch://INFRA-3365).
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True, env=self.env)
+        git = ["git", "-C", str(self.work)]
+        subprocess.run([*git, "remote", "add", "origin", f"https://github.com/{PUBLIC}.git"], check=True, env=self.env)
+        description = f"https://github.com/{PRIVATE}/issues/1 {TEXT}"
+        refused = self.run_gh(["agent-task", "create", description])
+        self.assert_refused(refused, "argument 1", line=1)
+        self.assertIn("to remote origin (public)", refused.stderr.decode())
+        # Controls: a URL is where `pr comment` goes, so the private repository's pull request gets the same text; and
+        # the description goes out from a private checkout.
+        argv = ["pr", "comment", f"https://github.com/{PRIVATE}/pull/1", "--body", TEXT]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+        subprocess.run([*git, "remote", "set-url", "origin", f"https://github.com/{PRIVATE}.git"], check=True,
+                       env=self.env)
+        argv = ["agent-task", "create", description]
+        self.setUp_calls()
+        self.assert_sent(self.run_gh(argv), argv)
+
     def test_text_gh_keeps_to_itself_is_not_read(self) -> None:
         # A jq filter and a Go template shape gh's own output, and a dry run prints the pull request it would create.
         endpoint = f"repos/{PUBLIC}/issues"
@@ -1027,7 +1049,8 @@ class GhLeakTerms(unittest.TestCase):
 
 
 class Tables(unittest.TestCase):
-    """The check reads gh's arguments as gh does, from a table of each command's options."""
+    """The check reads gh's arguments as gh does, from a table of each command's options and of the commands whose first
+    argument is the repository the call goes to."""
 
     def scanner(self):
         import importlib.machinery
@@ -1055,19 +1078,34 @@ class Tables(unittest.TestCase):
             self.skipTest("no gh on PATH")
         module = self.scanner()
         line = re.compile(r"^\s+(?:(-[A-Za-z0-9]), )?(--[A-Za-z0-9][A-Za-z0-9-]*)( \S+)?(?:\s{2,}|$)")
+        commands = set(module.GH_TEXT_COMMANDS)
+        self.assertLessEqual(module.GH_REPOSITORY_ARGUMENT, commands)
+        self.assertLessEqual(module.GH_URL_ARGUMENT, commands)
         for (group, sub), table in module.GH_TEXT_COMMANDS.items():
             with self.subTest(command=f"{group} {sub}"):
                 text = subprocess.run([gh, group, *([sub] if sub else []), "--help"], capture_output=True, text=True,
                                       check=True, timeout=60).stdout
-                values, flags, section = set(), set(), ""
+                values, flags, section, usage = set(), set(), "", []
                 for help_line in text.splitlines():
                     if help_line and not help_line.startswith(" "):
                         section = help_line.strip()
                     elif section in ("FLAGS", "INHERITED FLAGS") and (m := line.match(help_line)):
                         (values if m.group(3) else flags).update(n for n in m.group(1, 2) if n)
+                    elif section == "USAGE" and not usage:
+                        usage = help_line.split()
                 options = module.gh_options(table)
                 self.assertEqual({name for name, takes in options.items() if takes}, values)
                 self.assertEqual({name for name, takes in options.items() if not takes}, flags)
+                # The command's usage line, such as `gh repo edit [<repository>] [flags]`: a command whose first
+                # argument is `<repository>` is in GH_REPOSITORY_ARGUMENT, and no other; one whose arguments it names
+                # by URL, such as `gh pr comment [<number> | <url> | <branch>]`, is in GH_URL_ARGUMENT, and no other.
+                words = ["gh", group, *([sub] if sub else [])]
+                self.assertEqual(usage[:len(words)], words, text)
+                arguments = [word.strip("[]{}.") for word in usage[len(words):]]
+                first = arguments[0] if arguments else ""
+                self.assertEqual((group, sub) in module.GH_REPOSITORY_ARGUMENT, first == "<repository>", usage)
+                urls = {"<url>", "<urls>", "<discussion-url>", "<comment-url>"}
+                self.assertEqual((group, sub) in module.GH_URL_ARGUMENT, bool(urls.intersection(arguments)), usage)
 
     def test_the_shim_hands_every_text_command_to_the_check(self) -> None:
         text = GH.read_text(encoding="utf-8")
